@@ -1,0 +1,134 @@
+"""tests.test_theme -- rolo_claude/theme.py: precedence order, valid-name
+set, persistence round-trip via ~/.rolo-claude/config.json (U0 scope D).
+"""
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from rolo_claude import theme as t
+
+test, TESTS = new_registry()
+
+
+def _with_test_home(fn):
+    """Run `fn(home_path)` with BRIDGE_TEST_HOME pointed at a fresh temp
+    dir, restoring the previous value afterward."""
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    tmp = Path(tempfile.mkdtemp(prefix="rolo-claude-theme-"))
+    os.environ["BRIDGE_TEST_HOME"] = str(tmp)
+    try:
+        fn(tmp)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
+
+
+@test
+def test_valid_theme_names(ctx: Ctx):
+    ctx.check("claude-dark valid", t.is_valid_theme("claude-dark"))
+    ctx.check("claude-light valid", t.is_valid_theme("claude-light"))
+    ctx.check("claude-dark-daltonized valid", t.is_valid_theme("claude-dark-daltonized"))
+    ctx.check("claude-light-daltonized valid", t.is_valid_theme("claude-light-daltonized"))
+    ctx.check("claude-dark-ansi valid", t.is_valid_theme("claude-dark-ansi"))
+    ctx.check("claude-light-ansi valid", t.is_valid_theme("claude-light-ansi"))
+    ctx.check("garbage invalid", not t.is_valid_theme("solarized"))
+    ctx.check("None invalid", not t.is_valid_theme(None))
+
+
+@test
+def test_precedence_cli_wins_over_everything(ctx: Ctx):
+    resolved = t.resolve_theme(
+        cli_theme="claude-light", env={"CLAUDE_BRIDGE_THEME": "claude-dark-ansi"},
+        settings_theme="claude-dark", persisted_theme="claude-light-ansi",
+    )
+    ctx.check(f"cli wins, got {resolved!r}", resolved == "claude-light")
+
+
+@test
+def test_precedence_env_beats_settings_and_persisted(ctx: Ctx):
+    resolved = t.resolve_theme(
+        cli_theme=None, env={"CLAUDE_BRIDGE_THEME": "claude-dark-ansi"},
+        settings_theme="claude-dark", persisted_theme="claude-light",
+    )
+    ctx.check(f"env wins over settings, got {resolved!r}", resolved == "claude-dark-ansi")
+
+
+@test
+def test_precedence_rolo_claude_theme_env_checked_too(ctx: Ctx):
+    resolved = t.resolve_theme(cli_theme=None, env={"ROLO_CLAUDE_THEME": "claude-light-daltonized"},
+                                settings_theme=None, persisted_theme=None)
+    ctx.check(f"ROLO_CLAUDE_THEME honored, got {resolved!r}", resolved == "claude-light-daltonized")
+
+
+@test
+def test_precedence_settings_beats_persisted(ctx: Ctx):
+    resolved = t.resolve_theme(cli_theme=None, env={}, settings_theme="claude-light", persisted_theme="claude-dark-ansi")
+    ctx.check(f"settings wins over persisted, got {resolved!r}", resolved == "claude-light")
+
+
+@test
+def test_precedence_persisted_beats_default(ctx: Ctx):
+    resolved = t.resolve_theme(cli_theme=None, env={}, settings_theme=None, persisted_theme="claude-dark-ansi")
+    ctx.check(f"persisted wins over hardcoded default, got {resolved!r}", resolved == "claude-dark-ansi")
+
+
+@test
+def test_precedence_falls_back_to_default(ctx: Ctx):
+    resolved = t.resolve_theme(cli_theme=None, env={}, settings_theme=None, persisted_theme=None)
+    ctx.check(f"falls back to claude-dark, got {resolved!r}", resolved == t.DEFAULT_THEME)
+
+
+@test
+def test_invalid_values_at_every_tier_fall_through(ctx: Ctx):
+    resolved = t.resolve_theme(
+        cli_theme="not-a-theme", env={"CLAUDE_BRIDGE_THEME": "also-bogus"},
+        settings_theme="still-bogus", persisted_theme=None,
+    )
+    ctx.check(f"every invalid tier skipped, falls to default, got {resolved!r}", resolved == t.DEFAULT_THEME)
+
+
+@test
+def test_persist_and_reload_round_trip(ctx: Ctx):
+    def _run(home_path):
+        path = t.persist_theme("claude-light-ansi")
+        ctx.check("persist_theme wrote under BRIDGE_TEST_HOME", str(path).startswith(str(home_path)))
+        ctx.check("load_persisted_theme reads it back", t.load_persisted_theme() == "claude-light-ansi")
+        # a SECOND write must preserve any other key already in the file.
+        t.set_config_value("other_key", 42)
+        t.persist_theme("claude-dark")
+        data = t.load_config()
+        ctx.check("other_key survived a later persist_theme call", data.get("other_key") == 42)
+        ctx.check("theme updated to the newest value", data.get("theme") == "claude-dark")
+    _with_test_home(_run)
+
+
+@test
+def test_persist_theme_rejects_invalid_name(ctx: Ctx):
+    def _run(_home_path):
+        raised = False
+        try:
+            t.persist_theme("not-a-real-theme")
+        except ValueError:
+            raised = True
+        ctx.check("persist_theme raises ValueError for an invalid name", raised)
+    _with_test_home(_run)
+
+
+@test
+def test_load_config_missing_file_returns_empty_dict(ctx: Ctx):
+    def _run(_home_path):
+        ctx.check("load_config() == {} when nothing was ever persisted", t.load_config() == {})
+        ctx.check("load_persisted_theme() is None when nothing was ever persisted", t.load_persisted_theme() is None)
+    _with_test_home(_run)
+
+
+if __name__ == "__main__":
+    ctx = Ctx()
+    results, passed, failed, skipped = run_all(TESTS, ctx)
+    sys.exit(print_results(results, passed, failed, skipped))

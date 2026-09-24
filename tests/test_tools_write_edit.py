@@ -126,6 +126,39 @@ def test_write_rejects_relative_path(ctx: Ctx):
     ctx.check("relative path rejected", result.is_error is True)
 
 
+@test
+def test_write_lone_surrogate_leaves_existing_file_untouched(ctx: Ctx):
+    """finding 4: a lone surrogate (the classic split-emoji-escape shape
+    from `json.loads('"\\ud83d"')`) must fail to ENCODE before the file is
+    ever opened for writing -- the old bug opened (truncating) the file
+    first, so a genuine encode failure left it at 0 bytes."""
+    d = _tmpdir("write-surrogate-")
+    f = d / "existing.txt"
+    f.write_text("original content\n", encoding="utf-8")
+    ctx_obj = ToolContext(cwd=d)
+    ReadTool().run({"file_path": str(f)}, ctx_obj)
+    bad_content = "before " + "\ud83d" + " after"
+    result = WriteTool().run({"file_path": str(f), "content": bad_content}, ctx_obj)
+    ctx.check(f"an unencodable surrogate is reported as an error, got {result.content!r}", result.is_error is True)
+    ctx.check(f"the existing file is completely untouched, got {f.read_text(encoding='utf-8')!r}",
+              f.read_text(encoding="utf-8") == "original content\n")
+
+
+@test
+def test_write_new_file_keeps_models_own_crlf(ctx: Ctx):
+    """finding 4: a BRAND NEW file must keep whatever line endings the
+    model itself wrote -- forcing CRLF content down to LF (only to
+    re-expand it, which only happens for an EXISTING file) silently
+    corrupted an intentional \\r\\n (e.g. a new .bat file)."""
+    d = _tmpdir("write-new-crlf-")
+    f = d / "run.bat"
+    ctx_obj = ToolContext(cwd=d)
+    result = WriteTool().run({"file_path": str(f), "content": "@echo off\r\necho hi\r\n"}, ctx_obj)
+    ctx.check("no error creating the new file", result.is_error is False)
+    ctx.check(f"the model's own CRLF survives verbatim for a NEW file, got {f.read_bytes()!r}",
+              f.read_bytes() == b"@echo off\r\necho hi\r\n")
+
+
 # ---- Edit ---------------------------------------------------------------
 
 @test
@@ -206,7 +239,35 @@ def test_edit_whitespace_tolerant_fallback_match(ctx: Ctx):
     )
     ctx.check(f"tolerant match succeeds, got: {result.content!r}", result.is_error is False)
     ctx.check("tolerant match noted in the result", "tolerant" in result.content.lower())
-    ctx.check("file actually updated", "x = 2" in f.read_text(encoding="utf-8"))
+    # finding 16: assert the FULL file bytes, not just "x = 2" in text --
+    # the old bug ALSO ate the first line's leading indentation and the
+    # last matched line's own trailing newline (finding 3); a substring
+    # check passes even when both are silently corrupted.
+    ctx.check(f"file exactly correct after the tolerant match, got {f.read_text(encoding='utf-8')!r}",
+              f.read_text(encoding="utf-8") == "def f():\n    x = 2\n    return x\n")
+
+
+@test
+def test_edit_tolerant_match_reindents_and_preserves_surrounding_content(ctx: Ctx):
+    """finding 3's own verified repro: a multi-line tolerant match must
+    replace ONLY the content span -- the matched lines' real indentation
+    is re-applied to new_string (never left at old_string's own, usually
+    zero, indentation), and a following line glued right after the last
+    matched line's newline must survive completely untouched."""
+    d = _tmpdir("edit-tolerant-reindent-")
+    f = d / "e.py"
+    f.write_text("def f():\n    x = 1\n    y = 2\nz = 3\n", encoding="utf-8")
+    ctx_obj = ToolContext(cwd=d)
+    ReadTool().run({"file_path": str(f)}, ctx_obj)
+    result = EditTool().run(
+        {"file_path": str(f), "old_string": "x = 1\ny = 2", "new_string": "x = 10\ny = 20"},
+        ctx_obj,
+    )
+    ctx.check(f"tolerant match succeeds, got: {result.content!r}", result.is_error is False)
+    ctx.check(
+        f"content span re-indented to the file's real indent, z = 3 untouched, got {f.read_text(encoding='utf-8')!r}",
+        f.read_text(encoding="utf-8") == "def f():\n    x = 10\n    y = 20\nz = 3\n",
+    )
 
 
 @test
@@ -238,6 +299,41 @@ def test_edit_old_equals_new_is_error(ctx: Ctx):
     ReadTool().run({"file_path": str(f)}, ctx_obj)
     result = EditTool().run({"file_path": str(f), "old_string": "a", "new_string": "a"}, ctx_obj)
     ctx.check("identical old/new is rejected", result.is_error is True)
+
+
+@test
+def test_edit_empty_old_string_is_error(ctx: Ctx):
+    """finding 4: `"abc".replace("", "X")` inserts X between EVERY
+    character -- an empty old_string must never reach that point."""
+    d = _tmpdir("edit-emptyold-")
+    f = d / "e.txt"
+    f.write_text("abc\n", encoding="utf-8")
+    ctx_obj = ToolContext(cwd=d)
+    ReadTool().run({"file_path": str(f)}, ctx_obj)
+    result = EditTool().run({"file_path": str(f), "old_string": "", "new_string": "X", "replace_all": True}, ctx_obj)
+    ctx.check("empty old_string is rejected", result.is_error is True)
+    ctx.check("file unchanged", f.read_text(encoding="utf-8") == "abc\n")
+
+
+@test
+def test_edit_unrelated_edit_preserves_non_utf8_bytes_elsewhere(ctx: Ctx):
+    """finding 4: decoding with surrogateescape (not "replace") means an
+    EXISTING invalid-UTF-8 byte round-trips losslessly through an edit
+    that never touches it -- "replace" permanently swaps it for U+FFFD,
+    which re-encodes as a DIFFERENT (3-byte) sequence, corrupting content
+    the edit was never supposed to touch at all."""
+    d = _tmpdir("edit-latin1-")
+    f = d / "e.txt"
+    # latin-1 "café" (0xE9 for the accented e) followed by an unrelated
+    # ASCII line the edit actually targets.
+    f.write_bytes("caf\xe9 notes\n".encode("latin-1") + b"TARGET\n")
+    ctx_obj = ToolContext(cwd=d)
+    ReadTool().run({"file_path": str(f)}, ctx_obj)
+    result = EditTool().run({"file_path": str(f), "old_string": "TARGET", "new_string": "CHANGED"}, ctx_obj)
+    ctx.check(f"unrelated edit succeeds, got {result.content!r}", result.is_error is False)
+    raw = f.read_bytes()
+    ctx.check(f"the untouched latin-1 byte survives verbatim, got {raw!r}",
+              raw == "caf\xe9 notes\n".encode("latin-1") + b"CHANGED\n")
 
 
 if __name__ == "__main__":

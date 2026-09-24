@@ -52,10 +52,14 @@ def classify_pattern_content(content: str) -> dict:
     """Classify Bash/PowerShell/generic rule CONTENT (already paren+
     backslash-unescaped) into one of exact/prefix/glob/invalid [bin sec.5]:
     an unescaped trailing `:*` -> prefix (validated: must be at the end,
-    prefix non-empty); trailing unescaped ` *` -> prefix (matches the bare
-    form too, e.g. `Bash(ls *)` matches `ls`/`ls -la`, not `lsof`); any
-    other unescaped `*` -> glob (`Bash(ls*)` DOES match `lsof`); else exact.
-    `\\*` is always a literal star, never a wildcard marker."""
+    prefix non-empty); trailing unescaped ` *` alone -> prefix (matches the
+    bare form too, e.g. `Bash(ls *)` matches `ls`/`ls -la`, not `lsof`);
+    any other unescaped `*` (including a trailing ` *` COMBINED with an
+    inner `*`, e.g. `git push * --force *`) -> glob, whose VALUE is the
+    full original content so `_bash_wildcard_regex` can redo the
+    escaped-star protection itself (finding 1: `x * y *` must compile as a
+    real wildcard ending `(?: .*)?`, never a literal-star prefix); else
+    exact. `\\*` is always a literal star, never a wildcard marker."""
     protected = _protect_escaped_stars(content)
     if ":*" in protected:
         if not protected.endswith(":*"):
@@ -63,15 +67,56 @@ def classify_pattern_content(content: str) -> dict:
         prefix = protected[:-2]
         if prefix == "":
             return {"kind": "invalid", "error": "Prefix cannot be empty before :*", "value": _restore_stars(content)}
+        if "*" in prefix:
+            return {"kind": "glob", "value": _restore_stars(content)}
         return {"kind": "prefix", "value": _restore_stars(prefix)}
     if protected.endswith(" *"):
-        return {"kind": "prefix", "value": _restore_stars(protected[:-2])}
+        core = protected[:-2]
+        if "*" in core:
+            return {"kind": "glob", "value": _restore_stars(content)}
+        return {"kind": "prefix", "value": _restore_stars(core)}
     if "*" in protected:
-        return {"kind": "glob", "value": _restore_stars(protected)}
+        return {"kind": "glob", "value": _restore_stars(content)}
     return {"kind": "exact", "value": _restore_stars(protected)}
 
 
+def _bash_wildcard_regex(content: str, *, case_insensitive: bool = False) -> "re.Pattern":
+    """Compile CONTENT (the ORIGINAL, still paren-unescaped rule text --
+    NOT yet star-protected) into a real wildcard regex [bin sec.5, finding
+    1/15]: only an UNESCAPED `*` is special (`?`/`[...]` are always
+    literal -- fnmatch is never used for this grammar, finding 15); a
+    trailing, unescaped ` *` (a space then the FINAL star) becomes an
+    OPTIONAL `(?: .*)?` suffix so the bare form matches too (`git push *`
+    also matches bare `git push`), while every OTHER unescaped `*`
+    (leading/mid-string, or one with no preceding space) is a plain
+    required `.*`. `\\*` always compiles as a literal `*` character."""
+    protected = _protect_escaped_stars(content)
+    bare_suffix = protected.endswith(" *")
+    core = protected[:-2] if bare_suffix else protected
+    out = []
+    i, n = 0, len(core)
+    sentinel_len = len(_STAR_SENTINEL)
+    while i < n:
+        if core[i] == "*":
+            out.append(".*")
+            i += 1
+            continue
+        if core[i:i + sentinel_len] == _STAR_SENTINEL:
+            out.append(re.escape("*"))
+            i += sentinel_len
+            continue
+        out.append(re.escape(core[i]))
+        i += 1
+    body = "".join(out)
+    if bare_suffix:
+        body += r"(?: .*)?"
+    flags = re.IGNORECASE if case_insensitive else 0
+    return re.compile(f"^{body}$", flags)
+
+
 def _pattern_matches_text(kind: str, value: str, text: str, *, case_insensitive: bool = False) -> bool:
+    if kind == "glob":
+        return bool(_bash_wildcard_regex(value, case_insensitive=case_insensitive).match(text))
     if case_insensitive:
         value_cmp, text_cmp = value.lower(), text.lower()
     else:
@@ -80,8 +125,6 @@ def _pattern_matches_text(kind: str, value: str, text: str, *, case_insensitive:
         return text_cmp == value_cmp
     if kind == "prefix":
         return text_cmp == value_cmp or text_cmp.startswith(value_cmp + " ")
-    if kind == "glob":
-        return fnmatch.fnmatchcase(text_cmp, value_cmp)
     return False
 
 
@@ -132,6 +175,74 @@ def powershell_rule_matches(kind: str, value: str, command: str) -> bool:
     canon = canonicalize_powershell(command)
     return (_pattern_matches_text(kind, value, command, case_insensitive=True)
             or _pattern_matches_text(kind, value, canon, case_insensitive=True))
+
+
+def split_powershell_segments(command: str) -> list:
+    """finding 1: PowerShell deny/ask rules must also be segment-split --
+    quote-aware split on `;`, `|`, `&&`, `||`, newline (statement/pipeline
+    separators). PowerShell's own escape character is the backtick, NOT
+    backslash, and a single-quoted string has no escape character at all
+    (only a doubled `''` embeds a quote) -- this is deliberately a
+    separate function from `split_bash_segments`, not a shared one, since
+    the two shells disagree on both points."""
+    segments, buf = [], []
+    i, n = 0, len(command)
+    in_single = in_double = False
+
+    def _flush():
+        segments.append("".join(buf))
+        buf.clear()
+
+    while i < n:
+        c = command[i]
+        if in_single:
+            buf.append(c)
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if c == "`" and i + 1 < n:
+                buf.append(c); buf.append(command[i + 1]); i += 2
+                continue
+            buf.append(c)
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+        if c == "'":
+            in_single = True; buf.append(c); i += 1; continue
+        if c == '"':
+            in_double = True; buf.append(c); i += 1; continue
+        if c == "`" and i + 1 < n:
+            buf.append(c); buf.append(command[i + 1]); i += 2
+            continue
+        two = command[i:i + 2]
+        if two in ("&&", "||"):
+            _flush(); i += 2; continue
+        if c in (";", "|", "\n"):
+            _flush(); i += 1; continue
+        buf.append(c)
+        i += 1
+    if buf:
+        _flush()
+    return [s.strip() for s in segments if s.strip()]
+
+
+def powershell_deny_or_ask_matches(command: str, rules: list) -> Optional["Rule"]:
+    """Segment-split counterpart to `bash_deny_or_ask_matches` for
+    PowerShell (finding 1): the raw command AND every split segment are
+    each tried both raw and canonicalised, case-insensitive."""
+    candidates = [command] + split_powershell_segments(command)
+    for cand in candidates:
+        canon = canonicalize_powershell(cand)
+        for rule in rules:
+            if rule.kind not in ("exact", "prefix", "glob"):
+                continue
+            if (_pattern_matches_text(rule.kind, rule.value, cand, case_insensitive=True)
+                    or _pattern_matches_text(rule.kind, rule.value, canon, case_insensitive=True)):
+                return rule
+    return None
 
 
 # =============================================================================
@@ -226,12 +337,63 @@ def path_rule_regex(rule_value: str, base_dir: Path, *, any_depth: bool) -> "tup
 #    and WebFetch domain matching.
 # =============================================================================
 
+def _skip_heredoc(command: str, start: int) -> Optional[int]:
+    """finding 11: `command[start:]` begins with a heredoc redirection
+    (`<<[-]DELIM`, optionally quoted) -- return the index right after the
+    body's closing delimiter LINE (so the whole marker+body can be
+    appended to the current segment as opaque text, never scanned for
+    `;`/`&`/`|`/newline split points), or None if `start` isn't actually a
+    heredoc opener."""
+    n = len(command)
+    j = start + 2
+    if j < n and command[j] == "-":
+        j += 1
+    while j < n and command[j] in " \t":
+        j += 1
+    if j >= n:
+        return None
+    quote = None
+    if command[j] in ("'", '"'):
+        quote = command[j]
+        j += 1
+        delim_start = j
+        end_quote = command.find(quote, j)
+        if end_quote == -1:
+            return None
+        delim = command[delim_start:end_quote]
+        j = end_quote + 1
+    else:
+        delim_start = j
+        while j < n and not command[j].isspace() and command[j] not in "&|;":
+            j += 1
+        delim = command[delim_start:j].lstrip("\\")
+    if not delim:
+        return None
+    nl = command.find("\n", j)
+    body_start = nl + 1 if nl != -1 else n
+    strip_tabs = command[start:start + 3] == "<<-"
+    k = body_start
+    while k <= n:
+        line_end = command.find("\n", k)
+        line = command[k:line_end if line_end != -1 else n]
+        probe = line.lstrip("\t") if strip_tabs else line
+        if probe == delim:
+            return (line_end + 1) if line_end != -1 else n
+        if line_end == -1:
+            return n  # unterminated heredoc -- consume to EOF rather than mis-split its body
+        k = line_end + 1
+    return n
+
+
 def split_bash_segments(command: str) -> list:
     """Quote/escape-aware split on `&&`, `||`, `;`, `;;`, `|`, `|&`, `&`,
-    newline -- never splits inside a quoted string, a backtick span, or a
-    `$( )`/`( )`/`{ }` group (heredocs aren't specially recognized; a `<<`
-    body is opaque text that happens not to contain these operators in the
-    common case)."""
+    newline -- never splits inside a quoted string, a backtick span, a
+    `$( )`/`( )`/`{ }` group, or a heredoc body (finding 11: `<<DELIM` ...
+    `DELIM` is consumed whole, so a line inside it is never mistaken for a
+    command separator). A bare `&` is a background-job separator UNLESS it
+    is part of a redirection -- immediately after `>`/`<` (`2>&1`, `<&3`)
+    or immediately before `>` (`&>file`, `&>>file`) -- in which case it
+    stays literal text in the current segment."""
     segments, buf = [], []
     i, n = 0, len(command)
     depth = 0
@@ -264,6 +426,12 @@ def split_bash_segments(command: str) -> list:
         if c == "\\" and i + 1 < n:
             buf.append(c); buf.append(command[i + 1]); i += 2
             continue
+        if depth == 0 and command[i:i + 2] == "<<":
+            end = _skip_heredoc(command, i)
+            if end is not None:
+                buf.append(command[i:end])
+                i = end
+                continue
         if c == "`":
             buf.append(c); i += 1
             while i < n and command[i] != "`":
@@ -284,7 +452,13 @@ def split_bash_segments(command: str) -> list:
             two = command[i:i + 2]
             if two in ("&&", "||", ";;", "|&"):
                 _flush(); i += 2; continue
-            if c in (";", "|", "&", "\n"):
+            if c == "&":
+                prev = command[i - 1] if i > 0 else ""
+                nxt = command[i + 1] if i + 1 < n else ""
+                if prev in (">", "<") or nxt == ">":
+                    buf.append(c); i += 1; continue  # part of a redirection (2>&1, &>file, ...), not a separator
+                _flush(); i += 1; continue
+            if c in (";", "|", "\n"):
                 _flush(); i += 1; continue
         buf.append(c)
         i += 1
@@ -370,23 +544,74 @@ def strip_wrappers_and_env(segment: str) -> str:
     return seg
 
 
+# DENY/ASK-only candidate normalization (finding 1): unlike
+# strip_wrappers_and_env above, this strips EVERY leading `NAME=value`
+# (no keep-list -- a deny rule must not be defeated by a harmless-looking
+# `PATH=`/`GIT_*=` prefix) and treats sudo/doas/env as ordinary wrappers
+# too (a deny rule must still catch what actually runs underneath an
+# escalation/re-exec wrapper, the opposite of ALLOW's own safety
+# reasoning). Quote-aware (shlex) so `FOO="a b" rm -rf x` strips the whole
+# `FOO=a b` token as one unit; the rebuilt, space-joined result also
+# collapses any run of whitespace to one space (binary sec.4).
+_ENV_ASSIGN_ANY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DENY_STRIP_WRAPPERS = _WRAPPER_CMDS | frozenset({"sudo", "doas", "env"})
+
+
+def _tokenize_loose(segment: str) -> list:
+    try:
+        return shlex.split(segment, posix=True)
+    except ValueError:
+        return segment.split()
+
+
+def strip_wrappers_and_env_for_deny(segment: str) -> str:
+    """DENY/ASK candidate normalization -- see module comment above."""
+    tokens = _tokenize_loose(segment.strip())
+    changed = True
+    while changed and tokens:
+        changed = False
+        if _ENV_ASSIGN_ANY_RE.match(tokens[0]):
+            tokens.pop(0)
+            changed = True
+            continue
+        if tokens[0] in _DENY_STRIP_WRAPPERS:
+            wrapper = tokens.pop(0)
+            if wrapper in _WRAPPER_TAKES_VALUE and tokens:
+                tokens.pop(0)
+            changed = True
+    return " ".join(tokens)
+
+
+def _collapse_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
 # ---- read-only Bash whitelist [bin sec.3] ---------------------------------
 
 _RO_ANY_ARGS = frozenset({
     "ls", "cat", "head", "tail", "wc", "stat", "grep", "egrep", "fgrep", "diff", "du", "df",
     "echo", "strings", "hexdump", "od", "nl", "cut", "column", "tr", "tac", "rev", "cmp",
     "basename", "dirname", "realpath", "readlink", "sha256sum", "sha1sum", "md5sum", "cd", "pwd", "which",
+    # finding 12: the rest of [bin sec.3]'s "any arguments" read-only list,
+    # ported literally.
+    "cal", "uptime", "id", "uname", "free", "nproc", "locale", "groups",
+    "paste", "fold", "expand", "unexpand", "fmt", "comm", "numfmt",
+    "true", "false", "sleep", "type", "expr", "seq", "tsort", "pr",
 })
+# finding 12: subcommands that are read-only ONLY without a mutating flag
+# (an allowlist-of-flags would be more precise but the binary facts doc
+# doesn't enumerate every one; these deny-lists cover the verified
+# exploits -- `git branch -D`, `git diff --output=`, `find -fprint`).
+_GIT_BRANCH_UNSAFE = frozenset({
+    "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
+    "-u", "--set-upstream-to", "--unset-upstream", "--edit-description", "--create-reflog",
+})
+_GIT_OUTPUT_FLAG_RE = re.compile(r"^--output(=.*)?$")
+_FIND_UNSAFE = frozenset({"-exec", "-delete", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"})
 _RO_GIT_BARE = frozenset({
     "diff", "log", "show", "shortlog", "reflog", "ls-remote", "status", "blame", "ls-files",
-    "remote", "merge-base", "rev-parse", "rev-list", "describe", "cat-file", "for-each-ref",
-    "grep", "worktree", "tag", "branch",
-})
-_RO_GH_TWO_WORD = frozenset({
-    ("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
-    ("issue", "view"), ("issue", "list"), ("issue", "status"), ("repo", "view"),
-    ("run", "list"), ("run", "view"), ("auth", "status"), ("release", "list"), ("release", "view"),
-    ("workflow", "list"), ("workflow", "view"), ("label", "list"),
+    "merge-base", "rev-parse", "rev-list", "describe", "cat-file", "for-each-ref",
+    "grep", "tag",
 })
 
 
@@ -394,13 +619,22 @@ def _git_read_only(tokens: list) -> bool:
     if len(tokens) < 2:
         return False
     sub = tokens[1]
+    rest = tokens[2:]
     if sub == "config":
-        return "--get" in tokens[2:]
+        return "--get" in rest
     if sub == "stash":
-        return len(tokens) >= 3 and tokens[2] in ("list", "show")
+        return len(rest) >= 1 and rest[0] in ("list", "show")
     if sub == "worktree":
-        return len(tokens) >= 3 and tokens[2] == "list"
-    return sub in _RO_GIT_BARE
+        return len(rest) >= 1 and rest[0] == "list"
+    if sub == "remote":
+        # finding 12: bare `git remote` (list) or `git remote show <name>`
+        # only -- add/remove/rename/set-url/prune/... all mutate.
+        return not rest or rest[0] in ("-v", "--verbose", "show")
+    if sub == "branch":
+        return not any(t in _GIT_BRANCH_UNSAFE for t in rest)
+    if sub in _RO_GIT_BARE:
+        return not any(_GIT_OUTPUT_FLAG_RE.match(t) for t in rest)
+    return False
 
 
 def _gh_read_only(tokens: list) -> bool:
@@ -409,11 +643,22 @@ def _gh_read_only(tokens: list) -> bool:
     return len(tokens) >= 3 and (tokens[1], tokens[2]) in _RO_GH_TWO_WORD
 
 
+_RO_GH_TWO_WORD = frozenset({
+    ("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
+    ("issue", "view"), ("issue", "list"), ("issue", "status"), ("repo", "view"),
+    ("run", "list"), ("run", "view"), ("auth", "status"), ("release", "list"), ("release", "view"),
+    ("workflow", "list"), ("workflow", "view"), ("label", "list"),
+})
+
+
 def is_read_only_bash_segment(segment: str) -> bool:
     """A single (already `;`/`&&`/`|`/...-split) segment, with NO
     redirection and NO subshell of its own, whose command is on the
-    read-only whitelist (git/gh need a subcommand-level check; `find`
-    needs no `-exec`/`-delete`)."""
+    read-only whitelist (git/gh need a subcommand+safe-flag check; `find`
+    needs no `-exec`/`-delete`/`-fprint*`). finding 12: `tokens[0]` must be
+    a BARE name with no path separator -- a same-named LOCAL script
+    (`./scripts/cat --wipe`) is never treated as the real system binary
+    just because its basename matches one."""
     if any(tok in segment for tok in (">", "<", "$(", "`")):
         return False
     try:
@@ -422,7 +667,10 @@ def is_read_only_bash_segment(segment: str) -> bool:
         return False
     if not tokens:
         return False
-    cmd = os.path.basename(tokens[0]).lower()
+    raw0 = tokens[0]
+    if "/" in raw0 or "\\" in raw0:
+        return False
+    cmd = raw0.lower()
     cmd = _EXE_EXT_RE.sub("", cmd) if os.name == "nt" else cmd
     if cmd in ("pwd", "whoami", "alias") and len(tokens) == 1:
         return True
@@ -433,7 +681,7 @@ def is_read_only_bash_segment(segment: str) -> bool:
     if cmd == "gh":
         return _gh_read_only(tokens)
     if cmd == "find":
-        return not any(t in ("-exec", "-delete", "-execdir", "-ok", "-okdir") for t in tokens)
+        return not any(t in _FIND_UNSAFE for t in tokens)
     return False
 
 
@@ -487,12 +735,17 @@ def bash_allow_matches(command: str, allow_rules: list) -> bool:
 
 def bash_deny_or_ask_matches(command: str, rules: list) -> Optional["Rule"]:
     """RAW command + every raw/normalised segment + every subshell body are
-    ALL checked; one hit fires (D-CFG)."""
-    candidates = [command]
+    ALL checked; one hit fires (D-CFG). finding 1: every candidate is also
+    whitespace-collapsed (a double space must not defeat a prefix match),
+    and the wrapper/env-stripped candidate uses the DENY-only stripper
+    (strips every `NAME=value`, no keep-list, and sudo/doas/env too --
+    never the ALLOW-only `strip_wrappers_and_env`)."""
+    candidates = [_collapse_ws(command)]
     for seg in split_bash_segments(command):
-        candidates.append(seg)
-        candidates.append(strip_wrappers_and_env(seg))
-    candidates.extend(extract_subshell_bodies(command))
+        candidates.append(_collapse_ws(seg))
+        candidates.append(strip_wrappers_and_env_for_deny(seg))
+    for body in extract_subshell_bodies(command):
+        candidates.append(_collapse_ws(body))
     for cand in candidates:
         for rule in rules:
             if rule.kind not in ("exact", "prefix", "glob"):
@@ -645,6 +898,12 @@ class Decision:
     source: str = ""
     suggested_rule: Optional[str] = None
     matched_rule: Optional[Rule] = None
+    # U2: an INTERACTIVE answer may carry a rule the session should now
+    # honour (`allow_session`/`allow_always`) and free-text feedback from a
+    # denial ("tell Claude what to do differently"). Both are ignored by
+    # every non-interactive caller.
+    rule: Optional[str] = None
+    message: str = ""
     # print-mode only: {"tool_name","tool_input","reason"} -- what
     # headless.py/output.py surface as `permission_denials` in the json
     # result (D6: an `ask` outcome in print mode -> deny + this).
@@ -673,13 +932,17 @@ def _applicable_path_rule_source_tools(calling_tool_name: str, action: str) -> s
     `calling_tool_name` [D-CFG]: Read-deny blocks Edit/Write; Edit rules
     cover Write/NotebookEdit; Write(...)/Glob(...) are NEVER consulted (not
     even for a Write call -- only Edit-kind rules cover it); Glob/Grep
-    themselves consult no path-kind rule in this build (mode-table only)."""
+    consult Read deny/ask/allow rules against their own `path` argument
+    (finding 6: Claude Code applies Read rules to Glob/Grep best-effort --
+    a `Read(.env)` deny must also block `Grep(path=".env")`)."""
     if calling_tool_name == "Read":
         return {"Read"}
     if calling_tool_name in ("Edit", "NotebookEdit"):
         return {"Edit", "Read"} if action == "deny" else {"Edit"}
     if calling_tool_name == "Write":
         return {"Edit", "Read"} if action == "deny" else {"Edit"}
+    if calling_tool_name in ("Glob", "Grep"):
+        return {"Read"}
     return set()
 
 
@@ -704,11 +967,52 @@ def bare_deny_tool_names(deny_rules: list) -> set:
     return {r.tool for r in deny_rules if r.kind == "bare"}
 
 
+def _mcp_server_matches(pattern: str, server: str) -> bool:
+    """`pattern` is a `Rule.tool` server name, possibly containing an
+    unescaped `*` (only ever possible for a DENY/ASK rule -- `_parse_mcp_rule`
+    already rejects a glob in the server position for `action="allow"`)."""
+    if "*" in pattern:
+        return fnmatch.fnmatchcase(server, pattern)
+    return server == pattern
+
+
+def mcp_deny_tool_names(deny_rules: list, candidate_names) -> set:
+    """H3 must-do: which `mcp__...` names among `candidate_names` (the
+    live/registered catalog) a server-scoped DENY rule (`mcp__server` /
+    `mcp__server__*`, kind mcp_server/mcp_server_all -- never a single
+    mcp_tool rule, which only gates one call, not the whole catalog)
+    removes from the session's FROZEN catalog, exactly like a bare-tool-
+    name deny does for a built-in tool [D-CFG]. Glob-aware (finding 15):
+    `mcp__*`/`mcp__gith*` remove every tool of every/matching server."""
+    server_rules = [r for r in deny_rules if r.kind in ("mcp_server", "mcp_server_all")]
+    if not server_rules:
+        return set()
+    removed = set()
+    for name in candidate_names:
+        if not name.startswith("mcp__"):
+            continue
+        rest = name[len("mcp__"):]
+        server = rest.split("__", 1)[0] if "__" in rest else rest
+        if any(_mcp_server_matches(r.tool, server) for r in server_rules):
+            removed.add(name)
+    return removed
+
+
+class SettingsWriteRefused(Exception):
+    """Raised by `add_allow_rule` instead of silently clobbering an
+    existing settings file that doesn't parse (finding 13) -- a one-line
+    trailing comma in `settings.local.json` must never lose the rest of
+    that file's content (its `env` block, other permission rules, ...)."""
+
+
 def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
     """Write `rule_text` into `<dest>/settings[.local].json`'s
     `permissions.allow` list, tmp + `os.replace` (D-CFG). `destination` is
     "local" | "project" | "user"; "session" is in-memory only and must be
-    handled by the CALLER (nothing to write to disk)."""
+    handled by the CALLER (nothing to write to disk). Raises
+    `SettingsWriteRefused` (finding 13) rather than overwriting an
+    EXISTING file that fails to parse as a JSON object -- never silently
+    replace it with `{"permissions": {"allow": [rule]}}`."""
     if destination == "local":
         path = Path(cwd) / ".claude" / "settings.local.json"
     elif destination == "project":
@@ -719,15 +1023,22 @@ def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
     else:
         raise ValueError(f"add_allow_rule: unsupported destination {destination!r} (use 'session' in-memory instead)")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     data: dict = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            data = {}
-    if not isinstance(data, dict):
-        data = {}
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError as e:
+            raise SettingsWriteRefused(f"could not read existing settings file {path}: {e}") from e
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise SettingsWriteRefused(
+                f"{path} does not parse as JSON ({e}) -- refusing to overwrite it; fix the file by hand first"
+            ) from e
+        if not isinstance(data, dict):
+            raise SettingsWriteRefused(f"{path} does not contain a JSON object at its root -- refusing to overwrite it")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
     perms = data.get("permissions")
     if not isinstance(perms, dict):
         perms = {}
@@ -765,6 +1076,18 @@ class PermissionEngine:
         self.extra_dirs = [Path(d) for d in (extra_dirs or [])]
         self.print_mode = print_mode
 
+    def add_session_allow_rule(self, rule_text: str) -> bool:
+        """Teach THIS session one more allow rule (U2's `allow_session` /
+        `allow_always` answers). In-memory only -- nothing is written to
+        disk here; the UI's "always" path is what calls `add_allow_rule`
+        separately, into `.claude/settings.local.json`. Returns True when
+        the text parsed into a usable rule."""
+        rule = parse_rule(rule_text, source="session", base_dir=self.cwd, action="allow")
+        if rule is None or rule.kind == "invalid":
+            return False
+        self.allow_rules.append(rule)
+        return True
+
     def working_dirs(self) -> list:
         return [self.cwd] + self.extra_dirs
 
@@ -793,15 +1116,21 @@ class PermissionEngine:
             return rule.tool == tool_name
         if rule.kind == "tool_glob":
             return fnmatch.fnmatchcase(tool_name, rule.tool)
-        if rule.kind == "mcp_server":
-            return tool_name == f"mcp__{rule.tool}" or tool_name.startswith(f"mcp__{rule.tool}__")
-        if rule.kind == "mcp_server_all":
-            return tool_name.startswith(f"mcp__{rule.tool}__")
-        if rule.kind == "mcp_tool":
-            prefix = f"mcp__{rule.tool}__"
-            if tool_name.startswith(prefix):
-                return fnmatch.fnmatchcase(tool_name[len(prefix):], rule.value or "")
-            return fnmatch.fnmatchcase(tool_name, f"mcp__{rule.tool}__{rule.value}")
+        if rule.kind in ("mcp_server", "mcp_server_all", "mcp_tool"):
+            # finding 15: the SERVER part is glob-matched (`mcp__*`,
+            # `mcp__gith*`) via the shared _mcp_server_matches, not a
+            # literal `==`/`startswith` against the whole pattern string.
+            if not tool_name.startswith("mcp__"):
+                return False
+            rest = tool_name[len("mcp__"):]
+            has_tool_part = "__" in rest
+            server = rest.split("__", 1)[0] if has_tool_part else rest
+            if rule.kind == "mcp_server_all":
+                return has_tool_part and _mcp_server_matches(rule.tool, server)
+            if rule.kind == "mcp_tool":
+                return has_tool_part and _mcp_server_matches(rule.tool, server) \
+                    and fnmatch.fnmatchcase(rest.split("__", 1)[1], rule.value or "")
+            return _mcp_server_matches(rule.tool, server)  # mcp_server: whole-server, tool part optional
         if rule.kind == "agent":
             return tool_name == "Agent" and (tool_input.get("subagent_type") or tool_input.get("agent_type")) == rule.value
         if rule.kind == "skill":
@@ -814,16 +1143,12 @@ class PermissionEngine:
         if rule.kind == "param":
             return tool_name == rule.tool and str(tool_input.get(rule.param_key)) == rule.param_value
         if rule.kind == "path":
-            applicable = _applicable_path_rule_source_tools(tool_name, action)
-            if rule.tool not in applicable:
-                return False
-            path_str = tool.permission_content(tool_input) if tool is not None else tool_input.get("file_path", "")
-            target = self._resolve_target_path(path_str)
-            if target is None:
-                return False
-            base = rule.base_dir or self.cwd
-            regex, _is_abs = path_rule_regex(rule.value, base, any_depth=any_depth)
-            return bool(regex.match(_abs_posix(target))) != rule.negated
+            # finding 6: a lone `!`-rule must NEVER be decided in isolation
+            # (that would make it "every path except this one") -- path
+            # rules are only ever evaluated TOGETHER, as a group, by
+            # `_path_rule_hit` below; this generic per-rule scanner always
+            # skips them.
+            return False
         if rule.kind in ("exact", "prefix", "glob"):
             if rule.tool != tool_name:
                 return False
@@ -838,6 +1163,47 @@ class PermissionEngine:
             if self._rule_matches(rule, tool_name, tool_input, tool, action=action):
                 return rule
         return None
+
+    # ---- path rules get their OWN group evaluation, same reasoning as
+    # Bash above: a `!`-rule only means anything relative to the OTHER
+    # path rules in the SAME list (finding 6), so it can never be decided
+    # one rule at a time. ---------------------------------------------------
+
+    def _path_rule_hit(self, rules: list, tool_name: str, tool_input: dict, tool, *, action: str) -> Optional[Rule]:
+        """Gitignore-style path-rule evaluation for ONE rule list (deny_rules
+        / ask_rules / allow_rules): the first NON-negated rule that matches
+        the resolved target is a hit, UNLESS some `!`-rule in the SAME list
+        also matches that target -- a negation only ever CANCELS a match,
+        it never creates one by itself."""
+        applicable = _applicable_path_rule_source_tools(tool_name, action)
+        if not applicable:
+            return None
+        path_rules = [r for r in rules if r.kind == "path" and r.tool in applicable]
+        if not path_rules:
+            return None
+        path_str = tool.permission_content(tool_input) if tool is not None else tool_input.get("file_path", "")
+        target = self._resolve_target_path(path_str)
+        if target is None:
+            return None
+        target_posix = _abs_posix(target)
+        any_depth = action in ("deny", "ask")
+
+        def _rule_regex(r: Rule):
+            base = r.base_dir or self.cwd
+            regex, _is_abs = path_rule_regex(r.value, base, any_depth=any_depth)
+            return regex
+
+        positive_hit: Optional[Rule] = None
+        for r in path_rules:
+            if not r.negated and _rule_regex(r).match(target_posix):
+                positive_hit = r
+                break
+        if positive_hit is None:
+            return None
+        for r in path_rules:
+            if r.negated and _rule_regex(r).match(target_posix):
+                return None  # the exception cancels the positive hit
+        return positive_hit
 
     # ---- Bash gets its OWN path: "every segment" is a property of the
     # WHOLE allow-rule list, not any one rule in isolation, so it can never
@@ -871,6 +1237,37 @@ class PermissionEngine:
             return Decision("allow", "allowed by an explicit Bash rule", source="rules")
 
         return self._mode_table_decision("Bash", tool_input, None)
+
+    # ---- PowerShell gets the same segment-split treatment (finding 1) -----
+
+    def _decide_powershell(self, tool_input: dict) -> Decision:
+        command = tool_input.get("command", "")
+        ps_rules = lambda rs: [r for r in rs if r.tool == "PowerShell"]  # noqa: E731
+
+        deny_bare = [r for r in ps_rules(self.deny_rules) if r.kind == "bare"]
+        if deny_bare:
+            return Decision("deny", "denied by rule 'PowerShell' (whole tool)", source=deny_bare[0].source, matched_rule=deny_bare[0])
+        hit = powershell_deny_or_ask_matches(command, [r for r in ps_rules(self.deny_rules) if r.kind in ("exact", "prefix", "glob")])
+        if hit is not None:
+            return Decision("deny", f"denied by rule {hit.raw!r}", source=hit.source, matched_rule=hit)
+
+        if self.mode != "bypassPermissions":
+            ask_bare = [r for r in ps_rules(self.ask_rules) if r.kind == "bare"]
+            if ask_bare:
+                return self._resolve_ask("PowerShell", tool_input, None, ask_bare[0])
+            hit = powershell_deny_or_ask_matches(command, [r for r in ps_rules(self.ask_rules) if r.kind in ("exact", "prefix", "glob")])
+            if hit is not None:
+                return self._resolve_ask("PowerShell", tool_input, None, hit)
+
+        if self.mode in ("auto", "bypassPermissions"):
+            return Decision("allow", "mode allows (no deny/ask rule matched)", source="mode")
+
+        allow_bare = [r for r in ps_rules(self.allow_rules) if r.kind == "bare"]
+        allow_patterned = [r for r in ps_rules(self.allow_rules) if r.kind in ("exact", "prefix", "glob")]
+        if allow_bare or any(powershell_rule_matches(r.kind, r.value, command) for r in allow_patterned):
+            return Decision("allow", "allowed by an explicit PowerShell rule", source="rules")
+
+        return self._mode_table_decision("PowerShell", tool_input, None)
 
     def _resolve_ask(self, tool_name: str, tool_input: dict, tool, hit: Rule) -> Decision:
         if self.mode == "dontAsk":
@@ -919,6 +1316,14 @@ class PermissionEngine:
             for tok in tokens[1:]:
                 if tok.startswith("-"):
                     continue
+                # finding 12: `~`, `$HOME`, `$(...)`, backticks -- NEVER
+                # resolved as an ordinary cwd-relative path string; a shell
+                # would expand these to something outside acceptEdits'
+                # control, so treat the whole command as OUTSIDE the
+                # working dirs rather than silently auto-allowing it
+                # (verified exploit: `rm -rf ~`, `rm -rf $HOME/.ssh`).
+                if tok.startswith("~") or tok.startswith("$") or "$(" in tok or "`" in tok:
+                    return False
                 candidate = Path(tok)
                 target = candidate if candidate.is_absolute() else (self.cwd / candidate)
                 if not self._in_working_dirs(target):
@@ -930,6 +1335,12 @@ class PermissionEngine:
             if self.mode == "dontAsk":
                 return Decision("deny", "AskUserQuestion errors on a tool call in dontAsk mode", source="mode")
             return Decision("allow", "AskUserQuestion is allowed in every mode except dontAsk", source="mode")
+        if tool_name in ("TodoWrite", "ToolSearch"):
+            # finding 12: permission-free tools -- no side effects a mode
+            # table needs to gate, in EVERY mode (an explicit deny/ask rule,
+            # already checked before this fallback is ever reached, still
+            # overrides this).
+            return Decision("allow", f"{tool_name} is always allowed (no side effects requiring permission)", source="mode")
         category = self._categorize(tool_name, tool_input, tool)
         action = _MODE_TABLE.get(category, _MODE_TABLE["other"]).get(self.mode, "ask")
         if action == "ask" and self.print_mode:
@@ -944,23 +1355,40 @@ class PermissionEngine:
     # ---- entry point ------------------------------------------------------
 
     def decide(self, tool_name: str, tool_input: Optional[dict] = None, tool=None) -> Decision:
-        tool_input = tool_input or {}
+        """finding 15: any path-resolution error (e.g. a NUL byte in a
+        path -- `Path.resolve()` raises `ValueError` at the OS level) is
+        caught here, ONCE, at the single entry point every caller uses --
+        never left to kill the whole turn."""
+        try:
+            return self._decide(tool_name, tool_input or {}, tool)
+        except (ValueError, OSError) as e:
+            return Decision("deny", f"could not resolve a path for this {tool_name} call: {e}", source="error")
+
+    def _decide(self, tool_name: str, tool_input: dict, tool) -> Decision:
         if tool_name == "Bash":
             return self._decide_bash(tool_input)
+        if tool_name == "PowerShell":
+            return self._decide_powershell(tool_input)
 
-        hit = self._match_any(self.deny_rules, tool_name, tool_input, tool, action="deny")
+        hit = self._path_rule_hit(self.deny_rules, tool_name, tool_input, tool, action="deny")
+        if hit is None:
+            hit = self._match_any(self.deny_rules, tool_name, tool_input, tool, action="deny")
         if hit is not None:
             return Decision("deny", f"denied by rule {hit.raw!r}", source=hit.source, matched_rule=hit)
 
         if self.mode != "bypassPermissions":
-            hit = self._match_any(self.ask_rules, tool_name, tool_input, tool, action="ask")
+            hit = self._path_rule_hit(self.ask_rules, tool_name, tool_input, tool, action="ask")
+            if hit is None:
+                hit = self._match_any(self.ask_rules, tool_name, tool_input, tool, action="ask")
             if hit is not None:
                 return self._resolve_ask(tool_name, tool_input, tool, hit)
 
         if self.mode in ("auto", "bypassPermissions"):
             return Decision("allow", "mode allows (no deny/ask rule matched)", source="mode")
 
-        hit = self._match_any(self.allow_rules, tool_name, tool_input, tool, action="allow")
+        hit = self._path_rule_hit(self.allow_rules, tool_name, tool_input, tool, action="allow")
+        if hit is None:
+            hit = self._match_any(self.allow_rules, tool_name, tool_input, tool, action="allow")
         if hit is not None:
             return Decision("allow", f"allowed by rule {hit.raw!r}", source=hit.source, matched_rule=hit)
 
@@ -968,22 +1396,63 @@ class PermissionEngine:
 
     # ---- suggested_rules ---------------------------------------------------
 
+    def _suggest_abs_path_value(self, path) -> str:
+        """`//`-prefixed absolute-path rule VALUE for `path` (finding 13):
+        exactly two leading slashes total -- `_abs_posix` already returns
+        its own leading `/` on POSIX (or a bare `C:/...` drive form on
+        Windows), so the `//` marker must never DOUBLE it (the old bug:
+        `//` + `/tmp/x` = `///tmp/x`, which `path_rule_regex` can't parse
+        back to the right absolute location). Always forward-slashed, so
+        this also never emits a backslash to double-escape on Windows."""
+        posix = _abs_posix(path)
+        if re.match(r"^[A-Za-z]:/", posix):
+            return f"//{posix}"
+        return f"//{posix.lstrip('/')}"
+
+    def _suggest_path_value(self, target) -> str:
+        """cwd-relative (bare, portable) when `target` is under this
+        engine's cwd, else the `//`-absolute form above -- NEVER the raw,
+        possibly-backslashed input string a model handed us verbatim
+        (finding 13's `Read(/etc/hosts)`-resolves-as-cwd-relative bug and
+        the doubled-backslash-on-Windows bug both come from that)."""
+        try:
+            rel = Path(target).resolve().relative_to(self.cwd.resolve())
+            return str(rel).replace("\\", "/")
+        except ValueError:
+            return self._suggest_abs_path_value(target)
+
     def suggest_rule(self, tool_name: str, tool_input: Optional[dict] = None) -> Optional[str]:
         tool_input = tool_input or {}
         if tool_name == "Bash":
             command = tool_input.get("command", "").strip()
             if not command:
                 return None
-            try:
-                tokens = shlex.split(command, posix=True)
-            except ValueError:
-                tokens = command.split()
-            if not tokens:
-                return None
-            verb = tokens[0]
-            if verb in _MULTI_WORD_VERBS and len(tokens) > 1:
-                return f"Bash({_escape_rule_content(verb + ' ' + tokens[1])}:*)"
-            return f"Bash({_escape_rule_content(verb)}:*)"
+            # finding 13: one suggestion PER non-read-only segment -- a
+            # multi-segment command like `cd /srv && make build` must not
+            # suggest only a rule for `cd` (already read-only, needs no
+            # rule at all) while leaving the segment that actually
+            # triggered the ask/deny (`make build`) unaddressed.
+            segments = split_bash_segments(command) or [command]
+            targets = [s for s in segments
+                       if not (is_read_only_bash_segment(strip_wrappers_and_env(s)) or is_read_only_bash_segment(s))]
+            if not targets:
+                targets = segments[:1]
+            suggestions: list = []
+            for seg in targets:
+                try:
+                    tokens = shlex.split(seg, posix=True)
+                except ValueError:
+                    tokens = seg.split()
+                if not tokens:
+                    continue
+                verb = tokens[0]
+                if verb in _MULTI_WORD_VERBS and len(tokens) > 1:
+                    text = f"Bash({_escape_rule_content(verb + ' ' + tokens[1])}:*)"
+                else:
+                    text = f"Bash({_escape_rule_content(verb)}:*)"
+                if text not in suggestions:
+                    suggestions.append(text)
+            return ", ".join(suggestions) if suggestions else None
         if tool_name == "PowerShell":
             command = tool_input.get("command", "").strip()
             canon = canonicalize_powershell(command) if command else ""
@@ -991,18 +1460,17 @@ class PermissionEngine:
             return f"PowerShell({_escape_rule_content(cmdlet)}:*)" if cmdlet else None
         if tool_name == "Read":
             path = tool_input.get("file_path", "")
-            return f"Read({_escape_rule_content(path)})" if path else None
+            if not path:
+                return None
+            p = Path(path)
+            target = p if p.is_absolute() else (self.cwd / p)
+            return f"Read({_escape_rule_content(self._suggest_path_value(target))})"
         if tool_name in ("Edit", "Write"):
             path = tool_input.get("file_path", "")
             if not path:
                 return None
             rel_dir = Path(path).parent
-            try:
-                rel = rel_dir.resolve().relative_to(self.cwd.resolve())
-                rel_str = str(rel).replace("\\", "/")
-                return f"Edit({_escape_rule_content(rel_str)}/**)"
-            except ValueError:
-                return f"Edit(//{_escape_rule_content(_abs_posix(rel_dir))}/**)"
+            return f"Edit({_escape_rule_content(self._suggest_path_value(rel_dir))}/**)"
         if tool_name == "WebFetch":
             from urllib.parse import urlparse
             host = urlparse(tool_input.get("url", "")).hostname
@@ -1068,9 +1536,24 @@ def build_rules_from_settings(settings, *, cwd: Path, claude_json_allowed_tools=
     (already split via `split_tool_rule_list`); `session_allow` is
     in-memory-only rules accumulated this run (e.g. a future interactive
     `allow_session` reply)."""
-    deny = [parse_rule(r, source="settings", base_dir=cwd, action="deny") for r in settings.permissions_deny]
-    ask = [parse_rule(r, source="settings", base_dir=cwd, action="ask") for r in settings.permissions_ask]
-    allow = [parse_rule(r, source="settings", base_dir=cwd, action="allow") for r in settings.permissions_allow]
+    # finding 15: each settings-sourced rule resolves a RELATIVE path value
+    # against the layer it actually came from (userSettings' own
+    # ~/.claude, not always `cwd`) when that provenance is available;
+    # `permission_rule_base_dir` is a no-op (returns None -> falls back to
+    # `cwd`) for a Settings built without layers, e.g. a bare
+    # `Settings(raw=..., layers=[], errors=[])` in a test.
+    get_base = getattr(settings, "permission_rule_base_dir", None)
+
+    def _base_for(action: str, rule_text: str) -> Path:
+        if get_base is not None:
+            found = get_base(action, rule_text)
+            if found is not None:
+                return found
+        return cwd
+
+    deny = [parse_rule(r, source="settings", base_dir=_base_for("deny", r), action="deny") for r in settings.permissions_deny]
+    ask = [parse_rule(r, source="settings", base_dir=_base_for("ask", r), action="ask") for r in settings.permissions_ask]
+    allow = [parse_rule(r, source="settings", base_dir=_base_for("allow", r), action="allow") for r in settings.permissions_allow]
     for name in (claude_json_allowed_tools or []):
         allow.append(parse_rule(name, source="claude_json", base_dir=cwd, action="allow"))
     for r in (cli_disallow or []):
@@ -1093,20 +1576,24 @@ def normalize_permission_mode(raw: Optional[str]) -> str:
 def freeze_tool_registry(registry, *, tools_flag: Optional[str] = None,
                           disallowed_tools: Optional[list] = None, deny_rules: Optional[list] = None):
     """Apply `--tools` (`""` -> none, `"default"`/None -> unchanged, a name
-    list -> exactly those) and then bare-name catalog removal (deny rules'
-    bare tool names + any bare `--disallowedTools` entries) -- called ONCE
-    at session start; the result is the session's FROZEN catalog for its
-    whole lifetime [D-CFG]."""
+    list -> exactly those) and then catalog removal -- deny rules' bare
+    tool names, any bare `--disallowedTools` entries, AND (H3 must-do) a
+    server-scoped MCP deny rule (`mcp__srv`/`mcp__*`, glob-aware) removing
+    every one of that server's tools that are ALREADY in the registry --
+    called ONCE at session start; the result is the session's FROZEN
+    catalog for its whole lifetime [D-CFG]."""
     if tools_flag is not None and tools_flag.strip() != "" and tools_flag.strip().lower() != "default":
         names = split_tool_rule_list(tools_flag)
         registry = registry.filtered(names)
     elif tools_flag is not None and tools_flag.strip() == "":
         registry = registry.filtered([])
 
-    bare = set(bare_deny_tool_names(deny_rules or []))
+    deny_rules = deny_rules or []
+    bare = set(bare_deny_tool_names(deny_rules))
     for raw in (disallowed_tools or []):
         if "(" not in raw:
             bare.add(raw.strip())
+    bare |= mcp_deny_tool_names(deny_rules, registry.names())
     if bare:
         registry = registry.without(bare)
     return registry

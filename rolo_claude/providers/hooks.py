@@ -17,6 +17,7 @@ cycle with the modules that call it.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -224,38 +225,56 @@ def _tag_params(blob: str, param_re) -> dict:
     return {k.strip(): v.strip() for k, v in param_re.findall(blob)}
 
 
-def _extract_dsml(text: str) -> Optional[dict]:
+# finding 2: a candidate is only promoted when it's essentially the WHOLE
+# message -- the text on either side of the matched span (added together)
+# must be short. This is the "trailing content outside fenced/inline
+# code" scoping rule: a genuine leaked call is normally the model's
+# entire turn (at most a short "sure, calling it now:" lead-in); an
+# EXPLANATORY answer that merely quotes/demonstrates the same shape mid-
+# prose (verified: "explain in one paragraph how a harness would send a
+# json tool call..." executing the quoted example; a Qwen "prose example"
+# executed the same way) has substantial text around the match and is
+# correctly rejected here.
+_LEAK_SURROUNDING_MAX_CHARS = 60
+
+
+def _looks_like_the_whole_message(text: str, start: int, end: int) -> bool:
+    leftover = (text[:start] + text[end:]).strip()
+    return len(leftover) <= _LEAK_SURROUNDING_MAX_CHARS
+
+
+def _extract_dsml(text: str) -> Optional[tuple]:
     m = _DSML_INVOKE_RE.search(text)
     if not m:
         return None
-    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _DSML_PARAM_RE)}
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _DSML_PARAM_RE)}, m.start(), m.end()
 
 
-def _extract_qwen3_coder_xml(text: str) -> Optional[dict]:
+def _extract_qwen3_coder_xml(text: str) -> Optional[tuple]:
     m = _QWEN_FUNCTION_RE.search(text)
     if not m:
         return None
-    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _QWEN_PARAMETER_RE)}
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _QWEN_PARAMETER_RE)}, m.start(), m.end()
 
 
-def _extract_minimax_invoke_xml(text: str) -> Optional[dict]:
+def _extract_minimax_invoke_xml(text: str) -> Optional[tuple]:
     m = _MINIMAX_INVOKE_RE.search(text)
     if not m:
         return None
-    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _MINIMAX_PARAM_RE)}
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _MINIMAX_PARAM_RE)}, m.start(), m.end()
 
 
-def _extract_minimax_m1_tool_calls(text: str) -> Optional[dict]:
+def _extract_minimax_m1_tool_calls(text: str) -> Optional[tuple]:
     m = _MINIMAX_M1_RE.search(text)
     if not m:
         return None
     parsed = args_repair(m.group(1))
     if isinstance(parsed, dict) and isinstance(parsed.get("name"), str):
-        return {"name": parsed["name"], "arguments": parsed.get("arguments") or {}}
+        return {"name": parsed["name"], "arguments": parsed.get("arguments") or {}}, m.start(), m.end()
     return None
 
 
-def _extract_fenced_json(text: str) -> Optional[dict]:
+def _extract_fenced_json(text: str) -> Optional[tuple]:
     for m in _FENCED_JSON_RE.finditer(text):
         parsed = args_repair(m.group(1))
         if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str):
@@ -263,12 +282,19 @@ def _extract_fenced_json(text: str) -> Optional[dict]:
         args = parsed.get("arguments")
         if not isinstance(args, dict):
             args = parsed.get("input") if isinstance(parsed.get("input"), dict) else parsed.get("parameters")
-        return {"name": parsed["name"], "arguments": args if isinstance(args, dict) else {}}
+        if not isinstance(args, dict):
+            # finding 2: "carries an args key" -- a bare {"name": "my-cli",
+            # "version": "1.0", ...} shaped object (e.g. package.json
+            # content shown to the user) is NOT a tool call just because
+            # it happens to have a "name" string; require one of the real
+            # argument-carrying keys to actually be present.
+            continue
+        return {"name": parsed["name"], "arguments": args}, m.start(), m.end()
     return None
 
 
-# name -> extractor(text) -> {"name","arguments"} | None. Tried BEFORE
-# `_LEAK_PATTERNS` in `leak_parser` (a name is never in both dicts).
+# name -> extractor(text) -> ({"name","arguments"}, start, end) | None.
+# Tried BEFORE `_LEAK_PATTERNS` in `leak_parser` (a name is never in both).
 _LEAK_EXTRACTORS = {
     "dsml": _extract_dsml,
     "qwen3_coder_xml": _extract_qwen3_coder_xml,
@@ -288,21 +314,30 @@ def leak_parser(text: str, profile) -> Optional[dict]:
     own rule ("only when a tool call was expected... then retry once"),
     never run against ordinary prose. Returns {"name", "arguments"} (a
     plain dict, arguments already parsed) on a match, else None. Only the
-    patterns named in `profile.tool_leak_patterns` are tried."""
+    patterns named in `profile.tool_leak_patterns` are tried, and (finding
+    2) only a match that is essentially the WHOLE message (see
+    `_looks_like_the_whole_message`) is ever promoted -- the caller
+    (agent/loop.py) additionally checks the resolved name against the
+    real tool catalog before dispatching it, which this provider-generic
+    module deliberately has no knowledge of."""
     if not text or not profile.tool_leak_patterns:
         return None
     for pattern_name in profile.tool_leak_patterns:
         extractor = _LEAK_EXTRACTORS.get(pattern_name)
         if extractor is not None:
-            result = extractor(text)
-            if result is not None:
-                return result
+            found = extractor(text)
+            if found is not None:
+                result, start, end = found
+                if _looks_like_the_whole_message(text, start, end):
+                    return result
             continue
         rx = _LEAK_PATTERNS.get(pattern_name)
         if rx is None:
             continue
         m = rx.search(text)
         if not m:
+            continue
+        if not _looks_like_the_whole_message(text, m.start(), m.end()):
             continue
         if pattern_name == "glm_arg_key":
             name = m.group(1).strip()
@@ -334,13 +369,65 @@ def think_tag_strip(text: str) -> str:
     return sentinel_re.sub("", think_re.sub("", text, count=1))
 
 
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _split_outside_json_strings(text: str) -> list:
+    """`[(is_string, chunk), ...]` covering the whole text -- a chunk
+    INSIDE a well-formed double-quoted JSON string (escapes included) is
+    matched and returned WHOLE, verbatim; everything else (structural
+    JSON punctuation/whitespace/bareword tokens) is a separate, editable
+    chunk. finding 5: this is what lets a repair touch ONLY structure,
+    never a string's own content."""
+    pos = 0
+    out = []
+    for m in _JSON_STRING_RE.finditer(text):
+        if m.start() > pos:
+            out.append((False, text[pos:m.start()]))
+        out.append((True, m.group(0)))
+        pos = m.end()
+    if pos < len(text):
+        out.append((False, text[pos:]))
+    return out
+
+
+def _repair_structure_outside_strings(text: str) -> str:
+    """Trailing-comma removal and Python True/False/None -> JSON
+    true/false/null, applied ONLY to the chunks `_split_outside_json_strings`
+    marked as NOT a string literal -- a string VALUE's own text (e.g. Write
+    content that is itself the Python code `return x is None or True`) is
+    passed through completely untouched."""
+    out = []
+    for is_string, chunk in _split_outside_json_strings(text):
+        if is_string:
+            out.append(chunk)
+            continue
+        chunk = re.sub(r",(\s*[}\]])", r"\1", chunk)
+        chunk = re.sub(r"\bTrue\b", "true", chunk)
+        chunk = re.sub(r"\bFalse\b", "false", chunk)
+        chunk = re.sub(r"\bNone\b", "null", chunk)
+        out.append(chunk)
+    return "".join(out)
+
+
+def _count_outside_strings(text: str, ch: str) -> int:
+    return sum(chunk.count(ch) for is_string, chunk in _split_outside_json_strings(text) if not is_string)
+
+
 def args_repair(raw: str) -> Optional[dict]:
     """Lenient JSON repair for tool-call arguments: strip code fences,
-    drop trailing commas, swap a Python-repr'd dict's single quotes /
-    True|False|None for JSON's, balance an unterminated trailing brace.
-    Returns a parsed dict, or None if nothing recognizable came out.
-    Called from `oai_stream.py`'s `_finalize` as the SECOND attempt (after
-    a plain `json.loads`) before a tool call is tagged malformed."""
+    then (finding 5, string-aware -- NEVER edits a string's own contents)
+    try `ast.literal_eval` first (a REAL parser: handles a Python-repr'd
+    dict's single quotes, True/False/None and a trailing comma all at
+    once, safely, since Python string escaping is parsed properly rather
+    than regex-guessed), then a string-aware trailing-comma/True-False-
+    None repair with unterminated-brace balancing, then -- only as a last
+    resort, and only when the blob has no double quote ANYWHERE so
+    structural and content quotes are inherently indistinguishable either
+    way -- a blanket single-to-double quote swap. Returns a parsed dict,
+    or None if nothing recognizable came out. Called from
+    `oai_stream.py`'s `_finalize` as the SECOND attempt (after a plain
+    `json.loads`) before a tool call is tagged malformed."""
     if not raw or not raw.strip():
         return None
     candidate = raw.strip()
@@ -351,20 +438,32 @@ def args_repair(raw: str) -> Optional[dict]:
         return json.loads(candidate)
     except json.JSONDecodeError:
         pass
-    repaired = re.sub(r",\s*([}\]])", r"\1", candidate)  # trailing commas
-    if "'" in repaired and '"' not in repaired:
-        repaired = repaired.replace('"', '\\"').replace("'", '"')
-    repaired = re.sub(r"\bTrue\b", "true", repaired)
-    repaired = re.sub(r"\bFalse\b", "false", repaired)
-    repaired = re.sub(r"\bNone\b", "null", repaired)
-    opens = repaired.count("{") - repaired.count("}")
+
+    try:
+        result = ast.literal_eval(candidate)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        pass
+
+    repaired = _repair_structure_outside_strings(candidate)
+    opens = _count_outside_strings(repaired, "{") - _count_outside_strings(repaired, "}")
     if opens > 0:
         repaired += "}" * opens
     try:
         result = json.loads(repaired)
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
-        return None
+        pass
+
+    if "'" in repaired and '"' not in repaired:
+        swapped = repaired.replace('"', '\\"').replace("'", '"')
+        try:
+            result = json.loads(swapped)
+            return result if isinstance(result, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------

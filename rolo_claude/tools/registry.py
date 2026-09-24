@@ -11,7 +11,9 @@ this module only knows how to build a registry that omits/keeps them.
 from __future__ import annotations
 
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from typing import Optional
 
 from rolo_claude.tools.ask_user_question import AskUserQuestionTool
@@ -28,6 +30,11 @@ from rolo_claude.tools.webfetch import WebFetchTool
 from rolo_claude.tools.write import WriteTool
 
 READ_ONLY_POOL_SIZE = 4
+# H3 must-do: if an MCP `readOnlyHint` tool ever joins this pool, one hung
+# call (finding 8's FIFO scenario, or any other unexpected block) must
+# never hold up the whole turn -- every future is awaited with this
+# per-call bound, abort-aware.
+READ_ONLY_CALL_TIMEOUT_S = 30.0
 
 
 def default_tools() -> list:
@@ -98,12 +105,48 @@ def run_read_only_batch(registry: ToolRegistry, calls: list, ctx: ToolContext) -
     already established are read-only and safe to run concurrently. Runs
     them on a bounded thread pool (`READ_ONLY_POOL_SIZE`) and returns
     `ToolResult`s in the SAME order as `calls`, independent of which one
-    actually finished first."""
+    actually finished first.
+
+    H3 must-do: abort-aware and bounded per call (`READ_ONLY_CALL_TIMEOUT_S`)
+    -- collecting each future's result polls in short slices instead of a
+    single blocking `.result()`, so a hung call (finding 8's unfixed-FIFO
+    scenario, or anything else that blocks unexpectedly) gets a clear
+    timeout/aborted `ToolResult` instead of freezing the whole turn, and
+    the session's `abort` Event cuts the wait short too. The pool itself
+    is shut down WITHOUT waiting (`wait=False`) so a still-stuck call's
+    own worker thread (Python cannot forcibly kill a running thread) is
+    simply abandoned rather than blocking this function's return."""
     if not calls:
         return []
     if len(calls) == 1:
         name, tool_input = calls[0]
         return [registry.dispatch(name, tool_input, ctx)]
-    with ThreadPoolExecutor(max_workers=min(READ_ONLY_POOL_SIZE, len(calls))) as pool:
+
+    abort = getattr(ctx, "abort", None)
+    pool = ThreadPoolExecutor(max_workers=min(READ_ONLY_POOL_SIZE, len(calls)))
+    try:
         futures = [pool.submit(registry.dispatch, name, tool_input, ctx) for name, tool_input in calls]
-        return [f.result() for f in futures]
+        results = []
+        for f in futures:
+            deadline = time.monotonic() + READ_ONLY_CALL_TIMEOUT_S
+            result = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    result = ToolResult(
+                        f"Tool call timed out after {READ_ONLY_CALL_TIMEOUT_S:.0f}s waiting in the "
+                        f"read-only pool.", is_error=True,
+                    )
+                    break
+                if abort is not None and abort.is_set():
+                    result = ToolResult("Tool call aborted while waiting in the read-only pool.", is_error=True)
+                    break
+                try:
+                    result = f.result(timeout=min(0.2, remaining))
+                    break
+                except _FutureTimeoutError:
+                    continue
+            results.append(result)
+        return results
+    finally:
+        pool.shutdown(wait=False)

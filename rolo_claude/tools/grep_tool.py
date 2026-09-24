@@ -10,9 +10,11 @@ skips the live rg-vs-Python comparison with a stated reason).
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -50,22 +52,91 @@ def _looks_binary(raw: bytes) -> bool:
     return b"\x00" in raw[:_BINARY_SNIFF_BYTES]
 
 
+def _is_regular_file(path: Path) -> bool:
+    """finding 8: checked before EVERY open -- a FIFO/char-device/socket
+    walked into the result set would otherwise hang `open(path, "rb")`
+    reading an infinite/blocking stream (verified: a dir containing a FIFO
+    blocks the read-only pool forever, no timeout, no abort), exactly the
+    same reasoning as tools/read.py's own S_ISREG check."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except OSError:
+        return False
+
+
+def _translate_glob_pattern(pattern: str) -> str:
+    """gitignore-ish glob -> an ANCHORED regex (finding 8: fnmatch treats
+    `?`/`[...]` as wildcards too and has no `**`/`{a,b}` support at all,
+    silently missing `glob: "*.{ts,tsx}"` and `glob: "**/*.ts"`): `**` ->
+    any depth (crosses `/`), `*` -> one path segment, `?` -> one char
+    (never `/`), `{a,b,...}` -> alternation; everything else literal."""
+    i, n = 0, len(pattern)
+    out = []
+    while i < n:
+        c = pattern[i]
+        if pattern[i:i + 2] == "**":
+            out.append(".*")
+            i += 2
+            continue
+        if c == "*":
+            out.append("[^/]*")
+            i += 1
+            continue
+        if c == "?":
+            out.append("[^/]")
+            i += 1
+            continue
+        if c == "{":
+            j = pattern.find("}", i)
+            if j == -1:
+                out.append(re.escape(c))
+                i += 1
+                continue
+            options = pattern[i + 1:j].split(",")
+            out.append("(?:" + "|".join(re.escape(o) for o in options) + ")")
+            i = j + 1
+            continue
+        out.append(re.escape(c))
+        i += 1
+    return "^" + "".join(out) + "$"
+
+
+_POSIX_CLASSES = {
+    "alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z", "lower": "a-z",
+    "space": r"\s", "blank": r" \t", "punct": re.escape("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+    "cntrl": r"\x00-\x1f\x7f", "print": r"\x20-\x7e", "graph": r"\x21-\x7e", "xdigit": "0-9A-Fa-f",
+}
+_POSIX_CLASS_RE = re.compile(r"\[:(\w+):\]")
+
+
+def _translate_posix_classes(pattern: str) -> str:
+    """ripgrep/PCRE POSIX bracket classes (`[[:space:]]`, `[[:alpha:]]`,
+    ...) aren't recognized by Python's `re` at all -- rewritten to their
+    Python-`re`-legal equivalents (valid INSIDE a `[...]` bracket
+    expression, which is the only place a POSIX class is legal) before
+    compiling (finding 8: `foo[[:space:]]+bar` reported no matches)."""
+    return _POSIX_CLASS_RE.sub(lambda m: _POSIX_CLASSES.get(m.group(1), m.group(0)), pattern)
+
+
 def _iter_files(base: Path, glob_pattern, file_type):
     if base.is_file():
-        yield base
+        if _is_regular_file(base):
+            yield base
         return
-    import fnmatch
     exts = _TYPE_EXTENSIONS.get(file_type) if file_type else None
+    glob_re = re.compile(_translate_glob_pattern(glob_pattern)) if glob_pattern else None
     for root, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
         for fname in filenames:
             if exts is not None and not any(fnmatch.fnmatch(fname, e) for e in exts):
                 continue
             p = Path(root) / fname
-            if glob_pattern:
+            if glob_re is not None:
                 rel = str(p.relative_to(base)).replace(os.sep, "/")
-                if not (fnmatch.fnmatch(fname, glob_pattern) or fnmatch.fnmatch(rel, glob_pattern)):
+                if not (glob_re.match(fname) or glob_re.match(rel)):
                     continue
+            if not _is_regular_file(p):
+                continue
             yield p
 
 
@@ -152,16 +223,23 @@ def _run_python_backend(pattern, regex, base, *, glob_pattern, file_type, output
 
 
 def _parse_rg_line_output(text: str) -> dict:
-    """Parse ripgrep's `--line-number --no-heading` content output
-    (`path:lineno:text`, split on the first two colons only -- `text` may
-    itself contain colons) into the shared `{path: [(line_no, text), ...]}`
-    shape."""
+    """Parse ripgrep's `--line-number --no-heading --with-filename --null`
+    content output into the shared `{path: [(line_no, text), ...]}` shape.
+    finding 8: `--null` makes rg emit a NUL byte (never `:`) right after
+    the path, so the path is split off UNAMBIGUOUSLY first -- neither a
+    Windows drive letter's own `:` (`C:\\foo\\bar.py`) nor a colon inside
+    the matched TEXT can be mistaken for the path/line-number separator
+    (the old `split(":", 2)` broke on both); `--with-filename` (`-H`)
+    forces the path prefix even when `base` is a single file, which rg
+    otherwise omits on its own."""
     per_file: dict = {}
-    for raw_line in text.splitlines():
-        parts = raw_line.split(":", 2)
-        if len(parts) != 3:
+    for raw_line in text.split("\n"):
+        if not raw_line or "\x00" not in raw_line:
             continue
-        path_str, line_no_str, content = parts
+        path_str, rest = raw_line.split("\x00", 1)
+        line_no_str, sep, content = rest.partition(":")
+        if not sep:
+            continue
         try:
             line_no = int(line_no_str)
         except ValueError:
@@ -179,11 +257,14 @@ def _run_ripgrep_backend(pattern, base, *, ignore_case, glob_pattern, file_type,
     rg = shutil.which("rg")
     if not rg:
         raise _RipgrepUnavailable()
-    # Always ask rg for line-numbered, unheaded content output so its raw
-    # text can be parsed into the SAME shape the Python engine produces,
-    # then rendered through the one shared `_format` -- our own -n/before/
-    # after/head_limit are applied ourselves, not delegated to rg's flags.
-    args = [rg, "--line-number", "--no-heading", "--color=never"]
+    # Always ask rg for line-numbered, unheaded, NUL-delimited content
+    # output so its raw text can be parsed into the SAME shape the Python
+    # engine produces, then rendered through the one shared `_format` --
+    # our own -n/before/after/head_limit are applied ourselves, not
+    # delegated to rg's flags. finding 8: `--with-filename` (`-H`, else
+    # omitted for a single-file `base`) + `--null` (unambiguous path/text
+    # split -- see _parse_rg_line_output).
+    args = [rg, "--line-number", "--no-heading", "--with-filename", "--null", "--color=never"]
     if ignore_case:
         args.append("-i")
     if multiline:
@@ -263,7 +344,10 @@ class GrepTool(Tool):
         if multiline:
             flags |= re.MULTILINE | re.DOTALL
         try:
-            regex = re.compile(pattern, flags)
+            # finding 8: ripgrep/PCRE POSIX bracket classes (`[[:space:]]`)
+            # aren't valid Python `re` syntax on their own -- translated
+            # first so the SAME pattern text works on both backends.
+            regex = re.compile(_translate_posix_classes(pattern), flags)
         except re.error as e:
             return ToolResult(f"Invalid regular expression {pattern!r}: {e}", is_error=True)
 
@@ -276,6 +360,14 @@ class GrepTool(Tool):
 
         glob_pattern = input.get("glob")
         file_type = input.get("type")
+        if file_type and file_type not in _TYPE_EXTENSIONS:
+            # finding 8: an unrecognized `type` used to silently match
+            # EVERY file (no filter applied at all) instead of telling the
+            # model its filter never took effect.
+            return ToolResult(
+                f"Unknown type: {file_type!r}. Supported types: {', '.join(sorted(_TYPE_EXTENSIONS))}",
+                is_error=True,
+            )
 
         if shutil.which("rg"):
             try:

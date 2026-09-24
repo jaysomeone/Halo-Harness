@@ -173,8 +173,9 @@ def test_double_slash_absolute_path_rule(ctx: Ctx):
     r = P.parse_rule("Read(//etc/passwd)", source="user", base_dir=CWD)
     regex, is_abs = P.path_rule_regex(r.value, CWD, any_depth=False)
     ctx.check("// form is absolute", is_abs is True)
-    if sys_platform_posix := (Path("/") == Path("/")):
-        pass
+    ctx.check("// form actually matches /etc/passwd itself", regex.match("/etc/passwd") is not None)
+    ctx.check("// form does not match an unrelated absolute path",
+              regex.match("/etc/hosts") is None and regex.match("/tmp/etc/passwd") is None)
 
 
 @test
@@ -206,6 +207,37 @@ def test_negation_parsed_and_flips_match(ctx: Ctx):
     ])
     allowed = engine.decide("Read", {"file_path": str(CWD / "other.txt")}, tool=ReadTool())
     ctx.check(f"non-excluded file still allowed via Read(**), got {allowed.action}", allowed.action == "allow")
+    # finding 16: the negated path itself must actually be exercised -- a
+    # `!`-rule only CANCELS the Read(**) allow for secret.txt, it is never
+    # an independent positive match (the bug this test used to miss: the
+    # negation was applied as "every OTHER path", denying everything).
+    # secret.txt is IN the working dir, so it still resolves to "allow"
+    # overall (default mode's own read_in_workdir row) -- the thing that
+    # must be true is that the Read(**)/Read(!secret.txt) RULE PAIR itself
+    # produced no match (`matched_rule is None`), not the mode-table
+    # fallback rule wearing the Read(**) rule's clothes.
+    excluded = engine.decide("Read", {"file_path": str(CWD / "secret.txt")}, tool=ReadTool())
+    ctx.check(f"the negated path is NOT matched by the allow-rule pair (mode table decides it instead), "
+              f"got action={excluded.action} source={excluded.source} matched_rule={excluded.matched_rule}",
+              excluded.matched_rule is None and excluded.source == "mode")
+
+
+@test
+def test_negation_never_denies_other_paths_on_its_own(ctx: Ctx):
+    """finding 6's core verified bug: a solitary `!`-rule (no positive
+    rule alongside it in the same list) must never act as "every path
+    except this one" -- it has NOTHING to cancel, so it must never fire
+    at all."""
+    engine = P.PermissionEngine(mode="auto", cwd=CWD, deny_rules=[
+        P.parse_rule("Read(.env*)", source="user", base_dir=CWD),
+        P.parse_rule("Read(!.env.example)", source="user", base_dir=CWD),
+    ])
+    d = engine.decide("Read", {"file_path": str(CWD / "README.md")}, tool=ReadTool())
+    ctx.check(f"an unrelated file is NOT denied by the negation, got {d.action}", d.action == "allow")
+    d_env = engine.decide("Read", {"file_path": str(CWD / ".env")}, tool=ReadTool())
+    ctx.check(f".env itself is still denied by the positive rule, got {d_env.action}", d_env.action == "deny")
+    d_example = engine.decide("Read", {"file_path": str(CWD / ".env.example")}, tool=ReadTool())
+    ctx.check(f".env.example is exempted by the negation, got {d_example.action}", d_example.action == "allow")
 
 
 # ---- Read-deny-blocks-Edit -------------------------------------------------
@@ -400,6 +432,13 @@ def test_every_mode_table_row(ctx: Ctx):
         ctx.check(f"{mode}: Write inside workdir -> {write_expect}, got {d_write.action}", d_write.action == write_expect)
         d_other = engine.decide("Bash", {"command": "curl http://example.invalid"})
         ctx.check(f"{mode}: other bash call -> {other_expect}, got {d_other.action}", d_other.action == other_expect)
+        # finding 16: the mode table's coverage used to stop at Bash/Write
+        # -- TodoWrite/ToolSearch (finding 12) must be always-allow in
+        # EVERY mode, with no explicit rule needed.
+        d_todo = engine.decide("TodoWrite", {"todos": []})
+        ctx.check(f"{mode}: TodoWrite always allowed, got {d_todo.action}", d_todo.action == "allow")
+        d_search = engine.decide("ToolSearch", {"query": "select:Read"})
+        ctx.check(f"{mode}: ToolSearch always allowed, got {d_search.action}", d_search.action == "allow")
 
 
 @test
@@ -556,6 +595,112 @@ def test_bare_name_removal_applies_to_registry(ctx: Ctx):
     filtered = reg.without(names)
     ctx.check("Bash removed from the frozen catalog", "Bash" not in filtered.names())
     ctx.check("everything else stays", "Read" in filtered.names() and "Edit" in filtered.names())
+
+
+@test
+def test_mcp_server_glob_deny_removes_catalog_names(ctx: Ctx):
+    """H3 must-do: mcp__srv/mcp__* deny rules honoured for CATALOG removal
+    (bare_deny_tool_names' MCP-aware sibling), glob-aware (finding 15)."""
+    deny = [P.parse_rule("mcp__*", source="user")]
+    removed = P.mcp_deny_tool_names(deny, ["Bash", "Read", "mcp__srv__get_x", "mcp__other__y"])
+    ctx.check(f"mcp__* removes every mcp tool, got {removed}", removed == {"mcp__srv__get_x", "mcp__other__y"})
+    deny_one = [P.parse_rule("mcp__gith*", source="user")]
+    removed_one = P.mcp_deny_tool_names(deny_one, ["mcp__github__get_issue", "mcp__gitlab__get_mr"])
+    ctx.check(f"a server glob only removes matching servers, got {removed_one}", removed_one == {"mcp__github__get_issue"})
+
+
+@test
+def test_decide_never_raises_on_a_nul_byte_path(ctx: Ctx):
+    """finding 15: a path-resolution error (a NUL byte makes `Path.resolve()`
+    raise ValueError at the OS level) must be caught at `decide()`'s single
+    entry point -- never left to kill the whole -p turn -- in any manual
+    mode or whenever a path rule exists (both conditions reproduced here)."""
+    engine = P.PermissionEngine(mode="default", cwd=CWD, deny_rules=[
+        P.parse_rule("Read(secret.txt)", source="user", base_dir=CWD),
+    ])
+    bad_path = str(CWD) + "/\x00evil"
+    d = engine.decide("Read", {"file_path": bad_path}, tool=ReadTool())
+    ctx.check(f"a NUL-byte path is denied with a clear reason, never an exception, got {d.action}/{d.reason}",
+              d.action == "deny")
+
+
+# ---- H2 finding 16: the 8 new pinning tests --------------------------------
+
+@test
+def test_new_1_deny_env_prefix_double_space_and_inner_star_wildcard(ctx: Ctx):
+    """finding 1: quote-aware env/wrapper stripping (no ALLOW-only keep-
+    list), whitespace collapse, and `x * y *` compiling as a real wildcard
+    ending -- all three verified-broken deny scenarios in one test."""
+    engine = P.PermissionEngine(mode="auto", cwd=CWD, deny_rules=[
+        P.parse_rule("Bash(git push:*)", source="user", base_dir=CWD),
+    ])
+    d1 = engine.decide("Bash", {"command": 'GIT_SSH_COMMAND="ssh -i k" git push origin main'})
+    ctx.check(f"quoted GIT_*= prefix does not defeat the deny, got {d1.action}", d1.action == "deny")
+    d2 = engine.decide("Bash", {"command": "GIT_TERMINAL_PROMPT=0 git push"})
+    ctx.check(f"bare env prefix does not defeat the deny, got {d2.action}", d2.action == "deny")
+
+    engine_rf = P.PermissionEngine(mode="auto", cwd=CWD, deny_rules=[
+        P.parse_rule("Bash(rm -rf:*)", source="user", base_dir=CWD),
+    ])
+    d3 = engine_rf.decide("Bash", {"command": "rm  -rf /tmp/x"})  # double space
+    ctx.check(f"a double space does not defeat the deny, got {d3.action}", d3.action == "deny")
+
+    engine_star = P.PermissionEngine(mode="auto", cwd=CWD, deny_rules=[
+        P.parse_rule("Bash(git push * --force *)", source="user", base_dir=CWD),
+    ])
+    d4 = engine_star.decide("Bash", {"command": "git push origin --force"})
+    ctx.check(f"x * y * compiles as a real wildcard, got {d4.action}", d4.action == "deny")
+
+
+@test
+def test_new_2_redirection_ampersand_under_an_allow_rule(ctx: Ctx):
+    """finding 11: `2>&1` must stay part of ONE segment (a redirection),
+    never split into `2>` + `1` -- an allow rule for the whole command
+    must still match it."""
+    engine = P.PermissionEngine(mode="default", cwd=CWD, allow_rules=[
+        P.parse_rule("Bash(npm test:*)", source="user", base_dir=CWD),
+    ])
+    d = engine.decide("Bash", {"command": "npm test 2>&1"})
+    ctx.check(f"2>&1 does not break the allow-rule match, got {d.action}", d.action == "allow")
+    segs = P.split_bash_segments("npm test 2>&1")
+    ctx.check(f"2>&1 stays inside one segment, got {segs}", segs == ["npm test 2>&1"])
+
+
+@test
+def test_new_3_todowrite_always_allowed_in_print_mode_default(ctx: Ctx):
+    """finding 12: TodoWrite must never land in the "other" mode-table
+    category (which `-p` default would otherwise ask/deny for)."""
+    engine = P.PermissionEngine(mode="default", cwd=CWD, print_mode=True)
+    d = engine.decide("TodoWrite", {"todos": [{"content": "x", "status": "pending", "activeForm": "x"}]})
+    ctx.check(f"TodoWrite allowed even in -p default (print mode), got {d.action}", d.action == "allow")
+
+
+@test
+def test_new_8_suggest_parse_decide_round_trips_to_allow(ctx: Ctx):
+    """finding 13: a suggested rule must actually RE-ALLOW the exact call
+    it was suggested for -- covers the outside-cwd Read (//-prefix, no
+    doubled slash) and a multi-segment Bash command."""
+    other_root = Path(tempfile.mkdtemp(prefix="perm-suggest-"))
+    target = other_root / "outside.txt"
+    engine = P.PermissionEngine(mode="default", cwd=CWD)
+    read_input = {"file_path": str(target)}
+    suggestion = engine.suggest_rule("Read", read_input)
+    ctx.check(f"Read suggestion looks sane, got {suggestion!r}", suggestion is not None and suggestion.startswith("Read("))
+    rule = P.parse_rule(suggestion, source="session", base_dir=CWD, action="allow")
+    ctx.check(f"suggested Read rule parses cleanly, got {rule}", rule.kind != "invalid")
+    engine2 = P.PermissionEngine(mode="default", cwd=CWD, allow_rules=[rule])
+    d = engine2.decide("Read", read_input, tool=ReadTool())
+    ctx.check(f"suggest -> parse -> decide round-trips to allow for Read, got {d.action}", d.action == "allow")
+
+    bash_input = {"command": "cd /srv && make build"}
+    bash_suggestion = engine.suggest_rule("Bash", bash_input)
+    ctx.check(f"Bash suggestion targets the real (non-read-only) segment, got {bash_suggestion!r}",
+              bash_suggestion is not None and "make" in bash_suggestion)
+    bash_rules = [P.parse_rule(r.strip(), source="session", base_dir=CWD, action="allow")
+                  for r in bash_suggestion.split(",")]
+    engine3 = P.PermissionEngine(mode="default", cwd=CWD, allow_rules=bash_rules)
+    d_bash = engine3.decide("Bash", bash_input)
+    ctx.check(f"suggest -> parse -> decide round-trips to allow for Bash, got {d_bash.action}", d_bash.action == "allow")
 
 
 if __name__ == "__main__":

@@ -444,6 +444,44 @@ def test_ordinary_final_answer_never_triggers_a_spurious_retry(ctx: Ctx):
 
 
 @test
+def test_new_4_explanatory_fenced_json_example_never_dispatches(ctx: Ctx):
+    """finding 2's own verified end-to-end failure: a model asked to
+    EXPLAIN how tool calls work answers with prose that happens to embed
+    a fenced ```json {"name": "Bash", "arguments": {...}} ``` example --
+    this must be promoted to a real tool_use, executed, and made a second
+    upstream call. It must instead stay a single, unmodified prose
+    answer -- markup that is NOT the message's trailing content (more
+    explanation follows the fence) is never promoted."""
+    fh = build_fake_home()
+
+    def _scn(h, body):
+        explanation = (
+            'A harness would send a JSON tool call like ```json\n'
+            '{"name": "Bash", "arguments": {"command": "echo hi > f"}}\n'
+            '```\nwhich the harness then parses, validates, and executes, returning the '
+            'result back to the model in the next turn so the conversation can continue.'
+        )
+        _finish(h, _final_text_chunk(explanation))
+
+    SCENARIOS["h2-explain-json"] = _scn
+    mock = MockUpstream().start()
+    try:
+        session = _make_session(fh, mock, scenario="h2-explain-json",
+                                 extra_profile_fields={"tool_leak_patterns": ("json_text_call",)})
+        seen = list(session.turn("explain in one paragraph how a harness sends a tool call"))
+        ready = [e for e in seen if e.kind == "tool_use_ready"]
+        ctx.check(f"no tool call is ever dispatched, got {ready}", ready == [])
+        ctx.check(f"exactly one upstream call (no forced retry either), got {len(mock.requests)}",
+                   len(mock.requests) == 1)
+        final_text = "".join(e.data.get("text", "") for e in seen if e.kind == "text_delta")
+        ctx.check(f"the explanatory prose passed through unchanged, got {final_text!r}",
+                   "A harness would send" in final_text and '"name": "Bash"' in final_text)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
 def test_loop_breaker_still_works_through_the_new_pipeline(ctx: Ctx):
     """The loop breaker (remind/deny/end at 3/5/8) still fires correctly
     now that dispatch goes through repair + permission decide first."""

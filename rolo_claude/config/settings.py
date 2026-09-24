@@ -41,10 +41,22 @@ class Settings:
         raw: dict,
         layers: list[SettingsLayer],
         errors: list[SettingsError],
+        permission_rule_origins: "Optional[dict[str, dict[str, Path]]]" = None,
     ):
         self._raw = raw
         self._layers = layers
         self._errors = errors
+        # finding 15: {"allow"|"ask"|"deny": {rule_text: base_dir}} -- which
+        # LAYER's base_dir a given permission rule STRING should resolve a
+        # relative path value against (first TRUSTED-FILTERED layer to
+        # mention that exact string wins; see _merge_layers). None for a
+        # Settings built directly (e.g. `Settings(raw=..., layers=[],
+        # errors=[])` in a test) -- permissions.build_rules_from_settings
+        # falls back to `cwd` for every rule in that case, same as before.
+        self._permission_rule_origins = permission_rule_origins or {}
+
+    def permission_rule_base_dir(self, action: str, rule_text: str) -> Optional[Path]:
+        return self._permission_rule_origins.get(action, {}).get(rule_text)
 
     @property
     def raw(self) -> dict:
@@ -239,7 +251,7 @@ def _apply_trust_filter(layer_data: dict, layer_name: str, trusted: bool) -> dic
     return filtered
 
 
-def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> dict:
+def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> "tuple[dict, dict]":
     """Merge layers low-to-high precedence (`layers` must already be in that
     order) per the spec's algorithm.
 
@@ -278,6 +290,11 @@ def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> dict:
     perm_result: dict[str, Any] = {}
     perm_list_accumulator: dict[str, list[Any]] = {}
     perm_last_is_list: dict[str, bool] = {}
+    # finding 15: {"allow"|"ask"|"deny": {rule_text: base_dir}} -- first
+    # trusted-filtered layer to mention an exact rule STRING wins; a
+    # relative path-rule value must resolve against the layer it actually
+    # came from (e.g. userSettings' own ~/.claude), not always `cwd`.
+    perm_origin: dict[str, dict] = {"allow": {}, "ask": {}, "deny": {}}
 
     def _dedupe_preserve_order(items: list) -> list:
         seen: set = set()
@@ -332,6 +349,10 @@ def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> dict:
                         if isinstance(pvalue, list):
                             perm_list_accumulator.setdefault(pkey, []).extend(pvalue)
                             perm_last_is_list[pkey] = True
+                            if pkey in perm_origin:
+                                for item in pvalue:
+                                    if isinstance(item, str) and item not in perm_origin[pkey]:
+                                        perm_origin[pkey][item] = layer.base_dir
                         else:
                             perm_result[pkey] = pvalue
                             perm_last_is_list[pkey] = False
@@ -363,7 +384,7 @@ def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> dict:
     if hooks_accumulator:
         result["hooks"] = hooks_accumulator
 
-    return result
+    return result, perm_origin
 
 
 def resolve_settings(
@@ -469,6 +490,6 @@ def resolve_settings(
         add_layer("policySettings", policy_path, policy_path.parent, data, error)
 
     # Merge all layers
-    merged = _merge_layers(layers, trusted=trusted)
+    merged, perm_origin = _merge_layers(layers, trusted=trusted)
 
-    return Settings(raw=merged, layers=layers, errors=errors)
+    return Settings(raw=merged, layers=layers, errors=errors, permission_rule_origins=perm_origin)

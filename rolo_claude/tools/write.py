@@ -73,7 +73,8 @@ class WriteTool(Tool):
         read_cache = getattr(ctx, "read_cache", None) if isinstance(getattr(ctx, "read_cache", None), dict) else {}
         bom = b""
         newline = "\n"
-        if path.exists():
+        is_new_file = not path.exists()
+        if not is_new_file:
             if path.is_dir():
                 return ToolResult(f"Path is a directory, not a file: {file_path}", is_error=True)
             try:
@@ -97,27 +98,47 @@ class WriteTool(Tool):
             except OSError as e:
                 return ToolResult(f"Error reading existing file to preserve its formatting: {e}", is_error=True)
             bom = _detect_bom(raw)
-            existing_text = raw[len(bom):].decode("utf-8", "replace")
+            # finding 4: surrogateescape, not "replace" -- see edit.py's
+            # identical reasoning (only used here for BOM/newline
+            # sniffing, but a lossy decode elsewhere in this codebase is
+            # exactly what corrupted an unrelated Edit's untouched bytes).
+            existing_text = raw[len(bom):].decode("utf-8", "surrogateescape")
             newline = _detect_newline(existing_text)
+
+        # Preserve the file's own line-ending convention on OVERWRITE:
+        # normalize the incoming content to \n first (so a model that
+        # emits \n consistently -- the overwhelmingly common case --
+        # round-trips exactly against a \n file), then re-expand to \r\n
+        # only if the EXISTING file was CRLF. finding 4: a BRAND NEW file
+        # keeps the model's own line endings verbatim instead -- there is
+        # no existing convention to match, and forcing one silently turns
+        # a deliberate \r\n (e.g. a new .bat file) into \n.
+        if is_new_file:
+            body = content
+        else:
+            body = content.replace("\r\n", "\n")
+            if newline == "\r\n":
+                body = body.replace("\n", "\r\n")
+
+        # finding 4: encode BEFORE any filesystem mutation (not even
+        # mkdir) -- an encode failure (e.g. a lone surrogate from
+        # malformed JSON input) must leave an existing file completely
+        # untouched instead of truncating it, and must not even create a
+        # new file's parent directories.
+        try:
+            encoded = body.encode("utf-8", "surrogateescape")
+        except UnicodeEncodeError as e:
+            return ToolResult(f"Error encoding content as UTF-8: {e}", is_error=True)
 
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             return ToolResult(f"Error creating parent directories: {e}", is_error=True)
 
-        # Preserve the file's own line-ending convention: normalize the
-        # incoming content to \n first (so a model that emits \n
-        # consistently -- the overwhelmingly common case -- round-trips
-        # exactly against a \n file), then re-expand to \r\n only if the
-        # EXISTING file (or nothing, for a new file) was CRLF.
-        body = content.replace("\r\n", "\n")
-        if newline == "\r\n":
-            body = body.replace("\n", "\r\n")
-
         try:
             with open(path, "wb") as f:
                 f.write(bom)
-                f.write(body.encode("utf-8"))
+                f.write(encoded)
         except OSError as e:
             return ToolResult(f"Error writing file: {e}", is_error=True)
 

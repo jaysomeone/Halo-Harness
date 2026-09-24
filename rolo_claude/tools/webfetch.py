@@ -34,7 +34,13 @@ DESCRIPTION = (
 )
 
 _TIMEOUT_S = 30
-_MAX_BYTES = 100_000
+# finding 14: the RAW read cap is generous (a few MB of markup) -- an HTML
+# page is mostly tags/scripts/nav chrome, so capping the RAW bytes at 100KB
+# before ever stripping tags threw away almost all of the readable text on
+# any real page (verified: a 415KB page yielded 1,141 chars of navigation
+# and no article body). The 100KB cap applies to the CONVERTED TEXT instead.
+_MAX_RAW_BYTES = 5_000_000
+_MAX_TEXT_CHARS = 100_000
 _MAX_REDIRECTS = 5
 _CACHE_TTL_S = 15 * 60
 _CACHE: dict = {}  # url -> (fetched_at_monotonic, body_text)
@@ -138,30 +144,23 @@ class WebFetchTool(Tool):
     def permission_content(self, input: dict) -> str:
         return input.get("url", "") if isinstance(input, dict) else ""
 
-    def run(self, input: dict, ctx: ToolContext) -> ToolResult:
-        url = input.get("url") if isinstance(input, dict) else None
-        if not url or not isinstance(url, str):
-            return ToolResult("The url parameter is required", is_error=True)
+    def _fetch_once(self, url: str):
+        """One raw HTTP(S) attempt: returns `(raw_bytes, content_type,
+        final_url)` on success, or a `ToolResult` (always `is_error=True`)
+        describing the failure -- callers check `isinstance(result,
+        ToolResult)` to tell the two apart."""
         parsed = urlparse(url)
-        if parsed.scheme == "http" and not _is_local_host(parsed.hostname or ""):
-            url = "https://" + url[len("http://"):]
-            parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            return ToolResult(f"Invalid or unsupported URL: {url!r}", is_error=True)
-
-        now = time.monotonic()
-        cached = _CACHE.get(url)
-        if cached and now - cached[0] < _CACHE_TTL_S:
-            return ToolResult(cached[1])
-
         handler = _SameHostRedirectHandler(parsed.hostname)
         opener = urllib.request.build_opener(handler)
         req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude/0.3 (+webfetch tool)"})
         try:
             with opener.open(req, timeout=_TIMEOUT_S) as resp:
-                raw = resp.read(_MAX_BYTES + 1)
+                # finding 14: read a few MB of RAW bytes -- html_to_text
+                # below strips markup down to a small fraction of that.
+                raw = resp.read(_MAX_RAW_BYTES + 1)
                 content_type = resp.headers.get("Content-Type", "") or ""
                 final_url = resp.geturl()
+            return raw, content_type, final_url
         except _CrossHostRedirect as e:
             return ToolResult(
                 f"{url} redirected to a different host ({e.url}) -- refusing to follow automatically; "
@@ -175,8 +174,40 @@ class WebFetchTool(Tool):
         except (OSError, ValueError, TimeoutError) as e:
             return ToolResult(f"Error fetching {url}: {e}", is_error=True)
 
-        truncated = len(raw) > _MAX_BYTES
-        raw = raw[:_MAX_BYTES]
+    def run(self, input: dict, ctx: ToolContext) -> ToolResult:
+        url = input.get("url") if isinstance(input, dict) else None
+        if not url or not isinstance(url, str):
+            return ToolResult("The url parameter is required", is_error=True)
+        parsed = urlparse(url)
+        original_url = url
+        upgraded = parsed.scheme == "http" and not _is_local_host(parsed.hostname or "")
+        if upgraded:
+            url = "https://" + url[len("http://"):]
+            parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return ToolResult(f"Invalid or unsupported URL: {url!r}", is_error=True)
+
+        now = time.monotonic()
+        cached = _CACHE.get(url)
+        if cached and now - cached[0] < _CACHE_TTL_S:
+            return ToolResult(cached[1])
+
+        fetched = self._fetch_once(url)
+        if isinstance(fetched, ToolResult):
+            # finding 14: the https upgrade's CONNECTION itself failed (no
+            # TLS listener, cert error, connection refused, ...) -- fall
+            # back to the original plain http URL rather than giving up (a
+            # genuine http-only host, e.g. an internal service or a CTF
+            # box, must still be reachable).
+            if not upgraded:
+                return fetched
+            fallback = self._fetch_once(original_url)
+            if isinstance(fallback, ToolResult):
+                return fallback
+            fetched = fallback
+            url = original_url
+
+        raw, content_type, final_url = fetched
         charset = "utf-8"
         m = re.search(r"charset=([\w-]+)", content_type, re.IGNORECASE)
         if m:
@@ -188,8 +219,11 @@ class WebFetchTool(Tool):
 
         looks_html = "html" in content_type.lower() or "<html" in text_raw[:1000].lower()
         text = html_to_text(text_raw) if looks_html else text_raw
-        if truncated:
-            text += "\n... [response truncated at 100KB]"
+        # finding 14: the 100KB cap applies to the CONVERTED text, not the
+        # raw markup -- applied AFTER html_to_text so it never throws away
+        # the readable content before it's even extracted.
+        if len(text) > _MAX_TEXT_CHARS:
+            text = text[:_MAX_TEXT_CHARS] + "\n... [response truncated at 100KB of text]"
         header = f"URL: {final_url}\n\n" if final_url != url else ""
         body = (header + text).strip() or "(empty response)"
         _CACHE[url] = (now, body)

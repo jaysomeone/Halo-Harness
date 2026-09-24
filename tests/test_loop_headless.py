@@ -200,7 +200,7 @@ def test_without_p_flag_prints_tui_notice_exit_2(ctx: Ctx):
     result = subprocess.run([sys.executable, "-m", "rolo_claude"], env=env, cwd=str(REPO_DIR),
                              capture_output=True, text=True, timeout=15)
     ctx.check(f"exit code 2, got {result.returncode}", result.returncode == 2)
-    ctx.check("TUI-not-built-yet notice printed", "TUI not built yet" in result.stderr)
+    ctx.check("TUI-arrives-in-U2 notice printed", "TUI arrives in U2" in result.stderr)
 
 
 @test

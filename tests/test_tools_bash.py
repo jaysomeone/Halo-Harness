@@ -128,6 +128,45 @@ def test_bash_result_cap_is_30000_chars(ctx: Ctx):
     ctx.check("Bash.result_cap == 30000", BashTool().result_cap == 30_000)
 
 
+@test
+def test_new_6_backgrounded_command_returns_promptly(ctx: Ctx):
+    """finding 7: completion must be keyed on the WRAPPER process exiting,
+    never on stdout EOF -- a backgrounded child keeps the pipe's write end
+    open long after the foreground command finished, which used to block
+    for the full timeout."""
+    d = _tmpdir("bash-bg-")
+    t0 = time.monotonic()
+    result = BashTool().run({"command": "sleep 5 & echo started", "timeout": 60_000},
+                             ToolContext(cwd=d, bash_state={"cwd": d}))
+    elapsed = time.monotonic() - t0
+    ctx.check(f"returns promptly despite the backgrounded sleep, got {elapsed:.2f}s", elapsed < 3.0)
+    ctx.check("no error", result.is_error is False)
+    ctx.check(f"the foreground output is captured, got {result.content!r}", "started" in result.content)
+
+
+@test
+def test_new_7_bash_recovers_after_its_cwd_is_deleted(ctx: Ctx):
+    """finding 9: the persisted cwd is reused with no existence check --
+    `cd build` then `rm -rf build` used to fail EVERY later call for the
+    rest of the session, `cd /` included."""
+    import shutil as _shutil
+    d = _tmpdir("bash-cwd-deleted-")
+    sub = d / "build"
+    sub.mkdir()
+    bash_state = {"cwd": sub}
+    ctx_obj = ToolContext(cwd=d, bash_state=bash_state)
+    _shutil.rmtree(sub)
+    result = BashTool().run({"command": "echo still-alive"}, ctx_obj)
+    ctx.check(f"no error after the cwd vanished, got {result.content!r}", result.is_error is False)
+    ctx.check("the command still ran for real", "still-alive" in result.content)
+    ctx.check(f"bash_state falls back to the session cwd, got {bash_state['cwd']!r}",
+              Path(bash_state["cwd"]).resolve() == d.resolve())
+    # and the session keeps working on the next call too
+    result2 = BashTool().run({"command": "echo second-call"}, ctx_obj)
+    ctx.check(f"a later call also succeeds, got {result2.content!r}", result2.is_error is False
+              and "second-call" in result2.content)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

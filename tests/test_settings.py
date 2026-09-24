@@ -273,6 +273,39 @@ def test_h0_14_case8_policy_beats_flag_settings(ctx: Ctx):
         os.environ.pop("BRIDGE_TEST_MANAGED_DIR", None)
 
 
+@test
+def test_finding_15_permission_rule_tracks_its_own_layer_base_dir(ctx: Ctx):
+    """finding 15: every settings source used to get `base_dir=cwd`, even
+    though a rule that came from userSettings should resolve a relative
+    path VALUE against `~/.claude`, not the project cwd (verified: a
+    user-level `Read(/x)` resolved under cwd instead of the real home)."""
+    home = _isolated_project("home15")
+    proj = _isolated_project("proj15")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Read(user-notes.txt)"]}}), encoding="utf-8")
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Read(project-notes.txt)"]}}), encoding="utf-8")
+
+    settings = resolve_settings(proj)
+    ctx.check("both rules present in the merged allow list",
+              set(settings.permissions_allow) == {"Read(user-notes.txt)", "Read(project-notes.txt)"})
+    user_base = settings.permission_rule_base_dir("allow", "Read(user-notes.txt)")
+    proj_base = settings.permission_rule_base_dir("allow", "Read(project-notes.txt)")
+    ctx.check(f"the user-sourced rule's base_dir is ~/.claude, got {user_base}",
+              user_base is not None and Path(user_base).resolve() == (home / ".claude").resolve())
+    ctx.check(f"the project-sourced rule's base_dir is the project's .claude, got {proj_base}",
+              proj_base is not None and Path(proj_base).resolve() == (proj / ".claude").resolve())
+
+    from rolo_claude.permissions import build_rules_from_settings
+    _deny, _ask, allow_rules = build_rules_from_settings(settings, cwd=proj)
+    by_value = {r.value: r for r in allow_rules}
+    ctx.check("both parsed Rules carry their OWN source base_dir, not always cwd",
+              by_value["user-notes.txt"].base_dir.resolve() == (home / ".claude").resolve()
+              and by_value["project-notes.txt"].base_dir.resolve() == (proj / ".claude").resolve())
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

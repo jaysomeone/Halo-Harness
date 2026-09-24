@@ -101,9 +101,13 @@ _JSON_TYPES = {
 def validate_and_coerce(input: dict, schema: dict) -> "tuple[dict, list]":
     """(coerced_input, errors). Never raises; an empty `errors` list means
     `input` (possibly with a few values coerced -- a stringified number, a
-    numeric string for an integer field, "true"/"false" for a boolean) is
-    schema-valid. Only `properties`/`required`/`enum` are consulted --
-    deliberately not a full JSON-Schema implementation."""
+    numeric string for an integer field, "true"/"false" for a boolean, an
+    integral float for an integer field, or a JSON-encoded STRING for an
+    array/object field -- finding 5's two missing coercions, e.g. a Qwen/
+    GLM habit of sending TodoWrite's `todos` as `'[{"content":...}]'`
+    rather than a real array) is schema-valid. Only
+    `properties`/`required`/`enum` are consulted -- deliberately not a
+    full JSON-Schema implementation."""
     if not isinstance(schema, dict):
         return (input if isinstance(input, dict) else {}), []
     props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
@@ -130,6 +134,8 @@ def validate_and_coerce(input: dict, schema: dict) -> "tuple[dict, list]":
             pass
         elif expected == "string" and isinstance(value, (int, float)):
             out[key] = str(value)
+        elif expected == "integer" and isinstance(value, float) and value.is_integer():
+            out[key] = int(value)
         elif expected in ("number", "integer") and isinstance(value, str):
             try:
                 out[key] = int(value) if expected == "integer" else float(value)
@@ -137,6 +143,15 @@ def validate_and_coerce(input: dict, schema: dict) -> "tuple[dict, list]":
                 errors.append(f"parameter {key!r} must be {expected}, got {value!r}")
         elif expected == "boolean" and isinstance(value, str) and value.strip().lower() in ("true", "false"):
             out[key] = value.strip().lower() == "true"
+        elif expected in ("array", "object") and isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, py_types):
+                out[key] = parsed
+            else:
+                errors.append(f"parameter {key!r} must be {expected}, got {value!r}")
         else:
             errors.append(f"parameter {key!r} must be {expected}, got {type(value).__name__}")
         enum = prop_schema.get("enum")

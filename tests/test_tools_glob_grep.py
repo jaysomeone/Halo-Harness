@@ -192,6 +192,86 @@ def test_grep_rg_vs_python_backend_parity(ctx: Ctx):
     ctx.check(f"rg and python backends agree, got\nPY={py_out!r}\nRG={rg_out!r}", py_out == rg_out)
 
 
+@test
+def test_grep_rg_output_parser_handles_colons_in_path_and_text(ctx: Ctx):
+    """finding 8: `_parse_rg_line_output` must not require the REAL `rg`
+    binary to be installed to exercise its own parsing logic (both build
+    hosts lack rg, so the live parity test above never actually runs) --
+    a synthetic `--with-filename --null` sample pins the fix directly: a
+    Windows drive-letter path's OWN colon, and a colon inside the matched
+    TEXT, must never be mistaken for the path/line-number separator (the
+    old `split(":", 2)` broke on both)."""
+    from rolo_claude.tools.grep_tool import _parse_rg_line_output
+    sample = "C:\\repo\\a.py\x0012:x = {\"k\": 1}\nC:\\repo\\a.py\x0013:y = 2\n"
+    parsed = _parse_rg_line_output(sample)
+    ctx.check(f"exactly one file key, got {list(parsed.keys())}", len(parsed) == 1)
+    path = next(iter(parsed))
+    ctx.check(f"the Windows path with its own colon is the WHOLE path, got {path!r}", str(path) == "C:\\repo\\a.py")
+    lines = parsed[path]
+    ctx.check(f"both lines parsed with line numbers intact, got {lines}",
+              lines == [(12, 'x = {"k": 1}'), (13, "y = 2")])
+
+
+@test
+def test_grep_glob_filter_handles_braces_and_double_star(ctx: Ctx):
+    """finding 8: fnmatch has no `{a,b}`/`**` support at all -- the
+    schema's own documented examples must actually work."""
+    d = _build_tree()
+    (d / "src" / "c.tsx").write_text("foo tsx\n", encoding="utf-8")
+    r_brace = GrepTool().run({"pattern": "foo", "path": str(d), "glob": "*.{ts,tsx}"}, ToolContext(cwd=d))
+    ctx.check(f"brace glob matches .tsx, got {r_brace.content!r}", "c.tsx" in r_brace.content)
+    (d / "src" / "d.ts").write_text("foo ts\n", encoding="utf-8")
+    r_double_star = GrepTool().run({"pattern": "foo", "path": str(d), "glob": "**/*.ts"}, ToolContext(cwd=d))
+    ctx.check(f"**/*.ts matches a nested .ts file, got {r_double_star.content!r}", "d.ts" in r_double_star.content)
+
+
+@test
+def test_grep_unknown_type_is_error(ctx: Ctx):
+    d = _build_tree()
+    result = GrepTool().run({"pattern": "foo", "path": str(d), "type": "typescript"}, ToolContext(cwd=d))
+    ctx.check("an unrecognized type errors instead of silently matching everything", result.is_error is True)
+
+
+@test
+def test_grep_posix_bracket_class_in_pattern(ctx: Ctx):
+    """finding 8: `[[:space:]]` (ripgrep/PCRE syntax) is not valid Python
+    `re` on its own -- must be translated before compiling."""
+    d = Path(tempfile.mkdtemp(prefix="grep-posix-"))
+    (d / "ws.txt").write_text("foo   bar\n", encoding="utf-8")
+    result = GrepTool().run({"pattern": r"foo[[:space:]]+bar", "path": str(d), "output_mode": "content"},
+                             ToolContext(cwd=d))
+    ctx.check(f"POSIX class pattern matches, got {result.content!r}", "foo   bar" in result.content)
+
+
+@test
+def test_grep_over_a_fifo_does_not_hang(ctx: Ctx):
+    """finding 8: a FIFO discovered while walking a directory must never
+    reach `open(path, "rb")` (which blocks forever with no writer on the
+    other end) -- run the call on a background thread and JOIN it with a
+    generous timeout, so a regression fails this test instead of hanging
+    the whole suite."""
+    import os
+    import threading
+    if not hasattr(os, "mkfifo"):
+        raise SkipTest("os.mkfifo not available on this platform (Windows)")
+    d = Path(tempfile.mkdtemp(prefix="grep-fifo-"))
+    (d / "normal.txt").write_text("foo bar\n", encoding="utf-8")
+    fifo_path = d / "a_fifo"
+    os.mkfifo(fifo_path)
+    outcome: dict = {}
+
+    def _run():
+        outcome["result"] = GrepTool().run({"pattern": "foo", "path": str(d)}, ToolContext(cwd=d))
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    ctx.check("Grep over a dir containing a FIFO returns within 10s (does not hang)", not t.is_alive())
+    if not t.is_alive():
+        ctx.check(f"the FIFO is skipped, the real match is still found, got {outcome['result'].content!r}",
+                  "normal.txt" in outcome["result"].content)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

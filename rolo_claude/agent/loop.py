@@ -25,6 +25,7 @@ its own `is_error` result instead of silently ending the turn
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from rolo_claude.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
     max_tokens_budget, overflow_classifier, record_databricks_output_tokens,
 )
+from rolo_claude.providers.config import tool_child_env
 from rolo_claude.providers.profiles import ProviderProfile, resolve_profile
 from rolo_claude.providers.request import ToolCatalogTooLarge, build_request_body
 from rolo_claude.providers.routing import Route
@@ -52,7 +54,7 @@ from rolo_claude.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
     UpstreamError, stream_completion,
 )
-from rolo_claude.tools.base import ToolContext
+from rolo_claude.tools.base import ToolContext, ToolResult
 from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
 from rolo_claude.tools.truncate import spill_and_truncate
 
@@ -62,6 +64,11 @@ _MAX_RETRY_WAIT_S = 60.0  # per-wait cap, never the uncapped `time.sleep(Retry-A
 _LOOP_BREAKER_REMIND_AT = 3
 _LOOP_BREAKER_DENY_AT = 5
 _LOOP_BREAKER_END_AT = 8
+# H3 must-do: applied to a converted MCP tool result's TEXT, ahead of
+# (and independent from) the tool's own `result_cap`/spill_and_truncate
+# step -- an MCP server answering with a large resource/many blocks must
+# not blow past this before the ordinary truncation path ever runs.
+MAX_MCP_OUTPUT_TOKENS = 25_000
 
 # A wire ("error" SSE event) carries an Anthropic-shaped `type` string, not
 # an HTTP status -- reverses providers.errors.map_upstream_error's own
@@ -72,6 +79,43 @@ _WIRE_ERROR_TYPE_TO_STATUS = {
     "invalid_request_error": 400, "rate_limit_error": 429, "api_error": 500,
     "overloaded_error": 503,
 }
+
+
+def _mcp_content_to_text(blocks: list) -> str:
+    """Convert a list of MCP/Anthropic-shaped content blocks (a tool's
+    `ToolResult.content` when it isn't a plain string -- see tools/base.py)
+    into a readable TEXT representation for the transcript. H3 must-do:
+    never a blind `json.dumps` of the raw block structure (which used to
+    inline a whole base64 image payload as one giant JSON string, or
+    render `default=str`-mangled Python reprs for anything non-JSON-safe)
+    -- a text block's own text is used directly, an image/resource block
+    becomes a short, honest placeholder (or a resource's own embedded
+    text), and the whole thing is capped at MAX_MCP_OUTPUT_TOKENS."""
+    parts = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        btype = block.get("type")
+        if btype == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif btype == "image":
+            mime = block.get("mimeType") or ((block.get("source") or {}).get("media_type") if isinstance(block.get("source"), dict) else None) or "image"
+            parts.append(f"[image: {mime}]")
+        elif btype == "resource":
+            res = block.get("resource") if isinstance(block.get("resource"), dict) else {}
+            uri = res.get("uri") or block.get("uri") or "?"
+            if isinstance(res.get("text"), str):
+                parts.append(f"[resource {uri}]\n{res['text']}")
+            else:
+                parts.append(f"[resource: {uri}]")
+        else:
+            parts.append(f"[{btype or 'content'} block]")
+    text = "\n".join(parts)
+    limit = MAX_MCP_OUTPUT_TOKENS * 4  # this codebase's own len(text)/4 token estimate (providers/config.py)
+    if len(text) > limit:
+        text = text[:limit] + f"\n... [MCP result truncated at ~{MAX_MCP_OUTPUT_TOKENS} tokens]"
+    return text
 
 
 def _canonical_args(args) -> str:
@@ -109,10 +153,47 @@ def _reasoning_details_display_text(details) -> str:
 # or slightly-off tag still counts as "attempted" even though it couldn't
 # be parsed into a usable call.
 _LEAK_ATTEMPT_MARKERS = ("<tool_call", "<｜DSML｜", "<|tool_call", "<minimax:tool_call", "<function=")
+# finding 2: a bare substring match ANYWHERE used to fire this (Kimi bug:
+# an ordinary answer that merely MENTIONS `<tool_call>` while discussing
+# tool-calling, with normal prose continuing well past it, always
+# triggered a forced tool_choice=required retry and discarded a perfectly
+# good answer) -- the LAST marker occurrence must instead be near the very
+# END of the text (the model was cut off mid-attempt), never just present
+# somewhere in a longer message.
+_LEAK_ATTEMPT_TAIL_CHARS = 80
 
 
 def _looks_like_attempted_tool_call(text: str) -> bool:
-    return bool(text) and any(marker in text for marker in _LEAK_ATTEMPT_MARKERS)
+    if not text:
+        return False
+    last_pos = -1
+    for marker in _LEAK_ATTEMPT_MARKERS:
+        idx = text.rfind(marker)
+        if idx > last_pos:
+            last_pos = idx
+    if last_pos == -1:
+        return False
+    return (len(text) - last_pos) <= _LEAK_ATTEMPT_TAIL_CHARS
+
+
+# finding 2: markers that can open a promoted-from-text leak shape, used
+# ONLY to find where to truncate the LOGGED text (never for detection --
+# leak_parser itself already decided a promotion happened).
+_LEAK_STRIP_MARKERS = _LEAK_ATTEMPT_MARKERS + ("```json", "```", "<tool_calls>")
+
+
+def _strip_promoted_leak_text(text: str) -> str:
+    """Truncate `text` at the earliest point any leak-shaped marker
+    begins, keeping only the (typically short) prefix before it -- see
+    the call site for why this must happen once a call is promoted."""
+    if not text:
+        return text
+    earliest = len(text)
+    for marker in _LEAK_STRIP_MARKERS:
+        idx = text.find(marker)
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    return text[:earliest].rstrip()
 
 
 def _rough_estimate(system_text: str, messages: list) -> int:
@@ -180,9 +261,36 @@ class Session:
         self.permission_engine = permission_engine or PermissionEngine(mode="auto", cwd=cwd)
         self._read_cache: dict = {}
         self._bash_state: dict = {"cwd": cwd}
+        # finding 10 / H3 must-do: Bash/PowerShell/MCP CHILD PROCESSES get
+        # `settings.effective_env` (shell < user < trusted project/local <
+        # flag < policy -- so a settings.json `env` block, e.g. a PATH or
+        # proxy override, actually reaches them) minus every secret the
+        # harness itself loaded from its own env file plus the fixed
+        # provider-token key list -- never the harness's raw `os.environ`,
+        # which would otherwise leak OPENROUTER_API_KEY/DATABRICKS_TOKEN/...
+        # into a routine `env`/`printenv` tool call's transcript. A bare
+        # `session_context` without `.settings` (some unit tests) falls
+        # back to the process's own environment, stripped the same way.
+        settings = getattr(session_context, "settings", None)
+        raw_env = settings.effective_env if settings is not None else dict(os.environ)
+        self.tool_env: dict = tool_child_env(raw_env)
         # print-mode `ask` denials accumulate here for the json result's
         # `permission_denials` (rolo_claude/output.py reads this list).
         self.permission_denials: list = []
+        # U2/D-Contract: `interactive=True` (set by the TUI's Controller, and
+        # ONLY by it) makes an `ask` decision REALLY block -- the turn emits
+        # `permission_request` and then waits on a threading.Event keyed by
+        # the tool_use id until the UI calls `resolve_permission`. H2b's
+        # non-blocking "unavailable in this session" denial stays the
+        # behaviour for `-p` and for a bare Session in a unit test.
+        self.interactive = False
+        self._permission_waiters: dict = {}
+        # U2: the AskUserQuestion round trip parks here, keyed by tool_use
+        # id, exactly like `_permission_waiters`.
+        self._question_waiters: dict = {}
+        # U2: the Controller installs one before `run()`; a bare Session
+        # (a unit test, print mode) reports 0/0 in its status events.
+        self.mcp_status_fn = None
 
         self.log = session_log or SessionLog(cwd)
         existing_nodes = self.log.nodes()
@@ -383,6 +491,13 @@ class Session:
             finally:
                 gen.close()  # always close the upstream generator
 
+            if self.abort.is_set():
+                # U2: an interrupt (Esc/Ctrl+C in the TUI, or a UI `quit`)
+                # cut this call short -- never retry and never dress it up
+                # as a provider failure; `_turn_body` reports it as
+                # `turn_done(reason="interrupted")`.
+                return None
+
             if phase1_failure is not None:
                 if isinstance(phase1_failure, ContextOverflow):
                     e = phase1_failure
@@ -515,6 +630,11 @@ class Session:
         self.turn_count += 1
         turn_no = self.turn_count
         self._loop_breaker = {}
+        # H3/H4 must-do: a PREVIOUS turn's interrupt (Esc/Ctrl+C) leaves
+        # `self.abort` set -- reused unchanged, a brand new turn would see
+        # it already fired and abort immediately, before ever streaming a
+        # single token. Each turn starts with a clean slate.
+        self.abort.clear()
 
         blocks = [{"type": "text", "text": text}]
         for img in (images or []):
@@ -555,6 +675,13 @@ class Session:
             result = yield from self._step(turn_no)
             model_calls += 1
             if result is None:
+                if self.abort.is_set():
+                    # U2: an interrupt ended this turn -- a clean stop, not
+                    # an error (the UI shows it as "interrupted by user").
+                    yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
+                                         cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
+                    yield events.turn_done(turn=turn_no, reason="interrupted")
+                    return
                 yield events.turn_done(turn=turn_no, reason="error")
                 return
             self._account_usage(result)
@@ -581,11 +708,32 @@ class Session:
             if not tool_use_blocks and result.body.get("tools") and result.stop_reason != "tool_use":
                 text_so_far = "".join(b.get("text", "") for b in result.assistant_blocks if b.get("type") == "text")
                 leaked = leak_parser(text=text_so_far, profile=self.provider_profile)
-                if leaked and leaked.get("name"):
+                # finding 2: leak_parser already scopes promotion to markup
+                # that's essentially the whole message (never mid-prose
+                # demonstration/explanation); the SECOND gate, only
+                # available here (not in the provider-generic hooks
+                # module), is that the resolved name must be a REAL tool
+                # in this session's catalog -- a package.json's `"name":
+                # "my-cli"` (verified: became an "Unknown tool" error that
+                # replaced a perfectly good answer) never passes this.
+                if leaked and leaked.get("name") and self.tool_registry.get(leaked["name"]) is not None:
                     synthetic_id = f"toolu_repair_{uuid.uuid4().hex[:20]}"
                     synthetic_block = {"type": "tool_use", "id": synthetic_id, "name": leaked["name"],
                                         "input": leaked.get("arguments") or {}, "_promoted_from_leak": True}
-                    result.assistant_blocks = list(result.assistant_blocks) + [synthetic_block]
+                    # finding 2: strip the raw leaked markup from the TEXT
+                    # block(s) that get logged -- a future replay must see
+                    # a clean tool_use, never the raw markup ALSO sitting
+                    # there next to it (which would just teach the model to
+                    # repeat the same leaky shape).
+                    cleaned_blocks = []
+                    for b in result.assistant_blocks:
+                        if b.get("type") == "text":
+                            new_text = _strip_promoted_leak_text(b.get("text", ""))
+                            if new_text:
+                                cleaned_blocks.append({**b, "text": new_text})
+                        else:
+                            cleaned_blocks.append(b)
+                    result.assistant_blocks = cleaned_blocks + [synthetic_block]
                     tool_use_blocks = [synthetic_block]
                     log.debug("leak_parser promoted a text-embedded call to a real tool_use: %r", leaked)
                 elif self.provider_profile.tool_choice_required_supported and _looks_like_attempted_tool_call(text_so_far):
@@ -691,6 +839,17 @@ class Session:
             item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
             return item
 
+        if name == "AskUserQuestion" and self.interactive:
+            # U2: the question IS the interaction -- it is never a permission
+            # decision. `_dispatch_tools` emits `question` and parks this
+            # call on the reply from `answer_question` instead of ever
+            # reaching the tool's own run() (which stays print mode's error
+            # path: agent/loop.py only takes this branch when a UI is
+            # actually attached).
+            item["pending_question"] = True
+            self._question_waiters[tool_id] = {"event": threading.Event(), "answer": None}
+            return item
+
         tool = self.tool_registry.get(name)
         decision: Decision = self.permission_engine.decide(name, tool_input, tool=tool)
         if decision.action == "deny":
@@ -701,8 +860,17 @@ class Session:
             item["permission_denial"] = decision.permission_denial
             return item
         if decision.action == "ask":
-            item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
             item["ask_reason"] = decision.reason
+            if not self.interactive:
+                # no UI is attached (print mode / a bare Session in a test):
+                # resolve immediately as a denial, H2b's behaviour.
+                item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
+                return item
+            # interactive: `_dispatch_tools` yields the `permission_request`
+            # and then BLOCKS on this waiter until the UI answers (U2).
+            item["pending_ask"] = True
+            item["suggested_rule"] = decision.suggested_rule
+            self._permission_waiters[tool_id] = {"event": threading.Event(), "decision": None}
             return item
 
         item["ready"] = True
@@ -722,7 +890,14 @@ class Session:
                 self.permission_denials.append(item["permission_denial"])
             return
         tr = item["result"]
-        content_text = tr.content if isinstance(tr.content, str) else json.dumps(tr.content, default=str)
+        if isinstance(tr.content, str):
+            content_text = tr.content
+        elif isinstance(tr.content, list):
+            # H3 must-do: MCP image/resource blocks converted properly,
+            # never json.dumps'd as a raw blob (see _mcp_content_to_text).
+            content_text = _mcp_content_to_text(tr.content)
+        else:
+            content_text = str(tr.content)
         content_text = spill_and_truncate(content_text, cap=self.tool_registry.result_cap(name),
                                            session_dir=session_dir, tool_use_id=tool_id)
         count = item.get("count")
@@ -731,6 +906,86 @@ class Session:
                               f"{count} times this turn -- consider a different approach if unintentional]")
         self.log.append_tool_result(tool_use_id=tool_id, content=content_text, is_error=tr.is_error)
         yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": content_text[:200]}, turn=turn_no)
+
+    # ---- interactive permission handshake (U2) ---------------------------
+
+    def resolve_permission(self, request_id: str, decision) -> bool:
+        """Called from the UI THREAD: answer the `permission_request` for
+        `request_id`, unblocking the worker thread parked in
+        `_await_permission_decision`. `decision` is a
+        `rolo_claude.permissions.Decision` or a `{"action": ...}` dict
+        (repaired by `set_permission_mode`/mode changes before this). Returns
+        False when no such request is waiting (already answered/aborted)."""
+        slot = self._permission_waiters.get(request_id)
+        if slot is None:
+            return False
+        slot["decision"] = decision
+        slot["event"].set()
+        return True
+
+    def resolve_question(self, request_id: str, answer) -> bool:
+        """Called from the UI THREAD: answer a pending `question` (the
+        AskUserQuestion round trip), unblocking the worker parked in
+        `_await_reply`. `answer` is whatever the UI produced -- a plain
+        string, or a list/dict of answers, JSON-encoded into the tool
+        result. Returns False when nothing is waiting for `request_id`."""
+        slot = self._question_waiters.get(request_id)
+        if slot is None:
+            return False
+        slot["answer"] = answer
+        slot["event"].set()
+        return True
+
+    def _await_reply(self, waiters: dict, request_id: str, *, timeout: Optional[float] = None):
+        """Block the WORKER thread until a UI-thread `resolve_*` call answers
+        `request_id` or the session's abort Event is set (the escape hatch:
+        Esc/Ctrl+C during a pending prompt). Returns the stored value, or
+        None on abort/timeout/never-registered."""
+        slot = waiters.pop(request_id, None)
+        if slot is None:
+            return None
+        while not slot["event"].wait(0.1):
+            if self.abort.is_set():
+                return None
+            if timeout is not None:
+                timeout -= 0.1
+                if timeout <= 0:
+                    return None
+        return slot["answer"] if "answer" in slot else slot["decision"]
+
+    def _await_permission_decision(self, request_id: str, *, timeout: Optional[float] = None):
+        return self._await_reply(self._permission_waiters, request_id, timeout=timeout)
+
+    def _apply_permission_decision(self, item: dict, decision) -> None:
+        """Apply the UI's answer to a pending-`ask` item IN PLACE: `allow`
+        makes it ready to dispatch (and teaches the engine a session rule
+        when the answer carried one); `deny` / no answer at all becomes the
+        same `item["text"]` a decide()-time denial would have produced."""
+        item.pop("pending_ask", None)
+        if isinstance(decision, dict):
+            decision = Decision(action=decision.get("action", "deny"),
+                                 reason=decision.get("reason", ""),
+                                 rule=decision.get("rule"),
+                                 message=decision.get("message", "") or "",
+                                 permission_denial=decision.get("permission_denial"))
+        if decision is None:
+            item["text"] = (f"Permission request dismissed or interrupted "
+                             f"({item.get('ask_reason', 'interactive approval required')})")
+            return
+        if getattr(decision, "action", None) == "allow":
+            rule_text = getattr(decision, "rule", None)
+            if rule_text:
+                self.permission_engine.add_session_allow_rule(rule_text)
+            item["ready"] = True
+            return
+        text = f"Permission denied: {getattr(decision, 'reason', '') or item.get('ask_reason', '')}"
+        message = getattr(decision, "message", "") or ""
+        if message:
+            text += f"\nThe user said: {message}"
+        item["text"] = text
+        item["permission_denial"] = {"tool_name": item["name"], "tool_input": item["input"],
+                                      "reason": getattr(decision, "reason", "") or item.get("ask_reason", ""),
+                                      "suggested_rule": item.get("suggested_rule")}
 
     def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None) -> Iterator[events.Event]:
         """Runs every tool_use in this assistant turn, per call, in order:
@@ -755,7 +1010,7 @@ class Session:
         tool_call_flags = tool_call_flags or {}
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
-                           registry=self.tool_registry)
+                           registry=self.tool_registry, env=self.tool_env)
         repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry)
 
         end_turn = False
@@ -779,7 +1034,27 @@ class Session:
                                                     "repaired": item["repaired"]}, turn=turn_no)
             if "ask_reason" in item:
                 yield events.Event("permission_request", {"id": tool_id, "name": name, "input": item["input"],
-                                                            "reason": item["ask_reason"]}, turn=turn_no)
+                                                            "reason": item["ask_reason"],
+                                                            "suggested_rule": item.get("suggested_rule")}, turn=turn_no)
+
+            if item.get("pending_ask"):
+                # U2: this really BLOCKS the worker thread until the UI's
+                # PermissionCard answers (`answer_permission` ->
+                # `resolve_permission`) or the abort Event fires.
+                self._apply_permission_decision(item, self._await_permission_decision(tool_id))
+
+            if item.get("pending_question"):
+                # U2: the AskUserQuestion round trip -- never dispatched to
+                # the tool itself; the UI's answer becomes its result.
+                yield events.Event("question", {"id": tool_id, "name": name, "input": item["input"]}, turn=turn_no)
+                answer = self._await_reply(self._question_waiters, tool_id)
+                item.pop("pending_question", None)
+                if answer is None:
+                    item["text"] = "The user did not answer (the question was dismissed or the turn interrupted)."
+                else:
+                    item["result"] = ToolResult(answer if isinstance(answer, str)
+                                                  else json.dumps(answer, ensure_ascii=False, default=str))
+                    item["ready"] = True
 
             if item["ready"] and self.tool_registry.is_read_only(name):
                 pending_batch.append(item)
@@ -798,7 +1073,18 @@ class Session:
                 pending_batch = []
 
             if item["ready"]:
-                item["result"] = self.tool_registry.dispatch(name, item["input"], ctx)
+                # H3/H4 must-do: wire progress_cb -> tool_progress events.
+                # Solo dispatch only (never the concurrent read-only pool
+                # below, which shares ONE ctx across threads -- a per-call
+                # mutable callback there would race); a fresh per-call
+                # ToolContext, via dataclasses.replace, keeps read_cache/
+                # bash_state/abort/session_dir/registry/env as the SAME
+                # shared objects, only tool_use_id/progress_cb differ.
+                progress_chunks: list = []
+                item_ctx = dataclasses.replace(ctx, tool_use_id=tool_id, progress_cb=progress_chunks.append)
+                item["result"] = self.tool_registry.dispatch(name, item["input"], item_ctx)
+                for chunk in progress_chunks:
+                    yield events.Event("tool_progress", {"id": tool_id, "name": name, "text": chunk}, turn=turn_no)
             yield from self._finalize_tool_result(turn_no, item, ctx.session_dir)
             if item.get("end_turn"):
                 end_turn = True
@@ -810,3 +1096,90 @@ class Session:
                 if batched_item.get("end_turn"):
                     end_turn = True
         return end_turn
+
+    # ---- the interactive command pump (U2, D-Contract) -------------------
+
+    def set_model(self, model_ref: ModelRef, model_profile: ModelProfile, creds=None) -> None:
+        """Swap the active model mid-session (`/model`): the ref, its
+        profile and (when given) its credentials, plus the derived Route/
+        provider profile every request builder reads. The LOGGED frozen
+        catalog is deliberately untouched -- `derive_request` keeps
+        reconstructing the tools the session actually started with."""
+        self.model_ref = model_ref
+        self.model_profile = model_profile
+        if creds is not None:
+            self.creds = creds
+        self.model_label = model_ref.raw
+        self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
+        self.provider_profile = resolve_profile(self.route)
+
+    def status_event(self, *, phase: str = "idle", context_tokens=None, turn: Optional[int] = None) -> events.Event:
+        """The D-Contract `status` payload as THIS session knows it --
+        permission_mode/session_id/context_limit filled from live state, so
+        a UI never has to guess them. `mcp` comes from `self.mcp_status_fn`
+        when the caller installed one (the Controller does; a bare Session
+        reports 0/0)."""
+        mcp = self.mcp_status_fn() if self.mcp_status_fn else {"connected": 0, "total": 0}
+        return events.status(
+            phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
+            context_tokens=context_tokens, context_limit=self.model_profile.context_tokens,
+            cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None,
+            permission_mode=self.permission_engine.mode, session_id=self.log.session_id, mcp=mcp,
+        )
+
+    def _pump_turn(self, text: str, images, out) -> None:
+        """Drive ONE turn to completion, pushing every Event straight to
+        `out` (a queue's `.put`) as it arrives. The abort Event is cleared
+        here, at the start of the turn, so an Esc that arrived while the
+        session was idle never kills the NEXT prompt."""
+        self.abort.clear()
+        try:
+            for event in self.turn(text, images=images):
+                out(event)
+        except BaseException as e:  # never let a worker thread die silently, the UI would just hang
+            log.exception("turn failed")
+            out(events.error(f"{type(e).__name__}: {e}", turn=self.turn_count))
+            out(events.turn_done(turn=self.turn_count, reason="error"))
+            return
+
+    def run(self, commands, out, *, mcp_status_fn=None) -> int:
+        """The worker-thread command pump (D-Contract): consume `Command`s
+        from `commands` (a `queue.Queue`) until a `None` sentinel arrives,
+        pushing every `Event` the session produces to `out` (a callable --
+        the Controller passes its event queue's `.put`). Returns when the
+        session is done.
+
+        `interrupt` and the reply kinds are ALSO reachable through the UI
+        thread calling `abort.set()`/`resolve_permission()`/
+        `resolve_question()` directly -- that is the ONLY way they can
+        affect a turn already in flight, since this loop is parked inside
+        that turn's generator while it runs (and inside the reply wait)."""
+        self.mcp_status_fn = mcp_status_fn
+        out(self.status_event(phase="idle"))
+        while True:
+            cmd = commands.get()
+            if cmd is None:
+                return 0
+            kind = getattr(cmd, "kind", None)
+            data = getattr(cmd, "data", None) or {}
+            if kind == "user_input":
+                self._pump_turn(data.get("text", ""), data.get("images"), out)
+            elif kind == "interrupt":
+                self.abort.set()
+            elif kind == "set_mode":
+                mode = data.get("mode")
+                if mode:
+                    self.permission_engine.mode = mode
+                out(self.status_event())
+            elif kind == "set_model":
+                self.set_model(data["model_ref"], data["model_profile"], data.get("creds"))
+                out(self.status_event())
+            elif kind == "permission_reply":
+                # safety net only: the UI answers a pending request by
+                # calling resolve_permission() directly (this branch is
+                # unreachable while that wait is in flight).
+                self.resolve_permission(data.get("id"), data.get("decision"))
+            elif kind == "question_reply":
+                self.resolve_question(data.get("id"), data.get("answer"))
+            elif kind == "plan_reply":
+                pass  # H6 wires plan mode; the card exists against this event

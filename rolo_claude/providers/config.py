@@ -39,11 +39,12 @@ def default_state_dir() -> Path:
     return home() / ".rolo-claude"
 
 
-def load_env_file(path: Path) -> dict[str, str]:
-    """
-    Load KEY=value lines from file, setdefault into os.environ, return loaded dict.
-    """
-    loaded = {}
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Pure KEY=value parse (finding 10) -- no `os.environ` side effect,
+    so a caller that only needs to know WHICH KEYS an env file would
+    inject (to strip them from a tool child's environment) never has to
+    mutate the process environment just to find out."""
+    loaded: dict[str, str] = {}
     if not path.exists():
         return loaded
     try:
@@ -67,10 +68,44 @@ def load_env_file(path: Path) -> dict[str, str]:
                         value = value[1:-1]
                     if key:
                         loaded[key] = value
-                        os.environ.setdefault(key, value)
     except (OSError, UnicodeDecodeError):
         pass
     return loaded
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """
+    Load KEY=value lines from file, setdefault into os.environ, return loaded dict.
+    """
+    loaded = _parse_env_file(path)
+    for key, value in loaded.items():
+        os.environ.setdefault(key, value)
+    return loaded
+
+
+# finding 10: the harness's OWN provider-credential env vars -- never
+# forwarded to a Bash/PowerShell/MCP child, no matter which of the several
+# ways (the env file, a real ambient env var, BRIDGE_DBX_* overrides, ...)
+# they got into this process's environment. A routine `env`/`printenv`
+# step inside a tool call must not write these into the transcript, the
+# session JSONL, or the next upstream request.
+_HARNESS_SECRET_ENV_KEYS = frozenset({
+    "OPENROUTER_API_KEY", "DATABRICKS_TOKEN", "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY", "BRIDGE_DBX_TOKEN",
+})
+
+
+def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
+    """`env` (typically `Settings.effective_env`, shell < settings chain)
+    minus every key the harness's own env-file loader would inject PLUS
+    the fixed secret-key list above -- the environment a Bash/PowerShell/
+    MCP CHILD PROCESS should actually see. `env_file_path` defaults to the
+    same `BRIDGE_ENV_FILE` (or `~/.config/vibes-hacker/env`) location
+    `resolve_config`/`load_env_file` already use, read PURELY (see
+    `_parse_env_file` -- never touches `os.environ`)."""
+    path = env_file_path or Path(os.environ.get("BRIDGE_ENV_FILE", str(home() / ".config" / "vibes-hacker" / "env")))
+    strip_keys = set(_parse_env_file(path).keys()) | _HARNESS_SECRET_ENV_KEYS
+    return {k: v for k, v in env.items() if k not in strip_keys}
 
 
 def load_settings_env_chain(cwd: Path) -> dict:

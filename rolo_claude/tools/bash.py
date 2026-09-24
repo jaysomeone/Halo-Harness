@@ -8,6 +8,8 @@ non-zero exit; process-GROUP kill on timeout/abort.
 from __future__ import annotations
 
 import os
+import sys
+import uuid
 from pathlib import Path
 
 from rolo_claude.config.paths import from_posix, git_bash
@@ -30,30 +32,45 @@ DESCRIPTION = (
     "instructed or after you have verified that a dedicated tool (Glob, Grep, Read, Edit) cannot "
     "accomplish your task.\n"
     "- The working directory persists across calls within one session: a `cd` in one command is "
-    "still in effect for the next one, so prefer that over passing absolute paths to every command.\n"
+    "still in effect for the next one. Try to maintain your current working directory throughout "
+    "the session by using absolute paths and avoiding usage of `cd`, unless the user explicitly "
+    "requests it.\n"
     "- Always quote file paths that contain spaces (e.g. cd \"path with spaces/file.txt\").\n"
     "- Chain related commands with `&&` or `;` rather than making several separate tool calls."
 )
 
 
-def _strip_markers(output: str) -> "tuple[str, object, object]":
+def _strip_markers(output: str, nonce: str) -> "tuple[str, object, object]":
     """Split `output` into (displayed_text, exit_code_or_None,
     reported_cwd_or_None), removing the trailing marker lines a wrapped
     command appends (and the blank separator line printf's own leading \\n
-    introduces) so neither ever reaches the model."""
+    introduces) so neither ever reaches the model.
+
+    finding 9: `nonce` is a fresh random token generated for THIS call
+    only -- the marker prefixes actually written to the shell are
+    `{_EXIT_MARK}_{nonce}`/`{_CWD_MARK}_{nonce}`, so a command whose own
+    OUTPUT happens to contain a plain `__ROLO_CLAUDE_CWD__:...` line
+    (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\\n'; exit 0` used
+    to move the whole session to /etc) can never forge one without first
+    guessing this call's nonce. Only the LAST occurrence of each
+    nonce'd marker is honoured (the wrapper always appends them once, at
+    the very end -- taking the last one is a second, cheap guard against
+    an earlier line that coincidentally collides)."""
+    exit_prefix = f"{_EXIT_MARK}_{nonce}:"
+    cwd_prefix = f"{_CWD_MARK}_{nonce}:"
     exit_code = None
     cwd = None
     kept = []
     for line in output.splitlines(keepends=True):
         stripped = line.rstrip("\r\n")
-        if stripped.startswith(_EXIT_MARK + ":"):
+        if stripped.startswith(exit_prefix):
             try:
-                exit_code = int(stripped[len(_EXIT_MARK) + 1:].strip())
+                exit_code = int(stripped[len(exit_prefix):].strip())
             except ValueError:
                 pass
             continue
-        if stripped.startswith(_CWD_MARK + ":"):
-            cwd = stripped[len(_CWD_MARK) + 1:].strip()
+        if stripped.startswith(cwd_prefix):
+            cwd = stripped[len(cwd_prefix):].strip()
             continue
         kept.append(line)
     return "".join(kept).rstrip("\n"), exit_code, cwd
@@ -93,12 +110,37 @@ class BashTool(Tool):
         timeout_ms = min(timeout_ms, MAX_TIMEOUT_MS)
 
         bash_state = ctx.bash_state if isinstance(getattr(ctx, "bash_state", None), dict) else {}
-        cwd = bash_state.get("cwd") or ctx.cwd
+        session_cwd = bash_state.get("cwd") or ctx.cwd
+
+        # finding 9: the persisted cwd is reused with NO existence check --
+        # a `cd build` followed by `rm -rf build` used to fail EVERY later
+        # call for the rest of the session ("Error launching process:
+        # [Errno 2]"), `cd /` included, since subprocess.Popen(cwd=...)
+        # can't launch into a directory that no longer exists. Fall back to
+        # the session's own starting cwd, with a one-line notice, instead.
+        cwd_notice = ""
+        try:
+            cwd_ok = Path(session_cwd).is_dir()
+        except OSError:
+            cwd_ok = False
+        if cwd_ok:
+            cwd = session_cwd
+        else:
+            cwd = ctx.cwd
+            bash_state["cwd"] = cwd
+            cwd_notice = f"[note: the working directory {session_cwd} no longer exists -- reset to {cwd}]\n"
 
         shell_path = git_bash()
         if shell_path is None:
             return ToolResult("No POSIX shell (bash) is available on this system to run Bash commands.", is_error=True)
 
+        # finding 9: a per-call random nonce, never reused across calls or
+        # guessable from the command text -- the marker lines this wrapper
+        # appends can only be recognized under THIS nonce (see
+        # _strip_markers), so a command's own output can never forge one
+        # (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\n'` used to
+        # hijack the session's cwd).
+        nonce = uuid.uuid4().hex
         wrapped = (
             f"{command}\n"
             f"__rc=$?\n"
@@ -109,7 +151,7 @@ class BashTool(Tool):
             # (MSYS conventionally maps it to /tmp) is NOT a form
             # `subprocess.Popen(cwd=...)` can parse on the next call.
             f'__cwd=$(pwd -W 2>/dev/null || pwd)\n'
-            f'printf "\\n{_EXIT_MARK}:%s\\n{_CWD_MARK}:%s\\n" "$__rc" "$__cwd"\n'
+            f'printf "\\n{_EXIT_MARK}_{nonce}:%s\\n{_CWD_MARK}_{nonce}:%s\\n" "$__rc" "$__cwd"\n'
         )
         env = dict(ctx.env) if isinstance(ctx.env, dict) else dict(os.environ)
         env["CLAUDECODE"] = "1"
@@ -120,17 +162,21 @@ class BashTool(Tool):
         )
 
         if exit_code is None and not timed_out and not aborted:
-            return ToolResult(raw_output, is_error=True)  # the process never launched at all
+            return ToolResult(cwd_notice + raw_output if cwd_notice else raw_output, is_error=True)  # the process never launched at all
 
-        text, reported_exit, reported_cwd = _strip_markers(raw_output)
+        text, reported_exit, reported_cwd = _strip_markers(raw_output, nonce)
+        if cwd_notice:
+            text = cwd_notice + text
         if reported_cwd:
             # Git Bash reports $PWD in MSYS/POSIX form (/c/Users/...);
             # subprocess.Popen(cwd=...) on Windows needs a native path
             # (C:\Users\...) or it fails to launch the NEXT call outright.
-            # from_posix is a no-op for an already-native/relative path, so
-            # this is safe to apply unconditionally (POSIX bash's own $PWD
-            # is already native and never matches the /x/... shape).
-            bash_state["cwd"] = from_posix(reported_cwd)
+            # finding 9: from_posix is only meaningful for THAT Windows/
+            # Git-Bash translation -- applied unconditionally it also
+            # rewrites a genuine POSIX path on real Linux/WSL bash whose
+            # single-letter top-level dir happens to look like a drive
+            # form (e.g. `/a/bcd`), corrupting it into `A:/bcd`.
+            bash_state["cwd"] = from_posix(reported_cwd) if sys.platform == "win32" else reported_cwd
         final_exit = reported_exit if reported_exit is not None else exit_code
 
         if aborted:
