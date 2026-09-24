@@ -9,3 +9,4 @@ __pycache__/
 routes.json
 *.egg-info/
 requirements.lock.tmp
+.playwright-mcp/
