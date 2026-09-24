@@ -3444,7 +3444,15 @@ def test_launcher_stale_hash_restart(ctx: Ctx):
     then spawn a fresh one -- rather than failing to bind or silently
     reusing the stale server. Hermetic: builds a byte-mutated copy of
     bridge.py (different sha1, same behavior) and runs THAT directly as
-    `--serve` first."""
+    `--serve` first.
+
+    H0 note: bridge_py_sha1() is now a TREE hash (bridge.py + sorted
+    claude_bridge/providers/*.py bytes -- see providers/config.py's own
+    docstring), and the mutated copy lives alone in a tmp dir with no
+    claude_bridge/ sibling of its own, so its subprocess needs
+    PYTHONPATH=<repo> to import the real package (the same tree the real
+    bridge.py uses) -- only bridge.py's own bytes differ between the two.
+    """
     ctx.require_bridge_file_only()
     lc = LauncherCtx()
     stale_proc = None
@@ -3455,10 +3463,14 @@ def test_launcher_stale_hash_restart(ctx: Ctx):
         mutated_path = lc.tmp_root / "bridge_mutated.py"
         mutated_path.write_bytes(mutated_bytes)
 
+        stale_env = dict(os.environ)
+        _existing_pp = stale_env.get("PYTHONPATH")
+        stale_env["PYTHONPATH"] = str(REPO_DIR) if not _existing_pp else (str(REPO_DIR) + os.pathsep + _existing_pp)
+
         stale_log = open(lc.tmp_root / "stale-stdio.log", "wb")
         stale_proc = subprocess.Popen(
             [sys.executable, str(mutated_path), "--serve", "--port", str(lc.port), "--state-dir", str(lc.state_dir)],
-            stdout=stale_log, stderr=subprocess.STDOUT, cwd=str(REPO_DIR),
+            stdout=stale_log, stderr=subprocess.STDOUT, cwd=str(REPO_DIR), env=stale_env,
         )
 
         stale_hash = None
@@ -3480,7 +3492,20 @@ def test_launcher_stale_hash_restart(ctx: Ctx):
         ctx.check(f"the mutated stale server became healthy with a hash, got hash={stale_hash!r} pid={stale_pid!r}",
                    bool(stale_hash) and isinstance(stale_pid, int))
 
-        real_hash = hashlib.sha1(real_bytes).hexdigest()
+        def _tree_sha1(bridge_bytes: bytes, providers_dir: Path) -> str:
+            """Replica of providers/config.py's bridge_py_sha1() tree-hash
+            recipe: sha1 over bridge.py's bytes + every claude_bridge/
+            providers/*.py file's bytes in sorted-filename order, each entry
+            prefixed by its own name."""
+            hasher = hashlib.sha1()
+            hasher.update(b"bridge.py\x00")
+            hasher.update(bridge_bytes)
+            for p in sorted(providers_dir.glob("*.py")):
+                hasher.update(p.name.encode("utf-8") + b"\x00")
+                hasher.update(p.read_bytes())
+            return hasher.hexdigest()
+
+        real_hash = _tree_sha1(real_bytes, REPO_DIR / "rolo_claude" / "providers")
         ctx.check(f"stale server's hash differs from the real bridge.py's own hash, stale={stale_hash!r} real={real_hash!r}",
                    stale_hash != real_hash)
 
