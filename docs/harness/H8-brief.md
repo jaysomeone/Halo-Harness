@@ -67,3 +67,15 @@ auto` → line count first, completion notice later; a Playwright screenshot ren
 card in the TUI; `rolo-claude models --refresh`; `rolo-claude doctor --work` (offline here: reports
 unreachable with the VPN hint); README reviewed by Fable.
 Report ≤ 50 lines. Rules as in the other briefs.
+
+## Must-dos carried over from `review-findings-h4-h5-h3c.md` (H8 section) — added 2026-09-24
+- Work-box acceptance for the Databricks Claude passthrough: auth (H5b added the bearer header
+  inside the databricks branch — verify with the headers `build_session` produces), both paths
+  (`/ai-gateway/anthropic/v1/messages?beta=true` first, `/serving-endpoints/<name>/invocations`
+  fallback), thinking replay with signatures across a tool loop. Offline here: keep the mock
+  coverage and write the VPN checklist into `doctor --work` output.
+- Wire the `count_tokens` relay (`providers/http.py` has it, nothing calls it): use it for the
+  compaction gate when the route supports it (Databricks/Anthropic), with the estimator as fallback.
+- Verify H5b's three cheap items landed: `compactionModel` from `~/.rolo-claude/config.json` used by
+  the summariser; `anthropic-ratelimit-*-reset` parsed as RFC 3339; `_step` caps `Retry-After` at
+  300 s instead of 60 s (logged).

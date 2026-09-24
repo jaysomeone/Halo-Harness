@@ -72,3 +72,17 @@ Report ≤ 80 lines: acceptance table summary (counts per platform), MCP matrix 
 fixed with tests, anything that could not be exercised (VM unreachable, no Chrome on Linux, etc.).
 Rules as in the other briefs (≤ 250 lines per write, no heredocs with backslashes, no commits, no
 safety language).
+
+## Must-dos carried over from `review-findings-h4-h5-h3c.md` (H9 section) — added 2026-09-24
+- Linux: `bash -lc` PATH reset by Debian/Kali `/etc/profile` (settings `env.PATH` and the
+  `CLAUDE_ENV_FILE` additions must survive — test on WSL Ubuntu AND in a Debian-style profile);
+  dash (`/bin/sh`) never used for `!` pre-execution (must be `/bin/bash`); a real
+  `claude plugin install` manifest (array-of-records V2 shape) drives plugin MCP servers + hooks;
+  128k/256k-context models tested with the real `~/.rolo-claude/models.json` shapes (compaction
+  trigger never 0, never back-to-back); an SDK-style `--input-format stream-json` client that
+  writes one line and waits for `result` before the next (must not deadlock; a mid-turn line is a
+  steer); the lazy MCP start inside ToolSearch (serial today, cannot be aborted, up to MCP_TIMEOUT
+  per server) — make it parallel + abortable or document the cap.
+- Fuzz: send Esc or a steer at EVERY event boundary — including during hooks, compaction, and
+  retry waits — and after each turn assert that every `tool_use` in the log has a `tool_result`
+  and that no assistant node is empty.
