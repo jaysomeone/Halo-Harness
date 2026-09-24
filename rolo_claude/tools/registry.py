@@ -59,6 +59,17 @@ class ToolRegistry:
         """Anthropic tool-def dicts, name-sorted."""
         return [self._tools[name].definition() for name in sorted(self._tools)]
 
+    def definitions_for(self, names: list) -> list:
+        """Anthropic tool-def dicts for EXACTLY `names`, in the GIVEN
+        order (never re-sorted) -- H3 scope C: `agent.catalog.
+        SessionCatalog`'s growing wire-catalog name list is append-only,
+        never reordered, so the defs it logs must preserve that order too
+        (unlike `.definitions()`, which is only ever right for the ONE
+        initial freeze, before anything can have grown). A name with no
+        matching tool is silently skipped rather than raising -- a stale
+        name surviving an LRU eviction race is a shrink, not a crash."""
+        return [self._tools[n].definition() for n in names if n in self._tools]
+
     def names(self) -> list:
         return sorted(self._tools)
 
@@ -82,6 +93,22 @@ class ToolRegistry:
         freezing: bare-name deny rules / --disallowedTools)."""
         names = set(names)
         return ToolRegistry(tools=[t for n, t in self._tools.items() if n not in names])
+
+    def add_tool(self, tool: Tool) -> None:
+        """H3 scope C: the ONE deliberate in-place mutation this otherwise-
+        immutable-style class allows -- `agent/catalog.py`'s lazy-load path
+        (ToolSearch loading a deferred MCP tool) adds it to the SAME
+        registry instance a session's whole `ToolContext.registry`/
+        `Session.tool_registry` already points at, so every later
+        `dispatch`/`is_read_only`/`result_cap` call sees it immediately
+        with no extra plumbing. Never used at session-freeze time (that
+        path stays `without`/`filtered`, which return new registries)."""
+        self._tools[tool.name] = tool
+
+    def remove_tool(self, name: str) -> None:
+        """The inverse of `add_tool` -- LRU eviction of a previously
+        lazy-loaded deferred tool. A no-op if `name` isn't present."""
+        self._tools.pop(name, None)
 
     def filtered(self, names) -> "ToolRegistry":
         """A NEW registry containing ONLY `names` that exist (`--tools

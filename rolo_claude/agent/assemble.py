@@ -31,7 +31,7 @@ class SessionContext:
     def __init__(self, *, cwd: Path, model_label: str, model_family: str = "generic",
                  settings_flag: Optional[str] = None, setting_sources: Optional[list] = None,
                  append_system_prompt: Optional[str] = None, bare: bool = False,
-                 tool_registry: Optional[ToolRegistry] = None):
+                 tool_registry: Optional[ToolRegistry] = None, mcp_servers: Optional[list] = None):
         self.cwd = Path(cwd)
 
         # finding 5/6: real trust, threaded into settings resolution so an
@@ -51,7 +51,7 @@ class SessionContext:
 
         self.system_prompt = build_system_prompt(
             model_label=model_label, cwd=self.cwd, tool_definitions=self.tool_registry.definitions(),
-            family=model_family, append_system_prompt=append_system_prompt,
+            family=model_family, append_system_prompt=append_system_prompt, mcp_servers=mcp_servers,
         )
 
     def claude_md_text(self) -> str:

@@ -23,23 +23,24 @@ from typing import Optional
 
 from rolo_claude import events
 from rolo_claude.agent.assemble import SessionContext
+from rolo_claude.agent.catalog import SessionCatalog, host_cap, select_preload
 from rolo_claude.agent.log import SessionLog
 from rolo_claude.agent.loop import Session
 from rolo_claude.commands.builtins import HeadlessFacade
 from rolo_claude.commands.registry import Registry
-from rolo_claude.config.claude_json import is_trusted, load_claude_json, mcp_servers_for
+from rolo_claude.config.claude_json import is_trusted, load_claude_json
 from rolo_claude.config.paths import bridge_home, home, lookup_project
 from rolo_claude.config.settings import resolve_settings
 from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref, resolve_model_profile
 from rolo_claude.output import PrintModeSink, StreamJsonSink
 from rolo_claude.permissions import (
-    PermissionEngine, build_rules_from_settings, freeze_tool_registry,
-    normalize_permission_mode, split_tool_rule_list,
+    PermissionEngine, bare_deny_tool_names, build_rules_from_settings, freeze_tool_registry,
+    mcp_deny_tool_names, normalize_permission_mode, split_tool_rule_list,
 )
 from rolo_claude.providers.config import derive_workspace_root, load_env_file, load_routes, resolve_databricks, resolve_openrouter
 from rolo_claude.providers.profiles import model_family
 from rolo_claude.providers.stream import ProviderCreds
-from rolo_claude.theme import resolve_theme
+from rolo_claude.theme import load_config as load_rolo_config, resolve_theme
 from rolo_claude.tools.registry import ToolRegistry
 
 _SLASH_RE = re.compile(r"^/(\S+)(?:\s+(.*))?$", re.DOTALL)
@@ -134,6 +135,13 @@ def run_print_mode(
     json_schema: Optional[str] = None,
     replay_user_messages: bool = False,
     stdin_lines: Optional[list] = None,
+    chrome: bool = False,
+    no_chrome: bool = False,
+    playwright: bool = False,
+    playwright_cdp: Optional[str] = None,
+    playwright_headless: bool = False,
+    mcp_config: Optional[list] = None,
+    strict_mcp_config: bool = False,
 ) -> int:
     """Run one turn (`input_format="text"`) or several (`"stream-json"`,
     one turn per entry of `stdin_lines`) in print mode; returns the
@@ -183,6 +191,84 @@ def run_print_mode(
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
 
+    # H3 scope A-C/E: build the MCP manager (real servers + `--chrome`/
+    # `--playwright` dynamic ones), then split its tools into "preload"
+    # (added to the frozen registry now) vs "deferred" (SessionCatalog's
+    # lazy-load pool) under this provider's host cap. `--bare` disables
+    # MCP entirely (D-CFG: "--bare skips ... MCP ..."), matching every
+    # other config source it turns off.
+    mcp_manager = None
+    mcp_notices: list = []
+    session_catalog = None
+    mcp_servers_for_prompt: list = []
+    if not bare:
+        from rolo_claude.mcp_setup import build_manager, resolve_chrome_enabled
+        chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome)
+        mcp_manager, mcp_notices = build_manager(
+            cwd=cwd, claude_json=claude_json, settings=settings, print_mode=True,
+            mcp_config_flag=mcp_config, strict_mcp_config=strict_mcp_config,
+            chrome=chrome_enabled, playwright=playwright,
+            playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
+            bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True,
+        )
+        if mcp_manager is None and mcp_notices:
+            print(f"rolo-claude: {mcp_notices[0]}", file=sys.stderr)
+        elif verbose:
+            for n in mcp_notices:
+                print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
+
+        if mcp_manager is not None:
+            # scope B built-ins: only offered when there's something real
+            # for them to list/read (finding 14's "no false capability
+            # promises" rule, applied to MCP resources same as memory/Bash)
+            # -- AND only when `--tools`/bare-deny would have let them
+            # through `freeze_tool_registry` too (that call already ran,
+            # against a registry that couldn't have known about these two
+            # yet, so the SAME filter is re-applied here by hand rather
+            # than silently bypassing it for just these two names).
+            from rolo_claude.tools.mcp_tool import ListMcpResourcesTool, ReadMcpResourceTool
+            tools_subset = None
+            if tools is not None and tools.strip() != "" and tools.strip().lower() != "default":
+                tools_subset = set(split_tool_rule_list(tools))
+            elif tools is not None and tools.strip() == "":
+                tools_subset = set()
+            bare_denied_names = set(bare_deny_tool_names(deny_rules))
+            bare_denied_names |= {r.strip() for r in cli_disallow if "(" not in r}
+
+            def _builtin_allowed(name: str) -> bool:
+                if tools_subset is not None and name not in tools_subset:
+                    return False
+                return name not in bare_denied_names
+
+            if _builtin_allowed("ListMcpResourcesTool"):
+                frozen_registry.add_tool(ListMcpResourcesTool())
+            if _builtin_allowed("ReadMcpResourceTool"):
+                frozen_registry.add_tool(ReadMcpResourceTool())
+
+            all_mcp = mcp_manager.all_tools()
+            candidate_names = [t[1] for t in all_mcp]
+            denied = mcp_deny_tool_names(deny_rules, candidate_names)
+            denied |= {r.strip() for r in cli_disallow if "(" not in r and r.strip().startswith("mcp__")}
+            survivors = [t for t in all_mcp if t[1] not in denied]
+
+            cap = host_cap(model_ref.provider)
+            cap_budget = max(0, cap - len(frozen_registry.names()))
+            preload_names = set((load_rolo_config().get("mcpPreload") or []))
+            preload, deferred = select_preload(survivors, preload_names=preload_names, cap_budget=cap_budget)
+
+            from rolo_claude.tools.mcp_tool import McpTool
+            for server_name, wire_name, sdk_tool in preload:
+                frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager, vision=model_profile.vision))
+
+            session_catalog = SessionCatalog(
+                registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
+                vision=model_profile.vision, names=frozen_registry.names(),
+            )
+            mcp_servers_for_prompt = [
+                {"name": name, "instructions": h.instructions}
+                for name, h in mcp_manager.handles.items() if h.state == "connected"
+            ]
+
     effective_append = append_system_prompt
     if json_schema:
         note = f"Respond with JSON matching this schema (no prose outside the JSON): {json_schema}"
@@ -191,7 +277,7 @@ def run_print_mode(
     ctx = SessionContext(
         cwd=cwd, model_label=model_ref.raw, model_family=family, settings_flag=settings_flag,
         setting_sources=setting_sources, append_system_prompt=effective_append, bare=bare,
-        tool_registry=frozen_registry,
+        tool_registry=frozen_registry, mcp_servers=mcp_servers_for_prompt,
     )
     if system_prompt:
         ctx.system_prompt = system_prompt  # --system-prompt[-file]: full replacement
@@ -212,61 +298,76 @@ def run_print_mode(
         model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
         extra_headers=extra_headers, permission_engine=permission_engine,
+        session_catalog=session_catalog, mcp_manager=mcp_manager,
     )
 
     if verbose:
         print(f"[rolo-claude] model={model_ref.raw} provider={model_ref.provider} "
               f"dialect={model_ref.dialect} family={family} session={session_log.session_id}", file=sys.stderr)
 
-    registry = Registry.discover(cwd, home())
-    facade = HeadlessFacade(
-        cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
-        permission_mode=resolved_mode, tool_registry=frozen_registry, registry=registry,
-        memory_store=ctx.memory_store, instructions=ctx.instructions, session_id=session_log.session_id,
-        effort=effort, theme=resolve_theme(settings_theme=settings.theme),
-        context_limit=model_profile.context_tokens, mcp_servers=mcp_servers_for(cwd, claude_json),
-    )
-    mcp_names = sorted(facade.mcp_servers)
-    slash_names = [f"/{c.name}" for c in registry.all()]
+    # H3: everything past this point may have live MCP subprocess/loop
+    # state to tear down -- `finally` guarantees `mcp_manager.close_all()`
+    # runs on EVERY exit path (an ordinary return, an early stream-json
+    # error return, or an exception escaping `session.turn`), so a
+    # `-p` invocation never leaves an orphaned server process or a live
+    # daemon thread behind, and `~/.claude.json`/other state is quiescent
+    # before the process actually exits (the checksum-stability contract).
+    try:
+        registry = Registry.discover(cwd, home())
+        facade = HeadlessFacade(
+            cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
+            permission_mode=resolved_mode, tool_registry=frozen_registry, registry=registry,
+            memory_store=ctx.memory_store, instructions=ctx.instructions, session_id=session_log.session_id,
+            effort=effort, theme=resolve_theme(settings_theme=settings.theme),
+            context_limit=model_profile.context_tokens,
+            mcp_servers={h.config.name: {"type": h.config.type, "command": h.config.command, "args": h.config.args,
+                                          "url": h.config.url} for h in (mcp_manager.handles.values() if mcp_manager else [])},
+            mcp_status=(mcp_manager.status() if mcp_manager is not None else None),
+        )
+        mcp_names = sorted(facade.mcp_servers)
+        slash_names = [f"/{c.name}" for c in registry.all()]
 
-    def _make_sink():
-        if output_format == "stream-json":
-            return StreamJsonSink(
-                session_id=session_log.session_id, cwd=str(cwd), model=model_ref.raw,
-                permission_mode=resolved_mode, tools=frozen_registry.names(), mcp_servers=mcp_names,
-                slash_commands=slash_names, include_partial_messages=include_partial_messages,
-                max_budget_usd=max_budget_usd, permission_denials=session.permission_denials,
-                json_schema=json_schema,
-            )
-        return PrintModeSink(output_format=output_format, session_id=session_log.session_id, model=model_ref.raw,
-                              verbose=verbose, permission_denials=session.permission_denials, json_schema=json_schema,
-                              max_budget_usd=max_budget_usd)
+        def _make_sink():
+            if output_format == "stream-json":
+                return StreamJsonSink(
+                    session_id=session_log.session_id, cwd=str(cwd), model=model_ref.raw,
+                    permission_mode=resolved_mode, tools=frozen_registry.names(), mcp_servers=mcp_names,
+                    slash_commands=slash_names, include_partial_messages=include_partial_messages,
+                    max_budget_usd=max_budget_usd, permission_denials=session.permission_denials,
+                    json_schema=json_schema,
+                )
+            return PrintModeSink(output_format=output_format, session_id=session_log.session_id, model=model_ref.raw,
+                                  verbose=verbose, permission_denials=session.permission_denials, json_schema=json_schema,
+                                  max_budget_usd=max_budget_usd)
 
-    if input_format == "stream-json":
-        turns = [_extract_user_text(obj) for obj in (stdin_lines or [])]
-        turns = [t for t in turns if t]
-        if not turns:
-            print("rolo-claude: --input-format stream-json requires at least one user message on stdin", file=sys.stderr)
-            return 2
-        exit_code = 0
-        sink = _make_sink()  # ONE sink for the whole run: `init` (stream-json) is per-SESSION, not per-turn
-        for i, turn_text in enumerate(turns):
-            if replay_user_messages:
-                print(json.dumps({"type": "user", "message": {"role": "user", "content": turn_text}}))
-            facade.cost_usd = session.cost_meter.total_usd if session.cost_meter.has_cost_data else facade.cost_usd
-            final_prompt, direct_output = _maybe_run_slash_command(
-                turn_text, registry=registry, facade=facade, disable_slash_commands=disable_slash_commands)
-            if direct_output is not None:
-                exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=i + 1))
-            else:
-                exit_code = sink.consume(session.turn(final_prompt or turn_text))
-            facade.num_turns += 1
-        return exit_code
+        if input_format == "stream-json":
+            turns = [_extract_user_text(obj) for obj in (stdin_lines or [])]
+            turns = [t for t in turns if t]
+            if not turns:
+                print("rolo-claude: --input-format stream-json requires at least one user message on stdin", file=sys.stderr)
+                return 2
+            exit_code = 0
+            sink = _make_sink()  # ONE sink for the whole run: `init` (stream-json) is per-SESSION, not per-turn
+            for i, turn_text in enumerate(turns):
+                if replay_user_messages:
+                    print(json.dumps({"type": "user", "message": {"role": "user", "content": turn_text}}))
+                facade.cost_usd = session.cost_meter.total_usd if session.cost_meter.has_cost_data else facade.cost_usd
+                final_prompt, direct_output = _maybe_run_slash_command(
+                    turn_text, registry=registry, facade=facade, disable_slash_commands=disable_slash_commands)
+                if direct_output is not None:
+                    exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=i + 1))
+                else:
+                    exit_code = sink.consume(session.turn(final_prompt or turn_text))
+                facade.num_turns += 1
+            return exit_code
 
-    prompt_text = prompt or ""
-    final_prompt, direct_output = _maybe_run_slash_command(
-        prompt_text, registry=registry, facade=facade, disable_slash_commands=disable_slash_commands)
-    sink = _make_sink()
-    if direct_output is not None:
-        return sink.consume(_events_for_direct_output(direct_output))
-    return sink.consume(session.turn(final_prompt or prompt_text))
+        prompt_text = prompt or ""
+        final_prompt, direct_output = _maybe_run_slash_command(
+            prompt_text, registry=registry, facade=facade, disable_slash_commands=disable_slash_commands)
+        sink = _make_sink()
+        if direct_output is not None:
+            return sink.consume(_events_for_direct_output(direct_output))
+        return sink.consume(session.turn(final_prompt or prompt_text))
+    finally:
+        if mcp_manager is not None:
+            mcp_manager.close_all()

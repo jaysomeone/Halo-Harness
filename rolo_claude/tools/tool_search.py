@@ -1,10 +1,16 @@
-"""rolo_claude.tools.tool_search -- the ToolSearch tool (H2 scope A): a
-deferred-tool loader over the FROZEN catalog. Real MCP tools (which can
-genuinely be deferred/unloaded) arrive in H3, so for now this searches the
-same built-in registry every session already has fully loaded -- the tool
-exists and behaves correctly now so a model habituated to calling it (or a
-session that grows deferred MCP tools later) already has a working
-`ToolSearch`, without this milestone needing to invent MCP deferral first.
+"""rolo_claude.tools.tool_search -- the ToolSearch tool (H2 scope A, H3
+scope C). Two modes, picked per-call from `ctx.catalog`:
+
+- No `ctx.catalog` (every H2-era call site, and any session with zero MCP
+  servers): searches `ctx.registry` alone, unchanged from H2 -- every tool
+  is already fully loaded, so this is just a lookup.
+- `ctx.catalog` set (`agent.catalog.SessionCatalog`, H3): searches BOTH the
+  live registry and the still-deferred MCP pool; a match found in the
+  deferred pool is LOADED (appended to the session's growing wire catalog,
+  never reordered -- see agent/catalog.py) as a side effect of this very
+  call, and the result carries a `tool_reference` block per newly-loaded
+  name alongside the full JSON schema, so the model sees the schema THIS
+  turn even though the wire catalog only grows for the NEXT request.
 """
 
 from __future__ import annotations
@@ -50,17 +56,47 @@ class ToolSearchTool(Tool):
 
         max_results = input.get("max_results") if isinstance(input, dict) else None
         max_results = max_results if isinstance(max_results, int) and max_results > 0 else 5
-        defs = registry.definitions()
+
+        catalog = getattr(ctx, "catalog", None)
+        if catalog is not None:
+            results, deferred_matched = catalog.search(query, max_results)
+        else:
+            results, deferred_matched = self._search_registry_only(registry, query, max_results)
 
         if query.startswith("select:"):
             names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
-            found = [d for d in defs if d.get("name") in names]
-            found_names = {d.get("name") for d in found}
+            found_names = {d.get("name") for d in results}
             missing = [n for n in names if n not in found_names]
-            body = json.dumps(found, indent=2)
-            if missing:
-                body += f"\n\n(not found: {', '.join(missing)})"
+        else:
+            missing = []
+            if not results:
+                return ToolResult(f"No tools matched {query!r}. Available tools: {', '.join(registry.names())}")
+
+        loaded = catalog.load(deferred_matched) if (catalog is not None and deferred_matched) else []
+        body = json.dumps(results, indent=2)
+        if missing:
+            body += f"\n\n(not found: {', '.join(missing)})"
+        if not loaded:
             return ToolResult(body)
+
+        # H3 scope C: a deferred tool actually got loaded this call -- the
+        # NEXT request already carries its full definition (agent/loop.py's
+        # Session logs a new `meta` node via `catalog.on_grow`); this
+        # call's OWN result also gets a `tool_reference` block per loaded
+        # name (plan D5: "returns defs + tool_reference blocks"), on top of
+        # the plain JSON schema text every caller already gets.
+        blocks = [{"type": "text", "text": body}]
+        blocks.extend({"type": "tool_reference", "tool_name": name} for name in loaded)
+        return ToolResult(blocks)
+
+    @staticmethod
+    def _search_registry_only(registry, query: str, max_results: int) -> "tuple[list, list]":
+        """H2's original behaviour, unchanged: every tool is already fully
+        loaded, so this is a pure lookup with nothing ever deferred."""
+        defs = registry.definitions()
+        if query.startswith("select:"):
+            names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
+            return [d for d in defs if d.get("name") in names], []
 
         terms = [t.lower() for t in query.split() if t]
         scored = []
@@ -70,7 +106,4 @@ class ToolSearchTool(Tool):
             if score > 0:
                 scored.append((score, d.get("name", ""), d))
         scored.sort(key=lambda t: (-t[0], t[1]))
-        results = [d for _, _, d in scored[:max_results]]
-        if not results:
-            return ToolResult(f"No tools matched {query!r}. Available tools: {', '.join(registry.names())}")
-        return ToolResult(json.dumps(results, indent=2))
+        return [d for _, _, d in scored[:max_results]], []

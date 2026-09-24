@@ -105,8 +105,14 @@ def test_finding_14_no_false_capability_promises_in_prompt(ctx: Ctx):
               "write it ONLY inside" not in prompt)
     ctx.check('no "running a test" promise (no Bash tool)', "running a test" not in prompt)
     ctx.check('no false "No MCP servers are configured" claim', "No MCP servers are configured" not in prompt)
-    ctx.check('honest "not available in this build" MCP framing present',
-              "MCP tools are not available in this build" in prompt)
+    # H3: MCP support now genuinely exists in this build -- the honest
+    # statement is per-SESSION ("none configured/connected right now"),
+    # never a blanket "not available in this build" (that claim would now
+    # be FALSE whenever the user actually has servers configured).
+    ctx.check('honest "none configured/connected" MCP framing present (no mcp_servers passed)',
+              "none are configured/connected in this session" in prompt)
+    ctx.check('never claims MCP support doesn\'t exist as a build limitation',
+              "MCP tools are not available in this build" not in prompt)
 
 
 @test

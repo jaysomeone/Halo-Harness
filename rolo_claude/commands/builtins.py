@@ -38,6 +38,11 @@ class HeadlessFacade:
     theme: str = ""
     context_limit: Optional[int] = None
     mcp_servers: dict = field(default_factory=dict)
+    # H3 scope D: McpManager.status()'s own list of dicts, when a real
+    # manager was built this session -- None (the default, and every H2-
+    # era call site) means "no MCP client ran" and `_cmd_mcp` falls back
+    # to its old raw-config-only wording.
+    mcp_status: Optional[list] = None
 
 
 def _cmd_help(args: str, facade: HeadlessFacade) -> str:
@@ -72,12 +77,21 @@ def _cmd_model(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
+    if facade.mcp_status is not None:
+        # H3 scope D: real per-server health, same line format `mcp list` uses.
+        from rolo_claude.mcp_cli import format_mcp_list_line
+        if not facade.mcp_status:
+            return "No MCP servers configured."
+        lines = ["Configured MCP servers:"]
+        for entry in sorted(facade.mcp_status, key=lambda e: e.get("name", "")):
+            lines.append(f"  {format_mcp_list_line(entry)}")
+        return "\n".join(lines)
     if not facade.mcp_servers:
         return "No MCP servers configured."
     lines = ["Configured MCP servers:"]
     for name, spec in sorted(facade.mcp_servers.items()):
         kind = spec.get("type", "stdio") if isinstance(spec, dict) else "stdio"
-        lines.append(f"  {name} ({kind}) - not checked (MCP client arrives in a later milestone)")
+        lines.append(f"  {name} ({kind}) - not checked (no MCP client ran this session)")
     return "\n".join(lines)
 
 

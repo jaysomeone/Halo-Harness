@@ -228,7 +228,13 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
         reasoning_effort_supported=effort_supported, thinking_format="openrouter_details",
         reasoning_replay=replay if replay != "text" else "details",
         stream_usage=True, store=False, strict=False,
-        tool_result_name=False, body_allowlist=None, tools_max=None,
+        # H3 must-do (frozen-catalog host cap): 128, matching the plan's
+        # "the host cap (128 OpenRouter, 32 Databricks)" -- the frozen-
+        # catalog SELECTION step (agent/catalog.py) pre-selects under this
+        # cap so ToolCatalogTooLarge should never actually fire in normal
+        # operation; this is the backstop that makes a selection bug a
+        # clear error instead of a silent truncation/wire 400.
+        tool_result_name=False, body_allowlist=None, tools_max=128,
         supports_temperature_in_thinking=False, host_specific_fields=(route.provider == "openrouter"),
         family=family, use_temperature=row.get("use_temperature", True),
         temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),

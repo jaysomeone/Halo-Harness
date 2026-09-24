@@ -77,6 +77,16 @@ _REAL_FLAGS = [
     (["--disable-slash-commands"], dict(dest="disable_slash_commands", action="store_true")),
     (["--session-id"], dict(dest="session_id", default=None, metavar="UUID")),
     (["--replay-user-messages"], dict(dest="replay_user_messages", action="store_true")),
+    # H3: real now (were "not yet" -- MCP client + frozen catalog/lazy
+    # load + the claude-in-chrome/playwright dynamic servers land this
+    # milestone).
+    (["--chrome"], dict(dest="chrome", action="store_true")),
+    (["--no-chrome"], dict(dest="no_chrome", action="store_true")),
+    (["--playwright"], dict(dest="playwright", action="store_true")),
+    (["--playwright-cdp"], dict(dest="playwright_cdp", default=None, metavar="ENDPOINT")),
+    (["--playwright-headless"], dict(dest="playwright_headless", action="store_true")),
+    (["--mcp-config"], dict(dest="mcp_config", nargs="+", default=None, metavar="CONFIG")),
+    (["--strict-mcp-config"], dict(dest="strict_mcp_config", action="store_true")),
 ]
 
 _NOT_YET_FLAGS = [
@@ -89,7 +99,6 @@ _NOT_YET_FLAGS = [
     (["--bg", "--background"], dict(dest="background", action="store_true"), "--bg", "H8"),
     (["--betas"], dict(dest="betas", nargs="+", default=None, metavar="BETA"), "--betas", "H8"),
     (["--brief"], dict(dest="brief", action="store_true"), "--brief", "H4"),
-    (["--chrome"], dict(dest="chrome", action="store_true"), "--chrome", "H3"),
     (["--cloud"], dict(dest="cloud", nargs="?", const="", default=None), "--cloud", "H8"),
     (["-c", "--continue"], dict(dest="continue_", action="store_true"), "--continue", "H6"),
     (["-d", "--debug"], dict(dest="debug", nargs="?", const="", default=None), "--debug", "H8"),
@@ -104,15 +113,12 @@ _NOT_YET_FLAGS = [
     (["--from-pr"], dict(dest="from_pr", nargs="?", const="", default=None), "--from-pr", "H8"),
     (["--ide"], dict(dest="ide", action="store_true"), "--ide", "H8"),
     (["--include-hook-events"], dict(dest="include_hook_events", action="store_true"), "--include-hook-events", "H4"),
-    (["--mcp-config"], dict(dest="mcp_config", nargs="+", default=None, metavar="CONFIG"), "--mcp-config", "H3"),
     (["-n", "--name"], dict(dest="name", default=None), "--name", "H6"),
-    (["--no-chrome"], dict(dest="no_chrome", action="store_true"), "--no-chrome", "H3"),
     (["--no-session-persistence"], dict(dest="no_session_persistence", action="store_true"), "--no-session-persistence", "H6"),
     (["--permission-prompt-tool"], dict(dest="permission_prompt_tool", default=None, metavar="TOOL"), "--permission-prompt-tool", "H4"),
     (["--permission-prompts"], dict(dest="permission_prompts", choices=["host", "none"], default=None), "--permission-prompts", "H4"),
     (["--plugin-dir"], dict(dest="plugin_dir", action="append", default=None, metavar="PATH"), "--plugin-dir", "H4"),
     (["--plugin-url"], dict(dest="plugin_url", action="append", default=None, metavar="URL"), "--plugin-url", "H4"),
-    (["--playwright"], dict(dest="playwright", action="store_true"), "--playwright", "H3"),
     (["--prompt-suggestions"], dict(dest="prompt_suggestions", nargs="?", const="true", default=None,
         choices=["true", "false", "1", "0", "yes", "no", "on", "off"]), "--prompt-suggestions", "U3"),
     (["--remote-control"], dict(dest="remote_control", nargs="?", const="", default=None), "--remote-control", "H8"),
@@ -121,7 +127,6 @@ _NOT_YET_FLAGS = [
     (["--restricted"], dict(dest="restricted", action="store_true"), "--restricted", "H4"),
     (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None), "--resume", "H6"),
     (["--safe-mode"], dict(dest="safe_mode", action="store_true"), "--safe-mode", "H4"),
-    (["--strict-mcp-config"], dict(dest="strict_mcp_config", action="store_true"), "--strict-mcp-config", "H3"),
     (["--system-prompt-snapshot"], dict(dest="system_prompt_snapshot", choices=["on", "off"], default=None),
         "--system-prompt-snapshot", "H5"),
     (["--teleport"], dict(dest="teleport", nargs="?", const="", default=None), "--teleport", "H8"),
@@ -323,6 +328,9 @@ def main(argv: Optional[list] = None) -> int:
             json_schema=args.json_schema,
             replay_user_messages=args.replay_user_messages,
             stdin_lines=stdin_lines,
+            chrome=args.chrome, no_chrome=args.no_chrome, playwright=args.playwright,
+            playwright_cdp=args.playwright_cdp, playwright_headless=args.playwright_headless,
+            mcp_config=args.mcp_config, strict_mcp_config=args.strict_mcp_config,
         )
     except InvalidModelError as e:
         # a bad --model/alias must be a clean config error (exit 2), not an

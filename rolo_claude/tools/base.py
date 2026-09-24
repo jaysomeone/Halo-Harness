@@ -62,6 +62,17 @@ class ToolContext:
     # ToolRegistry) so this module never has to import tools/registry.py,
     # which itself imports THIS module (that reverse import would cycle).
     registry: Optional[object] = None
+    # H3 scope C: the session's SessionCatalog (agent/catalog.py), when MCP
+    # tools exist -- untyped for the same reverse-import reason as
+    # `registry`. Only ToolSearchTool consults this; when it's None (every
+    # existing test's bare ToolContext, and any session with zero MCP
+    # servers) ToolSearch falls back to searching `registry` alone,
+    # unchanged from H2.
+    catalog: Optional[object] = None
+    # H3 scope B: the session's McpManager, when one exists -- consulted by
+    # ListMcpResourcesTool/ReadMcpResourceTool only (McpTool itself carries
+    # its own manager reference directly, set at construction).
+    mcp_manager: Optional[object] = None
 
 
 @dataclass

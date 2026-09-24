@@ -228,6 +228,7 @@ class Session:
         max_turns: int = 50, openrouter_base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
         permission_engine: Optional[PermissionEngine] = None,
+        session_catalog: Optional[object] = None, mcp_manager: Optional[object] = None,
     ):
         self.cwd = cwd
         self.model_ref = model_ref
@@ -291,14 +292,32 @@ class Session:
         # U2: the Controller installs one before `run()`; a bare Session
         # (a unit test, print mode) reports 0/0 in its status events.
         self.mcp_status_fn = None
+        # H3 scope C: the frozen-catalog + lazy-load owner (agent/catalog.
+        # SessionCatalog) and the McpManager it draws deferred tools from
+        # -- both None for a bare Session (every pre-H3 test, and any
+        # session with zero MCP servers). `on_grow` is wired to append a
+        # new `meta` log node so the growing wire catalog is itself logged
+        # (model-visible means logged); `_dispatch_tools` threads
+        # `self.session_catalog` into every ToolContext as `catalog=`.
+        self.session_catalog = session_catalog
+        self.mcp_manager = mcp_manager
+        if self.session_catalog is not None:
+            self.session_catalog.on_grow = self._on_catalog_grow
 
         self.log = session_log or SessionLog(cwd)
         existing_nodes = self.log.nodes()
         if not existing_nodes:
+            # finding 4: when a SessionCatalog exists, `.names` (not
+            # `.definitions()`) is the source of truth for wire-catalog
+            # ORDER from this point on -- at this exact moment the two
+            # agree (the catalog was just frozen name-sorted), but only
+            # `.names` keeps agreeing after a later lazy-load append.
+            initial_tools = (self.tool_registry.definitions_for(self.session_catalog.names)
+                              if self.session_catalog is not None else self.tool_registry.definitions())
             self.log.append_meta(
                 model=model_ref.raw, cwd=str(cwd),
                 system_prompt_bytes=len(session_context.system_prompt.encode("utf-8")),
-                tools=self.tool_registry.definitions(),
+                tools=initial_tools,
             )
             self.log.append_system(session_context.system_prompt)
 
@@ -326,6 +345,16 @@ class Session:
                     "(tool registry or config changed since the original run) -- keeping the LOGGED text"
                 )
             synthesize_missing_results(self.log, reason="ABORTED_BEFORE_DISPATCH")
+
+    def _on_catalog_grow(self, names: list) -> None:
+        """H3 scope C: `SessionCatalog.load()`'s own callback -- a
+        ToolSearch call just appended one or more deferred MCP tools to
+        the session's wire catalog (or LRU-evicted one back out). Logs a
+        NEW `meta` node carrying the full, still name-order-frozen-then-
+        append-only tool list (`derive_request` always takes the LAST
+        meta node's `tools`, so this is the only write needed for the
+        NEXT request to carry it -- see agent/derive.py)."""
+        self.log.append_meta(tools=self.tool_registry.definitions_for(names))
 
     # ---- request construction ------------------------------------------
 
@@ -1010,7 +1039,8 @@ class Session:
         tool_call_flags = tool_call_flags or {}
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
-                           registry=self.tool_registry, env=self.tool_env)
+                           registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
+                           mcp_manager=self.mcp_manager)
         repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry)
 
         end_turn = False

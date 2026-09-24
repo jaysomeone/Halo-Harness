@@ -37,8 +37,12 @@ def test_every_seeded_model_table_row_resolves_without_raising(ctx: Ctx):
                 continue
             ctx.check(f"{host}/{model_id}: max_tokens_default is a positive int or None",
                       profile.max_tokens_default is None or (isinstance(profile.max_tokens_default, int) and profile.max_tokens_default > 0))
-            ctx.check(f"{host}/{model_id}: tools_max is 32 for databricks, None for openrouter",
-                      (profile.tools_max == 32) if host == "databricks" else (profile.tools_max is None))
+            # H3: the host cap is 32 for Databricks, 128 for OpenRouter (plan's
+            # "respecting the host cap (128 OpenRouter, 32 Databricks)") -- was
+            # `None` (unlimited) for OpenRouter pre-H3; the frozen-catalog
+            # selection step now relies on THIS being a real backstop.
+            ctx.check(f"{host}/{model_id}: tools_max is 32 for databricks, 128 for openrouter",
+                      (profile.tools_max == 32) if host == "databricks" else (profile.tools_max == 128))
     ctx.check(f"resolved at least 30 seeded rows total (found {total})", total >= 30)
 
 

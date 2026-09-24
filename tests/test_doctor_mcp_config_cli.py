@@ -25,8 +25,16 @@ def _fresh_home() -> Path:
 def _run(argv, home: Path, timeout=30):
     env = dict(os.environ)
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
+    # H3: `cli.py`'s `_make_streams_utf8_safe()` deliberately reconfigures
+    # the CHILD's stdout/stderr to UTF-8 (a model's reply, or an MCP
+    # status glyph like the ✔/✗/⏸ this milestone's `mcp
+    # list` prints, may not exist in a legacy Windows console codepage) --
+    # decoding the captured bytes with anything other than UTF-8 here
+    # (the bare `text=True` default is the LOCALE's preferred encoding,
+    # cp1252 on this host) turns every such character into mojibake
+    # (verified: "✔" -> "âœ”").
     return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 @test
@@ -48,20 +56,62 @@ def test_mcp_list_no_servers(ctx: Ctx):
 
 @test
 def test_mcp_list_reads_real_config(ctx: Ctx):
+    """H3: `mcp list` now does a REAL health check (not the H2-era 'not
+    checked' stub) -- a genuinely-working fake stdio server connects, a
+    broken one honestly fails, and either way the line format matches
+    binary-facts sec.9 (`${name}: ${command} ${args} - ${status}`)."""
     home = _fresh_home()
     (home / ".claude.json").write_text(json.dumps({
-        "mcpServers": {"demo-server": {"type": "stdio", "command": "python", "args": ["-m", "demo"]}},
+        "mcpServers": {
+            "demo-server": {"type": "stdio", "command": sys.executable,
+                             "args": ["-m", "tests.helpers.fake_mcp_server"]},
+            "broken-server": {"type": "stdio", "command": sys.executable,
+                               "args": ["-m", "tests.helpers.fake_mcp_server", "crash"]},
+        },
     }), encoding="utf-8")
-    result = _run(["mcp", "list"], home)
+    result = _run(["mcp", "list"], home, timeout=60)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    ctx.check("lists the configured server", "demo-server: python -m demo" in result.stdout)
-    ctx.check("honest about not health-checking yet", "not checked" in result.stdout)
+    ctx.check("prints the health-check header", "Checking MCP server health" in result.stdout)
+    ctx.check(f"working server line, got {result.stdout!r}",
+              f"demo-server: {sys.executable} -m tests.helpers.fake_mcp_server - ✔ Connected" in result.stdout)
+    ctx.check("broken server honestly reports a failure, never a crash",
+              "broken-server:" in result.stdout and "✗ Failed to connect" in result.stdout)
+    ctx.check("no traceback", "Traceback" not in result.stderr)
 
 
 @test
-def test_mcp_add_and_friends_are_not_yet(ctx: Ctx):
+def test_mcp_add_get_list_remove_round_trip(ctx: Ctx):
+    """H3: `add`/`get`/`remove` are real now -- a read-modify-write of
+    `~/.claude.json` that preserves unrelated keys, plus `mcp list`/`mcp
+    get` seeing the newly-added (real, connectable) server afterward."""
     home = _fresh_home()
-    for sub in (["add", "x", "y"], ["remove", "x"], ["get", "x"], ["add-json", "x", "{}"]):
+    (home / ".claude.json").write_text(json.dumps({"unrelatedKey": {"nested": [1, 2, 3]}}), encoding="utf-8")
+
+    add_result = _run(["mcp", "add", "-s", "user", "fake", sys.executable,
+                        "-m", "tests.helpers.fake_mcp_server"], home)
+    ctx.check(f"mcp add: exit 0, got {add_result.returncode}, stderr={add_result.stderr!r}", add_result.returncode == 0)
+
+    claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    ctx.check("unrelated key preserved", claude_json.get("unrelatedKey") == {"nested": [1, 2, 3]})
+    ctx.check("new server present under mcpServers (user scope)",
+              claude_json.get("mcpServers", {}).get("fake", {}).get("command") == sys.executable)
+
+    get_result = _run(["mcp", "get", "fake"], home, timeout=60)
+    ctx.check(f"mcp get: exit 0, got {get_result.returncode}", get_result.returncode == 0)
+    ctx.check("mcp get shows it connected", "✔ Connected" in get_result.stdout)
+    ctx.check("mcp get shows real tool count > 0", "Tools: 0" not in get_result.stdout)
+
+    remove_result = _run(["mcp", "remove", "-s", "user", "fake"], home)
+    ctx.check(f"mcp remove: exit 0, got {remove_result.returncode}", remove_result.returncode == 0)
+    after = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    ctx.check("removed from mcpServers", "fake" not in after.get("mcpServers", {}))
+    ctx.check("unrelated key still preserved after remove", after.get("unrelatedKey") == {"nested": [1, 2, 3]})
+
+
+@test
+def test_mcp_other_subcommands_still_not_yet(ctx: Ctx):
+    home = _fresh_home()
+    for sub in (["login"], ["logout"], ["serve"]):
         result = _run(["mcp"] + sub, home)
         ctx.check(f"mcp {sub[0]}: exit 0, got {result.returncode}", result.returncode == 0)
         ctx.check(f"mcp {sub[0]}: not-yet line printed", f"rolo-claude: mcp {sub[0]} is not supported yet" in result.stderr)

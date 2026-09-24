@@ -83,16 +83,71 @@ def _check_databricks() -> str:
     return f"{OK} Databricks: configured ({dbx.host})"
 
 
+_CHROME_NATIVE_HOST_ID = "com.anthropic.claude_code_browser_extension"
+# POSIX native-messaging manifest search dirs (Chrome/Chromium/Edge/Brave,
+# per-user) -- [verified doc]: Windows registers a registry key instead
+# (checked separately below), so this list is consulted only off win32.
+_POSIX_NATIVE_HOST_DIRS = (
+    "~/.config/google-chrome/NativeMessagingHosts",
+    "~/.config/chromium/NativeMessagingHosts",
+    "~/.config/microsoft-edge/NativeMessagingHosts",
+    "~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    "~/.mozilla/native-messaging-hosts",  # Firefox uses a different manifest shape but shares the dir convention
+)
+
+
+def _chrome_native_host_registered() -> "tuple[bool, str]":
+    """`(registered, detail)` -- registry key on win32
+    [claude-in-chrome-integration.md: `HKCU\\...\\NativeMessagingHosts\\
+    com.anthropic.claude_code_browser_extension`], manifest file presence
+    under the usual per-browser dirs on POSIX. Best-effort: any lookup
+    failure (no `winreg`, permission error, ...) reports "not found"
+    rather than raising."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key_path = f"Software\\Google\\Chrome\\NativeMessagingHosts\\{_CHROME_NATIVE_HOST_ID}"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                manifest_path, _ = winreg.QueryValueEx(key, None)
+            return True, f"HKCU\\{key_path} -> {manifest_path}"
+        except OSError:
+            return False, f"no HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\{_CHROME_NATIVE_HOST_ID} key"
+    for d in _POSIX_NATIVE_HOST_DIRS:
+        manifest = Path(d).expanduser() / f"{_CHROME_NATIVE_HOST_ID}.json"
+        if manifest.exists():
+            return True, str(manifest)
+    return False, f"no {_CHROME_NATIVE_HOST_ID}.json manifest found under the usual browser config dirs"
+
+
+def _chrome_bridge_pipe_present() -> bool:
+    """Best-effort: the native-host pipe/socket exists only while the
+    extension currently holds it open, so a False here is completely
+    normal (Chrome just isn't running with the extension enabled right
+    now) -- never treated as a failure, only extra detail."""
+    try:
+        user = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
+        if sys.platform == "win32":
+            return Path(rf"\\.\pipe\claude-mcp-browser-bridge-{user}").exists()
+        return Path(f"/tmp/claude-mcp-browser-bridge-{user}").exists()
+    except OSError:
+        return False
+
+
 def _check_chrome() -> str:
-    found = shutil.which("claude") or shutil.which("claude.exe") or shutil.which("claude.cmd")
-    if found:
-        return f"{OK} claude on PATH (needed for --chrome): {found}"
-    return f"{WARN} claude not found on PATH -- --chrome will print its not-yet-supported line"
+    from rolo_claude.mcp_setup import find_claude_exe
+    claude_exe = find_claude_exe()
+    if not claude_exe:
+        return f"{WARN} claude executable not found on PATH -- --chrome cannot spawn the claude-in-chrome MCP server"
+    registered, detail = _chrome_native_host_registered()
+    pipe = " (bridge pipe currently open)" if _chrome_bridge_pipe_present() else ""
+    if registered:
+        return f"{OK} claude={claude_exe}; native host registered ({detail}){pipe}"
+    return f"{WARN} claude={claude_exe}; Chrome extension native host NOT registered ({detail}) -- install/enable Claude in Chrome first"
 
 
 def _check_playwright() -> str:
     node = shutil.which("node")
-    npx = shutil.which("npx")
+    npx = shutil.which("npx") or shutil.which("npx.cmd")
     if node and npx:
         return f"{OK} node/npx on PATH (needed for --playwright): {node}"
     missing = ", ".join(n for n, p in (("node", node), ("npx", npx)) if not p)

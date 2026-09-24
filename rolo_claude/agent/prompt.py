@@ -60,14 +60,40 @@ delivered to you as a user-role message."""
 
 _HARNESS_SELF_DESCRIPTION_TAIL = """- **Skills and slash commands** -- reusable instructions the user or project has set up, listed \
 when available.
-- **MCP servers** -- external tool providers exposed as additional tools named \
-`mcp__<server>__<tool>`; MCP tools are not available in this build (this is a statement about \
-what this build can DO, not about what the user has configured -- do not tell the user no MCP \
-servers exist).
 - **Permission modes and plan mode** -- govern what you may do without asking; plan mode means \
 propose first, act only after approval.
 - **Sub-agents** -- specialised agents this harness (or Claude Code) can delegate a task to; not \
 available in this build."""
+
+
+def _mcp_servers_sentence(mcp_servers: Optional[list]) -> str:
+    """H3 scope C: one line per configured/connected MCP server (name +
+    its own `instructions`, when the server provided one) plus the "use
+    ToolSearch" pointer -- the system prompt NEVER lists individual MCP
+    TOOLS (finding 4/D-CFG: "the system prompt lists MCP servers with
+    their instructions one-liners + 'use ToolSearch', never the tool
+    list"), only server identity, so a session with many/large servers
+    stays cache-stable and small regardless of how many tools any one of
+    them exposes. `mcp_servers` is `[{"name", "instructions"}, ...]`
+    (agent/assemble.py builds this from the McpManager, or None/empty for
+    a build with no MCP client -- see also H2's own MCP-callout in
+    _HARNESS_SELF_DESCRIPTION_TAIL, now replaced by this dynamic section)."""
+    if not mcp_servers:
+        return ("- **MCP servers** -- external tool providers exposed as additional tools named "
+                "`mcp__<server>__<tool>`; none are configured/connected in this session (this is a "
+                "statement about what's available RIGHT NOW, not a permanent limitation -- do not "
+                "tell the user MCP support doesn't exist).")
+    lines = ["- **MCP servers** -- external tool providers exposed as additional tools named "
+             "`mcp__<server>__<tool>`. Most of their tools are NOT in your tool list yet (frozen-"
+             "catalog + lazy load, for cost/cache stability): call `ToolSearch` with `\"select:"
+             "mcp__<server>__<tool>\"` or a keyword query to load one before calling it. Configured "
+             "servers this session:"]
+    for srv in mcp_servers:
+        name = srv.get("name", "?") if isinstance(srv, dict) else str(srv)
+        instructions = (srv.get("instructions") or "").strip() if isinstance(srv, dict) else ""
+        one_liner = instructions.splitlines()[0] if instructions else "(no server-provided description)"
+        lines.append(f"  - `{name}`: {one_liner}")
+    return "\n".join(lines)
 
 
 def _memory_capability_sentence(has_write: bool) -> str:
@@ -105,12 +131,14 @@ def _closing_guidance_sentence(has_write: bool, has_bash: bool) -> str:
             f"back from a real tool call.")
 
 
-def build_harness_self_description(tool_definitions: list) -> str:
+def build_harness_self_description(tool_definitions: list, mcp_servers: Optional[list] = None) -> str:
     """The whole '## How this harness works' section, built from the
     REGISTRY (`tool_definitions`, name-sorted per rolo_claude.tools.
     registry.ToolRegistry.definitions()) instead of hardcoded prose that
     assumed tools (Write, Bash) this build may not actually have --
-    finding 14."""
+    finding 14. `mcp_servers` (H3 scope C) is threaded through to
+    `_mcp_servers_sentence`, same rule: only real server names, never a
+    tool list."""
     names = {td.get("name") for td in tool_definitions if isinstance(td, dict)}
     has_write = "Write" in names
     has_bash = "Bash" in names
@@ -118,6 +146,7 @@ def build_harness_self_description(tool_definitions: list) -> str:
         _HARNESS_SELF_DESCRIPTION_HEAD,
         _memory_capability_sentence(has_write),
         _HARNESS_SELF_DESCRIPTION_TAIL,
+        _mcp_servers_sentence(mcp_servers),
         "",
         _closing_guidance_sentence(has_write, has_bash),
     ]
@@ -165,17 +194,19 @@ def cwd_line(cwd) -> str:
 
 def build_system_prompt(
     *, model_label: str, cwd, tool_definitions: Optional[list] = None, family: str = "generic",
-    append_system_prompt: Optional[str] = None,
+    append_system_prompt: Optional[str] = None, mcp_servers: Optional[list] = None,
 ) -> str:
     """Build the full system prompt string. Byte-stable for a given input
     -- call this exactly ONCE per session (agent/loop.py stores the result
-    and never calls this again for that session)."""
+    and never calls this again for that session). `mcp_servers` (H3 scope
+    C) is resolved once, at the SAME "before the session's first request"
+    point tool_definitions itself is -- see agent/assemble.py."""
     tool_definitions = tool_definitions or []
     sections = [
         IDENTITY_TEXT,
         persona_line(model_label),
         PLAN_MODE_POLICY,
-        build_harness_self_description(tool_definitions),  # finding 14: registry-driven, no false promises
+        build_harness_self_description(tool_definitions, mcp_servers),  # finding 14: registry-driven, no false promises
         "## Tools available in this session\n" + tool_guidance_lines(tool_definitions),
         family_notation(family),
         cwd_line(str(cwd)),

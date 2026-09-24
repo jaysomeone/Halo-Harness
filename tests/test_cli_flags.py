@@ -110,36 +110,49 @@ def test_unknown_flag_is_an_argparse_error_exit_2(ctx: Ctx):
     ctx.check("argparse error mentions the bad flag", "totally-not-a-real-flag" in result.stderr)
 
 
-def _run_cli(fh, mock, prompt, extra_args=None, timeout=30):
+def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, extra_env=None):
     env = dict(os.environ)
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
+    env.update(extra_env or {})
     args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", "or:mock/model",
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
 
 @test
-def test_chrome_not_yet_and_prompt_still_runs(ctx: Ctx):
+def test_chrome_flag_real_and_prompt_still_runs(ctx: Ctx):
+    """H3: `--chrome` is real now (was not-yet) -- it tries to spawn the
+    claude-in-chrome MCP server; a short MCP_TIMEOUT keeps this test fast
+    and deterministic regardless of whether a live `claude.exe`/browser
+    happens to be reachable on the machine running it. Either way the
+    turn itself must complete normally: a failed/slow MCP server is
+    never fatal to the session (D-CFG)."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--chrome"])
-        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-300:]!r}", result.returncode == 0)
-        ctx.check("not-yet stderr line for --chrome", "rolo-claude: --chrome is not supported yet" in result.stderr)
+        result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--chrome"],
+                           extra_env={"MCP_TIMEOUT": "3000"})
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-400:]!r}", result.returncode == 0)
+        ctx.check("no not-yet line for --chrome any more", "--chrome is not supported yet" not in result.stderr)
+        ctx.check("no crash", "Traceback" not in result.stderr)
         ctx.check("prompt still ran (pong in stdout)", "pong" in result.stdout)
     finally:
         mock.stop()
 
 
 @test
-def test_playwright_not_yet_and_prompt_still_runs(ctx: Ctx):
+def test_playwright_flag_real_and_prompt_still_runs(ctx: Ctx):
+    """H3: `--playwright` is real now -- same shape as the chrome test
+    above (short MCP_TIMEOUT, never fatal to the turn)."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--playwright"])
-        ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-        ctx.check("not-yet stderr line for --playwright", "rolo-claude: --playwright is not supported yet" in result.stderr)
+        result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--playwright"],
+                           extra_env={"MCP_TIMEOUT": "3000"})
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-400:]!r}", result.returncode == 0)
+        ctx.check("no not-yet line for --playwright any more", "--playwright is not supported yet" not in result.stderr)
+        ctx.check("no crash", "Traceback" not in result.stderr)
         ctx.check("prompt still ran (pong in stdout)", "pong" in result.stdout)
     finally:
         mock.stop()

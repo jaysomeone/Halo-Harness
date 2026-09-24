@@ -1358,11 +1358,28 @@ class PermissionEngine:
         """finding 15: any path-resolution error (e.g. a NUL byte in a
         path -- `Path.resolve()` raises `ValueError` at the OS level) is
         caught here, ONCE, at the single entry point every caller uses --
-        never left to kill the whole turn."""
+        never left to kill the whole turn.
+
+        H3 fix (a): `_decide`'s own deny-rule branches (a straight DENY
+        rule hit, `--disallowedTools`, Bash/PowerShell deny, the NUL-byte
+        path-error branch just below) never populated `Decision.
+        permission_denial` themselves -- only the ask-turned-into-deny
+        branches (`_resolve_ask`, `_mode_table_decision`'s print-mode ask
+        path) did, so a plain deny-rule hit never showed up in the `-p`
+        JSON result's `permission_denials` array even though Claude Code's
+        own does. Rather than touching every `Decision("deny", ...)` call
+        site individually, EVERY deny outcome is backfilled here, once, at
+        the single entry point -- matching Claude Code."""
         try:
-            return self._decide(tool_name, tool_input or {}, tool)
+            decision = self._decide(tool_name, tool_input or {}, tool)
         except (ValueError, OSError) as e:
-            return Decision("deny", f"could not resolve a path for this {tool_name} call: {e}", source="error")
+            decision = Decision("deny", f"could not resolve a path for this {tool_name} call: {e}", source="error")
+        if decision.action == "deny" and decision.permission_denial is None and self.print_mode:
+            decision.permission_denial = {
+                "tool_name": tool_name, "tool_input": tool_input or {},
+                "reason": decision.reason, "suggested_rule": decision.suggested_rule,
+            }
+        return decision
 
     def _decide(self, tool_name: str, tool_input: dict, tool) -> Decision:
         if tool_name == "Bash":
