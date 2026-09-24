@@ -756,7 +756,19 @@ def test_controller_reconnect_mcp_threads_abort_through_to_a_slow_reconnect(ctx:
         ctx.check(f"reconnect_mcp returns SOMETHING (never raises), got {result}", isinstance(result, list))
         ctx.check(f"returns promptly (~0.3s), not the full 5s slow-start sleep, got {elapsed:.2f}s", elapsed < 3.0)
     finally:
-        mgr.close_all()
+        # abort only cuts reconnect_mcp's WAIT short -- the underlying
+        # connect this test deliberately made slow (FAKE_MCP_SLEEP_S=5)
+        # keeps running regardless ("abandoned, not stopped", same as
+        # everywhere else abort-aware waiting is used in this codebase),
+        # so close_all()'s own default 5.0s budget is not enough slack for
+        # it to finish naturally and close cleanly -- verified on Windows:
+        # with the default budget this reliably lost the race and left a
+        # live child process + an unclosed transport for the interpreter
+        # to crash on at shutdown. A generous explicit timeout here lets
+        # close_all() wait out the real 5s sleep (plus process-start/
+        # handshake overhead) and hit the fast, clean shutdown path
+        # instead of leaning on McpLoop.stop()'s forced-cancel fallback.
+        mgr.close_all(timeout=15.0)
 
 
 # ---- live connections through the REAL fake stdio server -------------------

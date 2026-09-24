@@ -807,7 +807,31 @@ class McpServerHandle:
         (`.result(timeout=)`, `start()`) or an async one already running
         on this same loop (`await asyncio.wrap_future(...)`,
         `McpManager.start_all()`'s `_start_one`) -- one implementation
-        serves both call sites."""
+        serves both call sites.
+
+        H3c-regression fix (verified on Windows): the final cleanup below
+        used to re-read `self._stack` instead of capturing it locally right
+        here. `McpManager.close_all()`'s own per-handle `_await_close()`
+        wait has a budget of its own (bounded by `close_all(timeout=...)`,
+        default 5s total across every handle) that can genuinely be
+        SHORTER than a still-connecting server needs -- when it gives up
+        waiting on THIS task's `_lifecycle_future`, it unconditionally
+        nulls `self._stack` right then (so a caller sees "closed" instead
+        of a stale connected/session object), regardless of whether this
+        task has actually finished. If this task were still reading
+        `self._stack` at that point, its own `finally` below would then
+        find it already `None` and silently skip closing the real, still-
+        open stack it alone owns -- a live child process + an unclosed
+        `BaseSubprocessTransport` left for the interpreter to crash on at
+        shutdown (`test_controller_reconnect_mcp_threads_abort_through_to_
+        a_slow_reconnect`: the abort only cuts the CALLER's wait short,
+        never the underlying connect, so `_await_close()` racing ahead of
+        a slow connect is the norm here, not an edge case). Every task
+        must own and close exactly the stack IT opened, independent of
+        whatever any other thread does to this handle's shared fields
+        concurrently -- same principle `_do()`'s own detached `_cleanup()`
+        closure (in `_connect_once` above) already followed by closing
+        over ITS local `stack`, never `self._stack`."""
         self._close_event = asyncio.Event()
         try:
             await self._connect_once()
@@ -815,13 +839,14 @@ class McpServerHandle:
             if not connect_future.done():
                 connect_future.set_exception(e)
             return
+        stack = self._stack
         if not connect_future.done():
             connect_future.set_result(None)
         try:
             await self._close_event.wait()
         finally:
-            if self._stack is not None:
-                await self._stack.aclose()
+            if stack is not None:
+                await stack.aclose()
 
     def start(self, abort=None) -> None:
         """`abort` (u2-h3b finding 9): when given, the WAIT for this

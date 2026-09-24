@@ -73,6 +73,21 @@ async def task_timeout(seconds: Optional[float]) -> "AsyncIterator[None]":
         handle.cancel()
 
 
+# H3c-regression fix: the independent grace period `McpLoop._cancel_
+# pending_tasks` gives a cancelled task's OWN follow-up cleanup (see that
+# method's docstring) once it decides to force a task. Sized off the
+# installed mcp SDK's own documented worst-case stdio shutdown budget
+# (mcp.client.stdio: PROCESS_TERMINATION_TIMEOUT=2.0s close-stdin grace +
+# _KILL_REAP_TIMEOUT=2.0s post-kill reap wait, run inside a cancellation-
+# shielded block the SDK itself won't cut short), plus headroom -- NEVER
+# derived from however little of `stop()`'s own (possibly near-exhausted)
+# `timeout` happens to be left, which is exactly what let a still-
+# connecting server's cleanup get abandoned mid-flight (verified on
+# Windows: a leaked BaseSubprocessTransport crashing the interpreter at
+# shutdown).
+_CANCEL_CLEANUP_GRACE_S = 5.0
+
+
 class McpAborted(Exception):
     """Raised by `McpLoop.run_abortable` when the caller-supplied `abort`
     Event fires before the coroutine finished (finding 4). Same "abandoned,
@@ -317,15 +332,22 @@ class McpLoop:
         process-exit safety net (`_stop_all_at_exit` above). First cancels
         every task still running on the loop (e.g. a `McpServerHandle.
         _lifecycle_task` still parked in `await self._close_event.wait()`
-        because nobody called `.close()` on its handle), giving them up to
-        half of `timeout` to actually unwind -- a cancelled
-        `_lifecycle_task` still runs its own `finally: await self._stack.
-        aclose()`, so this is what lets an MCP connection nobody
-        explicitly closed tear down its subprocess/transport BEFORE the
-        loop itself stops, rather than leaving it dangling for interpreter
-        shutdown to trip over. Then does exactly what `close()` does.
-        Idempotent, like `close()` (a second call, or a call after
-        `close()`, is a no-op)."""
+        because nobody called `.close()` on its handle, or one still
+        mid-connect that `McpManager.close_all()`'s own per-handle wait
+        already gave up on), giving them up to half of `timeout` to finish
+        NATURALLY first -- a cancelled `_lifecycle_task`/connect-attempt
+        still runs its own local-`stack`-owning cleanup (see
+        `_cancel_pending_tasks`'s docstring), so this is what lets an MCP
+        connection nobody explicitly closed (or couldn't finish closing in
+        time) tear down its subprocess/transport BEFORE the loop itself
+        stops, rather than leaving it dangling for interpreter shutdown to
+        trip over. Then does exactly what `close()` does. Idempotent, like
+        `close()` (a second call, or a call after `close()`, is a no-op).
+        NOTE: `_cancel_pending_tasks` below can, when it actually has
+        something to force-cancel, run past `timeout`'s own half -- by
+        design (see its docstring); `timeout` is honoured exactly whenever
+        there was nothing to clean up, which is the overwhelmingly common
+        case."""
         if self._stopped:
             return
         half = max(0.1, timeout / 2.0)
@@ -333,41 +355,76 @@ class McpLoop:
         self.close(timeout=max(0.1, timeout - half))
 
     def _cancel_pending_tasks(self, timeout: float) -> None:
-        """Best-effort only: give every non-done task on this loop up to
-        `timeout` to finish NATURALLY first, and only `.cancel()` whatever
-        is still running once that's spent -- never the other way around.
-        A straggler here can be a manager.py `McpServerHandle.
-        _lifecycle_task` still parked in `await self._close_event.wait()`
-        (cancelling it is exactly what lets its `finally: await self.
-        _stack.aclose()` run), but it can just as easily be a task already
-        MID-cleanup, e.g. manager.py's own fire-and-forget `stack.aclose()`
-        task for a connect attempt that timed out -- the installed mcp
-        SDK's `stdio_client` shutdown there is deliberately shielded from
-        cancellation (so a caller's cancellation can't abort it), but that
-        shield only protects against cancellation propagating from an
-        ENCLOSING scope; a raw `Task.cancel()` called directly on it from
-        here, as this method used to do first, still throws CancelledError
-        into it and interrupts the shutdown sequence before it reaches the
-        step that marks the subprocess transport closed -- verified on
-        Windows to reproduce the exact leaked/crashing transport this
-        whole mechanism exists to prevent. Waiting first avoids that.
-        Never raises -- `stop()` proceeds into `close()` regardless of
-        whether every task finishes in time."""
+        """Give every non-done task on this loop up to `timeout` to finish
+        NATURALLY first, and only `.cancel()` whatever is still running
+        once that's spent -- never the other way around. A straggler here
+        can be a manager.py `McpServerHandle._lifecycle_task` still parked
+        in `await self._close_event.wait()` (cancelling it is exactly what
+        lets its own `finally: await stack.aclose()` run), but it can just
+        as easily be a task already MID-cleanup, e.g. manager.py's own
+        fire-and-forget `stack.aclose()` task for a connect attempt that
+        timed out -- the installed mcp SDK's `stdio_client` shutdown there
+        is deliberately shielded from cancellation (so a caller's
+        cancellation can't abort it), but that shield only protects
+        against cancellation propagating from an ENCLOSING scope; a raw
+        `Task.cancel()` called directly on it from here, as this method
+        used to do first, still throws CancelledError into it and
+        interrupts the shutdown sequence before it reaches the step that
+        marks the subprocess transport closed -- verified on Windows to
+        reproduce the exact leaked/crashing transport this whole mechanism
+        exists to prevent. Waiting first avoids that.
+
+        H3c-regression fix (verified on Windows): cancelling a task that's
+        mid-connect (inside `manager._connect_once`'s `session.
+        initialize()`) doesn't close anything itself -- it makes `_do()`'s
+        own `except BaseException:` handler schedule a NEW, separate
+        detached cleanup task (`self._loop.spawn(_cleanup())`) and then
+        let the CancelledError propagate on, ending THIS task. The old
+        version called `.cancel()` and returned immediately afterward
+        ("best-effort courtesy only -- not awaited further"), so that
+        freshly-spawned follow-up task got no guaranteed chance to run
+        before `stop()` went on to `close()` (`loop.call_soon_threadsafe
+        (loop.stop)` then joining the thread) -- a real race, lost often
+        enough on Windows to leave a live child process + an unclosed
+        BaseSubprocessTransport for the interpreter to crash on at
+        shutdown. This now RE-SCANS `asyncio.all_tasks()` after cancelling
+        and keeps waiting/cancelling whatever is newly pending -- covering
+        a cancel-spawns-another-task hand-off of any depth, not just one
+        level -- bounded by its own `_CANCEL_CLEANUP_GRACE_S` floor (NEVER
+        by however little of `timeout` happened to be left; see that
+        constant's own docstring for why) so a genuinely stuck task can't
+        hang this past a bounded, small grace window either. Never raises
+        -- `stop()` proceeds into `close()` regardless of whether every
+        task finishes in time."""
         loop = self._loop
         if loop is None or not loop.is_running():
             return
 
         async def _wait_then_cancel() -> None:
             mine = asyncio.current_task()
-            tasks = [t for t in asyncio.all_tasks() if t is not mine and not t.done()]
-            if not tasks:
+            pending = [t for t in asyncio.all_tasks() if t is not mine and not t.done()]
+            if pending:
+                _done, pending = await asyncio.wait(pending, timeout=timeout)
+            if not pending:
                 return
-            _done, pending = await asyncio.wait(tasks, timeout=timeout)
-            for t in pending:
-                t.cancel()  # best-effort courtesy only -- not awaited further
+            grace_deadline = time.monotonic() + _CANCEL_CLEANUP_GRACE_S
+            while pending:
+                for t in pending:
+                    t.cancel()
+                remaining = grace_deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                # re-scan (not just re-await `pending`): a cancelled task's
+                # own cleanup handler can spawn a BRAND NEW task (manager.
+                # py's `_do()` does exactly this) that all_tasks() only
+                # reveals on the NEXT scan.
+                still = [t for t in asyncio.all_tasks() if t is not mine and not t.done()]
+                if not still:
+                    return
+                _done, pending = await asyncio.wait(still, timeout=remaining)
 
         try:
             fut = asyncio.run_coroutine_threadsafe(_wait_then_cancel(), loop)
-            fut.result(timeout=timeout + 1.0)
+            fut.result(timeout=timeout + _CANCEL_CLEANUP_GRACE_S + 1.0)
         except Exception:
             pass
