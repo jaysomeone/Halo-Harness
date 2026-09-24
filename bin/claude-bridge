@@ -1,0 +1,9 @@
+#!/bin/sh
+# claude-bridge (POSIX) -- one-liner launcher, mirrors bin/claude-bridge.cmd.
+# All real logic lives in bridge.py's own `launch` subcommand.
+here="$(dirname "$0")"
+if command -v uv >/dev/null 2>&1; then
+    exec uv run --script "$here/../bridge.py" launch "$@"
+else
+    exec python3 "$here/../bridge.py" launch "$@"
+fi

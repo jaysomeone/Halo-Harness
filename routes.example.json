@@ -1,0 +1,18 @@
+{
+  "_comment": "Optional per-box defaults for claude-bridge. Copy to ~/.claude-bridge/routes.json and edit; every field is optional and falls back to the bridge's own built-in defaults if this file or a field is missing. Model refs use the same dbx:/or:/vendor-model forms as `launch --model`.",
+
+  "default": "or:deepseek/deepseek-v3.2",
+  "small": "or:deepseek/deepseek-v3.2",
+
+  "profiles": {
+    "_comment": "context/max-output token profile per bare model name (no dbx:/or: prefix), used to clamp max_tokens and size CLAUDE_CODE_MAX_CONTEXT_TOKENS. 'default' applies when a model has no specific entry.",
+    "default": {
+      "context_tokens": 128000,
+      "max_output_tokens": 16384
+    },
+    "deepseek/deepseek-v3.2": {
+      "context_tokens": 163840,
+      "max_output_tokens": 16384
+    }
+  }
+}

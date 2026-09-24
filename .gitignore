@@ -1,0 +1,9 @@
+# runtime state lives in ~/.claude-bridge, never here
+state/
+*.log
+__pycache__/
+.venv/
+.pytest_cache/
+*.pyc
+.DS_Store
+routes.json
