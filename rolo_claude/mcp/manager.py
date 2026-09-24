@@ -25,6 +25,18 @@ from rolo_claude.config.paths import lookup_project
 
 log = logging.getLogger("bridge")
 
+# Fire-and-forget `stack.aclose()` cleanup tasks (see `_connect_once`) MUST
+# be held by a strong reference somewhere for their whole lifetime: asyncio
+# docs, `create_task()`: "the event loop only keeps weak references to
+# tasks... a task can disappear at any time before it's done ... For
+# reliable 'fire-and-forget' background tasks, gather them in a
+# collection." Without this, the task -- and the live subprocess/pipes its
+# `stack.aclose()` was supposed to tear down -- can vanish mid-cleanup,
+# which is exactly the leaked-transport shape that (verified on Windows)
+# crashes at interpreter shutdown rather than merely leaking. Each task
+# removes itself via `add_done_callback` once it finishes.
+_background_cleanup_tasks: set = set()
+
 # ---- timeouts (binary-facts sec.9) -----------------------------------------
 
 _INT32_MAX = 2**31 - 1
@@ -458,13 +470,48 @@ class McpServerHandle:
         """Open the transport, initialize, list_tools -- raises on any
         connect/initialize failure (list_tools failing on its own is
         caught and recorded as `tools_fetch_failed` instead, same as
-        before). Called from inside `_lifecycle_task`, never directly."""
+        before). Called from inside `_lifecycle_task`, never directly.
+
+        `_do()` has its OWN try/except around `initialize()`: the outer
+        `asyncio.wait_for` below cancels `_do()` on a slow/hung server
+        (MCP_TIMEOUT elapsed) -- without this, a `stack` that
+        `_open_transport` already opened (a real, live subprocess + its
+        pipes) would be silently dropped with nothing left to ever close
+        it. That's not a Python-level memory leak (refcounting collects
+        the AsyncExitStack object itself just fine) -- it's an OS-level
+        one: the child process keeps running and its pipe/overlapped-I/O
+        registrations stay live on the loop's proactor, which is exactly
+        the state that (verified on Windows) CRASHES rather than merely
+        leaks once the owning loop is later closed or GC'd during
+        interpreter shutdown [see tests/test_mcp_manager.py::
+        test_manager_start_all_is_bounded_by_mcp_timeout, which
+        deliberately reproduces this exact timing]. The close is fired via
+        `asyncio.create_task` rather than awaited here: the installed mcp
+        SDK's own `stdio_client` shutdown is already shielded + bounded
+        (close stdin, up to a multi-second grace period for the server to
+        exit on its own, then a hard kill -- mcp/client/stdio.py), but
+        awaiting that inline would turn THIS failed connect attempt's
+        latency into that same multi-second wait; a detached task lets the
+        caller see the timeout fail fast while the subprocess still gets
+        torn down a moment later, on the very loop McpManager.close_all()/
+        McpLoop.stop() already wait out before the process ever exits."""
         connect_timeout = mcp_connect_timeout_s()
         overall_timeout = mcp_timeout_s()
 
         async def _do():
             stack, session = await self._open_transport(connect_timeout)
-            init_result = await session.initialize()
+            try:
+                init_result = await session.initialize()
+            except BaseException:
+                async def _cleanup() -> None:
+                    try:
+                        await stack.aclose()
+                    except Exception:
+                        pass
+                cleanup_task = asyncio.create_task(_cleanup())
+                _background_cleanup_tasks.add(cleanup_task)
+                cleanup_task.add_done_callback(_background_cleanup_tasks.discard)
+                raise
             return stack, session, init_result
 
         stack, session, init_result = await asyncio.wait_for(_do(), timeout=overall_timeout)
@@ -589,6 +636,7 @@ class McpManager:
         self.loop = loop or McpLoop()
         self.configs = configs
         self._lazy_names = set(lazy_names or ())
+        self._closed = False
         self.handles: "dict[str, McpServerHandle]" = {
             name: McpServerHandle(cfg, self.loop, tool_env=tool_env or {}, cwd=cwd)
             for name, cfg in configs.items()
@@ -716,14 +764,21 @@ class McpManager:
         return h.state == "connected"
 
     def close_all(self, timeout: float = 5.0) -> None:
-        """Close every handle, then stop the shared loop -- the WHOLE
+        """Close every handle, then hard-stop the shared loop -- the WHOLE
         operation is bounded by `timeout` (D-CFG: "close_all() with a 5s
-        deadline"), each handle getting a fair share of whatever's left."""
+        deadline"), each handle getting a fair share of whatever's left.
+        Idempotent: a second call -- including one made by the mcp.client
+        process-exit safety net for a manager the caller already closed
+        itself -- is a no-op rather than re-touching handles or spinning
+        the shared loop back up."""
+        if self._closed:
+            return
+        self._closed = True
         deadline = time.monotonic() + timeout
         for h in self.handles.values():
             remaining = max(0.1, deadline - time.monotonic())
             h.close(timeout=remaining)
-        self.loop.close(timeout=max(0.1, deadline - time.monotonic()))
+        self.loop.stop(timeout=max(0.1, deadline - time.monotonic()))
 
     def resources(self) -> "list[tuple[str, object]]":
         out = []

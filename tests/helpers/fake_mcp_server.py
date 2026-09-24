@@ -38,11 +38,32 @@ import base64
 import os
 import sys
 import time
+from contextlib import contextmanager
 
 # A real (tiny, valid) 1x1 transparent PNG, base64-encoded.
 _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+@contextmanager
+def running_manager(configs: dict, **kwargs):
+    """`McpManager(configs, **kwargs)`, `start_all()`-ed, yielded, and
+    ALWAYS `close_all()`-ed on the way out -- including when the caller's
+    own `with` block raises -- so a test can't accidentally skip cleanup
+    and leave a live fake-server subprocess + McpLoop thread behind for
+    interpreter shutdown to trip over (see rolo_claude/mcp/client.py's
+    `McpLoop.stop()`/atexit safety net for the belt-and-suspenders half of
+    this; this is the suspenders). One-line replacement for the
+    hand-written `mgr = McpManager(...); try: mgr.start_all(); ...;
+    finally: mgr.close_all()` shape most tests in this file already use."""
+    from rolo_claude.mcp.manager import McpManager
+    mgr = McpManager(configs, **kwargs)
+    try:
+        mgr.start_all()
+        yield mgr
+    finally:
+        mgr.close_all()
 
 
 def _tool_count() -> int:

@@ -449,14 +449,10 @@ def test_manager_starts_multiple_servers_in_parallel(ctx: Ctx):
 
 @test
 def test_manager_call_dispatches_a_real_tool(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
-    mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
-    try:
-        mgr.start_all()
+    from tests.helpers.fake_mcp_server import running_manager
+    with running_manager({"fake": _fake_cfg()}, tool_env=dict(os.environ)) as mgr:
         result = mgr.call("fake", "echo", {"text": "round trip"})
         ctx.check("real call_tool round trip", result.content[0].text == "round trip")
-    finally:
-        mgr.close_all()
 
 
 @test
