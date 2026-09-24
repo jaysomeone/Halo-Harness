@@ -82,6 +82,16 @@ class FakeController:
         self.added_rules: list = []
         self.slash_calls: list = []
         self.reconnects = 0
+        # U5: sessions UX / !cmd / @file#L / git-shadow rewind recording state.
+        self.title = ""
+        self.renames: list = []
+        self.forks = 0
+        self.exports: list = []
+        self.inline_shell_decisions: list = []
+        self.inline_shell_runs: list = []
+        self.ingested_mentions: list = []
+        self.shadow_step_list: list = []
+        self.rewind_applies: list = []
 
     def submit(self, text: str, pasted=None, meta=None) -> Iterator[ev.Event]:
         self.submitted.append(text)
@@ -141,6 +151,63 @@ class FakeController:
     def quit(self) -> int:
         self.quit_called = True
         return 0
+
+    # ---- U5: sessions UX / `!cmd` / `@file#L` / git-shadow rewind --------
+    # Simple recording stubs -- real behaviour (the small-model title call,
+    # the real Bash tool, the real git-shadow repo) lives only in the real
+    # `rolo_claude.controller.Controller`; these just make the SAME
+    # `tui/slash.py`/`tui/app.py` code paths exercisable against a script,
+    # same spirit as `answer_permission`/`add_permission_rule` above.
+
+    def get_title(self) -> str:
+        return self.title
+
+    def rename_session(self, title: str) -> None:
+        self.title = title
+        self.renames.append(title)
+
+    def maybe_autoname_title(self):
+        if self.title:
+            return None
+        self.title = "Fake auto title"
+        return self.title
+
+    def fork_session(self) -> str:
+        self.forks += 1
+        return f"fake-fork-{self.forks}"
+
+    def export_session(self, *, sanitize: bool = False, path=None) -> str:
+        self.exports.append({"sanitize": sanitize, "path": path})
+        return path or f"/fake/exports/{self.model}.md"
+
+    def session_stats(self) -> dict:
+        return {"turns": len(self.submitted), "total_cost_usd": 0.0, "per_model": {}, "tool_counts": {}}
+
+    def decide_inline_shell(self, command: str):
+        from rolo_claude.permissions import Decision
+        self.inline_shell_decisions.append(command)
+        return Decision("allow", "fake: always allowed")
+
+    def run_inline_shell(self, command: str):
+        from rolo_claude.tools.base import ToolResult
+        self.inline_shell_runs.append(command)
+        return f"fake_inline_{len(self.inline_shell_runs)}", ToolResult(content=f"(fake output of: {command})")
+
+    def ingest_at_mentions(self, text: str) -> None:
+        self.ingested_mentions.append(text)
+
+    def shadow_steps(self) -> list:
+        return list(self.shadow_step_list)
+
+    def rewind_preview_undo(self):
+        return self.shadow_step_list[-1] if self.shadow_step_list else None
+
+    def rewind_preview_redo(self):
+        return None
+
+    def rewind_apply(self, step_id: str, *, verb: str = "rewind"):
+        self.rewind_applies.append((step_id, verb))
+        return {"step": {"id": step_id}, "files": []}
 
 
 def run_demo(*, output_format: str = "text", stress: Optional[int] = None, stream=None) -> int:

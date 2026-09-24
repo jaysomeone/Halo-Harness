@@ -15,17 +15,25 @@ _KEY_ROWS = [
     ("Enter", "Submit"),
     ("\\ + Enter, Ctrl+J, Alt+Enter", "Insert a newline"),
     ("Esc", "Interrupt the running turn / dismiss a card / deny"),
-    ("Ctrl+C (x2)", "Interrupt, then quit"),
+    ("Ctrl+C (x2)", "Interrupt, then quit (Ctrl+C on a selection copies it instead)"),
     ("Ctrl+D", "Quit (on an empty prompt)"),
     ("Shift+Tab", "Cycle permission mode: default -> acceptEdits -> plan -> auto"),
     ("Ctrl+L", "Clear the transcript view"),
     ("Ctrl+O", "Toggle verbose (expand thinking / tool cards)"),
+    ("o", "Expand a focused tool card in a full pager"),
     ("Ctrl+R", "Search prompt history"),
+    ("Ctrl+P", "Command palette (slash commands, skills, files, sessions)"),
+    ("Ctrl+E", "Edit the current prompt draft in $VISUAL/$EDITOR"),
+    ("Ctrl+X ...", "Chord prefix -- shows a which-key overlay listing continuations "
+                    "(export/rename/fork/undo/redo/stats/child-session nav; see /keybindings)"),
     ("PgUp / PgDn", "Scroll the transcript"),
     ("Tab", "Accept the highlighted / completion"),
     ("F1", "This help"),
     ("/ then text", "Slash command (Tab completes)"),
-    ("@ then text", "Path completion"),
+    ("@file or @file#L10-20", "Attach a file (or a line range) as context, via the Read path"),
+    ("!cmd", "Run a shell command inline (Bash tool + permissions), shown as a tool card"),
+    ("Shift + drag-select", "Bypass the app's mouse capture for native terminal selection/copy "
+                            "(most terminals -- xterm, kitty, gnome-terminal, tmux panes)"),
 ]
 
 

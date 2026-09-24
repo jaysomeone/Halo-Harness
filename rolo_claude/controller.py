@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -91,6 +93,12 @@ class Controller:
         # set by the TUI right before quitting when `tui != "fullscreen"`:
         # the transcript is then printed to normal scrollback on exit.
         self.replay_messages: list = []
+        # U5 scope A: `!cmd` inline shell's own persistent `cd` state --
+        # deliberately separate from the real session's tool-dispatch
+        # `bash_state` (agent/loop.py owns that one): an inline command
+        # runs OUTSIDE the model loop entirely, so it gets its own small,
+        # independent "current directory" memory across `!cmd` calls.
+        self._inline_bash_state: dict = {}
 
     # ---- worker lifecycle -------------------------------------------------
 
@@ -225,14 +233,15 @@ class Controller:
 
     def answer_plan(self, approved: bool, *, feedback: str = "", mode_after: Optional[str] = None) -> None:
         """`PlanCard`'s reply (D-Contract `plan_reply{approved, feedback,
-        mode_after}`). Queued, not a direct threading.Event resolve like
-        `answer_permission`/`answer_question` -- plan mode isn't wired to
-        block the worker thread yet (H6); the command pump's `plan_reply`
-        branch is currently a no-op, so this is forward-wiring against the
-        `plan_review` event the card already renders."""
-        self.commands.put(events.Command("plan_reply", {
-            "approved": approved, "feedback": feedback, "mode_after": mode_after,
-        }))
+        mode_after}`). Direct (see class docstring), like `answer_permission`/
+        `answer_question`: the worker thread is parked inside `ExitPlanMode`'s
+        own wait (`Session._handle_exit_plan_mode`, via `_await_reply`), not
+        polling the command queue, so this must unblock it directly rather
+        than going through `self.commands` -- a queued `plan_reply` would
+        just sit there until the turn ends on its own, defeating the point.
+        `Session.run()`'s own `plan_reply` branch calls `resolve_plan` too,
+        as a safety net for a reply that arrives with no turn in flight."""
+        self.session.resolve_plan({"approved": approved, "feedback": feedback, "mode_after": mode_after})
 
     def list_mcp_servers(self) -> list:
         """One dict per configured server (`McpManager.status()`'s own
@@ -332,31 +341,47 @@ class Controller:
         return out
 
     def list_sessions(self) -> list:
-        """`[{id, cwd, mtime, summary}, ...]`, newest first, for the
-        `--resume` picker. Reads OUR session logs only (~/.rolo-claude)."""
+        """`[{id, cwd, mtime, summary, title, cost_usd, turns}, ...]`,
+        newest first, for the `--resume`/`/resume` picker (U5 sessions UX:
+        "title/age/cost/turns" -- `title` is whatever `/rename` or the
+        after-first-turn auto-title last wrote as a `meta` node's own
+        `title` field, `""` if never set; `cost_usd`/`turns` are summed/
+        counted straight from that session's own `usage`/`user` nodes, the
+        same source `/cost` and `/stats` read). Reads OUR session logs only
+        (~/.rolo-claude). Synchronous file I/O -- U5 must-do: callers on
+        the UI thread (the `/resume` slash handler) run this on a worker,
+        never inline (matches `_git_branch`'s own fix)."""
         slug = project_slug(self.cwd)
         directory = self.state_dir / "sessions" / slug
         out: list = []
         if not directory.is_dir():
             return out
         for path in sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
-            summary = ""
+            summary, title, cost_usd, turns = "", "", 0.0, 0
             try:
                 for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     try:
                         node = json.loads(line)
                     except ValueError:
                         continue
-                    if node.get("type") == "user":
-                        for block in node.get("content") or []:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                summary = block.get("text", "")[:80]
-                                break
-                    if summary:
-                        break
+                    ntype = node.get("type")
+                    if ntype == "user":
+                        turns += 1
+                        if not summary:
+                            for block in node.get("content") or []:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    summary = block.get("text", "")[:80]
+                                    break
+                    elif ntype == "meta" and isinstance(node.get("title"), str) and node["title"]:
+                        title = node["title"]
+                    elif ntype == "usage":
+                        c = node.get("cost_usd")
+                        if isinstance(c, (int, float)):
+                            cost_usd += c
             except OSError:
                 pass
-            out.append({"id": path.stem, "cwd": str(self.cwd), "mtime": path.stat().st_mtime, "summary": summary})
+            out.append({"id": path.stem, "cwd": str(self.cwd), "mtime": path.stat().st_mtime,
+                        "summary": summary, "title": title, "cost_usd": cost_usd, "turns": turns})
         return out
 
     def resume(self, session_id: str) -> None:
@@ -441,6 +466,195 @@ class Controller:
         from rolo_claude.config.paths import memory_dir
         return memory_dir(str(self.cwd))
 
+    def ingest_at_mentions(self, text: str) -> None:
+        """`@file#L10-20` mentions (U5 scope A): resolve + read via the
+        Read tool (the SAME path resolution/line-numbering a model's own
+        Read call would use) and append each as a log snapshot -- the
+        mention text ITSELF is left untouched in the submitted turn
+        (matches `commands/registry.py`'s own `@path` convention for
+        custom commands: never inlined, always a separate context block).
+        Best-effort per mention: a path that doesn't resolve to a real
+        file is silently skipped, never an error (the model still sees
+        the literal `@mention` text and can ask/Read it itself)."""
+        from rolo_claude.tools.base import ToolContext
+        from rolo_claude.tools.read import ReadTool
+        from rolo_claude.tui.completion import parse_at_mentions
+
+        mentions = parse_at_mentions(text)
+        if not mentions:
+            return
+        tool = ReadTool()
+        ctx = ToolContext(cwd=self.cwd)
+        for raw, start, end in mentions:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                path = self.cwd / path
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            input_data = {"file_path": str(resolved)}
+            label = raw
+            if start is not None:
+                input_data["offset"] = max(0, start - 1)
+                input_data["limit"] = max(1, (end or start) - start + 1)
+                label = f"{raw}#L{start}" if not end or end == start else f"{raw}#L{start}-{end}"
+            try:
+                result = tool.run(input_data, ctx)
+            except Exception:
+                continue
+            content = result.content if isinstance(result.content, str) else str(result.content)
+            try:
+                self.session.log.append_snapshot([{"type": "text", "text": f"@{label}\n{content}"}],
+                                                  kind="at_mention")
+            except Exception:
+                pass
+
+    # ---- U5 scope A: `!cmd` inline shell -- through the Bash tool + the
+    # SAME permission rules a model-issued call would get, but never
+    # through the model loop (`agent/loop.py`'s command pump is untouched:
+    # nothing here ever queues a `Command`). -----------------------------
+
+    def decide_inline_shell(self, command: str) -> Decision:
+        """The `Decision` a plain `Bash(command)` call would get under the
+        CURRENT permission mode/rules -- read-only, no side effect.
+        `tui/app.py`'s `!cmd` handling uses this to decide whether to run
+        immediately, show a confirmation card, or refuse outright."""
+        return self.session.permission_engine.decide("Bash", {"command": command})
+
+    def run_inline_shell(self, command: str) -> "tuple[str, object]":
+        """Execute `command` via the real Bash tool. Synchronous -- always
+        called from a worker thread (`tui/app.py`, same pattern as
+        `_git_branch_worker`), never the UI thread. Returns `(tool_use_id,
+        ToolResult)` and best-effort appends a synthetic tool_use/
+        tool_result pair to the session log, so the NEXT turn's request
+        still carries the command + its output as context, same as a
+        model-issued Bash call would."""
+        from rolo_claude.tools.base import ToolContext
+        from rolo_claude.tools.bash import BashTool
+
+        result = BashTool().run({"command": command}, ToolContext(cwd=self.cwd, bash_state=self._inline_bash_state))
+        tool_use_id = f"inline_{uuid.uuid4().hex[:12]}"
+        try:
+            self.session.log.append_assistant(content=[
+                {"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {"command": command}},
+            ])
+            self.session.log.append_tool_result(tool_use_id=tool_use_id, content=result.content,
+                                                  is_error=result.is_error)
+        except Exception:
+            pass  # logging is best-effort -- the command already ran either way
+        return tool_use_id, result
+
+    # ---- U5 scope C: session titles/rename/fork/export/stats ----------
+
+    def get_title(self) -> str:
+        """The current session's own title (the last `meta` node carrying
+        one), "" if never set."""
+        for node in reversed(self.session.log.nodes()):
+            if node.get("type") == "meta" and isinstance(node.get("title"), str) and node["title"]:
+                return node["title"]
+        return ""
+
+    def rename_session(self, title: str) -> None:
+        title = (title or "").strip()
+        if title:
+            self.session.log.append_meta(title=title)
+
+    def maybe_autoname_title(self) -> Optional[str]:
+        """After the FIRST turn completes (`tui/app.py`'s `turn_done`
+        handling, `turn == 1`, from a worker thread): generate a short
+        title via the small model (falling back to a heuristic on any
+        failure) and store it, unless one is already set (`/rename` beat
+        it, or this already ran). Returns the title actually stored, or
+        None if one was already present / there's no first user turn yet."""
+        if self.get_title():
+            return None
+        first_user = ""
+        for node in self.session.log.nodes():
+            if node.get("type") == "user":
+                first_user = "".join(b.get("text", "") for b in node.get("content") or []
+                                      if isinstance(b, dict) and b.get("type") == "text")
+                break
+        if not first_user.strip():
+            return None
+        title = _generate_title(self.session, first_user)
+        self.rename_session(title)
+        return title
+
+    def fork_session(self) -> str:
+        """Copy the current session's log into a brand-new session id
+        under the same project slug (a real, independent file -- a
+        `SessionLog` is append-only, so forking is a copy, never a
+        symlink/shared-tail scheme) and switch this Controller onto it.
+        Returns the new session id; the conversation continues unchanged,
+        now diverging independently of the original."""
+        from rolo_claude.agent.log import SessionLog
+
+        new_id = uuid.uuid4().hex
+        new_log = SessionLog(self.cwd, session_id=new_id)
+        for node in self.session.log.nodes():
+            new_log._append({k: v for k, v in node.items() if k != "seq"})
+        self.session.log = new_log
+        return new_id
+
+    def export_session(self, *, sanitize: bool = False, path: Optional[str] = None) -> str:
+        """Render the current session as Markdown (`/export [--sanitize]
+        [file]`). Writes to `path` when given, else
+        `<state_dir>/exports/<session_id>.md`. Returns the path written.
+        `sanitize=True` redacts text shaped like a bearer token/API key/
+        password assignment -- best-effort pattern matching, not a
+        substitute for care about what gets exported."""
+        log = self.session.log
+        text = render_transcript_markdown(log.nodes(), session_id=log.session_id)
+        if sanitize:
+            text = sanitize_transcript(text)
+        out_path = Path(path) if path else (self.state_dir / "exports" / f"{log.session_id}.md")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        return str(out_path)
+
+    def session_stats(self) -> dict:
+        """`/stats`: tokens/cost per model + tool-call counts for the
+        CURRENT session's log."""
+        return compute_session_stats(self.session.log.nodes())
+
+    # ---- U5 scope B: git-shadow rewind ---------------------------------
+
+    def shadow_steps(self) -> list:
+        from rolo_claude.shadow import store_for_controller
+        store = store_for_controller(self)
+        return store.list_steps() if store is not None else []
+
+    def rewind_preview_undo(self) -> Optional[dict]:
+        from rolo_claude.shadow import store_for_controller
+        store = store_for_controller(self)
+        return store.preview_undo() if store is not None else None
+
+    def rewind_preview_redo(self) -> Optional[dict]:
+        from rolo_claude.shadow import store_for_controller
+        store = store_for_controller(self)
+        return store.preview_redo() if store is not None else None
+
+    def rewind_apply(self, step_id: str, *, verb: str = "rewind") -> Optional[dict]:
+        """Actually restore the working tree to `step_id` and log a
+        `rewind` node (`agent/log.py`'s own minimal append helper).
+        Returns `{"step", "files"}` (`ShadowStore.rewind_to`'s own shape),
+        or None if `step_id` matches no recorded step."""
+        from rolo_claude.shadow import store_for_controller
+        store = store_for_controller(self)
+        if store is None:
+            return None
+        result = store.rewind_to(step_id)
+        if result is None:
+            return None
+        try:
+            self.session.log.append_rewind(verb=verb, step_id=step_id, files=result.get("files") or [])
+        except Exception:
+            pass
+        return result
+
 
 def _messages_from_nodes(nodes: list) -> list:
     """The renderable subset of a session log: `{role, text}` for user and
@@ -460,3 +674,126 @@ def _messages_from_nodes(nodes: list) -> list:
             if text.strip():
                 out.append({"role": "assistant", "text": text})
     return out
+
+
+# ============================================================================
+# U5 scope C: session titles, export, stats -- pure helpers over a session
+# log's own node list, kept module-level (no `self`) so they're directly
+# unit-testable against a plain list of dicts, no Session/Controller needed.
+# ============================================================================
+
+def _heuristic_title(text: str) -> str:
+    """A short title with no model call: the first ~6 words of the first
+    user message. Always available, used as `_generate_title`'s fallback
+    and its own return value when there's no `session` to ask."""
+    title = " ".join(text.strip().split()[:6])
+    return title[:60] if title else "Untitled session"
+
+
+def _clean_title(raw: str) -> str:
+    """The small model's raw reply -> a bare title: first line only,
+    surrounding quotes/punctuation/whitespace stripped, capped at 60
+    chars."""
+    first_line = (raw or "").strip().splitlines()[0].strip() if (raw or "").strip() else ""
+    return first_line.strip(" \t\"'.,;:-")[:60]
+
+
+def _generate_title(session, first_user_text: str) -> str:
+    """The small model's own one-line title for `first_user_text`,
+    falling back to `_heuristic_title` on any failure (no small model
+    configured, a network error, an empty/unusable reply, ...) -- title
+    generation must never be able to fail a session or block on a dead
+    provider. `session._call_model_for_hook` (agent/loop.py) already
+    implements "one-shot small-model call, never logged" for hooks; reused
+    here with a title-specific prompt rather than duplicating the request-
+    building plumbing."""
+    heuristic = _heuristic_title(first_user_text)
+    caller = getattr(session, "_call_model_for_hook", None)
+    if not callable(caller):
+        return heuristic
+    try:
+        raw = caller(
+            "Reply with ONLY a short 3-6 word title (no quotes, no trailing punctuation) "
+            f"summarizing this conversation's request:\n\n{first_user_text[:2000]}",
+            4.0,
+        )
+    except Exception:
+        return heuristic
+    cleaned = _clean_title(raw)
+    return cleaned or heuristic
+
+
+def render_transcript_markdown(nodes: list, *, session_id: str) -> str:
+    """`/export`'s own Markdown rendering of a session log's node list --
+    user/assistant text, tool calls (as a fenced JSON block of their
+    input), tool results, and rewind markers, in log order."""
+    lines = [f"# rolo-claude session {session_id}", ""]
+    for node in nodes:
+        ntype = node.get("type")
+        if ntype == "user":
+            text = "".join(b.get("text", "") for b in node.get("content") or []
+                           if isinstance(b, dict) and b.get("type") == "text")
+            if text:
+                lines.append(f"## User\n\n{text}\n")
+        elif ntype == "assistant":
+            blocks = node.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+            if text.strip():
+                lines.append(f"## Assistant\n\n{text}\n")
+            for call in blocks:
+                if isinstance(call, dict) and call.get("type") == "tool_use":
+                    body = json.dumps(call.get("input", {}), indent=2, default=str, ensure_ascii=False)
+                    lines.append(f"### Tool call: {call.get('name', '?')}\n\n```json\n{body}\n```\n")
+        elif ntype == "tool_result":
+            content = node.get("content")
+            text = content if isinstance(content, str) else json.dumps(content, default=str, ensure_ascii=False)
+            label = " (error)" if node.get("is_error") else ""
+            lines.append(f"### Tool result{label}\n\n```\n{text[:4000]}\n```\n")
+        elif ntype == "rewind":
+            lines.append(f"### Rewind ({node.get('verb')}) to step {node.get('step_id')}\n")
+    return "\n".join(lines)
+
+
+# `key:`/`token:`/`password=`-shaped assignments and `Bearer <token>` --
+# best-effort, not a security boundary (see `export_session`'s own note).
+_SECRET_ASSIGN_RE = re.compile(r"(?i)\b((?:api|secret|access)?[-_]?(?:key|token|password|passwd|pwd)\s*[:=]\s*)(\S+)")
+_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9\-_.=]{8,})")
+
+
+def sanitize_transcript(text: str) -> str:
+    text = _SECRET_ASSIGN_RE.sub(lambda m: m.group(1) + "[REDACTED]", text)
+    text = _BEARER_RE.sub(lambda m: m.group(1) + "[REDACTED]", text)
+    return text
+
+
+def compute_session_stats(nodes: list) -> dict:
+    """`/stats`: `{turns, total_cost_usd, per_model: {model: {input_
+    tokens, output_tokens, cost_usd, calls}}, tool_counts: {name: n}}`."""
+    per_model: dict = {}
+    tool_counts: dict = {}
+    total_cost = 0.0
+    turns = 0
+    current_model = "?"
+    for node in nodes:
+        ntype = node.get("type")
+        if ntype == "meta" and node.get("model"):
+            current_model = node["model"]
+        elif ntype == "user":
+            turns += 1
+        elif ntype == "assistant":
+            for block in node.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    name = block.get("name", "?")
+                    tool_counts[name] = tool_counts.get(name, 0) + 1
+        elif ntype == "usage":
+            bucket = per_model.setdefault(current_model, {"input_tokens": 0, "output_tokens": 0,
+                                                            "cost_usd": 0.0, "calls": 0})
+            usage = node.get("usage") or {}
+            bucket["input_tokens"] += int(usage.get("input_tokens") or 0)
+            bucket["output_tokens"] += int(usage.get("output_tokens") or 0)
+            cost = node.get("cost_usd")
+            if isinstance(cost, (int, float)):
+                bucket["cost_usd"] += cost
+                total_cost += cost
+            bucket["calls"] += 1
+    return {"turns": turns, "total_cost_usd": total_cost, "per_model": per_model, "tool_counts": tool_counts}

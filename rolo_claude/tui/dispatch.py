@@ -9,12 +9,16 @@ ever needed.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from rolo_claude.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, _summarize_call
 from rolo_claude.tui.widgets.diffview import DiffView
 
 log = logging.getLogger("bridge")
 _SEVERITY = {"error": "error", "warning": "warning"}
+# U5 scope B: git-shadow snapshots are recorded for these tools only -- see
+# `_maybe_record_shadow_step`'s own docstring for why Bash is excluded.
+_SHADOW_TOOLS = frozenset({"Write", "Edit"})
 
 
 def _tool_header(app, name: str, input_data: dict) -> str:
@@ -32,6 +36,12 @@ async def _mount_tool_card(app, data: dict) -> None:
     card = ToolCard(tool_use_id=tool_id, header=_tool_header(app, name, input_data))
     card.set_verbose(app.verbose)
     await app.transcript.mount_tool_card(card)
+    # U5 scope B: stashed so the eventual `tool_result` (this event only
+    # carries {id, ok, summary, content} -- never the tool name/input) can
+    # decide whether/what to shadow-snapshot; see `_maybe_record_shadow_step`.
+    if not hasattr(app, "_pending_tool_inputs"):
+        app._pending_tool_inputs = {}
+    app._pending_tool_inputs[tool_id] = (name, input_data)
     # review finding 5: repair can hand a REJECTED tool_use through to
     # `tool_use_ready` with its raw, un-coerced input (e.g. `old_string:
     # null`) -- DiffView's `.splitlines()` on a non-str kills the whole
@@ -55,6 +65,41 @@ def _as_text(value) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
+    """U5 scope B: every successful Write/Edit records a git-shadow
+    snapshot of the file's RESULTING (post-edit) content, keyed to this
+    step, so `/rewind`/`/undo`/`/redo` has something to restore to.
+    Deliberately NOT done for Bash: detecting which files a shell command
+    touched would need a `git status` subprocess call right here, on the
+    UI thread (this function runs inside `apply_event`, the drain loop's
+    own call) -- exactly the kind of blocking call this same U5 pass is
+    elsewhere REMOVING (`list_sessions`/`_git_branch` off-thread). A
+    documented scope cut, not an oversight. Best-effort throughout: no
+    real session attached (FakeController), an unreadable file, ... all
+    silently skip -- a shadow snapshot is a convenience, never part of
+    the conversation itself, so it must never turn into an error note."""
+    pending = getattr(app, "_pending_tool_inputs", None)
+    info = pending.pop(tool_id, None) if pending else None
+    if not ok or info is None:
+        return
+    name, input_data = info
+    if name not in _SHADOW_TOOLS or not isinstance(input_data, dict):
+        return
+    file_path = input_data.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return
+    try:
+        from rolo_claude.shadow import store_for_controller
+
+        store = store_for_controller(app.controller)
+        if store is None:
+            return
+        content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        store.record_step({file_path: content}, label=f"{name}({Path(file_path).name})", trigger="tool")
+    except Exception:
+        pass
 
 
 async def _show_permission_card(app, data: dict) -> None:
@@ -166,6 +211,7 @@ async def _apply_event_inner(app, event) -> None:
         card = app.transcript.tool_cards.get(data.get("id"))
         if card is not None:
             card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"))
+        _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")))
     elif kind == "permission_request":
         await _show_permission_card(app, data)
     elif kind == "question":
@@ -190,9 +236,16 @@ async def _apply_event_inner(app, event) -> None:
         await app.transcript.finish_open_streams()
         app.on_turn_done(data.get("reason", "end_turn"))
     elif kind == "subagent_start":
-        await app.transcript.add_note(f"→ sub-agent: {data.get('name', '?')}", kind="subagent")
+        # U5 scope C: `agent_id`/`parent_tool_use_id` (D-Contract) are read
+        # defensively -- H6's sub-agent event payload is still landing --
+        # so this degrades to the plain note it always was if either is
+        # absent. Tracked in `subagent_marks` for child-session navigation.
+        suffix = f" (agent_id={data['agent_id']})" if data.get("agent_id") else ""
+        widget = await app.transcript.add_note(f"→ sub-agent: {data.get('name', '?')}{suffix}", kind="subagent")
+        app.transcript.subagent_marks.append(widget)
     elif kind == "subagent_end":
-        await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}", kind="subagent")
+        widget = await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}", kind="subagent")
+        app.transcript.subagent_marks.append(widget)
     elif kind == "replay":
         await _apply_replay(app, data.get("messages") or [])
     elif kind == "notification":

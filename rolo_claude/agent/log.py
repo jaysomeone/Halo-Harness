@@ -30,7 +30,7 @@ from rolo_claude.config.paths import bridge_home, project_slug
 
 NODE_TYPES = frozenset({
     "meta", "system", "user", "assistant", "tool_result",
-    "snapshot", "usage", "error", "interrupted", "compacted",
+    "snapshot", "usage", "error", "interrupted", "compacted", "rewind",
 })
 
 
@@ -124,6 +124,17 @@ class SessionLog:
         payload's own `trigger` field (Claude Code: "manual"|"auto")."""
         return self._append({"type": "compacted", "surface_op": "replace",
                               "trigger": trigger, "custom_instructions": custom_instructions})
+
+    def append_rewind(self, *, verb: str, step_id: str, files: Optional[list] = None) -> dict:
+        """U5 scope B: a pure marker node -- `/rewind`/`/undo`/`/redo`
+        touched the real working tree OUTSIDE the model conversation (a
+        git-shadow restore, `rolo_claude.shadow.ShadowStore`), so this is
+        purely an audit trail entry (never read by `derive_request`, same
+        as a `snapshot` node's `kind`) recording WHAT happened for
+        `/export`/`/stats` and a human skimming the raw log. `verb` is
+        "rewind"|"undo"|"redo"; `files` is the list of real paths
+        restored."""
+        return self._append({"type": "rewind", "verb": verb, "step_id": step_id, "files": files or []})
 
     # ---- reading ---------------------------------------------------------
 

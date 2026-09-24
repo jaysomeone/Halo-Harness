@@ -643,6 +643,29 @@ def test_svg_snapshots_main_permission_question_model_picker(ctx: Ctx):
             path4, svg4 = _write_snapshot(app4, "model-picker")
             ctx.check(f"model picker snapshot written to {path4}", path4.exists())
             ctx.check("model picker SVG shows the filter box", "Filter models" in svg4)
+
+        # U5: which-key overlay + a git-shadow RewindCard.
+        fake5 = FakeController()
+        app5 = await _mounted(fake5)
+        async with app5.run_test(size=(100, 40)) as pilot5:
+            await pilot5.press("ctrl+x")
+            await pilot5.pause(0.1)
+            path5, svg5 = _write_snapshot(app5, "which-key-overlay")
+            ctx.check(f"which-key overlay snapshot written to {path5}", path5.exists())
+            ctx.check("which-key SVG lists a real chord action", "session:export" in svg5)
+
+        fake6 = FakeController()
+        app6 = await _mounted(fake6)
+        async with app6.run_test(size=(100, 40)) as pilot6:
+            from rolo_claude.tui.widgets.cards import RewindCard
+            card = RewindCard(step={"id": "abc123", "ts": 0, "label": "Write(file.txt)", "files": ["file.txt"]},
+                              verb="undo", on_decide=lambda _confirmed: None)
+            await app6.transcript.mount_widget(card)
+            app6.set_pending_card(card)
+            await pilot6.pause(0.1)
+            path6, svg6 = _write_snapshot(app6, "rewind-card")
+            ctx.check(f"rewind card snapshot written to {path6}", path6.exists())
+            ctx.check("rewind card SVG names the step", "Write(file.txt)" in svg6)
     asyncio.run(body())
 
 
@@ -817,6 +840,445 @@ def test_slash_model_switches_the_real_session_and_next_reply_uses_it(ctx: Ctx):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+    asyncio.run(body())
+
+
+# ============================================================================
+# U5: keymap parsing (chords + which-key), palette filtering, @file#L
+# parsing, statusLine command output -- all pure, no textual App needed.
+# ============================================================================
+
+@test
+def test_keymap_defaults_merge_with_user_keybindings_json_chords_and_unbind(ctx: Ctx):
+    from rolo_claude.tui import keys as tui_keys
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "keybindings.json"
+        path.write_text(json.dumps({
+            "bindings": [
+                {"context": "Global", "bindings": {
+                    "ctrl+o": None,  # unbind our default toggleVerbose
+                    "ctrl+x ctrl+s": "session:export",  # same as default, harmless re-declare
+                    "ctrl+k": "app:commandPalette",  # a brand-new remap
+                }},
+            ],
+        }), encoding="utf-8")
+        keymap = tui_keys.load_keymap(path)
+        ctx.check("ctrl+o was unbound by the user file", "ctrl+o" not in keymap["Global"])
+        ctx.check(f"ctrl+k now maps to the palette, got {keymap['Global'].get('ctrl+k')}",
+                  keymap["Global"].get("ctrl+k") == "app:commandPalette")
+        ctx.check("an untouched default chord survives the merge",
+                  keymap["Global"].get("ctrl+x ctrl+r") == "session:rename")
+        ctx.check("chord key normalization: ctrl+x ctrl+s still present",
+                  keymap["Global"].get("ctrl+x ctrl+s") == "session:export")
+
+        # A missing/invalid file is a no-op -- defaults come through unchanged.
+        empty = tui_keys.load_keymap(Path(tmp) / "does-not-exist.json")
+        ctx.check("missing keybindings.json falls back to pure defaults",
+                  empty["Global"].get("ctrl+o") == "app:toggleVerbose")
+
+
+@test
+def test_keymap_normalize_keystroke_folds_aliases_and_modifier_order(ctx: Ctx):
+    from rolo_claude.tui import keys as tui_keys
+
+    ctx.check("control/opt/cmd aliases fold to ctrl/alt/meta",
+              tui_keys.normalize_keystroke("Control+Opt+S") == "ctrl+alt+s")
+    ctx.check("modifier order is canonicalized",
+              tui_keys.normalize_keystroke("shift+ctrl+p") == tui_keys.normalize_keystroke("ctrl+shift+p"))
+    ctx.check("esc/return aliases fold", tui_keys.normalize_keystroke("Esc") == "escape")
+    ctx.check("a chord normalizes each keystroke independently",
+              tui_keys.normalize_chord("Control+X Control+S") == "ctrl+x ctrl+s")
+
+
+@test
+def test_which_key_continuations_and_overlay_widget(ctx: Ctx):
+    from rolo_claude.tui import keys as tui_keys
+    from rolo_claude.tui.widgets.whichkey import WhichKeyOverlay
+
+    keymap = tui_keys.default_bindings_flat()
+    continuations = tui_keys.chord_continuations(keymap["Global"], "ctrl+x")
+    ctx.check(f"ctrl+x has multiple live continuations, got {sorted(continuations)}", len(continuations) >= 5)
+    ctx.check("ctrl+x is recognised as a live chord prefix",
+              tui_keys.is_chord_prefix(keymap["Global"], "ctrl+x") is True)
+    ctx.check("a key with no chords under it is NOT a prefix",
+              tui_keys.is_chord_prefix(keymap["Global"], "f1") is False)
+    formatted = tui_keys.format_which_key(continuations)
+    ctx.check("formatted which-key text lists a real action", "session:export" in formatted)
+
+    overlay = WhichKeyOverlay()
+    ctx.check("hidden by default", overlay.display is False)
+    overlay.show_for("ctrl+x", continuations)
+    ctx.check("shown after show_for", overlay.display is True)
+    overlay.hide()
+    ctx.check("hidden again after hide()", overlay.display is False)
+
+
+@test
+def test_palette_filter_items_prefix_then_substring(ctx: Ctx):
+    from rolo_claude.tui.dialogs.palette import filter_items
+
+    items = [
+        {"kind": "command", "label": "/model", "detail": "Show or change the model", "value": "model"},
+        {"kind": "command", "label": "/mcp", "detail": "List MCP servers", "value": "mcp"},
+        {"kind": "session", "label": "fix the bug", "detail": "abc123", "value": "abc123"},
+        {"kind": "file", "label": "README.md", "detail": "", "value": "README.md"},
+    ]
+    ctx.check("empty query returns everything, in order", filter_items(items, "") == items)
+    prefix_hits = filter_items(items, "/m")
+    ctx.check(f"a prefix match ranks first for both /model and /mcp, got {[i['label'] for i in prefix_hits]}",
+              {i["label"] for i in prefix_hits} == {"/model", "/mcp"})
+    substr_hits = filter_items(items, "bug")
+    ctx.check(f"a substring-only match (in the session label) is still found, got {substr_hits}",
+              len(substr_hits) == 1 and substr_hits[0]["value"] == "abc123")
+    ctx.check("no match at all -> empty list", filter_items(items, "zzz-nope") == [])
+
+
+@test
+def test_at_mention_line_range_parsing(ctx: Ctx):
+    from rolo_claude.tui.completion import parse_at_mentions
+
+    mentions = parse_at_mentions("look at @src/main.py#L10-20 and also @README.md and @a/b#L5 please")
+    ctx.check(f"three mentions found, got {mentions}", len(mentions) == 3)
+    ctx.check("a #L10-20 range parses (start, end)", mentions[0] == ("src/main.py", 10, 20))
+    ctx.check("a bare @path has no line range", mentions[1] == ("README.md", None, None))
+    ctx.check("a #L5 (no dash) sets start==end", mentions[2] == ("a/b", 5, 5))
+    ctx.check("no @ at all -> no mentions", parse_at_mentions("plain text, no mentions here") == [])
+
+
+@test
+def test_statusline_command_receives_claude_code_json_contract(ctx: Ctx):
+    from rolo_claude import statusline as sl
+
+    payload = sl.build_payload(session_id="sid1", cwd="/proj", model_id="or:x/y", cost_usd=1.5)
+    ctx.check("payload carries Claude Code's own field names",
+              payload["hook_event_name"] == "Status" and payload["model"]["id"] == "or:x/y"
+              and payload["workspace"]["current_dir"] == "/proj"
+              and payload["cost"]["total_cost_usd"] == 1.5)
+
+    # A trivial script that echoes back the model id it was FED on stdin --
+    # proves the JSON contract round-trips, not just that SOME text comes back.
+    script = 'import json,sys; d=json.load(sys.stdin); print("model=" + d["model"]["id"])'
+    out = sl.run_statusline_command(f'"{sys.executable}" -c \'{script}\'', payload, cwd=".")
+    if os.name == "nt":
+        # Windows cmd doesn't like single-quoted -c bodies the same way;
+        # retry with a temp file to keep this test host-independent.
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
+            f.write(script)
+            script_path = f.name
+        out = sl.run_statusline_command(f'"{sys.executable}" "{script_path}"', payload, cwd=".")
+        os.unlink(script_path)
+    ctx.check(f"the command's stdout, fed the real JSON payload, echoes it back, got {out!r}",
+              out == "model=or:x/y")
+    ctx.check("a nonexistent command returns None, never raises",
+              sl.run_statusline_command("this-command-does-not-exist-xyz", payload, cwd=".") is None)
+
+
+# ============================================================================
+# U5 pilots: chord + which-key dispatch, `!cmd`, `@file#L` ingestion,
+# git-shadow rewind, rename/fork/export/stats -- a REAL `Controller` wired
+# to a minimal (non-network) fake `Session` stand-in, since none of these
+# need a model call: just `session.permission_engine` + `session.log`
+# (a real `SessionLog`), exactly what `Controller`'s own U5 methods touch.
+# ============================================================================
+
+def _real_controller(cwd: Path, *, mode: str = "bypassPermissions"):
+    from rolo_claude.agent.log import SessionLog
+    from rolo_claude.controller import Controller
+    from rolo_claude.permissions import PermissionEngine
+
+    class _MinimalSession:
+        def __init__(self) -> None:
+            self.permission_engine = PermissionEngine(mode=mode, print_mode=False, cwd=cwd)
+            self.log = SessionLog(cwd)
+            self.busy = False  # Controller.submit reads this; no real turn ever runs in these pilots
+            self.interactive = False
+
+        def run(self, commands, emit, mcp_status_fn=None) -> int:
+            return 0  # Controller.start()'s worker thread target; nothing is ever queued to it here
+
+        def _fire_session_end(self, _reason) -> None:
+            pass
+
+    return Controller(session=_MinimalSession(), cwd=cwd)
+
+
+@test
+def test_chord_ctrl_x_which_key_then_dispatches_and_suppresses_the_plain_binding(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.add_note("marker")
+            await pilot.press("ctrl+x")
+            await pilot.pause(0.05)
+            ctx.check(f"which-key overlay shown, pending={app._pending_chord!r}", app.which_key.display is True)
+            await pilot.press("ctrl+l")  # ctrl+x ctrl+l -> session:resume (a FakeController stub)
+            await pilot.pause(0.1)
+            ctx.check("which-key overlay closes after the second keystroke", app.which_key.display is False)
+            ctx.check(f"pending chord cleared, got {app._pending_chord!r}", app._pending_chord is None)
+            kinds = [type(w).__name__ for w in app.transcript.children]
+            ctx.check(f"the marker note is UNTOUCHED -- bare ctrl+l's own clear_view did NOT also fire, "
+                      f"got {kinds}", kinds == ["SystemNote"])
+    asyncio.run(body())
+
+
+@test
+def test_chord_timeout_cancels_pending_chord(ctx: Ctx):
+    from rolo_claude.tui import keys as tui_keys
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+x")
+            await pilot.pause(0.05)
+            ctx.check("chord pending", app._pending_chord == "ctrl+x")
+            await pilot.pause(tui_keys.CHORD_TIMEOUT_S + 0.3)
+            ctx.check("chord auto-cancels after the timeout", app._pending_chord is None)
+            ctx.check("which-key overlay hides on timeout", app.which_key.display is False)
+    asyncio.run(body())
+
+
+@test
+def test_bang_command_runs_the_real_bash_tool_and_shows_a_tool_card(ctx: Ctx):
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            controller = _real_controller(cwd)
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "!echo hello-from-bang")
+                await pilot.press("enter")
+                for _ in range(30):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    cards = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                    if cards and cards[0].status != "running":
+                        break
+                cards = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check(f"a ToolCard was mounted for the inline command, got {len(cards)}", len(cards) == 1)
+                ctx.check(f"it ran through the REAL Bash tool, got body={cards[0].body_text!r}",
+                          "hello-from-bang" in cards[0].body_text)
+                ctx.check(f"it resolved ok, got status={cards[0].status!r}", cards[0].status == "ok")
+                nodes = controller.session.log.nodes()
+                tool_uses = [n for n in nodes if n.get("type") == "assistant"
+                            for b in n.get("content", []) if b.get("type") == "tool_use"]
+                ctx.check("the inline command was logged as a synthetic tool_use (context for the NEXT turn)",
+                          any(True for _ in tool_uses) or any(
+                              n.get("type") == "assistant" and any(
+                                  b.get("type") == "tool_use" and b.get("name") == "Bash"
+                                  for b in n.get("content", []))
+                              for n in nodes))
+    asyncio.run(body())
+
+
+@test
+def test_at_mention_with_line_range_is_ingested_as_a_log_snapshot(ctx: Ctx):
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            target = cwd / "notes.txt"
+            target.write_text("alpha\nbeta\ngamma\ndelta\n", encoding="utf-8")
+            controller = _real_controller(cwd)
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "@notes.txt#L2-3 summarize this")
+                await pilot.press("enter")
+                await pilot.pause(0.3)
+                nodes = controller.session.log.nodes()
+                snaps = [n for n in nodes if n.get("type") == "snapshot" and n.get("kind") == "at_mention"]
+                ctx.check(f"one at_mention snapshot logged, got {len(snaps)}", len(snaps) == 1)
+                text = snaps[0]["content"][0]["text"]
+                ctx.check(f"it carries the requested range's own lines (2-3), got {text!r}",
+                          "beta" in text and "gamma" in text and "alpha" not in text and "delta" not in text)
+    asyncio.run(body())
+
+
+@test
+def test_write_then_rewind_undo_restores_the_file_via_real_shadow_hook(ctx: Ctx):
+    """The REAL dispatch.py hook (`_maybe_record_shadow_step`), not a
+    hand-built ShadowStore call -- a Write's `tool_result` triggers a
+    snapshot automatically, `/undo` shows a RewindCard, confirming it
+    restores the file on disk."""
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            target = cwd / "doc.txt"
+            target.write_text("version 1\n", encoding="utf-8")
+            controller = _real_controller(cwd)
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                from rolo_claude.tui.dispatch import apply_event
+
+                await apply_event(app, ev.Event("tool_use_ready", {
+                    "id": "w1", "name": "Write", "input": {"file_path": str(target), "content": "version 1\n"},
+                    "repaired": False}, turn=1))
+                await apply_event(app, ev.Event("tool_result", {"id": "w1", "ok": True, "summary": "wrote"}, turn=1))
+
+                target.write_text("version 2\n", encoding="utf-8")
+                await apply_event(app, ev.Event("tool_use_ready", {
+                    "id": "w2", "name": "Write", "input": {"file_path": str(target), "content": "version 2\n"},
+                    "repaired": False}, turn=1))
+                await apply_event(app, ev.Event("tool_result", {"id": "w2", "ok": True, "summary": "wrote"}, turn=1))
+
+                ctx.check(f"2 shadow steps recorded automatically, got {len(controller.shadow_steps())}",
+                          len(controller.shadow_steps()) == 2)
+
+                target.write_text("uncommitted local edit\n", encoding="utf-8")
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/undo")
+                await pilot.press("enter")
+                await pilot.pause(0.15)
+                ctx.check(f"a RewindCard is pending, got {type(app.pending_card).__name__}",
+                          type(app.pending_card).__name__ == "RewindCard")
+                await pilot.press("1")  # confirm restore
+                await pilot.pause(0.2)
+                ctx.check(f"the file was restored to the PREVIOUS step's content, got {target.read_text()!r}",
+                          target.read_text(encoding="utf-8") == "version 1\n")
+                ctx.check("pending card cleared", app.pending_card is None)
+                nodes = controller.session.log.nodes()
+                ctx.check("a 'rewind' log node was written",
+                          any(n.get("type") == "rewind" and n.get("verb") == "undo" for n in nodes))
+    asyncio.run(body())
+
+
+@test
+def test_rename_fork_export_stats_via_fake_controller(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/rename my great session")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"FakeController recorded the rename, got {fake.renames}", fake.renames == ["my great session"])
+
+            await _type(pilot, "/fork")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"FakeController recorded a fork, got forks={fake.forks}", fake.forks == 1)
+
+            await _type(pilot, "/export --sanitize out.md")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"FakeController recorded the export with sanitize+path, got {fake.exports}",
+                      fake.exports == [{"sanitize": True, "path": "out.md"}])
+
+            await _type(pilot, "/stats")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"/stats rendered a note mentioning Turns, got plain_log tail={app.transcript.plain_log[-3:]}",
+                      any("Turns" in line for line in app.transcript.plain_log))
+    asyncio.run(body())
+
+
+@test
+def test_rename_and_stats_via_one_real_controller_pilot(ctx: Ctx):
+    """"one real-Controller pilot" (brief): a REAL Controller/SessionLog,
+    no FakeController -- /rename actually writes a `meta` node, /stats
+    actually reads real `usage` nodes back out."""
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            controller = _real_controller(cwd)
+            controller.session.log.append_usage({"input_tokens": 100, "output_tokens": 20}, 0.01)
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/rename Fix the login bug")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"the REAL session log now carries the title, got {controller.get_title()!r}",
+                          controller.get_title() == "Fix the login bug")
+
+                await _type(pilot, "/stats")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                stats = controller.session_stats()
+                ctx.check(f"real usage node counted, got {stats}", stats["total_cost_usd"] == 0.01)
+    asyncio.run(body())
+
+
+# ============================================================================
+# Rendering: thinking ABOVE the answer regardless of arrival order;
+# auto-grow counts WRAPPED rows, not logical lines.
+# ============================================================================
+
+@test
+def test_thinking_block_renders_above_answer_even_when_text_arrives_first(ctx: Ctx):
+    """review/U5 must-do: "OpenAI-dialect thinking mounts below the
+    answer" -- simulates exactly that arrival order (text_delta before
+    thinking_delta for the SAME message) and asserts the MOUNTED widget
+    order still puts ThinkingBlock first."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            app.transcript.begin_message(1)
+            await app.transcript.append_text(1, 0, "The answer is 42.")
+            await app.transcript.append_thinking(1, 0, "Let me think about this...")
+            kinds = [type(w).__name__ for w in app.transcript.children]
+            ctx.check(f"ThinkingBlock is mounted BEFORE AssistantText despite arriving second, got {kinds}",
+                      kinds == ["ThinkingBlock", "AssistantText"])
+    asyncio.run(body())
+
+
+@test
+def test_auto_grow_counts_wrapped_rows_not_logical_lines(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(40, 40)) as pilot:  # narrow terminal so a long line visibly wraps
+            await pilot.click("#prompt-input")
+            long_line = "word " * 40  # ~200 chars, ONE logical line, several wrapped rows at width 40
+            await _type(pilot, long_line)
+            await pilot.pause(0.1)
+            ctx.check(f"exactly one logical line (no newlines typed), got {app.prompt_input.document.line_count}",
+                      app.prompt_input.document.line_count == 1)
+            height = app.prompt_input.styles.height.value if app.prompt_input.styles.height else 0
+            ctx.check(f"auto-grow reflects WRAPPED rows (>1), not the single logical line, got height={height}",
+                      height > 1)
+    asyncio.run(body())
+
+
+@test
+def test_bang_command_ask_mode_shows_a_permission_card_first(ctx: Ctx):
+    """`default` permission mode asks for a bare Bash call with no
+    matching rule -- `!cmd` must show the SAME PermissionCard (not run
+    immediately) and only execute once confirmed."""
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            controller = _real_controller(cwd, mode="default")
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                # NOT `echo` -- that's in the permission engine's own
+                # read-only whitelist and would be allowed outright even
+                # in `default` mode, defeating the point of this test.
+                await _type(pilot, "!touch should-ask-first.txt")
+                await pilot.press("enter")
+                await pilot.pause(0.2)
+                ctx.check(f"a PermissionCard is pending BEFORE anything runs, got {type(app.pending_card).__name__}",
+                          isinstance(app.pending_card, PermissionCard))
+                cards_before = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check("no ToolCard exists yet (the command hasn't run)", cards_before == [])
+                await pilot.press("1")  # allow once
+                for _ in range(30):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if any(isinstance(w, ToolCard) and w.status != "running" for w in app.transcript.children):
+                        break
+                cards_after = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check(f"confirming runs it, got {len(cards_after)} card(s)", len(cards_after) == 1)
+                ctx.check(f"it actually ran, got status={cards_after[0].status!r}", cards_after[0].status == "ok")
+                ctx.check("the file it touched really exists on disk",
+                          (cwd / "should-ask-first.txt").exists())
     asyncio.run(body())
 
 

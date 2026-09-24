@@ -88,6 +88,40 @@ def persist_theme(name: str) -> Path:
     return set_config_value("theme", name)
 
 
+def supports_truecolor(env: Optional[dict] = None) -> bool:
+    """U5 scope D ("`system`/`ansi` theme auto-select ... `COLORTERM`,
+    `TERM` checks"): best-effort truecolor detection from the terminal's
+    own env vars, matching OpenCode's `system` theme idea ("auto-select
+    the -ansi variant under tmux / no COLORTERM") without needing a live
+    terminal query. True when `COLORTERM` is `truecolor`/`24bit`, OR
+    `TERM`/`TERM_PROGRAM` names a terminal known to support 24-bit color
+    even without COLORTERM set (kitty, iTerm, wezterm, vscode); False for
+    everything else, including a bare `xterm`/`screen`/`tmux`/`linux` TERM
+    or no TERM at all -- a conservative default (downgrade to -ansi) is
+    the safer failure mode than assuming truecolor and rendering
+    unreadably on a terminal that can't do it."""
+    environ = env if env is not None else os.environ
+    colorterm = (environ.get("COLORTERM") or "").strip().lower()
+    if colorterm in ("truecolor", "24bit"):
+        return True
+    term_program = (environ.get("TERM_PROGRAM") or "").strip().lower()
+    if term_program in ("iterm.app", "wezterm", "vscode", "ghostty"):
+        return True
+    term = (environ.get("TERM") or "").strip().lower()
+    if "kitty" in term or "wezterm" in term or "ghostty" in term:
+        return True
+    return False
+
+
+def auto_theme_for_env(env: Optional[dict] = None) -> str:
+    """The theme `resolve_theme` falls back to when NOTHING (no `--theme`,
+    no env var, no settings, no persisted choice) says otherwise: the
+    plain default on a truecolor-capable terminal, its `-ansi` sibling
+    everywhere else (a bare xterm, tmux/screen without COLORTERM passed
+    through, a dumb/unknown TERM, ...)."""
+    return DEFAULT_THEME if supports_truecolor(env) else f"{DEFAULT_THEME}-ansi"
+
+
 def resolve_theme(*, cli_theme: Optional[str] = None, env: Optional[dict] = None,
                    settings_theme: Optional[str] = None, persisted_theme: Optional[str] = None) -> str:
     """Resolve the active theme name per the precedence order. `env`
@@ -97,7 +131,11 @@ def resolve_theme(*, cli_theme: Optional[str] = None, env: Optional[dict] = None
     must never crash startup. `persisted_theme` (what `/theme` last wrote)
     sits between settings and the built-in default, matching D-TUI: a
     persisted choice from a previous session is itself a form of "settings",
-    just ours rather than Claude Code's."""
+    just ours rather than Claude Code's. Only when NONE of the four tiers
+    named anything valid does the terminal's own truecolor support pick
+    the final fallback (`auto_theme_for_env`) -- an explicit choice at any
+    tier is always honoured verbatim, never silently upgraded/downgraded
+    to an -ansi sibling."""
     environ = env if env is not None else os.environ
 
     if is_valid_theme(cli_theme):
@@ -114,4 +152,4 @@ def resolve_theme(*, cli_theme: Optional[str] = None, env: Optional[dict] = None
     if is_valid_theme(persisted_theme):
         return persisted_theme
 
-    return DEFAULT_THEME
+    return auto_theme_for_env(environ)

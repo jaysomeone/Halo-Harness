@@ -80,6 +80,28 @@ class ToolContext:
     # means a skill's allowed-tools grant its own `` !`cmd` `` pre-exec
     # (still enforced) but never widens the session's OWN permission rules.
     session_allow_rule: Optional[Callable[[str], bool]] = None
+    # H6 scope B: `agent/subagent.AgentRuntime` for the OWNING session --
+    # everything tools/agent.py's AgentTool needs that a bare ToolContext
+    # doesn't otherwise carry (the discovered AgentSpec catalog, the live
+    # parent Session, the depth counter, a bounded concurrency gate).
+    # Untyped for the same reverse-import reason as `registry`/`catalog`
+    # (agent/subagent.py imports agent/loop.py, which imports THIS module).
+    # None means "Agent tool unavailable" (every pre-H6 test, a bare
+    # ToolContext, or a session that opted out) -- AgentTool.run() reports
+    # a plain error instead of crashing.
+    agent_runtime: Optional[object] = None
+    # H6 scope B: a PER-CALL sink for a child session's own events, set via
+    # `dataclasses.replace(ctx, tool_use_id=..., agent_event_cb=...)` at
+    # dispatch time exactly like `progress_cb` -- AgentTool.run() calls
+    # this once per child event (already tagged with the child's agent_id)
+    # as the child's own turn() generator is drained, so agent/loop.py can
+    # replay them into the PARENT's live event stream right after dispatch
+    # returns, the same "collect during a blocking call, replay after"
+    # idiom `progress_cb`/`_BoundedChunks` already uses for Bash. None
+    # (every non-Agent tool, and any bare ToolContext) means "nobody's
+    # collecting" -- AgentTool.run() still works, it just has no live
+    # side-channel to report through.
+    agent_event_cb: Optional[Callable[[object], None]] = None
 
 
 @dataclass

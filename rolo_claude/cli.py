@@ -89,11 +89,17 @@ _REAL_FLAGS = [
     (["--playwright-headless"], dict(dest="playwright_headless", action="store_true")),
     (["--mcp-config"], dict(dest="mcp_config", nargs="+", default=None, metavar="CONFIG")),
     (["--strict-mcp-config"], dict(dest="strict_mcp_config", action="store_true")),
+    # H6: real now (agent definitions + the Agent tool + plan mode +
+    # sessions land this milestone).
+    (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
+    (["--agents"], dict(dest="agents", default=None, metavar="JSON_OR_FILE")),
+    (["-c", "--continue"], dict(dest="continue_", action="store_true")),
+    (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None)),
+    (["--fork-session"], dict(dest="fork_session", action="store_true")),
+    (["-n", "--name"], dict(dest="name", default=None)),
 ]
 
 _NOT_YET_FLAGS = [
-    (["--agent"], dict(dest="agent", default=None, metavar="AGENT"), "--agent", "H6"),
-    (["--agents"], dict(dest="agents", default=None, metavar="JSON_OR_FILE"), "--agents", "H6"),
     (["--allow-dangerously-skip-permissions"], dict(dest="allow_dangerously_skip_permissions", action="store_true"),
         "--allow-dangerously-skip-permissions", "H4"),
     (["--autocompact"], dict(dest="autocompact", default=None, metavar="AUTO_OR_TOKENS"), "--autocompact", "H5"),
@@ -102,7 +108,6 @@ _NOT_YET_FLAGS = [
     (["--betas"], dict(dest="betas", nargs="+", default=None, metavar="BETA"), "--betas", "H8"),
     (["--brief"], dict(dest="brief", action="store_true"), "--brief", "H4"),
     (["--cloud"], dict(dest="cloud", nargs="?", const="", default=None), "--cloud", "H8"),
-    (["-c", "--continue"], dict(dest="continue_", action="store_true"), "--continue", "H6"),
     (["-d", "--debug"], dict(dest="debug", nargs="?", const="", default=None), "--debug", "H8"),
     (["--debug-file"], dict(dest="debug_file", default=None, metavar="PATH"), "--debug-file", "H8"),
     (["--environment"], dict(dest="environment_id", default=None, metavar="ENVIRONMENT_ID"), "--environment", "H8"),
@@ -110,12 +115,10 @@ _NOT_YET_FLAGS = [
         "--exclude-dynamic-system-prompt-sections", "H5"),
     (["--fallback-model"], dict(dest="fallback_model", default=None, metavar="MODEL"), "--fallback-model", "H6"),
     (["--file"], dict(dest="file", nargs="+", default=None, metavar="SPEC"), "--file", "H8"),
-    (["--fork-session"], dict(dest="fork_session", action="store_true"), "--fork-session", "H6"),
     (["--forward-subagent-text"], dict(dest="forward_subagent_text", action="store_true"), "--forward-subagent-text", "H6"),
     (["--from-pr"], dict(dest="from_pr", nargs="?", const="", default=None), "--from-pr", "H8"),
     (["--ide"], dict(dest="ide", action="store_true"), "--ide", "H8"),
     (["--include-hook-events"], dict(dest="include_hook_events", action="store_true"), "--include-hook-events", "H4"),
-    (["-n", "--name"], dict(dest="name", default=None), "--name", "H6"),
     (["--no-session-persistence"], dict(dest="no_session_persistence", action="store_true"), "--no-session-persistence", "H6"),
     (["--permission-prompt-tool"], dict(dest="permission_prompt_tool", default=None, metavar="TOOL"), "--permission-prompt-tool", "H4"),
     (["--permission-prompts"], dict(dest="permission_prompts", choices=["host", "none"], default=None), "--permission-prompts", "H4"),
@@ -127,7 +130,6 @@ _NOT_YET_FLAGS = [
     (["--remote-control-session-name-prefix"], dict(dest="remote_control_session_name_prefix", default=None),
         "--remote-control-session-name-prefix", "H8"),
     (["--restricted"], dict(dest="restricted", action="store_true"), "--restricted", "H4"),
-    (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None), "--resume", "H6"),
     (["--safe-mode"], dict(dest="safe_mode", action="store_true"), "--safe-mode", "H4"),
     (["--system-prompt-snapshot"], dict(dest="system_prompt_snapshot", choices=["on", "off"], default=None),
         "--system-prompt-snapshot", "H5"),
@@ -347,6 +349,10 @@ def main(argv: Optional[list] = None) -> int:
             chrome=args.chrome, no_chrome=args.no_chrome, playwright=args.playwright,
             playwright_cdp=args.playwright_cdp, playwright_headless=args.playwright_headless,
             mcp_config=args.mcp_config, strict_mcp_config=args.strict_mcp_config,
+            continue_=bool(getattr(args, "continue_", False)), resume=getattr(args, "resume", None),
+            fork_session_flag=bool(getattr(args, "fork_session", False)),
+            agent=getattr(args, "agent", None), agents_flag=getattr(args, "agents", None),
+            name=getattr(args, "name", None),
         )
     except InvalidModelError as e:
         # a bad --model/alias must be a clean config error (exit 2), not an

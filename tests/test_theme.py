@@ -80,17 +80,43 @@ def test_precedence_persisted_beats_default(ctx: Ctx):
 
 @test
 def test_precedence_falls_back_to_default(ctx: Ctx):
-    resolved = t.resolve_theme(cli_theme=None, env={}, settings_theme=None, persisted_theme=None)
+    # U5: with nothing else set, the LAST fallback is terminal-capability-
+    # aware (`auto_theme_for_env`) -- a truecolor-capable terminal (signalled
+    # here explicitly, matching this test's own original intent: "falls back
+    # to the hardcoded default when every named tier is absent") still
+    # resolves to the plain default; the no-truecolor-signal case is its own
+    # dedicated test below.
+    resolved = t.resolve_theme(cli_theme=None, env={"COLORTERM": "truecolor"}, settings_theme=None,
+                                persisted_theme=None)
     ctx.check(f"falls back to claude-dark, got {resolved!r}", resolved == t.DEFAULT_THEME)
 
 
 @test
 def test_invalid_values_at_every_tier_fall_through(ctx: Ctx):
     resolved = t.resolve_theme(
-        cli_theme="not-a-theme", env={"CLAUDE_BRIDGE_THEME": "also-bogus"},
+        cli_theme="not-a-theme", env={"CLAUDE_BRIDGE_THEME": "also-bogus", "COLORTERM": "truecolor"},
         settings_theme="still-bogus", persisted_theme=None,
     )
     ctx.check(f"every invalid tier skipped, falls to default, got {resolved!r}", resolved == t.DEFAULT_THEME)
+
+
+@test
+def test_auto_theme_for_env_downgrades_to_ansi_without_truecolor_signal(ctx: Ctx):
+    # U5 scope D: "system/ansi theme auto-select ... COLORTERM, TERM
+    # checks" -- when NOTHING (cli/env/settings/persisted) names a theme
+    # AND the terminal never signalled truecolor support, the fallback is
+    # the -ansi sibling, not the plain (assumed-truecolor) default.
+    resolved = t.resolve_theme(cli_theme=None, env={"TERM": "xterm"}, settings_theme=None, persisted_theme=None)
+    ctx.check(f"no COLORTERM/known-truecolor TERM -> falls back to the -ansi variant, got {resolved!r}",
+              resolved == f"{t.DEFAULT_THEME}-ansi")
+    ctx.check("supports_truecolor(...) itself says False for a bare xterm",
+              t.supports_truecolor({"TERM": "xterm"}) is False)
+    ctx.check("supports_truecolor(...) says True for COLORTERM=truecolor",
+              t.supports_truecolor({"COLORTERM": "truecolor"}) is True)
+    ctx.check("supports_truecolor(...) says True for a kitty TERM even without COLORTERM",
+              t.supports_truecolor({"TERM": "xterm-kitty"}) is True)
+    ctx.check("an EXPLICIT theme choice at any tier is never auto-downgraded to -ansi",
+              t.resolve_theme(cli_theme="claude-light", env={"TERM": "xterm"}) == "claude-light")
 
 
 @test

@@ -132,15 +132,24 @@ class Transcript(VerticalScroll):
         # Plain-text scrollback (D-TUI: printed on exit when settings `tui
         # != "fullscreen"`) -- survives folding, unlike the widget tree.
         self.plain_log: "list[str]" = []
+        # U5 scope C: every subagent_start/subagent_end note, in mount
+        # order -- `scroll_to_next_subagent` (child-session navigation
+        # keys) jumps between them. A SEPARATE list from `_history`
+        # because folding may evict the widget objects themselves; a
+        # dead (unmounted) widget is skipped defensively there.
+        self.subagent_marks: "list" = []
 
     # ---- generic mount/fold plumbing --------------------------------------
 
     def is_at_bottom(self) -> bool:
         return self.scroll_y >= self.max_scroll_y - 1
 
-    async def _mount_tracked(self, widget) -> None:
+    async def _mount_tracked(self, widget, *, before=None) -> None:
         was_at_bottom = self.is_at_bottom()
-        await self.mount(widget)
+        if before is not None:
+            await self.mount(widget, before=before)
+        else:
+            await self.mount(widget)
         self._history.append(widget)
         if was_at_bottom:
             self.scroll_end(animate=False)
@@ -186,10 +195,31 @@ class Transcript(VerticalScroll):
         await self._mount_tracked(UserMessage(text))
         self.plain_log.append(f"> {text}")
 
-    async def add_note(self, text: str, *, kind: str = "note") -> None:
-        await self._mount_tracked(SystemNote(text, kind=kind))
+    async def add_note(self, text: str, *, kind: str = "note") -> "SystemNote":
+        widget = SystemNote(text, kind=kind)
+        await self._mount_tracked(widget)
         if kind not in ("todos",):  # a todo list is a transient status render, not worth replaying
             self.plain_log.append(text)
+        return widget
+
+    def scroll_to_next_subagent(self, direction: int) -> None:
+        """U5 scope C: child-session navigation keys -- jump to the next
+        (`direction=1`) or previous (`direction=-1`) sub-agent start/end
+        marker. A no-op if none exist yet, or if folding has evicted every
+        marker still in `subagent_marks` (each is dropped from the DOM
+        without being removed from this list -- `is_mounted` filters
+        those out defensively rather than scrolling to a dead widget)."""
+        marks = [w for w in self.subagent_marks if w.is_mounted]
+        if not marks:
+            return
+        y = self.scroll_y
+        ahead = [w for w in marks if w.region.y > y + 1]
+        behind = [w for w in marks if w.region.y < y - 1]
+        if direction > 0:
+            target = min(ahead, key=lambda w: w.region.y) if ahead else marks[0]
+        else:
+            target = max(behind, key=lambda w: w.region.y) if behind else marks[-1]
+        self.scroll_to_widget(target, animate=False)
 
     def begin_message(self, turn: int) -> int:
         """Call once per `message_start` -- returns this message's sequence
@@ -215,9 +245,24 @@ class Transcript(VerticalScroll):
         widget = self._blocks.get(key)
         if widget is None:
             widget = ThinkingBlock()
-            await self._mount_tracked(widget)
+            # review/U5 must-do: a ThinkingBlock renders ABOVE this
+            # message's answer text regardless of event ARRIVAL order --
+            # OpenAI-dialect reasoning can stream its text delta before
+            # its own reasoning delta, and the old unconditional append
+            # put the thinking block wherever it happened to arrive
+            # (below the answer, in that case). If a text widget for this
+            # SAME message already exists, mount right before it;
+            # otherwise (the common, correctly-ordered case) this is
+            # exactly the old behaviour.
+            await self._mount_tracked(widget, before=self._first_text_widget_for(turn, seq))
             self._blocks[key] = widget
         widget.append(text)
+
+    def _first_text_widget_for(self, turn: int, seq: int):
+        for (t, s, kind, _idx), widget in self._blocks.items():
+            if t == turn and s == seq and kind == "text":
+                return widget
+        return None
 
     async def finish_open_streams(self) -> None:
         """Stop every still-open `AssistantText` stream (called on

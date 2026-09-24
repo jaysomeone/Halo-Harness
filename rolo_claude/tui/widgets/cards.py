@@ -13,6 +13,7 @@ deliver the next Enter-submit back to it (`app.borrow_input(card)`).
 from __future__ import annotations
 
 import json
+import time
 from typing import Callable, Optional
 
 from textual.binding import Binding
@@ -349,3 +350,49 @@ class PlanCard(Static, can_focus=True):
 
     def resolve_with_message(self, message: str) -> None:
         self._finish({"approved": False, "mode_after": None, "feedback": message})
+
+
+class RewindCard(Static, can_focus=True):
+    """Confirmation card for `/rewind`/`/undo`/`/redo` (U5 scope B): shows
+    the target shadow-repo step and asks to confirm before touching the
+    real working tree. `on_decide(confirmed: bool)` fires exactly once."""
+
+    BINDINGS = [
+        Binding("1,y,enter", "confirm", "Restore", show=False),
+        Binding("2,n,escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, *, step: dict, verb: str = "rewind", on_decide: Callable) -> None:
+        super().__init__("", markup=False, classes="rewind-card")
+        self.step = step
+        self.verb = verb  # "rewind" | "undo" | "redo"
+        self._on_decide = on_decide
+        self.done = False
+        self._refresh()
+
+    def _refresh(self) -> None:
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.step.get("ts", 0) or 0))
+        files = ", ".join(self.step.get("files") or []) or "(no files recorded)"
+        lines = [
+            f"↩ {self.verb.capitalize()} to step {self.step.get('id', '?')} ({when}):",
+            f"  {self.step.get('label', '')}",
+            f"  files: {files}",
+        ]
+        if self.done:
+            pass
+        else:
+            lines.append("  [1] Restore   [2] Cancel")
+        self.update("\n".join(lines))
+
+    def _finish(self, confirmed: bool) -> None:
+        self.done = True
+        self._refresh()
+        self._on_decide(confirmed)
+
+    def action_confirm(self) -> None:
+        if not self.done:
+            self._finish(True)
+
+    def action_cancel(self) -> None:
+        if not self.done:
+            self._finish(False)

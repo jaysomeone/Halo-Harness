@@ -23,12 +23,15 @@ from pathlib import Path
 from typing import Optional
 
 from rolo_claude import events
+from rolo_claude.agent import sessions as agent_sessions
 from rolo_claude.agent.assemble import SessionContext
 from rolo_claude.agent.catalog import SessionCatalog, host_cap, select_preload
 from rolo_claude.agent.log import SessionLog
 from rolo_claude.agent.loop import Session
+from rolo_claude.agent.planmode import ensure_plan_file
 from rolo_claude.commands.builtins import HeadlessFacade
 from rolo_claude.commands.registry import Registry
+from rolo_claude.config.agents_md import discover_agents
 from rolo_claude.config.claude_json import is_trusted, load_claude_json
 from rolo_claude.config.paths import bridge_home, home, lookup_project
 from rolo_claude.config.settings import resolve_settings
@@ -148,6 +151,22 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
         session.log.append_snapshot([{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
 
 
+def _append_agent_mention_snapshot(session, text: Optional[str], agents: Optional[dict]) -> None:
+    """H6 scope A: `@agent-<name>` in the RAW prompt text (not just an
+    expanded slash body -- unlike `_append_at_mention_snapshots`, this
+    runs on whatever text the turn is actually about to carry) forces that
+    sub-agent (brief: "@agent-<name> in a prompt forces one") by telling
+    the model to use it, as a snapshot so it survives compaction the same
+    way every other dynamic instruction does."""
+    if not text or not agents:
+        return
+    from rolo_claude.config.agents_md import agent_mention_instruction, find_agent_mentions
+    names = find_agent_mentions(text, agents)
+    if names:
+        session.log.append_snapshot([{"type": "text", "text": agent_mention_instruction(names)}],
+                                     kind="agent_mention")
+
+
 def _events_for_direct_output(output: str, *, turn_no: int = 1):
     """A minimal, well-formed event sequence carrying `output` as the
     turn's whole reply -- lets a slash command's direct text run through
@@ -190,6 +209,8 @@ class SessionBuild:
     ctx: object                     # agent.assemble.SessionContext
     session_log: object
     hook_runner: Optional[object]
+    resume_error: Optional[str] = None   # H6 scope D: --continue/--resume didn't resolve to a session
+    agents: "dict" = None                # H6 scope A: the discovered AgentSpec catalog (for /agents)
 
 
 def build_session(
@@ -203,6 +224,8 @@ def build_session(
     json_schema: Optional[str] = None, chrome: bool = False, no_chrome: bool = False,
     playwright: bool = False, playwright_cdp: Optional[str] = None, playwright_headless: bool = False,
     mcp_config: Optional[list] = None, strict_mcp_config: bool = False, print_mode: bool = True,
+    continue_: bool = False, resume: Optional[str] = None, fork_session_flag: bool = False,
+    agent: Optional[str] = None, agents_flag: Optional[str] = None,
 ) -> SessionBuild:
     """The ONE shared builder (finding 9). `print_mode` (True for `-p`,
     False for the TUI) is the single knob that decides `PermissionEngine.
@@ -247,6 +270,14 @@ def build_session(
         deny_rules=deny_rules, ask_rules=ask_rules, allow_rules=allow_rules, mode=resolved_mode,
         cwd=cwd, extra_dirs=extra_dirs, print_mode=print_mode,
     )
+    if resolved_mode == "plan":
+        # H6 scope C: `--permission-mode plan` from the very start of the
+        # session (Shift+Tab/a model-initiated EnterPlanMode mid-session
+        # both go through agent/loop.py's own `_handle_enter_plan_mode`
+        # instead) -- the plan file is created NOW so it exists before the
+        # first turn even runs, matching "created per session".
+        plan_path = ensure_plan_file(cwd, settings)
+        permission_engine.set_plan_file(plan_path)
 
     env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
     load_env_file(env_path)
@@ -346,18 +377,66 @@ def build_session(
         note = f"Respond with JSON matching this schema (no prose outside the JSON): {json_schema}"
         effective_append = f"{effective_append}\n\n{note}" if effective_append else note
 
+    # H6 scope A: `--agent <name>` runs the WHOLE session as that agent --
+    # resolved against the FULLY assembled catalog (built-ins + MCP +
+    # WebSearch, all already added to `frozen_registry` above) so
+    # `spec.resolved_tools()` can actually see everything it might keep.
+    discovered_agents = {} if bare else discover_agents(cwd, settings=settings, agents_flag=agents_flag)
+    agent_spec = discovered_agents.get(agent) if agent else None
+    agent_type_restriction = None
+    if agent_spec is not None:
+        frozen_registry = frozen_registry.filtered(agent_spec.resolved_tools(frozen_registry.names()))
+        agent_type_restriction = agent_spec.allowed_subagent_types()
+        if agent_spec.permission_mode and not permission_mode and not dangerously_skip_permissions:
+            resolved_mode = agent_spec.permission_mode
+            permission_engine.mode = resolved_mode
+            if resolved_mode == "plan" and permission_engine.plan_file is None:
+                permission_engine.set_plan_file(ensure_plan_file(cwd, settings))
+    elif agent:
+        print(f"rolo-claude: unknown --agent {agent!r} (known: {', '.join(sorted(discovered_agents)) or '(none)'})",
+              file=sys.stderr)
+
     ctx = SessionContext(
         cwd=cwd, model_label=model_ref.raw, model_family=family, settings_flag=settings_flag,
         setting_sources=setting_sources, append_system_prompt=effective_append, bare=bare,
         tool_registry=frozen_registry, mcp_servers=mcp_servers_for_prompt,
     )
+    if agent_spec is not None and agent_spec.body:
+        ctx.system_prompt = agent_spec.body
     if system_prompt:
         ctx.system_prompt = system_prompt
 
     openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
 
-    session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
+    # H6 scope D: --continue/--resume/--fork-session all resolve to a
+    # concrete session_id BEFORE the log is opened -- an explicit
+    # --session-id always wins outright (validated by the caller); a
+    # resolved --continue/--resume id is then optionally forked (a fresh
+    # id, log copied) before Session.__init__ ever sees it, so the
+    # ORIGINAL session's own file is never appended to by the fork.
+    resolved_session_id = session_id
+    resume_error: Optional[str] = None
+    if resolved_session_id is None and continue_:
+        resolved_session_id = agent_sessions.resolve_continue(cwd)
+        if resolved_session_id is None:
+            resume_error = "no sessions found for this directory to --continue"
+    if resolved_session_id is None and resume is not None:
+        resolved_session_id, resume_error = agent_sessions.resolve_resume(cwd, resume if resume else None)
+    if resolved_session_id is not None and fork_session_flag:
+        resolved_session_id = agent_sessions.fork_session(cwd, resolved_session_id)
+    session_log = SessionLog(cwd, session_id=resolved_session_id or uuid.uuid4().hex)
+    # critical fix: `SessionLog.__init__` never reads its own file (only
+    # `SessionLog.latest_for_cwd` does that, via this exact same line) --
+    # without this, EVERY --session-id/--continue/--resume/--fork-session
+    # onto a session whose .jsonl already has content looks EMPTY to
+    # `Session.__init__`, which then takes the "brand new session" branch
+    # and re-appends a SECOND meta/system/snapshot set instead of resuming
+    # (silently dropping the entire prior transcript from every derived
+    # request from that point on). A brand-new id's file doesn't exist yet,
+    # so `read_all()` is a harmless no-op ([]) in that case.
+    if session_log.path.exists():
+        session_log._nodes = session_log.read_all()
     hook_runner = build_hook_runner(
         settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
         effort=effort, permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
@@ -368,6 +447,7 @@ def build_session(
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
         extra_headers=extra_headers, permission_engine=permission_engine,
         session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
+        agents=discovered_agents, routes=routes, agent_type_restriction=agent_type_restriction,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = session._call_model_for_hook
@@ -390,7 +470,7 @@ def build_session(
         mcp_manager=mcp_manager, mcp_notices=mcp_notices, session_catalog=session_catalog, settings=settings,
         claude_json=claude_json, resolved_mode=resolved_mode, routes=routes, state_dir=state_dir,
         model_ref=model_ref, model_profile=model_profile, creds=creds, ctx=ctx, session_log=session_log,
-        hook_runner=hook_runner,
+        hook_runner=hook_runner, resume_error=resume_error, agents=discovered_agents,
     )
 
 
@@ -430,6 +510,12 @@ def run_print_mode(
     playwright_headless: bool = False,
     mcp_config: Optional[list] = None,
     strict_mcp_config: bool = False,
+    continue_: bool = False,
+    resume: Optional[str] = None,
+    fork_session_flag: bool = False,
+    agent: Optional[str] = None,
+    agents_flag: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> int:
     """Run one turn (`input_format="text"`) or several (`"stream-json"`,
     one turn per entry of `stdin_lines`) in print mode; returns the
@@ -442,11 +528,13 @@ def run_print_mode(
     # returned 2 with those servers still running, `close_all()` never
     # called. Validating up front means a bad id never starts them at all,
     # rather than starting-then-cleaning-up.
-    if session_id:
-        try:
-            uuid.UUID(session_id)
-        except ValueError:
-            print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
+    if session_id and not agent_sessions.is_valid_session_id(session_id):
+        print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
+        return 2
+    if resume is not None and resume != "" and not continue_:
+        _resolved_probe, resume_err = agent_sessions.resolve_resume(cwd, resume)
+        if _resolved_probe is None and resume_err:
+            print(f"rolo-claude: --resume: {resume_err}", file=sys.stderr)
             return 2
 
     # u2-h3b finding 9: everything through a ready-to-drive Session is now
@@ -461,6 +549,8 @@ def run_print_mode(
         system_prompt=system_prompt, json_schema=json_schema, chrome=chrome, no_chrome=no_chrome,
         playwright=playwright, playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
         mcp_config=mcp_config, strict_mcp_config=strict_mcp_config, print_mode=True,
+        continue_=continue_, resume=resume, fork_session_flag=fork_session_flag,
+        agent=agent, agents_flag=agents_flag,
     )
     session, frozen_registry, model_ref, model_profile = (
         build.session, build.tool_registry, build.model_ref, build.model_profile)
@@ -476,6 +566,22 @@ def run_print_mode(
     if verbose:
         print(f"[rolo-claude] model={model_ref.raw} provider={model_ref.provider} "
               f"dialect={model_ref.dialect} family={family} session={session_log.session_id}", file=sys.stderr)
+
+    # H6 scope D: index.json's `first_prompt/started` are set ONCE, on the
+    # very first touch of this session_id -- a --continue/--resume/
+    # --fork-session onto an EXISTING entry must never reset its counters,
+    # so this only fires when nothing is there yet (a brand-new session,
+    # including a fresh fork -- fork_session copies the log but never the
+    # index entry under the NEW id, see agent/sessions.fork_session).
+    if agent_sessions.load_index(cwd).get(session_log.session_id) is None:
+        first_prompt_text = prompt or (
+            _extract_user_text(stdin_lines[0]) if stdin_lines else "")
+        agent_sessions.record_session_start(cwd, session_log.session_id, first_prompt_text)
+    if name:
+        # `-n/--name` at invocation time is an immediate `/rename` (brief
+        # D): the small-model auto-title, if any, would only ever apply
+        # when no explicit name was ever given.
+        agent_sessions.set_title(cwd, session_log.session_id, name)
 
     # H3: everything past this point may have live MCP subprocess/loop
     # state to tear down -- `finally` guarantees `mcp_manager.close_all()`
@@ -525,8 +631,12 @@ def run_print_mode(
                     exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=i + 1))
                 else:
                     _append_at_mention_snapshots(session, final_prompt, cwd)
+                    _append_agent_mention_snapshot(session, final_prompt or turn_text, build.agents)
                     exit_code = sink.consume(session.turn(final_prompt or turn_text))
                 facade.num_turns += 1
+                agent_sessions.record_session_turn(
+                    cwd, session_log.session_id,
+                    cost_usd=(session.cost_meter.total_usd if session.cost_meter.has_cost_data else None))
             return exit_code
 
         prompt_text = prompt or ""
@@ -536,7 +646,13 @@ def run_print_mode(
         if direct_output is not None:
             return sink.consume(_events_for_direct_output(direct_output))
         _append_at_mention_snapshots(session, final_prompt, cwd)
-        return sink.consume(session.turn(final_prompt or prompt_text))
+        _append_agent_mention_snapshot(session, final_prompt or prompt_text, build.agents)
+        try:
+            return sink.consume(session.turn(final_prompt or prompt_text))
+        finally:
+            agent_sessions.record_session_turn(
+                cwd, session_log.session_id,
+                cost_usd=(session.cost_meter.total_usd if session.cost_meter.has_cost_data else None))
     finally:
         try:
             session._fire_session_end("quit")

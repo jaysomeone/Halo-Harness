@@ -175,7 +175,22 @@ def _cmd_plan(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_resume(args: str, facade: HeadlessFacade) -> str:
-    return "The session picker needs the interactive TUI; pass --resume <session-id> on the command line instead."
+    from rolo_claude.agent import sessions as agent_sessions
+
+    if args.strip():
+        session_id, err = agent_sessions.resolve_resume(facade.cwd, args.strip())
+        if session_id is None:
+            return f"rolo-claude: --resume: {err}"
+        return (f"Found session {session_id} -- headless mode has no interactive picker to switch into "
+                f"it mid-turn; pass `-r {session_id}` on the command line to actually resume it.")
+    rows = agent_sessions.list_sessions(facade.cwd) if hasattr(agent_sessions, "list_sessions") else []
+    if not rows:
+        return "The session picker needs the interactive TUI; pass --resume <session-id|name> on the command line instead."
+    lines = ["The interactive picker needs the TUI; recent sessions for this directory (pass --resume <id> or a title):"]
+    for row in rows[:10]:
+        title = row.get("title") or "(untitled)"
+        lines.append(f"  {row['id']}  {title}")
+    return "\n".join(lines)
 
 
 def _cmd_status(args: str, facade: HeadlessFacade) -> str:
@@ -212,8 +227,24 @@ def _cmd_skills(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_agents(args: str, facade: HeadlessFacade) -> str:
-    return ("No custom sub-agents are loaded yet (sub-agents arrive in a later milestone).\n"
-            "Built-in agent types: Explore, Plan, general-purpose.")
+    """H6 scope A/F: lists every discovered agent definition (built-ins +
+    `.claude/agents`/`~/.claude/agents`/`--agents`/managed/plugin), name-
+    sorted, `name -- description` -- pulled straight off the live
+    session's own `agent_runtime.agents` (the SAME catalog `Agent(subagent_
+    type=...)` resolves against) when one is running, so this never drifts
+    from what a sub-agent call would actually see."""
+    session = getattr(facade, "session", None)
+    agents = getattr(getattr(session, "agent_runtime", None), "agents", None)
+    if not agents:
+        from rolo_claude.config.agents_md import discover_agents
+        agents = discover_agents(facade.cwd, settings=facade.settings)
+    if not agents:
+        return "No agent definitions found (not even the built-ins -- this shouldn't happen)."
+    lines = ["Available sub-agents:"]
+    for name in sorted(agents):
+        spec = agents[name]
+        lines.append(f"  {name} ({spec.source}) -- {spec.description}")
+    return "\n".join(lines)
 
 
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
@@ -262,6 +293,73 @@ def _cmd_exit(args: str, facade: HeadlessFacade) -> str:
     return "Nothing to exit: a single -p call already ends after this turn."
 
 
+# ---- U5 sessions UX + git-shadow rewind + keymap: "ui"-kind stubs here
+# (headless -p has no interactive picker/card/worker thread to run these
+# for real), real behaviour lives in tui/slash.py's own handler dict --
+# same split as /model, /mcp, /resume, /permissions, /theme above. ------
+
+def _cmd_rename(args: str, facade: HeadlessFacade) -> str:
+    """H6 scope D: sets `index.json[session_id].title` for real -- cwd/
+    session_id are both known to a headless facade (unlike the picker/
+    fork-and-switch commands above, this needs no running worker thread)."""
+    title = args.strip()
+    if not title:
+        return "Usage: /rename <title>"
+    from rolo_claude.agent import sessions as agent_sessions
+    agent_sessions.set_title(facade.cwd, facade.session_id, title)
+    return f"Renamed this session to {title!r}."
+
+
+def _cmd_fork(args: str, facade: HeadlessFacade) -> str:
+    """H6 scope D: copies THIS session's log under a new id right now (the
+    original is never touched) -- `-p` has no live worker thread to hand
+    the new session off to mid-turn, so the result is the id to `-r` into
+    afterward, not a live switch (that part IS the TUI's own job)."""
+    from rolo_claude.agent import sessions as agent_sessions
+    if not facade.session_id:
+        return "rolo-claude: no active session to fork."
+    new_id = agent_sessions.fork_session(facade.cwd, facade.session_id)
+    return f"Forked this session -> {new_id}. Continue it with: -r {new_id}"
+
+
+def _cmd_stats(args: str, facade: HeadlessFacade) -> str:
+    session = getattr(facade, "session", None)
+    if session is None:
+        return f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s)."
+    from rolo_claude.controller import compute_session_stats
+    stats = compute_session_stats(session.log.nodes())
+    lines = [f"Turns: {stats['turns']}", f"Total cost: ${stats['total_cost_usd']:.4f}"]
+    for model, bucket in sorted(stats["per_model"].items()):
+        lines.append(f"  {model}: {bucket['calls']} call(s), "
+                     f"{bucket['input_tokens']}in/{bucket['output_tokens']}out tok, ${bucket['cost_usd']:.4f}")
+    for name, n in sorted(stats["tool_counts"].items()):
+        lines.append(f"  tool {name}: {n} call(s)")
+    return "\n".join(lines)
+
+
+def _cmd_rewind(args: str, facade: HeadlessFacade) -> str:
+    return "rolo-claude: /rewind needs the interactive TUI (a file's history lives per-session)."
+
+
+def _cmd_undo(args: str, facade: HeadlessFacade) -> str:
+    return "rolo-claude: /undo needs the interactive TUI."
+
+
+def _cmd_redo(args: str, facade: HeadlessFacade) -> str:
+    return "rolo-claude: /redo needs the interactive TUI."
+
+
+def _cmd_keybindings(args: str, facade: HeadlessFacade) -> str:
+    from rolo_claude.tui.keys import load_keymap
+    keymap = load_keymap()
+    lines = ["Keybindings (~/.claude/keybindings.json merges onto these):"]
+    for ctx in sorted(keymap):
+        lines.append(f"  [{ctx}]")
+        for chord in sorted(keymap[ctx]):
+            lines.append(f"    {chord:<20} {keymap[ctx][chord]}")
+    return "\n".join(lines)
+
+
 # name -> (kind, description, argument_hint, run)
 _BUILTIN_SPECS = {
     "help": ("core", "Show available commands", None, _cmd_help),
@@ -286,6 +384,13 @@ _BUILTIN_SPECS = {
     "add-dir": ("core", "Add a working directory", "<directory>", _cmd_add_dir),
     "theme": ("core", "Show or set the color theme", "[theme]", _cmd_theme),
     "exit": ("ui", "Exit rolo-claude", None, _cmd_exit),
+    "rename": ("ui", "Rename this session", "<title>", _cmd_rename),
+    "fork": ("ui", "Fork this session into a new one", None, _cmd_fork),
+    "stats": ("core", "Show tokens/cost per model and tool-call counts", None, _cmd_stats),
+    "rewind": ("ui", "Restore the working tree to a recorded step", "[step-id]", _cmd_rewind),
+    "undo": ("ui", "Rewind one recorded step back", None, _cmd_undo),
+    "redo": ("ui", "Rewind one recorded step forward", None, _cmd_redo),
+    "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
 }
 
 

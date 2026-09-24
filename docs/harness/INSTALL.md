@@ -139,6 +139,51 @@ another tool), allocate a pty explicitly:
 script -q -c "rolo-claude --demo" /dev/null
 ```
 
+## Terminal notes (Linux acceptance)
+
+rolo-claude's TUI is built and tested against xterm, kitty, gnome-terminal
+and tmux (mouse on/off) over both a local Kali session and SSH; this is
+what to expect from each, and how to get the most out of it.
+
+- **Mouse**: on by default (Textual captures it for click-to-focus, drag-
+  scroll and drag-select-to-copy). **Hold Shift while dragging** to bypass
+  the app's own mouse capture and use the terminal's NATIVE text selection
+  instead -- this works the same way in xterm, kitty, gnome-terminal and
+  inside a tmux pane, and is the right move any time you want to select
+  text some OTHER way than what a Ctrl+C-on-selection copy gives you (e.g.
+  selecting across a scrolled-off region, or copying into a completely
+  different app). Inside tmux specifically, mouse mode is tmux's own
+  setting (`set -g mouse on`, on by default in modern tmux) -- rolo-claude
+  just receives whatever tmux forwards; toggle it in tmux itself
+  (`tmux set -g mouse off` for a session) if you want the terminal's native
+  selection to be the DEFAULT instead of needing Shift.
+- **Clipboard (OSC 52)**: Ctrl+C on a selected transcript run copies via
+  OSC 52, which works over SSH and through tmux (with tmux's own
+  `set -g set-clipboard on`, the default) without any extra tooling. As a
+  second, best-effort mechanism alongside it, rolo-claude also pipes the
+  same text through `wl-copy` (Wayland) or `xclip`/`xsel` (X11) if one is
+  on PATH -- useful on a terminal/multiplexer config that doesn't relay OSC
+  52. Neither is required for the primary OSC 52 path to work; install one
+  (`apt install xclip` or `wl-clipboard`) only if copy isn't reaching your
+  system clipboard and you want the fallback active too.
+- **Resize**: the layout re-flows live (Textual's own resize handling);
+  nothing rolo-claude does needs a restart after resizing a pane/window,
+  including the prompt's own auto-grow (1-8 rows, wrap-aware).
+- **Ctrl+Z / `fg`**: rolo-claude never binds Ctrl+Z itself, so it reaches
+  your shell as the normal Unix job-control suspend (SIGTSTP); `fg` resumes
+  the TUI cleanly with no hang or redraw glitch (Textual repaints on
+  resume).
+- **Chords and the which-key overlay** (`Ctrl+X ...`) work identically
+  across all four terminals above; `tmux`'s own prefix key (default
+  `Ctrl+B`) doesn't collide with rolo-claude's `Ctrl+X` chord prefix, but
+  if you've remapped tmux's prefix to `Ctrl+X` yourself, remap
+  rolo-claude's instead via `~/.claude/keybindings.json` (see
+  `/keybindings` for the live list, and the `keybindings-help` skill for
+  the file format).
+- **SSH**: everything above (mouse, OSC 52 clipboard, resize, chords) is
+  verified over SSH into the Kali VM inside tmux, not just on a local
+  console -- there's nothing SSH-specific to configure.
+
 ## Tests
 
 ```sh

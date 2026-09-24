@@ -84,10 +84,18 @@ AssistantText {
     margin-left: 2;
 }
 
-.permission-card, .question-card, .plan-card {
+.permission-card, .question-card, .plan-card, .rewind-card {
     border: round $bridge-warning;
     background: $bridge-surface;
     padding: 1 2;
+}
+
+#which-key-overlay {
+    max-height: 10;
+    border: round $bridge-accent;
+    background: $bridge-panel;
+    color: $bridge-text;
+    padding: 0 1;
 }
 
 .question-heading {

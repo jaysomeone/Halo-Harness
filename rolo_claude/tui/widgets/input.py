@@ -111,7 +111,20 @@ class PromptInput(TextArea):
     # ---- auto-grow 1-8 lines -------------------------------------------
 
     def _auto_grow(self) -> None:
-        lines = max(PROMPT_MIN_LINES, min(PROMPT_MAX_LINES, self.document.line_count))
+        # review/U5 must-do: count WRAPPED display rows, not logical
+        # (newline-delimited) lines -- a single 300-character line at 80
+        # columns is ~4 wrapped rows and used to report "1 of 5" (barely
+        # taller than empty) because `document.line_count` only counts
+        # `\n`s. `TextArea.wrapped_document.height` is Textual's own
+        # wrap-aware row count, kept live as the document/width change;
+        # `wrap_width` is 0 (nothing computed yet) for exactly one frame
+        # around initial mount, before any resize has happened, so this
+        # falls back to the logical count then rather than raising.
+        try:
+            row_count = self.wrapped_document.height
+        except Exception:
+            row_count = self.document.line_count
+        lines = max(PROMPT_MIN_LINES, min(PROMPT_MAX_LINES, row_count))
         self.styles.height = lines
 
     def on_text_area_changed(self, _event: TextArea.Changed) -> None:

@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from typing import Optional
 
+from rolo_claude.agent.planmode import EnterPlanModeTool, ExitPlanModeTool
+from rolo_claude.tools.agent import AgentTool, TaskTool
 from rolo_claude.tools.ask_user_question import AskUserQuestionTool
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
 from rolo_claude.tools.bash import BashTool
@@ -43,8 +45,9 @@ def default_tools() -> list:
     (imported lazily so a POSIX/Kali process never even imports a module
     that assumes `powershell.exe` might exist)."""
     tools = [
-        AskUserQuestionTool(), BashTool(), EditTool(), GlobTool(), GrepTool(),
-        ReadTool(), SkillTool(), TodoWriteTool(), ToolSearchTool(), WebFetchTool(), WriteTool(),
+        AgentTool(), AskUserQuestionTool(), BashTool(), EditTool(), EnterPlanModeTool(), ExitPlanModeTool(),
+        GlobTool(), GrepTool(), ReadTool(), SkillTool(), TaskTool(), TodoWriteTool(), ToolSearchTool(),
+        WebFetchTool(), WriteTool(),
     ]
     if sys.platform == "win32":
         from rolo_claude.tools.powershell import PowerShellTool

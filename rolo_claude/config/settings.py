@@ -172,11 +172,39 @@ class Settings:
         return self._raw.get("statusLine")
 
     @property
+    def input_needed_notif_enabled(self) -> bool:
+        """U5 scope D: "terminal bell + notify-send/toast when input is
+        needed and `inputNeededNotifEnabled`" -- the bell itself
+        (`app.bell()`) always fires (a terminal bell is cheap and
+        harmless even when unwanted); this key gates ONLY the extra
+        `notify-send`/toast desktop notification, matching the brief's own
+        naming. Defaults False (opt-in -- a desktop notification is a
+        bigger interruption than a bell, so it stays off until asked for)."""
+        return bool(self._raw.get("inputNeededNotifEnabled", False))
+
+    @property
     def respect_gitignore(self) -> bool:
         return self._raw.get("respectGitignore", True)
 
     def effort_level(self, model: str) -> Optional[str]:
         return self._raw.get("modelSettings", {}).get(model, {}).get("effortLevel")
+
+    @property
+    def plans_directory(self) -> Optional[str]:
+        """H6 scope C: `plansDirectory` -- an override for where plan-mode
+        plan files are written (default `~/.claude/plans`,
+        `config.paths.plans_dir()`); None means "use the default"."""
+        return self._raw.get("plansDirectory")
+
+    @property
+    def subagent_model(self) -> Optional[str]:
+        """H6 scope A: a settings-level `subagentModel` fallback in the
+        model-resolution chain (invocation -> frontmatter -> here/
+        `CLAUDE_CODE_SUBAGENT_MODEL` -> parent). Real Claude Code sources
+        this from the env var only; a settings key is this harness's own
+        convenience extension, tried AFTER the env var (config/agents_md.py
+        owns the actual precedence)."""
+        return self._raw.get("subagentModel")
 
 
 def _read_json_file(path: Path) -> tuple[dict, Optional[SettingsError]]:

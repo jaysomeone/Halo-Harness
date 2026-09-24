@@ -962,6 +962,11 @@ _MODE_TABLE = {
     "readonly_bash":         {"default": "allow", "acceptEdits": "allow", "plan": "allow", "dontAsk": "allow"},
     "edit_write_in_workdir": {"default": "ask", "acceptEdits": "allow", "plan": "deny", "dontAsk": "deny"},
     "other":                 {"default": "ask", "acceptEdits": "ask", "plan": "deny", "dontAsk": "deny"},
+    # H6 scope C: only ever produced by _categorize when self.mode=="plan"
+    # AND the target IS self.plan_file -- filled in for every mode
+    # defensively (never actually reached outside "plan") rather than
+    # falling back to _MODE_TABLE["other"]'s deny.
+    "plan_file_write":       {"default": "allow", "acceptEdits": "allow", "plan": "allow", "dontAsk": "allow"},
 }
 
 
@@ -1090,7 +1095,8 @@ class PermissionEngine:
     plan|auto|dontAsk|bypassPermissions."""
 
     def __init__(self, *, deny_rules=None, ask_rules=None, allow_rules=None,
-                 mode: str = "default", cwd, extra_dirs=None, print_mode: bool = False):
+                 mode: str = "default", cwd, extra_dirs=None, print_mode: bool = False,
+                 plan_file: Optional[Path] = None):
         self.deny_rules = list(deny_rules or [])
         self.ask_rules = list(ask_rules or [])
         self.allow_rules = list(allow_rules or [])
@@ -1098,6 +1104,13 @@ class PermissionEngine:
         self.cwd = Path(cwd)
         self.extra_dirs = [Path(d) for d in (extra_dirs or [])]
         self.print_mode = print_mode
+        # H6 scope C: plan mode's ONE writable path -- agent/planmode.py
+        # computes this (honouring `plansDirectory`) once per session and
+        # sets it here (a plain attribute, same as `self.mode` itself is
+        # mutated in place on a plan_reply/ExitPlanMode transition) so
+        # `_decide` can allow Write/Edit on exactly this file while every
+        # other edit/write stays denied by the ordinary mode table below.
+        self.plan_file: Optional[Path] = Path(plan_file) if plan_file else None
         # H4 scope C: a Skill tool's `allowed-tools` grant, live in
         # `allow_rules` (so every existing match path just works) but
         # marked here so `clear_temporary_allow_rules` (agent/loop.py's
@@ -1105,6 +1118,16 @@ class PermissionEngine:
         # "until the next user message") can strip exactly these and only
         # these, never a rule the user themselves granted interactively.
         self._temp_allow_start: Optional[int] = None
+
+    def set_plan_file(self, path) -> None:
+        """Called when a session enters plan mode (agent/planmode.py, both
+        the `--permission-mode plan` startup path and a model-initiated
+        `EnterPlanMode` mid-session) -- mutates the SAME engine instance
+        every ToolContext/tool_registry.dispatch call already shares, so
+        the very next Write/Edit decide() call sees it with no extra
+        plumbing (mirrors `self.mode` itself being a plain mutable
+        attribute for the same reason)."""
+        self.plan_file = Path(path) if path else None
 
     def add_session_allow_rule(self, rule_text: str, *, temporary: bool = False) -> bool:
         """Teach THIS session one more allow rule (U2's `allow_session` /
@@ -1348,6 +1371,18 @@ class PermissionEngine:
             return "other"
         if tool_name in ("Edit", "Write", "NotebookEdit"):
             target = self._resolve_target_path(tool_input.get("file_path", ""))
+            # H6 scope C: plan mode's ONE writable path -- checked BEFORE
+            # the ordinary in-workdir test so it wins even though the plan
+            # file normally lives OUTSIDE cwd (~/.claude/plans/...), which
+            # would otherwise categorize as "other" (denied in every mode
+            # that matters here anyway, but plan_file_write is the honest
+            # category name and the one _MODE_TABLE row that allows it).
+            if self.mode == "plan" and self.plan_file is not None and target is not None:
+                try:
+                    if target.resolve() == self.plan_file.resolve():
+                        return "plan_file_write"
+                except OSError:
+                    pass
             return "edit_write_in_workdir" if (target is not None and self._in_working_dirs(target)) else "other"
         return "other"
 
@@ -1390,6 +1425,26 @@ class PermissionEngine:
             # already checked before this fallback is ever reached, still
             # overrides this).
             return Decision("allow", f"{tool_name} is always allowed (no side effects requiring permission)", source="mode")
+        if tool_name in ("Agent", "Task"):
+            # H6 scope B: spawning a sub-agent is never mode-table-gated --
+            # depth-1 and the <=4-concurrent cap (agent/subagent.py) are the
+            # real guardrails, matching "no cyber blocks" (an explicit
+            # deny/ask rule for Agent/Task, already checked before this
+            # fallback is ever reached, still overrides this).
+            return Decision("allow", "Agent/Task spawning is always allowed (depth/concurrency limits gate it instead)",
+                             source="mode")
+        if tool_name == "EnterPlanMode" and self.print_mode:
+            # H6 scope C / brief: "EnterPlanMode ... allowed in -p" -- only
+            # ever NARROWS capability (every mode's Write/Edit gets
+            # stricter, never looser, once "plan" is active), so `-p`
+            # never needs an interactive prompt to skip the way an
+            # ordinary "ask" category would (an explicit deny/ask rule,
+            # already checked before this fallback is reached, still
+            # overrides this). Interactive sessions fall through to the
+            # ordinary category/mode-table lookup below so a real
+            # permission_request is still shown when the mode calls for one.
+            return Decision("allow", "EnterPlanMode is allowed outright in print mode (only narrows capability)",
+                             source="mode")
         category = self._categorize(tool_name, tool_input, tool)
         action = _MODE_TABLE.get(category, _MODE_TABLE["other"]).get(self.mode, "ask")
         if action == "ask":

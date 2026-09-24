@@ -32,6 +32,13 @@ class StatusBar(Static):
         self._phase_started_at = time.monotonic()
         self.spinner_index = 0
         self.new_count = 0
+        # U5 scope D: the `statusLine` command's own last output (None
+        # until the first successful run, or if none is configured).
+        self.statusline_text: "str | None" = None
+        self._refresh_display()
+
+    def set_statusline_text(self, text: "str | None") -> None:
+        self.statusline_text = text
         self._refresh_display()
 
     def apply_status(self, data: dict) -> None:
@@ -124,4 +131,16 @@ class StatusBar(Static):
         if self.new_count:
             text.append("│ ", style="dim")
             text.append(f"↓ {self.new_count} new ", style="bold magenta")
+        if self.statusline_text:
+            text.append("│ ", style="dim")
+            # U5 scope D: a `statusLine` script's own ANSI colour codes
+            # (a common thing for these scripts to emit) are preserved,
+            # not stripped -- `Text.from_ansi` is Rich's own parser for
+            # exactly this, so a red/green segment in the script's output
+            # renders as red/green here too, not literal escape bytes.
+            try:
+                text.append_text(Text.from_ansi(self.statusline_text))
+            except Exception:
+                text.append(self.statusline_text)
+            text.append(" ")
         self.update(text)

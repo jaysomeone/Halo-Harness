@@ -8,9 +8,33 @@ directory entries visited (D-TUI: "os.scandir walk with prunes, 20k cap").
 from __future__ import annotations
 
 import os
+import re
 
 SCAN_CAP = 20_000
 MAX_RESULTS = 50
+
+# U5 scope A: `@file#L10-20` / `@file#L10` mentions -- the `#L...` suffix is
+# OPTIONAL and, when present, is excluded from the path itself (it can't be
+# part of a real filename, so no path is ever mis-split by it).
+_AT_MENTION_LINE_RE = re.compile(r"(?<![\w`@])@((?:~/|\.{1,2}/|//?)?[^\s`'\"()<>#]+)(?:#[Ll](\d+)(?:-(\d+))?)?")
+
+
+def parse_at_mentions(text: str) -> "list[tuple[str, object, object]]":
+    """`[(raw_path, start_line_or_None, end_line_or_None), ...]` for every
+    `@path` or `@path#L10-20`/`@path#L10` mention in `text` -- pure regex,
+    no filesystem access (`Controller.ingest_at_mentions` resolves/reads
+    each one, via the Read tool's own path resolution, matching this
+    module's existing `complete_at_path`'s "no textual import" rule so
+    it's directly unit-testable)."""
+    out: "list[tuple[str, object, object]]" = []
+    for m in _AT_MENTION_LINE_RE.finditer(text or ""):
+        raw = m.group(1).rstrip(".,;:!?)")
+        if not raw:
+            continue
+        start = int(m.group(2)) if m.group(2) else None
+        end = int(m.group(3)) if (m.group(3) and start is not None) else start
+        out.append((raw, start, end))
+    return out
 
 _PRUNE_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",

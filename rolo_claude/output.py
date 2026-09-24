@@ -169,6 +169,19 @@ class PrintModeSink:
         self._pending_thinking_parts = []
 
     def _handle(self, event: ev.Event) -> None:
+        # H6 scope E: a sub-agent's own text/thinking/tool events (tagged
+        # with `agent_id`) never feed the MAIN session's text/json result
+        # -- text/json output has no nested-message shape to put them in
+        # (that's stream-json's job, output.StreamJsonSink); `--verbose`
+        # in text mode still gets a one-line breadcrumb so the work isn't
+        # invisible, without corrupting `_final_text`.
+        if event.kind in ("subagent_start", "subagent_end"):
+            if self.verbose and self.output_format == "text":
+                label = "started" if event.kind == "subagent_start" else "finished"
+                self.stream.write(f"\x1b[2m[sub-agent {label}: {event.data.get('name', '?')}]\x1b[0m\n")
+            return
+        if event.agent_id is not None:
+            return
         if event.kind == "message_start":
             if self._saw_any_message:
                 self._flush_pending_as_intermediate()
@@ -303,14 +316,15 @@ class StreamJsonSink:
         self.stream = stream or sys.stdout
         self._permission_denials = permission_denials if permission_denials is not None else []
 
-        self._has_pending_assistant = False
-        self._pending_text: list = []
-        self._pending_thinking: list = []
-        self._pending_tool_use: list = []
-        self._pending_stop_reason = None
-        self._pending_usage: dict = {}
-        self._pending_tool_results: list = []
-
+        # H6 scope E: keyed by `agent_id` (None = the main session) so a
+        # sub-agent's own text/tool_use/tool_result stream never corrupts
+        # the PARENT's pending assistant message -- every event a child
+        # session produces arrives here tagged (agent/subagent.py's
+        # `_tag()` sets both `Event.agent_id` and `data["parent_tool_use_
+        # id"]`), and each agent_id gets its own independent buffer,
+        # flushed into its own `assistant`/`user` lines the same shape the
+        # main session's own lines use, plus `parent_tool_use_id`.
+        self._buffers: dict = {}
         self._final_text = ""
         self._usage: dict = {}
         self._total_cost_usd: Optional[float] = None
@@ -341,70 +355,99 @@ class StreamJsonSink:
             "rolo_claude_version": __import__("rolo_claude").__version__,
         })
 
-    def _flush_pending(self) -> None:
-        if self._has_pending_assistant:
+    def _buf(self, agent_id: Optional[str]) -> dict:
+        return self._buffers.setdefault(agent_id, {
+            "active": False, "text": [], "thinking": [], "tool_use": [], "tool_results": [],
+            "stop_reason": None, "usage": {}, "parent_tool_use_id": None,
+        })
+
+    def _flush_pending(self, agent_id: Optional[str]) -> None:
+        buf = self._buf(agent_id)
+        extra = {"parent_tool_use_id": buf["parent_tool_use_id"]} if agent_id is not None else {}
+        if buf["active"]:
             content = []
-            thinking = "".join(self._pending_thinking)
+            thinking = "".join(buf["thinking"])
             if thinking:
                 content.append({"type": "thinking", "thinking": thinking})
-            text = think_tag_strip("".join(self._pending_text))
+            text = think_tag_strip("".join(buf["text"]))
             if text:
                 content.append({"type": "text", "text": text})
-            content.extend(self._pending_tool_use)
+            content.extend(buf["tool_use"])
             self._write({
                 "type": "assistant", "session_id": self.session_id,
                 "message": {"role": "assistant", "model": self.model, "content": content,
-                            "stop_reason": self._pending_stop_reason, "usage": self._pending_usage},
+                            "stop_reason": buf["stop_reason"], "usage": buf["usage"]},
+                **extra,
             })
-            self._has_pending_assistant = False
-            self._pending_text, self._pending_thinking, self._pending_tool_use = [], [], []
-            self._pending_stop_reason, self._pending_usage = None, {}
-        if self._pending_tool_results:
+            buf["active"] = False
+            buf["text"], buf["thinking"], buf["tool_use"] = [], [], []
+            buf["stop_reason"], buf["usage"] = None, {}
+        if buf["tool_results"]:
             self._write({
                 "type": "user", "session_id": self.session_id,
-                "message": {"role": "user", "content": list(self._pending_tool_results)},
+                "message": {"role": "user", "content": list(buf["tool_results"])},
+                **extra,
             })
-            self._pending_tool_results = []
+            buf["tool_results"] = []
 
     def _handle(self, event: ev.Event) -> None:
         kind = event.kind
+        agent_id = event.agent_id
+        parent_tool_use_id = event.data.get("parent_tool_use_id") if isinstance(event.data, dict) else None
+
+        if kind == "subagent_start":
+            self._write({"type": "subagent_start", "session_id": self.session_id, "agent_id": agent_id,
+                          "name": event.data.get("name"), "description": event.data.get("description"),
+                          "parent_tool_use_id": event.data.get("parent_tool_use_id")})
+            return
+        if kind == "subagent_end":
+            self._write({"type": "subagent_stop", "session_id": self.session_id, "agent_id": agent_id,
+                          "name": event.data.get("name"), "parent_tool_use_id": event.data.get("parent_tool_use_id")})
+            return
+
+        buf = self._buf(agent_id)
+        if parent_tool_use_id is not None:
+            buf["parent_tool_use_id"] = parent_tool_use_id
         if kind == "message_start":
-            self._flush_pending()
-            self._has_pending_assistant = True
+            self._flush_pending(agent_id)
+            buf["active"] = True
         elif kind == "text_delta":
-            self._pending_text.append(event.data.get("text", ""))
-            if self.include_partial_messages:
+            buf["text"].append(event.data.get("text", ""))
+            if self.include_partial_messages and agent_id is None:
                 self._write({"type": "stream_event", "session_id": self.session_id, "event": {
                     "type": "content_block_delta", "delta": {"type": "text_delta", "text": event.data.get("text", "")}}})
         elif kind == "thinking_delta":
-            self._pending_thinking.append(event.data.get("text", ""))
-            if self.include_partial_messages:
+            buf["thinking"].append(event.data.get("text", ""))
+            if self.include_partial_messages and agent_id is None:
                 self._write({"type": "stream_event", "session_id": self.session_id, "event": {
                     "type": "content_block_delta", "delta": {"type": "thinking_delta", "text": event.data.get("text", "")}}})
         elif kind == "tool_use_ready":
-            self._pending_tool_use.append({"type": "tool_use", "id": event.data.get("id"),
-                                            "name": event.data.get("name"), "input": event.data.get("input") or {}})
+            buf["tool_use"].append({"type": "tool_use", "id": event.data.get("id"),
+                                     "name": event.data.get("name"), "input": event.data.get("input") or {}})
         elif kind == "tool_result":
-            self._pending_tool_results.append({"type": "tool_result", "tool_use_id": event.data.get("id"),
-                                                "content": event.data.get("summary", ""),
-                                                "is_error": not event.data.get("ok", True)})
+            buf["tool_results"].append({"type": "tool_result", "tool_use_id": event.data.get("id"),
+                                         "content": event.data.get("summary", ""),
+                                         "is_error": not event.data.get("ok", True)})
         elif kind == "message_end":
-            self._pending_stop_reason = event.data.get("stop_reason")
-            self._pending_usage = event.data.get("usage") or {}
-            _merge_usage(self._usage, self._pending_usage)
-            self._stop_reason = self._pending_stop_reason
-            cost = event.data.get("cost_usd")
-            if cost is not None:
-                self._total_cost_usd = cost
-                if self.max_budget_usd is not None and cost >= self.max_budget_usd:
-                    self._budget_exceeded = True
+            buf["stop_reason"] = event.data.get("stop_reason")
+            buf["usage"] = event.data.get("usage") or {}
+            if agent_id is None:
+                _merge_usage(self._usage, buf["usage"])
+                self._stop_reason = buf["stop_reason"]
+                cost = event.data.get("cost_usd")
+                if cost is not None:
+                    self._total_cost_usd = cost
+                    if self.max_budget_usd is not None and cost >= self.max_budget_usd:
+                        self._budget_exceeded = True
         elif kind == "error":
-            self._had_error = True
-            self._error_message = event.data.get("message")
+            if agent_id is None:
+                self._had_error = True
+                self._error_message = event.data.get("message")
         elif kind == "turn_done":
-            self._num_turns = event.turn
-            self._final_text = think_tag_strip("".join(self._pending_text))
-            self._flush_pending()
+            if agent_id is None:
+                self._num_turns = event.turn
+                self._final_text = think_tag_strip("".join(buf["text"]))
+            self._flush_pending(agent_id)
 
     def consume(self, event_iter: Iterator[ev.Event]) -> int:
         """Emits `init` only the first time (see `emit_init`), then drains

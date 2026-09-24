@@ -32,9 +32,12 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator, Optional
 
 from rolo_claude import events
+from rolo_claude.agent.planmode import PLAN_MODE_NOTE, ensure_plan_file, write_plan
+from rolo_claude.agent.subagent import AgentRuntime
 from rolo_claude.agent.compact import (
     build_files_read_snapshot, build_summary_instruction, resolve_knobs, select_verbatim_tail,
     should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
@@ -294,6 +297,8 @@ class Session:
         permission_engine: Optional[PermissionEngine] = None,
         session_catalog: Optional[object] = None, mcp_manager: Optional[object] = None,
         hook_runner: Optional[HookRunner] = None,
+        agents: Optional[dict] = None, routes: Optional[dict] = None, agent_depth: int = 0,
+        agent_type_restriction: Optional[set] = None,
     ):
         self.cwd = cwd
         self.model_ref = model_ref
@@ -408,6 +413,33 @@ class Session:
         # reset at the start of every new turn() call, never carried from
         # a previous turn.
         self._stop_hook_active = False
+        # H6 scope B: the Agent/Task tool's own context -- `agent_depth`
+        # is 0 for every top-level session and 1 for a sub-agent's own
+        # child Session (agent/subagent.py._build_child_session passes
+        # `agent_depth=parent's + 1`); `run_agent_call` refuses outright
+        # once depth reaches MAX_DEPTH, which is what actually enforces
+        # "a sub-agent cannot itself spawn further sub-agents" -- `agents`
+        # (the discovered AgentSpec catalog) and `routes` (routes.json,
+        # for model-ref resolution) are supplied by whoever builds this
+        # Session (headless.py/tui/bootstrap.py); both default to {} for
+        # every pre-H6 test and a bare Session, in which case the Agent
+        # tool still works but only ever knows the 3 built-in specs.
+        self.agent_runtime = AgentRuntime(parent=self, agents=(agents or {}), routes=(routes or {}),
+                                           depth=agent_depth)
+        self.agent_type_restriction = agent_type_restriction
+        # H6 scope F: background sub-agent completions wait here (a plain
+        # list under a lock, exactly like the steering queue) until the
+        # NEXT turn() call applies them as a user-role notice (dsh: "report
+        # completion as a user-role notice in the next step").
+        self._pending_agent_notices: list = []
+        self._agent_notices_lock = threading.Lock()
+        # H6 scope C: plan mode's pending ExitPlanMode wait -- mirrors
+        # `_permission_waiters`/`_question_waiters` (a request_id-keyed
+        # dict + threading.Event) but only ever has ONE live entry at a
+        # time (a whole turn blocks on ExitPlanMode; PlanCard's own reply
+        # carries no request_id to key on either -- see resolve_plan).
+        self._plan_waiters: dict = {}
+        self._pending_plan_id: Optional[str] = None
 
         self.log = session_log or SessionLog(cwd)
         existing_nodes = self.log.nodes()
@@ -1174,6 +1206,7 @@ class Session:
         # bounded anything inside a tool loop; only the identical-call
         # breaker (a SEPARATE guard, kept as-is) did.
         model_calls = 0
+        yield from self._apply_pending_agent_notices(turn_no)
         while True:
             if model_calls >= self.max_turns:
                 # H5 scope F item 9 (OpenCode Appendix H): inject
@@ -1407,6 +1440,18 @@ class Session:
             return item
         if count >= _LOOP_BREAKER_DENY_AT:
             item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
+            return item
+
+        if name in ("EnterPlanMode", "ExitPlanMode"):
+            # H6 scope C: both are special-cased entirely in
+            # `_dispatch_tools` (a mode switch / a plan-review round trip,
+            # neither of which the generic permission-decide pipeline
+            # models) -- exactly like AskUserQuestion just below, this
+            # bypasses decide() outright rather than asking "may this tool
+            # run" about a tool whose own body already handles user
+            # confirmation on its own terms.
+            item["special"] = name
+            item["ready"] = True
             return item
 
         if name == "AskUserQuestion" and self.interactive:
@@ -1661,6 +1706,44 @@ class Session:
         slot["event"].set()
         return True
 
+    def resolve_plan(self, decision) -> bool:
+        """Called from the UI THREAD (`Controller.answer_plan`, DIRECTLY --
+        never through the command queue, same reasoning as
+        `resolve_permission`/`resolve_question`: the worker is parked
+        inside the running turn's `ExitPlanMode` wait, not polling
+        `commands`): answer the ONE pending plan review. `decision` is a
+        `{"approved": bool, "feedback": str, "mode_after": str|None}` dict
+        (PlanCard's own shape). Plan mode never has more than one pending
+        review at a time (a whole turn blocks on ExitPlanMode), so unlike
+        `resolve_permission`/`resolve_question` there is no caller-supplied
+        request_id to match against -- `self._pending_plan_id` (set by
+        `_dispatch_tools` right before it starts waiting) is authoritative.
+        Returns False when nothing is waiting."""
+        request_id = self._pending_plan_id
+        if request_id is None:
+            return False
+        slot = self._plan_waiters.get(request_id)
+        if slot is None:
+            return False
+        slot["decision"] = decision
+        slot["event"].set()
+        return True
+
+    def _apply_pending_agent_notices(self, turn_no: int):
+        """Pop every queued background-sub-agent-completion notice and
+        apply each as a user-role message (H6 scope F / dsh: "background
+        jobs ... report completion as a user-role notice in the next
+        step") -- called once at the START of `_turn_body`, so the model
+        sees any sub-agent that finished while this session was between
+        turns (or during a PRIOR turn's own tool dispatch) before it does
+        anything else this turn."""
+        with self._agent_notices_lock:
+            notices, self._pending_agent_notices = self._pending_agent_notices, []
+        for text in notices:
+            self.log.append_user([{"type": "text", "text": text}])
+            yield events.user_message(text, turn=turn_no)
+            yield events.notification(f"Sub-agent finished: {text.splitlines()[0]}")
+
     def _await_reply(self, waiters: dict, request_id: str, *, timeout: Optional[float] = None):
         """Block the WORKER thread until a UI-thread `resolve_*` call answers
         `request_id` or the session's abort Event is set (the escape hatch:
@@ -1723,6 +1806,85 @@ class Session:
                                       "reason": getattr(decision, "reason", "") or item.get("ask_reason", ""),
                                       "suggested_rule": item.get("suggested_rule")}
 
+    def _handle_enter_plan_mode(self, turn_no: int, item: dict) -> Iterator[events.Event]:
+        """H6 scope C: model-initiated `EnterPlanMode` -- always succeeds
+        (D-CFG: "allowed in -p"; interactive sessions get a `notification`
+        rather than a full ask round trip, since the mode switch itself
+        touches nothing). Ensures the session's plan file exists (reused
+        across repeated EnterPlanMode calls in the same session) and logs
+        `PLAN_MODE_NOTE` as a snapshot so the model's own next request
+        carries the "research, then ExitPlanMode" instruction."""
+        settings = getattr(self.session_context, "settings", None)
+        plan_path = ensure_plan_file(self.cwd, settings, existing=self.permission_engine.plan_file)
+        self.permission_engine.mode = "plan"
+        self.permission_engine.set_plan_file(plan_path)
+        self.log.append_snapshot([{"type": "text", "text": PLAN_MODE_NOTE}], kind="plan_mode")
+        item["result"] = ToolResult(f"Entered plan mode. Plan file: {plan_path}\n\n{PLAN_MODE_NOTE}")
+        yield events.notification(f"Plan mode entered (plan file: {plan_path})")
+        yield events.status(phase="thinking", model=self.model_ref.raw, turn=turn_no, permission_mode="plan")
+
+    def _handle_exit_plan_mode(self, turn_no: int, item: dict) -> Iterator[events.Event]:
+        """H6 scope C: `ExitPlanMode(plan)` writes the plan file and either
+        (interactive) emits `plan_review` and BLOCKS on `resolve_plan`
+        (Controller.answer_plan's direct call, mirroring `resolve_permission`/
+        `resolve_question`), or (print mode / a bare Session) resolves
+        immediately: `-p` auto-approves only under acceptEdits/
+        bypassPermissions, else the plan text itself becomes the turn's
+        visible result (`_plan_as_final_text`, emitted as a synthetic
+        assistant message by the caller right after this tool's result)."""
+        tool_id = item["tool_id"]
+        plan_text = (item.get("input") or {}).get("plan") or ""
+        settings = getattr(self.session_context, "settings", None)
+        plan_path = ensure_plan_file(self.cwd, settings, existing=self.permission_engine.plan_file)
+        self.permission_engine.set_plan_file(plan_path)
+        write_plan(plan_path, plan_text)
+
+        if self.interactive:
+            self._plan_waiters[tool_id] = {"event": threading.Event(), "decision": None}
+            self._pending_plan_id = tool_id
+            yield events.Event("plan_review", {"id": tool_id, "plan": plan_text, "path": str(plan_path)}, turn=turn_no)
+            decision = self._await_reply(self._plan_waiters, tool_id)
+            self._pending_plan_id = None
+            if decision is None:
+                item["result"] = ToolResult(
+                    "The plan review was dismissed or the turn was interrupted; the plan was not approved.",
+                    is_error=True,
+                )
+                return
+            approved = bool(decision.get("approved"))
+            feedback = (decision.get("feedback") or "").strip()
+            if approved:
+                mode_after = decision.get("mode_after") or "acceptEdits"
+                self.permission_engine.mode = mode_after
+                item["result"] = ToolResult("User approved the plan; implement it.")
+            else:
+                text = "The user did not approve the plan."
+                if feedback:
+                    text += f" Feedback: {feedback}"
+                item["result"] = ToolResult(text, is_error=True)
+            return
+
+        if self.permission_engine.mode in ("acceptEdits", "bypassPermissions"):
+            item["result"] = ToolResult("User approved the plan; implement it.")
+            return
+        # No interactive reviewer and the mode doesn't auto-approve: the
+        # plan text itself IS the turn's answer (brief C: "else the plan
+        # text is the result") -- end the turn right after this tool
+        # result, with no further model call.
+        item["result"] = ToolResult(plan_text)
+        item["end_turn"] = True
+        item["_plan_as_final_text"] = plan_text
+
+    def _emit_plan_as_final_text(self, turn_no: int, plan_text: str) -> Iterator[events.Event]:
+        """A synthetic assistant message carrying `plan_text` verbatim, so
+        every sink (PrintModeSink/StreamJsonSink/the TUI transcript) shows
+        the plan as the turn's final answer with zero sink-side special
+        casing -- see `_handle_exit_plan_mode`'s own docstring."""
+        self.log.append_assistant(content=[{"type": "text", "text": plan_text}], stop_reason="end_turn")
+        yield events.message_start(turn=turn_no, model=self.model_ref.raw)
+        yield events.text_delta(plan_text, turn=turn_no)
+        yield events.message_end(turn=turn_no, stop_reason="end_turn", usage={})
+
     def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None) -> Iterator[events.Event]:
         """Runs every tool_use in this assistant turn, per call, in order:
         length/malformed short-circuit (finding 3) -> basic shape validate
@@ -1747,13 +1909,46 @@ class Session:
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
-                           mcp_manager=self.mcp_manager,
+                           mcp_manager=self.mcp_manager, agent_runtime=self.agent_runtime,
                            session_allow_rule=lambda rule_text: self.permission_engine.add_session_allow_rule(
                                rule_text, temporary=True))
         repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
 
         end_turn = False
         pending_batch: list = []  # `item` dicts: a run of consecutive READY read-only calls, dispatch deferred
+        agent_batch: list = []    # `item` dicts: a run of consecutive READY Agent/Task calls, <=4 concurrent (H6 scope B)
+
+        def _dispatch_agent_batch() -> None:
+            """Runs every item in `agent_batch` via agent/subagent.py's
+            `run_agent_call` DIRECTLY (never `tool_registry.dispatch`, so
+            the child's own tagged events come back for replay) -- a
+            dedicated pool, never the read-only one (whose fixed 30s
+            per-call cap is far too short for a real multi-turn child)."""
+            from rolo_claude.agent.subagent import run_agent_call
+
+            def _run_one(it: dict) -> None:
+                child_events, tr = run_agent_call(
+                    runtime=self.agent_runtime, tool_id=it["tool_id"], tool_input=it["input"], tool_name=it["name"],
+                )
+                it["_agent_events"] = child_events
+                it["result"] = tr
+
+            if len(agent_batch) == 1:
+                _run_one(agent_batch[0])
+            else:
+                with ThreadPoolExecutor(max_workers=min(4, len(agent_batch))) as pool:
+                    list(pool.map(_run_one, agent_batch))
+
+        def _flush_agent_batch_items():
+            nonlocal end_turn
+            for it in agent_batch:
+                for child_ev in it.pop("_agent_events", None) or []:
+                    yield child_ev
+                yield from self._finalize_tool_result(turn_no, it, ctx.session_dir)
+                if it.get("_plan_as_final_text") is not None:
+                    yield from self._emit_plan_as_final_text(turn_no, it["_plan_as_final_text"])
+                if it.get("end_turn"):
+                    end_turn = True
 
         def _dispatch_pending_batch() -> None:
             """Actually RUN every item in `pending_batch` (fills in each
@@ -1781,6 +1976,10 @@ class Session:
                     for batched_item in pending_batch:
                         yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                     pending_batch = []
+                if agent_batch:
+                    _dispatch_agent_batch()
+                    yield from _flush_agent_batch_items()
+                    agent_batch = []
                 for remaining_tu in tool_use_blocks[i:]:
                     r_id, r_name = remaining_tu.get("id"), remaining_tu.get("name")
                     interrupted_item = {"tool_id": r_id, "name": r_name, "input": remaining_tu.get("input") or {},
@@ -1822,6 +2021,21 @@ class Session:
                                                   else json.dumps(answer, ensure_ascii=False, default=str))
                     item["ready"] = True
 
+            special = item.get("special")
+            if special == "EnterPlanMode":
+                yield from self._handle_enter_plan_mode(turn_no, item)
+            elif special == "ExitPlanMode":
+                yield from self._handle_exit_plan_mode(turn_no, item)
+
+            if item["ready"] and name in ("Agent", "Task"):
+                agent_batch.append(item)
+                continue  # deferred -- dispatched together (<=4 concurrent) when this run breaks
+
+            if agent_batch:
+                _dispatch_agent_batch()
+                yield from _flush_agent_batch_items()
+                agent_batch = []
+
             if item["ready"] and self.tool_registry.is_read_only(name):
                 pending_batch.append(item)
                 continue  # deferred -- dispatched only when the run breaks (below) or at the end
@@ -1839,7 +2053,7 @@ class Session:
                         end_turn = True
                 pending_batch = []
 
-            if item["ready"]:
+            if item["ready"] and "result" not in item:
                 # H3/H4 must-do: wire progress_cb -> tool_progress events.
                 # Solo dispatch only (never the concurrent read-only pool
                 # below, which shares ONE ctx across threads -- a per-call
@@ -1862,6 +2076,8 @@ class Session:
                 for chunk in progress_chunks.chunks:
                     yield events.Event("tool_progress", {"id": tool_id, "name": name, "text": chunk}, turn=turn_no)
             yield from self._finalize_tool_result(turn_no, item, ctx.session_dir)
+            if item.get("_plan_as_final_text") is not None:
+                yield from self._emit_plan_as_final_text(turn_no, item["_plan_as_final_text"])
             if item.get("end_turn"):
                 end_turn = True
             if self._pending_steer():
@@ -1880,6 +2096,9 @@ class Session:
                 yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                 if batched_item.get("end_turn"):
                     end_turn = True
+        if agent_batch:
+            _dispatch_agent_batch()
+            yield from _flush_agent_batch_items()
         return end_turn
 
     def _fire_post_tool_batch(self, turn_no: int, pending_batch: list) -> Iterator[events.Event]:
@@ -2078,4 +2297,8 @@ class Session:
             elif kind == "question_reply":
                 self.resolve_question(data.get("id"), data.get("answer"))
             elif kind == "plan_reply":
-                pass  # H6 wires plan mode; the card exists against this event
+                # safety net only, mirrors "permission_reply"/"question_
+                # reply" just above -- Controller.answer_plan normally
+                # calls resolve_plan() directly (this branch is unreachable
+                # while that wait is in flight).
+                self.resolve_plan(data)
