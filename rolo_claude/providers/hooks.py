@@ -196,6 +196,90 @@ _LEAK_PATTERNS = {
 }
 _GLM_ARG_RE = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
 
+# H2b repair layer (brief scope B): the remaining leak shapes the brief's
+# own format list names -- DSML (DeepSeek V3.2+/V4:
+# research_notes/.../deepseek_kimi_adapters.md:35), Qwen3-Coder/Qwen3.5's
+# `<function=...><parameter=...>` XML (glm_qwen_minimax_adapters.md:44),
+# MiniMax M2.x's `<minimax:tool_call><invoke>` and M1's plain
+# `<tool_calls>{json}</tool_calls>` (glm_qwen_minimax_adapters.md:53/56),
+# and fenced JSON with a "name" key. Each needs MORE than the flat
+# (name_group, args_group) shape the dict above handles (nested tag
+# extraction, or scanning several fenced blocks) -- registered as
+# EXTRACTOR FUNCTIONS instead, tried by the SAME `profile.tool_leak_patterns`
+# name lookup in `leak_parser` below, so a profile row never has to know
+# which of the two internal mechanisms serves its own pattern name.
+_DSML_INVOKE_RE = re.compile(r"<｜DSML｜invoke\s+name=\"([^\"]+)\"\s*>(.*?)</｜DSML｜invoke>", re.DOTALL)
+_DSML_PARAM_RE = re.compile(r"<｜DSML｜parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</｜DSML｜parameter>", re.DOTALL)
+_QWEN_FUNCTION_RE = re.compile(r"<function=([^>]+)>(.*?)</function>", re.DOTALL)
+_QWEN_PARAMETER_RE = re.compile(r"<parameter=([^>]+)>(.*?)</parameter>", re.DOTALL)
+_MINIMAX_INVOKE_RE = re.compile(
+    r"<minimax:tool_call>\s*<invoke\s+name=\"([^\"]+)\"\s*>(.*?)</invoke>\s*</minimax:tool_call>", re.DOTALL,
+)
+_MINIMAX_PARAM_RE = re.compile(r"<parameter\s+name=\"([^\"]+)\"\s*>(.*?)</parameter>", re.DOTALL)
+_MINIMAX_M1_RE = re.compile(r"<tool_calls>\s*(\{.*?\})\s*</tool_calls>", re.DOTALL)
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _tag_params(blob: str, param_re) -> dict:
+    return {k.strip(): v.strip() for k, v in param_re.findall(blob)}
+
+
+def _extract_dsml(text: str) -> Optional[dict]:
+    m = _DSML_INVOKE_RE.search(text)
+    if not m:
+        return None
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _DSML_PARAM_RE)}
+
+
+def _extract_qwen3_coder_xml(text: str) -> Optional[dict]:
+    m = _QWEN_FUNCTION_RE.search(text)
+    if not m:
+        return None
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _QWEN_PARAMETER_RE)}
+
+
+def _extract_minimax_invoke_xml(text: str) -> Optional[dict]:
+    m = _MINIMAX_INVOKE_RE.search(text)
+    if not m:
+        return None
+    return {"name": m.group(1).strip(), "arguments": _tag_params(m.group(2), _MINIMAX_PARAM_RE)}
+
+
+def _extract_minimax_m1_tool_calls(text: str) -> Optional[dict]:
+    m = _MINIMAX_M1_RE.search(text)
+    if not m:
+        return None
+    parsed = args_repair(m.group(1))
+    if isinstance(parsed, dict) and isinstance(parsed.get("name"), str):
+        return {"name": parsed["name"], "arguments": parsed.get("arguments") or {}}
+    return None
+
+
+def _extract_fenced_json(text: str) -> Optional[dict]:
+    for m in _FENCED_JSON_RE.finditer(text):
+        parsed = args_repair(m.group(1))
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str):
+            continue
+        args = parsed.get("arguments")
+        if not isinstance(args, dict):
+            args = parsed.get("input") if isinstance(parsed.get("input"), dict) else parsed.get("parameters")
+        return {"name": parsed["name"], "arguments": args if isinstance(args, dict) else {}}
+    return None
+
+
+# name -> extractor(text) -> {"name","arguments"} | None. Tried BEFORE
+# `_LEAK_PATTERNS` in `leak_parser` (a name is never in both dicts).
+_LEAK_EXTRACTORS = {
+    "dsml": _extract_dsml,
+    "qwen3_coder_xml": _extract_qwen3_coder_xml,
+    "minimax_invoke_xml": _extract_minimax_invoke_xml,
+    "minimax_m1_tool_calls": _extract_minimax_m1_tool_calls,
+    # model_table.json uses both names for a fenced-JSON-with-name shape
+    # (no row distinguishes them further) -- same extractor for both.
+    "json_text_call": _extract_fenced_json,
+    "name_json_text": _extract_fenced_json,
+}
+
 
 def leak_parser(text: str, profile) -> Optional[dict]:
     """Called from agent/loop.py's `_turn_body` ONLY when a tool call was
@@ -208,6 +292,12 @@ def leak_parser(text: str, profile) -> Optional[dict]:
     if not text or not profile.tool_leak_patterns:
         return None
     for pattern_name in profile.tool_leak_patterns:
+        extractor = _LEAK_EXTRACTORS.get(pattern_name)
+        if extractor is not None:
+            result = extractor(text)
+            if result is not None:
+                return result
+            continue
         rx = _LEAK_PATTERNS.get(pattern_name)
         if rx is None:
             continue

@@ -46,6 +46,8 @@ def _looks_binary(path: Path) -> bool:
 class ReadTool(Tool):
     name = "Read"
     description = DESCRIPTION
+    is_read_only = True
+    result_cap = None  # manages its own line/char caps below -- see _MAX_RESULT_CHARS
     input_schema = {
         "type": "object",
         "properties": {
@@ -58,6 +60,9 @@ class ReadTool(Tool):
 
     def summary(self, input: dict) -> str:
         return f"Read({input.get('file_path', '')})"
+
+    def permission_content(self, input: dict) -> str:
+        return input.get("file_path", "") if isinstance(input, dict) else ""
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         file_path = input.get("file_path") if isinstance(input, dict) else None
@@ -108,6 +113,13 @@ class ReadTool(Tool):
                 has_more = f.readline() != ""
         except OSError as e:
             return ToolResult(f"Error reading file: {e}", is_error=True)
+
+        # H2: record this Read in the session's shared cache (mtime AT READ
+        # TIME) -- Write's must-Read-first check and Edit's stale-file check
+        # both consult this same dict (agent/loop.py threads ONE ToolContext.
+        # read_cache instance through every dispatch call in a session).
+        if isinstance(getattr(ctx, "read_cache", None), dict):
+            ctx.read_cache[str(path)] = st.st_mtime
 
         numbered = []
         for i, line in enumerate(selected):

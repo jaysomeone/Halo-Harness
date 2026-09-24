@@ -38,6 +38,7 @@ class SessionContext:
         # untrusted project/local layer's allow/env/hooks/autoMemoryDirectory
         # never reach anything downstream.
         claude_json = load_claude_json()
+        self.claude_json = claude_json  # H2 scope C: headless.py reuses this for projects[cwd].allowedTools
         self.trusted = is_trusted(self.cwd, claude_json)
         self.settings = resolve_settings(
             self.cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=self.trusted,

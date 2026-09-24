@@ -91,21 +91,38 @@ def test_finding_14_memory_snapshot_includes_directory_path(ctx: Ctx):
 
 @test
 def test_finding_14_no_false_capability_promises_in_prompt(ctx: Ctx):
-    """finding 14: with only the Read tool registered (H2's actual tool
-    set), the system prompt must not claim it can write memory, run a
-    test, or that no MCP servers exist -- and the MCP sentence must be
-    honest about what this BUILD can't do, not about what the user has
-    configured."""
+    """finding 14: with only the Read tool registered (a registry that
+    genuinely has no Write/Bash -- H0's own shape), the system prompt must
+    not claim it can write memory or run a test; the MCP sentence must
+    always be honest about what this BUILD can't do, not about what the
+    user has configured, regardless of registry shape."""
     from rolo_claude.agent.prompt import build_system_prompt
+    from rolo_claude.tools.read import ReadTool
     from rolo_claude.tools.registry import ToolRegistry
     prompt = build_system_prompt(model_label="or:mock/model", cwd="/tmp/x",
-                                  tool_definitions=ToolRegistry().definitions(), family="generic")
+                                  tool_definitions=ToolRegistry(tools=[ReadTool()]).definitions(), family="generic")
     ctx.check('no "write it ONLY inside that memory directory" promise (no Write tool)',
               "write it ONLY inside" not in prompt)
     ctx.check('no "running a test" promise (no Bash tool)', "running a test" not in prompt)
     ctx.check('no false "No MCP servers are configured" claim', "No MCP servers are configured" not in prompt)
     ctx.check('honest "not available in this build" MCP framing present',
               "MCP tools are not available in this build" in prompt)
+
+
+@test
+def test_finding_14_capability_promises_appear_once_the_tools_exist(ctx: Ctx):
+    """The flip side of finding 14, now that H2's default registry actually
+    HAS Write and Bash: the SAME registry-driven sentences must now
+    promise memory-writing and mention running a test, proving prompt.py's
+    logic is genuinely registry-driven (not just permanently "off")."""
+    from rolo_claude.agent.prompt import build_system_prompt
+    from rolo_claude.tools.registry import ToolRegistry
+    prompt = build_system_prompt(model_label="or:mock/model", cwd="/tmp/x",
+                                  tool_definitions=ToolRegistry().definitions(), family="generic")
+    ctx.check('memory-write promise present now that Write exists',
+              "write it ONLY inside" in prompt)
+    ctx.check('"running a test" verification option present now that Bash exists',
+              "running a test" in prompt)
 
 
 @test

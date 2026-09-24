@@ -52,10 +52,16 @@ def build_result_object(
     result_text: str,
     is_error: bool = False,
     subtype: str = "success",
+    permission_denials: Optional[list] = None,
 ) -> dict:
     """The `-p --output-format json` result object -- a subset of plan
-    D-TUI's full shape (permission_denials/duration_ms/uuid are TUI/hook/
-    permission concerns that don't exist yet in H0's tool-less loop)."""
+    D-TUI's full shape (duration_ms/uuid are TUI/hook concerns that don't
+    exist yet in this build). H2 scope D: `permission_denials` is a list of
+    `{"tool_name","tool_input","reason"}` -- one entry per `ask`-turned-
+    deny outcome print mode hit this turn (D6: "an `ask` outcome -> deny
+    with an error tool_result naming the suggested rule" -- this is the
+    SAME information surfaced structurally for a `--output-format json`
+    caller, empty when nothing was denied for that reason)."""
     return {
         "type": "result",
         "subtype": subtype,
@@ -67,6 +73,7 @@ def build_result_object(
         "usage": usage or {},
         "total_cost_usd": total_cost_usd,
         "model": model,
+        "permission_denials": permission_denials or [],
     }
 
 
@@ -79,7 +86,7 @@ class PrintModeSink:
     1 on an error event)."""
 
     def __init__(self, *, output_format: str = "text", session_id: str = "", model: str = "", stream=None,
-                 verbose: bool = False):
+                 verbose: bool = False, permission_denials: Optional[list] = None):
         if output_format not in ("text", "json"):
             raise ValueError(f"unsupported output format: {output_format!r} (H0 supports text|json only)")
         self.output_format = output_format
@@ -87,6 +94,10 @@ class PrintModeSink:
         self.model = model
         self.stream = stream or sys.stdout
         self.verbose = verbose
+        # A reference to the CALLER's (agent/loop.py Session's own) list --
+        # mutated in place as the turn runs, so it's complete by the time
+        # `finish()` reads it after `consume()` has drained the generator.
+        self._permission_denials = permission_denials if permission_denials is not None else []
         self._pending_text_parts: list = []
         self._pending_thinking_parts: list = []
         self._final_text = ""  # the LAST message's text, decided once turn_done fires
@@ -133,6 +144,25 @@ class PrintModeSink:
             self._pending_thinking_parts.append(event.data.get("text", ""))
         elif event.kind == "text_delta":
             self._pending_text_parts.append(event.data.get("text", ""))
+        elif event.kind == "tool_use_ready":
+            # H2 scope D acceptance: "three tool calls visible with
+            # --verbose" -- a real Anthropic client shows a tool-use card
+            # for every call; text-mode --verbose gets the plain-text
+            # equivalent (dimmed, like thinking), never shown non-verbose
+            # (the whole point of --verbose here is showing the WORK, not
+            # just the final answer).
+            if self.verbose and self.output_format == "text":
+                name = event.data.get("name", "?")
+                tool_input = event.data.get("input") or {}
+                summary = json_module.dumps(tool_input, default=str)
+                if len(summary) > 200:
+                    summary = summary[:200] + "...}"
+                repaired = " (repaired)" if event.data.get("repaired") else ""
+                self.stream.write(f"\x1b[2m[tool] {name}{repaired} {summary}\x1b[0m\n")
+        elif event.kind == "tool_result":
+            if self.verbose and self.output_format == "text":
+                ok = "ok" if event.data.get("ok") else "error"
+                self.stream.write(f"\x1b[2m[tool result: {ok}]\x1b[0m\n")
         elif event.kind == "message_end":
             self._stop_reason = event.data.get("stop_reason")
             _merge_usage(self._usage, event.data.get("usage") or {})
@@ -173,6 +203,7 @@ class PrintModeSink:
                 result_text=self._final_text,
                 is_error=self._had_error,
                 subtype="error_during_execution" if self._had_error else "success",
+                permission_denials=self._permission_denials,
             )
             print(json_module.dumps(obj))
         return 1 if self._had_error else 0

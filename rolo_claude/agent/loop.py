@@ -30,13 +30,16 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Iterator, Optional
 
 from rolo_claude import events
 from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
-from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results
+from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
 from rolo_claude.agent.log import SessionLog
+from rolo_claude.agent.repair import repair_assistant_turn
 from rolo_claude.model import CostMeter, ModelProfile, ModelRef
+from rolo_claude.permissions import Decision, PermissionEngine
 from rolo_claude.providers.errors import CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, backoff_delay, is_reasoning_replay_bug
 from rolo_claude.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
@@ -50,7 +53,8 @@ from rolo_claude.providers.stream import (
     UpstreamError, stream_completion,
 )
 from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.registry import ToolRegistry
+from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+from rolo_claude.tools.truncate import spill_and_truncate
 
 log = logging.getLogger("bridge")
 
@@ -96,6 +100,21 @@ def _reasoning_details_display_text(details) -> str:
     return "".join(parts)
 
 
+# H2 scope B: the tool_choice=required retry must NEVER fire on an
+# ordinary, legitimate final answer (the overwhelmingly common case when a
+# tool call is absent -- the model is simply DONE) -- only on a genuine
+# signal the model ATTEMPTED a text-embedded call whose full leak_parser
+# regex didn't cleanly match (truncated/malformed markup). Plain substring
+# checks, not `leak_parser`'s own precise regexes, so a partially-formed
+# or slightly-off tag still counts as "attempted" even though it couldn't
+# be parsed into a usable call.
+_LEAK_ATTEMPT_MARKERS = ("<tool_call", "<｜DSML｜", "<|tool_call", "<minimax:tool_call", "<function=")
+
+
+def _looks_like_attempted_tool_call(text: str) -> bool:
+    return bool(text) and any(marker in text for marker in _LEAK_ATTEMPT_MARKERS)
+
+
 def _rough_estimate(system_text: str, messages: list) -> int:
     """len(json)/4, matching providers.config.estimate_tokens' own rule of
     thumb -- used only for the max_tokens budget headroom calculation."""
@@ -127,6 +146,7 @@ class Session:
         small_model_ref: Optional[ModelRef] = None, session_log: Optional[SessionLog] = None,
         max_turns: int = 50, openrouter_base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
+        permission_engine: Optional[PermissionEngine] = None,
     ):
         self.cwd = cwd
         self.model_ref = model_ref
@@ -149,6 +169,20 @@ class Session:
         # in `-p`) sets this; `_step` passes it into `stream_completion`
         # (cuts phase 2 short) and observes it in every retry wait.
         self.abort = threading.Event()
+        # H2 scope D: ONE PermissionEngine + ONE pair of read_cache/
+        # bash_state dicts for the session's WHOLE lifetime -- every
+        # ToolContext built in `_dispatch_tools` shares these same dict
+        # instances (never a fresh one per call), which is what makes
+        # Write's must-Read-first check and Bash's `cd` persistence work
+        # across separate tool_use calls. `permission_engine=None` (a bare
+        # Session in a unit test) means "allow everything" (auto, no
+        # rules) so existing tests that never set one up keep working.
+        self.permission_engine = permission_engine or PermissionEngine(mode="auto", cwd=cwd)
+        self._read_cache: dict = {}
+        self._bash_state: dict = {"cwd": cwd}
+        # print-mode `ask` denials accumulate here for the json result's
+        # `permission_denials` (rolo_claude/output.py reads this list).
+        self.permission_denials: list = []
 
         self.log = session_log or SessionLog(cwd)
         existing_nodes = self.log.nodes()
@@ -187,7 +221,7 @@ class Session:
 
     # ---- request construction ------------------------------------------
 
-    def _derive_and_build(self):
+    def _derive_and_build(self, tool_choice=None):
         # finding 4: tools=None makes derive_request fall back to the
         # logged meta node's FROZEN catalog, never the live registry --
         # what actually reached the model must match what a later replay
@@ -202,7 +236,7 @@ class Session:
             profile=self.provider_profile, effort=self.effort,
             context_tokens=self.model_profile.context_tokens,
             prompt_estimate=_rough_estimate(system_text, messages),
-            requested_max_tokens=requested_max_tokens,
+            requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
         )
         return system_text, messages, tools, body
 
@@ -235,7 +269,7 @@ class Session:
 
     # ---- one model call --------------------------------------------------
 
-    def _step(self, turn_no: int):
+    def _step(self, turn_no: int, tool_choice=None):
         """One model call, streamed: yields translated Events AS EACH wire
         event arrives (never buffers the whole reply before yielding
         anything) and `return`s a `_StepResult` (retrieved by the caller
@@ -247,9 +281,17 @@ class Session:
         DeepSeek reasoning-replay 400 is a request-builder BUG, surfaced
         immediately on EITHER phase, never retried; an empty completion
         (finding 7) and a `length` reply with <=1 output token
-        (finding 3) are each a provider failure, not retried in place."""
+        (finding 3) are each a provider failure, not retried in place.
+        `tool_choice` (H2 scope B: the repair layer's own one-shot
+        `tool_choice: required` retry, called from `_turn_body` -- never
+        set on an ordinary call) is forwarded straight to
+        `build_request_body`, which downgrades it to "auto" itself for any
+        profile row that doesn't support "required" (DeepSeek thinking/
+        GLM/Qwen -- `_turn_body` also checks this UP FRONT so it never even
+        calls `_step` with "required" for those rows, but the downgrade
+        stays as a second, cheap line of defense)."""
         try:
-            _, _, _, body = self._derive_and_build()
+            _, _, _, body = self._derive_and_build(tool_choice=tool_choice)
         except ToolCatalogTooLarge as e:
             # must-do 4: today this escaped as a bare traceback.
             yield events.error(
@@ -450,6 +492,19 @@ class Session:
         return _StepResult(assistant_blocks=cleaned, stop_reason=stop_reason, usage=usage, reasoning=reasoning,
                             body=body, tool_call_flags=harness_meta.get("tool_call_flags") or {})
 
+    def _account_usage(self, result: "_StepResult") -> None:
+        """Record cost/usage/OTPM bookkeeping for ONE model call's real
+        `result.usage` -- called for EVERY `_step` call `_turn_body` makes,
+        including one whose assistant content is later discarded (H2 scope
+        B's tool_choice=required retry: a discarded attempt still spent
+        real tokens against the account, so it must still count here even
+        though it never becomes a logged assistant message)."""
+        cost = self.cost_meter.add_usage(self.model_ref.provider, result.usage)
+        self.log.append_usage(result.usage, cost)
+        output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
+        if self.model_ref.provider == "databricks":
+            record_databricks_output_tokens(self.model_ref.raw, output_tokens)
+
     # ---- the turn: model call(s) + tool dispatch ------------------------
 
     def turn(self, text: str, images: Optional[list] = None) -> Iterator[events.Event]:
@@ -502,18 +557,53 @@ class Session:
             if result is None:
                 yield events.turn_done(turn=turn_no, reason="error")
                 return
+            self._account_usage(result)
+
+            # H2 scope B: the repair layer's text-embedded-call handling.
+            # Only when a tool call was actually EXPECTED (tools were
+            # offered) and none arrived (report's own leak_parser scoping
+            # rule) -- try providers.hooks.leak_parser first (promotes a
+            # real tool_use, `repaired=True` downstream); only if THAT
+            # finds nothing AND the text still looks like an ATTEMPTED
+            # (truncated/malformed) text-embedded call rather than an
+            # ordinary final answer (`_looks_like_attempted_tool_call` --
+            # never retry just because no tool call happened to be needed,
+            # the overwhelmingly common "no tool_use_blocks" case), and the
+            # profile says "required" is safe for this row (never DeepSeek-
+            # thinking/GLM/Qwen), retry ONCE with tool_choice=required. The
+            # original (prose-only) `result` is
+            # discarded in favor of whichever of these actually produced a
+            # usable call -- it is deliberately never logged; only a call
+            # that will actually be DISPATCHED becomes the turn's real
+            # assistant message (a discarded attempt still spent real
+            # tokens, which `_account_usage` already recorded above).
+            tool_use_blocks = [b for b in result.assistant_blocks if b.get("type") == "tool_use"]
+            if not tool_use_blocks and result.body.get("tools") and result.stop_reason != "tool_use":
+                text_so_far = "".join(b.get("text", "") for b in result.assistant_blocks if b.get("type") == "text")
+                leaked = leak_parser(text=text_so_far, profile=self.provider_profile)
+                if leaked and leaked.get("name"):
+                    synthetic_id = f"toolu_repair_{uuid.uuid4().hex[:20]}"
+                    synthetic_block = {"type": "tool_use", "id": synthetic_id, "name": leaked["name"],
+                                        "input": leaked.get("arguments") or {}, "_promoted_from_leak": True}
+                    result.assistant_blocks = list(result.assistant_blocks) + [synthetic_block]
+                    tool_use_blocks = [synthetic_block]
+                    log.debug("leak_parser promoted a text-embedded call to a real tool_use: %r", leaked)
+                elif self.provider_profile.tool_choice_required_supported and _looks_like_attempted_tool_call(text_so_far):
+                    retry_result = yield from self._step(turn_no, tool_choice="required")
+                    model_calls += 1
+                    if retry_result is not None:
+                        self._account_usage(retry_result)
+                        result = retry_result
+                        tool_use_blocks = [b for b in result.assistant_blocks if b.get("type") == "tool_use"]
+                    # else: the retry hard-failed (already emitted its own
+                    # `error` event) -- fall through and log the ORIGINAL
+                    # prose-only result rather than silently losing the turn.
 
             req_hash = content_hash_from_oai_body(result.body)  # finding 4: hash the body ACTUALLY SENT
             self.log.append_assistant(
                 content=result.assistant_blocks, reasoning=result.reasoning,
                 stop_reason=result.stop_reason, request_hash=req_hash,
             )
-
-            cost = self.cost_meter.add_usage(self.model_ref.provider, result.usage)
-            self.log.append_usage(result.usage, cost)
-            output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
-            if self.model_ref.provider == "databricks":
-                record_databricks_output_tokens(self.model_ref.raw, output_tokens)
             input_tokens = result.usage.get("input_tokens") if isinstance(result.usage, dict) else None
             context_pct = None
             if isinstance(input_tokens, int) and self.model_profile.context_tokens:
@@ -529,16 +619,7 @@ class Session:
                 context_pct=context_pct,
             )
 
-            tool_use_blocks = [b for b in result.assistant_blocks if b.get("type") == "tool_use"]
             if not tool_use_blocks:
-                if result.body.get("tools"):
-                    # only when a tool call was actually expected (report's
-                    # own scoping rule for leak_parser) -- minimal per H2's
-                    # scope (the full retry-as-a-real-call repair is H2b's).
-                    leaked = leak_parser(text="".join(b.get("text", "") for b in result.assistant_blocks
-                                                       if b.get("type") == "text"), profile=self.provider_profile)
-                    if leaked:
-                        log.debug("leak_parser matched a text-embedded tool call (not auto-retried in H2): %r", leaked)
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no, context_tokens=input_tokens,
                                      context_limit=self.model_profile.context_tokens,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -556,59 +637,176 @@ class Session:
                 return
             # else: loop back for another _step() call with the new tool_results
 
-    def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None) -> Iterator[events.Event]:
-        """Runs every tool_use in this assistant turn (loop-breaker rule 8:
-        remind at 3, deny at 5, end the turn at 8 -- a cumulative per-turn
-        hash of tool name + canonical args). A call `tool_call_flags`
-        (finding 3) tags `truncated_by_length` or `malformed_json` never
-        reaches real dispatch -- it gets a named `is_error` result instead,
-        so the model can split the operation or fix its JSON on the next
-        step rather than the turn silently ending with an unanswered call.
-        Returns True (via the generator's return value) iff the turn should
-        end now rather than call the model again."""
-        tool_call_flags = tool_call_flags or {}
-        ctx = ToolContext(cwd=self.cwd)
-        end_turn = False
-        for tu in tool_use_blocks:
-            tool_id, name = tu.get("id"), tu.get("name")
-            tool_input = tu.get("input") or {}
-            yield events.Event("tool_use_ready", {"id": tool_id, "name": name, "input": tool_input, "repaired": False}, turn=turn_no)
+    def _resolve_tool_call(self, tu: dict, outcome, tool_call_flags: dict) -> dict:
+        """Everything about ONE tool_use call up to (never including)
+        actual dispatch: length/malformed short-circuit -> basic shape
+        validate -> repair outcome -> loop breaker -> permission decide.
+        Returns a plain dict `_dispatch_tools` drives from (`ready=True`
+        means "go dispatch me"; the reason this is its own function is so
+        a run of consecutive read-only READY calls can be discovered and
+        batched -- see `_dispatch_tools` -- without duplicating any of
+        this decision logic)."""
+        tool_id, raw_name = tu.get("id"), tu.get("name")
+        item = {"tool_id": tool_id, "name": raw_name, "input": tu.get("input") or {}, "repaired": False, "ready": False}
 
-            classification = classify_length_tool_call(tool_call_flags.get(tool_id) or {})
+        classification = classify_length_tool_call(tool_call_flags.get(tool_id) or {})
+        if classification in ("length", "malformed"):
             if classification == "length":
-                text = (f"Tool call {name!r} was cut off at max_tokens mid-call -- split the operation into "
-                        f"smaller steps and retry.")
-                self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
-                yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
-                continue
-            if classification == "malformed":
+                item["text"] = (f"Tool call {raw_name!r} was cut off at max_tokens mid-call -- split the "
+                                 f"operation into smaller steps and retry.")
+            else:
                 json_error = (tool_call_flags.get(tool_id) or {}).get("json_error", "invalid JSON")
-                text = f"Tool call {name!r} arguments were not valid JSON: {json_error}"
-                self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
-                yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
-                continue
+                item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
+            item["input"] = {}
+            return item
 
-            key = (name, _canonical_args(tool_input))
-            count = self._loop_breaker.get(key, 0) + 1
-            self._loop_breaker[key] = count
+        basic_error = validate_tool_use(tu)
+        if basic_error is not None:
+            item["text"] = basic_error
+            return item
 
-            if count >= _LOOP_BREAKER_END_AT:
-                text = f"Loop breaker: {name} called with the same arguments {count} times this turn -- ending the turn."
-                self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
-                yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
+        if not outcome.ok:
+            item["text"] = outcome.error_text
+            item["repaired"] = outcome.repaired
+            return item
+
+        name = outcome.block.get("name")  # possibly renamed by repair
+        tool_input = outcome.block.get("input") or {}
+        # A block promoted from a text-embedded leak (H2 scope B) is
+        # ALWAYS "repaired" for transparency -- it never arrived as a
+        # native call, regardless of whether its name/schema also happened
+        # to need fixing up.
+        repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
+        item.update(name=name, input=tool_input, repaired=repaired)
+
+        key = (name, _canonical_args(tool_input))
+        count = self._loop_breaker.get(key, 0) + 1
+        self._loop_breaker[key] = count
+        item["count"] = count
+        if count >= _LOOP_BREAKER_END_AT:
+            item["text"] = f"Loop breaker: {name} called with the same arguments {count} times this turn -- ending the turn."
+            item["end_turn"] = True
+            return item
+        if count >= _LOOP_BREAKER_DENY_AT:
+            item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
+            return item
+
+        tool = self.tool_registry.get(name)
+        decision: Decision = self.permission_engine.decide(name, tool_input, tool=tool)
+        if decision.action == "deny":
+            text = f"Permission denied: {decision.reason}"
+            if decision.suggested_rule:
+                text += f" (suggested rule: {decision.suggested_rule})"
+            item["text"] = text
+            item["permission_denial"] = decision.permission_denial
+            return item
+        if decision.action == "ask":
+            item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
+            item["ask_reason"] = decision.reason
+            return item
+
+        item["ready"] = True
+        return item
+
+    def _finalize_tool_result(self, turn_no: int, item: dict, session_dir) -> Iterator[events.Event]:
+        """Log + yield the `tool_result` for one `_resolve_tool_call` item,
+        whether it was rejected before ever reaching a tool or actually
+        ran (solo or inside a read-only batch, `item["result"]` either way
+        by the time this is called)."""
+        tool_id, name = item["tool_id"], item["name"]
+        if not item["ready"]:
+            text = item["text"]
+            self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
+            yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
+            if item.get("permission_denial") is not None:
+                self.permission_denials.append(item["permission_denial"])
+            return
+        tr = item["result"]
+        content_text = tr.content if isinstance(tr.content, str) else json.dumps(tr.content, default=str)
+        content_text = spill_and_truncate(content_text, cap=self.tool_registry.result_cap(name),
+                                           session_dir=session_dir, tool_use_id=tool_id)
+        count = item.get("count")
+        if count is not None and _LOOP_BREAKER_REMIND_AT <= count < _LOOP_BREAKER_DENY_AT:
+            content_text += (f"\n\n[reminder: {name} has now been called with these same arguments "
+                              f"{count} times this turn -- consider a different approach if unintentional]")
+        self.log.append_tool_result(tool_use_id=tool_id, content=content_text, is_error=tr.is_error)
+        yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": content_text[:200]}, turn=turn_no)
+
+    def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None) -> Iterator[events.Event]:
+        """Runs every tool_use in this assistant turn, per call, in order:
+        length/malformed short-circuit (finding 3) -> basic shape validate
+        (agent/invariants.validate_tool_use) -> repair (agent/repair.py:
+        name resolution, schema coerce, duplicate detection) -> loop
+        breaker (rule 8) -> permission decide -- all via `_resolve_tool_call`
+        -- then dispatch -> truncate (tools/truncate.py). A RUN of
+        consecutive READY read-only calls is accumulated and dispatched
+        together on `tools.registry.run_read_only_batch`'s 4-thread pool
+        (results re-ordered back to call order); anything else (not ready,
+        or ready but not read-only) breaks the run and dispatches/resolves
+        immediately. `tool_use_ready` (and a would-be `permission_request`)
+        is still yielded per-call, in ORIGINAL order, the instant each
+        call's decision is known -- BEFORE any dispatch happens for it or
+        anything after it -- so an interrupt right after the Nth
+        `tool_use_ready` still guarantees nothing from N onward ever ran
+        (must-do 5: interrupt correctness is not weakened by batching).
+        `ctx` reuses the SAME read_cache/bash_state dicts for the whole
+        session. Returns True (via the generator's return value) iff the
+        turn should end now rather than call the model again."""
+        tool_call_flags = tool_call_flags or {}
+        ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
+                           bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
+                           registry=self.tool_registry)
+        repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry)
+
+        end_turn = False
+        pending_batch: list = []  # `item` dicts: a run of consecutive READY read-only calls, dispatch deferred
+
+        def _dispatch_pending_batch() -> None:
+            """Actually RUN every item in `pending_batch` (fills in each
+            `item["result"]`) -- does NOT log/yield anything; the caller
+            still has to `_finalize_tool_result` each one itself, in order,
+            same as a solo dispatch."""
+            calls = [(it["name"], it["input"]) for it in pending_batch]
+            results = run_read_only_batch(self.tool_registry, calls, ctx)
+            for it, tr in zip(pending_batch, results):
+                it["result"] = tr
+
+        for tu, outcome in zip(tool_use_blocks, repair_outcomes):
+            item = self._resolve_tool_call(tu, outcome, tool_call_flags)
+            tool_id, name = item["tool_id"], item["name"]
+
+            yield events.Event("tool_use_ready", {"id": tool_id, "name": name, "input": item["input"],
+                                                    "repaired": item["repaired"]}, turn=turn_no)
+            if "ask_reason" in item:
+                yield events.Event("permission_request", {"id": tool_id, "name": name, "input": item["input"],
+                                                            "reason": item["ask_reason"]}, turn=turn_no)
+
+            if item["ready"] and self.tool_registry.is_read_only(name):
+                pending_batch.append(item)
+                continue  # deferred -- dispatched only when the run breaks (below) or at the end
+
+            # This call breaks any read-only run in progress: run + finalize
+            # the WHOLE pending batch first (those calls were already
+            # announced earlier and never depend on anything after them),
+            # THEN handle the current one the same way.
+            if pending_batch:
+                _dispatch_pending_batch()
+                for batched_item in pending_batch:
+                    yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
+                    if batched_item.get("end_turn"):
+                        end_turn = True
+                pending_batch = []
+
+            if item["ready"]:
+                item["result"] = self.tool_registry.dispatch(name, item["input"], ctx)
+            yield from self._finalize_tool_result(turn_no, item, ctx.session_dir)
+            if item.get("end_turn"):
                 end_turn = True
-                continue
-            if count >= _LOOP_BREAKER_DENY_AT:
-                text = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
-                self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
-                yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
-                continue
 
-            tr = self.tool_registry.dispatch(name, tool_input, ctx)
-            content_text = tr.content if isinstance(tr.content, str) else json.dumps(tr.content, default=str)
-            if _LOOP_BREAKER_REMIND_AT <= count < _LOOP_BREAKER_DENY_AT:
-                content_text += (f"\n\n[reminder: {name} has now been called with these same arguments "
-                                  f"{count} times this turn -- consider a different approach if unintentional]")
-            self.log.append_tool_result(tool_use_id=tool_id, content=content_text, is_error=tr.is_error)
-            yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": content_text[:200]}, turn=turn_no)
+        if pending_batch:
+            _dispatch_pending_batch()
+            for batched_item in pending_batch:
+                yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
+                if batched_item.get("end_turn"):
+                    end_turn = True
         return end_turn

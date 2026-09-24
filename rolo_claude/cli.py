@@ -63,6 +63,20 @@ def _build_parser() -> argparse.ArgumentParser:
                               "OpenRouter, reasoning_effort on Databricks, thinking budget on Messages routes)")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--version", action="store_true")
+    # H2 scope D: permission-engine flags. A single string value (comma or
+    # space separated internally, e.g. "Bash(git *) Edit" -- binary facts
+    # sec.1's own example), never argparse nargs="+", so a rule containing
+    # spaces inside Tool(...) parens is never split across argv tokens by
+    # the shell/argparse before rolo-claude ever sees it as one string.
+    parser.add_argument("--allowedTools", "--allowed-tools", dest="allowed_tools", default=None, metavar="TOOLS")
+    parser.add_argument("--disallowedTools", "--disallowed-tools", dest="disallowed_tools", default=None, metavar="TOOLS")
+    parser.add_argument("--permission-mode", default=None,
+                         choices=["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "manual"],
+                         help="Permission mode (manual is the display alias for default)")
+    parser.add_argument("--dangerously-skip-permissions", action="store_true",
+                         help="Run with permission mode bypassPermissions (allow everything except an explicit deny rule)")
+    parser.add_argument("--tools", default=None, metavar="TOOLS",
+                         help='"" for none, "default" (or omit) for all, or a name list e.g. "Bash,Edit,Read"')
     return parser
 
 
@@ -154,6 +168,11 @@ def main(argv: Optional[list] = None) -> int:
             settings_flag=args.settings,
             verbose=args.verbose,
             effort=getattr(args, "effort", None),
+            allowed_tools=args.allowed_tools,
+            disallowed_tools=args.disallowed_tools,
+            permission_mode=args.permission_mode,
+            dangerously_skip_permissions=args.dangerously_skip_permissions,
+            tools=args.tools,
         )
     except InvalidModelError as e:
         # finding 7: a bad --model/alias must be a clean config error (exit

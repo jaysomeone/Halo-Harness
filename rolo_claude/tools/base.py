@@ -1,23 +1,67 @@
-"""rolo_claude.tools.base -- the Tool protocol (H1 scope G). Only `Read`
-exists in H1 (tools/read.py); Write/Edit/Bash/PowerShell/Glob/Grep/... are
-H2 -- this module's shape is deliberately small enough that adding them
-later doesn't need to change it.
+"""rolo_claude.tools.base -- the Tool protocol. H1 had only `Read`; H2 adds
+Write/Edit/Bash/PowerShell/Glob/Grep/WebFetch/TodoWrite/ToolSearch/
+AskUserQuestion/Skill on top of this same small shape.
+
+`is_read_only`/`is_destructive` are INFORMATIONAL ONLY (used for the
+read-only concurrency pool in tools/registry.py and for a tool card's
+display) -- rolo's "no cyber blocks" decision means neither one is ever
+consulted by the permission engine (rolo_claude/permissions.py) to gate or
+auto-deny anything; only the user's own rules and modes do that.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass
 class ToolContext:
-    """Whatever a tool's `run()` needs from the session -- H1 keeps this to
-    just `cwd` (Read has no other dependency); H2's Bash/Edit/etc. will
-    extend it (permissions, abort event, ...) without breaking Read's own
-    signature, since every field here has a default."""
+    """Whatever a tool's `run()` needs from the session. Every field has a
+    default so `ToolContext(cwd=...)` (H1's own call shape, and every
+    existing Read test) keeps working unchanged.
+
+    - `read_cache`: str(path) -> mtime-at-Read-time, shared for the whole
+      session. Write's must-Read-first check and Edit's stale-file check
+      both consult/update it (agent/loop.py owns the ONE dict instance and
+      threads it through every dispatch call).
+    - `abort`: set by an interrupt source (Bash kill, a future Esc) --
+      Bash.run() polls it to kill its subprocess group early.
+    - `bash_state`: persistent shell state across Bash calls IN ONE SESSION
+      (currently just {"cwd": Path}) -- `cd` in one call is visible to the
+      next (scope A: "cd persistence per session via a trailing marker
+      line").
+    - `session_dir`: base directory for this session's spilled tool results
+      (`<session_dir>/tool-results/<tool_use_id>.txt`); None means "don't
+      spill" (e.g. a bare `ToolContext(cwd=...)` in a unit test).
+    - `extra_dirs`: additional trusted working directories (settings
+      `additionalDirectories` + `--add-dir`), used only by the permission
+      engine, but threaded through ToolContext too so a tool that wants to
+      know its own working-directory set (none do yet) can.
+    """
     cwd: Path
+    read_cache: dict = field(default_factory=dict)
+    abort: "threading.Event" = field(default_factory=threading.Event)
+    bash_state: dict = field(default_factory=dict)
+    session_dir: Optional[Path] = None
+    extra_dirs: list = field(default_factory=list)
+    tool_use_id: Optional[str] = None
+    # Bash/PowerShell only: called with each NEW chunk of merged stdout/
+    # stderr roughly every 0.5s while a subprocess runs, so a caller (agent/
+    # loop.py) can bridge it into `tool_progress` events; None (the default,
+    # e.g. a bare unit test) just means "nobody's listening" -- the tool
+    # still buffers its full output normally either way.
+    progress_cb: Optional[Callable[[str], None]] = None
+    # Effective environment for a subprocess tool (settings.effective_env);
+    # None means "use this process's own os.environ" (every existing/unit
+    # test call site).
+    env: Optional[dict] = None
+    # ToolSearch's own registry to search over -- untyped (`object`, not
+    # ToolRegistry) so this module never has to import tools/registry.py,
+    # which itself imports THIS module (that reverse import would cycle).
+    registry: Optional[object] = None
 
 
 @dataclass
@@ -39,6 +83,13 @@ class Tool:
     name: str = ""
     description: str = ""
     input_schema: dict = {"type": "object", "properties": {}}
+    is_read_only: bool = False
+    is_destructive: bool = False
+    # Generic result-truncation cap in CHARS for tools/registry.py's spill
+    # step; None means "this tool manages its own truncation" (Read already
+    # does its own line/char caps -- see tools/read.py). Per-tool overrides
+    # below (Bash 30_000, WebFetch 100_000).
+    result_cap: Optional[int] = 25_000 * 4
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         raise NotImplementedError
@@ -48,6 +99,15 @@ class Tool:
         "Read(src/main.py)". Defaults to just the tool name; a tool with a
         single obvious "subject" argument should override this."""
         return self.name
+
+    def permission_content(self, input: dict) -> str:
+        """The string a permission `Rule` is matched against for this call
+        (rolo_claude/permissions.py never inspects `input` itself -- every
+        tool decides what its own "content" means: a file path, a shell
+        command, a URL, ...). Defaults to "" (a tool with no natural
+        content position, e.g. TodoWrite) so an unrecognized/param-only
+        rule shape still has SOMETHING deterministic to compare against."""
+        return ""
 
     def definition(self) -> dict:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}
