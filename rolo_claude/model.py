@@ -179,12 +179,40 @@ class CostMeter:
     the resulting `usage.cost` field; until then every OpenRouter turn is
     also `None`/unknown, exactly like Databricks, so `has_cost_data` starts
     True and simply never flips to a real number in H0 -- that's expected,
-    not a bug). Databricks never reports cost at all ("n/a")."""
+    not a bug). Databricks never reports cost at all ("n/a").
 
-    def __init__(self) -> None:
+    H5 scope D: when a response has no `usage.cost` (an OpenRouter reply
+    that genuinely omitted it, or ANY other host/route -- `ant:`, Databricks
+    Claude passthrough, a plain openai-chat gateway with no cost field),
+    `_fallback_cost` applies OpenCode's own formula (Appendix G) --
+    `input*price_in + output*price_out + reasoning*price_out` (reasoning
+    billed at the OUTPUT rate; `ModelProfile` has no per-field cache
+    pricing to add `cache_read`/`cache_write` as separate line items, so
+    those tokens are left priced at the ordinary input rate, folded into
+    `input_tokens` -- a documented approximation, not the tiered-pricing/
+    `context_over_200k` version of the formula) -- but ONLY when this
+    meter was actually constructed with real per-token pricing
+    (`price_in`/`price_out`, normally `ModelProfile.price_in`/`price_out`
+    from models.json); with neither `usage.cost` nor pricing, behaviour is
+    unchanged from before (`has_cost_data` flips False -- "n/a")."""
+
+    def __init__(self, *, price_in: Optional[float] = None, price_out: Optional[float] = None) -> None:
         self.total_usd: float = 0.0
         self.turns: int = 0
         self.has_cost_data: bool = True
+        self.price_in = price_in
+        self.price_out = price_out
+
+    def _fallback_cost(self, usage) -> Optional[float]:
+        if not isinstance(usage, dict) or self.price_in is None or self.price_out is None:
+            return None
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+            return None
+        reasoning = usage.get("reasoning_tokens")
+        reasoning = reasoning if isinstance(reasoning, int) else 0
+        return input_tokens * self.price_in + (output_tokens + reasoning) * self.price_out
 
     def add_usage(self, provider: str, usage: Optional[dict]) -> Optional[float]:
         """Record one turn's usage; returns this turn's cost in USD, or None
@@ -198,5 +226,9 @@ class CostMeter:
             cost = float(cost)
             self.total_usd += cost
             return cost
+        fallback = self._fallback_cost(usage)
+        if fallback is not None:
+            self.total_usd += fallback
+            return fallback
         self.has_cost_data = False
         return None

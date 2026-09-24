@@ -29,6 +29,7 @@ EVENT_KINDS = frozenset({
     "permission_request", "question", "plan_review", "todos", "status",
     "message_end", "error", "turn_done", "subagent_start", "subagent_end",
     "replay", "notification", "steer_queued", "steer_applied",
+    "compaction",  # H5 scope B
 })
 
 COMMAND_KINDS = frozenset({
@@ -149,6 +150,20 @@ def turn_done(*, turn: int = 0, reason: str = "end_turn") -> Event:
 def notification(text: str, *, level: str = "info") -> Event:
     """data: {level, text}"""
     return Event("notification", {"level": level, "text": text})
+
+
+def compaction(*, phase: str, trigger: str = "auto", turn: int = 0, tokens_before: Optional[int] = None,
+               tokens_after: Optional[int] = None, headings_missing: Optional[list] = None) -> Event:
+    """data: {phase, trigger, tokens_before, tokens_after, headings_missing}
+    (H5 scope B) -- `phase` is "start"|"retry"|"done"|"failed"; `trigger` is
+    "manual"|"auto"|"overflow" (mirrors the `compacted` log node's own
+    field and the PreCompact hook's `trigger`). Emitted by
+    `Session._run_compaction` so a UI can show a "Compacting..." indicator
+    and, on "done", how much room was freed."""
+    return Event("compaction", {
+        "phase": phase, "trigger": trigger, "tokens_before": tokens_before,
+        "tokens_after": tokens_after, "headings_missing": headings_missing or [],
+    }, turn=turn)
 
 
 def replay(messages: list) -> Event:

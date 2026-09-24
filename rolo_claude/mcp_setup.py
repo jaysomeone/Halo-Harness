@@ -190,7 +190,7 @@ def build_manager(
     base_env = settings.effective_env if settings is not None else dict(os.environ)
 
     from rolo_claude.config.plugins import discover_plugin_mcp_servers
-    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env)
+    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env, settings=settings)
     notices.extend(plugin_notices)
 
     configs, resolve_notices = resolve_server_configs(

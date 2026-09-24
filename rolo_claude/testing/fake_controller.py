@@ -131,7 +131,7 @@ class FakeController:
     def mcp_status(self) -> dict:
         return {"connected": 0, "total": 0}
 
-    def reconnect_mcp(self, name: str) -> None:
+    def reconnect_mcp(self, name: str, abort=None) -> None:
         self.reconnects += 1
 
     def memory_path(self):

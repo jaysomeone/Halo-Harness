@@ -217,7 +217,11 @@ def test_edit_not_found_reports_zero_near_matches(ctx: Ctx):
     ReadTool().run({"file_path": str(f)}, ctx_obj)
     result = EditTool().run({"file_path": str(f), "old_string": "nonexistent text", "new_string": "x"}, ctx_obj)
     ctx.check("not-found is an error", result.is_error is True)
-    ctx.check("structured 0-near-matches wording", "0 near-matches" in result.content)
+    # H5 scope F item 1: OpenCode's own "Could not find oldString..."
+    # wording (9-stage replacer chain, reports/OpenCode harness deep
+    # review.md Appendix C) replaces the old "0 near-matches" phrasing.
+    ctx.check(f"OpenCode-worded not-found error, got {result.content!r}",
+              "Could not find oldString in the file" in result.content)
 
 
 @test

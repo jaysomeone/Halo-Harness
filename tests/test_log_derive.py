@@ -241,6 +241,80 @@ def test_byte_identical_request_across_two_turns_with_identical_history(ctx: Ctx
     ctx.check("identical content_hash", content_hash(sa, ma, ta) == content_hash(sb, mb, tb))
 
 
+@test
+def test_compacted_node_shadows_everything_before_it(ctx: Ctx):
+    """H5 scope B: appending a `compacted` marker then a replacement `user`
+    node makes derive_request SKIP every original message before the
+    marker -- the shadowed range -- while keeping the (never-shadowed)
+    system node and everything appended after the marker."""
+    log = _fresh_log()
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "q1 -- should be shadowed"}])
+    log.append_assistant(content=[{"type": "text", "text": "a1 -- should be shadowed"}], stop_reason="end_turn")
+    log.append_user([{"type": "text", "text": "q2 -- should be shadowed"}])
+
+    marker = log.append_compacted(trigger="auto")
+    ctx.check("append_compacted returns the marker node with surface_op=replace", marker["surface_op"] == "replace")
+    log.append_user([{"type": "text", "text": "<compacted-summary>...</compacted-summary>"}])
+    log.append_user([{"type": "text", "text": "new turn after compaction"}])
+
+    system_text, messages, _ = derive_request(log)
+    ctx.check("system text is untouched by compaction", system_text == "SYS")
+    all_text = [b["text"] for m in messages for b in m["content"]]
+    ctx.check(f"shadowed content is gone, got {all_text}",
+              not any("should be shadowed" in t for t in all_text))
+    ctx.check("the compacted-summary text made it through", any("compacted-summary" in t for t in all_text))
+    ctx.check("the new post-compaction turn made it through", any("new turn after compaction" in t for t in all_text))
+
+
+@test
+def test_compacted_node_upto_before_marker_sees_original_history(ctx: Ctx):
+    """A replay cut BEFORE the compaction happened (`upto` < marker seq)
+    must reconstruct the ORIGINAL, unshadowed history -- proves the shadow
+    is a property of what's IN the sliced node list, not a global flag."""
+    log = _fresh_log()
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "q1"}])
+    cut_point = len(log.nodes())
+    log.append_compacted(trigger="manual")
+    log.append_user([{"type": "text", "text": "<compacted-summary>x</compacted-summary>"}])
+
+    _, messages, _ = derive_request(log, upto=cut_point)
+    ctx.check("pre-compaction replay still sees the original user turn",
+              messages[0]["content"][0]["text"] == "q1")
+
+
+@test
+def test_compacted_node_carries_trigger_and_instructions(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("SYS")
+    marker = log.append_compacted(trigger="manual", custom_instructions="focus on file names")
+    ctx.check("trigger recorded", marker["trigger"] == "manual")
+    ctx.check("custom_instructions recorded", marker["custom_instructions"] == "focus on file names")
+    marker2 = log.append_compacted(trigger="overflow")
+    ctx.check("custom_instructions defaults to None", marker2["custom_instructions"] is None)
+
+
+@test
+def test_only_the_latest_compacted_node_matters(ctx: Ctx):
+    """A SECOND compaction shadows everything before IT (including the
+    first compaction's own marker and replacement summary) -- only the
+    latest marker's seq is consulted."""
+    log = _fresh_log()
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "first era"}])
+    log.append_compacted(trigger="auto")
+    log.append_user([{"type": "text", "text": "<compacted-summary>first summary</compacted-summary>"}])
+    log.append_user([{"type": "text", "text": "second era"}])
+    log.append_compacted(trigger="auto")
+    log.append_user([{"type": "text", "text": "<compacted-summary>second summary (merged)</compacted-summary>"}])
+
+    _, messages, _ = derive_request(log)
+    all_text = [b["text"] for m in messages for b in m["content"]]
+    ctx.check(f"only content from the SECOND compaction onward survives, got {all_text}",
+              all_text == ["<compacted-summary>second summary (merged)</compacted-summary>"])
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

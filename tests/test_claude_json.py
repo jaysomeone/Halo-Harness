@@ -12,9 +12,44 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.config.claude_json import is_trusted, load_bridge_trust
+from rolo_claude.config.claude_json import is_trusted, load_bridge_trust, load_claude_json
 
 test, TESTS = new_registry()
+
+
+@test
+def test_load_claude_json_reads_a_bom_prefixed_file(ctx: Ctx):
+    """Linux/H4 must-do: `mcp add`/`mcp remove` PRESERVE a BOM the file
+    already had (mcp_cli.py's own byte-exact contract), but the old plain
+    `utf-8` read chokes on the BOM bytes and silently returns {} for an
+    otherwise perfectly valid file -- every configured server/project
+    vanishes. `utf-8-sig` must strip the BOM and parse normally."""
+    with tempfile.TemporaryDirectory() as td:
+        saved = _clean_env("BRIDGE_TEST_HOME", "CLAUDE_CONFIG_DIR")
+        os.environ["BRIDGE_TEST_HOME"] = td
+        try:
+            path = Path(td) / ".claude.json"
+            path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"mcpServers": {"x": {"command": "y"}}}).encode("utf-8"))
+            data = load_claude_json()
+            ctx.check(f"BOM'd file still parses, got {data}", data.get("mcpServers", {}).get("x", {}).get("command") == "y")
+        finally:
+            _restore_env(saved)
+
+
+@test
+def test_load_claude_json_still_reads_a_plain_utf8_file(ctx: Ctx):
+    """No regression: a file with NO BOM (the common case) still reads
+    identically under `utf-8-sig` as it did under plain `utf-8`."""
+    with tempfile.TemporaryDirectory() as td:
+        saved = _clean_env("BRIDGE_TEST_HOME", "CLAUDE_CONFIG_DIR")
+        os.environ["BRIDGE_TEST_HOME"] = td
+        try:
+            path = Path(td) / ".claude.json"
+            path.write_text(json.dumps({"mcpServers": {"a": {"command": "b"}}}), encoding="utf-8")
+            data = load_claude_json()
+            ctx.check(f"plain utf-8 file still parses, got {data}", data.get("mcpServers", {}).get("a", {}).get("command") == "b")
+        finally:
+            _restore_env(saved)
 
 
 def _clean_env(*names):

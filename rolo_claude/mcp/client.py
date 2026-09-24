@@ -80,6 +80,45 @@ class McpAborted(Exception):
     `.cancel()` is requested on the underlying future, but the coroutine
     may keep running on the loop."""
 
+
+class ProgressKeepalive:
+    """OpenCode-H9 MCP-compatibility item: "progress notifications reset
+    the call timeout" -- a thread-safe 'ping' flag, usable directly as an
+    `mcp.ClientSession.call_tool(..., progress_callback=...)` (an ASYNC
+    callable, per the SDK's `ProgressFnT` protocol: `async def
+    __call__(self, progress, total, message) -> None`), that
+    `McpLoop.run_abortable`'s `keepalive=` polling loop below consumes to
+    push its OWN outer deadline back out. Without this, a legitimately
+    long-running MCP tool that dutifully sends progress notifications
+    (Claude Code's own MCP contract explicitly allows this) still gets cut
+    off by `run_abortable`'s fixed `overall` bound in manager.py's
+    `call_tool`, even though the SDK's own inner `read_timeout_seconds`
+    would have kept waiting -- our wrapper has no visibility into THAT
+    timer resetting on its own, so it needs its own copy of the same
+    signal. `ping`/`consume` cross a real thread boundary (the SDK calls
+    `__call__` on the McpLoop daemon thread; `consume` is read from
+    whichever thread is blocked in `run_abortable`), so both are guarded
+    by a plain `threading.Lock` -- the critical section is a couple of
+    attribute writes, never worth an asyncio-side primitive."""
+
+    def __init__(self) -> None:
+        self._pinged = False
+        self._lock = threading.Lock()
+
+    async def __call__(self, progress=None, total=None, message=None) -> None:
+        with self._lock:
+            self._pinged = True
+
+    def consume(self) -> bool:
+        """True (and clears the flag) iff `__call__` fired at least once
+        since the last `consume()` -- edge-triggered, so a burst of
+        several progress notifications between two polls still counts as
+        exactly one deadline reset, not several."""
+        with self._lock:
+            was = self._pinged
+            self._pinged = False
+            return was
+
 # Every McpLoop still alive is tracked here (weakly -- being in this set
 # must never be the reason a McpLoop outlives its owner) so
 # `_stop_all_at_exit` can hard-stop any that are still running when the
@@ -164,7 +203,8 @@ class McpLoop:
             raise
 
     def run_abortable(self, coro: "Coroutine[Any, Any, T]", *, timeout: Optional[float] = None,
-                       abort: "Optional[Any]" = None, slice_s: float = 0.2) -> T:
+                       abort: "Optional[Any]" = None, slice_s: float = 0.2,
+                       keepalive: "Optional[ProgressKeepalive]" = None) -> T:
         """Like `run()`, but polls in `slice_s`-second steps instead of one
         blocking `.result(timeout=)` call, so an externally-set `abort`
         Event (agent/loop.py's `Session.abort`, threaded through a tool's
@@ -175,12 +215,20 @@ class McpLoop:
         `run()`) -- either way the coroutine itself is only `.cancel()`-ed
         as a best-effort courtesy (see `run()`'s own docstring: asyncio has
         no safe cross-thread hard cancel of an arbitrary await), so the
-        caller must treat the operation as ABANDONED, not actually stopped."""
+        caller must treat the operation as ABANDONED, not actually stopped.
+        `keepalive` (a `ProgressKeepalive`, OpenCode H9 MCP-compatibility
+        item): when given, each poll ALSO checks it and, if it fired since
+        the last poll, pushes `deadline` back out by the full `timeout`
+        again -- a still-progressing call is never cut off by this
+        wrapper's own fixed bound just because it legitimately takes
+        longer than one `timeout` window."""
         loop = self._ensure_started()
         fut = asyncio.run_coroutine_threadsafe(coro, loop)
         deadline = None if timeout is None else (time.monotonic() + timeout)
         try:
             while True:
+                if keepalive is not None and timeout is not None and keepalive.consume():
+                    deadline = time.monotonic() + timeout
                 remaining = None if deadline is None else (deadline - time.monotonic())
                 if remaining is not None and remaining <= 0:
                     raise concurrent.futures.TimeoutError()
@@ -194,6 +242,31 @@ class McpLoop:
         except (McpAborted, concurrent.futures.TimeoutError):
             fut.cancel()
             raise
+
+    def wait_future_abortable(self, fut: "concurrent.futures.Future[T]", *, timeout: Optional[float] = None,
+                               abort: "Optional[Any]" = None, slice_s: float = 0.2) -> T:
+        """Like `run_abortable`, but for a future ALREADY scheduled onto
+        this loop (typically via `spawn()`) instead of a coroutine to
+        schedule now -- `McpServerHandle.start()`/`close()` (manager.py)
+        use this so the reconnect-on-next-call path (and the TUI's `/mcp`
+        `r` reconnect) can honour Esc/`ctx.abort` too (u2-h3b finding 9),
+        not just an ordinary tool call. Same semantics/exceptions as
+        `run_abortable`: `McpAborted` on abort, `concurrent.futures.
+        TimeoutError` on an ordinary timeout, and the future itself is
+        left running either way (this only stops WAITING on it -- see
+        `run()`'s own "abandoned, not stopped" note)."""
+        deadline = None if timeout is None else (time.monotonic() + timeout)
+        while True:
+            remaining = None if deadline is None else (deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                raise concurrent.futures.TimeoutError()
+            wait_s = slice_s if remaining is None else min(slice_s, remaining)
+            try:
+                return fut.result(timeout=wait_s)
+            except concurrent.futures.TimeoutError:
+                if abort is not None and abort.is_set():
+                    raise McpAborted("mcp wait aborted") from None
+                continue
 
     def spawn(self, coro: "Coroutine[Any, Any, T]") -> "concurrent.futures.Future[T]":
         """Schedule `coro` onto the daemon loop WITHOUT blocking the

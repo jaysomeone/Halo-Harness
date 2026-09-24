@@ -8,6 +8,7 @@ blocks), and LRU eviction once the catalog is full.
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -399,6 +400,142 @@ def test_registry_add_and_remove_tool(ctx: Ctx):
     ctx.check("remove_tool removes it", reg.get("Read") is None)
     reg.remove_tool("NeverThere")  # must not raise
     ctx.check("removing a missing name is a silent no-op", True)
+
+
+# ---- finding 12: golden ToolSearch ranking on a real-shaped catalog -------
+# Names below are VERBATIM real deferred tool names from rolo's own live
+# session (`mcp list`/ToolSearch's own reminder block, 2026-09-24), across
+# all 15 of rolo-claude's real configured MCP servers (ableton, codriver,
+# devices, expanded-models, gui, hardware, hear, jam, kb, max, mix, play,
+# plugins, samples, sd3 -- excludes claude-in-chrome/claude_ai_* connectors,
+# which aren't rolo-claude's own servers). Descriptions are plausible
+# reconstructions in this codebase's own terse MCP-tool style (real
+# descriptions aren't captured in any log this offline test can read), sized
+# to match the finding's own repro shape: most are one short sentence,
+# `moog_set` and `hw_synth_cc` are deliberately long and mention "midi"
+# many times INCIDENTALLY (Moog/synth CC parameter dumps), recreating the
+# exact regression ("19 midi hits in 2,510 characters" outscoring hw_ports'
+# own short, on-topic one under the OLD raw-substring-count algorithm).
+
+def _midi_heavy_description(subject: str) -> str:
+    """~2,500 characters, ~19 incidental "midi" mentions -- same shape as
+    the finding's own verified repro, built programmatically rather than
+    typed out by hand."""
+    sentence = (f"Configures {subject} MIDI CC assignments, MIDI clock source, MIDI sync mode, "
+                f"MIDI velocity curve, MIDI aftertouch routing, MIDI pitch bend range, and MIDI "
+                f"program change behaviour for this device. ")
+    return (sentence * 8).strip()
+
+
+_REAL_TOOL_CATALOG = [
+    # server, tool, description
+    ("hardware", "hw_ports", "List every MIDI input and output port name currently visible to the OS."),
+    ("hardware", "hw_clock_start", "Start the hardware MIDI clock generator at the current tempo."),
+    ("hardware", "hw_clock_stop", "Stop the hardware MIDI clock generator."),
+    ("hardware", "hw_clock_status", "Report whether the hardware MIDI clock is currently running."),
+    ("hardware", "hw_calibrate", "Measure and store round-trip audio driver latency."),
+    ("hardware", "hw_buffer_find", "Find the smallest stable audio buffer size for this machine."),
+    ("hardware", "hw_latency_measure", "Measure end-to-end MIDI-to-audio latency with a loopback cable."),
+    ("hardware", "hw_gpu", "Report installed GPU(s) and available VRAM."),
+    ("hardware", "hw_cpu_profile", "Profile CPU headroom under a synthetic DSP load."),
+    ("hardware", "hw_driver_guide", "Recommend an audio driver (ASIO/WASAPI/CoreAudio) for this machine."),
+    ("hardware", "hw_machine_profile", "Summarise this machine's CPU/RAM/GPU/audio interface."),
+    ("hardware", "hw_playability", "Score a MIDI controller's playability from its velocity curve."),
+    ("hardware", "hw_profiles", "List saved hardware profiles."),
+    ("hardware", "hw_align_take", "Align a recorded take's timing against the hardware clock."),
+    ("hardware", "hw_multicore_status", "Report multicore render farm node status."),
+    ("hardware", "hw_multicore_build", "Build a multicore render job."),
+    ("hardware", "hw_multicore_mirror", "Mirror project files to a multicore render node."),
+    ("hardware", "hw_multicore_recommend", "Recommend multicore render settings for this project."),
+    ("hardware", "hw_synth_detect", "Detect connected hardware synthesizers over MIDI."),
+    ("hardware", "hw_synth_profile", "Read one hardware synth's stored parameter profile."),
+    ("hardware", "hw_synth_profiles", "List stored hardware synth profiles."),
+    ("hardware", "hw_synth_diagnose", "Diagnose a hardware synth connection problem."),
+    ("hardware", "hw_synth_setup_plan", "Plan a new hardware synth's studio setup."),
+    ("hardware", "hw_synth_program_change", "Send a MIDI program change to a hardware synth."),
+    ("hardware", "hw_synth_sysex_dump", "Dump a hardware synth's patch memory via SysEx."),
+    ("hardware", "hw_synth_sysex_restore", "Restore a hardware synth's patch memory via SysEx."),
+    ("hardware", "hw_synth_clock_plan", "Plan hardware synth MIDI clock routing."),
+    ("hardware", "hw_synth_local_control", "Toggle a hardware synth's local control on/off."),
+    ("hardware", "hw_synth_latency_compensation", "Compute hardware synth latency compensation in samples."),
+    ("hardware", "hw_synth_cc", _midi_heavy_description("the hardware synth")),
+    ("hardware", "ekit_detect", "Detect a connected electronic drum kit module."),
+    ("hardware", "ekit_profile", "Read one electronic kit's stored pad-mapping profile."),
+    ("hardware", "ekit_profiles_list", "List stored electronic kit profiles."),
+    ("hardware", "ekit_drum_rack_map", "Map an electronic kit's pads onto an Ableton drum rack."),
+    ("hardware", "ekit_jam_map", "Map an electronic kit for a jam session."),
+    ("hardware", "ekit_sd3_setup", "Configure Superior Drummer 3 for a detected electronic kit."),
+    ("ableton", "moog_set", _midi_heavy_description("the Moog Subsequent 37")),
+    ("ableton", "transport", "Start, stop, or query Live's transport."),
+    ("ableton", "midi_send", "Send a raw MIDI message to a track's input."),
+    ("ableton", "capture_midi", "Capture the last few bars of incoming MIDI as a clip."),
+    ("ableton", "tuning_system", "Set or query the current microtuning system."),
+    ("ableton", "scale", "Set or query the current musical scale."),
+    ("ableton", "set_mixer", "Set a track's volume/pan/sends."),
+    ("ableton", "create_track", "Create a new audio or MIDI track."),
+    ("ableton", "fire", "Fire a clip or scene."),
+    ("ableton", "get_session", "Read the current Live session's track/clip layout."),
+    ("codriver", "desktop_screenshot", "Take a screenshot of the desktop."),
+    ("codriver", "desktop_click", "Click at a screen coordinate."),
+    ("codriver", "desktop_find", "Find a UI element on screen by description."),
+    ("devices", "device_list", "List installed M4L devices."),
+    ("devices", "device_get", "Read one M4L device's current parameter state."),
+    ("devices", "device_new", "Scaffold a new M4L device project."),
+    ("expanded-models", "ask_local", "Ask a locally-hosted model a question."),
+    ("expanded-models", "ask_openrouter", "Ask an OpenRouter-hosted model a question."),
+    ("gui", "doctor", "Check the Live/Ableton install's health."),
+    ("gui", "export_audio", "Export the current selection as audio."),
+    ("hear", "analyze_file", "Analyze an audio file's spectral content."),
+    ("hear", "ab_compare", "A/B compare two audio renders."),
+    ("jam", "jam_status", "Report the current jam session's state."),
+    ("jam", "jam_generate_next", "Generate the next section of a jam."),
+    ("kb", "kb_midi_lookup", "Look up a plugin's MIDI CC map in the knowledge base."),
+    ("kb", "kb_midi_map", "Return a device's full MIDI CC map."),
+    ("kb", "kb_search", "Full-text search the knowledge base."),
+    ("kb", "kb_how_to", "Look up a how-to recipe by topic."),
+    ("max", "max_object", "Look up a Max object's inlets/outlets/attributes."),
+    ("max", "max_search", "Search Max object documentation."),
+    ("mix", "mix_diagnose", "Diagnose common mix problems in the current session."),
+    ("mix", "mix_apply", "Apply a mix plan to the session."),
+    ("play", "play_pattern", "Play a generated rhythmic pattern."),
+    ("play", "play_design_sound", "Design a synth sound from a text description."),
+    ("plugins", "plugins_list", "List installed plugins."),
+    ("plugins", "preset_recall", "Recall a saved plugin preset."),
+    ("samples", "samples_search", "Search the sample library by description."),
+    ("samples", "samples_similar", "Find samples similar to a given one."),
+    ("sd3", "sd3_search_instruments", "Search Superior Drummer 3's instrument library."),
+    ("sd3", "sd3_search_grooves", "Search Superior Drummer 3's MIDI groove library."),
+]
+
+
+def _sdk_tool(name, description):
+    return SimpleNamespace(name=name, description=description,
+                            input_schema={"type": "object", "properties": {}}, meta=None)
+
+
+@test
+def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx):
+    """The exact regression repro from the finding: on a real ~100-tool
+    catalog shape spanning every one of rolo-claude's 15 real MCP servers,
+    "list MIDI ports" must rank `mcp__hardware__hw_ports` FIRST -- not
+    14th behind a long, MIDI-word-stuffed description (moog_set/
+    hw_synth_cc, both deliberately built to recreate that exact
+    regression here)."""
+    from rolo_claude.mcp.manager import mcp_tool_name
+
+    deferred = {}
+    for server, name, desc in _REAL_TOOL_CATALOG:
+        wire_name = mcp_tool_name(server, name)
+        deferred[wire_name] = (server, _sdk_tool(name, desc))
+
+    catalog = SessionCatalog(registry=ToolRegistry(), deferred=deferred, manager=None, cap=999,
+                              names=ToolRegistry().names())
+    results, _ = catalog.search("list MIDI ports", max_results=5)
+    ranked_names = [d["name"] for d in results]
+    ctx.check(f"mcp__hardware__hw_ports ranks FIRST, got top 5={ranked_names}",
+              ranked_names and ranked_names[0] == "mcp__hardware__hw_ports")
+    ctx.check("the long MIDI-word-stuffed moog_set does NOT outrank it",
+              "mcp__ableton__moog_set" not in ranked_names or ranked_names[0] != "mcp__ableton__moog_set")
 
 
 if __name__ == "__main__":

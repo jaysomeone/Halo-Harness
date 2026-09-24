@@ -187,6 +187,30 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
 
 
 @dataclass
+class AntConfig:
+    """Direct (non-Databricks, non-OpenRouter) Anthropic API configuration
+    (H5 scope C's `ant:` provider): `ANTHROPIC_API_KEY` against
+    `api.anthropic.com` directly. Deliberately never reads
+    `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` -- those are Databricks'
+    (or another gateway's) own Claude-Code-compatible env vars at rolo's
+    work box, and conflating them here would silently point `ant:` at the
+    wrong host for whoever has that pair set."""
+    api_key: str
+    base_url: str = "https://api.anthropic.com"
+
+
+def resolve_anthropic(env: dict | None = None) -> AntConfig | None:
+    """None if `ANTHROPIC_API_KEY` isn't set -- the acceptance contract is
+    "`ant:` skipped unless an ANTHROPIC_API_KEY exists", not an error."""
+    env = env if env is not None else os.environ
+    api_key = env.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    base_url = env.get("BRIDGE_ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    return AntConfig(api_key=api_key, base_url=base_url)
+
+
+@dataclass
 class DbxConfig:
     """Databricks configuration."""
     host: str

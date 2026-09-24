@@ -1,15 +1,18 @@
-"""rolo_claude.tools.edit -- the Edit tool (H2 scope A). Wording matches
-Claude Code's own Edit tool exactly (binary-facts sec.14). Exact
-`old_string` match once (or every occurrence with `replace_all`); a
-whitespace-tolerant fallback when the exact text isn't found (a model that
-reproduces the right lines with slightly different indentation); a
-structured "not found" / "N near-matches" error otherwise; a Read-since-mtime
-check identical to Write's.
+"""rolo_claude.tools.edit -- the Edit tool (H2 scope A; H5 scope F item 1
+replaces the old two-stage matcher with OpenCode's NINE-stage replacer
+chain, in its own order, thresholds and error strings, verbatim where given
+-- reports/OpenCode harness deep review.md Appendix C). Parameters and
+description wording match Claude Code's own Edit tool (binary-facts
+sec.14); everything below `_levenshtein` is the replacer chain itself, tried
+in order until one stage yields exactly one match (or, with `replace_all`,
+every exact match). A Read-since-mtime check identical to Write's still
+gates every call.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, Optional
 
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
 from rolo_claude.tools.write import _detect_bom, _detect_newline
@@ -32,61 +35,293 @@ DESCRIPTION = (
     "useful if you want to rename a variable for instance."
 )
 
+# ---------------------------------------------------------------------------
+# Shared primitives
+# ---------------------------------------------------------------------------
 
-def _normalize_line(line: str) -> str:
-    return line.strip()
+BLOCK_ANCHOR_SIMILARITY = 0.65      # stage 3 (Appendix C)
+CONTEXT_AWARE_MATCH_FRACTION = 0.50  # stage 8 (Appendix C)
 
 
 def _leading_ws(line: str) -> str:
     return line[:len(line) - len(line.lstrip(" \t"))]
 
 
-def _tolerant_matches(content: str, old: str) -> list:
-    """Start/end char offsets of every window of `content`'s lines whose
-    per-line STRIPPED text matches `old`'s per-line stripped text (a rescue
-    for an old_string that reproduces the right content with different
-    indentation/trailing whitespace than the file actually has). finding 3:
-    the span is the CONTENT only -- from the first matched line's first
-    non-blank char to the last matched line's last non-blank char -- NEVER
-    the first line's own leading indentation (kept untouched, before
-    `start`) or the last line's trailing newline (kept untouched, after
-    `end`), so a tolerant replacement can never eat either. Each match is
-    `(start, end, first_line_indent)`; the indent is handed back so the
-    caller can re-indent `new_string` by the file-vs-old_string delta."""
+def _levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[-1]
+
+
+def _similarity(a: str, b: str) -> float:
+    """Levenshtein similarity in [0, 1]; two equally-empty strings are
+    trivially identical."""
+    longest = max(len(a), len(b))
+    return 1.0 if longest == 0 else 1.0 - (_levenshtein(a, b) / longest)
+
+
+def _common_indent(lines: list) -> str:
+    """The longest whitespace prefix every NON-BLANK line shares."""
+    candidates = [_leading_ws(l) for l in lines if l.strip()]
+    if not candidates:
+        return ""
+    shortest = min(candidates, key=len)
+    for i in range(len(shortest)):
+        if any(c[i:i + 1] != shortest[i] for c in candidates):
+            return shortest[:i]
+    return shortest
+
+
+def _collapse_ws(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _unescape(s: str) -> str:
+    return (s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\t", "\t")
+             .replace('\\"', '"').replace("\\'", "'"))
+
+
+def _line_offsets(content: str) -> "tuple[list, list]":
+    lines = content.splitlines(keepends=True)
+    offsets, pos = [], 0
+    for l in lines:
+        offsets.append(pos)
+        pos += len(l)
+    return lines, offsets
+
+
+def _window_span(lines: list, offsets: list, i: int, m: int) -> "tuple[int, int, str]":
+    """(start, end, first_line_indent) for lines[i:i+m] -- start sits right
+    AFTER the first line's own indentation, end is the last line's last
+    non-newline char, so a fuzzy replacement can never eat either."""
+    first_indent = _leading_ws(lines[i])
+    last_content = lines[i + m - 1].rstrip("\r\n")
+    return offsets[i] + len(first_indent), offsets[i + m - 1] + len(last_content), first_indent
+
+
+class Match:
+    __slots__ = ("start", "end", "indent")
+
+    def __init__(self, start: int, end: int, indent: str = ""):
+        self.start, self.end, self.indent = start, end, indent
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: Simple -- exact substring (handled directly in EditTool.run, not
+# here, since it needs the fast/common `str.count`/`str.replace` path).
+# ---------------------------------------------------------------------------
+
+def _sliding_window(lines: list, offsets: list, old_lines: list, transform: "Callable[[str], str]") -> list:
+    """Every window of len(old_lines) lines whose per-line
+    `transform(...)`-ed text equals old_lines' own transformed text --
+    shared by stages 2 (LineTrimmed, transform=str.strip) and 4
+    (WhitespaceNormalized, transform=_collapse_ws)."""
+    n, m = len(lines), len(old_lines)
+    if m == 0 or n < m:
+        return []
+    target = [transform(l) for l in old_lines]
+    out = []
+    for i in range(0, n - m + 1):
+        window = [w.rstrip("\r\n") for w in lines[i:i + m]]
+        if [transform(w) for w in window] == target:
+            out.append(Match(*_window_span(lines, offsets, i, m)))
+    return out
+
+
+def stage_line_trimmed(content: str, old: str) -> list:
+    lines, offsets = _line_offsets(content)
+    return _sliding_window(lines, offsets, old.splitlines(), str.strip)
+
+
+def stage_whitespace_normalized(content: str, old: str) -> list:
+    lines, offsets = _line_offsets(content)
+    return _sliding_window(lines, offsets, old.splitlines(), _collapse_ws)
+
+
+def stage_block_anchor(content: str, old: str) -> list:
+    """First/last lines (trimmed) anchor the window; middle lines scored by
+    average Levenshtein SIMILARITY, threshold >= 0.65; the single BEST
+    scoring candidate wins (not just the first)."""
+    old_lines = old.splitlines()
+    if len(old_lines) < 2:
+        return []
+    lines, offsets = _line_offsets(content)
+    n, m = len(lines), len(old_lines)
+    if n < m:
+        return []
+    first_anchor, last_anchor = old_lines[0].strip(), old_lines[-1].strip()
+    old_middle = [l.strip() for l in old_lines[1:-1]]
+    best, best_score = None, -1.0
+    for i in range(0, n - m + 1):
+        window = [w.rstrip("\r\n") for w in lines[i:i + m]]
+        if window[0].strip() != first_anchor or window[-1].strip() != last_anchor:
+            continue
+        mid = [w.strip() for w in window[1:-1]]
+        score = 1.0 if not old_middle else sum(_similarity(a, b) for a, b in zip(old_middle, mid)) / len(old_middle)
+        if score > best_score:
+            best_score, best = score, i
+    if best is None or best_score < BLOCK_ANCHOR_SIMILARITY:
+        return []
+    return [Match(*_window_span(lines, offsets, best, m))]
+
+
+def stage_indentation_flexible(content: str, old: str) -> list:
+    """Common leading indentation stripped from BOTH old_string and each
+    candidate window before comparing line-by-line."""
     old_lines = old.splitlines()
     if not old_lines:
         return []
-    content_lines = content.splitlines(keepends=True)
-    normalized_old = [_normalize_line(l) for l in old_lines]
-    n, m = len(content_lines), len(old_lines)
-    offsets = []
-    pos = 0
-    for l in content_lines:
-        offsets.append(pos)
-        pos += len(l)
-    matches = []
+    old_indent = _common_indent(old_lines)
+    old_target = [l[len(old_indent):] if l.startswith(old_indent) else l.strip() for l in old_lines]
+    lines, offsets = _line_offsets(content)
+    n, m = len(lines), len(old_lines)
+    out = []
     for i in range(0, n - m + 1):
-        window = content_lines[i:i + m]
-        if [_normalize_line(w) for w in window] == normalized_old:
-            first_line, last_line = window[0], window[-1]
-            first_indent = _leading_ws(first_line)
-            last_content = last_line.rstrip("\r\n")
-            start = offsets[i] + len(first_indent)
-            end = offsets[i + m - 1] + len(last_content)
-            matches.append((start, end, first_indent))
-    return matches
+        window = [w.rstrip("\r\n") for w in lines[i:i + m]]
+        win_indent = _common_indent(window)
+        win_stripped = [w[len(win_indent):] if w.startswith(win_indent) else w.strip() for w in window]
+        if win_stripped == old_target:
+            out.append(Match(*_window_span(lines, offsets, i, m)))
+    return out
+
+
+def stage_escape_normalized(content: str, old: str) -> list:
+    """`\\n`/`\\t`/etc. unescaped in old_string, then an exact substring
+    search (a model that double-escaped a string literal it copied from
+    Read's own display)."""
+    unescaped = _unescape(old)
+    if unescaped == old or not unescaped:
+        return []
+    out, start = [], 0
+    while True:
+        idx = content.find(unescaped, start)
+        if idx < 0:
+            break
+        out.append(Match(idx, idx + len(unescaped)))
+        start = idx + max(1, len(unescaped))
+    return out
+
+
+def stage_trimmed_boundary(content: str, old: str) -> list:
+    """Leading/trailing whitespace of the WHOLE old_string trimmed, then an
+    exact substring search."""
+    trimmed = old.strip()
+    if trimmed == old or not trimmed:
+        return []
+    out, start = [], 0
+    while True:
+        idx = content.find(trimmed, start)
+        if idx < 0:
+            break
+        out.append(Match(idx, idx + len(trimmed)))
+        start = idx + max(1, len(trimmed))
+    return out
+
+
+def stage_context_aware(content: str, old: str) -> list:
+    """First/last lines (trimmed) as anchors; >= 50% of MIDDLE lines must
+    match (trimmed, exact) -- looser than BlockAnchor's Levenshtein
+    scoring, so it catches a window with a few genuinely different middle
+    lines that BlockAnchor's average similarity rejected."""
+    old_lines = old.splitlines()
+    if len(old_lines) < 2:
+        return []
+    lines, offsets = _line_offsets(content)
+    n, m = len(lines), len(old_lines)
+    if n < m:
+        return []
+    first_anchor, last_anchor = old_lines[0].strip(), old_lines[-1].strip()
+    old_middle = [l.strip() for l in old_lines[1:-1]]
+    out = []
+    for i in range(0, n - m + 1):
+        window = [w.rstrip("\r\n") for w in lines[i:i + m]]
+        if window[0].strip() != first_anchor or window[-1].strip() != last_anchor:
+            continue
+        mid = [w.strip() for w in window[1:-1]]
+        matched = sum(1 for a, b in zip(old_middle, mid) if a == b)
+        fraction = 1.0 if not old_middle else matched / len(old_middle)
+        if fraction >= CONTEXT_AWARE_MATCH_FRACTION:
+            out.append(Match(*_window_span(lines, offsets, i, m)))
+    return out
+
+
+# Stage 9 (MultiOccurrence) needs no function of its own: it is stage 1
+# (Simple/exact) applied with `replace_all=True`, which `EditTool.run`
+# already handles via `str.count`/`str.replace` before this chain even
+# starts -- see Appendix C: "used for replaceAll".
+
+STAGES: "list[tuple[str, Callable[[str, str], list]]]" = [
+    ("LineTrimmed", stage_line_trimmed),
+    ("BlockAnchor", stage_block_anchor),
+    ("WhitespaceNormalized", stage_whitespace_normalized),
+    ("IndentationFlexible", stage_indentation_flexible),
+    ("EscapeNormalized", stage_escape_normalized),
+    ("TrimmedBoundary", stage_trimmed_boundary),
+    ("ContextAware", stage_context_aware),
+]
+
+
+def _check_span_guard(old: str, matched_text: str) -> Optional[str]:
+    """Appendix C span guard, verbatim thresholds: reject a fuzzy hit whose
+    matched span is either >= `max(oldLines+3, oldLines*2)` LINES or whose
+    length is > `max(len(oldString)+500, len(oldString)*4)` CHARS. Returns
+    the (OpenCode-worded) error string on a violation, else None."""
+    old_lines = max(1, len(old.splitlines()) or 1)
+    span_lines = matched_text.count("\n") + 1
+    line_limit = max(old_lines + 3, old_lines * 2)
+    char_limit = max(len(old) + 500, len(old) * 4)
+    if span_lines >= line_limit or len(matched_text) > char_limit:
+        return ("Refusing replacement because the matched span is much larger than oldString "
+                f"({span_lines} lines / {len(matched_text)} chars matched, oldString is {old_lines} "
+                f"lines / {len(old)} chars) -- provide more surrounding context to narrow the match.")
+    return None
+
+
+def find_replacement(content: str, old: str) -> "tuple[Optional[list], Optional[str], str]":
+    """Try each fuzzy stage in Appendix C order; the FIRST stage that
+    yields exactly one match wins. Returns (matches_or_None, stage_name,
+    error) -- `error` is only set when every stage that DID produce
+    candidate(s) also failed the span guard on all of them (still reported
+    as "not found", per Appendix C: a fuzzy hit that fails the guard is
+    refused, not silently promoted). `matches` is a length-1 list on
+    success (the chain never returns MULTIPLE candidates as a success --
+    an ambiguous stage already resolves to its own single best candidate,
+    per stage 3/8's own "single best candidate" rule, or is skipped)."""
+    for name, stage_fn in STAGES:
+        try:
+            candidates = stage_fn(content, old)
+        except Exception:
+            continue
+        if not candidates:
+            continue
+        m = candidates[0]
+        matched_text = content[m.start:m.end]
+        guard_error = _check_span_guard(old, matched_text)
+        if guard_error:
+            return None, name, guard_error
+        return [m], name, ""
+    return None, None, ""
 
 
 def _reindent_new_string(new_string: str, *, old_first_indent: str, file_first_indent: str) -> str:
-    """finding 3: shift every line of `new_string` by the delta between
-    old_string's OWN first-line indentation and the file's actual first-
-    matched-line indentation. The first line gets NO added prefix -- the
-    replacement span already starts right after the file's real
-    indentation (see `_tolerant_matches`), so re-adding it here would
-    double it. Every OTHER line that starts with old_string's first-line
-    indent has that shared prefix swapped for the file's (preserving any
-    EXTRA relative indentation, e.g. a nested block); a line that doesn't
-    share that prefix is re-indented from scratch."""
+    """Shift every line of `new_string` by the delta between old_string's
+    OWN first-line indentation and the file's actual matched-line
+    indentation. The first line gets no added prefix (the replacement span
+    already starts right after the file's real indentation); a later line
+    sharing old_string's first-line indent has that shared prefix swapped
+    for the file's (preserving extra relative indentation); anything else
+    is re-indented from scratch."""
     if old_first_indent == file_first_indent:
         return new_string
     lines = new_string.split("\n")
@@ -133,11 +368,7 @@ class EditTool(Tool):
         if not isinstance(old_string, str) or not isinstance(new_string, str):
             return ToolResult("old_string and new_string are required string parameters", is_error=True)
         if old_string == new_string:
-            return ToolResult("old_string and new_string must be different", is_error=True)
-        if old_string == "":
-            # finding 4: `"abc".replace("", "X")` inserts X between EVERY
-            # character (and at both ends) -- never a meaningful edit.
-            return ToolResult("old_string must not be empty", is_error=True)
+            return ToolResult("No changes to apply: oldString and newString are identical.", is_error=True)
         path = Path(file_path)
         if not path.is_absolute():
             return ToolResult(
@@ -145,9 +376,19 @@ class EditTool(Tool):
                 is_error=True,
             )
         if not path.exists():
-            return ToolResult(f"File does not exist: {file_path}", is_error=True)
+            return ToolResult(f"File {file_path} not found", is_error=True)
         if path.is_dir():
             return ToolResult(f"Path is a directory, not a file: {file_path}", is_error=True)
+        if old_string == "":
+            # Appendix C: empty oldString is only ever valid for creating a
+            # NEW file (Write's job) -- on an EXISTING file it can never be
+            # a meaningful edit (`"abc".replace("", "X")` inserts X between
+            # every character).
+            return ToolResult(
+                "oldString cannot be empty when editing an existing file. Use the Write tool instead "
+                "to create a new file, or provide the exact text to replace.",
+                is_error=True,
+            )
 
         read_cache = getattr(ctx, "read_cache", None) if isinstance(getattr(ctx, "read_cache", None), dict) else {}
         try:
@@ -172,11 +413,9 @@ class EditTool(Tool):
         except OSError as e:
             return ToolResult(f"Error reading file: {e}", is_error=True)
         bom = _detect_bom(raw)
-        # finding 4: surrogateescape (not "replace") -- a byte in the
-        # EXISTING file that isn't valid UTF-8 round-trips losslessly back
-        # to its own original byte on write, instead of being permanently
-        # replaced with U+FFFD (which re-encodes as a DIFFERENT byte
-        # sequence, corrupting untouched parts of the file).
+        # surrogateescape (not "replace"): a byte in the EXISTING file that
+        # isn't valid UTF-8 round-trips losslessly back to its own original
+        # byte on write, instead of being permanently replaced with U+FFFD.
         content = raw[len(bom):].decode("utf-8", "surrogateescape")
         newline = _detect_newline(content)
         normalized_content = content.replace("\r\n", "\n")
@@ -184,48 +423,41 @@ class EditTool(Tool):
         normalized_new = new_string.replace("\r\n", "\n")
 
         count = normalized_content.count(normalized_old)
-        used_tolerant = False
+        stage_used = "Simple"
         if count == 0:
-            candidates = _tolerant_matches(normalized_content, normalized_old)
-            if len(candidates) == 1:
-                start, end, file_first_indent = candidates[0]
-                old_first_indent = _leading_ws(normalized_old.splitlines()[0])
-                reindented = _reindent_new_string(
-                    normalized_new, old_first_indent=old_first_indent, file_first_indent=file_first_indent,
-                )
-                new_content = normalized_content[:start] + reindented + normalized_content[end:]
-                used_tolerant = True
-            elif len(candidates) == 0:
+            matches, stage_name, guard_error = find_replacement(normalized_content, normalized_old)
+            if guard_error:
+                return ToolResult(guard_error, is_error=True)
+            if not matches:
                 return ToolResult(
-                    f"String not found in file (0 near-matches): old_string did not match any text in {file_path}. "
-                    f"Make sure it is an exact substring, or matches the file's lines once whitespace is ignored.",
+                    "Could not find oldString in the file. It must match exactly, including whitespace "
+                    f"and indentation: {file_path}",
                     is_error=True,
                 )
-            else:
-                return ToolResult(
-                    f"String not found exactly, and {len(candidates)} near-matches (ambiguous whitespace-only "
-                    f"matches) were found in {file_path}. Provide more surrounding context to make old_string unique.",
-                    is_error=True,
-                )
+            m = matches[0]
+            matched_text = normalized_content[m.start:m.end]
+            old_first_indent = _leading_ws(normalized_old.splitlines()[0]) if normalized_old.splitlines() else ""
+            reindented = _reindent_new_string(normalized_new, old_first_indent=old_first_indent, file_first_indent=m.indent)
+            new_content = normalized_content[:m.start] + reindented + normalized_content[m.end:]
+            stage_used = stage_name
+            _ = matched_text  # kept for clarity/debugging symmetry with the guard check above
         elif count > 1 and not replace_all:
             return ToolResult(
-                f"old_string is not unique in the file: found {count} matches in {file_path}. "
-                f"Either provide a larger string with more surrounding context to make it unique, "
-                f"or use replace_all to change every instance.",
+                f"Found multiple matches for oldString: {count} matches in {file_path}. Provide more "
+                f"surrounding context to make oldString unique, or set replace_all to true to change "
+                f"every occurrence.",
                 is_error=True,
             )
         else:
             if replace_all:
                 new_content = normalized_content.replace(normalized_old, normalized_new)
+                stage_used = "MultiOccurrence" if count > 1 else "Simple"
             else:
                 new_content = normalized_content.replace(normalized_old, normalized_new, 1)
 
         if newline == "\r\n":
             new_content = new_content.replace("\n", "\r\n")
 
-        # finding 4: encode BEFORE opening the file -- an encode failure
-        # (e.g. new_string introduces a lone surrogate) must never
-        # truncate the file first.
         try:
             encoded = new_content.encode("utf-8", "surrogateescape")
         except UnicodeEncodeError as e:
@@ -245,5 +477,5 @@ class EditTool(Tool):
 
         occurrences = count if count > 0 else 1
         replaced = occurrences if replace_all else 1
-        note = " (tolerant whitespace match)" if used_tolerant else ""
+        note = "" if stage_used == "Simple" else f" (matched via {stage_used})"
         return ToolResult(f"The file {file_path} has been updated ({replaced} replacement(s)){note}.")

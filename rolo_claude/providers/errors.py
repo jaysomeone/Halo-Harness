@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 log = logging.getLogger("bridge")
 
@@ -96,6 +98,17 @@ def parse_context_overflow(status: int, err_msg: str, raw_meta: str | None,
         prompt_tokens = int(dbx_full.group(1))
         limit = int(dbx_full.group(3))
     else:
+        # Anthropic's native Messages API wording (H5 scope C): "prompt is
+        # too long: N tokens > M maximum" -- N is the PROMPT total, M is
+        # the limit; tried before the looser patterns below so it can't be
+        # shadowed by e.g. "context limit ... (\d+)" matching the wrong
+        # number out of the same sentence.
+        anthropic_m = re.search(r"prompt is too long:\s*(\d+)\s*tokens\s*>\s*(\d+)\s*maximum", text)
+        if anthropic_m:
+            total = int(anthropic_m.group(1))
+            limit = int(anthropic_m.group(2))
+            return OverflowInfo(limit, total, False, total)  # Anthropic's own message already IS the total; never silently clamp-retried
+
         for pattern in (
             r"maximum context length is (\d+)",           # OpenAI/vLLM and OpenRouter (superset phrase)
             r"exceeded model token limit:\s*(\d+)",        # Kimi (coordinator research, deepseek_kimi_adapters.md)
@@ -321,6 +334,165 @@ def backoff_delay(attempt: int, retry_after=None) -> float:
         except (TypeError, ValueError):
             extra = 0.0
     return base + extra
+
+
+# ---------------------------------------------------------------------------
+# H5 scope F items 2/4 (OpenCode Appendix A/B, reports/OpenCode harness deep
+# review.md) -- the message-pattern retry classifier and the merged
+# context-overflow regex list, ADDITIVE to everything above (classify_error_
+# category/backoff_delay/_OVERFLOW_TAXONOMY_RE are unchanged and still used
+# exactly as before by every existing caller).
+# ---------------------------------------------------------------------------
+
+# Appendix A, verbatim (8 of OpenCode's own ~27, captured in the review)
+# unioned with rolo-claude's existing _OVERFLOW_TAXONOMY_RE patterns and the
+# adapter-rules report's per-host regexes -- every pattern that means "this
+# is a context/quota overflow", from every source, in one place.
+OVERFLOW_PATTERNS = [
+    # OpenCode provider-error.ts (verbatim, 8 of ~27)
+    r"prompt is too long", r"request_too_large", r"exceeds the context window",
+    r"maximum context length is \d+ tokens", r"context[_ ]length[_ ]exceeded",
+    r"too many tokens", r"token limit exceeded", r"model_context_window_exceeded",
+    # rolo-claude errors.py (existing _OVERFLOW_TAXONOMY_RE, unioned in)
+    r"maximum context length is \d+", r"exceeded model token limit",
+    r"input token exceed the limit", r"input token length too long",
+    r"prompt tokens \+ max_tokens exceeds", r"context limit",
+    r"input token count \(\d+\) exceeds the maximum",      # Gemini
+    r"maximum prompt length is \d+",                         # xAI
+    r"context window exceeds limit",                         # MiniMax 2013
+    r"range of input length should be",                      # DashScope
+    # adapter-rules report (per host)
+    r"maximum context length is (\d+) tokens\. However, you requested about (\d+) tokens",  # OpenRouter
+    r"maximum context length is (\d+) tokens\. However, you requested (\d+) tokens",        # vLLM / DeepSeek
+    r"quota_limit_reached", r"\"code\"\s*:\s*\"?1261\"?", r"Prompt too long",              # DeepSeek terse, Z.ai
+    r"prompt is too long: (\d+) tokens > (\d+) maximum",                                     # Anthropic
+]
+OVERFLOW_EXCLUSIONS = [r"rate limit", r"too many requests", r"^(throttling error|service unavailable):"]
+
+MERGED_OVERFLOW_RE = re.compile("|".join(OVERFLOW_PATTERNS), re.IGNORECASE)
+_OVERFLOW_EXCLUSIONS_RE = re.compile("|".join(OVERFLOW_EXCLUSIONS), re.IGNORECASE)
+
+
+def is_context_overflow_message(status: int, message: str, body: Optional[dict] = None) -> bool:
+    """Appendix A's rule, verbatim: classify as overflow if `status == 413`,
+    or `body.error.code == "context_length_exceeded"`, or any pattern
+    matches AND no exclusion matches. Never retry this class -- hand it to
+    compaction (see `retryable` below, which checks this FIRST)."""
+    if status == 413:
+        return True
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("code") == "context_length_exceeded":
+            return True
+    message = message or ""
+    if _OVERFLOW_EXCLUSIONS_RE.search(message):
+        return False
+    return bool(MERGED_OVERFLOW_RE.search(message))
+
+
+# Appendix B, verbatim.
+RETRY_INITIAL_DELAY_MS = 2000
+RETRY_BACKOFF_FACTOR = 2
+RETRY_JITTER_FACTOR = 0.25
+RETRY_MAX_DELAY_NO_HEADERS_MS = 30_000
+RETRY_MAX_DELAY_MS = 2_147_483_647          # only reachable via a Retry-After header
+RETRY_MAX_RETRIES = 5
+
+RETRYABLE_MESSAGE_PATTERNS = [               # all case-insensitive
+    r"429|500|502|503|504|524",
+    r"rate increased too quickly|rate limit|rate-limit|rate_limit|too many requests",
+    r"overloaded|service unavailable|internal error|provider returned error|provider_returned_error",
+    r"terminated|fetch failed|socket hang up|connection refused|econnrefused|econnreset|etimedout",
+    r"^timeout$|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b",
+    r"try your request again|retry your request|resource exhausted|resource_exhausted",
+    r"\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b",
+]
+_RETRYABLE_MESSAGE_RE = re.compile("|".join(RETRYABLE_MESSAGE_PATTERNS), re.IGNORECASE)
+
+
+def is_retryable_message(status: Optional[int], message: str, *, body_text: str = "",
+                          host: Optional[str] = None, raw_finish_reason: Optional[str] = None,
+                          kind: Optional[str] = None) -> bool:
+    """`retryable()`, Appendix B: never retries CONTEXT_WINDOW_EXCEEDED;
+    always retries >=500 or 429; OpenAI's own occasional spurious 404
+    ("sometimes returns 404 for models that are actually available") is
+    retryable only for that host; `raw_finish_reason == "network_error"`
+    (an SDK-level signal, not an HTTP status) and `kind` in
+    ("header_timeout", "sse_read_timeout") (the watchdog below) are always
+    retryable; otherwise falls through to the message-pattern list."""
+    if is_context_overflow_message(status or 0, message):
+        return False
+    if isinstance(status, int) and (status >= 500 or status == 429):
+        return True
+    if status == 404 and host == "openai":
+        return True
+    if raw_finish_reason == "network_error":
+        return True
+    if kind in ("header_timeout", "sse_read_timeout"):
+        return True
+    text = f"{message or ''} {body_text or ''}"
+    return bool(_RETRYABLE_MESSAGE_RE.search(text))
+
+
+def _parse_retry_after_seconds(value) -> Optional[float]:
+    from email.utils import parsedate_to_datetime
+    import datetime as _dt
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return float(text)
+    try:
+        dt = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return max(0.0, (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds())
+
+
+def retry_delay_ms(attempt: int, headers: Optional[dict] = None) -> int:
+    """Appendix B `delay_ms`, verbatim precedence: `retry-after-ms` (any
+    case) first, then `retry-after` (seconds, or an HTTP date), else
+    `2000 * 2^(attempt-1)` with 25% jitter, capped at 30s when no header is
+    present. `attempt` is 1-based. A header-driven delay is capped only by
+    the effectively-unbounded `RETRY_MAX_DELAY_MS`, never by the 30s no-
+    header cap -- a provider that asks for a longer wait is honoured."""
+    headers = {k.lower(): v for k, v in (headers or {}).items()}
+    if "retry-after-ms" in headers:
+        try:
+            return min(int(float(headers["retry-after-ms"])), RETRY_MAX_DELAY_MS)
+        except (TypeError, ValueError):
+            pass
+    if "retry-after" in headers:
+        secs = _parse_retry_after_seconds(headers["retry-after"])
+        if secs is not None:
+            return min(int(secs * 1000), RETRY_MAX_DELAY_MS)
+    base = RETRY_INITIAL_DELAY_MS * (RETRY_BACKOFF_FACTOR ** max(0, attempt - 1))
+    jitter = base * RETRY_JITTER_FACTOR * random.random()
+    return min(int(base + jitter), RETRY_MAX_DELAY_NO_HEADERS_MS)
+
+
+# ---------------------------------------------------------------------------
+# H5 scope F item 3: SSE chunk-idle watchdog constants (OpenCode: 300s header
+# timeout, 300s between-chunk timeout on a text/event-stream body). The
+# watchdog ITSELF lives in providers/stream.py (it needs the live socket/
+# queue), these are its shared, testable constants + the classification it
+# raises for `is_retryable_message`'s `kind=` parameter above.
+# ---------------------------------------------------------------------------
+
+SSE_HEADER_TIMEOUT_S = 300.0
+SSE_CHUNK_IDLE_TIMEOUT_S = 300.0
+
+
+class SSEChunkIdleTimeout(Exception):
+    """Raised when no SSE chunk arrives for `SSE_CHUNK_IDLE_TIMEOUT_S`
+    seconds -- classified `kind="sse_read_timeout"`, always retryable per
+    `is_retryable_message` above."""
 
 
 def flatten_content_parts(content) -> str:

@@ -31,6 +31,7 @@ import logging
 import queue
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -41,10 +42,12 @@ from rolo_claude.providers.errors import (
     build_prompt_too_long_message, map_upstream_error, parse_context_overflow,
     parse_databricks_rate_limit, upstream_error_text,
 )
-from rolo_claude.providers.http import UpstreamConnectError, call_databricks_chat, call_openai_chat
+from rolo_claude.providers.http import UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat
 from rolo_claude.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
 from rolo_claude.providers.routing import Route
 from rolo_claude.providers.translate import anthropic_to_openai
+from rolo_claude.providers.anthropic_sse import AnthropicSSEDecoder
+from rolo_claude.providers.errors import SSE_CHUNK_IDLE_TIMEOUT_S
 
 log = logging.getLogger("bridge")
 
@@ -99,6 +102,13 @@ class CompletionRequest:
     # keeps the proxy always minting fresh unique ids, exactly as before;
     # only agent/loop.py's Session ever passes anything else.
     tool_id_format: str = "mint"
+    # H5 scope C: when set, `stream_anthropic_completion` (never
+    # `stream_completion`, which stays openai-chat-dialect only) sends
+    # this ALREADY-native-Anthropic-shaped body verbatim instead of
+    # calling `providers.request.build_anthropic_request_body` itself --
+    # same "prebuilt body, caller already did the profile-driven building"
+    # pattern as `prebuilt_oai_body` above.
+    prebuilt_anthropic_body: Optional[dict] = None
 
 
 class ContextOverflow(Exception):
@@ -493,6 +503,167 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
         # `abort`-triggered `return` or an external `gen.close()`/exception
         # skips this comment entirely, which is exactly the other
         # "no terminal event was consumed" case `finally` must clean up.
+    finally:
+        if not terminal_reached and sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
+        dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
+
+
+# ---------------------------------------------------------------------------
+# H5 scope C: the native-Anthropic-dialect sibling of stream_completion.
+# Deliberately NOT a code path inside stream_completion itself (see this
+# module's own docstring: the Databricks passthrough dialect stays split
+# from the openai-chat one) -- but it DOES share stream_completion's retry/
+# overflow/ping/abort DESIGN, just against `call_anthropic_native` and
+# `AnthropicSSEDecoder` instead of the openai-chat call + translator. Events
+# pass through essentially AS-IS (already Anthropic-shaped on the wire),
+# which is what makes this simpler than stream_completion's translation.
+# ---------------------------------------------------------------------------
+
+def _run_phase1_anthropic(req: CompletionRequest, abort: "threading.Event | None" = None):
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    body = req.prebuilt_anthropic_body
+    if req.creds is None:
+        provider_label = "Databricks" if req.route.provider == "databricks" else "Anthropic"
+        raise ProviderNotConfigured(f"{provider_label} not configured")
+
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
+    def _call_upstream():
+        return call_anthropic_native(
+            base_url=req.creds.base_url, api_key=req.creds.api_key, body=body,
+            extra_headers=req.extra_headers, state_dir=req.state_dir,
+            route_provider=req.route.provider, on_connect=_register_sock,
+        )
+
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        for attempt in range(2):
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            try:
+                result = _call_upstream()
+            except UpstreamConnectError as e:
+                if abort is not None and abort.is_set():
+                    raise _Aborted() from e
+                if attempt == 0:
+                    continue
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+                raise _upstream_error_from_mapping(status, jbody, hdrs) from e
+            if 200 <= result.status < 300:
+                return body, result
+            raw = result.resp.read() if result.resp else b""
+            try:
+                err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            err_msg = upstream_error_text(err_obj)
+            if result.status == 400:
+                overflow = parse_context_overflow(result.status, err_msg, None, requested_max_tokens=body.get("max_tokens"))
+                if overflow:
+                    raise ContextOverflow(overflow.limit, overflow.prompt_tokens, overflow.total)
+            status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            if result.status == 429 and "Retry-After" not in hdrs:
+                # H5 scope E: honour `retry-after`/`anthropic-ratelimit-*`
+                # even when the response used neither header's canonical
+                # casing (http.client lower-cases headers for us already,
+                # so this is really just picking whichever of the two the
+                # response actually sent).
+                ra = result.headers.get("retry-after") or result.headers.get("anthropic-ratelimit-requests-reset")
+                if ra:
+                    hdrs = {**hdrs, "Retry-After": str(ra)}
+            raise _upstream_error_from_mapping(status, jbody, hdrs)
+        raise UpstreamError(502, "api_error", "upstream failure after retries", True)
+    finally:
+        watcher_done.set()
+
+
+def stream_anthropic_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
+    """Drive one native-Anthropic-dialect completion end to end (ant:,
+    Databricks Claude passthrough). Same two-phase contract as
+    `stream_completion`; `req.prebuilt_anthropic_body` MUST be set (the
+    caller -- agent/loop.py -- always builds it via
+    `providers.request.build_anthropic_request_body` first)."""
+    try:
+        _body, result = _run_phase1_anthropic(req, abort=abort)
+    except _Aborted:
+        return
+
+    decoder = AnthropicSSEDecoder()
+    dumped_lines: list = []
+    dumped_events: list = []
+    q: "queue.Queue" = queue.Queue()
+    reader = threading.Thread(target=sse_reader_thread, args=(result.resp, q))
+    reader.daemon = True
+    reader.start()
+
+    sock = result.conn.sock if result.conn is not None else None
+    terminal_reached = False
+    last_activity = time.monotonic()
+
+    try:
+        poll_timeout = min(req.ping_interval, 0.25) if req.ping_interval > 0 else 0.25
+        elapsed = 0.0
+        while True:
+            if abort is not None and abort.is_set():
+                return
+            try:
+                item = q.get(timeout=poll_timeout)
+            except queue.Empty:
+                elapsed += poll_timeout
+                if time.monotonic() - last_activity >= SSE_CHUNK_IDLE_TIMEOUT_S:
+                    # H5 scope F item 3: the chunk-idle watchdog -- classified
+                    # retryable (providers.errors.is_retryable_message's own
+                    # kind="sse_read_timeout" branch); the CALLER (agent/
+                    # loop.py's _step) is what actually retries the whole
+                    # request, this generator just reports the failure.
+                    ev = {"type": "error", "error": {"type": "api_error",
+                          "message": f"SSE read timed out after {SSE_CHUNK_IDLE_TIMEOUT_S:.0f}s of upstream silence",
+                          "kind": "sse_read_timeout"}}
+                    dumped_events.append(ev)
+                    yield ev
+                    break
+                if elapsed >= req.ping_interval:
+                    elapsed = 0.0
+                    yield {"type": "ping"}
+                continue
+            last_activity = time.monotonic()
+            elapsed = 0.0
+            kind, value = item
+            if kind == "line":
+                line = value.decode("utf-8", "replace").rstrip("\n")
+                dumped_lines.append(line)
+                for ev in decoder.feed_line(line):
+                    dumped_events.append(ev)
+                    yield ev
+                    if ev.get("type") == "message_stop":
+                        terminal_reached = True
+                if decoder.done:
+                    break
+            elif kind == "eof":
+                for ev in decoder.on_eof():
+                    dumped_events.append(ev)
+                    yield ev
+                terminal_reached = True
+                break
+            elif kind == "exc":
+                ev = {"type": "error", "error": {"type": "api_error", "message": f"upstream connection error: {value}"}}
+                dumped_events.append(ev)
+                yield ev
+                terminal_reached = True
+                break
     finally:
         if not terminal_reached and sock is not None:
             try:

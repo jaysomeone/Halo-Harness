@@ -120,7 +120,10 @@ def test_builtins_all_22_registered_with_expected_kinds(ctx: Ctx):
     env = _Env()
     try:
         reg = env.discover()
-        expected_ui = {"clear", "compact", "plan", "resume", "export", "exit"}
+        # H5 scope B: /compact moved from "ui" to "core" -- it now fully
+        # executes a real compaction (or a clear no-session message)
+        # instead of describing what the TUI would do.
+        expected_ui = {"clear", "plan", "resume", "export", "exit"}
         expected_prompt = {"init"}
         for name in ("help", "clear", "compact", "cost", "context", "model", "mcp", "memory", "permissions",
                       "plan", "resume", "status", "config", "skills", "agents", "effort", "init", "doctor",

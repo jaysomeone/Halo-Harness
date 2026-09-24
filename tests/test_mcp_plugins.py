@@ -5,6 +5,7 @@ the fixture plugin in tests/helpers/fake_home.py::add_fake_plugin (rolo has
 none installed for real as of 2026-09-24). See config/plugins.py's own
 module docstring for the on-disk layout this mirrors.
 """
+import json
 import os
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import add_fake_plugin
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -253,6 +254,254 @@ def test_plugin_server_survives_a_real_connection_with_namespaced_tool_names(ctx
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+# ---- finding 11: installed_plugins.json V2 (installPath + enabledPlugins) -
+
+def _write_v2_manifest(claude_dir: Path, key: str, install_path: Path, *, extra_entry_fields=None) -> None:
+    from rolo_claude.config.plugins import installed_plugins_manifest_path
+    manifest_path = installed_plugins_manifest_path()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"installPath": str(install_path)}
+    entry.update(extra_entry_fields or {})
+    manifest_path.write_text(json.dumps({"version": 2, "plugins": {key: entry}}), encoding="utf-8")
+
+
+def _fake_settings(raw: dict):
+    from rolo_claude.config.settings import Settings
+    return Settings(raw=raw, layers=[], errors=[])
+
+
+@test
+def test_v2_manifest_installpath_and_enabled_plugins_settings_gate(ctx: Ctx):
+    """finding 11: 2.1.281's real installed_plugins.json shape --
+    {version: 2, plugins: {"<name>@<marketplace>": {installPath, ...}}} --
+    with enablement taken from settings `enabledPlugins`, and the wire
+    server name using the plugin name WITHOUT the @marketplace suffix."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {
+                "command": sys.executable, "args": ["-m", "tests.helpers.fake_mcp_server"]}}}),
+            encoding="utf-8")
+        _write_v2_manifest(claude_dir, "foo@some-marketplace", plugin_root)
+        settings = _fake_settings({"enabledPlugins": {"foo@some-marketplace": True}})
+        servers, notices = discover_plugin_mcp_servers(env={}, settings=settings)
+        expected_name = plugin_server_name("foo", "fakeserver")
+        ctx.check(f"V2 plugin discovered, name has NO @marketplace suffix, got {list(servers)}",
+                  expected_name in servers)
+        ctx.check(f"no notices for a clean discovery, got {notices}", notices == [])
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_v2_manifest_disabled_via_enabled_plugins_settings(ctx: Ctx):
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin-off"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {"command": "x"}}}), encoding="utf-8")
+        _write_v2_manifest(claude_dir, "foo@mp", plugin_root)
+        settings = _fake_settings({"enabledPlugins": {"foo@mp": False}})
+        servers, _ = discover_plugin_mcp_servers(env={}, settings=settings)
+        expected_name = plugin_server_name("foo", "fakeserver")
+        ctx.check("explicitly disabled via enabledPlugins settings -> not discovered",
+                  expected_name not in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_v2_manifest_defaults_enabled_when_settings_say_nothing(ctx: Ctx):
+    """A freshly-cloned/installed V2 plugin the settings' `enabledPlugins`
+    map doesn't mention AT ALL yet must still be discovered (parity with
+    V1's own "installed == on" default), not silently invisible."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin-silent"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {"command": "x"}}}), encoding="utf-8")
+        _write_v2_manifest(claude_dir, "foo@mp", plugin_root)
+        for settings in (None, _fake_settings({}), _fake_settings({"enabledPlugins": {"other@mp": True}})):
+            servers, _ = discover_plugin_mcp_servers(env={}, settings=settings)
+            expected_name = plugin_server_name("foo", "fakeserver")
+            ctx.check(f"defaults to enabled with settings={settings!r}, got {list(servers)}",
+                      expected_name in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+# ---- finding 11: bare .mcp.json + string mcpServers path in plugin.json ---
+
+@test
+def test_bare_mcp_json_map_is_discovered(ctx: Ctx):
+    """finding 11's exact repro: 9 of 14 real plugin .mcp.json files
+    (including github and playwright) are a BARE {server: entry} map,
+    never wrapped in {"mcpServers": ...} -- the original implementation
+    only ever checked for the wrapped key and silently discovered
+    nothing for any of them."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir / "plugins" / "cache" / "bare-plugin"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        # BARE -- no "mcpServers" wrapper, exactly like the real github/
+        # playwright plugin.mcp.json files.
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"fakeserver": {"command": sys.executable,
+                                        "args": ["-m", "tests.helpers.fake_mcp_server"]}}),
+            encoding="utf-8")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"bare-plugin": {"enabled": True}}}), encoding="utf-8")
+        servers, notices = discover_plugin_mcp_servers(env={})
+        expected_name = plugin_server_name("bare-plugin", "fakeserver")
+        ctx.check(f"bare .mcp.json map is discovered, got {list(servers)}", expected_name in servers)
+        ctx.check(f"no notices for a clean discovery, got {notices}", notices == [])
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_plugin_json_mcp_servers_string_path(ctx: Ctx):
+    """finding 11: `.claude-plugin/plugin.json`'s own `mcpServers` can be
+    a STRING -- a path, relative to the plugin root, to another JSON file
+    declaring the servers (itself either wrapped or bare)."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir / "plugins" / "cache" / "stringref-plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "stringref-plugin", "mcpServers": "mcp-servers.json"}), encoding="utf-8")
+        (plugin_root / "mcp-servers.json").write_text(
+            json.dumps({"fakeserver": {"command": sys.executable,
+                                        "args": ["-m", "tests.helpers.fake_mcp_server"]}}),
+            encoding="utf-8")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"stringref-plugin": {"enabled": True}}}), encoding="utf-8")
+        servers, _ = discover_plugin_mcp_servers(env={})
+        expected_name = plugin_server_name("stringref-plugin", "fakeserver")
+        ctx.check(f"servers declared via a string path are discovered, got {list(servers)}",
+                  expected_name in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+# ---- finding 11: a COPY of a real marketplace plugin (github) -------------
+# Verbatim content read from rolo's own claude-plugins-official marketplace
+# clone (~/.claude/plugins/marketplaces/claude-plugins-official/
+# external_plugins/github/) on 2026-09-24 -- embedded here (rather than
+# read from that Windows-specific path at test time) so this test is
+# reproducible on Kali/WSL/CI, which never has that clone on disk.
+_REAL_GITHUB_PLUGIN_MCP_JSON = {
+    "github": {
+        "type": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "headers": {"Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"},
+    },
+}
+_REAL_GITHUB_PLUGIN_JSON = {
+    "name": "github",
+    "description": ("Official GitHub MCP server for repository management. Create issues, manage pull "
+                     "requests, review code, search repositories, and interact with GitHub's full API "
+                     "directly from Claude Code."),
+    "author": {"name": "GitHub"},
+}
+
+
+@test
+def test_real_github_plugin_copy_is_discovered_and_named_correctly(ctx: Ctx):
+    """finding 11's own acceptance case: `claude plugin install
+    github@claude-plugins-official` -> discovered, named
+    `plugin_github_github` (not `plugin_github_claude-plugins-official_...`),
+    its BARE .mcp.json map read correctly (github's real file has no
+    "mcpServers" wrapper), and ${VAR} expansion still applies to its
+    templated Authorization header."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "github-plugin-copy"
+        (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(json.dumps(_REAL_GITHUB_PLUGIN_MCP_JSON), encoding="utf-8")
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps(_REAL_GITHUB_PLUGIN_JSON), encoding="utf-8")
+        _write_v2_manifest(claude_dir, "github@claude-plugins-official", plugin_root)
+        settings = _fake_settings({"enabledPlugins": {"github@claude-plugins-official": True}})
+        servers, notices = discover_plugin_mcp_servers(env={"GITHUB_PERSONAL_ACCESS_TOKEN": "test-token-123"},
+                                                          settings=settings)
+        expected_name = plugin_server_name("github", "github")
+        ctx.check(f"named plugin_github_github (no marketplace suffix), got {list(servers)}",
+                  expected_name == "plugin_github_github" and expected_name in servers)
+        ctx.check(f"no notices, got {notices}", notices == [])
+        cfg = servers[expected_name]
+        ctx.check(f"type/url carried through from the bare .mcp.json map, got {cfg.type!r}/{cfg.url!r}",
+                  cfg.type == "http" and cfg.url == "https://api.githubcopilot.com/mcp/")
+        # manager.py's own `credential_blank` rule: a credential-SHAPED var
+        # name (GITHUB_PERSONAL_ACCESS_TOKEN matches /TOKEN/i) is expanded
+        # to "" in a header/url regardless of whether it's actually set --
+        # a real secret must never land in a logged/displayed config. The
+        # ${VAR} SYNTAX itself still resolved (no literal "${...}" left
+        # behind); only the VALUE is deliberately blanked.
+        ctx.check(f"the templated header expanded (blanked, not left literal), got {cfg.headers}",
+                  cfg.headers.get("Authorization") == "Bearer ")
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_real_marketplace_clone_on_this_machine_if_present(ctx: Ctx):
+    """Bonus, best-effort: when THIS machine actually has rolo's real
+    claude-plugins-official marketplace clone on disk (true on the
+    Windows build host as of 2026-09-24; never assumed elsewhere), read
+    github's REAL files directly and confirm `_read_plugin_mcp_servers`
+    parses them exactly like the embedded-copy test above. Skipped
+    (never failed) when the clone isn't present -- e.g. on Kali/CI."""
+    from rolo_claude.config.plugins import _read_plugin_mcp_servers
+    real_root = (Path.home() / ".claude" / "plugins" / "marketplaces" / "claude-plugins-official"
+                 / "external_plugins" / "github")
+    if not (real_root / ".mcp.json").exists():
+        raise SkipTest(f"no real marketplace clone at {real_root}")
+    servers = _read_plugin_mcp_servers(real_root)
+    ctx.check(f"github's real bare .mcp.json parses to a servers map, got {servers}",
+              "github" in servers and servers["github"].get("type") == "http")
 
 
 if __name__ == "__main__":

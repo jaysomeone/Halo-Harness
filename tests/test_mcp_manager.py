@@ -379,14 +379,18 @@ def test_resolve_extra_dynamic_dropped_under_managed_mcp_json_with_notice(ctx: C
                   any("playwright" in n and "managed-mcp.json" in n for n in notices))
 
 
-# ---- managed allowedMcpServers/deniedMcpServers [finding 11] --------------
+# ---- managed allowedMcpServers/deniedMcpServers [finding 10] --------------
+# 2.1.281's real schema (read from the binary) is a list of OBJECTS, each
+# with exactly one of serverName/serverCommand/serverUrl -- NEVER bare
+# strings (the old fixture shape here raised `TypeError: unhashable type:
+# 'dict'` the instant a real managed-settings file used the real shape).
 
 @test
 def test_managed_denied_mcp_servers_removes_a_server(ctx: Ctx):
     from rolo_claude.config.settings import Settings
     cwd = Path("/tmp/proj5")
     claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
-    settings = Settings(raw={"deniedMcpServers": ["github"]}, layers=[], errors=[])
+    settings = Settings(raw={"deniedMcpServers": [{"serverName": "github"}]}, layers=[], errors=[])
     resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
     ctx.check("denied server removed", "github" not in resolved)
     ctx.check("other server survives", "other" in resolved)
@@ -397,9 +401,73 @@ def test_managed_allowed_mcp_servers_narrows_to_the_list(ctx: Ctx):
     from rolo_claude.config.settings import Settings
     cwd = Path("/tmp/proj6")
     claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
-    settings = Settings(raw={"allowedMcpServers": ["github"]}, layers=[], errors=[])
+    settings = Settings(raw={"allowedMcpServers": [{"serverName": "github"}]}, layers=[], errors=[])
     resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
     ctx.check("only the allow-listed server survives", set(resolved) == {"github"})
+
+
+@test
+def test_allowed_mcp_servers_empty_list_is_lockdown(ctx: Ctx):
+    """finding 10: `allowedMcpServers: []` -- PRESENT but with zero
+    entries -- means "users can use no servers of their own", distinct
+    from the key being entirely absent (no restriction at all, covered by
+    every other resolve_server_configs test that never sets it)."""
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj6b")
+    claude_json = _claude_json(user={"github": {"command": "gh"}})
+    settings = Settings(raw={"allowedMcpServers": []}, layers=[], errors=[])
+    resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check(f"empty allow list locks everything out, got {list(resolved)}", resolved == {})
+
+
+@test
+def test_denied_mcp_servers_server_command_matches_the_exact_invocation(ctx: Ctx):
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj6c")
+    claude_json = _claude_json(user={"a": {"command": "npx", "args": ["-y", "bad-server"]},
+                                      "b": {"command": "npx", "args": ["-y", "good-server"]}})
+    settings = Settings(raw={"deniedMcpServers": [{"serverCommand": ["npx", "-y", "bad-server"]}]},
+                         layers=[], errors=[])
+    resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check(f"only the exact command+args match is denied, got {list(resolved)}",
+              "a" not in resolved and "b" in resolved)
+
+
+@test
+def test_denied_mcp_servers_server_url_wildcard_matches(ctx: Ctx):
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj6d")
+    claude_json = _claude_json(user={
+        "remote": {"type": "http", "url": "https://evil.example.com/mcp"},
+        "other": {"type": "http", "url": "https://good.example.com/mcp"},
+    })
+    settings = Settings(raw={"deniedMcpServers": [{"serverUrl": "https://evil.example.com/*"}]},
+                         layers=[], errors=[])
+    resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check(f"wildcard url match denied, exact other url survives, got {list(resolved)}",
+              "remote" not in resolved and "other" in resolved)
+
+
+@test
+def test_malformed_policy_entries_are_skipped_with_a_notice(ctx: Ctx):
+    """A bare string (the OLD, wrong shape), an entry with zero or more
+    than one of the three keys, or a non-dict entry must never crash
+    resolve_server_configs (finding 10's exact repro: `TypeError:
+    unhashable type: 'dict'`) and must never match anything -- skipped,
+    with a notice explaining why, and every server survives untouched."""
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj6e")
+    claude_json = _claude_json(user={"github": {"command": "gh"}})
+    settings = Settings(raw={"deniedMcpServers": [
+        "github",                                       # bare string -- the old, wrong shape
+        {},                                              # zero keys
+        {"serverName": "github", "serverUrl": "x"},       # more than one key
+        {"serverName": 123},                              # wrong value type
+    ]}, layers=[], errors=[])
+    resolved, notices = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check(f"nothing crashed and the server survives, got {list(resolved)}", "github" in resolved)
+    ctx.check(f"a notice explains the malformed entries, got {notices}",
+              any("malformed entry" in n for n in notices))
 
 
 # ---- disabledMcpjsonServers/enabledMcpjsonServers read from settings too --
@@ -476,6 +544,219 @@ def test_mcp_loop_close_is_idempotent(ctx: Ctx):
 
 async def _noop_coro():
     return None
+
+
+# ---- OpenCode-H9 MCP compatibility: progress resets the call timeout ------
+
+@test
+def test_progress_keepalive_extends_run_abortable_past_its_own_timeout(ctx: Ctx):
+    """A coroutine that takes LONGER than `timeout` must still succeed as
+    long as it "pings" the keepalive before each window elapses -- proof
+    that `run_abortable`'s OWN outer deadline is pushed back out by a
+    progress signal, not just whatever the SDK's internal read timeout
+    does on its own."""
+    import asyncio
+    from rolo_claude.mcp.client import McpLoop, ProgressKeepalive
+    loop = McpLoop()
+    keepalive = ProgressKeepalive()
+
+    async def _slow_with_progress():
+        for _ in range(3):
+            await asyncio.sleep(0.15)
+            await keepalive(1, 3, "still going")
+        return "done"
+
+    try:
+        # 0.15s * 3 == 0.45s total, each leg pinging BEFORE a 0.25s
+        # timeout would otherwise have expired -- without the keepalive
+        # extending the deadline this would raise TimeoutError well
+        # before the coroutine finishes.
+        result = loop.run_abortable(_slow_with_progress(), timeout=0.25, keepalive=keepalive)
+        ctx.check(f"survives past one timeout window via progress pings, got {result!r}", result == "done")
+    finally:
+        loop.close()
+
+
+@test
+def test_run_abortable_without_keepalive_still_times_out_normally(ctx: Ctx):
+    """No regression: passing `keepalive=None` (every existing caller)
+    behaves exactly like before -- a slow coroutine with no progress
+    signal still times out on schedule."""
+    import asyncio
+    import concurrent.futures
+    from rolo_claude.mcp.client import McpLoop
+    loop = McpLoop()
+    try:
+        async def _slow():
+            await asyncio.sleep(2)
+        raised = False
+        try:
+            loop.run_abortable(_slow(), timeout=0.1)
+        except concurrent.futures.TimeoutError:
+            raised = True
+        ctx.check("still times out with no keepalive", raised)
+    finally:
+        loop.close()
+
+
+@test
+def test_wait_future_abortable_honours_abort(ctx: Ctx):
+    """The generic helper `McpServerHandle.start()`/`close()` now use for
+    finding 9's "reconnect honours Esc" -- an abort Event set mid-wait
+    raises McpAborted promptly instead of waiting out the full timeout."""
+    import concurrent.futures
+    import threading
+    import time as _time
+    from rolo_claude.mcp.client import McpAborted, McpLoop
+    loop = McpLoop()
+    try:
+        fut = concurrent.futures.Future()  # never resolved -- simulates a hung connect/close
+        abort = threading.Event()
+        threading.Timer(0.1, abort.set).start()
+        start = _time.monotonic()
+        raised = None
+        try:
+            loop.wait_future_abortable(fut, timeout=5.0, abort=abort)
+        except McpAborted as e:
+            raised = e
+        elapsed = _time.monotonic() - start
+        ctx.check(f"raised McpAborted, got {raised!r}", raised is not None)
+        ctx.check(f"returned promptly (~0.1s), not the full 5s timeout, got {elapsed:.2f}s", elapsed < 2.0)
+    finally:
+        loop.close()
+
+
+# ---- OpenCode-H9 MCP compatibility: Streamable HTTP -> SSE fallback -------
+
+@test
+def test_http_transport_falls_back_to_sse_on_connect_failure(ctx: Ctx):
+    """A server configured `type: "http"` that only actually speaks the
+    deprecated `sse` transport (Streamable HTTP handshake fails outright)
+    must still connect via the sse fallback instead of failing the whole
+    handle."""
+    import asyncio
+    from rolo_claude.mcp import http_sse
+
+    calls = {"http": 0, "sse": 0}
+
+    async def _fake_connect_http(*, url, headers, connect_timeout):
+        calls["http"] += 1
+        raise RuntimeError("405 Method Not Allowed (streamable-http not supported)")
+
+    async def _fake_connect_sse(*, url, headers, connect_timeout):
+        calls["sse"] += 1
+        return "FAKE_STACK", "FAKE_SESSION"
+
+    orig_http, orig_sse = http_sse.connect_http, http_sse.connect_sse
+    http_sse.connect_http = _fake_connect_http
+    http_sse.connect_sse = _fake_connect_sse
+    try:
+        cfg = M.McpServerConfig(name="fallback-test", type="http", url="https://example.com/mcp")
+        handle = M.McpServerHandle(cfg, loop=None, tool_env={}, cwd=Path("."))
+        stack, session = asyncio.run(handle._open_transport(connect_timeout=1.0))
+        ctx.check("streamable-http was tried first", calls["http"] == 1)
+        ctx.check("sse fallback was used", calls["sse"] == 1)
+        ctx.check(f"the sse connection's own result is returned, got {(stack, session)}",
+                  (stack, session) == ("FAKE_STACK", "FAKE_SESSION"))
+    finally:
+        http_sse.connect_http, http_sse.connect_sse = orig_http, orig_sse
+
+
+@test
+def test_http_transport_raises_the_original_error_when_sse_also_fails(ctx: Ctx):
+    """When NEITHER transport works, the ORIGINAL (streamable-http)
+    failure is what surfaces -- it's the more informative one for a
+    server that's simply unreachable/misconfigured, not a transport
+    mismatch."""
+    import asyncio
+    from rolo_claude.mcp import http_sse
+
+    async def _fake_connect_http(*, url, headers, connect_timeout):
+        raise RuntimeError("original streamable-http failure")
+
+    async def _fake_connect_sse(*, url, headers, connect_timeout):
+        raise RuntimeError("sse also failed")
+
+    orig_http, orig_sse = http_sse.connect_http, http_sse.connect_sse
+    http_sse.connect_http, http_sse.connect_sse = _fake_connect_http, _fake_connect_sse
+    try:
+        cfg = M.McpServerConfig(name="fallback-test-2", type="http", url="https://example.com/mcp")
+        handle = M.McpServerHandle(cfg, loop=None, tool_env={}, cwd=Path("."))
+        raised = None
+        try:
+            asyncio.run(handle._open_transport(connect_timeout=1.0))
+        except RuntimeError as e:
+            raised = e
+        ctx.check(f"the ORIGINAL http error surfaces, got {raised!r}",
+                  raised is not None and "original streamable-http failure" in str(raised))
+    finally:
+        http_sse.connect_http, http_sse.connect_sse = orig_http, orig_sse
+
+
+# ---- Linux/H4 must-do: mcpLazy servers connect for discoverability --------
+
+@test
+def test_ensure_lazy_started_all_starts_only_pending_lazy_servers(ctx: Ctx):
+    cfg_lazy = M.McpServerConfig(name="lazy1", type="stdio", command=sys.executable,
+                                  args=["-m", "tests.helpers.fake_mcp_server"], cwd=str(REPO_DIR), lazy=True)
+    cfg_eager = M.McpServerConfig(name="eager1", type="stdio", command=sys.executable,
+                                   args=["-m", "tests.helpers.fake_mcp_server"], cwd=str(REPO_DIR))
+    mgr = M.McpManager({"lazy1": cfg_lazy, "eager1": cfg_eager}, tool_env=dict(os.environ),
+                        cwd=REPO_DIR, lazy_names={"lazy1"})
+    try:
+        mgr.start_all()
+        ctx.check("the eager server started at start_all()", mgr.handles["eager1"].state == "connected")
+        ctx.check("the lazy server did NOT start at start_all()", mgr.handles["lazy1"].state == "pending")
+        ctx.check("its tools are therefore invisible to all_tools() so far",
+                  not any(s == "lazy1" for s, _, _ in mgr.all_tools()))
+        started = mgr.ensure_lazy_started_all()
+        ctx.check(f"ensure_lazy_started_all reports it started lazy1, got {started}", started == ["lazy1"])
+        ctx.check(f"the lazy server is now connected, got {mgr.handles['lazy1'].state}",
+                  mgr.handles["lazy1"].state == "connected")
+        ctx.check("its tools are now visible to all_tools()",
+                  any(s == "lazy1" for s, _, _ in mgr.all_tools()))
+        again = mgr.ensure_lazy_started_all()
+        ctx.check(f"a second call is a cheap no-op, got {again}", again == [])
+    finally:
+        mgr.close_all()
+
+
+# ---- finding 9: Controller.reconnect_mcp threads abort through --------------
+
+@test
+def test_controller_reconnect_mcp_threads_abort_through_to_a_slow_reconnect(ctx: Ctx):
+    """`Controller.reconnect_mcp(name, abort=...)` (the TUI's `/mcp`
+    dialog worker thread's own call, tui/dialogs/mcp_status.py) must
+    thread the abort Event all the way down to `McpManager.reconnect`'s
+    own close/start waits -- against a server whose STARTUP itself is
+    slow (5s), an abort fired 0.3s in must return well before the 5s
+    sleep elapses, proving the whole chain (Controller -> the
+    tui/bootstrap.py-style reconnect closure -> McpManager.reconnect ->
+    McpServerHandle.start -> wait_future_abortable) is actually wired,
+    not just the bottom primitive tested in isolation elsewhere."""
+    import threading
+    import time as _time
+    from rolo_claude.controller import Controller
+
+    env = {"FAKE_MCP_MODE": "slow", "FAKE_MCP_SLEEP_S": "5"}
+    cfg = M.McpServerConfig(name="slowreconnect", type="stdio", command=sys.executable,
+                             args=["-m", "tests.helpers.fake_mcp_server"], env=env, cwd=str(REPO_DIR))
+    mgr = M.McpManager({"slowreconnect": cfg}, tool_env=dict(os.environ), cwd=REPO_DIR)
+    try:
+        def _reconnect_fn(name, abort=None):
+            ok = mgr.reconnect(name, abort=abort)
+            return [f"{name}: {'connected' if ok else 'failed'}"]
+
+        controller = Controller(session=None, cwd=REPO_DIR, reconnect_fn=_reconnect_fn)
+        abort = threading.Event()
+        threading.Timer(0.3, abort.set).start()
+        start = _time.monotonic()
+        result = controller.reconnect_mcp("slowreconnect", abort=abort)
+        elapsed = _time.monotonic() - start
+        ctx.check(f"reconnect_mcp returns SOMETHING (never raises), got {result}", isinstance(result, list))
+        ctx.check(f"returns promptly (~0.3s), not the full 5s slow-start sleep, got {elapsed:.2f}s", elapsed < 3.0)
+    finally:
+        mgr.close_all()
 
 
 # ---- live connections through the REAL fake stdio server -------------------

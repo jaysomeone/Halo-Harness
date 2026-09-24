@@ -52,6 +52,41 @@ _NAME_ALIASES = {
 
 _SEP_RE = re.compile(r"[-_\s]+")
 
+# u2-h3b finding 13: the guard against fuzzy-renaming an MCP tool name (see
+# `resolve_tool_name` below) originally checked only a RAW `mcp__` prefix,
+# so a single mangled underscore/hyphen or wrong case -- `mcp_hardware__
+# hw_clock_stop`, `MCP__hardware__hw_clock_stop`, `mcp-hardware__hw_clock_
+# stop` -- fell all the way through to the generic alias-table/difflib path
+# below and got auto-renamed into a DIFFERENT, unrelated MCP tool (the exact
+# bug finding 2 was meant to close, just reached through a spelling variant
+# instead of the exact "mcp__" prefix). `_MCP_PREFIX_RE` recognises "mcp"
+# (any case) followed by one or more `_`/`-` separators as an INTENDED mcp
+# reference; `canonicalize_mcp_name` normalises just that prefix to the
+# canonical "mcp__", leaving the server/tool halves untouched (they stay
+# case-sensitive/exact -- only the well-known "mcp__" marker itself is
+# spelling-tolerant).
+_MCP_PREFIX_RE = re.compile(r"^mcp[_-]+", re.IGNORECASE)
+
+
+def canonicalize_mcp_name(name: str) -> Optional[str]:
+    """`None` for a name that doesn't look like an mcp__ reference at all
+    (never touches an ordinary built-in tool name like "Read"). For one
+    that does, returns the canonical "mcp__<rest>" spelling -- unchanged
+    when `name` already has the exact "mcp__" prefix, prefix-normalised
+    otherwise."""
+    if not name:
+        return None
+    if name.startswith("mcp__"):
+        return name
+    m = _MCP_PREFIX_RE.match(name)
+    if not m:
+        return None
+    return "mcp__" + name[m.end():]
+
+
+def looks_like_mcp_name(name: str) -> bool:
+    return canonicalize_mcp_name(name) is not None
+
 
 def normalize_tool_name(name: str) -> str:
     """Alias-table lookup (separator/case-insensitive) for a common
@@ -92,13 +127,20 @@ def resolve_tool_name(name: str, known_names: list, *, catalog=None, registry=No
         return None, list(known_names)[:5]
     if name in known_names:
         return name, []
-    if name.startswith("mcp__"):
-        if registry is not None and registry.get(name) is not None:
-            return name, []
-        if catalog is not None and name in catalog.deferred:
-            loaded = catalog.load([name])
-            if name in loaded:
-                return name, []
+    canonical = canonicalize_mcp_name(name)
+    if canonical is not None:
+        # finding 13: normalise mcp_/MCP__/mcp- to mcp__ FIRST, then apply
+        # the exact-same finding-2 rule to the canonical spelling -- an
+        # exact/registry/deferred match only, never difflib, regardless of
+        # which of the four prefix spellings the model actually sent.
+        if canonical in known_names:
+            return canonical, []
+        if registry is not None and registry.get(canonical) is not None:
+            return canonical, []
+        if catalog is not None and canonical in catalog.deferred:
+            loaded = catalog.load([canonical])
+            if canonical in loaded:
+                return canonical, []
         return None, []
     aliased = normalize_tool_name(name)
     if aliased in known_names:
@@ -257,10 +299,14 @@ def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = N
     name = block.get("name")
     resolved, close = resolve_tool_name(name, names, catalog=catalog, registry=registry)
     if resolved is None:
-        if name and name.startswith("mcp__"):
+        if name and looks_like_mcp_name(name):
+            # finding 13: hint at the CANONICAL name (never the model's
+            # possibly-mangled prefix) so the "select:" query it's told to
+            # retry with is one ToolSearch can actually match.
+            hint_name = canonicalize_mcp_name(name) or name
             error_text = (f"Unknown tool {name!r}. If this is a real MCP tool that just isn't "
                           f"loaded in this conversation yet, call ToolSearch with query "
-                          f"\"select:{name}\" to load it, then call it again -- never assume it's "
+                          f"\"select:{hint_name}\" to load it, then call it again -- never assume it's "
                           f"one of the tools below. Available tools: {', '.join(names)}")
         else:
             suggestion = f" Did you mean one of: {', '.join(close)}?" if close else ""

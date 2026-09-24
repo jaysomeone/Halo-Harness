@@ -374,11 +374,20 @@ class Controller:
     def mcp_status(self) -> dict:
         return self._mcp_status()
 
-    def reconnect_mcp(self, name: str) -> list:
+    def reconnect_mcp(self, name: str, abort=None) -> list:
+        """`abort` (u2-h3b finding 9, default None -- unchanged for every
+        existing sync caller): a `threading.Event` a caller running THIS
+        on its own worker thread (never the UI thread itself -- see
+        `tui/dialogs/mcp_status.py`) can set to cut a hung/slow reconnect's
+        WAIT short, threaded down to `McpManager.reconnect`'s own
+        abort-aware close/start waits. The reconnect keeps running
+        regardless (same "abandoned, not stopped" caveat as everywhere
+        else abort-aware waiting is used in this codebase) -- aborting
+        just stops the CALLER from blocking on it."""
         if self._reconnect_fn is None:
             return [f"MCP support is not connected in this build ({name} unchanged)."]
         try:
-            result = self._reconnect_fn(name)
+            result = self._reconnect_fn(name, abort=abort)
             # H3b must-do (unwired seam): a reconnected server's tool list
             # only ever entered the deferred pool once, at session start
             # (`SessionCatalog` built from `McpManager.all_tools()` THEN) --
@@ -396,7 +405,7 @@ class Controller:
         except Exception as e:
             return [f"reconnect {name} failed: {type(e).__name__}: {e}"]
 
-    def approve_mcp_server(self, name: str) -> list:
+    def approve_mcp_server(self, name: str, abort=None) -> list:
         """H3b must-do (unwired seam): completes the `.mcp.json`
         `pending_approval` interactive flow. Persists the approval via
         `mcp_setup.record_mcp_approval` -- keyed by the entry's own
@@ -405,7 +414,9 @@ class Controller:
         new field threaded through `mcp/manager.py`'s own config objects
         -- so the server stays approved on the NEXT launch too, not just
         this session, then reconnects it (which also now refreshes its
-        deferred ToolSearch pool, see `reconnect_mcp`)."""
+        deferred ToolSearch pool, see `reconnect_mcp`). `abort`: see
+        `reconnect_mcp`'s own docstring -- threaded through to the
+        reconnect this triggers."""
         if self.mcp_manager is None:
             return [f"MCP support is not connected in this build ({name} unchanged)."]
         handle = self.mcp_manager.handles.get(name)
@@ -424,7 +435,7 @@ class Controller:
         from rolo_claude import mcp_setup
         mcp_setup.record_mcp_approval(name, raw_entry)
         handle.config.pending_approval = False
-        return self.reconnect_mcp(name)
+        return self.reconnect_mcp(name, abort=abort)
 
     def memory_path(self):
         from rolo_claude.config.paths import memory_dir

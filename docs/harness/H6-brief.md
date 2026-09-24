@@ -58,6 +58,16 @@ D. **Sessions**: `--continue` (latest for cwd), `--resume [id|name|transcript.js
 E. **stream-json**: sub-agent events (`subagent_start/stop` with `agent_id`, `parent_tool_use_id`) and
    nested `assistant`/`user` lines carry `parent_tool_use_id` like Claude Code's SDK output.
 
+F. **OpenCode adopt items for H6** (`reports/OpenCode harness deep review.md`): the MAX_STEPS_PROMPT
+   text when `maxTurns` is hit (ask the model to summarise state instead of dying silently);
+   **resumable sub-agent tasks** — the Agent tool returns `<task_result>` wrapped output plus a
+   `task_id`, and a later `Agent(task_id=…, prompt=…)` resumes that child session with its context;
+   background sub-agents complete as a user-role notice; `AGENTS.md` fallback when no CLAUDE.md exists
+   (already in `config/claude_md.py` — verify); session titles via the small model + `/rename`;
+   child sessions navigable in the TUI (parent ↔ child keys); OpenCode's `question` tool shape is
+   NOT adopted — use Claude Code's `questions[{question, header, options[{label, description}],
+   multiSelect}]` (the U2/H3b review must-do) and support multi-select.
+
 ## Tests (≥ 60, OS-neutral)
 Agent discovery precedence + frontmatter parsing (all fields, tools string vs list, model chain);
 built-ins tool sets; Agent tool e2e via the mock upstream with `ScriptedTurns` (child answers,

@@ -173,6 +173,65 @@ def test_cost_meter_missing_cost_field(ctx: Ctx):
     ctx.check("has_cost_data flips False once cost is unknown", meter.has_cost_data is False)
 
 
+@test
+def test_cost_meter_fallback_formula_when_no_usage_cost(ctx: Ctx):
+    """H5 scope D: OpenCode's fallback formula -- input*price_in +
+    output*price_out + reasoning*price_out -- applies whenever a per-turn
+    response carries no usage.cost AND the meter was given real pricing."""
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)  # $1/$2 per 1M tokens
+    cost = meter.add_usage("openrouter", {"input_tokens": 1000, "output_tokens": 500})
+    expected = 1000 * 0.000001 + 500 * 0.000002
+    ctx.check(f"fallback formula applied, got {cost}", cost is not None and abs(cost - expected) < 1e-12)
+    ctx.check("has_cost_data stays True (a real, computed number)", meter.has_cost_data is True)
+    ctx.check(f"total accumulates the fallback cost, got {meter.total_usd}", abs(meter.total_usd - expected) < 1e-12)
+
+
+@test
+def test_cost_meter_fallback_bills_reasoning_at_output_rate(ctx: Ctx):
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)
+    cost = meter.add_usage("openrouter", {"input_tokens": 100, "output_tokens": 50, "reasoning_tokens": 200})
+    expected = 100 * 0.000001 + (50 + 200) * 0.000002
+    ctx.check(f"reasoning billed at the OUTPUT rate, got {cost}", cost is not None and abs(cost - expected) < 1e-12)
+
+
+@test
+def test_cost_meter_real_usage_cost_wins_over_fallback(ctx: Ctx):
+    """A real, provider-reported usage.cost is always preferred over the
+    fallback formula, even when pricing is ALSO available."""
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)
+    cost = meter.add_usage("openrouter", {"cost": 0.0009, "input_tokens": 1000, "output_tokens": 500})
+    ctx.check(f"real usage.cost used verbatim, got {cost}", cost == 0.0009)
+
+
+@test
+def test_cost_meter_no_pricing_no_fallback_unchanged_behavior(ctx: Ctx):
+    """With NO pricing configured (the plain CostMeter() default), missing
+    usage.cost still correctly reports unknown -- proves the fallback is
+    opt-in and never changes pre-H5 behaviour for a caller that doesn't
+    pass pricing."""
+    meter = CostMeter()  # no price_in/price_out
+    cost = meter.add_usage("openrouter", {"input_tokens": 1000, "output_tokens": 500})
+    ctx.check("no pricing -> no fallback -> None, exactly like before", cost is None)
+    ctx.check("has_cost_data flips False", meter.has_cost_data is False)
+
+
+@test
+def test_cost_meter_fallback_requires_both_token_counts(ctx: Ctx):
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)
+    cost = meter.add_usage("openrouter", {"input_tokens": 1000})  # no output_tokens
+    ctx.check("fallback needs BOTH input and output token counts", cost is None)
+
+
+@test
+def test_cost_meter_databricks_still_na_even_with_pricing(ctx: Ctx):
+    """Databricks stays "n/a" even when the meter has pricing configured --
+    per the brief, Databricks cost is always unknown, never estimated."""
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)
+    cost = meter.add_usage("databricks", {"input_tokens": 1000, "output_tokens": 500})
+    ctx.check("Databricks never computes a fallback cost", cost is None)
+    ctx.check("has_cost_data flips False", meter.has_cost_data is False)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

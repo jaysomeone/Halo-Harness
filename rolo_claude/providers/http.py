@@ -279,13 +279,21 @@ def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers:
 
 
 
-def proxy_anthropic(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, path: str = "/v1/messages") -> UpstreamResult:
-    """POST an already-shaped Anthropic-format body straight through to Databricks' native Claude endpoint; raw relay, no dialect translation."""
+def proxy_anthropic(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, path: str = "/v1/messages",
+                     query_suffix: str = "?beta=true", on_connect=None) -> UpstreamResult:
+    """POST an already-shaped Anthropic-format body straight through to a
+    native Claude endpoint; raw relay, no dialect translation. Originally
+    Databricks-only (hence the hardcoded `?beta=true`, kept as the default
+    so every existing caller is byte-for-byte unaffected); H5 scope C's
+    `call_anthropic_native` (below) reuses this SAME function for BOTH
+    Databricks' Claude passthrough (`query_suffix` left at its default) and
+    a direct `ant:` call to api.anthropic.com (`query_suffix=""` -- a real
+    Anthropic endpoint has no use for Databricks' own gateway flag)."""
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     tls = parsed.scheme == "https"
-    request_path = parsed.path.rstrip("/") + path + "?beta=true"
+    request_path = parsed.path.rstrip("/") + path + query_suffix
     body_bytes = jdumps(body)
     dump_debug(state_dir, "upstream-request", body)
     headers = {
@@ -295,13 +303,48 @@ def proxy_anthropic(base_url: str, api_key: str, body: dict, extra_headers: dict
     }
     headers.update(extra_headers)
     try:
-        conn = open_upstream(host, port, tls)
+        conn = open_upstream(host, port, tls, on_connect=on_connect)
         conn.request("POST", request_path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
         return UpstreamResult(status=resp.status, headers=resp_headers, resp=resp, conn=conn, body_bytes=None)
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"Databricks connection failed: {e}") from e
+        raise UpstreamConnectError(f"Anthropic-dialect connection failed: {e}") from e
+
+
+def call_anthropic_native(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir,
+                           route_provider: str, on_connect=None) -> UpstreamResult:
+    """H5 scope C: the ONE call site `stream.stream_anthropic_completion`
+    uses for every native-Anthropic-dialect route. `route_provider` picks
+    the host-specific bits `proxy_anthropic` itself stays agnostic of:
+      - "anthropic" (`ant:`): `x-api-key`, `anthropic-version`, no
+        Databricks gateway query flag.
+      - "databricks" (`dbx:databricks-claude-*`/`dbx:system.ai.claude-*`):
+        `Authorization: Bearer <token>`, `x-databricks-use-coding-agent-
+        mode: true` (both already merged into `extra_headers` by the
+        caller, same as the OpenAI-dialect Databricks path), Databricks'
+        own `?beta=true` gateway flag and BOTH candidate paths tried on a
+        404 (mirrors `call_databricks_chat`'s own route-candidate dance,
+        applied to the two Anthropic-dialect paths from Appendix F:
+        `/ai-gateway/anthropic/v1/messages`, `/serving-endpoints/anthropic/
+        v1/messages`)."""
+    if route_provider == "anthropic":
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        headers.update(extra_headers)
+        return proxy_anthropic(base_url, api_key, body, headers, state_dir,
+                                path="/v1/messages", query_suffix="", on_connect=on_connect)
+    # databricks: try the ai-gateway path first, fall back to serving-endpoints on 404.
+    for path in ("/ai-gateway/anthropic/v1/messages", "/serving-endpoints/anthropic/v1/messages"):
+        result = proxy_anthropic(base_url, api_key, body, extra_headers, state_dir,
+                                  path=path, query_suffix="?beta=true", on_connect=on_connect)
+        if result.status != 404:
+            return result
+        try:
+            if result.resp is not None:
+                result.resp.read()
+        except Exception:
+            pass
+    return result
 
 
 def call_databricks_count_tokens(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir) -> UpstreamResult:

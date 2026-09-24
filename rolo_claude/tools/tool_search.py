@@ -65,6 +65,14 @@ class ToolSearchTool(Tool):
 
         catalog = getattr(ctx, "catalog", None)
         if catalog is not None:
+            # Linux/H4 must-do: connect any still-pending `mcpLazy` server
+            # NOW, on ToolSearch's own first (and every subsequent, cheaply
+            # no-op) call -- otherwise a lazy server's tools can never
+            # enter `catalog.deferred` at all (see
+            # `SessionCatalog.ensure_lazy_discovered`'s own docstring).
+            ensure_lazy = getattr(catalog, "ensure_lazy_discovered", None)
+            if ensure_lazy is not None:
+                ensure_lazy()
             results, deferred_matched = catalog.search(query, max_results)
         else:
             results, deferred_matched = self._search_registry_only(registry, query, max_results)

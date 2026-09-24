@@ -113,6 +113,12 @@ class ProviderProfile:
     host_specific_fields: bool = False              # OpenRouter-only fields allowed
     family: str = "generic"
     use_temperature: bool = True
+    # H5 scope F (OpenCode Appendix G transform table): `top_p` needs to be
+    # gated INDEPENDENTLY of `temperature` for a row like DeepSeek V4 Flash
+    # (0731) -- "omit temperature, but DO send top_p: 0.95". None (every
+    # row before H5) means "follow use_temperature", so this is a pure
+    # opt-in override with zero effect on any other row's wire body.
+    use_top_p: Optional[bool] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens_default: Optional[int] = None
@@ -211,7 +217,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             reasoning_replay=replay, stream_usage=True, store=False, strict=True,
             tool_result_name=False, body_allowlist=DATABRICKS_BODY_ALLOWLIST, tools_max=32,
             supports_temperature_in_thinking=False, host_specific_fields=False, family=family,
-            use_temperature=row.get("use_temperature", default_use_temp),
+            use_temperature=row.get("use_temperature", default_use_temp), use_top_p=row.get("use_top_p"),
             temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),
             max_tokens_default=row.get("max_tokens_default", 16384),
             max_tokens_cap=row.get("max_tokens_cap", 16384),
@@ -236,7 +242,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
         # clear error instead of a silent truncation/wire 400.
         tool_result_name=False, body_allowlist=None, tools_max=128,
         supports_temperature_in_thinking=False, host_specific_fields=(route.provider == "openrouter"),
-        family=family, use_temperature=row.get("use_temperature", True),
+        family=family, use_temperature=row.get("use_temperature", True), use_top_p=row.get("use_top_p"),
         temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),
         max_tokens_default=row.get("max_tokens_default"), max_tokens_cap=row.get("max_tokens_cap"),
         reasoning_default_effort=row.get("reasoning_default_effort"),

@@ -13,7 +13,8 @@ the storage half.
 Node types: meta, system, user, assistant (content blocks incl. raw
 thinking/reasoning), tool_result, snapshot (dynamic context delivered as a
 user-role block: permission mode, CLAUDE.md chain, memory index, skills,
-notices), usage, error, interrupted, compacted (H5, unused here).
+notices), usage, error, interrupted, compacted (H5: a pure shadow-range
+marker -- see `append_compacted` and `agent/derive.py`).
 """
 
 from __future__ import annotations
@@ -104,6 +105,25 @@ class SessionLog:
 
     def append_interrupted(self, **fields) -> dict:
         return self._append({"type": "interrupted", **fields})
+
+    def append_compacted(self, *, trigger: str, custom_instructions: Optional[str] = None) -> dict:
+        """H5 scope B: a pure MARKER node -- carries no transcript content
+        of its own. `agent/derive.py` uses THIS node's own `seq` (assigned
+        by `_append` below, BEFORE the caller appends anything else) as the
+        exclusive upper bound of the "shadowed" range: every later call to
+        `derive_request` skips every non-system/meta node whose `seq` is
+        less than this one. The caller (agent/compact.py, via
+        `Session._run_compaction`) always appends this node FIRST, then
+        immediately appends the replacement content (a `user` node carrying
+        the `<compacted-summary>`, `snapshot` nodes for the re-injected
+        CLAUDE.md/rules/memory/plan, and copies of the retained verbatim
+        tail) -- all of which land at LATER seqs than this marker and are
+        therefore never shadowed by it. `trigger` is "manual" (`/compact`)
+        or "auto" (the 80%-of-context gate) or "overflow"
+        (`ContextOverflow` -> compact -> retry); mirrors the PreCompact hook
+        payload's own `trigger` field (Claude Code: "manual"|"auto")."""
+        return self._append({"type": "compacted", "surface_op": "replace",
+                              "trigger": trigger, "custom_instructions": custom_instructions})
 
     # ---- reading ---------------------------------------------------------
 

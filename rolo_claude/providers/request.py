@@ -180,6 +180,45 @@ def budget_max_tokens(*, profile: ProviderProfile, context_tokens: int, prompt_e
     return max(1, min(want, cap, headroom))
 
 
+_OPENROUTER_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _as_cache_controlled_content(content) -> list:
+    """A `content` field as `_flatten_messages` left it (a plain string,
+    normally) -> a one-part array with `cache_control` on that part --
+    OpenRouter's wire shape for a cached breakpoint on a chat-completions
+    message (mirrors `cache_control: {"type": "ephemeral"}` content
+    blocks; a list already is copied and the marker added to its last
+    part instead of wrapping it again)."""
+    if isinstance(content, list):
+        out = list(content)
+        last = dict(out[-1]) if out and isinstance(out[-1], dict) else {"type": "text", "text": ""}
+        last["cache_control"] = dict(_OPENROUTER_CACHE_CONTROL)
+        if out:
+            out[-1] = last
+        else:
+            out = [last]
+        return out
+    return [{"type": "text", "text": content if isinstance(content, str) else "", "cache_control": dict(_OPENROUTER_CACHE_CONTROL)}]
+
+
+def apply_openrouter_claude_cache_control(oai_messages: list) -> None:
+    """Mutates `oai_messages` IN PLACE (called right after they're built,
+    before anything else reads them): cache_control on the system message
+    (index 0, when present) and on the LAST `role: "tool"` message -- H5
+    scope C's "OpenRouter anthropic/claude-* ... cache_control breakpoints
+    (<=4, on the system node and the last tool result)". A no-op when
+    there is no system message and/or no tool message."""
+    if oai_messages and oai_messages[0].get("role") == "system":
+        oai_messages[0]["content"] = _as_cache_controlled_content(oai_messages[0].get("content"))
+    last_tool_idx = None
+    for i, msg in enumerate(oai_messages):
+        if msg.get("role") == "tool":
+            last_tool_idx = i
+    if last_tool_idx is not None:
+        oai_messages[last_tool_idx]["content"] = _as_cache_controlled_content(oai_messages[last_tool_idx].get("content"))
+
+
 def build_request_body(
     *, system_text: str, messages: list, tools: Optional[list] = None, tool_choice=None,
     route, profile: ProviderProfile, effort: Optional[str] = None,
@@ -202,6 +241,15 @@ def build_request_body(
     _restore_empty_assistant_protos(oai_messages)
     oai_tools = convert_tools(tools, profile)
     reasoning_echo(oai_messages, messages, profile, tools_present=bool(oai_tools))
+    if profile.family == "claude" and profile.host_specific_fields:
+        # H5 scope C: OpenRouter needs EXPLICIT cache_control breakpoints
+        # for Anthropic-backed models (no automatic caching, unlike
+        # OpenAI/DeepSeek/Gemini/Grok/Groq/Moonshot) -- system node + the
+        # last tool result, mirroring the native-dialect placement in
+        # apply_anthropic_cache_control, just in the openai-chat wire shape
+        # (content as an array-of-parts with cache_control on the block,
+        # not the plain string _flatten_messages produced).
+        apply_openrouter_claude_cache_control(oai_messages)
 
     max_tokens = budget_max_tokens(
         profile=profile, context_tokens=context_tokens, prompt_estimate=prompt_estimate,
@@ -223,10 +271,15 @@ def build_request_body(
     if profile.use_temperature:
         if profile.temperature is not None:
             body["temperature"] = profile.temperature
-        if profile.top_p is not None:
-            body["top_p"] = profile.top_p
         if profile.top_k is not None and profile.host_specific_fields:
             body["top_k"] = profile.top_k  # OpenRouter accepts top_k; Databricks does not (allowlist drops it below)
+    # H5 scope F: top_p gated independently when a row says so (DeepSeek V4
+    # Flash: omit temperature, still send top_p 0.95) -- `use_top_p is
+    # None` (every pre-H5 row) falls back to `use_temperature` exactly as
+    # before, so this is a no-op for every row that never opted in.
+    send_top_p = profile.use_top_p if profile.use_top_p is not None else profile.use_temperature
+    if send_top_p and profile.top_p is not None:
+        body["top_p"] = profile.top_p
 
     body.update(map_effort(effort, profile))  # map_effort itself handles reasoning_no_disable
 
@@ -261,4 +314,122 @@ def build_request_body(
         body.pop("provider", None)
         body.pop("usage", None)
 
+    return body
+
+
+# ---------------------------------------------------------------------------
+# H5 scope C: the native-Anthropic-dialect request builder (`ant:`, Databricks
+# Claude passthrough `dbx:databricks-claude-*`/`dbx:system.ai.claude-*`, and
+# OpenRouter Claude `or:anthropic/claude-*` -- the last of those ALSO uses
+# `build_request_body` above for its actual wire body, since OpenRouter
+# speaks the openai-chat dialect even for Claude; this function is used only
+# when `route.dialect == "anthropic-passthrough"`). Unlike the OpenAI-dialect
+# builder, the derived transcript is ALREADY Anthropic-shaped end to end --
+# messages, tool defs (`input_schema`, no conversion), thinking blocks with
+# their `signature` -- so this is mostly straight assembly, not translation.
+# ---------------------------------------------------------------------------
+
+_CACHE_CONTROL = {"type": "ephemeral"}
+MAX_CACHE_BREAKPOINTS = 4
+
+
+def _mark_cache_control(content: list) -> list:
+    """Return a copy of `content` (a list of Anthropic content blocks) with
+    `cache_control` added to its LAST block -- a no-op (returns the list
+    unchanged) for an empty list."""
+    if not content:
+        return content
+    out = list(content)
+    last = dict(out[-1]) if isinstance(out[-1], dict) else {"type": "text", "text": str(out[-1])}
+    last["cache_control"] = dict(_CACHE_CONTROL)
+    out[-1] = last
+    return out
+
+
+def apply_anthropic_cache_control(system_text: str, messages: list) -> "tuple[list, list]":
+    """Appendix F / scope C: cache_control breakpoints (<= 4) on the system
+    node and the LAST tool result -- returns (system_blocks, messages) with
+    `cache_control` markers placed; never mutates the input `messages`.
+    Breakpoint budget used here: 1 (system) + 1 (last tool result) = 2,
+    comfortably under the 4-breakpoint cap (OpenRouter prompt-caching docs;
+    Appendix F's OpenRouter recipe)."""
+    system_blocks = [{"type": "text", "text": system_text, "cache_control": dict(_CACHE_CONTROL)}] if system_text else []
+    out = list(messages)
+    last_tool_result_idx = None
+    for i, msg in enumerate(out):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            last_tool_result_idx = i
+    if last_tool_result_idx is not None:
+        msg = dict(out[last_tool_result_idx])
+        msg["content"] = _mark_cache_control(msg.get("content") or [])
+        out[last_tool_result_idx] = msg
+    return system_blocks, out
+
+
+def map_effort_anthropic(effort: Optional[str], model_id: str) -> dict:
+    """`{"thinking": {...}}` (Sonnet/DeepSeek-class: a token budget) or
+    `{"output_config": {"effort": ...}}` (Opus/Fable-class: a named level,
+    per the brief's "output_config.effort for Opus/Fable-class") from
+    `--effort`. Returns {} when `effort` is falsy (omit -> provider
+    default, never a disabling value sent blindly)."""
+    if not effort:
+        return {}
+    low = (model_id or "").lower()
+    if "opus" in low or "fable" in low:
+        return {"output_config": {"effort": effort}}
+    budget_by_effort = {"low": 4096, "medium": 10000, "high": 24000, "xhigh": 32000, "max": 32000}
+    return {"thinking": {"type": "enabled", "budget_tokens": budget_by_effort.get(effort, 10000)}}
+
+
+def map_tool_choice_anthropic(tool_choice) -> Optional[dict]:
+    """The harness's internal tool_choice vocabulary (None, "auto",
+    "required" -- see providers.routing.map_tool_choice's OWN reverse
+    mapping for the OpenAI-dialect side) -> Anthropic's `{"type": "auto"|
+    "any"|"tool", "name": ...}` shape."""
+    if tool_choice is None or tool_choice == "auto":
+        return None  # omit -> Anthropic's own default (auto)
+    if tool_choice == "required":
+        return {"type": "any"}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        name = (tool_choice.get("function") or {}).get("name")
+        return {"type": "tool", "name": name} if name else {"type": "any"}
+    return None
+
+
+def build_anthropic_request_body(
+    *, system_text: str, messages: list, tools: Optional[list] = None, tool_choice=None,
+    route, profile: ProviderProfile, effort: Optional[str] = None,
+    requested_max_tokens: Optional[int] = None, apply_cache_control: bool = True,
+) -> dict:
+    """Build a native Anthropic Messages body. `messages`/`tools` are
+    ALREADY Anthropic-shaped (agent/derive.py's own canonical form) --
+    passed through essentially verbatim, including any `thinking` block's
+    `signature` (Anthropic requires it replayed byte-for-byte; nothing
+    here strips or rewrites it). `apply_cache_control` is True for every
+    caller except a Databricks Claude passthrough row that opts out (none
+    do today; the flag exists for a future host that rejects the field)."""
+    if apply_cache_control:
+        system_blocks, out_messages = apply_anthropic_cache_control(system_text, messages)
+    else:
+        system_blocks = [{"type": "text", "text": system_text}] if system_text else []
+        out_messages = list(messages)
+
+    max_tokens = requested_max_tokens or profile.max_tokens_default or 8192
+    body: dict = {
+        "model": route.upstream_model, "messages": out_messages, "stream": True,
+        "max_tokens": max_tokens,
+    }
+    if system_blocks:
+        body["system"] = system_blocks
+    if tools:
+        ordered = sorted(tools, key=lambda t: t.get("name", ""))
+        body["tools"] = ordered
+        tc = map_tool_choice_anthropic(tool_choice)
+        if tc is not None:
+            body["tool_choice"] = tc
+
+    body.update(map_effort_anthropic(effort, route.upstream_model))
     return body

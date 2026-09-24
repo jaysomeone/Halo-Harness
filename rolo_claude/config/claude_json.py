@@ -29,12 +29,23 @@ def load_claude_json() -> dict:
     """Load ~/.claude.json fresh every call; {} if missing or invalid. Not
     cached on purpose -- these are small local files and a test may write
     then immediately re-read one within the same process, so freshness beats
-    the (negligible) cost of re-parsing."""
+    the (negligible) cost of re-parsing.
+
+    Linux/H4 must-do: read as `utf-8-sig`, not plain `utf-8` -- `mcp add`/
+    `mcp remove` (mcp_cli.py's `_write_claude_json_raw`) preserve a BOM if
+    the file already had one, but plain `utf-8` chokes on the BOM bytes
+    themselves (`json.loads` sees `﻿{...}` and raises), so a BOM'd
+    `~/.claude.json` silently read as `{}` here -- every configured MCP
+    server, project, etc. -- even though the file itself was perfectly
+    valid JSON-with-BOM the whole time. `utf-8-sig` strips a leading BOM
+    when present and behaves exactly like `utf-8` when it isn't, matching
+    every other `~/.claude.json`/`.mcp.json` reader in this codebase
+    (mcp/manager.py's `_load_json_file`, config/plugins.py)."""
     path = claude_json_path()
     try:
         if not path.exists():
             return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             return {}
         return data

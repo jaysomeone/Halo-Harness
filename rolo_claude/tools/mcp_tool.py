@@ -73,6 +73,85 @@ def tool_meta_max_result_size_chars(meta: Optional[dict]) -> Optional[int]:
     return int(v)
 
 
+# ---- OpenCode-H9 MCP compatibility: per-family tool-schema sanitising -----
+# Claude Code's own built-in tool schemas are flat (name/type/properties,
+# no $ref/anyOf/tuple-items), so this never mattered for THEM -- but MCP
+# servers ship arbitrary JSON Schema, and a non-Anthropic model's own
+# function-calling schema validator can be considerably stricter than
+# Claude's. Applied ONCE, at McpTool construction time (same point/same
+# limitation as `vision`: re-sanitising after a `/model` family switch is
+# H5's `set_model` territory, not this module's), keyed off
+# `providers.profiles.model_family()`'s coarse family string.
+
+def _strip_ref_siblings(node):
+    """Moonshot/Kimi expands `$ref` before validation and rejects sibling
+    keywords (e.g. `description`) on the SAME node -- reduce any dict that
+    has both `$ref` and other keys down to `{"$ref": ...}` alone."""
+    if isinstance(node, dict):
+        if "$ref" in node and len(node) > 1:
+            return {"$ref": node["$ref"]}
+        return {k: _strip_ref_siblings(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_strip_ref_siblings(v) for v in node]
+    return node
+
+
+def _flatten_tuple_items(node):
+    """Moonshot/Kimi's schema validator doesn't understand TUPLE-style
+    `items` (a JSON array, one sub-schema per positional slot) -- flatten
+    it to its first element (`items[0]`), same as OpenCode's own rule."""
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k == "items" and isinstance(v, list):
+                out[k] = _flatten_tuple_items(v[0]) if v else {}
+            else:
+                out[k] = _flatten_tuple_items(v)
+        return out
+    if isinstance(node, list):
+        return [_flatten_tuple_items(v) for v in node]
+    return node
+
+
+def _coerce_gemini_enums(node):
+    """Gemini's function-calling schema only accepts STRING enum members
+    -- coerce any non-string enum value rather than have Gemini reject
+    the whole tool definition."""
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k == "enum" and isinstance(v, list):
+                out[k] = [v2 if isinstance(v2, str) else json.dumps(v2, default=str) for v2 in v]
+            else:
+                out[k] = _coerce_gemini_enums(v)
+        return out
+    if isinstance(node, list):
+        return [_coerce_gemini_enums(v) for v in node]
+    return node
+
+
+def sanitize_tool_schema(schema: dict, *, family: Optional[str] = None) -> dict:
+    """`family` is `providers.profiles.model_family()`'s own string
+    ("kimi", "gemini", ...); `None`/an unrecognised family (in particular
+    "claude", which never reaches an OpenAI/Gemini/Moonshot-shaped
+    endpoint) is a no-op -- returns `schema` unchanged."""
+    if not isinstance(schema, dict):
+        return schema
+    out = schema
+    if family == "kimi":
+        out = _strip_ref_siblings(out)
+        out = _flatten_tuple_items(out)
+        # Kimi K2.5 additionally rejects a `{}` (no properties) object
+        # schema without an explicit "required": [] -- Claude Code itself
+        # never sends a bare {} for a real parameter schema, but a no-arg
+        # MCP tool's own input_schema often is exactly that.
+        if out.get("type") == "object" and not out.get("properties"):
+            out = {**out, "properties": {}, "required": list(out.get("required") or [])}
+    if family == "gemini":
+        out = _coerce_gemini_enums(out)
+    return out
+
+
 def convert_content_blocks(content, *, vision: bool) -> list:
     """One `CallToolResult.content` list -> Anthropic-shaped blocks (scope
     B): text passthrough; `image` -> a real `image` block when `vision`,
@@ -202,14 +281,16 @@ class McpTool(Tool):
 
     result_cap = None  # manages its own truncation+spill (cap_and_spill), like tools/read.py
 
-    def __init__(self, server_name: str, sdk_tool, manager, *, vision: bool = False) -> None:
+    def __init__(self, server_name: str, sdk_tool, manager, *, vision: bool = False,
+                 family: Optional[str] = None) -> None:
         self.server_name = server_name
         self.sdk_tool = sdk_tool  # kept for agent/catalog.py's LRU eviction (rebuild the deferred-pool entry)
         self.tool_name = getattr(sdk_tool, "name", "")
         self.name = mcp_tool_name(server_name, self.tool_name)
         self.description = (getattr(sdk_tool, "description", None) or
                              f"{self.tool_name} (from MCP server {server_name!r})")
-        self.input_schema = getattr(sdk_tool, "input_schema", None) or {"type": "object", "properties": {}}
+        raw_schema = getattr(sdk_tool, "input_schema", None) or {"type": "object", "properties": {}}
+        self.input_schema = sanitize_tool_schema(raw_schema, family=family)
         annotations = getattr(sdk_tool, "annotations", None)
         self.is_read_only = bool(getattr(annotations, "read_only_hint", False))
         self.is_destructive = bool(getattr(annotations, "destructive_hint", False))

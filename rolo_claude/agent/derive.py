@@ -43,16 +43,37 @@ def derive_request(log, tools: Optional[list] = None, upto: Optional[int] = None
       * `tools` -- `tools` if given (the session's frozen catalog, owned by
         the tool registry / caller, never re-derived from the log every
         call); else the last `meta` node's own `tools` list, if any.
-    `usage`/`error`/`interrupted`/`compacted` nodes never contribute a
-    message directly (compaction is H5; an `interrupted` node's synthetic
-    tool_results are themselves logged as ordinary `tool_result` nodes by
-    `agent/invariants.py`, so they need no special handling here).
+    `usage`/`error`/`interrupted` nodes never contribute a message directly
+    (an `interrupted` node's synthetic tool_results are themselves logged as
+    ordinary `tool_result` nodes by `agent/invariants.py`, so they need no
+    special handling here). A `compacted` node (H5) also contributes no
+    message of its own, but its `seq` marks the exclusive upper bound of a
+    SHADOWED range: every non-system/meta node before it is skipped
+    entirely -- see the `shadow_before` pass below.
     """
     nodes = log.nodes(upto=upto) if hasattr(log, "nodes") else list(log)
     system_text: Optional[str] = None
     messages: list = []
     pending: list = []
     tools_out = tools
+
+    # H5 scope B: a `compacted` node (`surface_op: replace`) shadows every
+    # non-system/meta node BEFORE it -- its own `seq` (assigned when it was
+    # appended, i.e. "how many nodes existed at that point") is the
+    # exclusive upper bound. Only the LATEST one matters: each new
+    # compaction's own replay prefix already includes everything back to
+    # the PRIOR compaction's replacement content (the prior
+    # `<compacted-summary>` sits in an ordinary `user` node AFTER the prior
+    # marker, so it is itself summarised into the new one -- "merge any
+    # prior summary" falls out of this for free, no special-casing needed
+    # here). A `upto` cut that lands before the marker naturally excludes
+    # it from `nodes`, so `shadow_before` stays 0 and nothing is skipped --
+    # exactly right for "what did the request look like before compaction
+    # happened".
+    shadow_before = 0
+    for node in nodes:
+        if node.get("type") == "compacted":
+            shadow_before = node.get("seq", 0)
 
     def flush_user():
         nonlocal pending
@@ -62,6 +83,13 @@ def derive_request(log, tools: Optional[list] = None, upto: Optional[int] = None
 
     for node in nodes:
         kind = node.get("type")
+        # The system node is cache-stable and never shadowed (compaction
+        # replays it verbatim, per dsh's "prefix reuses the conversation's
+        # own system prompt" rule); `meta` (the frozen tool catalog) is
+        # likewise exempt -- neither carries transcript CONTENT a summary
+        # could stand in for.
+        if kind not in ("system", "meta", "compacted") and node.get("seq", 0) < shadow_before:
+            continue
         if kind == "system":
             if system_text is not None:
                 raise LogAssemblyError("session log has more than one 'system' node -- exactly one is required")

@@ -123,6 +123,72 @@ def test_structured_fallback_noop_when_neither(ctx: Ctx):
     ctx.check("no text, no structuredContent -> unchanged", T.content_with_structured_fallback([], None) == [])
 
 
+# ---- OpenCode-H9 MCP compatibility: per-family schema sanitising --------
+
+@test
+def test_sanitize_schema_noop_for_claude_and_none(ctx: Ctx):
+    schema = {"type": "object", "properties": {"x": {"$ref": "#/defs/X", "description": "should stay"}}}
+    ctx.check("family=None is a no-op", T.sanitize_tool_schema(schema, family=None) == schema)
+    ctx.check("family='claude' is a no-op", T.sanitize_tool_schema(schema, family="claude") == schema)
+
+
+@test
+def test_sanitize_schema_kimi_strips_ref_siblings(ctx: Ctx):
+    """Moonshot/Kimi expands $ref before validation and rejects sibling
+    keywords (e.g. description) on the same node."""
+    schema = {"type": "object", "properties": {
+        "x": {"$ref": "#/defs/X", "description": "extra sibling keyword"},
+        "y": {"type": "string"},
+    }}
+    out = T.sanitize_tool_schema(schema, family="kimi")
+    ctx.check(f"$ref node reduced to just $ref, got {out['properties']['x']}",
+              out["properties"]["x"] == {"$ref": "#/defs/X"})
+    ctx.check("a node without $ref is untouched", out["properties"]["y"] == {"type": "string"})
+
+
+@test
+def test_sanitize_schema_kimi_flattens_tuple_items(ctx: Ctx):
+    schema = {"type": "object", "properties": {
+        "pair": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
+    }}
+    out = T.sanitize_tool_schema(schema, family="kimi")
+    ctx.check(f"tuple items flattened to items[0], got {out['properties']['pair']['items']}",
+              out["properties"]["pair"]["items"] == {"type": "string"})
+
+
+@test
+def test_sanitize_schema_kimi_adds_required_to_empty_object(ctx: Ctx):
+    """Kimi K2.5 rejects a bare {} parameter schema without an explicit
+    "required": [] -- a real, common shape for a no-arg MCP tool."""
+    out = T.sanitize_tool_schema({"type": "object", "properties": {}}, family="kimi")
+    ctx.check(f"required: [] added, got {out}", out.get("required") == [])
+
+
+@test
+def test_sanitize_schema_gemini_coerces_enum_to_strings(ctx: Ctx):
+    schema = {"type": "object", "properties": {"level": {"type": "integer", "enum": [1, 2, 3]}}}
+    out = T.sanitize_tool_schema(schema, family="gemini")
+    ctx.check(f"enum values coerced to strings, got {out['properties']['level']['enum']}",
+              out["properties"]["level"]["enum"] == ["1", "2", "3"])
+
+
+@test
+def test_sanitize_schema_gemini_leaves_kimi_quirks_alone(ctx: Ctx):
+    schema = {"type": "object", "properties": {"x": {"$ref": "#/defs/X", "description": "kept for gemini"}}}
+    out = T.sanitize_tool_schema(schema, family="gemini")
+    ctx.check("gemini never strips $ref siblings (that's a kimi-only rule)",
+              out["properties"]["x"] == {"$ref": "#/defs/X", "description": "kept for gemini"})
+
+
+@test
+def test_mcptool_applies_family_sanitising_to_its_own_input_schema(ctx: Ctx):
+    sdk_tool = SimpleNamespace(name="t", description="d", input_schema={
+        "type": "object", "properties": {"x": {"$ref": "#/defs/X", "description": "sibling"}}})
+    tool = T.McpTool("srv", sdk_tool, manager=None, family="kimi")
+    ctx.check(f"McpTool.input_schema was sanitised for kimi, got {tool.input_schema}",
+              tool.input_schema["properties"]["x"] == {"$ref": "#/defs/X"})
+
+
 # ---- tool_always_load / maxResultSizeChars validation -------------------
 
 @test

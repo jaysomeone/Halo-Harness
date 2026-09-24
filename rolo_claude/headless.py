@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +38,9 @@ from rolo_claude.permissions import (
     PermissionEngine, bare_deny_tool_names, build_rules_from_settings, freeze_tool_registry,
     mcp_deny_tool_names, normalize_permission_mode, split_tool_rule_list,
 )
-from rolo_claude.providers.config import derive_workspace_root, load_env_file, load_routes, resolve_databricks, resolve_openrouter
+from rolo_claude.providers.config import (
+    derive_workspace_root, load_env_file, load_routes, resolve_anthropic, resolve_databricks, resolve_openrouter,
+)
 from rolo_claude.providers.profiles import model_family
 from rolo_claude.providers.stream import ProviderCreds
 from rolo_claude.theme import load_config as load_rolo_config, resolve_theme
@@ -63,7 +66,16 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         if dbx is None:
             return None
         return ProviderCreds(base_url=derive_workspace_root(dbx.host), api_key=dbx.token)
-    return None  # "ant:" (direct Anthropic) isn't wired into the openai-chat stream_completion path
+    if ref.provider == "anthropic":
+        # H5 scope C: `ant:` goes through stream_anthropic_completion (the
+        # native-dialect sibling of stream_completion), not the openai-chat
+        # path this function's name suggests -- but ProviderCreds is the
+        # same plain (base_url, api_key) shape either way.
+        ant = resolve_anthropic(env)
+        if ant is None:
+            return None
+        return ProviderCreds(base_url=ant.base_url, api_key=ant.api_key)
+    return None
 
 
 def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: str,
@@ -148,6 +160,240 @@ def _events_for_direct_output(output: str, *, turn_no: int = 1):
     yield events.turn_done(turn=turn_no, reason="end_turn")
 
 
+@dataclass
+class SessionBuild:
+    """u2-h3b finding 9: everything `-p` (`run_print_mode` below) and the
+    TUI (`tui/bootstrap.build_controller`) build IDENTICALLY, up through a
+    ready-to-drive `Session` -- one function, `build_session`, instead of
+    two hand-maintained copies that had already drifted (the TUI's copy
+    was missing server-level `alwaysLoad` and the "keep ToolSearch when
+    deferred tools exist" rule -- see `build_session`'s own docstring).
+    Each caller then does its OWN tail: `run_print_mode` drives `session.
+    turn()` through a sink; `build_controller` wraps `session` in a
+    `Controller` and wires the TUI's own `/mcp` status+reconnect
+    closures."""
+    session: object                 # agent.loop.Session
+    command_registry: object        # commands.registry.Registry (slash commands)
+    tool_registry: object           # tools.registry.ToolRegistry (frozen, growable via ToolSearch)
+    facade: object                  # commands.builtins.HeadlessFacade
+    mcp_manager: Optional[object]
+    mcp_notices: list
+    session_catalog: Optional[object]
+    settings: object
+    claude_json: dict
+    resolved_mode: str
+    routes: dict
+    state_dir: Path
+    model_ref: object
+    model_profile: object
+    creds: Optional[object]
+    ctx: object                     # agent.assemble.SessionContext
+    session_log: object
+    hook_runner: Optional[object]
+
+
+def build_session(
+    *, cwd: Path, model_ref_raw: Optional[str] = None, small_model_ref_raw: Optional[str] = None,
+    settings_flag: Optional[str] = None, setting_sources: Optional[list] = None,
+    effort: Optional[str] = None, allowed_tools: Optional[str] = None, disallowed_tools: Optional[str] = None,
+    permission_mode: Optional[str] = None, dangerously_skip_permissions: bool = False,
+    tools: Optional[str] = None, add_dir: Optional[list] = None, bare: bool = False,
+    session_id: Optional[str] = None, max_turns: int = 50,
+    append_system_prompt: Optional[str] = None, system_prompt: Optional[str] = None,
+    json_schema: Optional[str] = None, chrome: bool = False, no_chrome: bool = False,
+    playwright: bool = False, playwright_cdp: Optional[str] = None, playwright_headless: bool = False,
+    mcp_config: Optional[list] = None, strict_mcp_config: bool = False, print_mode: bool = True,
+) -> SessionBuild:
+    """The ONE shared builder (finding 9). `print_mode` (True for `-p`,
+    False for the TUI) is the single knob that decides `PermissionEngine.
+    print_mode`, `build_manager`'s own `print_mode` (approve/spawn every
+    `.mcp.json` server outright vs. respect `pending_approval`), and
+    `resolve_chrome_enabled`'s `interactive` (`claudeInChromeDefaultEnabled`
+    is never consulted for `-p` -- finding 14). Everything else is common.
+
+    Fixes folded in here that the TUI's OLD hand-copy (`tui/bootstrap.py`,
+    pre-finding-9) never had: server-level `alwaysLoad` (`always_load_
+    servers`, below) preloads every tool from that server, and ToolSearch
+    is kept in the frozen registry whenever the deferred pool is non-empty
+    even if `--tools`/a deny rule would otherwise have excluded it -- a
+    `--tools Read,Bash`-style TUI launch used to leave the whole deferred
+    MCP pool unreachable while the prompt still said "call ToolSearch"."""
+    claude_json = load_claude_json()
+    trusted = is_trusted(cwd, claude_json)
+    settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
+    claude_json_allowed_tools = lookup_project(claude_json, cwd).get("allowedTools")
+
+    cli_allow = split_tool_rule_list(allowed_tools) if allowed_tools else []
+    cli_disallow = split_tool_rule_list(disallowed_tools) if disallowed_tools else []
+    deny_rules, ask_rules, allow_rules = build_rules_from_settings(
+        settings, cwd=cwd, claude_json_allowed_tools=claude_json_allowed_tools,
+        cli_allow=cli_allow, cli_disallow=cli_disallow,
+    )
+
+    if dangerously_skip_permissions:
+        resolved_mode = "bypassPermissions"
+    elif permission_mode:
+        resolved_mode = normalize_permission_mode(permission_mode)
+    elif settings.permissions_default_mode:
+        resolved_mode = normalize_permission_mode(settings.permissions_default_mode)
+    else:
+        resolved_mode = "default"
+
+    frozen_registry = freeze_tool_registry(
+        ToolRegistry(), tools_flag=tools, disallowed_tools=cli_disallow, deny_rules=deny_rules,
+    )
+    extra_dirs = [Path(d) for d in settings.permissions_additional_directories] + [Path(d) for d in (add_dir or [])]
+    permission_engine = PermissionEngine(
+        deny_rules=deny_rules, ask_rules=ask_rules, allow_rules=allow_rules, mode=resolved_mode,
+        cwd=cwd, extra_dirs=extra_dirs, print_mode=print_mode,
+    )
+
+    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
+    load_env_file(env_path)
+
+    state_dir = bridge_home()
+    routes = load_routes(state_dir / "routes.json")
+
+    model_raw = model_ref_raw or os.environ.get("BRIDGE_MODEL") or routes.get("default") or DEFAULT_MODEL_REF
+    model_ref = parse_model_ref(model_raw, routes)
+    small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL") or routes.get("small") or model_raw
+    small_ref = parse_model_ref(small_raw, routes) if small_raw else None
+    model_profile = resolve_model_profile(model_ref, state_dir, routes)
+    family = model_family(model_ref.model)
+
+    mcp_manager = None
+    mcp_notices: list = []
+    session_catalog = None
+    mcp_servers_for_prompt: list = []
+    if not bare:
+        from rolo_claude.mcp_setup import build_manager, resolve_chrome_enabled
+        chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome,
+                                                 interactive=not print_mode)
+        mcp_manager, mcp_notices = build_manager(
+            cwd=cwd, claude_json=claude_json, settings=settings, print_mode=print_mode,
+            mcp_config_flag=mcp_config, strict_mcp_config=strict_mcp_config,
+            chrome=chrome_enabled, playwright=playwright,
+            playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
+            bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True, trusted=trusted,
+        )
+        if mcp_manager is not None:
+            from rolo_claude.tools.mcp_tool import ListMcpResourcesTool, McpTool, ReadMcpResourceTool
+            tools_subset = None
+            if tools is not None and tools.strip() not in ("", "default"):
+                tools_subset = set(split_tool_rule_list(tools))
+            elif tools is not None and tools.strip() == "":
+                tools_subset = set()
+            bare_denied_names = set(bare_deny_tool_names(deny_rules))
+            bare_denied_names |= {r.strip() for r in cli_disallow if "(" not in r}
+
+            def _builtin_allowed(name: str) -> bool:
+                if tools_subset is not None and name not in tools_subset:
+                    return False
+                return name not in bare_denied_names
+
+            if _builtin_allowed("ListMcpResourcesTool"):
+                frozen_registry.add_tool(ListMcpResourcesTool())
+            if _builtin_allowed("ReadMcpResourceTool"):
+                frozen_registry.add_tool(ReadMcpResourceTool())
+
+            all_mcp = mcp_manager.all_tools()
+            candidate_names = [t[1] for t in all_mcp]
+            denied = mcp_deny_tool_names(deny_rules, candidate_names)
+            denied |= {r.strip() for r in cli_disallow if "(" not in r and r.strip().startswith("mcp__")}
+            survivors = [t for t in all_mcp if t[1] not in denied]
+
+            cap = host_cap(model_ref.provider)
+            cap_budget = max(0, cap - len(frozen_registry.names()))
+            preload_names = set((load_rolo_config().get("mcpPreload") or []))
+            # finding 13 must-do: server-level "alwaysLoad" preloads every
+            # tool from that server (was missing from the TUI's own copy).
+            always_load_servers = {name for name, h in mcp_manager.handles.items() if h.config.always_load}
+            preload, deferred = select_preload(survivors, preload_names=preload_names,
+                                                always_load_servers=always_load_servers, cap_budget=cap_budget)
+
+            for server_name, wire_name, sdk_tool in preload:
+                frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager,
+                                                  vision=model_profile.vision, family=family))
+
+            # finding 13 must-do: keep ToolSearch whenever the deferred pool
+            # is non-empty, even when --tools/a deny rule would otherwise
+            # have excluded it (was missing from the TUI's own copy).
+            if deferred and frozen_registry.get("ToolSearch") is None:
+                from rolo_claude.tools.tool_search import ToolSearchTool
+                frozen_registry.add_tool(ToolSearchTool())
+
+            session_catalog = SessionCatalog(
+                registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
+                vision=model_profile.vision, family=family, names=frozen_registry.names(),
+            )
+            mcp_servers_for_prompt = [
+                {"name": name, "instructions": h.instructions}
+                for name, h in mcp_manager.handles.items() if h.state == "connected"
+            ]
+
+    creds = _resolve_creds(model_ref, settings)
+    if not bare and model_ref.provider == "openrouter" and creds is not None and frozen_registry.get("WebSearch") is None:
+        from rolo_claude.tools.websearch import build_websearch_tool
+        ws_tool = build_websearch_tool(
+            main_provider=model_ref.provider, creds=creds,
+            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
+        )
+        if ws_tool is not None:
+            frozen_registry.add_tool(ws_tool)
+
+    effective_append = append_system_prompt
+    if json_schema:
+        note = f"Respond with JSON matching this schema (no prose outside the JSON): {json_schema}"
+        effective_append = f"{effective_append}\n\n{note}" if effective_append else note
+
+    ctx = SessionContext(
+        cwd=cwd, model_label=model_ref.raw, model_family=family, settings_flag=settings_flag,
+        setting_sources=setting_sources, append_system_prompt=effective_append, bare=bare,
+        tool_registry=frozen_registry, mcp_servers=mcp_servers_for_prompt,
+    )
+    if system_prompt:
+        ctx.system_prompt = system_prompt
+
+    openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
+    extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
+
+    session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
+    hook_runner = build_hook_runner(
+        settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
+        effort=effort, permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
+    )
+    session = Session(
+        cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
+        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
+        max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
+        extra_headers=extra_headers, permission_engine=permission_engine,
+        session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
+    )
+    if hook_runner is not None:
+        hook_runner.prompt_caller = session._call_model_for_hook
+
+    command_registry = Registry.discover(cwd, home())
+    facade = HeadlessFacade(
+        cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
+        permission_mode=resolved_mode, tool_registry=frozen_registry, registry=command_registry,
+        memory_store=ctx.memory_store, instructions=ctx.instructions, session_id=session_log.session_id,
+        effort=effort, theme=resolve_theme(settings_theme=settings.theme),
+        context_limit=model_profile.context_tokens,
+        mcp_servers={h.config.name: {"type": h.config.type, "command": h.config.command, "args": h.config.args,
+                                      "url": h.config.url} for h in (mcp_manager.handles.values() if mcp_manager else [])},
+        mcp_status=(mcp_manager.status() if mcp_manager is not None else None),
+        session=session,  # H5 scope D: live /cost, /context, /status, /compact
+    )
+
+    return SessionBuild(
+        session=session, command_registry=command_registry, tool_registry=frozen_registry, facade=facade,
+        mcp_manager=mcp_manager, mcp_notices=mcp_notices, session_catalog=session_catalog, settings=settings,
+        claude_json=claude_json, resolved_mode=resolved_mode, routes=routes, state_dir=state_dir,
+        model_ref=model_ref, model_profile=model_profile, creds=creds, ctx=ctx, session_log=session_log,
+        hook_runner=hook_runner,
+    )
+
+
 def run_print_mode(
     *,
     prompt: Optional[str] = None,
@@ -203,198 +449,29 @@ def run_print_mode(
             print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
             return 2
 
-    claude_json = load_claude_json()
-    trusted = is_trusted(cwd, claude_json)
-    settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
-    claude_json_allowed_tools = lookup_project(claude_json, cwd).get("allowedTools")
-
-    cli_allow = split_tool_rule_list(allowed_tools) if allowed_tools else []
-    cli_disallow = split_tool_rule_list(disallowed_tools) if disallowed_tools else []
-    deny_rules, ask_rules, allow_rules = build_rules_from_settings(
-        settings, cwd=cwd, claude_json_allowed_tools=claude_json_allowed_tools,
-        cli_allow=cli_allow, cli_disallow=cli_disallow,
+    # u2-h3b finding 9: everything through a ready-to-drive Session is now
+    # the ONE shared builder both -p and the TUI call -- see
+    # `build_session`/`SessionBuild` above for what it does and why.
+    build = build_session(
+        cwd=cwd, model_ref_raw=model_ref_raw, small_model_ref_raw=small_model_ref_raw,
+        settings_flag=settings_flag, setting_sources=setting_sources, effort=effort,
+        allowed_tools=allowed_tools, disallowed_tools=disallowed_tools, permission_mode=permission_mode,
+        dangerously_skip_permissions=dangerously_skip_permissions, tools=tools, add_dir=add_dir, bare=bare,
+        session_id=session_id, max_turns=max_turns, append_system_prompt=append_system_prompt,
+        system_prompt=system_prompt, json_schema=json_schema, chrome=chrome, no_chrome=no_chrome,
+        playwright=playwright, playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
+        mcp_config=mcp_config, strict_mcp_config=strict_mcp_config, print_mode=True,
     )
-
-    if dangerously_skip_permissions:
-        resolved_mode = "bypassPermissions"
-    elif permission_mode:
-        resolved_mode = normalize_permission_mode(permission_mode)
-    elif settings.permissions_default_mode:
-        resolved_mode = normalize_permission_mode(settings.permissions_default_mode)
-    else:
-        resolved_mode = "default"
-
-    frozen_registry = freeze_tool_registry(
-        ToolRegistry(), tools_flag=tools, disallowed_tools=cli_disallow, deny_rules=deny_rules,
-    )
-    extra_dirs = [Path(d) for d in settings.permissions_additional_directories] + [Path(d) for d in (add_dir or [])]
-    permission_engine = PermissionEngine(
-        deny_rules=deny_rules, ask_rules=ask_rules, allow_rules=allow_rules, mode=resolved_mode,
-        cwd=cwd, extra_dirs=extra_dirs, print_mode=True,
-    )
-
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    load_env_file(env_path)
-
-    state_dir = bridge_home()
-    routes = load_routes(state_dir / "routes.json")
-
-    model_raw = model_ref_raw or os.environ.get("BRIDGE_MODEL") or routes.get("default") or DEFAULT_MODEL_REF
-    model_ref = parse_model_ref(model_raw, routes)
-    small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL") or routes.get("small") or model_raw
-    small_ref = parse_model_ref(small_raw, routes) if small_raw else None
-    model_profile = resolve_model_profile(model_ref, state_dir, routes)
+    session, frozen_registry, model_ref, model_profile = (
+        build.session, build.tool_registry, build.model_ref, build.model_profile)
+    mcp_manager, resolved_mode, session_log = build.mcp_manager, build.resolved_mode, build.session_log
     family = model_family(model_ref.model)
 
-    # H3 scope A-C/E: build the MCP manager (real servers + `--chrome`/
-    # `--playwright` dynamic ones), then split its tools into "preload"
-    # (added to the frozen registry now) vs "deferred" (SessionCatalog's
-    # lazy-load pool) under this provider's host cap. `--bare` disables
-    # MCP entirely (D-CFG: "--bare skips ... MCP ..."), matching every
-    # other config source it turns off.
-    mcp_manager = None
-    mcp_notices: list = []
-    session_catalog = None
-    mcp_servers_for_prompt: list = []
-    if not bare:
-        from rolo_claude.mcp_setup import build_manager, resolve_chrome_enabled
-        # finding 14: -p is always non-interactive -- claudeInChromeDefaultEnabled
-        # must never auto-enable Chrome here (before this fix, every `-p`
-        # on a box with that setting on spawned claude.CMD --claude-in-chrome-mcp,
-        # which `claude -p` itself never does).
-        chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome,
-                                                 interactive=False)
-        mcp_manager, mcp_notices = build_manager(
-            cwd=cwd, claude_json=claude_json, settings=settings, print_mode=True,
-            mcp_config_flag=mcp_config, strict_mcp_config=strict_mcp_config,
-            chrome=chrome_enabled, playwright=playwright,
-            playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
-            bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True, trusted=trusted,
-        )
-        if mcp_manager is None and mcp_notices:
-            print(f"rolo-claude: {mcp_notices[0]}", file=sys.stderr)
-        elif verbose:
-            for n in mcp_notices:
-                print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
-
-        if mcp_manager is not None:
-            # scope B built-ins: only offered when there's something real
-            # for them to list/read (finding 14's "no false capability
-            # promises" rule, applied to MCP resources same as memory/Bash)
-            # -- AND only when `--tools`/bare-deny would have let them
-            # through `freeze_tool_registry` too (that call already ran,
-            # against a registry that couldn't have known about these two
-            # yet, so the SAME filter is re-applied here by hand rather
-            # than silently bypassing it for just these two names).
-            from rolo_claude.tools.mcp_tool import ListMcpResourcesTool, ReadMcpResourceTool
-            tools_subset = None
-            if tools is not None and tools.strip() != "" and tools.strip().lower() != "default":
-                tools_subset = set(split_tool_rule_list(tools))
-            elif tools is not None and tools.strip() == "":
-                tools_subset = set()
-            bare_denied_names = set(bare_deny_tool_names(deny_rules))
-            bare_denied_names |= {r.strip() for r in cli_disallow if "(" not in r}
-
-            def _builtin_allowed(name: str) -> bool:
-                if tools_subset is not None and name not in tools_subset:
-                    return False
-                return name not in bare_denied_names
-
-            if _builtin_allowed("ListMcpResourcesTool"):
-                frozen_registry.add_tool(ListMcpResourcesTool())
-            if _builtin_allowed("ReadMcpResourceTool"):
-                frozen_registry.add_tool(ReadMcpResourceTool())
-
-            all_mcp = mcp_manager.all_tools()
-            candidate_names = [t[1] for t in all_mcp]
-            denied = mcp_deny_tool_names(deny_rules, candidate_names)
-            denied |= {r.strip() for r in cli_disallow if "(" not in r and r.strip().startswith("mcp__")}
-            survivors = [t for t in all_mcp if t[1] not in denied]
-
-            cap = host_cap(model_ref.provider)
-            cap_budget = max(0, cap - len(frozen_registry.names()))
-            preload_names = set((load_rolo_config().get("mcpPreload") or []))
-            # finding 13 must-do: a SERVER-level "alwaysLoad" (parsed but
-            # previously never consulted) preloads every tool from that
-            # server, same as each tool having its own _meta[anthropic/
-            # alwaysLoad].
-            always_load_servers = {name for name, h in mcp_manager.handles.items() if h.config.always_load}
-            preload, deferred = select_preload(survivors, preload_names=preload_names,
-                                                always_load_servers=always_load_servers, cap_budget=cap_budget)
-
-            from rolo_claude.tools.mcp_tool import McpTool
-            for server_name, wire_name, sdk_tool in preload:
-                frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager, vision=model_profile.vision))
-
-            # finding 13 must-do: keep ToolSearch whenever the deferred pool
-            # is non-empty, even when --tools/a deny rule would otherwise
-            # have excluded it from `frozen_registry` -- without this, e.g.
-            # `--tools Read,Bash` strands every deferred MCP tool while the
-            # prompt still tells the model to "call ToolSearch".
-            if deferred and frozen_registry.get("ToolSearch") is None:
-                from rolo_claude.tools.tool_search import ToolSearchTool
-                frozen_registry.add_tool(ToolSearchTool())
-
-            session_catalog = SessionCatalog(
-                registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
-                vision=model_profile.vision, names=frozen_registry.names(),
-            )
-            mcp_servers_for_prompt = [
-                {"name": name, "instructions": h.instructions}
-                for name, h in mcp_manager.handles.items() if h.state == "connected"
-            ]
-
-    # H4 scope E: creds resolved HERE (not after SessionContext, the old
-    # position) so WebSearch can be added to `frozen_registry` BEFORE
-    # `ctx`/its byte-stable system prompt are built from it -- added
-    # after, the tool would still dispatch (same registry object) but the
-    # prompt's own tool listing / "WebSearch available" sentence would
-    # never mention it (both computed once, at ctx-construction time).
-    creds = _resolve_creds(model_ref, settings)
-    if not bare and model_ref.provider == "openrouter" and creds is not None and frozen_registry.get("WebSearch") is None:
-        from rolo_claude.tools.websearch import build_websearch_tool
-        ws_tool = build_websearch_tool(
-            main_provider=model_ref.provider, creds=creds,
-            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
-        )
-        if ws_tool is not None:
-            frozen_registry.add_tool(ws_tool)
-
-    effective_append = append_system_prompt
-    if json_schema:
-        note = f"Respond with JSON matching this schema (no prose outside the JSON): {json_schema}"
-        effective_append = f"{effective_append}\n\n{note}" if effective_append else note
-
-    ctx = SessionContext(
-        cwd=cwd, model_label=model_ref.raw, model_family=family, settings_flag=settings_flag,
-        setting_sources=setting_sources, append_system_prompt=effective_append, bare=bare,
-        tool_registry=frozen_registry, mcp_servers=mcp_servers_for_prompt,
-    )
-    if system_prompt:
-        ctx.system_prompt = system_prompt  # --system-prompt[-file]: full replacement
-
-    openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
-    extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
-
-    # (--session-id already validated at the top of this function, before
-    # any MCP server was ever started -- see the must-do note there.)
-    session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
-    hook_runner = build_hook_runner(
-        settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
-        effort=effort, permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
-    )
-    session = Session(
-        cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
-        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
-        max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
-        extra_headers=extra_headers, permission_engine=permission_engine,
-        session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
-    )
-    if hook_runner is not None:
-        # a `prompt`/`agent` hook's one-shot model call is a Session method
-        # (it needs the session's own route/profile/creds) -- bound here,
-        # after construction, to avoid a chicken-and-egg dependency.
-        hook_runner.prompt_caller = session._call_model_for_hook
+    if mcp_manager is None and build.mcp_notices:
+        print(f"rolo-claude: {build.mcp_notices[0]}", file=sys.stderr)
+    elif verbose:
+        for n in build.mcp_notices:
+            print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
 
     if verbose:
         print(f"[rolo-claude] model={model_ref.raw} provider={model_ref.provider} "
@@ -408,17 +485,7 @@ def run_print_mode(
     # daemon thread behind, and `~/.claude.json`/other state is quiescent
     # before the process actually exits (the checksum-stability contract).
     try:
-        registry = Registry.discover(cwd, home())
-        facade = HeadlessFacade(
-            cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
-            permission_mode=resolved_mode, tool_registry=frozen_registry, registry=registry,
-            memory_store=ctx.memory_store, instructions=ctx.instructions, session_id=session_log.session_id,
-            effort=effort, theme=resolve_theme(settings_theme=settings.theme),
-            context_limit=model_profile.context_tokens,
-            mcp_servers={h.config.name: {"type": h.config.type, "command": h.config.command, "args": h.config.args,
-                                          "url": h.config.url} for h in (mcp_manager.handles.values() if mcp_manager else [])},
-            mcp_status=(mcp_manager.status() if mcp_manager is not None else None),
-        )
+        registry, facade = build.command_registry, build.facade
         # finding 7 must-do: init.mcp_servers is [{name, status}, ...]
         # (Claude Code's own stream-json shape), never a bare name list.
         mcp_servers_status = sorted(

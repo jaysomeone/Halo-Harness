@@ -238,8 +238,9 @@
     "deepseek/deepseek-v4-flash-0731": {
       "family": "deepseek-v4",
       "use_temperature": false,
+      "use_top_p": true,
       "temperature": null,
-      "top_p": 1.0,
+      "top_p": 0.95,
       "top_k": null,
       "context_tokens": 1310720,
       "max_tokens_default": 65536,
@@ -2325,8 +2326,9 @@
     "databricks-deepseek-v4-flash-0731": {
       "family": "deepseek-v4",
       "use_temperature": false,
+      "use_top_p": true,
       "temperature": null,
-      "top_p": 1.0,
+      "top_p": 0.95,
       "top_k": null,
       "context_tokens": 1048576,
       "max_tokens_default": 10000,

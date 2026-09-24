@@ -366,7 +366,8 @@ def resolve_server_configs(
             if cfg is not None:
                 resolved[name] = cfg
         _notice_dropped_dynamic(extra_dynamic, resolved, notices, "managed-mcp.json is exclusive")
-        resolved = _apply_mcp_server_policy(resolved, settings_raw)
+        resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
+        notices.extend(policy_notices)
         return _expand_all(resolved, env_for_expansion, notices)
 
     def _add_missing(entries: dict, scope: str, source_path=None):
@@ -396,7 +397,8 @@ def resolve_server_configs(
     if strict_mcp_config:
         _notice_dropped_dynamic(extra_dynamic, resolved, notices,
                                  "--strict-mcp-config restricts MCP servers to --mcp-config entries only")
-        resolved = _apply_mcp_server_policy(resolved, settings_raw)
+        resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
+        notices.extend(policy_notices)
         return _expand_all(resolved, env_for_expansion, notices)
 
     _add_missing_configs(extra_dynamic)
@@ -444,7 +446,8 @@ def resolve_server_configs(
     for name in set(proj.get("disabledMcpServers") or []):
         resolved.pop(name, None)
 
-    resolved = _apply_mcp_server_policy(resolved, settings_raw)
+    resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
+    notices.extend(policy_notices)
     return _expand_all(resolved, env_for_expansion, notices)
 
 
@@ -458,20 +461,81 @@ def _notice_dropped_dynamic(extra_dynamic: Optional[dict], resolved: dict, notic
             notices.append(f"{name!r} was requested but {why} -- it was not started")
 
 
-def _apply_mcp_server_policy(resolved: dict, settings_raw: dict) -> dict:
-    """Managed `allowedMcpServers`/`deniedMcpServers` [finding 11]: a
-    non-empty `allowedMcpServers` narrows to exactly those names; a
-    `deniedMcpServers` name is removed regardless of anything else (deny
-    always wins). Applied on every return path, including the
-    managed-mcp.json-exclusive and `--strict-mcp-config` early returns."""
+def _mcp_server_entry_matches(cfg: "McpServerConfig", entry: dict) -> bool:
+    """One `allowedMcpServers`/`deniedMcpServers` OBJECT entry against one
+    resolved server config -- u2-h3b finding 10: 2.1.281's real schema (read
+    from the binary) is a list of OBJECTS, each with EXACTLY ONE of:
+      - `serverName`: exact name match (the common case: `{"serverName":
+        "github"}`).
+      - `serverCommand`: the server's `command` PLUS `args`, as an EXACT
+        array match against `[command, *args]` -- lets a policy pin down a
+        specific invocation, not just any server sharing a name.
+      - `serverUrl`: a WILDCARD match (`fnmatch`-style `*`/`?`) against an
+        http/sse server's `url` -- names never apply to a remote server.
+    A malformed entry (not an object, none/more-than-one of the three keys
+    set, or an empty list/string) matches nothing -- the caller reports a
+    notice and moves on rather than crashing or silently allow/denying
+    everything."""
+    import fnmatch
+    if not isinstance(entry, dict):
+        return False
+    keys_present = [k for k in ("serverName", "serverCommand", "serverUrl") if entry.get(k) not in (None, "", [])]
+    if len(keys_present) != 1:
+        return False
+    key = keys_present[0]
+    if key == "serverName":
+        return isinstance(entry["serverName"], str) and cfg.name == entry["serverName"]
+    if key == "serverCommand":
+        want = entry["serverCommand"]
+        if not isinstance(want, list) or not want:
+            return False
+        got = ([cfg.command] if cfg.command else []) + list(cfg.args or [])
+        return [str(x) for x in want] == [str(x) for x in got]
+    # serverUrl: wildcard match against an http/sse server's url only.
+    want_url = entry["serverUrl"]
+    return isinstance(want_url, str) and bool(cfg.url) and fnmatch.fnmatchcase(cfg.url, want_url)
+
+
+def _apply_mcp_server_policy(resolved: dict, settings_raw: dict) -> "tuple[dict, list[str]]":
+    """`(resolved, notices)`. Managed `allowedMcpServers`/`deniedMcpServers`
+    [finding 10]: each is a LIST OF OBJECTS (`{"serverName"|"serverCommand"|
+    "serverUrl": ...}`), never bare strings -- matched per-entry via
+    `_mcp_server_entry_matches`.
+    A non-empty `allowedMcpServers` narrows to exactly the servers SOME
+    entry matches; an EMPTY `allowedMcpServers` list (`[]`, present but
+    with zero entries) means lockdown -- "users can use no servers of
+    their own" -- distinct from the key being entirely ABSENT (`None`,
+    meaning no restriction at all). A `deniedMcpServers` match is removed
+    regardless of anything else (deny always wins). A malformed entry
+    (not an object, or not exactly one of the three keys) is skipped with
+    a notice rather than silently matching everything or crashing.
+    Applied on every return path, including the managed-mcp.json-exclusive
+    and `--strict-mcp-config` early returns."""
     allowed = settings_raw.get("allowedMcpServers")
-    denied = set(settings_raw.get("deniedMcpServers") or [])
-    if isinstance(allowed, list) and allowed:
-        allowed_set = set(allowed)
-        resolved = {name: cfg for name, cfg in resolved.items() if name in allowed_set}
-    if denied:
-        resolved = {name: cfg for name, cfg in resolved.items() if name not in denied}
-    return resolved
+    denied = settings_raw.get("deniedMcpServers")
+    notices: list = []
+
+    def _valid_entries(raw_list, field_name: str) -> list:
+        out = []
+        for entry in raw_list:
+            if isinstance(entry, dict) and len([k for k in ("serverName", "serverCommand", "serverUrl")
+                                                 if entry.get(k) not in (None, "", [])]) == 1:
+                out.append(entry)
+            else:
+                notices.append(f"{field_name}: malformed entry {entry!r} (must have exactly one of "
+                                f"serverName/serverCommand/serverUrl) -- skipped")
+        return out
+
+    if isinstance(allowed, list):
+        # present (even []) -- [] itself is lockdown, matching NO server.
+        allow_entries = _valid_entries(allowed, "allowedMcpServers")
+        resolved = {name: cfg for name, cfg in resolved.items()
+                    if any(_mcp_server_entry_matches(cfg, e) for e in allow_entries)}
+    if isinstance(denied, list) and denied:
+        deny_entries = _valid_entries(denied, "deniedMcpServers")
+        resolved = {name: cfg for name, cfg in resolved.items()
+                    if not any(_mcp_server_entry_matches(cfg, e) for e in deny_entries)}
+    return resolved, notices
 
 
 def _expand_all(resolved: dict, env_for_expansion, notices: list) -> "tuple[dict, list]":
@@ -610,8 +674,27 @@ class McpServerHandle:
             )
         if self.config.type == "http":
             headers = await self._resolved_headers()
-            return await http_sse_mod.connect_http(
-                url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+            try:
+                return await http_sse_mod.connect_http(
+                    url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+            except Exception as http_exc:
+                # OpenCode-H9 MCP-compatibility item: "Streamable HTTP ->
+                # SSE fallback" -- a server declared `type: "http"`
+                # (Streamable HTTP, the current spec) that only actually
+                # speaks the OLDER `sse` transport rejects the Streamable
+                # HTTP handshake outright (typically a 4xx/405 on the very
+                # first POST); retry the SAME url over the deprecated `sse`
+                # transport before giving up, same as every other MCP
+                # client's own documented fallback. Costs nothing when the
+                # server DOES speak Streamable HTTP -- this branch is only
+                # ever reached after that already failed.
+                log.debug("mcp %s: streamable-http connect failed (%s), retrying as sse",
+                          self.config.name, http_exc)
+                try:
+                    return await http_sse_mod.connect_sse(
+                        url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+                except Exception:
+                    raise http_exc  # the ORIGINAL failure is the more informative one to report
         if self.config.type == "sse":
             log.debug("mcp %s: 'sse' transport is deprecated (use 'http')", self.config.name)
             headers = await self._resolved_headers()
@@ -740,7 +823,14 @@ class McpServerHandle:
             if self._stack is not None:
                 await self._stack.aclose()
 
-    def start(self) -> None:
+    def start(self, abort=None) -> None:
+        """`abort` (u2-h3b finding 9): when given, the WAIT for this
+        connect attempt (never the connect attempt itself -- same
+        "abandoned, not stopped" caveat as everywhere else abort-aware
+        waiting is used in this codebase) is cut short as soon as it
+        fires, via `wait_future_abortable` -- lets a `/mcp` reconnect
+        started from the TUI honour Esc instead of freezing the whole app
+        for up to MCP_TIMEOUT+4s."""
         if self.state in ("disabled", "pending_approval"):
             return
         from rolo_claude.mcp import http_sse as http_sse_mod
@@ -749,7 +839,7 @@ class McpServerHandle:
         self._lifecycle_future = self._loop.spawn(self._lifecycle_task(connect_future))
         self._lifecycle_future.add_done_callback(self._on_lifecycle_done)
         try:
-            connect_future.result(timeout=mcp_timeout_s() + 4)
+            self._loop.wait_future_abortable(connect_future, timeout=mcp_timeout_s() + 4, abort=abort)
         except Exception as e:
             self.state = "needs_auth" if http_sse_mod.looks_like_auth_required(e) else "failed"
             self.error = f"{type(e).__name__}: {e}"
@@ -798,11 +888,20 @@ class McpServerHandle:
     def call_tool(self, name: str, arguments: dict, *, timeout: Optional[float] = None, abort=None):
         if self._session is None:
             raise RuntimeError(f"mcp server {self.config.name!r} is not connected (state={self.state})")
-        from rolo_claude.mcp.client import McpAborted
-        coro = self._session.call_tool(name, arguments or {}, read_timeout_seconds=timeout)
+        from rolo_claude.mcp.client import McpAborted, ProgressKeepalive
+        # OpenCode-H9 MCP-compatibility item: "progress notifications reset
+        # the call timeout" -- `keepalive` is handed to the SDK as the
+        # request's own `progress_callback` AND to `run_abortable` below,
+        # so a `notifications/progress` message during a long-but-healthy
+        # call pushes run_abortable's OWN `overall` deadline back out, not
+        # just whatever the SDK's internal `read_timeout_seconds` does on
+        # its own.
+        keepalive = ProgressKeepalive()
+        coro = self._session.call_tool(name, arguments or {}, read_timeout_seconds=timeout,
+                                        progress_callback=keepalive)
         overall = (timeout + 3) if timeout else mcp_timeout_s() + 3
         try:
-            return self._loop.run_abortable(coro, timeout=overall, abort=abort)
+            return self._loop.run_abortable(coro, timeout=overall, abort=abort, keepalive=keepalive)
         except McpAborted:
             raise
         except concurrent.futures.TimeoutError:
@@ -866,7 +965,7 @@ class McpServerHandle:
             except Exception:
                 pass
 
-    def _await_close(self, timeout: float = 5.0) -> None:
+    def _await_close(self, timeout: float = 5.0, abort=None) -> None:
         """Blocking half of `close()`: wait (up to `timeout`) for the SAME
         task that opened the connection to run its own `aclose()` -- never
         a separate `run()` call (that would recreate the cross-task
@@ -876,16 +975,24 @@ class McpServerHandle:
         `stack.aclose()`, scheduled by `_connect_once`/`_do()`) -- without
         this, `close()`/`McpManager.close_all()` could return while that
         real kill was still in flight, which is exactly what let a spawned
-        child outlive `close_all()` on Windows (verified)."""
+        child outlive `close_all()` on Windows (verified). `abort` (u2-h3b
+        finding 9, default None): waits via `wait_future_abortable` instead
+        of a plain `.result(timeout=)` -- with `abort=None` (every
+        `close_all()` call site, unchanged) this behaves identically, just
+        polled in short slices; a real Event (the TUI's `/mcp` reconnect)
+        lets Esc cut the wait short without changing `close_all()`'s own
+        timing at all."""
         deadline = time.monotonic() + timeout
         if self._lifecycle_future is not None:
             try:
-                self._lifecycle_future.result(timeout=max(0.0, deadline - time.monotonic()))
+                self._loop.wait_future_abortable(self._lifecycle_future,
+                                                  timeout=max(0.0, deadline - time.monotonic()), abort=abort)
             except Exception:
                 pass
         if self._connect_cleanup_future is not None:
             try:
-                self._connect_cleanup_future.result(timeout=max(0.0, deadline - time.monotonic()))
+                self._loop.wait_future_abortable(self._connect_cleanup_future,
+                                                  timeout=max(0.0, deadline - time.monotonic()), abort=abort)
             except Exception:
                 pass
         if self._errlog is not None:
@@ -894,9 +1001,9 @@ class McpServerHandle:
         self._stack = None
         self._session = None
 
-    def close(self, timeout: float = 5.0) -> None:
+    def close(self, timeout: float = 5.0, abort=None) -> None:
         self._signal_close()
-        self._await_close(timeout=timeout)
+        self._await_close(timeout=timeout, abort=abort)
 
 
 # ---- McpManager ---------------------------------------------------------------
@@ -989,13 +1096,36 @@ class McpManager:
                     h.state = "failed"
                     h.error = f"startup exceeded MCP_TIMEOUT ({overall:.1f}s): {type(e).__name__}: {e}"
 
-    def ensure_started(self, name: str) -> None:
+    def ensure_started(self, name: str, abort=None) -> None:
         """`mcpLazy` servers (and a not-yet-approved `.mcp.json` server
         that just became approved) connect on FIRST USE instead of at
         `start_all()` time."""
         h = self.handles.get(name)
         if h is not None and h.state == "pending":
-            h.start()
+            h.start(abort=abort)
+
+    def ensure_lazy_started_all(self) -> "list[str]":
+        """Linux/H4 must-do: start EVERY still-`pending` `mcpLazy` server
+        now -- a lazy server otherwise never appears in `all_tools()`
+        (that only ever looks at `connected` handles), so its tools can
+        never enter `SessionCatalog.deferred` (built once, from
+        `all_tools()`, at session start) and are permanently
+        undiscoverable through ToolSearch even by keyword, no matter how
+        long the session runs. `ToolSearchTool`'s own first call in a
+        session (agent/catalog.py's `SessionCatalog.ensure_lazy_discovered`)
+        calls this once so a lazy server's tools actually become
+        searchable/loadable at all -- still never PRELOADED, only
+        discoverable. Returns the names actually (attempted to be)
+        started, so the caller knows whose tools to (re)fetch via
+        `all_tools()`; a no-op (returns []) once every lazy server has
+        already been started, or there are none."""
+        started = []
+        for name in self._lazy_names:
+            h = self.handles.get(name)
+            if h is not None and h.state == "pending":
+                h.start()
+                started.append(name)
+        return started
 
     def all_tools(self) -> "list[tuple[str, str, object]]":
         """`[(server_name, wire_tool_name, sdk_tool), ...]` across every
@@ -1015,14 +1145,20 @@ class McpManager:
         h = self.handles.get(server)
         if h is None:
             raise RuntimeError(f"unknown mcp server: {server!r}")
-        self.ensure_started(server)
+        self.ensure_started(server, abort=abort)
         if h._reconnect_on_next_call:
             # finding 6: a PREVIOUSLY-working connection died mid-session
             # (_mark_dead set this) -- reconnect once, here, on its next
             # use. A server that never connected in the first place never
             # sets this flag, so it keeps failing fast as before.
+            # u2-h3b finding 9: this reconnect used to be a PLAIN blocking
+            # call, ignoring `abort` entirely -- a hung/slow server's
+            # reconnect-on-next-call could hold the whole turn (Esc did
+            # nothing) for up to `mcp_timeout_s()*2 + 9`s. Threading
+            # `abort` through makes it honour Esc same as the tool call
+            # that follows it.
             h._reconnect_on_next_call = False
-            self.reconnect(server)
+            self.reconnect(server, abort=abort)
         effective_timeout = timeout if timeout is not None else tool_timeout_s(h.config.timeout_ms)
         return h.call_tool(tool, arguments, timeout=effective_timeout, abort=abort)
 
@@ -1041,7 +1177,7 @@ class McpManager:
             })
         return out
 
-    def reconnect(self, name: str) -> bool:
+    def reconnect(self, name: str, abort=None) -> bool:
         """U2 must-do: unlike a plain `h.close(); h.start()`, this (a)
         waits LONG ENOUGH for the OLD lifecycle task to genuinely finish
         (not just `close()`'s default 5s budget) before spawning a new
@@ -1049,16 +1185,25 @@ class McpManager:
         set `_stack`/`_session` itself, AFTER the new one already did,
         silently clobbering the fresh connection; and (b) resets `error`/
         `tools_fetch_failed` so a successful reconnect doesn't keep
-        showing the PREVIOUS attempt's stale failure."""
+        showing the PREVIOUS attempt's stale failure. `abort` (u2-h3b
+        finding 9): threaded through both the close-wait and the
+        start-wait, so a caller on a thread that honours it (the `call()`
+        reconnect-on-next-call path above, and the TUI's `/mcp` `r`
+        worker thread) can cut either wait short instead of blocking for
+        up to `mcp_timeout_s()*2 + 9` seconds -- the underlying close/
+        connect keeps running regardless (same "abandoned, not stopped"
+        caveat as every other abort-aware wait here); a caller that
+        aborts mid-reconnect simply sees whatever transient state the
+        handle is in when it gives up waiting."""
         h = self.handles.get(name)
         if h is None:
             return False
-        h.close(timeout=mcp_timeout_s() + 5.0)
+        h.close(timeout=mcp_timeout_s() + 5.0, abort=abort)
         h.error = None
         h.tools_fetch_failed = False
         h._reconnect_on_next_call = False
         h.state = "pending_approval" if h.config.pending_approval else "pending"
-        h.start()
+        h.start(abort=abort)
         return h.state == "connected"
 
     def close_all(self, timeout: float = 5.0) -> None:

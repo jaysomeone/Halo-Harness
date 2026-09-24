@@ -60,6 +60,35 @@ def _scn_page_forever(h, body):
 SCENARIOS["page-forever"] = _scn_page_forever
 
 
+def _scn_page_until_no_tools(h, body):
+    """Like `_scn_page_forever`, but a COMPLIANT model: once a request
+    arrives with no `tools` field at all (H5's MAX_STEPS_PROMPT wrap-up
+    call withholds it), reply with a plain text summary instead of another
+    tool call -- proving the wrap-up call, when the model actually behaves,
+    ends the turn with real text rather than another tool_use."""
+    if not (body or {}).get("tools"):
+        _finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "Reached the maximum number of steps; summary: paged through the file."}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ])
+        return
+    messages = (body or {}).get("messages") or []
+    offset = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool") * 100
+    _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": f"call_page_{offset}", "type": "function",
+             "function": {"name": "Read", "arguments": json.dumps(
+                 {"file_path": str(Path(tempfile.gettempdir()) / "loop-breaker-target.txt"), "offset": offset})}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
+SCENARIOS["page-until-no-tools"] = _scn_page_until_no_tools
+
+
 def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model", max_turns=20):
     # finding 9: --max-turns now counts MODEL CALLS made within the one
     # turn `-p` runs (Claude Code semantics), not `turn()` invocations --
@@ -110,8 +139,18 @@ def test_max_turns_caps_model_calls_per_turn(ctx: Ctx):
     `-p` runs, not `turn()` invocations (which `-p` only ever calls once,
     so the pre-H2 semantics never actually bounded anything inside a tool
     loop). A DIFFERENT tool call every time (paging by offset) never trips
-    the identical-args loop breaker, so ONLY --max-turns can stop it here;
-    the turn must end with reason "max_turns" at exactly that many calls."""
+    the identical-args loop breaker, so ONLY --max-turns can stop it here.
+
+    H5 scope F item 9 (OpenCode Appendix H): once the cap is hit, the loop
+    now makes ONE MORE call -- MAX_STEPS_PROMPT injected, `tools` withheld
+    from the wire entirely -- so the model gets a real chance to summarise
+    instead of just being cut off; --max-turns=4 therefore means 5 upstream
+    calls (4 tool-calling + 1 wrap-up), and that final call's request must
+    carry no `tools` field at all. This mock always scripts a tool_use
+    reply regardless of what it's asked (it doesn't simulate a model that
+    reads MAX_STEPS_PROMPT), so `stop_reason` is still "tool_use" here --
+    test_max_turns_wrap_up_call_gets_a_text_reply below covers the case
+    where the model DOES comply."""
     fh = build_fake_home()
     (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").write_text("target file\n", encoding="utf-8")
     mock = MockUpstream().start()
@@ -119,10 +158,39 @@ def test_max_turns_caps_model_calls_per_turn(ctx: Ctx):
         result = _run_cli(fh, mock, "page through the file", extra_args=["--output-format", "json", "--verbose"],
                            model="or:mock/page-forever", max_turns=4)
         ctx.check(f"process exits cleanly, got {result.returncode}", result.returncode in (0, 1))
-        ctx.check(f"upstream called EXACTLY --max-turns times (4), got {len(mock.requests)}", len(mock.requests) == 4)
+        ctx.check(f"upstream called max_turns + 1 wrap-up call (5), got {len(mock.requests)}", len(mock.requests) == 5)
+        ctx.check("the wrap-up call's own request body carries no tools field",
+                  "tools" not in (mock.requests[-1].get("body") or {}))
         obj = json.loads(result.stdout)
-        ctx.check(f"json result reports stop_reason tool_use (cut off mid-loop), got {obj.get('stop_reason')!r}",
-                   obj.get("stop_reason") == "tool_use")
+        ctx.check(f"json result reports a stop_reason, got {obj.get('stop_reason')!r}",
+                   obj.get("stop_reason") in ("tool_use", "end_turn"))
+    finally:
+        mock.stop()
+        try:
+            (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").unlink()
+        except OSError:
+            pass
+
+
+@test
+def test_max_turns_wrap_up_call_gets_a_text_reply(ctx: Ctx):
+    """H5 scope F item 9: with a model that actually honours "no tools
+    offered -> reply with text", the wrap-up call ends the turn with a
+    real text summary (stop_reason "end_turn"), not another tool_use --
+    the MAX_STEPS_PROMPT snapshot did its job."""
+    fh = build_fake_home()
+    (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").write_text("target file\n", encoding="utf-8")
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "page through the file", extra_args=["--output-format", "json", "--verbose"],
+                           model="or:mock/page-until-no-tools", max_turns=3)
+        ctx.check(f"process exits cleanly, got {result.returncode}", result.returncode in (0, 1))
+        ctx.check(f"3 tool-calling rounds + 1 wrap-up = 4 requests, got {len(mock.requests)}", len(mock.requests) == 4)
+        obj = json.loads(result.stdout)
+        ctx.check(f"the turn ends cleanly once the model complies, got stop_reason={obj.get('stop_reason')!r}",
+                   obj.get("stop_reason") == "end_turn")
+        ctx.check(f"the wrap-up text made it into the result, got {obj.get('result')!r}",
+                   "summary" in (obj.get("result") or "").lower())
     finally:
         mock.stop()
         try:

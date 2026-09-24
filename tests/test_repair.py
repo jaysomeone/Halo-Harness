@@ -105,6 +105,46 @@ def test_mcp_name_never_fuzzy_renamed_even_one_edit_away(ctx: Ctx):
 
 
 @test
+def test_finding_13_mangled_mcp_prefix_never_fuzzy_renamed_either(ctx: Ctx):
+    """finding 13: the guard used to check only a RAW `mcp__` prefix, so
+    `mcp_hardware__hw_clock_stop` (single underscore) fell through to
+    difflib and WAS auto-renamed to the sibling `mcp__hardware__
+    hw_clock_start` -- verified in the review. Every mangled spelling
+    below (single underscore, wrong case, hyphen) must be normalised to
+    "mcp__" and then follow the EXACT same never-fuzzy-rename rule as an
+    already-correct mcp__ name."""
+    known = ["Bash", "mcp__hardware__hw_clock_start"]
+    for mangled in ("mcp_hardware__hw_clock_stop", "MCP__hardware__hw_clock_stop",
+                     "mcp-hardware__hw_clock_stop", "Mcp_hardware__hw_clock_stop"):
+        resolved, close = repair.resolve_tool_name(mangled, known)
+        ctx.check(f"{mangled!r} never silently renamed to a sibling mcp__ tool, got {resolved!r}", resolved is None)
+        ctx.check(f"{mangled!r}: no fuzzy suggestions either", close == [])
+
+
+@test
+def test_finding_13_mangled_mcp_prefix_resolves_an_exact_match(ctx: Ctx):
+    """The flip side: a mangled prefix must still resolve when the
+    CANONICAL name is actually known/loaded -- normalising the prefix
+    must not turn a real, resolvable call into a false negative."""
+    known = ["Bash", "mcp__hardware__hw_ports"]
+    resolved, close = repair.resolve_tool_name("mcp_hardware__hw_ports", known)
+    ctx.check(f"resolves via the canonical mcp__ spelling, got {resolved!r}", resolved == "mcp__hardware__hw_ports")
+    ctx.check("no fuzzy suggestions needed for a real match", close == [])
+
+
+@test
+def test_finding_13_mangled_prefix_toolsearch_hint_uses_canonical_name(ctx: Ctx):
+    """The ToolSearch hint text must name the CANONICAL "select:" query
+    (mcp__...), never the model's own mangled spelling -- a retry with the
+    mangled name would just fail the same way again."""
+    reg = ToolRegistry()
+    outcome = repair.repair_tool_use_block({"id": "c1", "name": "mcp_ghost__nope", "input": {}}, reg)
+    ctx.check("not ok", outcome.ok is False)
+    ctx.check(f"hint uses the canonical mcp__ name, got {outcome.error_text!r}",
+              "select:mcp__ghost__nope" in outcome.error_text)
+
+
+@test
 def test_mcp_name_auto_loads_from_catalog_deferred(ctx: Ctx):
     reg = ToolRegistry()
     cat = _FakeCatalog({"mcp__srv__get_x": ("srv", object())})

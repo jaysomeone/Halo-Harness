@@ -20,6 +20,7 @@ miss, never reorder").
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -29,6 +30,52 @@ from rolo_claude.tools.registry import ToolRegistry
 DEFAULT_DATABRICKS_CAP = 32
 DEFAULT_OPENROUTER_CAP = 128
 DEFERRED_LRU_MAX = 100  # D5: "LRU of 100 loaded deferred tools"
+
+# ---- finding 12: ToolSearch keyword-search ranking -------------------------
+# Old behaviour: `haystack.count(t)` over "name description" -- a raw
+# substring COUNT, so a long, wordy description that happens to repeat a
+# query term many times could outrank a short, precisely-named tool that
+# mentions it once. Verified repro: on 117 real tool definitions, "list
+# MIDI ports" ranked mcp__hardware__hw_ports 14th (score 3) behind
+# ableton__moog_set at 20 (19 "midi" hits in a 2,510-character
+# description), so the default 5-result cutoff never contained it.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+_NAME_TOKEN_WEIGHT = 10.0   # an exact whole-token hit in the tool's own name
+_NAME_SUBSTR_WEIGHT = 4.0   # term appears inside the name string, not as a whole token
+_HINT_WEIGHT = 6.0          # term present in the server's own _meta[anthropic/searchHint]
+_DESC_BM25_K = 25.0         # BM25-ish k1 analogue, tuned to this catalog's short 1-2 sentence descriptions
+
+
+def _tokens(text: Optional[str]) -> list:
+    return _TOKEN_RE.findall((text or "").lower())
+
+
+def _term_score(term: str, *, name_tokens: set, name_lower: str,
+                 desc_tokens_set: set, desc_len_words: int, hint_tokens: set) -> float:
+    """One query TERM's contribution to one tool's ranking score -- PER-
+    TERM PRESENCE only (the caller iterates each unique query term exactly
+    once: see `search()` below), name-token hits weighted far above a
+    plain description hit, a `searchHint` hit weighted between the two
+    (finding 13 must-do: "given MORE weight than the tool's own name/
+    description" -- kept just below a NAME hit, since an exact name-token
+    match naming the tool outright is still the single strongest possible
+    signal), and a BM25-style `k / (k + len)` length normalisation on the
+    description contribution alone -- a term buried in a huge block of
+    prose counts for less than the SAME term appearing in a short, precise
+    one, closing the exact regression above (19 incidental "midi" hits in
+    a long description can no longer outrank hw_ports' own short, on-topic
+    one)."""
+    score = 0.0
+    if term in name_tokens:
+        score += _NAME_TOKEN_WEIGHT
+    elif term in name_lower:
+        score += _NAME_SUBSTR_WEIGHT
+    if term in hint_tokens:
+        score += _HINT_WEIGHT
+    if term in desc_tokens_set:
+        score += _DESC_BM25_K / (_DESC_BM25_K + desc_len_words)
+    return score
 
 
 def host_cap(provider: str) -> int:
@@ -96,6 +143,13 @@ class SessionCatalog:
     manager: object                                      # McpManager, or a test double with the same .call()
     cap: int
     vision: bool = False
+    # OpenCode-H9 MCP-compatibility item: `providers.profiles.model_family()`'s
+    # coarse family string, threaded into every McpTool `load()` constructs
+    # so its input_schema gets the same per-family sanitising a PRELOADED
+    # McpTool gets at session-build time (headless.py/tui/bootstrap.py) --
+    # same freeze-once/no-re-sanitise-on-`/model`-switch limitation as
+    # `vision` above (H5's `set_model` territory).
+    family: Optional[str] = None
     names: list = field(default_factory=list)             # the ordered, append-only wire catalog
     on_grow: Optional[Callable[[list], None]] = None
     _loaded_order: list = field(default_factory=list)      # deferred-loaded names, oldest-first (LRU)
@@ -141,21 +195,32 @@ class SessionCatalog:
         # finding 13 must-do: `_meta[anthropic/searchHint]` -- only the
         # DEFERRED pool carries raw sdk_tool meta at all (an already-loaded
         # McpTool's `.definition()` is just name/description/input_schema,
-        # same as any built-in); weighted 3x a plain description word so a
-        # server's own curated search terms actually move the ranking.
+        # same as any built-in).
         hint_by_name = {n: tool_search_hint(getattr(sdk_tool, "meta", None))
                          for n, (_server, sdk_tool) in self.deferred.items()}
-        terms = [t.lower() for t in query.split() if t]
+        # finding 12: PER-TERM presence -- the unique SET of query terms,
+        # never a raw substring count over the whole query string (a
+        # repeated query word must not double-count).
+        terms = set(t.lower() for t in query.split() if t)
+        if not terms:
+            return [], []
         scored = []
         for d in all_defs:
             name = d.get("name", "")
-            haystack = f"{name} {d.get('description', '')}".lower()
+            description = d.get("description", "") or ""
             hint = hint_by_name.get(name)
-            if hint:
-                haystack += f" {((hint + ' ') * 3).lower()}"
-            score = sum(haystack.count(t) for t in terms)
+            name_tokens = set(_tokens(name))
+            name_lower = name.lower()
+            desc_word_list = _tokens(description)
+            desc_tokens_set = set(desc_word_list)
+            desc_len_words = max(1, len(desc_word_list))
+            hint_tokens = set(_tokens(hint)) if hint else set()
+            score = sum(_term_score(t, name_tokens=name_tokens, name_lower=name_lower,
+                                     desc_tokens_set=desc_tokens_set, desc_len_words=desc_len_words,
+                                     hint_tokens=hint_tokens)
+                        for t in terms)
             if score > 0:
-                scored.append((score, d.get("name", ""), d))
+                scored.append((score, name, d))
         scored.sort(key=lambda t: (-t[0], t[1]))
         results = [d for _, _, d in scored[:max(1, max_results)]]
         matched_deferred = [d.get("name") for d in results if d.get("name") in self.deferred]
@@ -197,7 +262,7 @@ class SessionCatalog:
                     continue
                 self.deferred.pop(name, None)
                 server, sdk_tool = entry
-                tool = McpTool(server, sdk_tool, self.manager, vision=self.vision)
+                tool = McpTool(server, sdk_tool, self.manager, vision=self.vision, family=self.family)
                 self.registry.add_tool(tool)
                 self.names.append(name)
                 self._loaded_order.append(name)
@@ -251,3 +316,24 @@ class SessionCatalog:
                 if server != server_name or wire_name in self.names:
                     continue
                 self.deferred[wire_name] = (server, sdk_tool)
+
+    def ensure_lazy_discovered(self) -> None:
+        """Linux/H4 must-do: "`mcpLazy` servers must connect on first
+        ToolSearch hit so their tools are discoverable" -- a lazy server
+        is never started at `start_all()` time, so it never appears in
+        `McpManager.all_tools()` (connected-only), so its tools never
+        entered `self.deferred` in the first place (built once, at
+        session start) -- permanently undiscoverable through ToolSearch,
+        by keyword OR by name, no matter how long the session runs.
+        `ToolSearchTool.run()` calls this at the top of EVERY call (cheap:
+        `McpManager.ensure_lazy_started_all()` is a no-op once every lazy
+        server has already been started) so a lazy server's tools become
+        searchable/loadable starting with the model's very next
+        ToolSearch call -- still never PRELOADED, only discoverable."""
+        started = self.manager.ensure_lazy_started_all()
+        if not started:
+            return
+        with self._lock:
+            for server, wire_name, sdk_tool in self.manager.all_tools():
+                if server in started and wire_name not in self.names and wire_name not in self.deferred:
+                    self.deferred[wire_name] = (server, sdk_tool)

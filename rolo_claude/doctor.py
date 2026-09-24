@@ -145,6 +145,23 @@ def _check_chrome() -> str:
     return f"{WARN} claude={claude_exe}; Chrome extension native host NOT registered ({detail}) -- install/enable Claude in Chrome first"
 
 
+def _check_plugins() -> str:
+    """finding 11: report what plugin-provided MCP servers were actually
+    discovered under ~/.claude/plugins/ -- the fastest way to confirm a
+    `claude plugin install ...`'d plugin's servers are reachable at all,
+    without needing a full `-p`/TUI launch."""
+    try:
+        from rolo_claude.config.plugins import discover_plugin_mcp_servers
+        servers, notices = discover_plugin_mcp_servers(env=dict(os.environ))
+    except Exception as e:  # never let a doctor check crash the whole command
+        return f"{WARN} Plugins: could not check ({type(e).__name__}: {e})"
+    if not servers:
+        return f"{OK} Plugins: no plugin-provided MCP servers discovered"
+    names = ", ".join(sorted(servers))
+    suffix = f" -- {len(notices)} notice(s)" if notices else ""
+    return f"{OK} Plugins: {len(servers)} MCP server(s) discovered ({names}){suffix}"
+
+
 def _check_playwright() -> str:
     node = shutil.which("node")
     npx = shutil.which("npx") or shutil.which("npx.cmd")
@@ -188,6 +205,7 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     lines.append(_check_databricks())
     lines.append(_check_chrome())
     lines.append(_check_playwright())
+    lines.append(_check_plugins())
     lines.append(_check_platform())
     ok = not any(line.startswith(MISSING) for line in lines)
     return lines, ok

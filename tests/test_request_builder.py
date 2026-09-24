@@ -266,6 +266,83 @@ def test_databricks_tool_schemas_are_simplified_in_the_built_body(ctx: Ctx):
     ctx.check(f"Databricks tool schema capped at 16 properties, got {len(params['properties'])}", len(params["properties"]) <= 16)
 
 
+@test
+def test_deepseek_v4_flash_0731_sends_top_p_without_temperature(ctx: Ctx):
+    """H5 scope F transform table: DeepSeek V4 Flash omits temperature but
+    DOES send top_p=0.95 (OpenCode Appendix G's own per-model rule) --
+    `use_top_p` gates top_p independently of `use_temperature`."""
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="deepseek/deepseek-v4-flash-0731", dialect="openai-chat")
+    profile = resolve_profile(route)
+    ctx.check("use_temperature is False for this row", profile.use_temperature is False)
+    ctx.check("use_top_p opts in independently", profile.use_top_p is True)
+    body = build_request_body(system_text="S", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                               route=route, profile=profile)
+    ctx.check("temperature omitted from the wire body", "temperature" not in body)
+    ctx.check(f"top_p=0.95 sent despite use_temperature=False, got {body.get('top_p')}", body.get("top_p") == 0.95)
+
+
+@test
+def test_openrouter_claude_gets_cache_control_breakpoints(ctx: Ctx):
+    """H5 scope C: or:anthropic/claude-* through the OPENAI dialect still
+    needs explicit cache_control (OpenRouter has no automatic caching for
+    Anthropic-backed models) on the system node and the last tool result."""
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="anthropic/claude-sonnet-4.5", dialect="openai-chat")
+    profile = resolve_profile(route)
+    ctx.check("family resolves to claude", profile.family == "claude")
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "q1"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "result 1"}]},
+    ]
+    body = build_request_body(system_text="SYS", messages=messages, route=route, profile=profile)
+    sys_msg = body["messages"][0]
+    ctx.check(f"system content is an array with cache_control, got {sys_msg}",
+              isinstance(sys_msg["content"], list) and sys_msg["content"][-1].get("cache_control") == {"type": "ephemeral"})
+    tool_msg = next(m for m in body["messages"] if m.get("role") == "tool")
+    ctx.check(f"the tool result carries cache_control, got {tool_msg}",
+              isinstance(tool_msg["content"], list) and tool_msg["content"][-1].get("cache_control") == {"type": "ephemeral"})
+    ctx.check("system text preserved verbatim inside the block", sys_msg["content"][0]["text"] == "SYS")
+    ctx.check("tool result text preserved verbatim inside the block", tool_msg["content"][0]["text"] == "result 1")
+
+
+@test
+def test_non_claude_openrouter_model_gets_no_cache_control(ctx: Ctx):
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="deepseek/deepseek-v3.2", dialect="openai-chat")
+    profile = resolve_profile(route)
+    body = build_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                               route=route, profile=profile)
+    ctx.check("plain string content, no cache_control for a non-Claude model",
+              body["messages"][0]["content"] == "SYS")
+
+
+@test
+def test_databricks_claude_passthrough_family_never_touches_openai_dialect_cache_control(ctx: Ctx):
+    """A Databricks Claude route never reaches build_request_body at all in
+    the real loop (it's dialect=anthropic-passthrough), but even if it did,
+    host_specific_fields is False for Databricks so the gate stays off."""
+    reset_model_table_cache()
+    route = Route(provider="databricks", upstream_model="databricks-claude-sonnet-4-6", dialect="openai-chat")
+    profile = resolve_profile(route)
+    ctx.check("Databricks never sets host_specific_fields", profile.host_specific_fields is False)
+
+
+@test
+def test_use_top_p_none_falls_back_to_use_temperature(ctx: Ctx):
+    """Every OTHER row (use_top_p unset -> None) is completely unaffected
+    by the new field -- top_p still follows use_temperature exactly as
+    before H5."""
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="z-ai/glm-5.3", dialect="openai-chat")
+    profile = resolve_profile(route)
+    ctx.check("use_top_p is unset (None) for a row that never opted in", profile.use_top_p is None)
+    body = build_request_body(system_text="S", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                               route=route, profile=profile, effort="high")
+    ctx.check(f"top_p follows use_temperature (True for GLM 5.3), got {body.get('top_p')}", body.get("top_p") == 0.95)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

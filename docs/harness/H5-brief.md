@@ -62,6 +62,25 @@ E. **Robustness**: streaming 429/5xx backoff already exists — add Retry-After 
    Anthropic routes (`retry-after`, `anthropic-ratelimit-*` headers), overflow wording for the
    Anthropic API ("prompt is too long: N tokens > M maximum") → compaction.
 
+F. **OpenCode adopt items for H5** (from `reports/OpenCode harness deep review.md`, Appendix A–H —
+   port verbatim where a rule is given): the **9-stage edit replacer chain** in order with thresholds
+   and span guards (Simple → LineTrimmed → BlockAnchor (Levenshtein ≥ 0.65) → WhitespaceNormalized →
+   IndentationFlexible → EscapeNormalized → TrimmedBoundary → ContextAware (≥ 50 %) → MultiOccurrence)
+   with OpenCode's exact error strings, replacing H2c's two-stage Edit matcher; the **retry classifier**
+   (5xx/429 + the quoted message regexes) with 2 s × 2^n, 25 % jitter, 30 s cap, `retry-after-ms`/
+   `retry-after`, max 5 — merged with our ladder; an **SSE chunk-idle watchdog** (300 s header/chunk
+   timeouts); the **overflow regex list** merged with ours (+ HTTP 413 + `error.code ==
+   context_length_exceeded`); compaction constants and strings (`usable = (limit.input or context −
+   max_output) − reserved`, `reserved = min(20 000, max_output)`, prune protect 40k / minimum 20k,
+   "[Old tool result content cleared]", "[Tool execution was interrupted]", the five-heading summary
+   template and prior-summary merge rules, the MAX_STEPS_PROMPT) — keep dsh's 8-section checkpoint as
+   the primary summary format but accept OpenCode's tail-retention formula `min(15k, max(2k, 25 % of
+   usable))`; cross-model reasoning replay rule (reasoning downgraded to text when the model changes
+   mid-session); cost fallback formula from models.dev pricing (reasoning billed at output rate, tiers,
+   `context_over_200k`); Databricks Anthropic route: `toolStreaming: false` (no eager input streaming)
+   for non-Claude models on the Anthropic dialect; the per-model transform table (Kimi 1.0/0.6, GLM
+   1.0, MiniMax 1.0/topP 0.95/topK 40, Gemini 1.0/topK 64, DeepSeek V4 Flash topP 0.95 — NO Qwen rule).
+
 ## Tests (≥ 60, OS-neutral)
 Pruning determinism and prefix stability (bytes before the pruned tail identical); compaction
 trigger math for three profiles; the summariser call replays the exact prefix (assert bytes) and the

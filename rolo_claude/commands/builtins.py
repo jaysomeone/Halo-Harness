@@ -43,6 +43,16 @@ class HeadlessFacade:
     # era call site) means "no MCP client ran" and `_cmd_mcp` falls back
     # to its old raw-config-only wording.
     mcp_status: Optional[list] = None
+    # H5 scope D must-do: the review's "TUI's /cost, /status, /context,
+    # /model currently read a static facade showing $0.0000" -- `cost_usd`/
+    # `num_turns`/`context_limit` above are snapshotted ONCE at facade-
+    # construction time and never updated. `session` (the real, live
+    # agent.loop.Session instance, when one is running -- None for every
+    # bare/unit-test facade and for a facade built before a Session exists)
+    # is a REFERENCE, not a snapshot: `session.cost_meter`/`session.log`
+    # reflect whatever has ACTUALLY happened by the time a command reads
+    # them, no matter how long after facade construction that is.
+    session: object = None
 
 
 def _cmd_help(args: str, facade: HeadlessFacade) -> str:
@@ -59,16 +69,61 @@ def _cmd_clear(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_compact(args: str, facade: HeadlessFacade) -> str:
-    return "Nothing to compact: a single -p turn has no prior history to summarize."
+    """H5 scope B: `/compact [instructions]` -- runs the REAL dsh-replay
+    compaction synchronously (this command's own contract is "return a
+    string", so the compaction generator is simply drained here rather
+    than streamed) when a live Session is attached; the old canned
+    response remains the fallback for a bare -p turn/unit-test facade with
+    no session (a single turn has no prior history worth summarising)."""
+    session = getattr(facade, "session", None)
+    if session is None:
+        return "Nothing to compact: a single -p turn has no prior history to summarize."
+    custom = args.strip() or None
+    done = None
+    for ev in session._run_compaction(session.turn_count, trigger="manual", custom_instructions=custom):
+        if ev.kind == "compaction" and ev.data.get("phase") == "done":
+            done = ev.data
+    if done is None:
+        return "Compaction ran but reported no result (see logs)."
+    before, after = done.get("tokens_before"), done.get("tokens_after")
+    saved = f", freed ~{before - after} tokens" if isinstance(before, int) and isinstance(after, int) else ""
+    return f"Compacted the conversation (~{before} -> ~{after} tokens{saved})."
 
 
 def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
+    session = getattr(facade, "session", None)
+    if session is not None:
+        cm = session.cost_meter
+        cost_str = f"${cm.total_usd:.4f}" if cm.has_cost_data else "n/a (provider does not report cost)"
+        return f"Total cost: {cost_str} across {cm.turns} turn(s) (model: {facade.model_ref or '?'})"
     return (f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s) "
             f"(model: {facade.model_ref or '?'})")
 
 
 def _cmd_context(args: str, facade: HeadlessFacade) -> str:
+    """H5 scope D: a real breakdown (system, tools, messages, pruned) from
+    the LIVE session log when one is attached, via agent/derive.py +
+    agent/prune.py -- the same pipeline a real request would build."""
     limit = facade.context_limit if facade.context_limit is not None else "?"
+    session = getattr(facade, "session", None)
+    if session is not None:
+        from rolo_claude.agent.compact import opencode_usable
+        from rolo_claude.agent.derive import derive_request
+        from rolo_claude.agent.prune import context_breakdown, prune_messages
+        system_text, messages, tools = derive_request(session.log, tools=None)
+        pruned = prune_messages(messages)
+        bd = context_breakdown(system_text, messages, tools, pruned)
+        pct = round(100.0 * bd["total"] / limit, 1) if isinstance(limit, int) and limit else None
+        usable = opencode_usable(session.model_profile.context_tokens, session.model_profile.max_output_tokens)
+        lines = [
+            f"Context window: {limit} tokens (model: {facade.model_ref or '?'})",
+            f"  system:   ~{bd['system']:>7} tokens",
+            f"  tools:    ~{bd['tools']:>7} tokens",
+            f"  messages: ~{bd['messages']:>7} tokens" + (f"  (pruned ~{bd['pruned']} tokens)" if bd["pruned"] else ""),
+            f"  total:    ~{bd['total']:>7} tokens" + (f"  ({pct}% of window)" if pct is not None else ""),
+            f"  compacts once usable prompt tokens reach ~{usable} (OpenCode floor) or the 80% dsh trigger, whichever is lower",
+        ]
+        return "\n".join(lines)
     return f"Context window: {limit} tokens (model: {facade.model_ref or '?'}); nothing used yet this call."
 
 
@@ -126,12 +181,19 @@ def _cmd_resume(args: str, facade: HeadlessFacade) -> str:
 def _cmd_status(args: str, facade: HeadlessFacade) -> str:
     from rolo_claude import __version__
     mcp_n = len(facade.mcp_servers)
+    session = getattr(facade, "session", None)
+    if session is not None:
+        cm = session.cost_meter
+        cost_line = f"Cost so far: ${cm.total_usd:.4f} ({cm.turns} turn(s))" if cm.has_cost_data else "Cost so far: n/a"
+    else:
+        cost_line = f"Cost so far: ${facade.cost_usd:.4f} ({facade.num_turns} turn(s))"
     return (f"rolo-claude {__version__}\n"
             f"Model: {facade.model_ref or '?'}\n"
             f"cwd: {facade.cwd}\n"
             f"Permission mode: {facade.permission_mode}\n"
             f"MCP servers: {mcp_n}\n"
-            f"Theme: {facade.theme or '?'}")
+            f"Theme: {facade.theme or '?'}\n"
+            f"{cost_line}")
 
 
 def _cmd_config(args: str, facade: HeadlessFacade) -> str:
@@ -204,7 +266,7 @@ def _cmd_exit(args: str, facade: HeadlessFacade) -> str:
 _BUILTIN_SPECS = {
     "help": ("core", "Show available commands", None, _cmd_help),
     "clear": ("ui", "Clear the conversation history", None, _cmd_clear),
-    "compact": ("ui", "Summarize the conversation to free up context", "[instructions]", _cmd_compact),
+    "compact": ("core", "Summarize the conversation to free up context", "[instructions]", _cmd_compact),
     "cost": ("core", "Show the total cost and duration of the session", None, _cmd_cost),
     "context": ("core", "Show current context window usage", None, _cmd_context),
     "model": ("core", "Show or change the active model", "[model]", _cmd_model),

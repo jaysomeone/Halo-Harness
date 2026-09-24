@@ -116,11 +116,26 @@ def test_init_is_prompt_kind_with_nonempty_body(ctx: Ctx):
 def test_ui_kind_commands_still_return_friendly_text(ctx: Ctx):
     fh = build_fake_home()
     facade, registry = _facade_for(fh)
-    for name in ("clear", "compact", "plan", "resume", "export", "exit"):
+    for name in ("clear", "plan", "resume", "export", "exit"):
         cmd = registry.resolve(name)
         ctx.check(f"/{name} is kind=ui", cmd.kind == "ui")
         out = cmd.run("", facade)
         ctx.check(f"/{name} (ui kind) returns non-empty text instead of erroring", bool(out.strip()))
+
+
+@test
+def test_compact_is_now_core_kind_and_handles_no_session(ctx: Ctx):
+    """H5 scope B: /compact fully executes (kind="core") -- a real
+    compaction with a live Session attached (see test_compact_command_runs_
+    a_real_compaction in test_loop_h2_integration-adjacent coverage), or a
+    clear "nothing to compact" message for a bare facade with none."""
+    fh = build_fake_home()
+    facade, registry = _facade_for(fh)
+    cmd = registry.resolve("compact")
+    ctx.check("/compact is kind=core (fully executes, not a UI stub)", cmd.kind == "core")
+    out = cmd.run("", facade)
+    ctx.check(f"no session attached -> the honest no-history message, got {out!r}",
+              "no prior history" in out.lower())
 
 
 # ---- e2e through the real CLI (core kind never reaches a model) -----------
