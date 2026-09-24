@@ -145,6 +145,93 @@ def test_build_entry_http_shape_with_headers(ctx: Ctx):
 
 
 @test
+def test_claude_json_add_remove_byte_identical_on_non_ascii_no_trailing_newline_fixture(ctx: Ctx):
+    """finding 8, verified against rolo's real 66837-byte ~/.claude.json
+    (non-ASCII text, no trailing newline): ensure_ascii=False, the
+    source's own trailing-newline state is reproduced, and add+remove of
+    the SAME entry restores the file byte for byte (byte compare, not
+    parsed-dict compare -- a dict compare can't see \\uXXXX escaping or a
+    missing/extra trailing newline)."""
+    def _run(home):
+        fixture = ('{\n  "greeting": "café — naïve résumé 你好 \U0001F600",\n'
+                   '  "mcpServers": {}\n}')  # deliberately NO trailing newline
+        (home / ".claude.json").write_bytes(fixture.encode("utf-8"))
+        before = (home / ".claude.json").read_bytes()
+
+        dest = C._store_entry(scope="user", name="tmp-server", entry={"type": "stdio", "command": "c"}, cwd=home)
+        after_add = (home / ".claude.json").read_bytes()
+        ctx.check("non-ASCII characters are NOT re-escaped to \\uXXXX",
+                  "café".encode("utf-8") in after_add and b"\\u00e9" not in after_add)
+
+        data = json.loads(after_add.decode("utf-8"))
+        del data["mcpServers"]["tmp-server"]
+        indent = C._sniff_indent(after_add.decode("utf-8"))
+        # simulate `mcp remove`'s own read-modify-write of the SAME state
+        C._write_claude_json_raw(data, indent, trailing_newline=fixture.endswith("\n"), bom=False)
+        after_remove = (home / ".claude.json").read_bytes()
+        ctx.check(f"byte-identical to the original after add+remove, "
+                  f"before_tail={before[-40:]!r} after_tail={after_remove[-40:]!r}",
+                  after_remove == before)
+    _with_claude_json_path(_run)
+
+
+@test
+def test_claude_json_write_preserves_trailing_newline_and_bom_state(ctx: Ctx):
+    def _run(home):
+        path = home / ".claude.json"
+        path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"mcpServers": {}}).encode("utf-8"))  # BOM, no trailing \n
+        C._store_entry(scope="user", name="s", entry={"type": "stdio", "command": "c"}, cwd=home)
+        raw = path.read_bytes()
+        ctx.check("BOM preserved", raw.startswith(b"\xef\xbb\xbf"))
+        ctx.check(f"no trailing newline added (source had none), got tail={raw[-15:]!r}", not raw.endswith(b"\n"))
+    _with_claude_json_path(_run)
+
+
+@test
+def test_claude_json_write_preserves_file_mode(ctx: Ctx):
+    import stat as _stat
+    def _run(home):
+        path = home / ".claude.json"
+        path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            raise SkipTestSentinel
+        before_mode = _stat.S_IMODE(path.stat().st_mode)
+        C._store_entry(scope="user", name="s", entry={"type": "stdio", "command": "c"}, cwd=home)
+        after_mode = _stat.S_IMODE(path.stat().st_mode)
+        ctx.check(f"file mode preserved across the replace, before={oct(before_mode)} after={oct(after_mode)}",
+                  after_mode == before_mode)
+    try:
+        _with_claude_json_path(_run)
+    except SkipTestSentinel:
+        pass
+
+
+class SkipTestSentinel(Exception):
+    pass
+
+
+@test
+def test_parse_add_argv_dash_dash_separator(ctx: Ctx):
+    """finding 9: `mcp add name -- cmd args` -- the FIRST bare `--` is
+    consumed as a separator, never stored as the command itself."""
+    opts, positionals = C._parse_add_argv(["airtable", "--", "npx", "-y", "airtable-mcp-server"])
+    ctx.check(f"'--' itself never appears in positionals, got {positionals}", "--" not in positionals)
+    ctx.check(f"name/command/args in the right order, got {positionals}",
+              positionals == ["airtable", "npx", "-y", "airtable-mcp-server"])
+
+
+@test
+def test_parse_add_argv_inline_env_and_scope(ctx: Ctx):
+    opts, positionals = C._parse_add_argv(["--env=API_KEY=abc=123", "--scope=project", "srv", "cmd"])
+    ctx.check(f"--env=K=V inline form (value itself may contain '='), got {opts['env']}",
+              opts["env"] == ["API_KEY=abc=123"])
+    ctx.check(f"--scope=x inline form, got {opts['scope']!r}", opts["scope"] == "project")
+    ctx.check(f"positionals unaffected, got {positionals}", positionals == ["srv", "cmd"])
+
+
+@test
 def test_parse_add_argv_flags_before_name_only(ctx: Ctx):
     opts, positionals = C._parse_add_argv(["-t", "http", "-s", "user", "srv", "https://x", "--extra-flag-for-server"])
     ctx.check("options captured", opts["transport"] == "http" and opts["scope"] == "user")

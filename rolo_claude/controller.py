@@ -62,7 +62,7 @@ class Controller:
         self, *, session, cwd: Path, state_dir: Optional[Path] = None, routes: Optional[dict] = None,
         registry=None, facade=None, model_resolver: Optional[Callable] = None,
         mcp_status_fn: Optional[Callable] = None, reconnect_fn: Optional[Callable] = None,
-        settings=None,
+        settings=None, mcp_manager: Optional[object] = None,
     ):
         self.session = session
         self.cwd = Path(cwd)
@@ -76,6 +76,11 @@ class Controller:
                                                 settings=self.settings))
         self._mcp_status_fn = mcp_status_fn
         self._reconnect_fn = reconnect_fn
+        # tui/bootstrap.py hands this over so quit() can close every MCP
+        # subprocess/loop cleanly (mirrors headless.py's own `finally:
+        # mcp_manager.close_all()`); None for a print-mode-less bare
+        # Session, a unit test, or `--bare`.
+        self.mcp_manager = mcp_manager
 
         self.events: "queue.Queue" = queue.Queue()
         self.commands: "queue.Queue" = queue.Queue()
@@ -130,9 +135,13 @@ class Controller:
         self.quit_called = True
         self.session.abort.set()
         self.commands.put(None)
-        if self._worker is not None:
-            self._worker.join(QUIT_DEADLINE_S)
-        self._stopped.set()
+        try:
+            if self._worker is not None:
+                self._worker.join(QUIT_DEADLINE_S)
+        finally:
+            self._stopped.set()
+            if self.mcp_manager is not None:
+                self.mcp_manager.close_all()
         return self.exit_code
 
     # ---- UI -> loop (non-blocking) ---------------------------------------
@@ -182,6 +191,39 @@ class Controller:
 
     def answer_question(self, request_id: str, answer) -> bool:
         return self.session.resolve_question(request_id, answer)
+
+    def answer_plan(self, approved: bool, *, feedback: str = "", mode_after: Optional[str] = None) -> None:
+        """`PlanCard`'s reply (D-Contract `plan_reply{approved, feedback,
+        mode_after}`). Queued, not a direct threading.Event resolve like
+        `answer_permission`/`answer_question` -- plan mode isn't wired to
+        block the worker thread yet (H6); the command pump's `plan_reply`
+        branch is currently a no-op, so this is forward-wiring against the
+        `plan_review` event the card already renders."""
+        self.commands.put(events.Command("plan_reply", {
+            "approved": approved, "feedback": feedback, "mode_after": mode_after,
+        }))
+
+    def list_mcp_servers(self) -> list:
+        """One dict per configured server (`McpManager.status()`'s own
+        shape) for the `/mcp` dialog -- `[]` when no manager was built this
+        session (`--bare`, or MCP failed to start)."""
+        if self.mcp_manager is None:
+            return []
+        try:
+            return self.mcp_manager.status()
+        except Exception:
+            return []
+
+    def list_permission_rules(self) -> list:
+        """`[{"action": "allow"|"ask"|"deny", "source": ..., "rule": ...},
+        ...]` -- the live `PermissionEngine`'s own rule lists, for the
+        `/permissions` dialog."""
+        engine = self.session.permission_engine
+        out: list = []
+        for action, rules in (("deny", engine.deny_rules), ("ask", engine.ask_rules), ("allow", engine.allow_rules)):
+            for r in rules:
+                out.append({"action": action, "source": r.source or "?", "rule": r.raw or r.value or r.tool})
+        return out
 
     # ---- slash commands ---------------------------------------------------
 

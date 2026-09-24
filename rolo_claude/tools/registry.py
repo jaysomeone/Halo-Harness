@@ -10,6 +10,7 @@ this module only knows how to build a registry that omits/keeps them.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -128,31 +129,41 @@ class ToolRegistry:
 
 
 def run_read_only_batch(registry: ToolRegistry, calls: list, ctx: ToolContext) -> list:
-    """`calls` is `[(name, input), ...]`, all of which the CALLER has
-    already established are read-only and safe to run concurrently. Runs
-    them on a bounded thread pool (`READ_ONLY_POOL_SIZE`) and returns
-    `ToolResult`s in the SAME order as `calls`, independent of which one
-    actually finished first.
+    """`calls` is `[(name, input), ...]` or `[(name, input, tool_use_id), ...]`
+    (finding 5 must-do: a pooled call gets its OWN `tool_use_id`, so an
+    MCP result that needs to spill lands at `<session_dir>/tool-results/
+    <tool_use_id>.txt` like any other, instead of every call in the batch
+    silently sharing one `ctx` with `tool_use_id=None`) -- all of which
+    the CALLER has already established are read-only and safe to run
+    concurrently. Runs them on a bounded thread pool (`READ_ONLY_POOL_SIZE`)
+    and returns `ToolResult`s in the SAME order as `calls`, independent of
+    which one actually finished first.
 
     H3 must-do: abort-aware and bounded per call (`READ_ONLY_CALL_TIMEOUT_S`)
     -- collecting each future's result polls in short slices instead of a
     single blocking `.result()`, so a hung call (finding 8's unfixed-FIFO
     scenario, or anything else that blocks unexpectedly) gets a clear
     timeout/aborted `ToolResult` instead of freezing the whole turn, and
-    the session's `abort` Event cuts the wait short too. The pool itself
-    is shut down WITHOUT waiting (`wait=False`) so a still-stuck call's
-    own worker thread (Python cannot forcibly kill a running thread) is
-    simply abandoned rather than blocking this function's return."""
+    the session's `abort` Event cuts the wait short too. finding 4 must-do:
+    this now includes a SOLO call too (the old fast path dispatched it
+    directly, bypassing this exact wait) -- "route single read-only calls
+    through the same wait". The pool itself is shut down WITHOUT waiting
+    (`wait=False`) so a still-stuck call's own worker thread (Python cannot
+    forcibly kill a running thread) is simply abandoned rather than
+    blocking this function's return."""
     if not calls:
         return []
-    if len(calls) == 1:
-        name, tool_input = calls[0]
-        return [registry.dispatch(name, tool_input, ctx)]
+
+    def _ctx_for(tool_use_id: Optional[str]) -> ToolContext:
+        return dataclasses.replace(ctx, tool_use_id=tool_use_id) if tool_use_id is not None else ctx
 
     abort = getattr(ctx, "abort", None)
     pool = ThreadPoolExecutor(max_workers=min(READ_ONLY_POOL_SIZE, len(calls)))
     try:
-        futures = [pool.submit(registry.dispatch, name, tool_input, ctx) for name, tool_input in calls]
+        futures = []
+        for entry in calls:
+            name, tool_input, tool_use_id = entry if len(entry) == 3 else (*entry, None)
+            futures.append(pool.submit(registry.dispatch, name, tool_input, _ctx_for(tool_use_id)))
         results = []
         for f in futures:
             deadline = time.monotonic() + READ_ONLY_CALL_TIMEOUT_S

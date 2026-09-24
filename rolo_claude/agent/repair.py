@@ -65,17 +65,41 @@ def normalize_tool_name(name: str) -> str:
     return name
 
 
-def resolve_tool_name(name: str, known_names: list) -> "tuple[Optional[str], list]":
+def resolve_tool_name(name: str, known_names: list, *, catalog=None, registry=None) -> "tuple[Optional[str], list]":
     """Resolve `name` against `known_names` (the frozen catalog): exact
-    match, then the alias table, then a case-insensitive exact match, then
-    `difflib` at cutoff >= 0.85 (auto-renamed -- the single best match is
-    used). Returns (resolved_name_or_None, closest_5_names) -- `closest_5`
-    is populated (even on a clean resolution's empty list) only when a
-    caller needs to quote alternatives in an error message."""
+    match, then (for anything OTHER than an `mcp__` name) the alias
+    table, a case-insensitive exact match, then `difflib` at cutoff
+    >= 0.85 (auto-renamed -- the single best match is used).
+
+    finding 2: an `mcp__`-prefixed name is NEVER fuzzy-renamed -- MCP
+    sibling tools are often one edit apart (`mcp__hardware__hw_clock_stop`
+    vs `hw_clock_start`, `mcp__kb__kb_plugin_params` vs `kb_plugin_card`),
+    so difflib silently dispatches a DIFFERENT tool with the model's
+    original arguments. When an `mcp__` name isn't already resolvable, two
+    more sources are tried before giving up: `registry` (a name another
+    tool_use block already auto-loaded EARLIER in this SAME turn --
+    `known_names` is a snapshot taken once at the top of
+    `repair_assistant_turn`, so it can't see that), then `catalog.
+    deferred` (the session's SessionCatalog, when one exists) -- found
+    there, it's LOADED right here, so a call to a not-yet-loaded MCP tool
+    (or one a resumed `--session-id` replay logged before it was ever
+    loaded into THIS process) just works instead of failing the turn.
+
+    Returns (resolved_name_or_None, closest_5_names) -- `closest_5` is
+    always empty for an `mcp__` name (never a fuzzy "did you mean"
+    suggestion pointing at an unrelated MCP tool)."""
     if not name:
         return None, list(known_names)[:5]
     if name in known_names:
         return name, []
+    if name.startswith("mcp__"):
+        if registry is not None and registry.get(name) is not None:
+            return name, []
+        if catalog is not None and name in catalog.deferred:
+            loaded = catalog.load([name])
+            if name in loaded:
+                return name, []
+        return None, []
     aliased = normalize_tool_name(name)
     if aliased in known_names:
         return aliased, []
@@ -214,39 +238,54 @@ class RepairOutcome:
     error_text: Optional[str] = None
     repaired: bool = False          # name was renamed and/or args were coerced
     duplicate_of: Optional[str] = None
+    # H4 must-do: "hook matchers must see the model's original tool name,
+    # not a repair rename" -- the model's OWN spelling, set only when the
+    # name was actually changed (alias-table/difflib; never set for an
+    # mcp__ auto-load, which never renames anything). None otherwise (incl.
+    # every existing caller/test that never looks at this field).
+    original_name: Optional[str] = None
 
 
-def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = None) -> RepairOutcome:
+def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = None, *, catalog=None) -> RepairOutcome:
     """Resolve `block["name"]` against the registry and validate/coerce its
     `input` against that tool's schema. `known_names` lets a caller pass a
-    catalog snapshot explicitly (falls back to `registry.names()`)."""
+    catalog snapshot explicitly (falls back to `registry.names()`).
+    `catalog` (agent/catalog.py's SessionCatalog, when one exists) lets an
+    unresolved `mcp__` name be auto-loaded from the deferred pool -- see
+    `resolve_tool_name`."""
     names = known_names if known_names is not None else registry.names()
     name = block.get("name")
-    resolved, close = resolve_tool_name(name, names)
+    resolved, close = resolve_tool_name(name, names, catalog=catalog, registry=registry)
     if resolved is None:
-        suggestion = f" Did you mean one of: {', '.join(close)}?" if close else ""
-        return RepairOutcome(
-            block=block, ok=False,
-            error_text=f"Unknown tool {name!r}.{suggestion} Available tools: {', '.join(names)}",
-        )
+        if name and name.startswith("mcp__"):
+            error_text = (f"Unknown tool {name!r}. If this is a real MCP tool that just isn't "
+                          f"loaded in this conversation yet, call ToolSearch with query "
+                          f"\"select:{name}\" to load it, then call it again -- never assume it's "
+                          f"one of the tools below. Available tools: {', '.join(names)}")
+        else:
+            suggestion = f" Did you mean one of: {', '.join(close)}?" if close else ""
+            error_text = f"Unknown tool {name!r}.{suggestion} Available tools: {', '.join(names)}"
+        return RepairOutcome(block=block, ok=False, error_text=error_text)
 
     repaired_name = resolved != name
     tool = registry.get(resolved)
     schema = tool.input_schema if tool is not None else None
     coerced, errors = validate_and_coerce(block.get("input") or {}, schema or {})
+    original_name = name if repaired_name else None
     if errors:
         return RepairOutcome(
             block={**block, "name": resolved}, ok=False,
             error_text=f"Invalid arguments for {resolved}: " + "; ".join(errors),
-            repaired=repaired_name,
+            repaired=repaired_name, original_name=original_name,
         )
 
     repaired_args = coerced != (block.get("input") or {})
     new_block = {**block, "name": resolved, "input": coerced}
-    return RepairOutcome(block=new_block, ok=True, repaired=(repaired_name or repaired_args))
+    return RepairOutcome(block=new_block, ok=True, repaired=(repaired_name or repaired_args),
+                          original_name=original_name)
 
 
-def repair_assistant_turn(tool_use_blocks: list, registry) -> "list[RepairOutcome]":
+def repair_assistant_turn(tool_use_blocks: list, registry, *, catalog=None) -> "list[RepairOutcome]":
     """Run `repair_tool_use_block` over every block in one assistant
     message, PLUS duplicate detection across the whole set (a duplicate is
     reported without ever touching the registry/schema for that block --
@@ -260,5 +299,5 @@ def repair_assistant_turn(tool_use_blocks: list, registry) -> "list[RepairOutcom
             outcomes.append(RepairOutcome(block=b, ok=False, duplicate_of=dupes[block_id],
                                            error_text=f"(duplicate of {dupes[block_id]})"))
             continue
-        outcomes.append(repair_tool_use_block(b, registry, known_names=names))
+        outcomes.append(repair_tool_use_block(b, registry, known_names=names, catalog=catalog))
     return outcomes

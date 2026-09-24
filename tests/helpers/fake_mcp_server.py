@@ -111,9 +111,32 @@ def build_app():
     def read_only_tool() -> str:
         return "read-only result"
 
+    # finding 16 test 3: opt-in via FAKE_MCP_EXTRA_TOOLS (comma-separated),
+    # never present by default -- every EXISTING test's tool count/set stays
+    # exactly as before.
+    extra = {e.strip() for e in (os.environ.get("FAKE_MCP_EXTRA_TOOLS") or "").split(",") if e.strip()}
+    extra_added = 0
+    if "badbytes_tool" in extra:
+        @app.tool(name="badbytes_tool",
+                  description="Emit raw invalid UTF-8 bytes to stdout before answering (finding 3 repro).")
+        def badbytes_tool() -> str:
+            try:
+                sys.stdout.buffer.write(b"\xff\xfeA\n")
+                sys.stdout.buffer.flush()
+            except Exception:
+                pass
+            return "answered after bad bytes"
+        extra_added += 1
+    if "die_mid_call" in extra:
+        @app.tool(name="die_mid_call",
+                  description="Hard-exit the process immediately, no cleanup (finding 6 repro: dead transport mid-call).")
+        def die_mid_call() -> str:
+            os._exit(1)
+        extra_added += 1
+
     core_names = {"echo", "image", "error_tool", "huge", "slow_tool", "always_load_tool", "read_only_tool"}
     n = _tool_count()
-    filler_needed = max(0, n - len(core_names))
+    filler_needed = max(0, n - len(core_names) - extra_added)
     for i in range(filler_needed):
         def _make(i=i):
             def _filler() -> str:
@@ -133,6 +156,16 @@ def build_app():
 
 
 def main() -> None:
+    pid_file = os.environ.get("FAKE_MCP_PID_FILE")
+    if pid_file:
+        # finding 16 test 5: written FIRST, before any mode dispatch (incl.
+        # "slow"/"crash"), so a caller can find this process's real PID
+        # regardless of which mode it's running in.
+        try:
+            with open(pid_file, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
     mode = os.environ.get("FAKE_MCP_MODE") or (sys.argv[1] if len(sys.argv) > 1 else "normal")
     if mode == "crash":
         sys.stderr.write("fake_mcp_server: crash mode -- exiting immediately\n")

@@ -22,6 +22,19 @@ commit.
    (`hooks` accessor), `controller.py`, `permissions.py`, `tests/helpers/*`.
 
 ## Scope
+0. **Auto mode = uninterrupted, plus steering (rolo, binding — read the plan section "Auto mode =
+   uninterrupted + steering")**: (a) audit and guarantee that in `auto`/`bypassPermissions` no
+   tool, MCP server, browser tool (`claude-in-chrome`, Playwright), WebFetch or Bash call ever
+   produces a `permission_request` or a refusal — only the user's own deny/ask rules and hooks
+   apply; remove ANY prompt/tool-description/error/UI wording that says something is not allowed
+   "in auto mode" (grep the tree); (b) Esc / Ctrl+C semantics unchanged (hard stop); (c) implement
+   **steering**: `Command("steer", text)` from the TUI (input stays enabled while a turn runs;
+   Enter = steer) and from `--input-format stream-json` lines arriving mid-turn; the in-flight
+   model call is cut at the next chunk (partial assistant text logged), running tools finish, the
+   text is appended as a user-role message and the loop continues at once; steers queue in order;
+   events `steer_queued` / `steer_applied`; TUI shows "↳ steering…"; tests: steer mid-stream changes
+   the next request, steer during a tool call applies after the tool result, two steers in order,
+   steer during a pending card does not answer the card.
 A. **`rolo_claude/hooks.py`** per D-CFG: `HookDef`, `HookResult`, `HookOutcome`, `normalize_hooks`
    (settings levels — untrusted project/local dropped — plus plugin `hooks/hooks.json` with
    `${CLAUDE_PLUGIN_ROOT}`, skill/agent frontmatter `hooks:` with scope), `HookRunner.run(event,

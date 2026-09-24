@@ -46,6 +46,19 @@ def tool_always_load(meta: Optional[dict]) -> bool:
     return isinstance(meta, dict) and meta.get("anthropic/alwaysLoad") is True
 
 
+def tool_search_hint(meta: Optional[dict]) -> Optional[str]:
+    """binary-facts sec.9: `_meta[anthropic/searchHint]` -- extra keyword
+    text a server supplies specifically to improve ToolSearch discovery of
+    a still-deferred tool (finding 13 must-do: "score searchHint"), given
+    MORE weight than the tool's own name/description in
+    `agent/catalog.py::SessionCatalog.search`'s ranking. A non-string (or
+    blank) value is ignored rather than crashing the search."""
+    if not isinstance(meta, dict):
+        return None
+    hint = meta.get("anthropic/searchHint")
+    return hint if isinstance(hint, str) and hint.strip() else None
+
+
 def tool_meta_max_result_size_chars(meta: Optional[dict]) -> Optional[int]:
     """binary-facts sec.9: "`anthropic/maxResultSizeChars` (positive
     finite)" -- anything else (missing, non-numeric, <=0, inf/nan) is
@@ -131,8 +144,12 @@ def cap_and_spill(blocks: list, *, meta: Optional[dict] = None,
     algorithm, not this codebase's generic head+tail sandwich) to fit
     the remaining budget after reserving `IMAGE_TOKEN_COST` tokens' worth
     of chars per image block (an image is never itself truncated), and
-    Claude Code's EXACT truncation string (binary-facts sec.9) is
-    appended: "[OUTPUT TRUNCATED - exceeded N token limit]"."""
+    Claude Code's EXACT truncation string (binary-facts sec.9), "[OUTPUT
+    TRUNCATED - exceeded N token limit]", is appended -- with (finding 5
+    must-do) a spill-file pointer of this codebase's own after it when a
+    spill actually happened, so a truncated MCP result names where the
+    full text went, same as `tools/truncate.py::spill_and_truncate`
+    already does for every other tool's own cap."""
     token_limit = default_output_token_limit()
     cap_chars = token_limit * 4
     meta_cap = tool_meta_max_result_size_chars(meta)
@@ -146,12 +163,15 @@ def cap_and_spill(blocks: list, *, meta: Optional[dict] = None,
     if text_chars + image_chars_equiv <= cap_chars:
         return blocks
 
+    spill_note = ""
     if session_dir is not None and tool_use_id:
         full_text = "\n".join(b.get("text", "") or "" for b in blocks if b.get("type") == "text")
         try:
             results_dir = Path(session_dir) / "tool-results"
             results_dir.mkdir(parents=True, exist_ok=True)
-            (results_dir / f"{tool_use_id}.txt").write_text(full_text, encoding="utf-8")
+            spill_path = results_dir / f"{tool_use_id}.txt"
+            spill_path.write_text(full_text, encoding="utf-8")
+            spill_note = f" Full output saved to {spill_path}."
         except OSError:
             pass
 
@@ -170,7 +190,8 @@ def cap_and_spill(blocks: list, *, meta: Optional[dict] = None,
         else:
             new_blocks.append({**b, "text": text[:remaining]})
             remaining = 0
-    new_blocks.append({"type": "text", "text": f"[OUTPUT TRUNCATED - exceeded {effective_token_limit} token limit]"})
+    new_blocks.append({"type": "text",
+                        "text": f"[OUTPUT TRUNCATED - exceeded {effective_token_limit} token limit]{spill_note}"})
     return new_blocks
 
 
@@ -207,9 +228,20 @@ class McpTool(Tool):
         return f"{self.name}({body[:80]})"
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """H4/finding 4/5 must-do: the call itself is abort-aware (polls
+        `ctx.abort` in <=0.2s slices via McpManager.call -> McpServerHandle.
+        call_tool -> McpLoop.run_abortable, never blocking the whole turn
+        on a hung server), and the result is returned UNCAPPED -- capping
+        (`cap_and_spill`) moves to agent/loop.py's `_finalize_tool_result`,
+        which runs AFTER the (future H4) PostToolUse hook point, so that
+        hook sees the model's real, full output rather than an
+        already-truncated one."""
+        from rolo_claude.mcp.client import McpAborted
         arguments = input if isinstance(input, dict) else {}
         try:
-            result = self.manager.call(self.server_name, self.tool_name, arguments)
+            result = self.manager.call(self.server_name, self.tool_name, arguments, abort=getattr(ctx, "abort", None))
+        except McpAborted:
+            return ToolResult(f"MCP tool {self.name!r} call interrupted.", is_error=True)
         except Exception as e:  # a hung/failed/disconnected server must never crash the loop
             return ToolResult(f"MCP tool {self.name!r} call failed: {type(e).__name__}: {e}", is_error=True)
 
@@ -217,10 +249,6 @@ class McpTool(Tool):
         blocks = content_with_structured_fallback(blocks, getattr(result, "structured_content", None))
         if not blocks:
             blocks = [{"type": "text", "text": "(no content returned)"}]
-        blocks = cap_and_spill(
-            blocks, meta=self.meta, session_dir=getattr(ctx, "session_dir", None),
-            tool_use_id=getattr(ctx, "tool_use_id", None),
-        )
         return ToolResult(content=blocks, is_error=bool(getattr(result, "is_error", False)))
 
 

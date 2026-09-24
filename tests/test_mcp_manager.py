@@ -245,6 +245,33 @@ def test_resolve_mcp_config_flag_inline_json(ctx: Ctx):
 
 
 @test
+def test_resolve_mcp_config_flag_long_inline_json_no_slash(ctx: Ctx):
+    """finding 10: a long inline JSON value with no '/' used to hit
+    `Path(spec).exists()` FIRST, which raises OSError (errno 36, "File
+    name too long") on Linux -- verified in WSL. A JSON-shaped value (it
+    starts with '{') must never touch the filesystem at all."""
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        padding = "x" * 400
+        spec = '{"mcpServers": {"' + padding + '": {"command": "c"}}}'
+        resolved, notices = M.resolve_server_configs(cwd=cwd, claude_json={}, mcp_config_flag=[spec])
+        ctx.check(f"parses as JSON without ever touching the filesystem, got notices={notices}",
+                  resolved.get(padding) is not None and resolved[padding].command == "c")
+
+
+@test
+def test_load_mcp_config_arg_never_raises_on_a_bad_path(ctx: Ctx):
+    from rolo_claude.mcp.manager import _load_mcp_config_arg
+    with tempfile.TemporaryDirectory() as td:
+        # a non-JSON-looking value that ALSO can't be checked as a path
+        # cleanly on every OS (a NUL byte is invalid on both Windows and
+        # POSIX) -- exists() wrapped in try/except must never propagate.
+        entries, err = _load_mcp_config_arg("not-json-and-has-a-\x00-nul-byte", Path(td))
+        ctx.check(f"degrades to a clear error, never raises, got entries={entries} err={err!r}",
+                  entries == {} and err is not None)
+
+
+@test
 def test_resolve_managed_mcp_json_is_exclusive(ctx: Ctx):
     with tempfile.TemporaryDirectory() as td:
         cwd = Path(td)
@@ -289,10 +316,16 @@ def test_resolve_dot_mcp_json_approval_states(ctx: Ctx):
         resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, print_mode=False)
         ctx.check("explicitly enabled server is approved", resolved["a"].pending_approval is False)
         ctx.check("un-enabled server is pending approval", resolved["b"].pending_approval is True)
-        # our own approvals store also grants approval
+        # our own approvals store also grants approval -- must-do: keyed by
+        # the ENTRY's sha256 (mcp_approval_key), never the bare name, so an
+        # edited/tampered entry can't silently ride on a stale approval.
+        approval_key = M.mcp_approval_key({"command": "c"})
         resolved2, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, print_mode=False,
-                                                  approvals={"c": True})
+                                                  approvals={approval_key: True})
         ctx.check("our own approvals.json entry approves it too", resolved2["c"].pending_approval is False)
+        ctx.check("a name-keyed (pre-must-do-shape) approval entry no longer matches anything",
+                  M.resolve_server_configs(cwd=cwd, claude_json=claude_json, print_mode=False,
+                                            approvals={"c": True})[0]["c"].pending_approval is True)
 
 
 @test
@@ -305,14 +338,97 @@ def test_resolve_print_mode_approves_dot_mcp_json_without_asking(ctx: Ctx):
 
 
 @test
-def test_resolve_extra_dynamic_lowest_precedence(ctx: Ctx):
+def test_resolve_extra_dynamic_is_flag_tier_precedence(ctx: Ctx):
+    """finding 14: --chrome/--playwright rank at the SAME precedence as
+    --mcp-config (a flag the user passed THIS run), not below user scope
+    -- the old "lowest precedence" behavior let a static user-scope
+    "playwright" entry silently override --playwright-cdp/--headless."""
     cwd = Path("/tmp/proj3")
     claude_json = _claude_json(user={"srv": {"command": "real-cmd"}})
     dynamic = {"srv": M.McpServerConfig(name="srv", type="stdio", command="dynamic-cmd", scope="dynamic"),
                "claude-in-chrome": M.McpServerConfig(name="claude-in-chrome", type="stdio", command="claude", scope="dynamic")}
     resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, extra_dynamic=dynamic)
-    ctx.check("a real config entry wins over a same-named dynamic one", resolved["srv"].command == "real-cmd")
+    ctx.check("the flag-created dynamic entry now wins over a same-named user-scope one",
+              resolved["srv"].command == "dynamic-cmd")
     ctx.check("a dynamic server with no collision is still added", resolved["claude-in-chrome"].command == "claude")
+
+
+@test
+def test_resolve_extra_dynamic_dropped_under_strict_mcp_config_with_notice(ctx: Ctx):
+    """finding 14: still excluded under --strict-mcp-config (unchanged,
+    correct exclusivity) but no longer SILENTLY."""
+    cwd = Path("/tmp/proj4")
+    dynamic = {"claude-in-chrome": M.McpServerConfig(name="claude-in-chrome", type="stdio", command="claude", scope="dynamic")}
+    resolved, notices = M.resolve_server_configs(cwd=cwd, claude_json={}, extra_dynamic=dynamic, strict_mcp_config=True)
+    ctx.check("still dropped under --strict-mcp-config", "claude-in-chrome" not in resolved)
+    ctx.check(f"but a notice explains why, got {notices}",
+              any("claude-in-chrome" in n and "strict" in n.lower() for n in notices))
+
+
+@test
+def test_resolve_extra_dynamic_dropped_under_managed_mcp_json_with_notice(ctx: Ctx):
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        managed_path = Path(td) / "managed-mcp.json"
+        managed_path.write_text('{"mcpServers": {"managed-only": {"command": "m"}}}', encoding="utf-8")
+        dynamic = {"playwright": M.McpServerConfig(name="playwright", type="stdio", command="npx", scope="dynamic")}
+        resolved, notices = M.resolve_server_configs(cwd=cwd, claude_json={}, extra_dynamic=dynamic,
+                                                        managed_mcp_path=managed_path)
+        ctx.check("still dropped under managed-mcp.json exclusivity", "playwright" not in resolved)
+        ctx.check(f"but a notice explains why, got {notices}",
+                  any("playwright" in n and "managed-mcp.json" in n for n in notices))
+
+
+# ---- managed allowedMcpServers/deniedMcpServers [finding 11] --------------
+
+@test
+def test_managed_denied_mcp_servers_removes_a_server(ctx: Ctx):
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj5")
+    claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
+    settings = Settings(raw={"deniedMcpServers": ["github"]}, layers=[], errors=[])
+    resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check("denied server removed", "github" not in resolved)
+    ctx.check("other server survives", "other" in resolved)
+
+
+@test
+def test_managed_allowed_mcp_servers_narrows_to_the_list(ctx: Ctx):
+    from rolo_claude.config.settings import Settings
+    cwd = Path("/tmp/proj6")
+    claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
+    settings = Settings(raw={"allowedMcpServers": ["github"]}, layers=[], errors=[])
+    resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings)
+    ctx.check("only the allow-listed server survives", set(resolved) == {"github"})
+
+
+# ---- disabledMcpjsonServers/enabledMcpjsonServers read from settings too --
+
+@test
+def test_disabled_mcpjson_servers_read_from_settings_never_removes_other_scopes(ctx: Ctx):
+    """finding 11: (a) disabledMcpjsonServers is read from the resolved
+    settings too, not just ~/.claude.json; (b) it removes ONLY the actual
+    .mcp.json-sourced entry, never a same-named user/local/flag server."""
+    from rolo_claude.config.settings import Settings
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        (cwd / ".mcp.json").write_text('{"mcpServers": {"github": {"command": "project-gh"}}}', encoding="utf-8")
+        claude_json = _claude_json(user={"github": {"command": "user-gh"}})
+        settings = Settings(raw={"disabledMcpjsonServers": ["github"]}, layers=[], errors=[])
+        resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json=claude_json, settings=settings, print_mode=True)
+        ctx.check(f"the .mcp.json entry is dropped, the user-scope one survives, got {resolved.get('github')}",
+                  resolved.get("github") is not None and resolved["github"].command == "user-gh")
+
+
+@test
+def test_enabled_mcpjson_servers_read_from_settings(ctx: Ctx):
+    from rolo_claude.config.settings import Settings
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        (cwd / ".mcp.json").write_text('{"mcpServers": {"a": {"command": "a"}}}', encoding="utf-8")
+        settings = Settings(raw={"enabledMcpjsonServers": ["a"]}, layers=[], errors=[])
+        resolved, _ = M.resolve_server_configs(cwd=cwd, claude_json={}, settings=settings, print_mode=False)
+        ctx.check("approved via the settings-sourced enabledMcpjsonServers", resolved["a"].pending_approval is False)
 
 
 # ---- McpLoop ------------------------------------------------------------
@@ -513,6 +629,143 @@ def test_manager_scales_to_300_tools(ctx: Ctx):
         mgr.close_all()
 
 
+# ---- finding 16 test 3: fake-server badbytes / die-mid-call modes ---------
+
+@test
+def test_badbytes_call_returns_within_limit_encoding_replace(ctx: Ctx):
+    """finding 3: a non-UTF-8 byte on the server's stdout must never kill
+    the reader permanently -- verified end to end (real subprocess, real
+    bad bytes) rather than just unit-testing StdioServerParameters."""
+    from tests.helpers.fake_mcp_server import running_manager
+    cfg = _fake_cfg("fake")
+    cfg.env["FAKE_MCP_EXTRA_TOOLS"] = "badbytes_tool"
+    t0 = time.monotonic()
+    with running_manager({"fake": cfg}, tool_env=dict(os.environ)) as mgr:
+        result = mgr.call("fake", "badbytes_tool", {})
+        elapsed = time.monotonic() - t0
+        ctx.check(f"answered promptly despite the bad bytes, took {elapsed:.2f}s", elapsed < 10.0)
+        ctx.check("the real answer came through", "answered after bad bytes" in result.content[0].text)
+
+
+@test
+def test_die_mid_call_marks_the_handle_failed_and_drops_session(ctx: Ctx):
+    """finding 6: the server process dying mid-call must be detected --
+    the call itself returns promptly (an error, not a hang), and the
+    handle's status is no longer 'connected' afterward."""
+    from rolo_claude.mcp.manager import McpManager
+    cfg = _fake_cfg("fake")
+    cfg.env["FAKE_MCP_EXTRA_TOOLS"] = "die_mid_call"
+    mgr = McpManager({"fake": cfg}, tool_env=dict(os.environ))
+    try:
+        mgr.start_all()
+        t0 = time.monotonic()
+        raised = False
+        try:
+            mgr.call("fake", "die_mid_call", {})
+        except Exception:
+            raised = True
+        elapsed = time.monotonic() - t0
+        ctx.check(f"the call fails promptly rather than hanging, took {elapsed:.2f}s", raised and elapsed < 10.0)
+        # the (failed) call above already triggered ONE auto-reconnect
+        # attempt (finding 6: "reconnect once on the next call") against a
+        # dead process, which itself fails fast -- status must reflect
+        # that, never a stale "connected".
+        ctx.check(f"status is no longer connected, got {mgr.status()[0]}", mgr.status()[0]["state"] != "connected")
+    finally:
+        mgr.close_all()
+
+
+# ---- finding 16 test 4: abort during an in-flight MCP call ----------------
+
+@test
+def test_abort_during_call_tool_returns_in_under_1s(ctx: Ctx):
+    """finding 4: an in-flight MCP call must poll `abort` in <=0.2s
+    slices, not block for the tool's own (here, 6s) sleep."""
+    import threading
+    from rolo_claude.mcp.client import McpAborted
+    with running_manager_ctx() as mgr:
+        h = mgr.handles["fake"]
+        abort = threading.Event()
+
+        def _fire_abort():
+            time.sleep(1.0)
+            abort.set()
+        threading.Thread(target=_fire_abort, daemon=True).start()
+
+        t0 = time.monotonic()
+        raised = False
+        try:
+            h.call_tool("slow_tool", {"seconds": 6.0}, timeout=30.0, abort=abort)
+        except McpAborted:
+            raised = True
+        elapsed = time.monotonic() - t0
+        ctx.check(f"aborted well under the 6s sleep, took {elapsed:.2f}s", raised and elapsed < 2.0)
+
+
+def running_manager_ctx():
+    from tests.helpers.fake_mcp_server import running_manager
+    return running_manager({"fake": _fake_cfg("fake")}, tool_env=dict(os.environ))
+
+
+# ---- finding 16 test 5: startup timeout + close_all leaves nothing behind -
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+@test
+def test_startup_timeout_then_close_all_leaves_no_child_and_no_future_exception(ctx: Ctx):
+    """finding 16 test 5 (finding 15's own verification bar): after a
+    connect that never finishes within MCP_TIMEOUT, followed by
+    close_all(), (a) the child process is gone, and (b) the handle's
+    `_lifecycle_future` holds NO exception (an unretrieved future
+    exception is exactly what `PYTHONWARNINGS=error::RuntimeWarning`
+    would have caught as a cancel-scope RuntimeWarning before finding 15's
+    fix)."""
+    from rolo_claude.mcp.manager import McpManager
+    with tempfile.TemporaryDirectory() as td:
+        pid_file = Path(td) / "pid.txt"
+        old = os.environ.pop("MCP_TIMEOUT", None)
+        try:
+            os.environ["MCP_TIMEOUT"] = "150"
+            cfg = _fake_cfg("slow", mode="slow")
+            cfg.env["FAKE_MCP_PID_FILE"] = str(pid_file)
+            mgr = McpManager({"slow": cfg}, tool_env={**os.environ, "FAKE_MCP_SLEEP_S": "3"})
+            mgr.start_all()
+            ctx.check(f"failed within MCP_TIMEOUT, got {mgr.status()[0]}", mgr.status()[0]["state"] == "failed")
+            h = mgr.handles["slow"]
+            fut = h._lifecycle_future
+            mgr.close_all()
+            # give the OS a moment to actually reap the killed child on slow CI
+            deadline = time.monotonic() + 5.0
+            pid = None
+            if pid_file.exists():
+                try:
+                    pid = int(pid_file.read_text(encoding="utf-8").strip())
+                except ValueError:
+                    pid = None
+            while pid is not None and _pid_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if pid is not None:
+                ctx.check(f"no child process survives (pid {pid})", not _pid_alive(pid))
+            exc = None
+            if fut is not None:
+                try:
+                    exc = fut.exception(timeout=0)
+                except Exception as e:
+                    exc = e
+            ctx.check(f"the lifecycle future holds no unhandled exception, got {exc!r}", exc is None)
+        finally:
+            if old is None:
+                os.environ.pop("MCP_TIMEOUT", None)
+            else:
+                os.environ["MCP_TIMEOUT"] = old
+
+
 @test
 def test_looks_like_auth_required_detection(ctx: Ctx):
     """The needs_auth STATE TRANSITION is exercised directly (a synthetic
@@ -550,6 +803,82 @@ def test_needs_auth_state_via_injected_failure(ctx: Ctx):
     try:
         h.start()
         ctx.check(f"state is needs_auth, got {h.state}", h.state == "needs_auth")
+    finally:
+        h.close()
+        loop.close()
+
+
+# ---- headersHelper: off the event loop, trust-gated for project scope ----
+
+@test
+def test_headers_helper_does_not_block_other_loop_work(ctx: Ctx):
+    """H4 must-do: headersHelper's blocking subprocess.run must run OFF
+    the McpLoop's own event loop thread -- proven by running a slow (1s)
+    helper CONCURRENTLY with an unrelated coroutine on the SAME loop; if
+    the helper blocked the loop thread (the old sync `_resolved_headers`),
+    the unrelated coroutine couldn't even START running until the helper
+    finished."""
+    from rolo_claude.mcp.client import McpLoop
+    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    py = sys.executable
+    helper_cmd = f'"{py}" -c "import time,json; time.sleep(1.0); print(json.dumps({{\'X\': \'y\'}}))"'
+    cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",
+                           headers_helper=helper_cmd, scope="user")
+    loop = McpLoop()
+    h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=True)
+    try:
+        headers_future = loop.spawn(h._resolved_headers())
+        time.sleep(0.15)  # let the helper's subprocess actually start sleeping
+        t0 = time.monotonic()
+        loop.run(_noop_coro(), timeout=2.0)
+        elapsed = time.monotonic() - t0
+        ctx.check(f"an unrelated coroutine on the SAME loop runs promptly while the "
+                  f"helper is still sleeping, took {elapsed:.2f}s", elapsed < 0.5)
+        headers = headers_future.result(timeout=5)
+        ctx.check(f"the helper's own result still comes through afterward, got {headers}", headers.get("X") == "y")
+    finally:
+        h.close()
+        loop.close()
+
+
+@test
+def test_headers_helper_skipped_for_untrusted_project_scope(ctx: Ctx):
+    """binary-facts sec.9: "repo-resident config needs persisted trust" --
+    an untrusted PROJECT-scope (.mcp.json-sourced) server's headersHelper
+    must never run; only the static headers are used."""
+    from rolo_claude.mcp.client import McpLoop
+    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",
+                           headers={"Static": "yes"}, headers_helper="echo should-never-run",
+                           scope="project")
+    loop = McpLoop()
+    h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=False)
+    try:
+        headers = loop.run(h._resolved_headers(), timeout=5)
+        ctx.check(f"untrusted project scope: helper skipped, only the static header survives, got {headers}",
+                  headers == {"Static": "yes"})
+    finally:
+        h.close()
+        loop.close()
+
+
+@test
+def test_headers_helper_runs_for_untrusted_non_project_scope(ctx: Ctx):
+    """Only PROJECT-scope (repo-resident) config needs trust -- a
+    user-scope server's headersHelper is the operator's OWN global
+    config and must still run regardless of `trusted` (a fresh/untrusted
+    project must not silently disable the user's own working setup)."""
+    from rolo_claude.mcp.client import McpLoop
+    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    py = sys.executable
+    helper_cmd = f'"{py}" -c "import json; print(json.dumps({{\'X\': \'ran\'}}))"'
+    cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",
+                           headers_helper=helper_cmd, scope="user")
+    loop = McpLoop()
+    h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=False)
+    try:
+        headers = loop.run(h._resolved_headers(), timeout=10)
+        ctx.check(f"user-scope helper still runs even when trusted=False, got {headers}", headers.get("X") == "ran")
     finally:
         h.close()
         loop.close()

@@ -1,0 +1,139 @@
+/* rolo_claude.tui styles -- colors come from BridgeApp.get_css_variables()
+   (tui/theme.py's `variables_for`), never hardcoded here, so a theme swap
+   only ever needs a new palette dict, not a stylesheet edit. */
+
+Screen {
+    background: $bridge-bg;
+    color: $bridge-text;
+    layout: vertical;
+}
+
+#transcript {
+    height: 1fr;
+    width: 100%;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#transcript > * {
+    margin: 0 0 1 0;
+    width: 100%;
+}
+
+.user-message {
+    color: $bridge-user;
+    text-style: bold;
+}
+
+.system-note {
+    color: $bridge-muted;
+}
+
+.system-note-error {
+    color: $bridge-error;
+    text-style: bold;
+}
+
+.system-note-command, .system-note-note, .system-note-replay {
+    color: $bridge-muted;
+}
+
+.system-note-subagent {
+    color: $bridge-accent;
+}
+
+.folded-history {
+    color: $bridge-muted;
+    text-style: italic;
+    border: round $bridge-border;
+    padding: 0 1;
+}
+
+.thinking-block {
+    color: $bridge-thinking;
+    text-style: italic;
+    padding: 0 2;
+}
+
+AssistantText {
+    color: $bridge-assistant;
+}
+
+.tool-card {
+    color: $bridge-tool;
+    border-left: thick $bridge-border;
+    padding: 0 1;
+}
+
+.tool-card.tool-running {
+    border-left: thick $bridge-warning;
+}
+
+.tool-card.tool-ok {
+    border-left: thick $bridge-success;
+}
+
+.tool-card.tool-error {
+    border-left: thick $bridge-error;
+    color: $bridge-error;
+}
+
+.diff-view {
+    border: round $bridge-border;
+    padding: 0 1;
+    margin-left: 2;
+}
+
+.permission-card, .question-card, .plan-card {
+    border: round $bridge-warning;
+    background: $bridge-surface;
+    padding: 1 2;
+}
+
+.question-heading {
+    text-style: bold;
+    margin-top: 1;
+}
+
+#completion-popup {
+    max-height: 8;
+    border: round $bridge-border;
+    background: $bridge-panel;
+}
+
+#prompt-row {
+    height: auto;
+    max-height: 10;
+    dock: bottom;
+    background: $bridge-surface;
+    border-top: solid $bridge-border;
+}
+
+#prompt-glyph {
+    width: 2;
+    color: $bridge-accent;
+    text-style: bold;
+    content-align: center middle;
+}
+
+#prompt-input {
+    width: 1fr;
+    height: auto;
+    min-height: 1;
+    max-height: 8;
+    background: $bridge-surface;
+    border: none;
+}
+
+.status-bar {
+    dock: bottom;
+    height: 1;
+    width: 100%;
+    background: $bridge-panel;
+    color: $bridge-text;
+}
+
+.dialog-title {
+    text-style: bold;
+    margin-bottom: 1;
+}

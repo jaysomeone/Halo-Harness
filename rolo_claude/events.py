@@ -32,7 +32,7 @@ EVENT_KINDS = frozenset({
 })
 
 COMMAND_KINDS = frozenset({
-    "user_input", "interrupt", "set_mode", "slash", "permission_reply",
+    "user_input", "interrupt", "set_mode", "set_model", "slash", "permission_reply",
     "question_reply", "plan_reply",
 })
 

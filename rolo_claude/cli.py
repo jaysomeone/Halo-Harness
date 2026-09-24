@@ -7,8 +7,10 @@ and gets one `rolo_claude.not_yet` stderr line, never an argparse error --
 so an actually-unknown flag really is unknown and remains an argparse
 error, exit 2). Subcommands `proxy`/`models`/`mcp`/`config`/`doctor` are
 dispatched before the main parser ever sees the rest of argv (each has its
-own, separate flag surface). Bare `rolo-claude` (no `-p`) prints
-"TUI arrives in U2" and exits 2 -- the TUI itself is U2's job.
+own, separate flag surface). Bare `rolo-claude` (no `-p`) opens the U2
+full-screen TUI (`rolo_claude/tui/launch.py`, imported lazily so `-p`/
+`import rolo_claude` never pull in textual); a positional PROMPT without
+`-p` opens the TUI and submits it as the first turn.
 """
 
 from __future__ import annotations
@@ -251,14 +253,28 @@ def main(argv: Optional[list] = None) -> int:
         if _flag_was_set(getattr(args, kwargs["dest"])):
             print_not_yet(label, milestone)
 
-    if args.demo:
+    if args.demo and args.print_mode:
         from rolo_claude.testing.fake_controller import run_demo
         demo_format = args.output_format if args.output_format in ("text", "json") else "text"
         return run_demo(output_format=demo_format, stress=args.stress)
 
     if not args.print_mode:
-        print("TUI arrives in U2", file=sys.stderr)
-        return 2
+        # U2: bare `rolo-claude [PROMPT]` and `rolo-claude --demo` (without
+        # -p) both open the full-screen TUI; textual/rich become real
+        # imports only from this lazy import down. A full-screen session
+        # needs a real terminal to render into and read keys from -- stdin
+        # not being a tty (piped/redirected input, or a subprocess with no
+        # console at all, e.g. a headless test or CI runner) means nothing
+        # could ever drive it, so this is a deterministic one-line notice
+        # + exit 2 rather than Textual hanging trying to set up a terminal
+        # that doesn't exist.
+        if not sys.stdin.isatty():
+            print("rolo-claude: a full-screen session requires an interactive terminal "
+                  "(stdin is not a tty) -- use -p/--print for a non-interactive run",
+                  file=sys.stderr)
+            return 2
+        from rolo_claude.tui.launch import run_tui
+        return run_tui(args)
 
     system_prompt_text = args.system_prompt
     if args.system_prompt_file and system_prompt_text is None:

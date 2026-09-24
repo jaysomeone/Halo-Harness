@@ -807,7 +807,12 @@ def _parse_mcp_rule(raw: str, *, source: str, action: Optional[str]) -> Optional
                         error="allow rules permit globs only in the tool position")
         return Rule(tool=server, kind="mcp_server_all", value="*", raw=raw, source=source)
     if "__" in rest:
-        server, tool_part = rest.rsplit("__", 1)
+        # finding 13: split on the FIRST "__" (matches manager.
+        # split_mcp_tool_name's own convention) -- `rsplit` (the LAST
+        # "__") mis-parses a rule naming a tool whose OWN name contains a
+        # literal "__" (e.g. mcp__srv__list__files -> server="srv__list"
+        # instead of "srv"), so it can never match that tool.
+        server, tool_part = rest.split("__", 1)
         if action == "allow" and "*" in server:
             return Rule(tool=raw, kind="invalid", raw=raw, source=source,
                         error="allow rules permit globs only in the tool position")
@@ -976,24 +981,42 @@ def _mcp_server_matches(pattern: str, server: str) -> bool:
     return server == pattern
 
 
+def _mcp_tool_part_matches(pattern: str, tool_part: str) -> bool:
+    if "*" in pattern:
+        return fnmatch.fnmatchcase(tool_part, pattern)
+    return tool_part == pattern
+
+
 def mcp_deny_tool_names(deny_rules: list, candidate_names) -> set:
     """H3 must-do: which `mcp__...` names among `candidate_names` (the
-    live/registered catalog) a server-scoped DENY rule (`mcp__server` /
-    `mcp__server__*`, kind mcp_server/mcp_server_all -- never a single
-    mcp_tool rule, which only gates one call, not the whole catalog)
-    removes from the session's FROZEN catalog, exactly like a bare-tool-
-    name deny does for a built-in tool [D-CFG]. Glob-aware (finding 15):
-    `mcp__*`/`mcp__gith*` remove every tool of every/matching server."""
+    live/registered catalog) a DENY rule removes from the session's
+    FROZEN catalog, exactly like a bare-tool-name deny does for a
+    built-in tool [D-CFG]. Two rule kinds apply here: a server-scoped one
+    (`mcp__server` / `mcp__server__*`, kind mcp_server/mcp_server_all)
+    removes every tool of that server; a single-tool one (`mcp__server__
+    tool`, kind mcp_tool -- finding 13's own required outcome: "mcp__srv
+    __tool deny rules remove the tool") removes just that ONE name. Both
+    are glob-aware (finding 15: `mcp__*`/`mcp__gith*` remove every/
+    matching server's tools; `mcp__srv__list_*` removes matching tools of
+    one server) and split the candidate name on the FIRST `__` after
+    `mcp__` (finding 13: matches `manager.split_mcp_tool_name`'s own
+    convention -- a `rsplit` here would mis-parse a candidate tool name
+    that itself contains `__`)."""
     server_rules = [r for r in deny_rules if r.kind in ("mcp_server", "mcp_server_all")]
-    if not server_rules:
+    tool_rules = [r for r in deny_rules if r.kind == "mcp_tool"]
+    if not server_rules and not tool_rules:
         return set()
     removed = set()
     for name in candidate_names:
         if not name.startswith("mcp__"):
             continue
         rest = name[len("mcp__"):]
-        server = rest.split("__", 1)[0] if "__" in rest else rest
+        server, _, tool_part = rest.partition("__")
         if any(_mcp_server_matches(r.tool, server) for r in server_rules):
+            removed.add(name)
+            continue
+        if any(_mcp_server_matches(r.tool, server) and _mcp_tool_part_matches(r.value or "", tool_part)
+               for r in tool_rules):
             removed.add(name)
     return removed
 

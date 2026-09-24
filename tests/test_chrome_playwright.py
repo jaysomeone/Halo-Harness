@@ -21,23 +21,63 @@ test, TESTS = new_registry()
 
 # ---- resolve_chrome_enabled -------------------------------------------------
 
+def _without_cfc_env(fn):
+    """finding 14: resolve_chrome_enabled now consults CLAUDE_CODE_ENABLE_CFC
+    -- isolate it so these tests never depend on whatever's set in the
+    real shell running the suite."""
+    old = os.environ.pop("CLAUDE_CODE_ENABLE_CFC", None)
+    try:
+        return fn()
+    finally:
+        if old is not None:
+            os.environ["CLAUDE_CODE_ENABLE_CFC"] = old
+
+
 @test
 def test_chrome_enabled_by_flag(ctx: Ctx):
-    ctx.check("--chrome enables it", S.resolve_chrome_enabled({}, chrome_flag=True, no_chrome_flag=False) is True)
+    _without_cfc_env(lambda: ctx.check(
+        "--chrome enables it", S.resolve_chrome_enabled({}, chrome_flag=True, no_chrome_flag=False) is True))
 
 
 @test
 def test_chrome_disabled_by_no_chrome_flag_even_if_default_enabled(ctx: Ctx):
-    ctx.check("--no-chrome wins over everything",
-              S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=True, no_chrome_flag=True) is False)
+    _without_cfc_env(lambda: ctx.check(
+        "--no-chrome wins over everything",
+        S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=True, no_chrome_flag=True) is False))
 
 
 @test
 def test_chrome_default_from_claude_json(ctx: Ctx):
-    ctx.check("claudeInChromeDefaultEnabled=true, no flags -> enabled",
-              S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=False, no_chrome_flag=False) is True)
-    ctx.check("absent -> disabled",
-              S.resolve_chrome_enabled({}, chrome_flag=False, no_chrome_flag=False) is False)
+    def _run():
+        ctx.check("claudeInChromeDefaultEnabled=true, no flags -> enabled",
+                  S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=False, no_chrome_flag=False) is True)
+        ctx.check("absent -> disabled",
+                  S.resolve_chrome_enabled({}, chrome_flag=False, no_chrome_flag=False) is False)
+    _without_cfc_env(_run)
+
+
+@test
+def test_chrome_enable_order_flag_beats_env_beats_interactive_beats_default(ctx: Ctx):
+    """finding 14: the binary's own order -- flag -> CLAUDE_CODE_ENABLE_CFC
+    -> off for non-interactive -> claudeInChromeDefaultEnabled."""
+    def _run():
+        os.environ["CLAUDE_CODE_ENABLE_CFC"] = "0"
+        ctx.check("env var can DISABLE it even when claudeInChromeDefaultEnabled is true",
+                  S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=False,
+                                            no_chrome_flag=False) is False)
+        os.environ["CLAUDE_CODE_ENABLE_CFC"] = "1"
+        ctx.check("env var can ENABLE it even when claudeInChromeDefaultEnabled is absent",
+                  S.resolve_chrome_enabled({}, chrome_flag=False, no_chrome_flag=False) is True)
+        ctx.check("--chrome still beats the env var either way",
+                  S.resolve_chrome_enabled({}, chrome_flag=True, no_chrome_flag=False) is True)
+        os.environ.pop("CLAUDE_CODE_ENABLE_CFC", None)
+        ctx.check("non-interactive (-p) NEVER auto-enables via claudeInChromeDefaultEnabled",
+                  S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=False,
+                                            no_chrome_flag=False, interactive=False) is False)
+        ctx.check("interactive (TUI, the default) still honours claudeInChromeDefaultEnabled",
+                  S.resolve_chrome_enabled({"claudeInChromeDefaultEnabled": True}, chrome_flag=False,
+                                            no_chrome_flag=False, interactive=True) is True)
+    _without_cfc_env(_run)
 
 
 # ---- chrome_server_config ---------------------------------------------------

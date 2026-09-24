@@ -148,6 +148,19 @@ def run_print_mode(
     process's exit code (the LAST turn's, for stream-json input)."""
     cwd = Path(cwd).resolve() if cwd else Path.cwd()
 
+    # must-do: validated FIRST, before anything (incl. MCP) starts -- the
+    # old position (right before `Session(...)`, well after `build_manager`
+    # already spawned real MCP subprocesses) meant a bad --session-id
+    # returned 2 with those servers still running, `close_all()` never
+    # called. Validating up front means a bad id never starts them at all,
+    # rather than starting-then-cleaning-up.
+    if session_id:
+        try:
+            uuid.UUID(session_id)
+        except ValueError:
+            print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
+            return 2
+
     claude_json = load_claude_json()
     trusted = is_trusted(cwd, claude_json)
     settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
@@ -203,13 +216,18 @@ def run_print_mode(
     mcp_servers_for_prompt: list = []
     if not bare:
         from rolo_claude.mcp_setup import build_manager, resolve_chrome_enabled
-        chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome)
+        # finding 14: -p is always non-interactive -- claudeInChromeDefaultEnabled
+        # must never auto-enable Chrome here (before this fix, every `-p`
+        # on a box with that setting on spawned claude.CMD --claude-in-chrome-mcp,
+        # which `claude -p` itself never does).
+        chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome,
+                                                 interactive=False)
         mcp_manager, mcp_notices = build_manager(
             cwd=cwd, claude_json=claude_json, settings=settings, print_mode=True,
             mcp_config_flag=mcp_config, strict_mcp_config=strict_mcp_config,
             chrome=chrome_enabled, playwright=playwright,
             playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
-            bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True,
+            bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True, trusted=trusted,
         )
         if mcp_manager is None and mcp_notices:
             print(f"rolo-claude: {mcp_notices[0]}", file=sys.stderr)
@@ -254,11 +272,26 @@ def run_print_mode(
             cap = host_cap(model_ref.provider)
             cap_budget = max(0, cap - len(frozen_registry.names()))
             preload_names = set((load_rolo_config().get("mcpPreload") or []))
-            preload, deferred = select_preload(survivors, preload_names=preload_names, cap_budget=cap_budget)
+            # finding 13 must-do: a SERVER-level "alwaysLoad" (parsed but
+            # previously never consulted) preloads every tool from that
+            # server, same as each tool having its own _meta[anthropic/
+            # alwaysLoad].
+            always_load_servers = {name for name, h in mcp_manager.handles.items() if h.config.always_load}
+            preload, deferred = select_preload(survivors, preload_names=preload_names,
+                                                always_load_servers=always_load_servers, cap_budget=cap_budget)
 
             from rolo_claude.tools.mcp_tool import McpTool
             for server_name, wire_name, sdk_tool in preload:
                 frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager, vision=model_profile.vision))
+
+            # finding 13 must-do: keep ToolSearch whenever the deferred pool
+            # is non-empty, even when --tools/a deny rule would otherwise
+            # have excluded it from `frozen_registry` -- without this, e.g.
+            # `--tools Read,Bash` strands every deferred MCP tool while the
+            # prompt still tells the model to "call ToolSearch".
+            if deferred and frozen_registry.get("ToolSearch") is None:
+                from rolo_claude.tools.tool_search import ToolSearchTool
+                frozen_registry.add_tool(ToolSearchTool())
 
             session_catalog = SessionCatalog(
                 registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
@@ -286,12 +319,8 @@ def run_print_mode(
     openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
 
-    if session_id:
-        try:
-            uuid.UUID(session_id)
-        except ValueError:
-            print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
-            return 2
+    # (--session-id already validated at the top of this function, before
+    # any MCP server was ever started -- see the must-do note there.)
     session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
@@ -324,14 +353,19 @@ def run_print_mode(
                                           "url": h.config.url} for h in (mcp_manager.handles.values() if mcp_manager else [])},
             mcp_status=(mcp_manager.status() if mcp_manager is not None else None),
         )
-        mcp_names = sorted(facade.mcp_servers)
+        # finding 7 must-do: init.mcp_servers is [{name, status}, ...]
+        # (Claude Code's own stream-json shape), never a bare name list.
+        mcp_servers_status = sorted(
+            ({"name": s.get("name"), "status": s.get("state")} for s in (facade.mcp_status or [])),
+            key=lambda s: s["name"] or "",
+        )
         slash_names = [f"/{c.name}" for c in registry.all()]
 
         def _make_sink():
             if output_format == "stream-json":
                 return StreamJsonSink(
                     session_id=session_log.session_id, cwd=str(cwd), model=model_ref.raw,
-                    permission_mode=resolved_mode, tools=frozen_registry.names(), mcp_servers=mcp_names,
+                    permission_mode=resolved_mode, tools=frozen_registry.names(), mcp_servers=mcp_servers_status,
                     slash_commands=slash_names, include_partial_messages=include_partial_messages,
                     max_budget_usd=max_budget_usd, permission_denials=session.permission_denials,
                     json_schema=json_schema,

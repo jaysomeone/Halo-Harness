@@ -88,6 +88,73 @@ def test_mcp_e2e_echo_tool_via_scripted_turns(ctx: Ctx):
 
 
 @test
+def test_mcp_e2e_vision_image_reaches_the_request_body(ctx: Ctx):
+    """finding 16 test 6: a vision image from an MCP tool result must
+    reach the OUTGOING request as a REAL image part, not a "[image: ...]"
+    text placeholder -- proven on the actual wire body the model sees
+    (not just a unit test of the conversion function in isolation)."""
+    fh = build_fake_home()
+    _write_fake_mcp_only_claude_json(fh["home"])
+    (fh["home"] / ".rolo-claude").mkdir(parents=True, exist_ok=True)
+    (fh["home"] / ".rolo-claude" / "routes.json").write_text(
+        json.dumps({"profiles": {"default": {"vision": True}}}), encoding="utf-8")
+
+    seen_bodies = []
+
+    def _scn(h, body):
+        from tests.helpers.mock_openai import _finish
+        seen_bodies.append(body)
+        tool_msgs = [m for m in (body.get("messages") or []) if m.get("role") == "tool"]
+        if not tool_msgs:
+            return _finish(h, _tool_call_chunk("call_img", "mcp__fake__image", {}))
+        _finish(h, _final_text_chunk("got the image"))
+    SCENARIOS["h3-mcp-vision"] = _scn
+
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "use the fake server's image tool", model="or:mock/h3-mcp-vision",
+                           extra_args=["--permission-mode", "auto"], timeout=30)
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-1200:]!r}", result.returncode == 0)
+        ctx.check(f"two upstream requests seen (before/after the tool call), got {len(seen_bodies)}",
+                  len(seen_bodies) == 2)
+        second_body_text = json.dumps(seen_bodies[1])
+        ctx.check("no lossy text placeholder for the image in the request body",
+                  "[image content" not in second_body_text and "omitted" not in second_body_text)
+        ctx.check(f"a real image part (image_url/base64 data) reached the request body, "
+                  f"got a {len(second_body_text)}-char body", "image" in second_body_text.lower()
+                  and ("image_url" in second_body_text or "base64" in second_body_text
+                       or "data:image" in second_body_text))
+    finally:
+        mock.stop()
+
+
+@test
+def test_mcp_e2e_toolsearch_kept_when_tools_flag_would_have_excluded_it(ctx: Ctx):
+    """finding 13 must-do: "--tools Read,Bash strands every deferred tool
+    while the prompt still says call ToolSearch" -- --tools naming only
+    built-ins (never "ToolSearch") must not actually strand the deferred
+    MCP pool; ToolSearch must still be callable so the model can reach
+    mcp__fake__echo despite --tools excluding it by name."""
+    fh = build_fake_home()
+    _write_fake_mcp_only_claude_json(fh["home"])
+    steps = [
+        _tool_call_chunk("call_ts", "ToolSearch", {"query": "select:mcp__fake__echo"}),
+        _tool_call_chunk("call_echo", "mcp__fake__echo", {"text": "still reachable"}),
+        _final_text_chunk("done: still reachable"),
+    ]
+    SCENARIOS["h3-toolsearch-kept"] = ScriptedTurns(steps)
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "search then use the echo tool", model="or:mock/h3-toolsearch-kept",
+                           extra_args=["--permission-mode", "auto", "--tools", "Read,Bash"], timeout=30)
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-1200:]!r}", result.returncode == 0)
+        ctx.check(f"ToolSearch stayed callable and the deferred tool was reachable, got {result.stdout!r}",
+                  "still reachable" in result.stdout)
+    finally:
+        mock.stop()
+
+
+@test
 def test_mcp_e2e_isError_tool_result_reaches_the_model(ctx: Ctx):
     fh = build_fake_home()
     _write_fake_mcp_only_claude_json(fh["home"])

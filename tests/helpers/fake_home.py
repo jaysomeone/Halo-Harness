@@ -197,3 +197,54 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
         "memory_dir": memory_dir,
         "slug": slug,
     }
+
+
+def add_fake_plugin(claude_dir: Path, *, plugin_name: str = "fake-plugin",
+                     server_name: str = "fakeserver", enabled: bool = True,
+                     via_plugin_json: bool = False, command: Optional[list] = None) -> dict:
+    """OPT-IN plugin fixture (config/plugins.py's own layout) -- never
+    called by `build_fake_home` itself, so no EXISTING test's MCP server
+    count/set changes just by building a fake home; a plugin-server test
+    calls this explicitly on the `claude_dir` a `build_fake_home()` call
+    already returned. `via_plugin_json=True` declares the server through
+    `.claude-plugin/plugin.json` instead of `.mcp.json`, to exercise that
+    fallback path too. Returns `{plugins_dir, plugin_root, wire_server_name}`.
+    `command` defaults to the real fake MCP stdio server (tests/helpers/
+    fake_mcp_server.py) so a live-connect test can use this directly, with
+    `${CLAUDE_PLUGIN_ROOT}` threaded into its env to prove expansion works."""
+    import sys
+    from rolo_claude.config.plugins import plugin_server_name
+
+    plugins_root = claude_dir / "plugins"
+    plugin_root = plugins_root / "cache" / plugin_name
+    plugin_root.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = plugins_root / "installed_plugins.json"
+    manifest = {"plugins": {}}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            manifest = {"plugins": {}}
+        manifest.setdefault("plugins", {})
+    manifest["plugins"][plugin_name] = {"enabled": enabled}
+    _write_json(manifest_path, manifest)
+
+    server_entry = {
+        "type": "stdio",
+        "command": command[0] if command else sys.executable,
+        "args": (command[1:] if command else ["-m", "tests.helpers.fake_mcp_server"]),
+        "env": {"FAKE_PLUGIN_ROOT_SEEN": "${CLAUDE_PLUGIN_ROOT}"},
+    }
+    if via_plugin_json:
+        (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+        _write_json(plugin_root / ".claude-plugin" / "plugin.json",
+                     {"name": plugin_name, "mcpServers": {server_name: server_entry}})
+    else:
+        _write_json(plugin_root / ".mcp.json", {"mcpServers": {server_name: server_entry}})
+
+    return {
+        "plugins_dir": plugins_root,
+        "plugin_root": plugin_root,
+        "wire_server_name": plugin_server_name(plugin_name, server_name),
+    }

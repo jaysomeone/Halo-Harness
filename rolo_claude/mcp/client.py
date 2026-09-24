@@ -18,10 +18,67 @@ import asyncio
 import atexit
 import concurrent.futures
 import threading
+import time
 import weakref
-from typing import Any, Coroutine, Optional, TypeVar
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Coroutine, Optional, TypeVar
 
 T = TypeVar("T")
+
+
+@asynccontextmanager
+async def task_timeout(seconds: Optional[float]) -> "AsyncIterator[None]":
+    """finding 15: a `with`-style timeout for code that opens a resource
+    which must OUTLIVE this block (an `AsyncExitStack`-held async context
+    manager, e.g. `stdio_client`) -- cancels the CURRENT task directly
+    (`asyncio.Task.cancel()`) rather than wrapping the guarded code in a
+    NEW task (`asyncio.wait_for`'s own approach) or a NEW nested anyio
+    cancel scope (`anyio.fail_after`). Both of those break once the
+    guarded code opens something meant to survive past this block:
+    `wait_for` ties the resource's anyio cancel scope to a task that's
+    gone by the time the resource's `aclose()` runs later from the
+    DIFFERENT (real owning) task -- verified: "Attempted to exit cancel
+    scope in a different task than it was entered in". `anyio.fail_after`
+    nests its OWN cancel scope around the still-open resource's, which
+    then can't legally close before `fail_after`'s scope does -- verified
+    (empirically, in a minimal repro, NOT just cross-task -- this happens
+    even fully within ONE task): "Attempted to exit a cancel scope that
+    isn't the current task's current cancel scope". A raw `Task.cancel()`
+    creates neither a new task nor a new scope -- it just injects
+    `CancelledError` at whatever await point is current, in THIS task, so
+    whatever the guarded code opens stays correctly tied to this one task
+    for its whole life, however long that turns out to be past this
+    block. `seconds=None` disables the timeout (plain passthrough)."""
+    if seconds is None:
+        yield
+        return
+    task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    timed_out = False
+
+    def _fire() -> None:
+        nonlocal timed_out
+        timed_out = True
+        if task is not None:
+            task.cancel()
+
+    handle = loop.call_later(seconds, _fire)
+    try:
+        yield
+    except asyncio.CancelledError:
+        if timed_out:
+            raise TimeoutError(f"timed out after {seconds:.1f}s") from None
+        raise  # a genuinely different cancellation reason -- never mask it as our own timeout
+    finally:
+        handle.cancel()
+
+
+class McpAborted(Exception):
+    """Raised by `McpLoop.run_abortable` when the caller-supplied `abort`
+    Event fires before the coroutine finished (finding 4). Same "abandoned,
+    not stopped" caveat as a plain timeout applies -- a best-effort
+    `.cancel()` is requested on the underlying future, but the coroutine
+    may keep running on the loop."""
 
 # Every McpLoop still alive is tracked here (weakly -- being in this set
 # must never be the reason a McpLoop outlives its owner) so
@@ -103,6 +160,38 @@ class McpLoop:
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
+            fut.cancel()
+            raise
+
+    def run_abortable(self, coro: "Coroutine[Any, Any, T]", *, timeout: Optional[float] = None,
+                       abort: "Optional[Any]" = None, slice_s: float = 0.2) -> T:
+        """Like `run()`, but polls in `slice_s`-second steps instead of one
+        blocking `.result(timeout=)` call, so an externally-set `abort`
+        Event (agent/loop.py's `Session.abort`, threaded through a tool's
+        `ctx.abort`) cuts an in-flight MCP call short instead of holding
+        the calling thread for the full timeout (finding 4: "in-flight MCP
+        calls ignore ctx.abort"). Raises `McpAborted` on an abort,
+        `concurrent.futures.TimeoutError` on an ordinary timeout (same as
+        `run()`) -- either way the coroutine itself is only `.cancel()`-ed
+        as a best-effort courtesy (see `run()`'s own docstring: asyncio has
+        no safe cross-thread hard cancel of an arbitrary await), so the
+        caller must treat the operation as ABANDONED, not actually stopped."""
+        loop = self._ensure_started()
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        deadline = None if timeout is None else (time.monotonic() + timeout)
+        try:
+            while True:
+                remaining = None if deadline is None else (deadline - time.monotonic())
+                if remaining is not None and remaining <= 0:
+                    raise concurrent.futures.TimeoutError()
+                wait_s = slice_s if remaining is None else min(slice_s, remaining)
+                try:
+                    return fut.result(timeout=wait_s)
+                except concurrent.futures.TimeoutError:
+                    if abort is not None and abort.is_set():
+                        raise McpAborted("mcp call aborted") from None
+                    continue
+        except (McpAborted, concurrent.futures.TimeoutError):
             fut.cancel()
             raise
 

@@ -64,11 +64,6 @@ _MAX_RETRY_WAIT_S = 60.0  # per-wait cap, never the uncapped `time.sleep(Retry-A
 _LOOP_BREAKER_REMIND_AT = 3
 _LOOP_BREAKER_DENY_AT = 5
 _LOOP_BREAKER_END_AT = 8
-# H3 must-do: applied to a converted MCP tool result's TEXT, ahead of
-# (and independent from) the tool's own `result_cap`/spill_and_truncate
-# step -- an MCP server answering with a large resource/many blocks must
-# not blow past this before the ordinary truncation path ever runs.
-MAX_MCP_OUTPUT_TOKENS = 25_000
 
 # A wire ("error" SSE event) carries an Anthropic-shaped `type` string, not
 # an HTTP status -- reverses providers.errors.map_upstream_error's own
@@ -81,41 +76,41 @@ _WIRE_ERROR_TYPE_TO_STATUS = {
 }
 
 
-def _mcp_content_to_text(blocks: list) -> str:
-    """Convert a list of MCP/Anthropic-shaped content blocks (a tool's
-    `ToolResult.content` when it isn't a plain string -- see tools/base.py)
-    into a readable TEXT representation for the transcript. H3 must-do:
-    never a blind `json.dumps` of the raw block structure (which used to
-    inline a whole base64 image payload as one giant JSON string, or
-    render `default=str`-mangled Python reprs for anything non-JSON-safe)
-    -- a text block's own text is used directly, an image/resource block
-    becomes a short, honest placeholder (or a resource's own embedded
-    text), and the whole thing is capped at MAX_MCP_OUTPUT_TOKENS."""
-    parts = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            parts.append(str(block))
-            continue
-        btype = block.get("type")
-        if btype == "text" and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-        elif btype == "image":
-            mime = block.get("mimeType") or ((block.get("source") or {}).get("media_type") if isinstance(block.get("source"), dict) else None) or "image"
-            parts.append(f"[image: {mime}]")
-        elif btype == "resource":
-            res = block.get("resource") if isinstance(block.get("resource"), dict) else {}
-            uri = res.get("uri") or block.get("uri") or "?"
-            if isinstance(res.get("text"), str):
-                parts.append(f"[resource {uri}]\n{res['text']}")
-            else:
-                parts.append(f"[resource: {uri}]")
-        else:
-            parts.append(f"[{btype or 'content'} block]")
-    text = "\n".join(parts)
-    limit = MAX_MCP_OUTPUT_TOKENS * 4  # this codebase's own len(text)/4 token estimate (providers/config.py)
-    if len(text) > limit:
-        text = text[:limit] + f"\n... [MCP result truncated at ~{MAX_MCP_OUTPUT_TOKENS} tokens]"
-    return text
+def _mcp_blocks_for_log(blocks: list, *, meta, session_dir, tool_use_id) -> list:
+    """finding 5: log a block-content tool result (MCP tools; any future
+    tool that returns Anthropic-shaped content blocks) AS BLOCKS, never
+    pre-flattened to text -- a vision image stays a REAL image block so
+    `providers/request.py`'s own "image hoisting" step can find and
+    surface it to the model, and a `tool_reference` block (ToolSearch's
+    own load-confirmation marker -- never something a TOOL's result
+    itself should carry) is dropped rather than rendered as
+    "[tool_reference block]". Capping happens HERE, in the finalize step
+    -- ONE canonical pass, via `cap_and_spill` (mcp_tool.py's own
+    implementation, reused rather than duplicated), running AFTER the
+    tool itself ran so a future H4 PostToolUse hook sees the model's
+    real, full output. (The old `_mcp_content_to_text` flattened to text
+    first and then cut AGAIN at a hard-coded, env-var-blind 25000 tokens,
+    so Claude Code's own truncation string never reached the model
+    intact and no spill path was ever named -- both fixed by having
+    exactly one capping pass, here.)"""
+    from rolo_claude.tools.mcp_tool import cap_and_spill
+    filtered = [b for b in blocks if not (isinstance(b, dict) and b.get("type") == "tool_reference")]
+    if not filtered:
+        filtered = [{"type": "text", "text": "(no content returned)"}]
+    return cap_and_spill(filtered, meta=meta, session_dir=session_dir, tool_use_id=tool_use_id)
+
+
+def _summary_text_for_blocks(blocks: list) -> str:
+    """A short, human-readable stand-in for the `tool_result` EVENT's
+    `summary` field (display/verbose-log only -- never what's logged to
+    the session or sent to the model, which is the full block list) --
+    the first real text block, or an honest placeholder naming whatever
+    non-text content came back (e.g. "[image]")."""
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+            return b["text"]
+    kinds = sorted({b.get("type", "content") for b in blocks if isinstance(b, dict)}) or ["content"]
+    return f"[{', '.join(kinds)}]"
 
 
 def _canonical_args(args) -> str:
@@ -919,22 +914,34 @@ class Session:
                 self.permission_denials.append(item["permission_denial"])
             return
         tr = item["result"]
-        if isinstance(tr.content, str):
-            content_text = tr.content
-        elif isinstance(tr.content, list):
-            # H3 must-do: MCP image/resource blocks converted properly,
-            # never json.dumps'd as a raw blob (see _mcp_content_to_text).
-            content_text = _mcp_content_to_text(tr.content)
+        if isinstance(tr.content, list):
+            # finding 5/H4 must-do: logged AS BLOCKS (vision images stay
+            # real image blocks; tool_reference stripped) and capped HERE,
+            # after the tool ran -- see _mcp_blocks_for_log's own docstring.
+            tool = self.tool_registry.get(name)
+            meta = getattr(tool, "meta", None)
+            content_for_log = _mcp_blocks_for_log(tr.content, meta=meta, session_dir=session_dir, tool_use_id=tool_id)
+            summary_text = _summary_text_for_blocks(content_for_log)
+        elif isinstance(tr.content, str):
+            content_for_log = spill_and_truncate(tr.content, cap=self.tool_registry.result_cap(name),
+                                                  session_dir=session_dir, tool_use_id=tool_id)
+            summary_text = content_for_log
         else:
-            content_text = str(tr.content)
-        content_text = spill_and_truncate(content_text, cap=self.tool_registry.result_cap(name),
-                                           session_dir=session_dir, tool_use_id=tool_id)
+            content_for_log = spill_and_truncate(str(tr.content), cap=self.tool_registry.result_cap(name),
+                                                  session_dir=session_dir, tool_use_id=tool_id)
+            summary_text = content_for_log
+
         count = item.get("count")
         if count is not None and _LOOP_BREAKER_REMIND_AT <= count < _LOOP_BREAKER_DENY_AT:
-            content_text += (f"\n\n[reminder: {name} has now been called with these same arguments "
-                              f"{count} times this turn -- consider a different approach if unintentional]")
-        self.log.append_tool_result(tool_use_id=tool_id, content=content_text, is_error=tr.is_error)
-        yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": content_text[:200]}, turn=turn_no)
+            reminder = (f"\n\n[reminder: {name} has now been called with these same arguments "
+                        f"{count} times this turn -- consider a different approach if unintentional]")
+            if isinstance(content_for_log, list):
+                content_for_log = content_for_log + [{"type": "text", "text": reminder.strip()}]
+            else:
+                content_for_log += reminder
+            summary_text += reminder
+        self.log.append_tool_result(tool_use_id=tool_id, content=content_for_log, is_error=tr.is_error)
+        yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200]}, turn=turn_no)
 
     # ---- interactive permission handshake (U2) ---------------------------
 
@@ -1041,7 +1048,7 @@ class Session:
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
                            mcp_manager=self.mcp_manager)
-        repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry)
+        repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
 
         end_turn = False
         pending_batch: list = []  # `item` dicts: a run of consecutive READY read-only calls, dispatch deferred
@@ -1050,8 +1057,10 @@ class Session:
             """Actually RUN every item in `pending_batch` (fills in each
             `item["result"]`) -- does NOT log/yield anything; the caller
             still has to `_finalize_tool_result` each one itself, in order,
-            same as a solo dispatch."""
-            calls = [(it["name"], it["input"]) for it in pending_batch]
+            same as a solo dispatch. finding 5 must-do: each call gets its
+            OWN `tool_use_id` (the 3rd tuple element) so a pooled MCP
+            result that needs to spill doesn't collide/silently skip."""
+            calls = [(it["name"], it["input"], it["tool_id"]) for it in pending_batch]
             results = run_read_only_batch(self.tool_registry, calls, ctx)
             for it, tr in zip(pending_batch, results):
                 it["result"] = tr

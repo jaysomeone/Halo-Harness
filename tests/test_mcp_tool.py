@@ -320,6 +320,40 @@ def test_mcptool_result_cap_is_none_manages_own_truncation(ctx: Ctx):
     ctx.check("class-level result_cap is None (like Read)", T.McpTool.result_cap is None)
 
 
+@test
+def test_mcptool_run_no_longer_caps_h4_moved_to_finalize(ctx: Ctx):
+    """finding 5/H4 must-do: capping moves to agent/loop.py's
+    _finalize_tool_result (after the future PostToolUse hook point) --
+    McpTool.run itself must return the FULL, uncapped result."""
+    def _run():
+        tool, mgr = _mcp_tool_for("huge")
+        try:
+            result = tool.run({"chars": 200_000}, ToolContext(cwd=REPO_DIR))
+            ctx.check("no error", result.is_error is False)
+            total_len = sum(len(b.get("text", "")) for b in result.content if b.get("type") == "text")
+            ctx.check(f"the full 200000-char result comes back uncapped, got {total_len}", total_len == 200_000)
+        finally:
+            mgr.close_all()
+    _with_env("MAX_MCP_OUTPUT_TOKENS", "50", _run)  # a tiny cap that would have truncated it pre-fix
+
+
+@test
+def test_mcptool_run_aborts_promptly(ctx: Ctx):
+    import threading
+    tool, mgr = _mcp_tool_for("slow_tool")
+    try:
+        abort = threading.Event()
+        threading.Timer(0.3, abort.set).start()
+        t0 = __import__("time").monotonic()
+        result = tool.run({"seconds": 6.0}, ToolContext(cwd=REPO_DIR, abort=abort))
+        elapsed = __import__("time").monotonic() - t0
+        ctx.check(f"aborted well under the 6s sleep, took {elapsed:.2f}s", elapsed < 2.0)
+        ctx.check("a clean interrupted error, not a raised exception", result.is_error is True
+                  and "interrupted" in result.content.lower())
+    finally:
+        mgr.close_all()
+
+
 # ---- ListMcpResourcesTool / ReadMcpResourceTool ----------------------------
 
 def _manager_for_resources():

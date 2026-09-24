@@ -1,0 +1,20 @@
+#!/bin/sh
+# rolo-claude (POSIX) -- standalone Claude Code-like harness on OpenRouter/
+# Databricks models. Launches like `claude` (full-screen TUI); `-p` prints;
+# `rolo-claude proxy ...` is the older claude-bridge proxy mode.
+#
+# Prefers the `uv tool install --editable .` console script
+# (~/.local/bin/rolo-claude) when it exists and isn't THIS file (a PATH
+# entry pointing back here would recurse); falls back to
+# `python3 -m rolo_claude` from this checkout otherwise (docs/harness/
+# INSTALL.md's `pip install --user -e .` path, or no install at all yet).
+here="$(cd "$(dirname "$0")" && pwd)"
+installed="$HOME/.local/bin/rolo-claude"
+
+if [ -x "$installed" ] && [ "$(cd "$(dirname "$installed")" 2>/dev/null && pwd)/$(basename "$installed")" != "$here/$(basename "$0")" ]; then
+    exec "$installed" "$@"
+fi
+
+repo_root="$(dirname "$here")"
+export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m rolo_claude "$@"

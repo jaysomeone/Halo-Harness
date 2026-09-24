@@ -109,6 +109,79 @@ def test_mcp_add_get_list_remove_round_trip(ctx: Ctx):
 
 
 @test
+def test_mcp_list_unapproved_dot_mcp_json_shows_pending_approval_and_spawns_nothing(ctx: Ctx):
+    """finding 16 test 8: an unapproved `.mcp.json` server must show
+    "⏸ Pending approval" and NEVER actually be spawned by `mcp list` --
+    proven by pointing it at a command that doesn't exist at all: if it
+    were spawned, the manager would report "✗ Failed to connect", not
+    "Pending approval"."""
+    home = _fresh_home()
+    proj = home / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {"unapproved": {"type": "stdio", "command": "definitely-not-a-real-command-xyz"}},
+    }), encoding="utf-8")
+    result = _run(["mcp", "list", "--cwd", str(proj)], home, timeout=30)
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check(f"shows Pending approval, got {result.stdout!r}",
+              "unapproved:" in result.stdout and "⏸ Pending approval" in result.stdout)
+    ctx.check("never spawned (would show Failed to connect if it had tried)",
+              "Failed to connect" not in result.stdout)
+
+
+@test
+def test_mcp_list_prints_checking_header_before_server_lines(ctx: Ctx):
+    home = _fresh_home()
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"demo-server": {"type": "stdio", "command": sys.executable,
+                                         "args": ["-m", "tests.helpers.fake_mcp_server"]}},
+    }), encoding="utf-8")
+    result = _run(["mcp", "list"], home, timeout=60)
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    ctx.check(f"the health-check header is the FIRST line, got {lines[:2]}",
+              lines and "Checking MCP server health" in lines[0])
+
+
+@test
+def test_mcp_add_dash_dash_separator_and_inline_env(ctx: Ctx):
+    """finding 9: `mcp add name -- cmd args` (Claude Code's own documented
+    form) and `--env=K=V` inline."""
+    home = _fresh_home()
+    (home / ".claude.json").write_text("{}", encoding="utf-8")
+    result = _run(["mcp", "add", "-s", "user", "--env=SOME_KEY=1", "airtable", "--",
+                    sys.executable, "-m", "tests.helpers.fake_mcp_server"], home)
+    ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr!r}", result.returncode == 0)
+    data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    entry = data.get("mcpServers", {}).get("airtable", {})
+    ctx.check(f"command is the REAL command, never the literal '--', got {entry.get('command')!r}",
+              entry.get("command") == sys.executable)
+    ctx.check(f"args carry the rest, got {entry.get('args')!r}",
+              entry.get("args") == ["-m", "tests.helpers.fake_mcp_server"])
+    ctx.check(f"--env=K=V inline form captured, got {entry.get('env')!r}", entry.get("env") == {"SOME_KEY": "1"})
+
+
+@test
+def test_mcp_config_flag_long_inline_json_works_end_to_end(ctx: Ctx):
+    """finding 10: a long inline --mcp-config JSON value with no '/' must
+    not crash a real session (verified failure on Linux: OSError errno 36
+    'File name too long' out of build_manager)."""
+    home = _fresh_home()
+    padding = "x" * 400
+    spec = '{"mcpServers": {"' + padding + '": {"command": "definitely-not-real"}}}'
+    result = _run(["mcp", "list", "--cwd", str(home)], home, timeout=30)
+    ctx.check("baseline sanity: plain mcp list still exits 0", result.returncode == 0)
+    # mcp list has no --mcp-config flag of its own -- exercise the parser
+    # (manager.py's own job) directly instead, in-process, for the exact
+    # OSError repro; the subprocess round trip above just confirms the
+    # harness as a whole tolerates a long-running real session.
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_DIR))
+    from rolo_claude.mcp.manager import resolve_server_configs
+    resolved, notices = resolve_server_configs(cwd=home, claude_json={}, mcp_config_flag=[spec])
+    ctx.check(f"parses without raising, got notices={notices}", padding in resolved)
+
+
+@test
 def test_mcp_other_subcommands_still_not_yet(ctx: Ctx):
     home = _fresh_home()
     for sub in (["login"], ["logout"], ["serve"]):

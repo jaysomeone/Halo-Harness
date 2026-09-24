@@ -86,21 +86,33 @@ async def connect(*, command: str, args: list, env: dict, cwd: Optional[str],
     `AsyncExitStack` STILL OPEN -- the caller (manager.McpServerHandle)
     owns its lifetime from here and must `await stack.aclose()` exactly
     once. Raises on any failure (spawn error, connect timeout); the caller
-    maps the exception to a connection state."""
-    import asyncio
+    maps the exception to a connection state.
+
+    finding 15: `connect_timeout` is enforced via `client.task_timeout`
+    (same-task `Task.cancel()`), never `asyncio.wait_for` -- `stdio_client`
+    stays open past this function's return (the AsyncExitStack pattern is
+    the whole point), and `wait_for` ties its anyio cancel scope to the
+    short-lived Task it creates to run the awaitable, not to whichever
+    task calls `stack.aclose()` later -- verified: "Attempted to exit
+    cancel scope in a different task than it was entered in"."""
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from rolo_claude.mcp.client import task_timeout
 
     params = StdioServerParameters(
         command=command, args=[str(a) for a in (args or [])],
         env=env, cwd=str(cwd) if cwd else None,
+        # finding 3: the SDK default is "strict" -- one non-UTF-8 byte on
+        # the server's stdout then kills the reader permanently (every
+        # later response silently dropped, every call hangs its full
+        # timeout). "replace" degrades that one line instead of the whole
+        # connection.
+        encoding_error_handler="replace",
     )
     stack = AsyncExitStack()
     try:
-        read, write = await asyncio.wait_for(
-            stack.enter_async_context(stdio_client(params, errlog=errlog)),
-            timeout=connect_timeout,
-        )
+        async with task_timeout(connect_timeout):
+            read, write = await stack.enter_async_context(stdio_client(params, errlog=errlog))
         session = await stack.enter_async_context(ClientSession(read, write))
         return stack, session
     except BaseException:

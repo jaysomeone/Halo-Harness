@@ -296,6 +296,75 @@ def _scn_read_then_answer(target_path: str):
     return fn
 
 
+# ---- finding 5: _mcp_blocks_for_log / _summary_text_for_blocks -----------
+# Pure-function unit tests (no Session/subprocess needed) for
+# agent/loop.py's own block-content finalize helpers.
+
+@test
+def test_mcp_blocks_for_log_preserves_a_real_image_block(ctx: Ctx):
+    """finding 5: a vision image must stay a REAL image block through
+    logging -- the old code flattened it to `[image: mime]` text before
+    it ever reached the log/wire, so a vision-capable model never saw it."""
+    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    blocks = [{"type": "text", "text": "here's a screenshot"},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QQ=="}}]
+    logged = _mcp_blocks_for_log(blocks, meta=None, session_dir=None, tool_use_id=None)
+    images = [b for b in logged if b.get("type") == "image"]
+    ctx.check(f"the image block survives untouched, got {logged}",
+              len(images) == 1 and images[0]["source"]["data"] == "QQ==")
+
+
+@test
+def test_mcp_blocks_for_log_strips_tool_reference(ctx: Ctx):
+    """finding 5: a `tool_reference` block (ToolSearch's own load-
+    confirmation marker) must never appear in a TOOL RESULT's logged
+    content -- it's not a real answer, and the old code rendered it as
+    the literal string "[tool_reference block]"."""
+    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    blocks = [{"type": "text", "text": "real answer"}, {"type": "tool_reference", "tool_name": "mcp__x__y"}]
+    logged = _mcp_blocks_for_log(blocks, meta=None, session_dir=None, tool_use_id=None)
+    ctx.check(f"tool_reference dropped entirely, got {logged}",
+              not any(b.get("type") == "tool_reference" for b in logged))
+    ctx.check("the real text block survives", any(b.get("text") == "real answer" for b in logged))
+
+
+@test
+def test_mcp_blocks_for_log_caps_once_with_spill_note(ctx: Ctx):
+    """finding 5: capping happens ONCE here (via cap_and_spill), and the
+    truncation line names the spill file -- no second, independent,
+    hard-coded cut on top."""
+    import os
+    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    old = os.environ.get("MAX_MCP_OUTPUT_TOKENS")
+    os.environ["MAX_MCP_OUTPUT_TOKENS"] = "50"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            blocks = [{"type": "text", "text": "Z" * 5000}]
+            logged = _mcp_blocks_for_log(blocks, meta=None, session_dir=Path(td), tool_use_id="toolu_x")
+            joined = " ".join(b.get("text", "") for b in logged)
+            ctx.check(f"Claude Code's exact truncation string, intact, got tail={joined[-120:]!r}",
+                      "[OUTPUT TRUNCATED - exceeded 50 token limit]" in joined)
+            ctx.check(f"names the spill file, got tail={joined[-160:]!r}", "Full output saved to" in joined
+                      and str(Path(td) / "tool-results" / "toolu_x.txt") in joined)
+            spill_path = Path(td) / "tool-results" / "toolu_x.txt"
+            ctx.check("the spill file holds the FULL untruncated text",
+                      spill_path.exists() and len(spill_path.read_text(encoding="utf-8")) == 5000)
+    finally:
+        if old is None:
+            os.environ.pop("MAX_MCP_OUTPUT_TOKENS", None)
+        else:
+            os.environ["MAX_MCP_OUTPUT_TOKENS"] = old
+
+
+@test
+def test_summary_text_for_blocks_prefers_real_text(ctx: Ctx):
+    from rolo_claude.agent.loop import _summary_text_for_blocks
+    ctx.check("first real text block wins", _summary_text_for_blocks(
+        [{"type": "image", "source": {}}, {"type": "text", "text": "hello"}]) == "hello")
+    ctx.check("no text -> an honest placeholder naming the content type",
+              _summary_text_for_blocks([{"type": "image", "source": {}}]) == "[image]")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

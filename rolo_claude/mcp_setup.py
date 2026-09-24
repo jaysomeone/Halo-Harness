@@ -20,7 +20,10 @@ from rolo_claude.config.paths import bridge_home, home, managed_dir
 def load_mcp_approvals() -> dict:
     """`~/.rolo-claude/mcp-approvals.json` -- OUR OWN approval store for a
     `.mcp.json` project server (D-CFG: "our `~/.rolo-claude/mcp-approvals.
-    json`"), never Claude Code's own state. `{}` if missing/invalid."""
+    json`"), never Claude Code's own state. Must-do: keys are each
+    approved entry's `manager.mcp_approval_key(raw_entry)` sha256 (an
+    edited/tampered entry needs re-approval), never the bare server name.
+    `{}` if missing/invalid."""
     path = bridge_home() / "mcp-approvals.json"
     try:
         import json
@@ -30,6 +33,27 @@ def load_mcp_approvals() -> dict:
     except Exception:
         pass
     return {}
+
+
+def record_mcp_approval(name: str, raw_entry: dict) -> None:
+    """Persist an approval for one `.mcp.json` server entry, read-modify-
+    write, best-effort (never raises -- an approval that fails to save
+    just means the user gets asked again next time, not a crashed
+    session). Ready for U2's interactive `question`-event approval flow
+    (loop.py's Session.run()/permission-wait-seam, not this module's job)
+    to call once the user answers "yes"."""
+    from rolo_claude.mcp.manager import mcp_approval_key
+    path = bridge_home() / "mcp-approvals.json"
+    data = load_mcp_approvals()
+    data[mcp_approval_key(raw_entry)] = {"name": name}
+    try:
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def managed_mcp_json_path() -> Path:
@@ -56,13 +80,36 @@ def find_claude_exe() -> Optional[str]:
     return None
 
 
-def resolve_chrome_enabled(claude_json: dict, *, chrome_flag: bool, no_chrome_flag: bool) -> bool:
-    """`--chrome`/`--no-chrome` beat `claudeInChromeDefaultEnabled`
-    [claude-in-chrome-integration.md]."""
+def _env_bool(name: str) -> Optional[bool]:
+    """`None` when unset; else the var's own boolean reading ("0"/"false"/
+    "no"/"off"/"" -> False, anything else -> True)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def resolve_chrome_enabled(claude_json: dict, *, chrome_flag: bool, no_chrome_flag: bool,
+                            interactive: bool = True) -> bool:
+    """finding 14: the binary's own enable order -- flag -> env var ->
+    off for non-interactive sessions -> `claudeInChromeDefaultEnabled`.
+    `--no-chrome` always wins outright first (not itself part of the
+    documented ladder, but the one override nothing below it can undo).
+    `interactive=False` (headless.py's own `-p` call site) means
+    `claudeInChromeDefaultEnabled` is NEVER consulted -- before this,
+    every `rolo-claude -p` on a box with that setting on spawned
+    `claude.CMD --claude-in-chrome-mcp`, which `claude -p` itself never
+    does. The TUI (interactive, U2's own call site) keeps the default
+    `interactive=True` and is unaffected."""
     if no_chrome_flag:
         return False
     if chrome_flag:
         return True
+    env_val = _env_bool("CLAUDE_CODE_ENABLE_CFC")
+    if env_val is not None:
+        return env_val
+    if not interactive:
+        return False
     return bool((claude_json or {}).get("claudeInChromeDefaultEnabled"))
 
 
@@ -105,7 +152,7 @@ def build_manager(
     mcp_config_flag: Optional[list] = None, strict_mcp_config: bool = False,
     chrome: bool = False, playwright: bool = False,
     playwright_cdp: Optional[str] = None, playwright_headless: bool = False,
-    bypass_mode: bool = False, start: bool = True,
+    bypass_mode: bool = False, start: bool = True, trusted: bool = True,
 ):
     """`(manager_or_None, notices)`. `manager` is None ONLY when the `mcp`
     package itself isn't installed (`rolo_claude.mcp.available()` False)
@@ -114,7 +161,10 @@ def build_manager(
     (zero-handle) `McpManager`, never None, so a caller never has to tell
     "not installed" apart from "installed, nothing configured" by hand.
     `start=False` (mcp_cli.py's `mcp get`/`mcp add` etc.) resolves configs
-    without connecting to anything."""
+    without connecting to anything. `trusted` (default True, so an
+    existing caller that doesn't pass it keeps today's behaviour) gates a
+    PROJECT-scope `.mcp.json` server's `headersHelper` (binary-facts sec.9:
+    "repo-resident config needs persisted trust")."""
     from rolo_claude.mcp import NOT_AVAILABLE_NOTICE, available
     notices: list = []
     if not available():
@@ -138,15 +188,26 @@ def build_manager(
             notices.append(err)
 
     base_env = settings.effective_env if settings is not None else dict(os.environ)
+
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers
+    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env)
+    notices.extend(plugin_notices)
+
     configs, resolve_notices = resolve_server_configs(
         cwd=cwd, claude_json=claude_json, mcp_config_flag=mcp_config_flag,
         strict_mcp_config=strict_mcp_config, print_mode=print_mode,
         approvals=load_mcp_approvals(), managed_mcp_path=managed_mcp_json_path(),
-        env_for_expansion=base_env, extra_dynamic=dynamic,
+        env_for_expansion=base_env, extra_dynamic=dynamic, settings=settings,
+        plugin_servers=plugin_servers,
     )
     notices.extend(resolve_notices)
 
-    manager = McpManager(configs, tool_env=tool_child_env(base_env), cwd=cwd)
+    # finding 13 must-do: server-level "mcpLazy" -- connect on first tool
+    # use instead of at start_all() time (parsed into McpServerConfig.lazy
+    # but never consulted anywhere until now).
+    lazy_names = {name for name, cfg in configs.items() if cfg.lazy}
+    manager = McpManager(configs, tool_env=tool_child_env(base_env), cwd=cwd,
+                          lazy_names=lazy_names, trusted=trusted)
     if start:
         manager.start_all()
     return manager, notices

@@ -80,20 +80,21 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     same contract as `stdio.connect`. Headers are carried on a pre-built
     httpx.AsyncClient (this SDK version's `streamable_http_client` no
     longer takes `headers=` directly -- verified against the installed
-    2.2.0 API, not assumed)."""
-    import asyncio
+    2.2.0 API, not assumed). finding 15: `connect_timeout` uses
+    `client.task_timeout` (same-task `Task.cancel()`), not
+    `asyncio.wait_for` -- see `stdio.connect`'s own docstring for why."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     from mcp.shared._httpx_utils import create_mcp_http_client
+    from rolo_claude.mcp.client import task_timeout
 
     http_client = create_mcp_http_client(headers=headers or {})
     stack = AsyncExitStack()
     try:
         stack.push_async_callback(http_client.aclose)
-        read, write, _get_session_id = await asyncio.wait_for(
-            stack.enter_async_context(streamable_http_client(url, http_client=http_client)),
-            timeout=connect_timeout,
-        )
+        async with task_timeout(connect_timeout):
+            read, write, _get_session_id = await stack.enter_async_context(
+                streamable_http_client(url, http_client=http_client))
         session = await stack.enter_async_context(ClientSession(read, write))
         return stack, session
     except BaseException:
@@ -104,17 +105,17 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
 async def connect_sse(*, url: str, headers: dict, connect_timeout: float):
     """Deprecated `sse` transport connect (kept for existing configs that
     still name it -- `manager.py` logs a deprecation notice when it does).
-    Returns `(stack, session)`, stack OPEN."""
-    import asyncio
+    Returns `(stack, session)`, stack OPEN. finding 15: same
+    `client.task_timeout` swap as `connect_http`/`stdio.connect`."""
     from mcp import ClientSession
     from mcp.client.sse import sse_client
+    from rolo_claude.mcp.client import task_timeout
 
     stack = AsyncExitStack()
     try:
-        read, write = await asyncio.wait_for(
-            stack.enter_async_context(sse_client(url, headers=headers or {}, timeout=connect_timeout)),
-            timeout=connect_timeout + 1,
-        )
+        async with task_timeout(connect_timeout + 1):
+            read, write = await stack.enter_async_context(
+                sse_client(url, headers=headers or {}, timeout=connect_timeout))
         session = await stack.enter_async_context(ClientSession(read, write))
         return stack, session
     except BaseException:

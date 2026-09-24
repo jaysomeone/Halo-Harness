@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -118,6 +119,33 @@ def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, extra_env=None):
     args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", "or:mock/model",
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
+
+
+@test
+def test_print_mode_never_imports_textual(ctx: Ctx):
+    """U2 scope A: `import rolo_claude` and `-p` must stay dependency-free
+    of textual/rich -- only `tui/launch.py`'s lazy import (reached solely
+    from the bare, no-`-p` branch) may ever touch them. Proven with a
+    PYTHONPATH shim: a poisoned `textual.py` stub that raises ImportError
+    the instant anything imports it, placed EARLIER on sys.path than the
+    real installed textual package (PYTHONPATH entries are searched before
+    site-packages) -- so a `-p` run completing normally is only possible if
+    nothing on that path ever did `import textual`."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    with tempfile.TemporaryDirectory() as shim_dir:
+        stub = Path(shim_dir) / "textual.py"
+        stub.write_text(
+            "raise ImportError('textual must not be imported by -p/print mode')\n", encoding="utf-8",
+        )
+        try:
+            result = _run_cli(fh, mock, "reply with the single word pong",
+                               extra_env={"PYTHONPATH": f"{shim_dir}{os.pathsep}{REPO_DIR}"})
+            ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-400:]!r}", result.returncode == 0)
+            ctx.check("prompt still ran (pong in stdout)", "pong" in result.stdout)
+            ctx.check("the poisoned stub was never triggered", "must not be imported by -p" not in result.stderr)
+        finally:
+            mock.stop()
 
 
 @test

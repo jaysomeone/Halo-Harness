@@ -78,6 +78,7 @@ class FakeController:
         self.quit_called = False
         self.permission_replies: list = []
         self.question_replies: list = []
+        self.plan_replies: list = []
         self.added_rules: list = []
         self.slash_calls: list = []
         self.reconnects = 0
@@ -107,6 +108,12 @@ class FakeController:
 
     def answer_question(self, request_id: str, answer) -> None:
         self.question_replies.append((request_id, answer))
+
+    def answer_plan(self, approved: bool, *, feedback: str = "", mode_after=None) -> None:
+        # additive, matches rolo_claude.controller.Controller.answer_plan --
+        # no existing test touches this (plan mode/`plan_review` didn't
+        # exist before U2's PlanCard).
+        self.plan_replies.append({"approved": approved, "feedback": feedback, "mode_after": mode_after})
 
     def run_slash(self, name: str, args: str = "") -> str:
         self.slash_calls.append((name, args))

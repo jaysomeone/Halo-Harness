@@ -74,6 +74,84 @@ def test_resolve_unknown_name_lists_5_closest(ctx: Ctx):
     ctx.check(f"up to 5 candidates offered, got {close}", 0 < len(close) <= 5)
 
 
+# ---- finding 2: mcp__ names are never fuzzy-renamed ------------------
+
+class _FakeCatalog:
+    """Minimal SessionCatalog double: `.deferred` + a `.load()` that
+    behaves like the real one enough for repair.py's own logic (pop on
+    success, report only genuinely-loaded names)."""
+    def __init__(self, deferred: dict):
+        self.deferred = dict(deferred)
+
+    def load(self, names):
+        loaded = []
+        for n in names:
+            if n in self.deferred:
+                del self.deferred[n]
+                loaded.append(n)
+        return loaded
+
+
+@test
+def test_mcp_name_never_fuzzy_renamed_even_one_edit_away(ctx: Ctx):
+    """finding 2's exact repro: mcp__hardware__hw_clock_stop must NEVER
+    resolve to mcp__hardware__hw_clock_start just because they're one
+    difflib edit apart -- that dispatches the WRONG tool with the
+    model's original arguments."""
+    known = ["Bash", "mcp__hardware__hw_clock_start"]
+    resolved, close = repair.resolve_tool_name("mcp__hardware__hw_clock_stop", known)
+    ctx.check(f"never silently renamed to a sibling mcp__ tool, got {resolved!r}", resolved is None)
+    ctx.check("no fuzzy suggestions offered for an mcp__ name either", close == [])
+
+
+@test
+def test_mcp_name_auto_loads_from_catalog_deferred(ctx: Ctx):
+    reg = ToolRegistry()
+    cat = _FakeCatalog({"mcp__srv__get_x": ("srv", object())})
+    resolved, close = repair.resolve_tool_name("mcp__srv__get_x", reg.names(), catalog=cat, registry=reg)
+    ctx.check(f"resolves by loading from the deferred pool, got {resolved!r}", resolved == "mcp__srv__get_x")
+    ctx.check("actually removed from the deferred pool (loaded, not just peeked)",
+              "mcp__srv__get_x" not in cat.deferred)
+
+
+@test
+def test_mcp_name_already_loaded_by_an_earlier_block_this_turn(ctx: Ctx):
+    """`known_names` is a snapshot taken once per turn -- a name another
+    block already auto-loaded into `registry` (mutated in place) earlier
+    in the SAME turn must still resolve, even though the stale snapshot
+    doesn't contain it and it's no longer in `catalog.deferred` either."""
+    from rolo_claude.tools.read import ReadTool
+    reg = ToolRegistry(tools=[ReadTool()])
+    stale_names = reg.names()  # snapshot BEFORE the tool gets added
+    reg.add_tool(ReadTool())  # stand-in for an mcp__ tool another block just loaded
+    reg._tools["mcp__srv__get_x"] = reg._tools.pop("Read")  # rename the stand-in for this test's purposes
+    resolved, close = repair.resolve_tool_name("mcp__srv__get_x", stale_names, catalog=None, registry=reg)
+    ctx.check(f"resolves via the LIVE registry, not the stale snapshot, got {resolved!r}",
+              resolved == "mcp__srv__get_x")
+
+
+@test
+def test_mcp_name_unresolvable_gets_a_toolsearch_hint_not_a_guess(ctx: Ctx):
+    reg = ToolRegistry()
+    outcome = repair.repair_tool_use_block({"id": "c1", "name": "mcp__ghost__nope", "input": {}}, reg)
+    ctx.check("not ok", outcome.ok is False)
+    ctx.check(f"error points at ToolSearch, never a guessed rename, got {outcome.error_text!r}",
+              "ToolSearch" in outcome.error_text and "select:mcp__ghost__nope" in outcome.error_text)
+
+
+@test
+def test_repaired_block_records_original_name_for_hook_matchers(ctx: Ctx):
+    """H4 must-do: a hook matcher needs the model's ORIGINAL spelling, not
+    the repaired one -- a plain rename (non-mcp__) sets it; an unrenamed
+    exact match does not."""
+    reg = ToolRegistry()
+    renamed = repair.repair_tool_use_block({"id": "c1", "name": "read_file", "input": {"file_path": "/x"}}, reg)
+    ctx.check(f"original_name captures the model's own spelling, got {renamed.original_name!r}",
+              renamed.original_name == "read_file")
+    exact = repair.repair_tool_use_block({"id": "c2", "name": "Read", "input": {"file_path": "/x"}}, reg)
+    ctx.check("no rename -> original_name stays None", exact.original_name is None)
+
+
 # ---- schema validate/coerce --------------------------------------------
 
 @test

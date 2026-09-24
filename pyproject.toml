@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "textual==8.2.8",
     "rich>=14,<16",
-    "mcp>=1.26,<3",
+    "mcp>=2.2,<3",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +28,11 @@ py-modules = ["bridge"]
 
 [tool.setuptools.packages.find]
 include = ["rolo_claude*"]
+
+[tool.setuptools.package-data]
+# U2: tui/styles.tcss must ship with a non-editable install too (App's
+# CSS_PATH resolves relative to tui/app.py at runtime).
+rolo_claude = ["tui/*.tcss"]
 
 [tool.setuptools.dynamic]
 version = { attr = "rolo_claude.__version__" }

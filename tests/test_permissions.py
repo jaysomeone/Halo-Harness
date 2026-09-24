@@ -335,6 +335,36 @@ def test_mcp_allow_glob_only_in_tool_position(ctx: Ctx):
     ctx.check("same shape is fine for deny", bad_ok_for_deny.kind == "mcp_tool")
 
 
+@test
+def test_mcp_rule_splits_on_first_double_underscore_not_last(ctx: Ctx):
+    """finding 13: a TOOL name that itself contains "__" (e.g. sanitised
+    from a name with two consecutive special chars) must still parse with
+    the correct server -- rsplit (the LAST "__") used to grab too much
+    into the server half."""
+    r = P.parse_rule("mcp__srv__list__files", source="user")
+    ctx.check(f"server is 'srv', not 'srv__list', got tool={r.tool!r} value={r.value!r}",
+              r.tool == "srv" and r.value == "list__files")
+
+
+@test
+def test_mcp_tool_kind_deny_rule_removes_just_that_tool_from_catalog(ctx: Ctx):
+    """finding 13 required outcome: "mcp__srv__tool deny rules remove the
+    tool" -- a single-tool deny rule (kind mcp_tool) must remove ONLY
+    that one name from the frozen catalog, not the whole server, and
+    never a different tool of the same server."""
+    deny = [P.parse_rule("mcp__srv__get_x", source="user")]
+    removed = P.mcp_deny_tool_names(deny, ["mcp__srv__get_x", "mcp__srv__get_y", "mcp__other__get_x"])
+    ctx.check(f"only the exact server+tool match is removed, got {removed}", removed == {"mcp__srv__get_x"})
+
+
+@test
+def test_mcp_tool_kind_deny_rule_glob_in_tool_position(ctx: Ctx):
+    deny = [P.parse_rule("mcp__srv__list_*", source="user")]
+    removed = P.mcp_deny_tool_names(deny, ["mcp__srv__list_files", "mcp__srv__list_dirs", "mcp__srv__get_x"])
+    ctx.check(f"glob in the tool position matches multiple tools of that server, got {removed}",
+              removed == {"mcp__srv__list_files", "mcp__srv__list_dirs"})
+
+
 # ---- param rules --------------------------------------------------------
 
 @test

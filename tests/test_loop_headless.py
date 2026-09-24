@@ -201,12 +201,21 @@ def test_verbose_flag_does_not_break_output(ctx: Ctx):
 
 @test
 def test_without_p_flag_prints_tui_notice_exit_2(ctx: Ctx):
+    # U2: bare launch now opens the real full-screen TUI, which needs an
+    # actual terminal -- stdin=PIPE (closed immediately, no `input=`) makes
+    # `sys.stdin.isatty()` reliably False regardless of the tty state of
+    # whatever process runs this test suite, so this can never hang
+    # waiting on Textual to set up a terminal that isn't there (must stay
+    # fast/deterministic in a headless CI runner). NOTE: `stdin=DEVNULL`
+    # does NOT work for this on Windows -- CPython's `os.isatty()` there
+    # only inspects `GetFileType`, and NUL reports FILE_TYPE_CHAR just
+    # like a real console, so it still reads as a tty.
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_DIR)
     result = subprocess.run([sys.executable, "-m", "rolo_claude"], env=env, cwd=str(REPO_DIR),
-                             capture_output=True, text=True, timeout=15)
+                             capture_output=True, text=True, timeout=15, stdin=subprocess.PIPE)
     ctx.check(f"exit code 2, got {result.returncode}", result.returncode == 2)
-    ctx.check("TUI-arrives-in-U2 notice printed", "TUI arrives in U2" in result.stderr)
+    ctx.check("not-a-tty notice printed", "stdin is not a tty" in result.stderr)
 
 
 @test

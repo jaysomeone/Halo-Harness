@@ -265,6 +265,64 @@ def test_read_only_pool_runs_concurrently_and_preserves_call_order(ctx: Ctx):
 
 
 @test
+def test_read_only_batch_single_call_routes_through_the_same_wait(ctx: Ctx):
+    """finding 4 must-do: "route single read-only calls through the same
+    wait" -- the old fast path (`len(calls) == 1`) dispatched a solo call
+    DIRECTLY, bypassing the abort-aware poll loop entirely. A solo call
+    must still be abortable via ctx.abort, same as a batch of 2+."""
+    import threading
+    import time as time_mod
+    from rolo_claude.tools.base import Tool, ToolContext
+    from rolo_claude.tools.base import ToolResult as TR
+    from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+
+    class _HangingReadOnlyTool(Tool):
+        name = "HangRO"
+        is_read_only = True
+
+        def run(self, input, ctx):
+            time_mod.sleep(30.0)
+            return TR("should never get here")
+
+    reg = ToolRegistry(tools=[_HangingReadOnlyTool()])
+    abort = threading.Event()
+    threading.Timer(0.3, abort.set).start()
+    t0 = time_mod.monotonic()
+    results = run_read_only_batch(reg, [("HangRO", {})], ToolContext(cwd=Path("."), abort=abort))
+    elapsed = time_mod.monotonic() - t0
+    ctx.check(f"a SOLO call aborts promptly too, took {elapsed:.2f}s", elapsed < 2.0)
+    ctx.check(f"one result, marked aborted, got {results}", len(results) == 1 and results[0].is_error is True
+              and "aborted" in results[0].content.lower())
+
+
+@test
+def test_read_only_batch_per_call_tool_use_id(ctx: Ctx):
+    """finding 5 must-do: each pooled call gets its OWN tool_use_id via a
+    3-tuple `(name, input, tool_use_id)`, not one shared ctx with
+    tool_use_id=None for the whole batch."""
+    from rolo_claude.tools.base import Tool, ToolContext
+    from rolo_claude.tools.base import ToolResult as TR
+    from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+
+    seen_ids = []
+
+    class _IdEchoTool(Tool):
+        name = "IdEcho"
+        is_read_only = True
+
+        def run(self, input, ctx):
+            seen_ids.append(ctx.tool_use_id)
+            return TR(f"id={ctx.tool_use_id}")
+
+    reg = ToolRegistry(tools=[_IdEchoTool()])
+    calls = [("IdEcho", {}, "toolu_a"), ("IdEcho", {}, "toolu_b")]
+    results = run_read_only_batch(reg, calls, ToolContext(cwd=Path(".")))
+    ctx.check(f"each call saw its own tool_use_id, got {sorted(seen_ids)}", sorted(seen_ids) == ["toolu_a", "toolu_b"])
+    ctx.check(f"results carry the matching ids in call order, got {[r.content for r in results]}",
+              [r.content for r in results] == ["id=toolu_a", "id=toolu_b"])
+
+
+@test
 def test_loop_dispatches_parallel_read_calls_correctly(ctx: Ctx):
     """A single assistant message with THREE parallel Read tool_use blocks
     -- the loop's own batching wiring must still pair each tool_result

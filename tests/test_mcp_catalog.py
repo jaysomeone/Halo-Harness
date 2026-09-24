@@ -83,12 +83,38 @@ def test_select_preload_zero_budget_defers_everything(ctx: Ctx):
 
 @test
 def test_select_preload_never_exceeds_cap_budget(ctx: Ctx):
+    """finding 1: preload is ONLY alwaysLoad + mcpPreload, so an
+    over-budget REQUEST (more mcpPreload names than cap_budget allows) is
+    what must be truncated -- "rest" (unrequested) tools never fill
+    leftover budget regardless of how much headroom cap_budget leaves."""
     mgr = _manager(tool_count=20)
     try:
         triples = mgr.all_tools()
-        preload, deferred = select_preload(triples, cap_budget=5)
-        ctx.check(f"exactly cap_budget preloaded, got {len(preload)}", len(preload) == 5)
-        ctx.check("the rest deferred", len(deferred) == 15)
+        requested_names = {t[1] for t in triples if t[1] != "mcp__fake__always_load_tool"}
+        ctx.check(f"at least 6 requestable names to work with, got {len(requested_names)}",
+                  len(requested_names) >= 6)
+        preload, deferred = select_preload(triples, preload_names=requested_names, cap_budget=5)
+        ctx.check(f"exactly cap_budget preloaded (never more), got {len(preload)}", len(preload) == 5)
+        ctx.check(f"the rest deferred, got preload={len(preload)} deferred={len(deferred)} total={len(triples)}",
+                  len(preload) + len(deferred) == len(triples))
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_select_preload_rest_never_fills_leftover_budget(ctx: Ctx):
+    """The bug finding 1 fixes, directly: with NO requested names at all,
+    a huge cap_budget must still preload ONLY the alwaysLoad tool -- never
+    quietly fill the rest of the budget with unrequested tools (that's
+    what put rolo's real catalog exactly at cap with zero headroom)."""
+    mgr = _manager(tool_count=20)
+    try:
+        triples = mgr.all_tools()
+        preload, deferred = select_preload(triples, cap_budget=1000)
+        names = [t[1] for t in preload]
+        ctx.check(f"only the alwaysLoad tool preloads, got {names}", names == ["mcp__fake__always_load_tool"])
+        ctx.check("every other tool -- however much budget is left -- is deferred",
+                  len(deferred) == len(triples) - 1)
     finally:
         mgr.close_all()
 
@@ -110,7 +136,10 @@ def _catalog(mgr, *, cap, preload_names=None, cap_budget=None):
 def test_catalog_search_select_finds_loaded_and_deferred(ctx: Ctx):
     mgr = _manager()
     try:
-        cat = _catalog(mgr, cap=30, cap_budget=2)
+        # finding 1: "echo" must be explicitly REQUESTED (mcpPreload-style)
+        # to be preloaded now -- select_preload no longer auto-fills
+        # leftover cap_budget with unrequested ("rest") tools.
+        cat = _catalog(mgr, cap=30, cap_budget=2, preload_names={"mcp__fake__echo"})
         defs, deferred_matched = cat.search("select:mcp__fake__echo,mcp__fake__error_tool")
         found_names = {d["name"] for d in defs}
         ctx.check(f"finds both (one loaded, one deferred), got {found_names}",
@@ -249,6 +278,95 @@ def test_toolsearch_next_request_carries_the_loaded_tool(ctx: Ctx):
         next_request_defs = cat.registry.definitions_for(cat.names)
         names = [d["name"] for d in next_request_defs]
         ctx.check("the loaded tool is now in the wire catalog", "mcp__fake__slow_tool" in names)
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_headless_preload_formula_toolsearch_load_at_databricks_and_openrouter_caps(ctx: Ctx):
+    """finding 16 test 1: the REAL headless.py formula (cap - len(built-in
+    registry)), at BOTH real host caps -- a ToolSearch load must reach the
+    wire catalog. This is exactly the path finding 1 broke: at cap 32/128
+    with the OLD select_preload, headroom differed wildly by provider and
+    a load could evict itself; slow_tool used to already be preloaded at
+    cap 30 (7 fake tools fit easily), silently defeating this whole test."""
+    from rolo_claude.agent.catalog import DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP
+    for cap in (DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP):
+        mgr = _manager()
+        try:
+            cat = _catalog(mgr, cap=cap)  # default cap_budget = headless.py's own "cap - len(registry)"
+            ctx.check(f"cap={cap}: only the alwaysLoad tool preloads",
+                      cat.names.count("mcp__fake__always_load_tool") == 1)
+            ctx.check(f"cap={cap}: slow_tool starts DEFERRED, not auto-filled into the wire catalog",
+                      "mcp__fake__slow_tool" in cat.deferred and "mcp__fake__slow_tool" not in cat.names)
+            tctx = ToolContext(cwd=REPO_DIR, registry=cat.registry, catalog=cat)
+            result = ToolSearchTool().run({"query": "select:mcp__fake__slow_tool"}, tctx)
+            ctx.check(f"cap={cap}: no error", result.is_error is False)
+            ref_names = ([b["tool_name"] for b in result.content if b.get("type") == "tool_reference"]
+                         if isinstance(result.content, list) else [])
+            ctx.check(f"cap={cap}: a real tool_reference for the newly loaded tool, got {ref_names}",
+                      ref_names == ["mcp__fake__slow_tool"])
+            next_names = [d["name"] for d in cat.registry.definitions_for(cat.names)]
+            ctx.check(f"cap={cap}: the NEXT request's wire catalog carries it", "mcp__fake__slow_tool" in next_names)
+        finally:
+            mgr.close_all()
+
+
+@test
+def test_catalog_load_never_evicts_the_tool_being_loaded(ctx: Ctx):
+    """finding 1's exact repro: cap sits with ZERO headroom above the
+    frozen set (nothing loaded-deferred yet) -- loading ONE more deferred
+    tool must be REFUSED, never evict itself (the only entry
+    `_loaded_order` would otherwise contain right after being added)."""
+    mgr = _manager()
+    try:
+        cat = _catalog(mgr, cap=len(ToolRegistry().names()) + 1, preload_names=set(), cap_budget=1)
+        ctx.check(f"zero headroom at start, len(names)={len(cat.names)} cap={cat.cap}", len(cat.names) == cat.cap)
+        deferred_name = sorted(cat.deferred)[0]
+        loaded = cat.load([deferred_name])
+        ctx.check(f"nothing could be evicted -> the load is REFUSED, not self-evicting, got loaded={loaded}",
+                  loaded == [] and deferred_name not in cat.names)
+        ctx.check(f"reported as refused, got {cat.last_refused}", cat.last_refused == [deferred_name])
+        ctx.check("still findable/re-triable later (never dropped forever)", deferred_name in cat.deferred)
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_toolsearch_reports_refused_load_with_no_tool_reference(ctx: Ctx):
+    """finding 1: ToolSearch must never claim a tool it COULDN'T fit is
+    now loaded -- no tool_reference block for a refused name, but its
+    schema is still shown (the model sees it this turn even if it can't
+    be called until something frees up room)."""
+    mgr = _manager()
+    try:
+        cat = _catalog(mgr, cap=len(ToolRegistry().names()) + 1, preload_names=set(), cap_budget=1)
+        deferred_name = sorted(cat.deferred)[0]
+        tctx = ToolContext(cwd=REPO_DIR, registry=cat.registry, catalog=cat)
+        result = ToolSearchTool().run({"query": f"select:{deferred_name}"}, tctx)
+        has_ref = isinstance(result.content, list) and any(b.get("type") == "tool_reference" for b in result.content)
+        ctx.check(f"no tool_reference block for a refused load, got {result.content!r}", not has_ref)
+        body = result.content if isinstance(result.content, str) else next(
+            (b["text"] for b in result.content if b.get("type") == "text"), "")
+        ctx.check(f"the schema is still shown this turn, got body[:300]={body[:300]!r}", deferred_name in body)
+        ctx.check(f"a clear explanation that it could not be loaded, got body={body!r}",
+                  "could not load" in body.lower())
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_refresh_deferred_for_server_adds_new_tools_leaves_loaded_alone(ctx: Ctx):
+    mgr = _manager()
+    try:
+        cat = _catalog(mgr, cap=30, cap_budget=2, preload_names={"mcp__fake__echo"})
+        loaded_names_before = list(cat.names)
+        cat.deferred.pop("mcp__fake__huge", None)  # simulate it having gone missing pre-refresh
+        cat.refresh_deferred_for_server("fake")
+        ctx.check("re-adds a tool the pool had lost", "mcp__fake__huge" in cat.deferred)
+        ctx.check("already-loaded tools untouched", cat.names == loaded_names_before)
+        ctx.check("an already-loaded tool is never re-added to the deferred pool",
+                  "mcp__fake__echo" not in cat.deferred)
     finally:
         mgr.close_all()
 

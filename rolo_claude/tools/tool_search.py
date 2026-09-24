@@ -19,13 +19,19 @@ import json
 
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
 
+# finding 13 must-do: Claude Code's own deferred-tool wording (this
+# build's actual, current help text -- the old copy's "This build has no
+# deferred MCP tools yet" placeholder was already false the moment ANY
+# MCP server was configured, and a model that took it literally never
+# tried ToolSearch for a real deferred name).
 DESCRIPTION = (
-    "Fetches full schema definitions for deferred tools so they can be called. This build has no "
-    "deferred MCP tools yet (every built-in tool is already fully loaded), so this simply looks "
-    "tools up by exact name or keyword over the registry -- once MCP tools exist, unloaded ones "
-    "will show up here too.\n\n"
+    "Fetches full schema definitions for deferred tools so they can be called. Deferred tools are "
+    "real, usable tools (mostly from MCP servers) that are not loaded into this conversation yet to "
+    "save context -- their names may already appear in this tool's own listings without a schema. "
+    "Call this before using one of those names directly, or to search by keyword when the exact name "
+    "isn't known.\n\n"
     "Query forms:\n"
-    "- \"select:Read,Edit,Grep\" -- fetch these exact tools by name\n"
+    "- \"select:<name>[,<name>...]\" -- load these exact tools by name\n"
     "- \"read files\" -- keyword search, ranked by relevance, up to max_results best matches"
 )
 
@@ -73,9 +79,19 @@ class ToolSearchTool(Tool):
                 return ToolResult(f"No tools matched {query!r}. Available tools: {', '.join(registry.names())}")
 
         loaded = catalog.load(deferred_matched) if (catalog is not None and deferred_matched) else []
+        # finding 1 must-do: a recognised, deferred name `load()` could NOT
+        # fit (catalog at cap, nothing loaded-deferred left to evict) --
+        # its schema is still shown above (found via `catalog.search`), but
+        # it must never get a tool_reference block promising it's usable
+        # NEXT turn when it isn't.
+        refused = list(getattr(catalog, "last_refused", []) or []) if catalog is not None else []
         body = json.dumps(results, indent=2)
         if missing:
             body += f"\n\n(not found: {', '.join(missing)})"
+        if refused:
+            body += (f"\n\n(could not load right now -- the tool catalog is full and nothing could be "
+                      f"freed to make room: {', '.join(refused)}. Try again after this turn, or call a "
+                      f"tool that's already loaded instead.)")
         if not loaded:
             return ToolResult(body)
 

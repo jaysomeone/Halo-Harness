@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Optional
@@ -78,11 +79,21 @@ def _cmd_list(rest: list) -> int:
     args = parser.parse_args(rest)
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
 
+    # finding 7: printed BEFORE the health check itself (build_manager's
+    # own start=True is what actually connects) -- the old position (after
+    # build_manager returned) meant the header always lagged behind the
+    # work it's supposed to announce.
+    print("Checking MCP server health...")
     try:
         from rolo_claude.mcp_setup import build_manager
         claude_json, settings = _session_inputs(cwd)
+        # finding 7: print_mode=False -- an unapproved .mcp.json server
+        # must show "⏸ Pending approval" and never actually be spawned just
+        # because someone ran `mcp list` in that project (print_mode=True
+        # here meant `-p`'s own auto-approve rule leaked into a read-only
+        # health check).
         manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
-                                          print_mode=True, start=True)
+                                          print_mode=False, start=True)
     except Exception as e:  # `mcp list` must NEVER crash -- report and degrade
         print(f"rolo-claude mcp list: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
         return 1
@@ -97,7 +108,6 @@ def _cmd_list(rest: list) -> int:
         if not statuses:
             print("No MCP servers configured.")
             return 0
-        print("Checking MCP server health...")
         for entry in sorted(statuses, key=lambda e: e.get("name", "")):
             print(format_mcp_list_line(entry))
         return 0
@@ -115,8 +125,10 @@ def _cmd_get(rest: list) -> int:
     try:
         from rolo_claude.mcp_setup import build_manager
         claude_json, settings = _session_inputs(cwd)
+        # finding 7: same print_mode=False as `mcp list` -- a health check
+        # must never auto-approve/spawn an unapproved .mcp.json server.
         manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
-                                          print_mode=True, start=True)
+                                          print_mode=False, start=True)
     except Exception as e:
         print(f"rolo-claude mcp get: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
         return 1
@@ -160,28 +172,59 @@ def _sniff_indent(text: str) -> int:
     return 2
 
 
-def _read_claude_json_raw() -> "tuple[dict, int]":
+def _read_claude_json_raw() -> "tuple[dict, int, bool, bool]":
+    """`(data, indent, had_trailing_newline, had_bom)` -- finding 8:
+    `_write_claude_json_raw` needs the SOURCE file's own trailing-newline
+    and BOM state to reproduce it exactly, rather than always adding a
+    newline the file might never have had and always stripping a BOM it
+    might have had. `had_bom` is checked on the raw bytes (`utf-8-sig`
+    decoding strips it transparently, so it's otherwise invisible from
+    the decoded text alone)."""
     path = claude_json_path()
     if not path.exists():
-        return {}, 2
-    text = path.read_text(encoding="utf-8-sig")
+        return {}, 2, True, False
+    raw_bytes = path.read_bytes()
+    had_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
+    text = raw_bytes.decode("utf-8-sig")
+    had_trailing_newline = text.endswith("\n")
     data = json.loads(text) if text.strip() else {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} does not contain a JSON object")
-    return data, _sniff_indent(text)
+    return data, _sniff_indent(text), had_trailing_newline, had_bom
 
 
-def _write_claude_json_raw(data: dict, indent: int) -> None:
+def _write_claude_json_raw(data: dict, indent: int, *, trailing_newline: bool = True, bom: bool = False) -> None:
     """Read-modify-write: `data` came FROM `_read_claude_json_raw`, so
     every key this process never touched is still exactly as parsed
     (dict insertion order == source JSON order) -- only the one path
-    `add`/`add-json`/`remove` mutated actually changes. tmp + `os.replace`
-    for atomicity, same pattern as `permissions.add_allow_rule`/
-    `theme.set_config_value`."""
+    `add`/`add-json`/`remove` mutated actually changes.
+
+    finding 8 fixes, all verified against rolo's real 66837-byte
+    `~/.claude.json`: `ensure_ascii=False` (the old `ensure_ascii=True`
+    default re-escaped all 40+ non-ASCII characters in that file to
+    `\\uXXXX`, starting at the first U+2014); `trailing_newline`/`bom`
+    (from `_read_claude_json_raw`) reproduce the source's own state
+    instead of always adding a newline / always stripping a BOM; the
+    replaced file's permission bits are copied from the ORIGINAL before
+    `os.replace` (on Kali, a 0600 file used to become 0644 -- `tmp.write_
+    text`'s new file gets the process umask's default, not the source's
+    own mode). tmp + `os.replace` for atomicity, same pattern as
+    `permissions.add_allow_rule`/`theme.set_config_value`."""
     path = claude_json_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=indent, ensure_ascii=False)
+    if trailing_newline:
+        text += "\n"
+    raw = text.encode("utf-8")
+    if bom:
+        raw = b"\xef\xbb\xbf" + raw
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(data, indent=indent) + "\n", encoding="utf-8")
+    tmp.write_bytes(raw)
+    try:
+        if path.exists():
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+    except OSError:
+        pass
     os.replace(tmp, path)
 
 
@@ -233,7 +276,7 @@ def _store_entry(*, scope: str, name: str, entry: dict, cwd: Path) -> str:
         _write_dot_mcp_json(mcp_json_path, data)
         return str(mcp_json_path)
 
-    data, indent = _read_claude_json_raw()
+    data, indent, trailing_newline, bom = _read_claude_json_raw()
     if scope == "user":
         data.setdefault("mcpServers", {})
         data["mcpServers"][name] = entry
@@ -243,7 +286,7 @@ def _store_entry(*, scope: str, name: str, entry: dict, cwd: Path) -> str:
         proj = data["projects"].setdefault(key, {})
         proj.setdefault("mcpServers", {})
         proj["mcpServers"][name] = entry
-    _write_claude_json_raw(data, indent)
+    _write_claude_json_raw(data, indent, trailing_newline=trailing_newline, bom=bom)
     return str(claude_json_path())
 
 
@@ -257,28 +300,53 @@ _ADD_FLAGS_WITH_VALUE = {
 
 def _parse_add_argv(rest: list) -> "tuple[dict, list]":
     """Manual flag extraction instead of argparse: `-e`/`-H`/etc take a
-    value and may appear ANYWHERE, but the trailing `<commandOrUrl>
-    [args...]` positionals are very likely to themselves start with `-`
-    (`npx -y @playwright/mcp@latest --headless`) -- argparse's own
-    `nargs="*"` positional refuses to swallow dash-prefixed tokens without
-    an explicit `--` separator the real `claude mcp add` doesn't require,
-    so this walks `rest` by hand instead. Returns `(opts, positionals)`."""
+    value and may appear ANYWHERE before the name, but the trailing
+    `<commandOrUrl> [args...]` positionals are very likely to themselves
+    start with `-` (`npx -y @playwright/mcp@latest --headless`) --
+    argparse's own `nargs="*"` positional refuses to swallow dash-
+    prefixed tokens without an explicit `--` separator, so this walks
+    `rest` by hand instead. Returns `(opts, positionals)`.
+
+    finding 9 fixes: (a) `mcp add name -- cmd args` (Claude Code's own
+    documented form) is now handled -- the FIRST bare `--` token is
+    consumed as a plain separator rather than stored as the command
+    itself (`{"command": "--", ...}`, a server that could never start);
+    a LATER literal `--` (part of the command's own arguments) is left
+    alone. (b) `--env=KEY=VALUE` / `--scope=x` inline forms are accepted
+    alongside the existing `--env KEY=VALUE` two-token form (still only
+    before the first positional, same as every other flag)."""
     opts: dict = {"transport": "stdio", "scope": "local", "env": [], "header": [],
                   "client_id": None, "client_secret": None, "callback_port": None, "cwd": None}
     positionals: list = []
     i = 0
     seen_positionals = False
+    dash_dash_consumed = False
     while i < len(rest):
         tok = rest[i]
-        key = _ADD_FLAGS_WITH_VALUE.get(tok)
-        if key is not None and not seen_positionals:
-            value = rest[i + 1] if i + 1 < len(rest) else ""
-            if key.endswith("*"):
-                opts[key[:-1]].append(value)
-            else:
-                opts[key] = value
-            i += 2
+        if tok == "--" and not dash_dash_consumed:
+            dash_dash_consumed = True
+            i += 1
             continue
+        if not seen_positionals:
+            key = _ADD_FLAGS_WITH_VALUE.get(tok)
+            if key is None and "=" in tok:
+                flag, _, value = tok.partition("=")
+                inline_key = _ADD_FLAGS_WITH_VALUE.get(flag)
+                if inline_key is not None:
+                    if inline_key.endswith("*"):
+                        opts[inline_key[:-1]].append(value)
+                    else:
+                        opts[inline_key] = value
+                    i += 1
+                    continue
+            elif key is not None:
+                value = rest[i + 1] if i + 1 < len(rest) else ""
+                if key.endswith("*"):
+                    opts[key[:-1]].append(value)
+                else:
+                    opts[key] = value
+                i += 2
+                continue
         positionals.append(tok)
         seen_positionals = True  # once the FIRST positional (the name) appears, nothing after it is a flag
         i += 1
@@ -365,12 +433,12 @@ def _cmd_remove(rest: list) -> int:
                     print(f"Removed MCP server {args.name!r} from project scope ({mcp_json_path})")
                     return 0
                 continue
-            data, indent = _read_claude_json_raw()
+            data, indent, trailing_newline, bom = _read_claude_json_raw()
             if scope == "user":
                 servers = data.get("mcpServers")
                 if isinstance(servers, dict) and args.name in servers:
                     del servers[args.name]
-                    _write_claude_json_raw(data, indent)
+                    _write_claude_json_raw(data, indent, trailing_newline=trailing_newline, bom=bom)
                     print(f"Removed MCP server {args.name!r} from user scope")
                     return 0
             else:  # local
@@ -382,7 +450,7 @@ def _cmd_remove(rest: list) -> int:
                             servers = prec.get("mcpServers")
                             if isinstance(servers, dict) and args.name in servers:
                                 del servers[args.name]
-                                _write_claude_json_raw(data, indent)
+                                _write_claude_json_raw(data, indent, trailing_newline=trailing_newline, bom=bom)
                                 print(f"Removed MCP server {args.name!r} from local scope")
                                 return 0
         except (OSError, ValueError) as e:
