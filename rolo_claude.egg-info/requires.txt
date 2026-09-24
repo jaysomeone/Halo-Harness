@@ -1,6 +1,0 @@
-textual==8.2.8
-rich<16,>=14
-mcp<3,>=1.26
-
-[dev]
-textual-dev

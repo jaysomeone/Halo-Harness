@@ -1,2 +1,0 @@
-[console_scripts]
-rolo-claude = rolo_claude.cli:main
