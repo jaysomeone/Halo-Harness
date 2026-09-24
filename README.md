@@ -44,7 +44,6 @@ The installed `claude-bridge` wrapper forwards its whole argument list to `bridg
 
 ```sh
 claude-bridge --model or:deepseek/deepseek-v3.2 -p "reply with the single word pong"
-claude-bridge --model or:deepseek/deepseek-v3.2 -p "reply with the single word pong"
 claude-bridge -p "reply with the single word pong"
 claude-bridge                       # interactive
 ```
