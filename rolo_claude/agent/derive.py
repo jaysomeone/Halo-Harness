@@ -102,3 +102,33 @@ def content_hash(system_text: str, messages: list, tools) -> str:
         sort_keys=True, ensure_ascii=False, default=str,
     )
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+# H2 finding 4: keys that vary run-to-run from harness POLICY (a budget
+# calculation, a --effort flag, an OpenRouter pin) rather than CONVERSATION
+# CONTENT -- excluded so the same logical conversation always hashes the
+# same regardless of which max_tokens/sampling/pin choice happened to be in
+# effect for a given call.
+HASH_POLICY_KEYS = frozenset({
+    "max_tokens", "max_completion_tokens", "temperature", "top_p", "top_k",
+    "provider", "usage", "reasoning", "reasoning_effort", "stream_options",
+})
+
+
+def content_hash_from_oai_body(body: dict) -> str:
+    """SHA-256 over the EXACT OpenAI-dialect wire body a request was sent
+    with, minus `HASH_POLICY_KEYS` -- this is the log's own "what did we
+    actually send" hash (agent/loop.py's `Session._step`, stored on the
+    assistant node as `request_hash`), independent of `content_hash` above
+    (the Anthropic-shaped "what does the log reconstruct to" hash tests use
+    to prove the two agree via `derive_request(upto=seq)` +
+    `providers.request.build_request_body`). Hashing the body ACTUALLY SENT
+    -- not a body re-derived after the fact from whatever the tool registry
+    happens to return right now -- is what makes the runtime assertion
+    non-tautological: a tool-description change between the original run
+    and a later replay changes this hash, instead of silently passing
+    because both sides re-derived from the SAME (already-changed)
+    registry."""
+    filtered = {k: v for k, v in body.items() if k not in HASH_POLICY_KEYS}
+    canon = json.dumps(filtered, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()

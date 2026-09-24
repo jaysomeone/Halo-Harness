@@ -1,24 +1,22 @@
 """tests.helpers.fake_home -- builds a temp home directory mirroring rolo's
 real ~/.claude layout (plan D-CFG "Fixtures"), for BRIDGE_TEST_HOME.
 
-settings.local.json is a byte-for-byte SNAPSHOT of rolo's real 19 rules
-(finding 14: the suite must not depend on whatever settings.local.json
-happens to exist on the machine running it -- a prior version copied the
-live file, which passed only on rolo's own box and read 27+ rules on any
-other machine, incl. the Kali VM this suite ultimately runs on). settings.json
-still falls back to a synthetic stand-in when rolo's real file isn't present,
-since nothing asserts its exact shape/count the way the 19-rules test does.
+Both settings.json and settings.local.json are ALWAYS the synthetic
+stand-ins below, NEVER a copy of whatever's on the machine running the
+suite (finding 14/16: a prior version copied the live settings.json/
+settings.local.json when present, so the suite's actual behavior -- model
+name, permission mode, the count and shape of settings.local.json's rules
+-- silently depended on whichever machine happened to run it, passing only
+on rolo's own box and reading a different rule count on any other, incl.
+the Kali VM this suite ultimately runs on).
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
-
-_REAL_HOME = Path.home()
 
 # Fallback (used only if the real files aren't present on this machine) --
 # the SAME 19-rule shape/escaping as rolo's real settings.local.json, a
@@ -106,14 +104,6 @@ def _write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
 
 
-def _copy_or_fallback(real_path: Path, dest_path: Path, fallback_obj) -> None:
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    if real_path.exists():
-        shutil.copyfile(real_path, dest_path)
-    else:
-        _write_json(dest_path, fallback_obj)
-
-
 def build_fake_home(root: Optional[Path] = None) -> dict:
     """Build the fixture under `root` (a fresh tempdir if not given) and
     return a dict of useful paths: home, claude_dir, proj, sub, memory_dir."""
@@ -122,11 +112,13 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
 
-    # settings.json falls back to a synthetic stand-in when rolo's real file
-    # isn't present on this machine; settings.local.json is ALWAYS the fixed
-    # 19-rule snapshot above, regardless of what's on the machine running the
-    # tests (finding 14 -- this file's own docstring explains why).
-    _copy_or_fallback(_REAL_HOME / ".claude" / "settings.json", claude_dir / "settings.json", _FALLBACK_SETTINGS_JSON)
+    # finding 16: settings.json is ALWAYS the synthetic stand-in now, same
+    # as settings.local.json below -- a prior version copied rolo's real
+    # settings.json when present, so the suite's actual behavior depended
+    # on whatever happened to be in it on whichever machine ran the tests
+    # (the model name, permission mode, etc.), exactly the "must not depend
+    # on the live machine" defect finding 14/16 flags for settings.local.json.
+    _write_json(claude_dir / "settings.json", _FALLBACK_SETTINGS_JSON)
     _write_json(claude_dir / "settings.local.json", _SETTINGS_LOCAL_JSON)
 
     # ~/.claude.json -- projects keyed in BOTH separator forms, plus a

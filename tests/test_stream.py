@@ -130,6 +130,29 @@ def test_mid_stream_error_event_no_message_stop(ctx: Ctx):
 
 
 @test
+def test_finding_12_socket_shut_after_mid_stream_error(ctx: Ctx):
+    """finding 12: `terminal_reached` is set true ONLY for done/eof/exc --
+    a mid-stream `{"error":...}` chunk must still force-shut the socket in
+    `finally` (verified pre-fix: the mock kept streaming 30 more chunks
+    over ~3s with the reader thread still alive)."""
+    mock = MockUpstream().start()
+    try:
+        t0 = time.monotonic()
+        events = list(stream_completion(_req(mock, "error-then-keeps-streaming", ping_interval=15.0)))
+        dt = time.monotonic() - t0
+        kinds = [e.get("type") for e in events]
+        ctx.check("an error event was emitted", "error" in kinds)
+        ctx.check(f"returned promptly, not after the mock's ~3s of post-error chunks, got dt={dt:.2f}s", dt < 1.5)
+        deadline = time.monotonic() + 5.0
+        while not mock.disconnect_events and time.monotonic() < deadline:
+            time.sleep(0.1)
+        ctx.check(f"the mock's own write attempt saw the disconnect (the socket was force-shut), "
+                   f"got {mock.disconnect_events}", len(mock.disconnect_events) >= 1)
+    finally:
+        mock.stop()
+
+
+@test
 def test_unknown_scenario_maps_to_upstream_error(ctx: Ctx):
     mock = MockUpstream().start()
     try:

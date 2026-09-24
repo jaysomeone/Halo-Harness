@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from rolo_claude.tools.base import ToolContext
 from rolo_claude.tools.read import ReadTool
 from rolo_claude.tools.registry import ToolRegistry
@@ -37,8 +37,11 @@ def test_read_offset_and_limit(ctx: Ctx):
     result = tool.run({"file_path": str(f), "offset": 5, "limit": 3}, ToolContext(cwd=d))
     ctx.check("offset+limit selects the right window", "L6" in result.content and "L7" in result.content and "L8" in result.content)
     ctx.check("line before the window absent", "L5\n" not in result.content and not result.content.strip().startswith("     5"))
-    ctx.check("line after the window absent from the body proper", "L9" not in result.content.split("more line")[0])
-    ctx.check("truncation note mentions remaining lines", "more line" in result.content)
+    ctx.check("line after the window absent from the body proper", "L9" not in result.content.split("pass offset")[0])
+    # finding 10: the hint is offset-based, deliberately WITHOUT a precise
+    # remaining-line count -- computing one would mean reading the rest of
+    # the file, exactly what streaming offset+limit is meant to avoid.
+    ctx.check("truncation note hints the next offset to continue from", "pass offset=8 to continue" in result.content)
 
 
 @test
@@ -85,6 +88,62 @@ def test_read_empty_file(ctx: Ctx):
     tool = ReadTool()
     result = tool.run({"file_path": str(f)}, ToolContext(cwd=d))
     ctx.check("empty file is not an error", result.is_error is False)
+
+
+@test
+def test_read_refuses_non_regular_file(ctx: Ctx):
+    """finding 10: a FIFO must be refused, never opened for a blocking
+    read (Read /dev/zero, /dev/urandom, or a named pipe hangs the process
+    or exhausts memory) -- POSIX only (os.mkfifo doesn't exist on
+    Windows)."""
+    import os
+    if not hasattr(os, "mkfifo"):
+        raise SkipTest("os.mkfifo not available on this platform (Windows)")
+    d = Path(tempfile.mkdtemp(prefix="read-tool-fifo-"))
+    fifo_path = d / "a.fifo"
+    os.mkfifo(fifo_path)
+    tool = ReadTool()
+    result = tool.run({"file_path": str(fifo_path)}, ToolContext(cwd=d))
+    ctx.check("a FIFO is refused, not opened", result.is_error is True)
+    ctx.check("error names it as non-regular", "regular file" in result.content.lower())
+
+
+@test
+def test_read_flags_binary_content(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-tool-binary-"))
+    f = d / "data.bin"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4)
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d))
+    ctx.check("a binary file is flagged as an error, not dumped as text", result.is_error is True)
+    ctx.check("error names it as binary", "binary" in result.content.lower())
+
+
+@test
+def test_read_truncates_a_very_long_line(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-tool-longline-"))
+    f = d / "minified.js"
+    f.write_text("x=" + ("a" * 5000) + ";\nshort line\n", encoding="utf-8")
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d))
+    ctx.check("not an error", result.is_error is False)
+    first_line = result.content.splitlines()[0]
+    ctx.check(f"first line capped well under the raw 5000+ chars, got {len(first_line)}", len(first_line) < 2200)
+    ctx.check("truncation is noted on the line itself", "truncated" in first_line)
+    ctx.check("the short second line still comes through untouched", "short line" in result.content)
+
+
+@test
+def test_read_caps_total_result_size(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-tool-hugeresult-"))
+    f = d / "huge.txt"
+    # ~2000 lines * ~100 chars/line ~ 200k chars, comfortably over the
+    # ~100k-char (~25k token) result cap even with a generous default limit.
+    f.write_text("\n".join(("y" * 95) for _ in range(2000)) + "\n", encoding="utf-8")
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d))
+    ctx.check(f"result stays near the ~25k-token cap, got {len(result.content)} chars", len(result.content) < 105_000)
+    ctx.check("size-cap hint present", "truncated at ~25000 tokens" in result.content)
 
 
 @test

@@ -21,8 +21,13 @@ _READ_TOOL = {"name": "Read", "description": "reads a file", "input_schema": {
 }}
 
 
-def _messages_with_tool_turn(reasoning_value=None):
-    node_reasoning = {"format": "text", "value": reasoning_value} if reasoning_value is not None else None
+def _messages_with_tool_turn(reasoning_text=None, reasoning_details=None):
+    """`reasoning` node shape is `{"text": str|None, "details": list|None}`
+    (H2: see agent/loop.py's `_step` and providers/hooks.reasoning_echo) --
+    NOT the pre-H2 `{"format", "value"}` shape, which could only ever carry
+    one of the two at a time (finding 2's second bug)."""
+    node_reasoning = ({"text": reasoning_text, "details": reasoning_details}
+                       if reasoning_text is not None or reasoning_details is not None else None)
     msg = {"role": "assistant", "content": [
         {"type": "text", "text": "ok"},
         {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"file_path": "a.py"}},
@@ -42,7 +47,7 @@ def test_deepseek_reasoning_content_injected_with_and_without_tools(ctx: Ctx):
     reset_model_table_cache()
     route = Route(provider="databricks", upstream_model="databricks-deepseek-v4-1-flash", dialect="openai-chat")
     profile = resolve_profile(route)
-    messages = _messages_with_tool_turn(reasoning_value="my reasoning trace")
+    messages = _messages_with_tool_turn(reasoning_text="my reasoning trace")
 
     with_tools = build_request_body(system_text="SYS", messages=messages, tools=[_READ_TOOL], route=route, profile=profile)
     assistants = [m for m in with_tools["messages"] if m.get("role") == "assistant"]
@@ -61,14 +66,57 @@ def test_openrouter_reasoning_details_verbatim_and_ordered(ctx: Ctx):
     reset_model_table_cache()
     route = Route(provider="openrouter", upstream_model="deepseek/deepseek-v4.1-flash", dialect="openai-chat")
     profile = resolve_profile(route)
+    ctx.check("deepseek-v4.1-flash is a dual-field (echo_required_400) row", profile.reasoning_dual_field is True)
     details = [{"type": "reasoning.text", "text": "step 1"}, {"type": "reasoning.summary", "text": "step 2"}]
-    messages = _messages_with_tool_turn(reasoning_value=details)
+    messages = _messages_with_tool_turn(reasoning_text="accumulated reasoning text", reasoning_details=details)
     body = build_request_body(system_text="SYS", messages=messages, tools=[_READ_TOOL], route=route, profile=profile)
     assistants = [m for m in body["messages"] if m.get("role") == "assistant"]
     ctx.check("reasoning_details replayed VERBATIM (identity, not a copy that dropped fields)",
               assistants[0].get("reasoning_details") == details)
     ctx.check("order preserved exactly", [d["type"] for d in assistants[0]["reasoning_details"]] == ["reasoning.text", "reasoning.summary"])
-    ctx.check("no reasoning_content key on an OpenRouter (details-replay) profile", "reasoning_content" not in assistants[0])
+    # finding 2's second bug: a DeepSeek V4 (echo_required_400) row on
+    # OpenRouter must ALSO carry reasoning_content beside the verbatim
+    # details array -- DeepSeek 400s ("reasoning_content ... must be passed
+    # back") if it's missing, regardless of whether reasoning_details is
+    # also present; the pre-H2 test asserted the OPPOSITE (absence), which
+    # is exactly what finding 2 flagged as a bug, not a spec.
+    ctx.check("reasoning_content ALSO present (dual-field DeepSeek V4 rule), got "
+              f"{assistants[0].get('reasoning_content')!r}", assistants[0].get("reasoning_content") == "accumulated reasoning text")
+
+    empty_turn_messages = _messages_with_tool_turn(reasoning_text=None, reasoning_details=None)
+    empty_body = build_request_body(system_text="SYS", messages=empty_turn_messages, tools=[_READ_TOOL], route=route, profile=profile)
+    empty_assistants = [m for m in empty_body["messages"] if m.get("role") == "assistant"]
+    ctx.check('dual-field reasoning_content is "" (not omitted) when no reasoning was captured that turn',
+              empty_assistants[0].get("reasoning_content") == "")
+
+
+@test
+def test_finding_8_empty_assistant_node_does_not_shift_reasoning_alignment(ctx: Ctx):
+    """finding 8's exact repro: an assistant node with EMPTY content (spent
+    its whole budget thinking) carrying reasoning R1, followed by a
+    tool_use assistant node carrying R2. Pre-H2, `_flatten_messages` simply
+    DROPPED the empty node's proto, so R2 ended up attached to the position
+    R1 should have had, and R1 was lost. Every assistant proto must survive
+    (finding 8's other half: content: "" instead of being dropped)."""
+    reset_model_table_cache()
+    route = Route(provider="databricks", upstream_model="databricks-deepseek-v4-1-flash", dialect="openai-chat")
+    profile = resolve_profile(route)
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "q1"}]},
+        {"role": "assistant", "content": [], "reasoning": {"text": "R1 -- spent the whole budget thinking", "details": None}},
+        {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"file_path": "a.py"}}],
+         "reasoning": {"text": "R2", "details": None}},
+    ]
+    body = build_request_body(system_text="SYS", messages=messages, tools=[_READ_TOOL], route=route, profile=profile)
+    assistants = [m for m in body["messages"] if m.get("role") == "assistant"]
+    ctx.check(f"BOTH assistant protos survive (the empty one is not dropped), got {len(assistants)}", len(assistants) == 2)
+    ctx.check(f"the empty proto's content is \"\" (never dropped, never omitted), got {assistants[0].get('content')!r}",
+              assistants[0].get("content") == "")
+    ctx.check(f"the FIRST proto gets R1, never R2's reasoning, got {assistants[0].get('reasoning_content')!r}",
+              assistants[0].get("reasoning_content") == "R1 -- spent the whole budget thinking")
+    ctx.check(f"the SECOND (tool_use) proto gets R2, never R1's leftover, got {assistants[1].get('reasoning_content')!r}",
+              assistants[1].get("reasoning_content") == "R2")
 
 
 @test
@@ -162,6 +210,46 @@ def test_schema_simplifier_caps_properties_and_strips_ref(ctx: Ctx):
     ctx.check(f"properties capped at 16, got {len(simplified['properties'])}", len(simplified["properties"]) == 16)
     ctx.check("required list pruned to only still-present keys", set(simplified["required"]) <= set(simplified["properties"]))
     ctx.check("$ref node replaced with a permissive object", simplified["nested"] == {"type": "object"})
+
+
+@test
+def test_finding_13_pattern_property_survives_schema_keyword_strip(ctx: Ctx):
+    """finding 13's exact repro: a Grep/Glob-shaped schema has a PROPERTY
+    literally named `pattern` -- the pre-H2 simplifier stripped every dict
+    key named pattern/anyOf/oneOf/allOf/$defs AT ANY DEPTH, including
+    property NAMES inside `properties`, so this tool's `pattern` parameter
+    vanished while `required: ["pattern"]` stayed, breaking the tool on
+    every Databricks request. A genuine `pattern` SCHEMA KEYWORD (a regex
+    constraint on a string) must still be stripped."""
+    grep_shaped_schema = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "the regex pattern to search for", "pattern": "^.+$"},
+            "path": {"type": "string"},
+        },
+        "required": ["pattern"],
+    }
+    simplified = simplify_schema_for_databricks(grep_shaped_schema)
+    ctx.check(f"the 'pattern' PROPERTY survives, got {simplified['properties']}", "pattern" in simplified["properties"])
+    ctx.check("required still names it", simplified["required"] == ["pattern"])
+    ctx.check("the property's OWN 'pattern' schema KEYWORD (a regex constraint) is still stripped",
+              "pattern" not in simplified["properties"]["pattern"])
+    ctx.check("the property's other keys survive", simplified["properties"]["pattern"]["type"] == "string")
+
+
+@test
+def test_finding_13_any_of_nullable_collapses_to_the_real_type(ctx: Ctx):
+    """finding 13's other half: `anyOf: [T, {"type": "null"}]` (the common
+    "optional nullable" shape) must collapse to T, not lose its type
+    entirely the way blanket-deleting `anyOf` did."""
+    schema = {"type": "object", "properties": {
+        "count": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "optional count"},
+    }}
+    simplified = simplify_schema_for_databricks(schema)
+    prop = simplified["properties"]["count"]
+    ctx.check(f"anyOf gone, got {prop}", "anyOf" not in prop)
+    ctx.check(f"collapsed to the real (non-null) type, got {prop}", prop.get("type") == "integer")
+    ctx.check("other keys on the node survive the collapse", prop.get("description") == "optional count")
 
 
 @test

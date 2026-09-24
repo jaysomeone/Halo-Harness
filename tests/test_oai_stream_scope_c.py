@@ -5,6 +5,7 @@ malformed JSON tagging (strict_tool_json); strip_display_artifacts;
 map_usage's additive keys; capture_reasoning is opt-in only (proxy default
 False is completely unaffected).
 """
+import json
 import sys
 from pathlib import Path
 
@@ -118,6 +119,95 @@ def test_capture_reasoning_opt_in_only(ctx: Ctx):
     ctx.check("strict_tool_json defaults False (proxy path)", sm_default.strict_tool_json is False)
     sm_default.feed_chunk({"choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": "should not be captured"}}]})
     ctx.check("reasoning_text stays empty without the opt-in", sm_default.reasoning_text == "")
+
+
+@test
+def test_finding_2_streamed_reasoning_details_fragments_replay_merged(ctx: Ctx):
+    """finding 16 required test #2: OpenRouter streams reasoning_details as
+    PER-CHUNK FRAGMENTS -- "last chunk wins" used to silently truncate
+    everything but the final fragment (finding 2's own repro: "I need " +
+    "to read." logged/replayed as only the last fragment)."""
+    sm = OpenAIStreamToAnthropic("m", 10, capture_reasoning=True)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {
+        "reasoning_details": [{"type": "reasoning.text", "index": 0, "text": "I need "}]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {
+        "reasoning_details": [{"type": "reasoning.text", "index": 0, "text": "to read."}]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"content": "ok"}}]})
+    sm.on_eof()
+    ctx.check(f"fragments concatenated, not just the last one, got {sm.reasoning_details}",
+              sm.reasoning_details == [{"type": "reasoning.text", "index": 0, "text": "I need to read."}])
+
+
+@test
+def test_finding_2_reasoning_details_merge_by_type_and_index(ctx: Ctx):
+    """A different (type,index) pair is a SEPARATE entry, never concatenated
+    into the wrong one -- and a type change at the same index starts fresh
+    rather than mixing two kinds of fragment together."""
+    sm = OpenAIStreamToAnthropic("m", 10, capture_reasoning=True)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"reasoning_details": [
+        {"type": "reasoning.text", "index": 0, "text": "part-a-1 "},
+        {"type": "reasoning.summary", "index": 1, "summary": "sum-1 "},
+    ]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"reasoning_details": [
+        {"type": "reasoning.text", "index": 0, "text": "part-a-2"},
+        {"type": "reasoning.summary", "index": 1, "summary": "sum-2"},
+    ]}}]})
+    sm.on_eof()
+    ctx.check(f"index 0 concatenated within its own type, got {sm.reasoning_details}",
+              sm.reasoning_details[0] == {"type": "reasoning.text", "index": 0, "text": "part-a-1 part-a-2"})
+    ctx.check(f"index 1 concatenated separately, got {sm.reasoning_details}",
+              sm.reasoning_details[1] == {"type": "reasoning.summary", "index": 1, "summary": "sum-1 sum-2"})
+
+
+@test
+def test_finding_11_explicit_null_name_and_arguments_handled(ctx: Ctx):
+    """finding 16 required test #7 / finding 11 rules 1-2: explicit-null
+    continuation deltas must never overwrite a captured name, and must
+    never raise on `arguments: null` (pre-H2: TypeError trying to
+    concatenate None onto the accumulated string)."""
+    sm = OpenAIStreamToAnthropic("m", 10)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "call_1", "type": "function", "function": {"name": "Read", "arguments": '{"a":'}},
+    ]}}]})
+    # explicit-null continuation: must not clobber "Read", must not raise on null arguments
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "function": {"name": None, "arguments": None}},
+    ]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "function": {"arguments": ' 1}'}},
+    ]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+    events = sm.on_eof()
+    starts = [e for e in events if e.get("type") == "content_block_start" and e["content_block"].get("type") == "tool_use"]
+    ctx.check(f"exactly one tool_use (never split/renamed to 'unknown'), got {len(starts)}", len(starts) == 1)
+    ctx.check(f"name survived the null delta, got {starts[0]['content_block']['name']!r}",
+              starts[0]["content_block"]["name"] == "Read")
+    deltas = [e for e in events if e.get("type") == "content_block_delta"]
+    ctx.check("arguments assembled correctly around the null (never raised)",
+              json.loads(deltas[0]["delta"]["partial_json"]) == {"a": 1})
+
+
+@test
+def test_finding_11_index_less_id_change_continues_current_call(ctx: Ctx):
+    """finding 11 rule 3: a GLM-style id change on an index-less
+    continuation delta must continue the CURRENT call, never split into
+    two malformed calls."""
+    sm = OpenAIStreamToAnthropic("m", 10)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "chatcmpl-tool-abc", "type": "function", "function": {"name": "Read", "arguments": '{"file_'}},
+    ]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"id": "toolcall0", "function": {"arguments": 'path":"a"}'}},
+    ]}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+    events = sm.on_eof()
+    starts = [e for e in events if e.get("type") == "content_block_start" and e["content_block"].get("type") == "tool_use"]
+    ctx.check(f"ONE call, not split into two, got {len(starts)}", len(starts) == 1)
+    deltas = [e for e in events if e.get("type") == "content_block_delta"]
+    ctx.check("arguments assembled from BOTH deltas despite the id change",
+              json.loads(deltas[0]["delta"]["partial_json"]) == {"file_path": "a"})
 
 
 if __name__ == "__main__":

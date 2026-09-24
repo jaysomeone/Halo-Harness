@@ -318,6 +318,20 @@ def _scn_error_mid_stream(h, body):
     end_sse(h)
 
 
+def _scn_error_then_keeps_streaming(h, body):
+    """finding 12: an upstream that sends a mid-stream error chunk and then
+    KEEPS SENDING more data afterward (verified: 30 more chunks over ~3s) --
+    proves the client actually shuts the socket instead of just stopping
+    its own read loop while the connection dangles open."""
+    start_sse(h)
+    write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+    write_sse_chunk(h, None, {"error": {"message": "upstream exploded", "type": "server_error"}})
+    for _ in range(30):
+        write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"content": "x"}}]})
+        time.sleep(0.1)
+    end_sse(h)
+
+
 def _scn_die_mid_stream(h, body):
     start_sse(h)
     write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
@@ -478,6 +492,7 @@ SCENARIOS = {
     "no-done-no-finish": _scn_no_done_no_finish,
     "usage-after-finish": _scn_usage_after_finish,
     "error-mid-stream": _scn_error_mid_stream,
+    "error-then-keeps-streaming": _scn_error_then_keeps_streaming,
     "die-mid-stream": _scn_die_mid_stream,
     "json-not-sse": _scn_json_not_sse,
     "slow": _scn_slow,
@@ -572,8 +587,12 @@ class MockUpstream:
             self._requests.clear()
             self.disconnect_events.clear()
 
-    def start(self) -> "MockUpstream":
-        self._server = _ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    def start(self, port: int = 0) -> "MockUpstream":
+        """`port=0` (default) picks a free OS-assigned port; a caller that
+        needs to bind a SPECIFIC port (H0 #14 case 6: connect to a port
+        with nothing listening yet, then bring the mock up on that exact
+        port to prove the connect-retry) passes it explicitly."""
+        self._server = _ThreadingHTTPServer(("127.0.0.1", port), _Handler)
         self._server.mock = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

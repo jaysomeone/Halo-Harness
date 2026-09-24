@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import uuid
 
 from rolo_claude.providers.config import jdumps
 from rolo_claude.providers.errors import _coerce_text, flatten_content_parts
+from rolo_claude.providers.hooks import (
+    args_repair, normalize_tool_id, stream_aggregate_apply, stream_aggregate_key, think_tag_strip,
+)
 
 log = logging.getLogger("bridge")
 
@@ -28,14 +30,20 @@ class OpenAIStreamToAnthropic:
     (tagged `_truncated_by_length`) and malformed JSON is tagged
     `_malformed_json` instead of being silently dropped/swallowed to `{}`."""
     def __init__(self, requested_model: str, input_tokens_estimate: int, msg_id: str | None = None,
-                 capture_reasoning: bool = False, strict_tool_json: bool = False):
+                 capture_reasoning: bool = False, strict_tool_json: bool = False,
+                 tool_id_format: str = "mint"):
         self.msg_id = msg_id or f"msg_{uuid.uuid4().hex[:24]}"
         self.requested_model = requested_model
         self.input_tokens_estimate = input_tokens_estimate
         self.capture_reasoning = capture_reasoning
         self.strict_tool_json = strict_tool_json
+        # H2 finding 1: which row-driven id transform to apply at finalize
+        # time (providers/hooks.py.normalize_tool_id) -- "preserve" (the
+        # proxy's permanent default) keeps this byte-for-byte unchanged.
+        self.tool_id_format = tool_id_format
         self.reasoning_text = ""
         self.reasoning_details: list | None = None
+        self._reasoning_details_by_index: dict = {}  # finding 2: merge state, by (type,index)
         self.tool_call_flags: dict = {}
         self.length_with_minimal_output = False
         self.next_index = 0
@@ -44,8 +52,9 @@ class OpenAIStreamToAnthropic:
         self.tool_order = []
         self.tool_buf = {}
         self._id_to_key = {}
-        self._last_key = None
-        self._next_auto = 0
+        self._last_key_box = [None]  # boxed: hooks.stream_aggregate_key mutates these in place
+        self._next_auto_box = [0]
+        self._kimi_counter_box = [0]  # hooks.normalize_tool_id's per-stream rename counter
         self.finish_reason = None
         self.usage = {}
         self.done = False
@@ -78,23 +87,48 @@ class OpenAIStreamToAnthropic:
         }
 
     def _key_for(self, tc: dict) -> tuple:
-        """Return a stable key for a tool-call delta dict."""
-        idx = tc.get("index")
-        if idx is not None:
-            key = ("idx", idx)
-        else:
-            id_ = tc.get("id")
-            if id_ is not None:
-                if id_ not in self._id_to_key:
-                    self._id_to_key[id_] = ("auto", self._next_auto)
-                    self._next_auto += 1
-                key = self._id_to_key[id_]
-            else:
-                key = self._last_key or ("auto", self._next_auto)
-                if key == ("auto", self._next_auto):
-                    self._next_auto += 1
-        self._last_key = key
-        return key
+        """Return a stable key for a tool-call delta dict -- delegates to
+        `hooks.stream_aggregate_key` (finding 11: an index-less delta
+        always continues the CURRENT call, never opens a new one by id)."""
+        return stream_aggregate_key(
+            tc.get("index"), tc.get("id"),
+            id_to_key=self._id_to_key, next_auto=self._next_auto_box, last_key=self._last_key_box,
+        )
+
+    def _merge_reasoning_details_delta(self, details: list) -> None:
+        """Merge one SSE chunk's `reasoning_details` fragment array into
+        `self._reasoning_details_by_index` by (type, index) -- see
+        feed_chunk's call site for why (finding 2). Each incoming entry is
+        matched to its existing merged entry by `index` (defaulting to 0
+        when the upstream omits it, e.g. a single-block non-parallel
+        stream); a TYPE CHANGE at the same index starts a fresh entry
+        rather than concatenating text of two different kinds together.
+        `text`/`summary`/`data` (whichever the entry actually carries) are
+        concatenated; `id`/`format`/`signature` take the latest non-null
+        value, needed verbatim for OpenRouter's signed/encrypted formats
+        (Gemini `thought_signature`, Grok `encrypted_content`)."""
+        for entry in details:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            idx = idx if isinstance(idx, int) else 0
+            existing = self._reasoning_details_by_index.get(idx)
+            if existing is None or existing.get("type") != entry.get("type"):
+                self._reasoning_details_by_index[idx] = dict(entry)
+                continue
+            for text_key in ("text", "summary", "data"):
+                if text_key in entry:
+                    prev = existing.get(text_key)
+                    piece = entry[text_key]
+                    if isinstance(prev, str) and isinstance(piece, str):
+                        existing[text_key] = prev + piece
+                    elif isinstance(piece, str):
+                        existing[text_key] = piece
+            for meta_key in ("id", "format", "signature"):
+                if entry.get(meta_key) is not None:
+                    existing[meta_key] = entry[meta_key]
+        self.reasoning_details = [self._reasoning_details_by_index[i]
+                                   for i in sorted(self._reasoning_details_by_index)]
 
     def feed_chunk(self, chunk: dict) -> dict:
         """Process one upstream chunk, return {"kind":"events"/"error","events":list}."""
@@ -149,29 +183,30 @@ class OpenAIStreamToAnthropic:
                     log.debug("reasoning delta (not emitted), length=%d", len(reasoning))
             details = delta.get("reasoning_details")
             if details and self.capture_reasoning:
-                # OpenRouter unifies reasoning under `reasoning_details[]`;
-                # treated as a snapshot of the current full array (verbatim,
-                # never trimmed/reordered) rather than incrementally
-                # appended -- OpenRouter's own delta shape for this field is
-                # under-documented for streaming, and "last non-null wins"
-                # is safe for both a single final snapshot and a stream that
-                # never touches it until the end.
-                self.reasoning_details = details
+                # Finding 2: OpenRouter streams reasoning_details as
+                # PER-CHUNK FRAGMENTS (Roo and the AI-SDK provider merge
+                # them by type+index) -- "last chunk wins" silently
+                # truncated everything but the final fragment. Merge by
+                # (type, index): concatenate text/summary/data, keep the
+                # latest non-null id/format/signature.
+                self._merge_reasoning_details_delta(details)
 
             # Tool calls
             for tc in delta.get("tool_calls") or []:
                 key = self._key_for(tc)
                 if key not in self.tool_buf:
-                    self.tool_buf[key] = {"name": None, "args": ""}
+                    self.tool_buf[key] = {"name": None, "args": "", "raw_id": None}
                     if key not in self.tool_order:
                         self.tool_order.append(key)
                 buf = self.tool_buf[key]
+                # Finding 1: keep the FIRST non-empty upstream id per key,
+                # never overwritten by a later None/empty delta on the same
+                # key -- this is what every LATER request replays verbatim.
+                tc_id = tc.get("id")
+                if isinstance(tc_id, str) and tc_id and buf["raw_id"] is None:
+                    buf["raw_id"] = tc_id
                 func = tc.get("function") or {}
-                if "name" in func:
-                    buf["name"] = func["name"]
-                if "arguments" in func:
-                    buf["args"] += func["arguments"]
-                    self._output_units += len(func["arguments"])
+                self._output_units += stream_aggregate_apply(buf, func)
 
             # Finish reason
             fr = choice.get("finish_reason")
@@ -245,7 +280,15 @@ class OpenAIStreamToAnthropic:
             try:
                 parsed = json.loads(args_str) if args_str.strip() else {}
             except json.JSONDecodeError as e:
-                if self.strict_tool_json:
+                # H2 args_repair: a second, lenient attempt (trailing
+                # commas, Python-repr True/False/None, single quotes)
+                # BEFORE giving up and tagging the call malformed -- a
+                # length-truncated call (key == truncated_key) skips this
+                # entirely, since a partial call is never "repairable" JSON.
+                repaired = args_repair(args_str) if key != truncated_key else None
+                if repaired is not None:
+                    parsed = repaired
+                elif self.strict_tool_json:
                     parsed = {}
                     flags = {"malformed_json": True, "raw_input": args_str, "json_error": str(e)}
                 else:
@@ -256,7 +299,14 @@ class OpenAIStreamToAnthropic:
 
             idx = self.next_index
             self.next_index += 1
-            tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
+            # Finding 1 + tool_id_normalize: the upstream's own id (kept
+            # verbatim per index since the first delta that carried one)
+            # wins, row-transformed per profile.tool_id_format; only minted
+            # fresh when the upstream never sent one at all.
+            tool_id = normalize_tool_id(
+                buf.get("raw_id"), name=buf["name"] or "unknown",
+                tool_id_format=self.tool_id_format, counter=self._kimi_counter_box,
+            ) or f"toolu_{uuid.uuid4().hex[:24]}"
             if flags and self.strict_tool_json:
                 self.tool_call_flags[tool_id] = flags
             block = {"type": "tool_use", "id": tool_id, "name": buf["name"] or "unknown", "input": {}}
@@ -306,20 +356,11 @@ def _extract_reasoning_from_parts(content) -> str:
     return "".join(out)
 
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
-_SENTINEL_TOKEN_RE = re.compile(r"<｜end▁of▁sentence｜>|<\|end_of_sentence\|>")
-
-
-def strip_display_artifacts(text: str) -> str:
-    """Strip a leading `<think>...</think>` block and stray end-of-sentence
-    sentinel tokens seen leaking into `content` on some OpenRouter endpoints
-    (e.g. deepseek-v3.2-exp, deepseek-v4-flash-0731) -- scope C. Applied by
-    the LOOP/OUTPUT layer to what's DISPLAYED; the raw text (this function's
-    input) is what actually gets logged/stored, so nothing here touches the
-    session log."""
-    if not text:
-        return text
-    return _SENTINEL_TOKEN_RE.sub("", _THINK_TAG_RE.sub("", text, count=1))
+# H2: the real implementation now lives in providers/hooks.py (named hook
+# think_tag_strip, called from output.py per finding 15) -- re-exported
+# here under its original scope-C name so every existing import of
+# `oai_stream.strip_display_artifacts` keeps working unchanged.
+strip_display_artifacts = think_tag_strip
 
 
 def decide_stop_reason(finish_reason: str | None, has_tool_calls: bool) -> str:

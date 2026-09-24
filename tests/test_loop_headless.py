@@ -72,6 +72,43 @@ def test_memory_md_content_reaches_the_upstream_request(ctx: Ctx):
 
 
 @test
+def test_finding_14_memory_snapshot_includes_directory_path(ctx: Ctx):
+    """finding 14: the memory directory's real path is included in the
+    memory snapshot itself (rather than the system prompt CLAIMING a
+    writing capability this build doesn't have)."""
+    from rolo_claude.agent.assemble import SessionContext
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    try:
+        ctx_obj = SessionContext(cwd=fh["proj"], model_label="or:mock/model")
+        snapshot = ctx_obj.memory_snapshot_text()
+        ctx.check("memory snapshot non-empty for this fixture", bool(snapshot))
+        ctx.check(f"memory directory path present in the snapshot, got head={snapshot[:120]!r}",
+                  "Memory directory:" in snapshot and str(ctx_obj.memory_store.memory_dir_path) in snapshot)
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_finding_14_no_false_capability_promises_in_prompt(ctx: Ctx):
+    """finding 14: with only the Read tool registered (H2's actual tool
+    set), the system prompt must not claim it can write memory, run a
+    test, or that no MCP servers exist -- and the MCP sentence must be
+    honest about what this BUILD can't do, not about what the user has
+    configured."""
+    from rolo_claude.agent.prompt import build_system_prompt
+    from rolo_claude.tools.registry import ToolRegistry
+    prompt = build_system_prompt(model_label="or:mock/model", cwd="/tmp/x",
+                                  tool_definitions=ToolRegistry().definitions(), family="generic")
+    ctx.check('no "write it ONLY inside that memory directory" promise (no Write tool)',
+              "write it ONLY inside" not in prompt)
+    ctx.check('no "running a test" promise (no Bash tool)', "running a test" not in prompt)
+    ctx.check('no false "No MCP servers are configured" claim', "No MCP servers are configured" not in prompt)
+    ctx.check('honest "not available in this build" MCP framing present',
+              "MCP tools are not available in this build" in prompt)
+
+
+@test
 def test_json_output_shape(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()

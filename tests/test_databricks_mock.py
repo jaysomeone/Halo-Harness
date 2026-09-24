@@ -131,7 +131,12 @@ def test_429_body_with_retry_after_honoured(ctx: Ctx):
             ctx.check("a 429 must surface as UpstreamError", False)
         except UpstreamError as e:
             ctx.check(f"status 429, got {e.status}", e.status == 429)
-            ctx.check(f"retry_after propagated from the body, got {e.retry_after!r}", e.retry_after in ("2", 2, None) or e.retry_after is not None)
+            # finding 16/7: the mock's 429 body carries retry_after=2 with
+            # NO Retry-After HTTP header at all -- this was previously
+            # tautological (`in (..., None) or is not None` is always
+            # true); now it must be the value the BODY actually said.
+            ctx.check(f"retry_after read from the 429 BODY (no header present), got {e.retry_after!r}",
+                      e.retry_after is not None and float(e.retry_after) == 2.0)
     finally:
         mock.stop()
 

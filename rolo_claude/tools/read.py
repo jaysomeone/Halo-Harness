@@ -6,6 +6,7 @@ identical guidance to a real Claude Code session -- rule 3/D4 in the plan.
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
@@ -25,6 +26,21 @@ DESCRIPTION = (
 )
 
 DEFAULT_LIMIT = 2000
+_MAX_LINE_CHARS = 2000  # finding 10: a minified/binary-ish "line" must never become one multi-MB block
+_MAX_RESULT_CHARS = 25_000 * 4  # ~25k tokens at this codebase's own len(text)/4 estimate (providers/config.py)
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _looks_binary(path: Path) -> bool:
+    """A NUL byte in the first 8 KiB is the standard cheap binary sniff
+    (git/most editors use the same heuristic) -- read as raw bytes, never
+    through the text-mode path that would otherwise have to guess an
+    encoding for content that isn't text at all."""
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return False
 
 
 class ReadTool(Tool):
@@ -53,22 +69,62 @@ class ReadTool(Tool):
                 f"The file_path parameter must be an absolute path, not a relative path: {file_path!r}",
                 is_error=True,
             )
-        if not path.exists():
-            return ToolResult(f"File does not exist: {file_path}", is_error=True)
-        if path.is_dir():
-            return ToolResult(f"Path is a directory, not a file: {file_path}", is_error=True)
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            st = path.stat()
+        except OSError:
+            return ToolResult(f"File does not exist: {file_path}", is_error=True)
+        if stat.S_ISDIR(st.st_mode):
+            return ToolResult(f"Path is a directory, not a file: {file_path}", is_error=True)
+        if not stat.S_ISREG(st.st_mode):
+            # finding 10: a FIFO/char-device/socket -- Read /dev/zero,
+            # /dev/urandom, or a named pipe would otherwise hang the
+            # process reading an infinite/blocking stream, or exhaust
+            # memory well before any line-based cap below ever applies.
+            return ToolResult(f"Not a regular file (refusing to read): {file_path}", is_error=True)
+        if _looks_binary(path):
+            return ToolResult(
+                f"{file_path} appears to be a binary file ({st.st_size} bytes) -- refusing to read it as text.",
+                is_error=True,
+            )
+
+        offset = max(0, int(input.get("offset") or 0))
+        limit = max(1, int(input.get("limit") or DEFAULT_LIMIT))
+
+        # finding 10: stream the file line by line, reading only up to
+        # offset+limit(+1 peek) lines regardless of the file's real size --
+        # a multi-GB regular file never gets materialized whole in memory
+        # the way `path.read_text()` used to.
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for _ in range(offset):
+                    if f.readline() == "":
+                        break
+                selected = []
+                for _ in range(limit):
+                    line = f.readline()
+                    if line == "":
+                        break
+                    selected.append(line.rstrip("\r\n"))
+                has_more = f.readline() != ""
         except OSError as e:
             return ToolResult(f"Error reading file: {e}", is_error=True)
 
-        lines = text.splitlines()
-        offset = max(0, int(input.get("offset") or 0))
-        limit = max(1, int(input.get("limit") or DEFAULT_LIMIT))
-        selected = lines[offset:offset + limit]
-        numbered = [f"{i + offset + 1:6d}\t{line}" for i, line in enumerate(selected)]
+        numbered = []
+        for i, line in enumerate(selected):
+            if len(line) > _MAX_LINE_CHARS:
+                line = line[:_MAX_LINE_CHARS] + f"... [line truncated at {_MAX_LINE_CHARS} chars]"
+            numbered.append(f"{i + offset + 1:6d}\t{line}")
         body = "\n".join(numbered) if numbered else "(file is empty)"
-        remaining = len(lines) - (offset + len(selected))
-        if remaining > 0:
-            body += f"\n... [{remaining} more line(s) not shown; pass offset={offset + len(selected)} to continue]"
+
+        size_truncated = len(body) > _MAX_RESULT_CHARS
+        if size_truncated:
+            body = body[:_MAX_RESULT_CHARS]
+
+        hints = []
+        if has_more:
+            hints.append(f"pass offset={offset + len(selected)} to continue")
+        if size_truncated:
+            hints.append(f"result truncated at ~{_MAX_RESULT_CHARS // 4} tokens; use a smaller limit")
+        if hints:
+            body += "\n... [" + "; ".join(hints) + "]"
         return ToolResult(body)

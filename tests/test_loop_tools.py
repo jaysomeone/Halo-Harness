@@ -38,14 +38,43 @@ def _scn_repeat_read_forever(h, body):
 SCENARIOS["repeat-read-forever"] = _scn_repeat_read_forever
 
 
-def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model"):
+def _scn_page_forever(h, body):
+    """Read the SAME file with a DIFFERENT (ever-increasing) offset every
+    call -- finding 9's own failure scenario ("a model that pages through a
+    large file by offset ... runs and bills indefinitely in -p"). Each call
+    is canonically DIFFERENT, so the identical-args loop breaker (rule 8)
+    never trips; only --max-turns (model calls per turn) can stop this."""
+    messages = (body or {}).get("messages") or []
+    offset = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool") * 100
+    _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": f"call_page_{offset}", "type": "function",
+             "function": {"name": "Read", "arguments": json.dumps(
+                 {"file_path": str(Path(tempfile.gettempdir()) / "loop-breaker-target.txt"), "offset": offset})}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
+SCENARIOS["page-forever"] = _scn_page_forever
+
+
+def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model", max_turns=20):
+    # finding 9: --max-turns now counts MODEL CALLS made within the one
+    # turn `-p` runs (Claude Code semantics), not `turn()` invocations --
+    # the pre-H2 value here (3) relied on the OLD (buggy) meaning to avoid
+    # cutting the loop-breaker test below short; the default is now well
+    # above the loop breaker's own 8-call end threshold so THIS helper
+    # keeps testing the loop breaker, not --max-turns (see
+    # test_max_turns_caps_model_calls_per_turn for the flag itself).
     env = dict(os.environ)
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
         "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
     })
     args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model,
-            "--cwd", str(fh["proj"]), "--max-turns", "3"] + (extra_args or [])
+            "--cwd", str(fh["proj"]), "--max-turns", str(max_turns)] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
 
@@ -67,6 +96,33 @@ def test_loop_breaker_ends_the_turn_by_8_repeats(ctx: Ctx):
         # plus a small margin, not dozens/hundreds.
         ctx.check(f"upstream was called a bounded number of times (<=10), got {len(mock.requests)}", len(mock.requests) <= 10)
         ctx.check(f"upstream was called AT LEAST 8 times (reached the end-turn threshold), got {len(mock.requests)}", len(mock.requests) >= 8)
+    finally:
+        mock.stop()
+        try:
+            (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").unlink()
+        except OSError:
+            pass
+
+
+@test
+def test_max_turns_caps_model_calls_per_turn(ctx: Ctx):
+    """finding 9: --max-turns counts MODEL CALLS made within the ONE turn
+    `-p` runs, not `turn()` invocations (which `-p` only ever calls once,
+    so the pre-H2 semantics never actually bounded anything inside a tool
+    loop). A DIFFERENT tool call every time (paging by offset) never trips
+    the identical-args loop breaker, so ONLY --max-turns can stop it here;
+    the turn must end with reason "max_turns" at exactly that many calls."""
+    fh = build_fake_home()
+    (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").write_text("target file\n", encoding="utf-8")
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "page through the file", extra_args=["--output-format", "json", "--verbose"],
+                           model="or:mock/page-forever", max_turns=4)
+        ctx.check(f"process exits cleanly, got {result.returncode}", result.returncode in (0, 1))
+        ctx.check(f"upstream called EXACTLY --max-turns times (4), got {len(mock.requests)}", len(mock.requests) == 4)
+        obj = json.loads(result.stdout)
+        ctx.check(f"json result reports stop_reason tool_use (cut off mid-loop), got {obj.get('stop_reason')!r}",
+                   obj.get("stop_reason") == "tool_use")
     finally:
         mock.stop()
         try:
@@ -109,10 +165,14 @@ def test_loop_breaker_unit_level_thresholds(ctx: Ctx):
 
 @test
 def test_interrupt_leaves_no_unanswered_tool_use(ctx: Ctx):
-    """gen.close() mid-turn (an external interrupt) must leave the log
-    fully paired -- proving agent/invariants.py's synthesize on GeneratorExit."""
+    """finding 16 (test #4 from the review's required list): an interrupt
+    AFTER `tool_use_ready` (the assistant node WITH the tool_use is
+    already logged -- unlike closing at `message_start`, before any
+    tool_use exists at all, which is vacuously true regardless of whether
+    synthesis actually works) must leave a REAL synthetic error result
+    behind, not just an absence of unpaired ids that was never at risk."""
     from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from rolo_claude.agent.invariants import INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
     from rolo_claude.providers.stream import ProviderCreds
@@ -130,11 +190,22 @@ def test_interrupt_leaves_no_unanswered_tool_use(ctx: Ctx):
             session_context=session_ctx, openrouter_base_url=mock.base_url,
         )
         gen = session.turn("read the loop target repeatedly")
-        next(gen)  # user_message
-        next(gen)  # status
-        next(gen)  # message_start (first model call under way)
-        gen.close()  # simulated interrupt, mid-turn
+        seen = []
+        tool_use_id = None
+        for event in gen:
+            seen.append(event)
+            if event.kind == "tool_use_ready":
+                tool_use_id = event.data.get("id")
+                break
+        ctx.check("reached tool_use_ready before closing (the assistant node WITH the tool_use is now logged)",
+                  tool_use_id is not None)
+        gen.close()  # simulated interrupt, mid-dispatch -- BEFORE the real tool ran or a result was written
         ctx.check("no unanswered tool_use ids remain after an interrupt", find_unpaired_tool_use_ids(session.log) == [])
+        result_nodes = [n for n in session.log.nodes() if n.get("type") == "tool_result" and n.get("tool_use_id") == tool_use_id]
+        ctx.check(f"a REAL synthetic tool_result was written for {tool_use_id!r}, got {result_nodes}", len(result_nodes) == 1)
+        ctx.check("it's tagged as an error", result_nodes[0].get("is_error") is True)
+        ctx.check(f"content names the interruption, got {result_nodes[0].get('content')!r}",
+                   INTERRUPTED_MESSAGE in str(result_nodes[0].get("content")))
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
@@ -159,6 +230,47 @@ def test_read_tool_end_to_end_via_cli(ctx: Ctx):
         ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-500:]!r})", result.returncode == 0)
         ctx.check(f"answers with the real line count (5), got {result.stdout!r}", "5" in result.stdout)
         ctx.check("two upstream calls (tool call, then the answer)", len(mock.requests) == 2)
+    finally:
+        mock.stop()
+
+
+@test
+def test_finding_15_narrating_model_prints_only_the_final_answer(ctx: Ctx):
+    """finding 15: a model that narrates ("Let me read the file.") before
+    its tool_calls, then answers cleanly on the second call, must print
+    ONLY the final answer in non-verbose text mode -- not
+    "Let me read the file.5" (every intermediate message concatenated)."""
+    fh = build_fake_home()
+    target = fh["proj"] / "narrate_target.txt"
+    target.write_text("l1\nl2\nl3\nl4\nl5\n", encoding="utf-8")
+    mock = MockUpstream().start()
+
+    def _scn_narrate_then_read(h, body):
+        messages = (body or {}).get("messages") or []
+        if any(m.get("role") == "tool" for m in messages):
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"content": "5"}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ])
+        else:
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"content": "Let me read the file."}}]},
+                {"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_narrate", "type": "function",
+                     "function": {"name": "Read", "arguments": json.dumps({"file_path": str(target)})}},
+                ]}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ])
+
+    SCENARIOS["narrate-then-read"] = _scn_narrate_then_read
+    try:
+        result = _run_cli(fh, mock, f"read {target} and reply with only the number of lines",
+                           model="or:mock/narrate-then-read")
+        ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-500:]!r})", result.returncode == 0)
+        ctx.check(f"stdout is ONLY the final answer, got {result.stdout!r}", result.stdout.strip() == "5")
+        ctx.check('the narration text never reached stdout', "Let me read" not in result.stdout)
     finally:
         mock.stop()
 

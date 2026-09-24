@@ -37,7 +37,10 @@ from typing import Iterator, Optional
 
 from rolo_claude.providers.config import dump_debug, estimate_tokens
 from rolo_claude.providers.databricks import databricks_unreachable_response, dbx_cache_get_max_tokens_limit
-from rolo_claude.providers.errors import build_prompt_too_long_message, map_upstream_error, parse_context_overflow, upstream_error_text
+from rolo_claude.providers.errors import (
+    build_prompt_too_long_message, map_upstream_error, parse_context_overflow,
+    parse_databricks_rate_limit, upstream_error_text,
+)
 from rolo_claude.providers.http import UpstreamConnectError, call_databricks_chat, call_openai_chat
 from rolo_claude.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
 from rolo_claude.providers.routing import Route
@@ -91,6 +94,11 @@ class CompletionRequest:
     # unchanged. None (the proxy's permanent default) preserves the
     # original translate-from-`req.body` behavior exactly.
     prebuilt_oai_body: Optional[dict] = None
+    # H2 finding 1: row-driven tool-call id transform (providers/hooks.py.
+    # normalize_tool_id) -- "mint" (oai_stream.py's own permanent default)
+    # keeps the proxy always minting fresh unique ids, exactly as before;
+    # only agent/loop.py's Session ever passes anything else.
+    tool_id_format: str = "mint"
 
 
 class ContextOverflow(Exception):
@@ -184,9 +192,34 @@ def sse_reader_thread(resp, q: "queue.Queue") -> None:
 
 class _Aborted(Exception):
     """Internal-only: raised from `_run_phase1` when `abort` fires between
-    (not during -- see the module docstring's finding-4 note) retry
-    attempts. Caught in `stream_completion`, which then simply returns
-    without yielding anything, exactly like an abort during phase 2."""
+    retry attempts, OR (must-do 5) during one, via the connect-time socket
+    watcher below. Caught in `stream_completion`, which then simply
+    returns without yielding anything, exactly like an abort during
+    phase 2."""
+
+
+def _phase1_abort_watcher(abort: "threading.Event", done: threading.Event, sock_box: list) -> None:
+    """must-do 5: `_call_upstream()` is a single blocking call (connect,
+    send, read response HEADERS) with no other hook point to interrupt it
+    from -- this thread polls `abort` (0.25s, matching phase 2's own
+    poll interval; `threading.Event` has no "wait for either of two
+    events" primitive) while phase 1 is in flight, and force-shuts
+    whatever socket `on_connect` most recently registered into `sock_box`
+    the moment `abort` fires, so a stuck time-to-first-byte wait doesn't
+    run the full 300s idle timeout. `done` (set in `_run_phase1`'s
+    `finally`) stops the watcher as soon as phase 1 finishes on its own
+    (success OR failure), via `Event.wait`'s immediate-return-on-set, so it
+    never outlives the call it's watching."""
+    while not done.is_set():
+        if abort.is_set():
+            sock = sock_box[0]
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            return
+        done.wait(0.25)
 
 
 def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
@@ -201,14 +234,14 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
 
     `abort` (finding 4) is checked before each connect attempt -- a caller
     that sets it while phase 1 is between attempts (e.g. during the single
-    connect retry) gets `_Aborted` instead of a completed request. A
-    connect/request already blocked INSIDE `_call_upstream()` cannot be
-    interrupted from here: `call_openai_chat`/`call_databricks_chat` open,
-    send, and read response headers as one blocking call with no hook point
-    to hand back an in-flight socket earlier -- documented limitation, not
-    silently ignored; phase 2's long-lived read loop (the actual reported
-    leak: "the daemon reader pulling billed tokens until the model
-    finishes") is fully abort-aware via the socket capture below."""
+    connect retry) gets `_Aborted` instead of a completed request.
+    must-do 5: a connect/request already blocked INSIDE `_call_upstream()`
+    (time-to-first-byte, up to the 300s idle timeout) is now ALSO
+    interruptible -- `on_connect` hands the live socket to
+    `_phase1_abort_watcher` the moment `open_upstream()` connects, so an
+    abort during that wait force-shuts it instead of running the full
+    timeout; phase 2's long-lived read loop remains separately abort-aware
+    via its own socket capture."""
     if abort is not None and abort.is_set():
         raise _Aborted()
     oai_body = (req.prebuilt_oai_body if req.prebuilt_oai_body is not None
@@ -224,11 +257,17 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
         provider_label = "Databricks" if req.route.provider == "databricks" else "OpenRouter"
         raise ProviderNotConfigured(f"{provider_label} not configured")
 
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
     if req.route.provider == "databricks":
         def _call_upstream():
             return call_databricks_chat(
                 base_url=req.creds.base_url, api_key=req.creds.api_key, body=oai_body,
                 extra_headers=req.extra_headers, state_dir=req.state_dir, model=req.route.upstream_model,
+                on_connect=_register_sock,
             )
     else:
         base_url = req.openrouter_base_url or req.creds.base_url
@@ -237,9 +276,22 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
             return call_openai_chat(
                 base_url=base_url, api_key=req.creds.api_key, body=oai_body,
                 extra_headers=req.extra_headers, state_dir=req.state_dir,
+                on_connect=_register_sock,
             )
 
     max_attempts = 2
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        return _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts)
+    finally:
+        watcher_done.set()  # stop the watcher whether phase 1 succeeded, failed, or raised
+
+
+def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
     overflow_retries = 0
     result = None
     for attempt in range(max_attempts):
@@ -248,6 +300,12 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
         try:
             result = _call_upstream()
         except UpstreamConnectError as e:
+            if abort is not None and abort.is_set():
+                # must-do 5: the abort watcher force-shut a socket WHILE
+                # this call was blocked inside getresponse() -- that's an
+                # abort, not a genuine connectivity failure; never retry it
+                # or map it to a 502.
+                raise _Aborted() from e
             if attempt == 0:
                 continue
             if req.route.provider == "databricks":
@@ -293,6 +351,14 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
                     raise ContextOverflow(overflow.limit, overflow.prompt_tokens, overflow.total)
 
             status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            if req.route.provider == "databricks" and result.status == 429 and "Retry-After" not in hdrs:
+                # finding 7: Databricks' 429 body carries retry_after
+                # (parse_databricks_rate_limit was, pre-H2, only ever
+                # called from tests) -- read it whenever the response
+                # didn't ALSO send a Retry-After header.
+                dbx_retry = parse_databricks_rate_limit(err_obj).get("retry_after")
+                if dbx_retry is not None:
+                    hdrs = {**hdrs, "Retry-After": str(dbx_retry)}
         except ContextOverflow:
             raise
         except Exception as e:
@@ -324,7 +390,8 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
     # what emit_reasoning happens to be.
     harness_mode = getattr(req, "harness_mode", False)
     sm = OpenAIStreamToAnthropic(req.model_label, estimate,
-                                  capture_reasoning=harness_mode, strict_tool_json=harness_mode)
+                                  capture_reasoning=harness_mode, strict_tool_json=harness_mode,
+                                  tool_id_format=getattr(req, "tool_id_format", "mint"))
 
     dumped_lines: list = []
     dumped_events: list = []
@@ -371,23 +438,36 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
                     for ev in step["events"]:
                         dumped_events.append(ev)
                         yield ev
-                    if step["kind"] in ("error", "done"):
+                    if step["kind"] == "done":
+                        terminal_reached = True
+                        break
+                    if step["kind"] == "error":
+                        # finding 12: a mid-stream {"error":...} SSE chunk
+                        # delivers an error EVENT to the consumer, but the
+                        # upstream connection itself is NOT necessarily
+                        # done -- verified: the mock kept streaming ~30 more
+                        # chunks over ~3s with the reader thread still
+                        # alive. Leave terminal_reached False so the
+                        # `finally` block below force-shuts the socket.
                         break
                 elif kind == "json":
                     dumped_lines.append(value)
                     for ev in MessageCollector.to_events(value, sm):
                         dumped_events.append(ev)
                         yield ev
+                    terminal_reached = True
                     break
                 elif kind == "eof":
                     for ev in sm.on_eof():
                         dumped_events.append(ev)
                         yield ev
+                    terminal_reached = True
                     break
                 elif kind == "exc":
                     ev = sm.error_event(str(value))
                     dumped_events.append(ev)
                     yield ev
+                    terminal_reached = True  # the reader thread itself already ended (a real connection error)
                     break
             except Exception as e:
                 # finding 6 (see wip/SIGNATURES.md): malformed upstream data
@@ -396,18 +476,23 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
                 # this try block can raise a socket/BrokenPipe error anymore
                 # -- this generator never writes to the client itself -- so
                 # there is no connection-error class to let through uncaught.)
+                # finding 12: same rule as the mid-stream error chunk above
+                # -- this is OUR parser choking on one malformed piece of a
+                # stream the upstream may still be actively sending; leave
+                # terminal_reached False so `finally` shuts the socket.
                 log.warning("malformed upstream stream data: %s", e)
                 ev = sm.error_event(f"upstream sent malformed data: {e}")
                 dumped_events.append(ev)
                 yield ev
                 break
-        # Reached only via one of the `break`s above -- every one of them
-        # already delivered a real terminal wire event (done/error/eof/exc)
-        # to the consumer; an `abort`-triggered `return` or an external
-        # `gen.close()`/exception skips this line entirely, which is
-        # exactly the "no terminal event was consumed" case `finally` below
-        # must still clean up after.
-        terminal_reached = True
+        # Reached via one of the `break`s above; `terminal_reached` was set
+        # TRUE only for done/eof/exc (finding 12 -- a genuine end of
+        # stream), and stays FALSE for a mid-stream error chunk or a
+        # malformed-data exception, so `finally` below still force-shuts a
+        # socket the upstream may still be actively writing to. An
+        # `abort`-triggered `return` or an external `gen.close()`/exception
+        # skips this comment entirely, which is exactly the other
+        # "no terminal event was consumed" case `finally` must clean up.
     finally:
         if not terminal_reached and sock is not None:
             try:

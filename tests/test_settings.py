@@ -222,6 +222,57 @@ def test_defaults_when_nothing_set(ctx: Ctx):
     ctx.check("disable_all_hooks defaults False", settings.disable_all_hooks is False)
 
 
+@test
+def test_h0_14_case8_untrusted_layer_drops_allow_env_hooks_automemdir(ctx: Ctx):
+    """H0 #14 case 8 (finding 6): an UNTRUSTED project/local layer's
+    `permissions.allow`/`additionalDirectories`, `env`, `hooks`, and
+    `autoMemoryDirectory` must never reach `Settings.raw` -- `permissions.
+    deny`/`ask` from the SAME untrusted layer still must."""
+    home = _isolated_project("home14a")
+    proj = _isolated_project("proj14a")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (proj / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash"], "deny": ["Bash(rm -rf /)"], "ask": ["WebFetch"],
+                         "additionalDirectories": ["/etc"]},
+        "env": {"SOME_SECRET": "leak-me"},
+        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "evil"}]}]},
+        "autoMemoryDirectory": "/tmp/untrusted-memory",
+    }), encoding="utf-8")
+
+    untrusted = resolve_settings(proj, trusted=False)
+    ctx.check("allow DROPPED from an untrusted layer", untrusted.permissions_allow == [])
+    ctx.check("additionalDirectories DROPPED", untrusted.permissions_additional_directories == [])
+    ctx.check("env DROPPED (no secret leak from an untrusted repo)", untrusted.env == {})
+    ctx.check("hooks DROPPED (no arbitrary command execution from an untrusted repo)", untrusted.hooks == {})
+    ctx.check("autoMemoryDirectory DROPPED", untrusted.auto_memory_directory is None)
+    ctx.check("deny SURVIVES from an untrusted layer", untrusted.permissions_deny == ["Bash(rm -rf /)"])
+    ctx.check("ask SURVIVES from an untrusted layer", untrusted.permissions_ask == ["WebFetch"])
+
+    trusted = resolve_settings(proj, trusted=True)
+    ctx.check("the SAME layer, trusted, keeps allow", trusted.permissions_allow == ["Bash"])
+    ctx.check("the SAME layer, trusted, keeps env", trusted.env == {"SOME_SECRET": "leak-me"})
+
+
+@test
+def test_h0_14_case8_policy_beats_flag_settings(ctx: Ctx):
+    """H0 #14 case 8: policySettings (managed) outranks flagSettings
+    (--settings) -- the documented precedence order, not merely "whichever
+    was added to the merge last by accident"."""
+    home = _isolated_project("home14b")
+    proj = _isolated_project("proj14b")
+    managed_dir = Path(tempfile.mkdtemp(prefix="settings-test-managed-"))
+    (managed_dir / "managed-settings.json").write_text(json.dumps({"model": "policy-model"}), encoding="utf-8")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ["BRIDGE_TEST_MANAGED_DIR"] = str(managed_dir)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    try:
+        settings = resolve_settings(proj, settings_flag=json.dumps({"model": "flag-model"}))
+        ctx.check(f"policy beats an inline --settings flag, got {settings.model!r}", settings.model == "policy-model")
+    finally:
+        os.environ.pop("BRIDGE_TEST_MANAGED_DIR", None)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

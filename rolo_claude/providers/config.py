@@ -135,15 +135,19 @@ class OrConfig:
     base_url: str = "https://openrouter.ai/api/v1"
 
 
-def resolve_openrouter() -> OrConfig | None:
+def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     """
-    Resolve OpenRouter config from environment.
-    Returns None if OPENROUTER_API_KEY not set.
+    Resolve OpenRouter config from `env` (must-do 6: the harness passes
+    `Settings.effective_env` -- shell < user < trusted project/local <
+    flag < policy -- so a settings.json `env` block can supply the key;
+    the proxy's own callers pass nothing and keep reading bare
+    `os.environ`, unchanged). Returns None if OPENROUTER_API_KEY not set.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    env = env if env is not None else os.environ
+    api_key = env.get("OPENROUTER_API_KEY")
     if not api_key:
         return None
-    base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    base_url = env.get("BRIDGE_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     return OrConfig(api_key=api_key, base_url=base_url)
 
 
@@ -204,36 +208,51 @@ def load_databrickscfg(path: Path) -> DbxConfig | None:
     return None
 
 
-def resolve_databricks() -> DbxConfig | None:
+def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     """
     Resolve Databricks host+token: BRIDGE_DBX_* override, then filtered
-    ANTHROPIC_* (process env then settings chain, Databricks hosts only,
-    never loopback), then DATABRICKS_HOST/TOKEN, then ~/.databrickscfg
-    [DEFAULT]. Never raises.
+    ANTHROPIC_* (Databricks hosts only, never loopback), then
+    DATABRICKS_HOST/TOKEN, then ~/.databrickscfg [DEFAULT]. Never raises.
+
+    must-do 6: when `env` is given (the harness passes `Settings.
+    effective_env` -- shell < user < trusted project/local < flag <
+    policy, resolved ONCE with the real trust/cwd this session actually
+    has), it is used directly for steps 1/2/4 instead of bare
+    `os.environ`, and step 3's OWN settings-chain re-derivation (which read
+    `%LOCALAPPDATA%` managed settings, gave them the LOWEST precedence,
+    let process env beat settings, and ignored `--cwd` entirely -- see
+    `load_settings_env_chain`) is skipped, since `env` already IS that
+    merged chain, correctly ordered and trust-filtered. The proxy's own
+    callers pass nothing and get the exact pre-H2 behavior.
     """
+    env = env if env is not None else os.environ
+
     # 1. Explicit override -- always wins, unfiltered.
-    bridge_host = os.environ.get("BRIDGE_DBX_BASE_URL")
-    bridge_token = os.environ.get("BRIDGE_DBX_TOKEN")
+    bridge_host = env.get("BRIDGE_DBX_BASE_URL")
+    bridge_token = env.get("BRIDGE_DBX_TOKEN")
     if bridge_host and bridge_token:
         return DbxConfig(host=bridge_host.rstrip("/"), token=bridge_token)
 
-    # 2. Process env ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Databricks hosts only).
-    anth_host = os.environ.get("ANTHROPIC_BASE_URL")
-    anth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    # 2. ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Databricks hosts only).
+    anth_host = env.get("ANTHROPIC_BASE_URL")
+    anth_token = env.get("ANTHROPIC_AUTH_TOKEN")
     if anth_host and anth_token and looks_like_databricks_host(anth_host):
         return DbxConfig(host=anth_host.rstrip("/"), token=anth_token)
 
-    # 3. Settings chain ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (same filter).
-    settings_env = load_settings_env_chain(Path.cwd())
-    anth_host = settings_env.get("ANTHROPIC_BASE_URL")
-    anth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN")
-    if anth_host and anth_token and looks_like_databricks_host(anth_host):
-        return DbxConfig(host=anth_host.rstrip("/"), token=anth_token)
+    # 3. The proxy's OWN settings-chain re-derivation -- only when the
+    # caller did NOT already hand us a merged env (see docstring above).
+    settings_env = {} if env is not os.environ else load_settings_env_chain(Path.cwd())
+    if settings_env:
+        anth_host = settings_env.get("ANTHROPIC_BASE_URL")
+        anth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN")
+        if anth_host and anth_token and looks_like_databricks_host(anth_host):
+            return DbxConfig(host=anth_host.rstrip("/"), token=anth_token)
 
-    # 4. DATABRICKS_HOST + DATABRICKS_TOKEN (process env, falling back to
-    # settings chain per-field) -- unambiguous by name, no host filter.
-    dbx_host = os.environ.get("DATABRICKS_HOST")
-    dbx_token = os.environ.get("DATABRICKS_TOKEN")
+    # 4. DATABRICKS_HOST + DATABRICKS_TOKEN (falling back to the proxy's
+    # own settings chain per-field when using bare os.environ) --
+    # unambiguous by name, no host filter.
+    dbx_host = env.get("DATABRICKS_HOST")
+    dbx_token = env.get("DATABRICKS_TOKEN")
     if not dbx_host or not dbx_token:
         dbx_host = settings_env.get("DATABRICKS_HOST") or dbx_host
         dbx_token = settings_env.get("DATABRICKS_TOKEN") or dbx_token

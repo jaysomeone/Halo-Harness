@@ -2,7 +2,17 @@
 reconstructs (system_text, messages, tools) from the log; content_hash
 backs the "model-visible means logged" runtime assertion; snapshot/user
 node interleaving and tool_result pairing.
+
+finding 16: every `@test` here is transparently wrapped in an isolated,
+per-test `BRIDGE_STATE_DIR` (SessionLog's storage root is ALWAYS
+bridge_home(), which without this fell back to the real
+`~/.rolo-claude/sessions` -- 39 `derive-test-*` dirs accumulated there on
+rolo's own box) with the prior value restored afterward, so a LATER test
+module in the same `run_all.py` process (which runs every tests/test_*.py
+file in one interpreter) never inherits it.
 """
+import functools
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -11,9 +21,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.derive import LogAssemblyError, content_hash, derive_request
+from rolo_claude.agent.derive import LogAssemblyError, content_hash, content_hash_from_oai_body, derive_request
 
-test, TESTS = new_registry()
+_register, TESTS = new_registry()
+
+
+def test(fn):
+    @functools.wraps(fn)
+    def wrapper(ctx):
+        old = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="derive-test-state-")))
+        try:
+            return fn(ctx)
+        finally:
+            if old is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old
+    return _register(wrapper)
 
 
 def _fresh_log() -> SessionLog:
@@ -121,22 +146,77 @@ def test_model_visible_means_logged_round_trip(ctx: Ctx):
     """The runtime assertion (scope E): re-deriving the log UP TO (excluding)
     a given assistant node and re-hashing must match the hash stored ON
     that node when it was first appended -- proving the request that
-    produced it is reconstructable from the log alone."""
+    produced it is reconstructable from the log alone.
+
+    finding 4: `tools=None` (the meta node's own FROZEN catalog) both
+    times, not the SAME hardcoded literal list passed to both calls -- the
+    pre-H2 version of this test could never fail no matter what
+    derive_request actually did with tools, since it was really only
+    proving content_hash is a deterministic pure function of whatever you
+    hand it."""
     log = _fresh_log()
+    log.append_meta(tools=[{"name": "Read"}])
     log.append_system("SYS")
     log.append_user([{"type": "text", "text": "hello"}])
 
     # Simulate what agent/loop.py does: derive BEFORE appending the reply, hash it, store it.
-    pre_system, pre_messages, pre_tools = derive_request(log, tools=[{"name": "Read"}])
+    pre_system, pre_messages, pre_tools = derive_request(log, tools=None)
+    ctx.check("tools came from the meta node's frozen catalog", pre_tools == [{"name": "Read"}])
     stored_hash = content_hash(pre_system, pre_messages, pre_tools)
     assistant_node = log.append_assistant(content=[{"type": "text", "text": "hi there"}], stop_reason="end_turn", request_hash=stored_hash)
 
     # Now re-derive using ONLY the nodes before that assistant node (upto its seq index).
-    replay_system, replay_messages, replay_tools = derive_request(log, tools=[{"name": "Read"}], upto=assistant_node["seq"])
+    replay_system, replay_messages, replay_tools = derive_request(log, tools=None, upto=assistant_node["seq"])
     replay_hash = content_hash(replay_system, replay_messages, replay_tools)
     ctx.check(f"re-derived request hash matches the one stored on the assistant node, "
               f"stored={stored_hash!r} replay={replay_hash!r}", replay_hash == assistant_node["request_hash"])
     ctx.check("stored hash matches what we computed just before appending", stored_hash == assistant_node["request_hash"])
+
+
+@test
+def test_finding_4_request_hash_from_actual_body_survives_policy_changes(ctx: Ctx):
+    """finding 4's OWN specific fix: agent/loop.py stores `request_hash` as
+    `content_hash_from_oai_body(the EXACT body actually sent)`, not a
+    second `derive_request` re-run after the fact. Rebuilding the body from
+    `derive_request(upto=seq)` PLUS the meta node's own tools must
+    reproduce the SAME hash even when a POLICY value (max_tokens -- a
+    budget choice, not conversation content) differs between the original
+    call and the replay; a genuinely different TOOL CATALOG must still
+    change it."""
+    from rolo_claude.providers.profiles import resolve_profile
+    from rolo_claude.providers.request import build_request_body
+    from rolo_claude.providers.routing import Route
+
+    log = _fresh_log()
+    tools = [{"name": "Read", "description": "reads a file", "input_schema": {"type": "object", "properties": {}}}]
+    log.append_meta(model="or:mock/model", cwd="/x", system_prompt_bytes=3, tools=tools)
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "hi"}])
+
+    route = Route(provider="openrouter", upstream_model="mock/model", dialect="openai-chat")
+    profile = resolve_profile(route)
+
+    system_text, messages, derived_tools = derive_request(log, tools=None)
+    body = build_request_body(system_text=system_text, messages=messages, tools=derived_tools, route=route, profile=profile)
+    stored_hash = content_hash_from_oai_body(body)
+    assistant_node = log.append_assistant(content=[{"type": "text", "text": "hi there"}], stop_reason="end_turn", request_hash=stored_hash)
+
+    replay_system, replay_messages, replay_tools = derive_request(log, tools=None, upto=assistant_node["seq"])
+    ctx.check(f"tools reproduced from the meta node's frozen catalog, got {replay_tools}", replay_tools == tools)
+    # A deliberately DIFFERENT max_tokens (requested_max_tokens) -- a policy
+    # choice, never logged conversation content -- must NOT change the hash.
+    replay_body = build_request_body(system_text=replay_system, messages=replay_messages, tools=replay_tools,
+                                      route=route, profile=profile, requested_max_tokens=999)
+    replay_hash = content_hash_from_oai_body(replay_body)
+    ctx.check(f"re-derived hash matches despite a different max_tokens (a policy key, excluded), "
+              f"stored={stored_hash!r} replay={replay_hash!r}", replay_hash == stored_hash)
+    ctx.check("stored hash matches what was computed just before appending", stored_hash == assistant_node["request_hash"])
+
+    changed_tools = [{"name": "Read", "description": "CHANGED description", "input_schema": {"type": "object", "properties": {}}}]
+    changed_body = build_request_body(system_text=replay_system, messages=replay_messages, tools=changed_tools,
+                                       route=route, profile=profile)
+    ctx.check("a genuinely different tool catalog DOES change the hash",
+              content_hash_from_oai_body(changed_body) != stored_hash)
 
 
 @test

@@ -50,8 +50,17 @@ def pick_proxy(host: str) -> str | None:
     return None
 
 
-def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10) -> http.client.HTTPConnection | http.client.HTTPSConnection:
-    """Open HTTP(S) connection to upstream, respecting proxy and TLS settings."""
+def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10,
+                   on_connect=None) -> http.client.HTTPConnection | http.client.HTTPSConnection:
+    """Open HTTP(S) connection to upstream, respecting proxy and TLS
+    settings. `on_connect` (must-do 5), when given, is called with the
+    live `conn` object right after `connect()` succeeds -- BEFORE the
+    caller sends the request or blocks in `getresponse()` -- so a caller
+    that wants to interrupt a phase-1 call mid-flight (a genuinely
+    blocking operation with no other hook point) can hand the socket to an
+    abort watcher immediately, rather than only after the whole call
+    returns. Exceptions from `on_connect` are swallowed (never let a
+    watcher-registration bug break a real upstream call)."""
     proxy_url = pick_proxy(host)
     
     # Create TLS context if needed
@@ -96,7 +105,12 @@ def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10) ->
     conn.connect()
     if conn.sock:
         conn.sock.settimeout(300)  # 5 minutes idle timeout
-    
+    if on_connect is not None:
+        try:
+            on_connect(conn)
+        except Exception:
+            pass
+
     return conn
 
 
@@ -114,7 +128,8 @@ class UpstreamResult:
     body_bytes: bytes | None = None
 
 
-def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir: Path) -> UpstreamResult:
+def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir: Path,
+                      on_connect=None) -> UpstreamResult:
     """POST to OpenAI-compatible chat completions endpoint."""
     # Normalize base_url
     if base_url.endswith("/"):
@@ -148,13 +163,13 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
     
     try:
         # Open connection and send request
-        conn = open_upstream(host, port, tls)
+        conn = open_upstream(host, port, tls, on_connect=on_connect)
         conn.request("POST", path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
-        
+
         # Collect headers (lowercase keys)
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
-        
+
         return UpstreamResult(
             status=resp.status,
             headers=resp_headers,
@@ -168,7 +183,8 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
 
 
 
-def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_headers: dict, state_dir):
+def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_headers: dict, state_dir,
+               on_connect=None):
     """POST to a Databricks endpoint, returning (resp, conn) or raising UpstreamConnectError."""
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
@@ -185,7 +201,7 @@ def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_head
     }
     headers.update(extra_headers)
     try:
-        conn = open_upstream(host, port, tls)
+        conn = open_upstream(host, port, tls, on_connect=on_connect)
         conn.request("POST", path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
         return resp, conn
@@ -193,7 +209,8 @@ def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_head
         raise UpstreamConnectError(f"Databricks connection failed: {e}") from e
 
 
-def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, model: str) -> UpstreamResult:
+def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, model: str,
+                          on_connect=None) -> UpstreamResult:
     """POST an OpenAI-chat body to a Databricks route, trying the cached/candidate paths with 404 fallback and a max_tokens-limit clamp-retry."""
     # Deferred import: breaks the http.py <-> databricks.py module cycle
     # (see this module's docstring). By the time this function is actually
@@ -218,7 +235,7 @@ def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers:
     chosen = None  # (orig_idx, path, include_model, resp, conn)
     for pos, (orig_idx, path, include_model) in enumerate(order):
         req_body = build_databricks_body(body, include_model, model)
-        resp, conn = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir)
+        resp, conn = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir, on_connect=on_connect)
         if resp.status == 404 and pos != len(order) - 1:
             resp.read()
             continue
@@ -251,7 +268,7 @@ def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers:
             retry_body = dict(body)
             retry_body["max_tokens"] = limit
             req_body = build_databricks_body(retry_body, include_model, model)
-            resp2, conn2 = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir)
+            resp2, conn2 = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir, on_connect=on_connect)
             dbx_cache_set_max_tokens_limit(model, limit, state_dir)
             headers2 = {k.lower(): v for k, v in resp2.getheaders()}
             return UpstreamResult(status=resp2.status, headers=headers2, resp=resp2, conn=conn2, body_bytes=None)

@@ -44,7 +44,7 @@ the same across every permission mode, for request-cache stability -- a tool bei
 does not mean it is currently allowed to run; the permission layer (not this prompt) decides \
 that at dispatch time."""
 
-HARNESS_SELF_DESCRIPTION = """## How this harness works
+_HARNESS_SELF_DESCRIPTION_HEAD = """## How this harness works
 rolo-claude is not Claude Code itself -- it is a separate program that reads Claude Code's own \
 configuration files and makes the actual API calls to your model on the user's behalf, over that \
 model's own vendor API (OpenRouter or Databricks), translating this conversation and your tool \
@@ -56,24 +56,72 @@ The project you are working in may define, and you should treat as binding proje
 present:
 - **CLAUDE.md** files (walked from the filesystem root down to the current directory, plus \
 `~/.claude/CLAUDE.md` and `.claude/rules/*.md`) -- project- and user-level instructions, \
-delivered to you as a user-role message.
-- **Auto-memory** -- a MEMORY.md index plus topic files under a per-project memory directory, \
-delivered as a user-role snapshot. If asked to remember something for next time, write it ONLY \
-inside that memory directory, never elsewhere.
-- **Skills and slash commands** -- reusable instructions the user or project has set up, listed \
+delivered to you as a user-role message."""
+
+_HARNESS_SELF_DESCRIPTION_TAIL = """- **Skills and slash commands** -- reusable instructions the user or project has set up, listed \
 when available.
 - **MCP servers** -- external tool providers exposed as additional tools named \
-`mcp__<server>__<tool>`, listed below when any are configured.
+`mcp__<server>__<tool>`; MCP tools are not available in this build (this is a statement about \
+what this build can DO, not about what the user has configured -- do not tell the user no MCP \
+servers exist).
 - **Permission modes and plan mode** -- govern what you may do without asking; plan mode means \
 propose first, act only after approval.
 - **Sub-agents** -- specialised agents this harness (or Claude Code) can delegate a task to; not \
-available in this build.
+available in this build."""
 
-Work the way Claude Code itself does: answer concisely; take action with your tools rather than \
-describing what you would do; use the Read tool on a file before editing it; use absolute paths; \
-verify your own work (re-reading a file, running a test) rather than assuming it worked; follow \
-the existing conventions of whatever project you are in; and never report a tool result you did \
-not actually get back from a real tool call."""
+
+def _memory_capability_sentence(has_write: bool) -> str:
+    """finding 14: H2 has no Write tool, so the pre-H2 "write it ONLY
+    inside that memory directory" promise was false -- a model that
+    believed it could write memory, and told the user so, was lying on
+    this harness's behalf. Registry-driven so this becomes true again
+    automatically once a Write tool is registered, with no prose to
+    remember to update by hand."""
+    if has_write:
+        return ("- **Auto-memory** -- a MEMORY.md index plus topic files under a per-project memory "
+                "directory (its path is included in the memory snapshot below), delivered as a "
+                "user-role snapshot. If asked to remember something for next time, write it ONLY "
+                "inside that memory directory, never elsewhere.")
+    return ("- **Auto-memory** -- a MEMORY.md index plus topic files under a per-project memory "
+            "directory (its path is included in the memory snapshot below), delivered as a "
+            "user-role snapshot. This build has no file-writing tool, so you cannot save new memory "
+            "yourself -- never tell the user you saved or updated it.")
+
+
+def _closing_guidance_sentence(has_write: bool, has_bash: bool) -> str:
+    """finding 14: "running a test" implied a Bash tool that H2 doesn't
+    have; a model that claimed to have run one was, again, lying on this
+    harness's behalf. Built from the registry so the verification clause
+    only ever names something this build can actually do."""
+    verify_options = ["re-reading a file"]
+    if has_bash:
+        verify_options.append("running a test")
+    verify = " or ".join(verify_options)
+    edit_clause = "use the Read tool on a file before editing it; " if has_write else ""
+    return (f"Work the way Claude Code itself does: answer concisely; take action with your tools "
+            f"rather than describing what you would do; {edit_clause}use absolute paths; verify your "
+            f"own work ({verify}) rather than assuming it worked; follow the existing conventions of "
+            f"whatever project you are in; and never report a tool result you did not actually get "
+            f"back from a real tool call.")
+
+
+def build_harness_self_description(tool_definitions: list) -> str:
+    """The whole '## How this harness works' section, built from the
+    REGISTRY (`tool_definitions`, name-sorted per rolo_claude.tools.
+    registry.ToolRegistry.definitions()) instead of hardcoded prose that
+    assumed tools (Write, Bash) this build may not actually have --
+    finding 14."""
+    names = {td.get("name") for td in tool_definitions if isinstance(td, dict)}
+    has_write = "Write" in names
+    has_bash = "Bash" in names
+    sections = [
+        _HARNESS_SELF_DESCRIPTION_HEAD,
+        _memory_capability_sentence(has_write),
+        _HARNESS_SELF_DESCRIPTION_TAIL,
+        "",
+        _closing_guidance_sentence(has_write, has_bash),
+    ]
+    return "\n".join(sections)
 
 _FAMILY_NOTATION = {
     "deepseek": "Model notes: use native tool/function calling only. Prior reasoning from this "
@@ -96,9 +144,6 @@ _FAMILY_NOTATION = {
 
 def family_notation(family: str) -> str:
     return _FAMILY_NOTATION.get(family, _FAMILY_NOTATION["generic"])
-
-
-MCP_PLACEHOLDER = "No MCP servers are configured for this session."  # a real per-server list is H3
 
 
 def tool_guidance_lines(tool_definitions: list) -> str:
@@ -125,14 +170,14 @@ def build_system_prompt(
     """Build the full system prompt string. Byte-stable for a given input
     -- call this exactly ONCE per session (agent/loop.py stores the result
     and never calls this again for that session)."""
+    tool_definitions = tool_definitions or []
     sections = [
         IDENTITY_TEXT,
         persona_line(model_label),
         PLAN_MODE_POLICY,
-        HARNESS_SELF_DESCRIPTION,
-        "## Tools available in this session\n" + tool_guidance_lines(tool_definitions or []),
+        build_harness_self_description(tool_definitions),  # finding 14: registry-driven, no false promises
+        "## Tools available in this session\n" + tool_guidance_lines(tool_definitions),
         family_notation(family),
-        MCP_PLACEHOLDER,
         cwd_line(str(cwd)),
     ]
     prompt = "\n\n".join(sections)

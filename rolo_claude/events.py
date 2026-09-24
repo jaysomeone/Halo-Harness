@@ -128,9 +128,17 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
     }, turn=turn)
 
 
-def error(message: str, *, turn: int = 0, err_type: str = "error", retryable: bool = False) -> Event:
-    """data: {message, err_type, retryable}"""
-    return Event("error", {"message": message, "err_type": err_type, "retryable": retryable}, turn=turn)
+def error(message: str, *, turn: int = 0, err_type: str = "error", retryable: bool = False,
+          category: Optional[str] = None) -> Event:
+    """data: {message, err_type, retryable, category}. `category` (H2 must-do
+    3: providers.hooks.overflow_classifier) is the dsh-style taxonomy
+    bucket (AUTH/RATE_LIMIT/CONTEXT_WINDOW_EXCEEDED/PROVIDER_FAILURE/
+    MALFORMED_RESPONSE/EMPTY_RESPONSE) for a caller that wants to react by
+    KIND of failure rather than parsing `err_type`'s per-source wire
+    string; None when the caller didn't classify (e.g. a harness-internal
+    error like tool_catalog_too_large that was never a wire error)."""
+    return Event("error", {"message": message, "err_type": err_type, "retryable": retryable,
+                            "category": category}, turn=turn)
 
 
 def turn_done(*, turn: int = 0, reason: str = "end_turn") -> Event:

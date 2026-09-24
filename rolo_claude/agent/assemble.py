@@ -63,12 +63,19 @@ class SessionContext:
     def memory_snapshot_text(self) -> str:
         """MEMORY.md content (already capped by MemoryStore) plus the
         topic-file index, as one snapshot block; "" if auto-memory found
-        nothing (or is disabled)."""
+        nothing (or is disabled). finding 14: the memory directory's real
+        PATH is included here (not asserted as a writable-by-you claim in
+        the system prompt -- prompt.py's own capability sentence is
+        registry-driven and says so only when a Write tool actually
+        exists) so a model with a Write tool, or the user reading this
+        snapshot, knows exactly where it is."""
         parts = []
         if self.memory_index.text:
             parts.append("# Memory (auto-loaded from MEMORY.md)\n\n" + self.memory_index.text)
         if self.memory_index.topics:
             parts.append("## Topic files (read on demand -- not included in full here)\n\n" + self.memory_store.index_text())
+        if parts:
+            parts.insert(0, f"Memory directory: {self.memory_store.memory_dir_path}")
         return "\n\n".join(parts)
 
     def environment_snapshot_text(self, model_label: str) -> str:

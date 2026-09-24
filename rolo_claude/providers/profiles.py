@@ -7,6 +7,17 @@ this harness builds is driven by an explicit `ProviderProfile`, resolved
 from (host, model family) with per-model overrides from `model_table.json`
 (an Aider-shaped data file, not code).
 
+H2 must-do 2: `model_table.json` is now the COMPILED form of the canonical
+`reports/Open weight model adapter rules.md` block (`tools/
+ingest_model_table.py` -- 64 model rows, effective row = family (+) model
+(+) host, `unverified` flags carried through per row) -- every field a
+tabled row can supply (sampling, reasoning replay/effort, tool_choice
+modes, tool id format, leak patterns, Databricks rate limits, ...) is read
+from THAT row; `_fallback_family_defaults` below (the old
+`_thinking_defaults_for_family`) now only fires for the handful of
+proprietary families the open-weight report doesn't cover (claude/gpt/
+gemini/generic), exactly the narrow role its name now says.
+
 This module is purely additive: nothing in `bridge.py`'s proxy path imports
 it, so the 97 proxy tests are unaffected regardless of what's seeded here.
 """
@@ -121,12 +132,28 @@ class ProviderProfile:
     # 400 code 1210 -- a resolved effort of None/"none"/"disabled" must be
     # forced to `reasoning_default_effort` instead of omitted/disabled.
     reasoning_no_disable: bool = False
+    # H2 code-branch hook fields (must-do 3), all row-driven:
+    # preserve | kimi_functions_idx | alnum9 | minimax_preserve (hooks.tool_id_normalize).
+    tool_id_format: str = "preserve"
+    # DeepSeek V4 rows only: on OpenRouter, ALSO send reasoning_content
+    # (accumulated text, "" when absent) beside the verbatim reasoning_details
+    # array (finding 2's dual-field fix; hooks.reasoning_echo).
+    reasoning_dual_field: bool = False
+    tool_leak_patterns: tuple = ()  # hooks.leak_parser pattern names for this row
+    system_placement: str = "first"  # "first" | "fold_into_first_user" (hooks.system_normalize)
+    context_tokens: Optional[int] = None  # row-reported context window, informational
+    databricks_rate_limits: Optional[dict] = None  # {itpm, otpm, qph} (hooks.max_tokens_budget)
+    unverified: tuple = ()  # field names this row's data lacks a primary source for
 
 
-def _thinking_defaults_for_family(family: str, dialect: str) -> "tuple[str, str, bool]":
-    """(thinking_format, reasoning_replay, reasoning_effort_supported)
-    before model_table.json overrides -- rule 5/6 of the research report's
-    provider tables."""
+def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
+    """(thinking_format, reasoning_replay, reasoning_effort_supported) for a
+    model with NO row in the ingested table -- i.e. a family the open-weight
+    adapter report doesn't cover at all (claude/gpt/plain-gemini/generic).
+    Every row that DOES exist in model_table.json (H2 must-do 2: the
+    compiled `reports/Open weight model adapter rules.md` block) overrides
+    every one of these three via `row.get(...)` below; this function is a
+    narrow fallback now, not the primary source it was pre-H2."""
     if dialect == "anthropic-passthrough":
         return "anthropic_thinking", "thinking", True
     if family in ("deepseek", "kimi", "glm", "grok", "minimax"):
@@ -157,11 +184,24 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             family=family, edit_format=row.get("edit_format", "diff"),
         )
 
-    thinking_format, replay, effort_supported = _thinking_defaults_for_family(family, route.dialect)
+    thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
     replay = row.get("reasoning_replay", replay)
-    # Qwen (tool_choice "required" unsupported on DashScope) and GLM (auto
-    # only) reject it as a FAMILY rule; a row may still override explicitly.
+    effort_supported = row.get("reasoning_effort_supported", effort_supported)
+    # Fallback ONLY (untabled families -- claude/gpt/generic): qwen/glm
+    # reject tool_choice "required" as a coarse family rule; every tabled
+    # row (the common case from H2 on) sets tool_choice_required_supported
+    # explicitly from its own tool_choice_modes, so this default is never
+    # consulted for a DeepSeek/Kimi/GLM/Qwen/MiniMax model.
     tc_required_default = family not in ("qwen", "qwen-coder", "qwen-qwq", "glm")
+    hook_fields = dict(
+        tool_id_format=row.get("tool_id_format", "preserve"),
+        reasoning_dual_field=bool(row.get("reasoning_dual_field", False)),
+        tool_leak_patterns=tuple(row.get("tool_leak_patterns") or ()),
+        system_placement=row.get("system_placement", "first"),
+        context_tokens=row.get("context_tokens"),
+        databricks_rate_limits=row.get("rate_limits"),
+        unverified=tuple(row.get("unverified") or ()),
+    )
 
     if route.provider == "databricks":
         default_use_temp = family not in ("deepseek", "kimi", "glm", "qwen", "qwen-coder")
@@ -179,6 +219,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
             edit_format=row.get("edit_format", "diff"),
             tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+            **hook_fields,
         )
 
     # openrouter (also the fallback for any other openai-chat-dialect host)
@@ -196,6 +237,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
         reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
         openrouter_pin=row.get("openrouter_pin"), edit_format=row.get("edit_format", "diff"),
         tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+        **hook_fields,
     )
 
 
