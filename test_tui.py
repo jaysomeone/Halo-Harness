@@ -195,14 +195,19 @@ def test_permission_card_allow_once(ctx: Ctx):
             await pilot.press("enter")
             await _drain_a_few(app, pilot, n=6)
             ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
-            ctx.check("prompt input disabled while pending", app.prompt_input.disabled is True)
+            # scope 0(c) (rolo, binding): the prompt stays ENABLED while a
+            # card is pending -- same as any other running turn -- so
+            # steering still works underneath the card; focus defaults to
+            # the card itself so its own digit/Esc keys keep working.
+            ctx.check("prompt input stays enabled while a card is pending", app.prompt_input.disabled is False)
+            ctx.check("focus defaults to the pending card", app.focused is app.pending_card)
             await pilot.press("1")
             await pilot.pause(0.05)
             ctx.check(f"answered allow once, got {fake.permission_replies}",
                       fake.permission_replies == [("tu1", {"action": "allow", "reason": "", "rule": None, "message": ""})])
             ctx.check("no rule added for a one-time allow", fake.added_rules == [])
             ctx.check("pending card cleared", app.pending_card is None)
-            ctx.check("prompt re-enabled", app.prompt_input.disabled is False)
+            ctx.check("focus returns to the prompt once the card clears", app.focused is app.prompt_input)
     asyncio.run(body())
 
 

@@ -25,17 +25,21 @@ from rolo_claude.config.paths import lookup_project
 
 log = logging.getLogger("bridge")
 
-# Fire-and-forget `stack.aclose()` cleanup tasks (see `_connect_once`) MUST
-# be held by a strong reference somewhere for their whole lifetime: asyncio
-# docs, `create_task()`: "the event loop only keeps weak references to
-# tasks... a task can disappear at any time before it's done ... For
-# reliable 'fire-and-forget' background tasks, gather them in a
-# collection." Without this, the task -- and the live subprocess/pipes its
-# `stack.aclose()` was supposed to tear down -- can vanish mid-cleanup,
-# which is exactly the leaked-transport shape that (verified on Windows)
-# crashes at interpreter shutdown rather than merely leaking. Each task
-# removes itself via `add_done_callback` once it finishes.
-_background_cleanup_tasks: set = set()
+# H4 fix (was: a fire-and-forget `asyncio.create_task(_cleanup())` set here,
+# for a `session.initialize()` failure's `stack.aclose()` in `_connect_once`
+# below) -- a DETACHED cleanup task meant `_connect_once` returned/raised
+# before the SDK's own shielded stdio shutdown (the thing that actually
+# kills the spawned child) had finished running, so `_lifecycle_task`'s
+# `except Exception: connect_future.set_exception(e); return` -- and
+# everything chained off THAT, including `McpManager.close_all()`'s own
+# `_lifecycle_future.result(timeout=...)` wait -- observed the connect
+# attempt as "done" while the child process was still alive in the
+# background. Verified on Windows: `test_startup_timeout_then_close_all_
+# leaves_no_child_and_no_future_exception` failed ("no child process
+# survives") because `close_all()` returned, and the test's own 5s poll
+# loop expired, before the detached task ever got a chance to run to
+# completion. `_do()` now AWAITS that cleanup directly instead (see
+# `_connect_once`), so this bookkeeping set is no longer needed.
 
 # ---- timeouts (binary-facts sec.9) -----------------------------------------
 
@@ -551,6 +555,19 @@ class McpServerHandle:
         # receive on already-open streams, never touch the scope itself).
         self._close_event: Optional[asyncio.Event] = None
         self._lifecycle_future: "Optional[concurrent.futures.Future]" = None
+        # H4 fix: a `session.initialize()` failure's `stack.aclose()` (see
+        # `_connect_once`) is scheduled via `self._loop.spawn(...)` rather
+        # than awaited inline, so `_connect_once`/`_lifecycle_task` -- and
+        # `McpManager.start_all()`, which is bounded by ~MCP_TIMEOUT --
+        # still return promptly even though the SDK's own shielded stdio
+        # shutdown (closing stdin, waiting out the grace period, then the
+        # Job Object/process-group kill) can take a few seconds. This
+        # handle-visible `concurrent.futures.Future` is what lets `close()`/
+        # `_await_close()` below actually WAIT for that real kill to finish
+        # (bounded by the SAME close deadline) instead of a detached task
+        # nobody downstream ever waited for -- verified on Windows: without
+        # this, the spawned child outlived `close_all()` and a 5s poll.
+        self._connect_cleanup_future: "Optional[concurrent.futures.Future]" = None
 
     async def _resolved_headers(self) -> dict:
         """H4 must-do: run the (optional) `headersHelper` off the event
@@ -637,23 +654,31 @@ class McpServerHandle:
         than merely leaks once the owning loop is later closed or GC'd
         during interpreter shutdown [tests/test_mcp_manager.py::
         test_manager_start_all_is_bounded_by_mcp_timeout reproduces this].
-        The close is fired via `asyncio.create_task` rather than awaited
-        here: the installed mcp SDK's own `stdio_client` shutdown is
-        already shielded + bounded (close stdin, a grace period, then a
-        hard kill -- mcp/client/stdio.py), but awaiting it inline would
-        turn THIS failed connect attempt's latency into that same
-        multi-second wait; a detached task lets the caller see the timeout
-        fail fast while the subprocess still gets torn down a moment
-        later, on the very loop McpManager.close_all()/McpLoop.stop()
-        already wait out before the process ever exits."""
+        The close is scheduled via `self._loop.spawn(...)` (see `_do()`
+        below), STILL detached from this coroutine's own return -- the
+        installed mcp SDK's own `stdio_client` shutdown is already
+        shielded + bounded (close stdin, a grace period, then a hard kill
+        -- mcp/client/stdio.py), but awaiting it inline HERE would turn
+        THIS failed connect attempt's latency into that same multi-second
+        wait, breaking `start_all()`'s own ~MCP_TIMEOUT bound. H4 fix: the
+        detached cleanup's `concurrent.futures.Future` is now stored on
+        `self._connect_cleanup_future` (`McpLoop.spawn`, not a bare
+        `asyncio.create_task` -- a real thread-safe Future any caller can
+        `.result(timeout=)` on, unlike an `asyncio.Task`), so `close()`/
+        `_await_close()` below can actually WAIT for the real kill to
+        finish before this handle is considered closed -- the ORIGINAL bug
+        (verified on Windows): nothing downstream ever waited for the old
+        fire-and-forget task, so `close_all()` returned, and a caller's own
+        post-close poll expired, while the spawned child was still alive."""
         from rolo_claude.mcp.client import task_timeout
         connect_timeout = mcp_connect_timeout_s()
         overall_timeout = mcp_timeout_s()
         # must-do: a genuine RECONNECT reuses this same handle object --
-        # never carry a stale error/tools_fetch_failed from the PREVIOUS
-        # attempt into a freshly-successful one.
+        # never carry a stale error/tools_fetch_failed/cleanup-future from
+        # the PREVIOUS attempt into a freshly-successful one.
         self.error = None
         self.tools_fetch_failed = False
+        self._connect_cleanup_future = None
 
         async def _do():
             stack, session = await self._open_transport(connect_timeout)
@@ -665,9 +690,12 @@ class McpServerHandle:
                         await stack.aclose()
                     except Exception:
                         pass
-                cleanup_task = asyncio.create_task(_cleanup())
-                _background_cleanup_tasks.add(cleanup_task)
-                cleanup_task.add_done_callback(_background_cleanup_tasks.discard)
+                # H4 fix: `self._loop.spawn(...)` (a thread-safe
+                # `concurrent.futures.Future`), not a bare
+                # `asyncio.create_task` (a plain `asyncio.Task` has no
+                # thread-safe `.result(timeout=)` a foreign closing thread
+                # could ever wait on) -- see this method's own docstring.
+                self._connect_cleanup_future = self._loop.spawn(_cleanup())
                 raise
             return stack, session, init_result
 
@@ -842,10 +870,22 @@ class McpServerHandle:
         """Blocking half of `close()`: wait (up to `timeout`) for the SAME
         task that opened the connection to run its own `aclose()` -- never
         a separate `run()` call (that would recreate the cross-task
-        cancel-scope bug the `_lifecycle_task` design fixes)."""
+        cancel-scope bug the `_lifecycle_task` design fixes). H4 fix: ALSO
+        waits (out of the SAME overall `timeout` budget) for a still-
+        detached `_connect_cleanup_future` (a failed connect's own
+        `stack.aclose()`, scheduled by `_connect_once`/`_do()`) -- without
+        this, `close()`/`McpManager.close_all()` could return while that
+        real kill was still in flight, which is exactly what let a spawned
+        child outlive `close_all()` on Windows (verified)."""
+        deadline = time.monotonic() + timeout
         if self._lifecycle_future is not None:
             try:
-                self._lifecycle_future.result(timeout=timeout)
+                self._lifecycle_future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                pass
+        if self._connect_cleanup_future is not None:
+            try:
+                self._connect_cleanup_future.result(timeout=max(0.0, deadline - time.monotonic()))
             except Exception:
                 pass
         if self._errlog is not None:

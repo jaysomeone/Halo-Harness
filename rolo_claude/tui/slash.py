@@ -51,7 +51,8 @@ async def _handle_mcp(app, _args: str) -> None:
 
     list_fn = getattr(app.controller, "list_mcp_servers", None)
     servers = list_fn() if list_fn is not None else []
-    app.push_screen(McpStatus(servers, reconnect=app.controller.reconnect_mcp))
+    app.push_screen(McpStatus(servers, reconnect=app.controller.reconnect_mcp,
+                               approve=app.controller.approve_mcp_server))
 
 
 async def _handle_clear(app, _args: str) -> None:

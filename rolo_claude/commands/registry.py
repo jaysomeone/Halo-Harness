@@ -30,6 +30,13 @@ class SlashCommand:
     source: str = "builtin"  # "builtin" | "custom" | "skill"
     path: Optional[Path] = None
     run: Optional[Callable] = None  # (args_text: str, facade) -> str
+    # H4 scope C: a skill's OWN frontmatter, separate from `user-invocable`
+    # (which gates the `/` slash surface instead) -- `disable-model-
+    # invocation: true` hides it from the Skill TOOL only; a skill may
+    # still be typed as `/name` by the user even when this is False.
+    model_invocable: bool = True
+    allowed_tools: tuple = ()
+    context_mode: Optional[str] = None  # None | "fork" | "agent" (frontmatter `context:`)
 
     def invocation(self) -> str:
         return f"/{self.name}"
@@ -200,3 +207,60 @@ def expand_command_body(body: str, args_text: str, *, allowed_tools: Optional[li
     the one entry point custom.py and skills.py both call."""
     substituted = substitute_arguments(body, args_text)
     return run_preexec_commands(substituted, allowed_tools=allowed_tools, cwd=cwd)
+
+
+# =============================================================================
+# H4 scope C: `@path` attachments in an EXPANDED command/skill body -- read
+# via the same path-resolution a Read tool call would use and appended as
+# SNAPSHOTS (never inlined into the prompt text itself), mirroring
+# config/claude_md.py's own `@import` convention but for arbitrary file
+# mentions in a slash-invoked prompt body. The `@`-mention text itself is
+# left untouched in the submitted turn -- the model still sees exactly what
+# the command/skill author wrote, plus the real file content alongside it.
+# =============================================================================
+
+_AT_MENTION_RE = re.compile(r"(?<![\w`@])@((?:~/|\.{1,2}/|//?)?[^\s`'\"()<>]+)")
+_AT_MENTION_MAX_BYTES = 200_000
+
+
+def extract_at_mentions(text: str, *, cwd: Path) -> "list[Path]":
+    """Every `@path` mention that resolves to a REAL, existing regular
+    file under (or reachable from) `cwd` -- a mention that doesn't
+    resolve is left alone for the model to notice/ask about, never an
+    error here. Deduplicated, in first-seen order."""
+    out: "list[Path]" = []
+    seen: set = set()
+    for m in _AT_MENTION_RE.finditer(text or ""):
+        raw = m.group(1).rstrip(".,;:!?)")
+        if not raw:
+            continue
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = Path(cwd) / p
+        try:
+            resolved = p.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out
+
+
+def read_at_mention_snapshots(text: str, *, cwd: Path, max_bytes: int = _AT_MENTION_MAX_BYTES) -> "list[tuple[str, str]]":
+    """`[(path_str, content_text), ...]` for every `@path` mention
+    `extract_at_mentions` finds -- best-effort: an unreadable or
+    oversized file is silently skipped (its `@mention` stays in the
+    submitted text either way; a model that needs it can still Read it
+    directly), never raised."""
+    out: "list[tuple[str, str]]" = []
+    for path in extract_at_mentions(text, cwd=cwd):
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append((str(path), content))
+    return out

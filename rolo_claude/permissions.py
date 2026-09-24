@@ -1098,18 +1098,38 @@ class PermissionEngine:
         self.cwd = Path(cwd)
         self.extra_dirs = [Path(d) for d in (extra_dirs or [])]
         self.print_mode = print_mode
+        # H4 scope C: a Skill tool's `allowed-tools` grant, live in
+        # `allow_rules` (so every existing match path just works) but
+        # marked here so `clear_temporary_allow_rules` (agent/loop.py's
+        # Session.turn(), at the START of every new user turn -- D-CFG:
+        # "until the next user message") can strip exactly these and only
+        # these, never a rule the user themselves granted interactively.
+        self._temp_allow_start: Optional[int] = None
 
-    def add_session_allow_rule(self, rule_text: str) -> bool:
+    def add_session_allow_rule(self, rule_text: str, *, temporary: bool = False) -> bool:
         """Teach THIS session one more allow rule (U2's `allow_session` /
-        `allow_always` answers). In-memory only -- nothing is written to
-        disk here; the UI's "always" path is what calls `add_allow_rule`
+        `allow_always` answers, or -- `temporary=True` -- a Skill's own
+        `allowed-tools`). In-memory only -- nothing is written to disk
+        here; the UI's "always" path is what calls `add_allow_rule`
         separately, into `.claude/settings.local.json`. Returns True when
         the text parsed into a usable rule."""
         rule = parse_rule(rule_text, source="session", base_dir=self.cwd, action="allow")
         if rule is None or rule.kind == "invalid":
             return False
+        if temporary and self._temp_allow_start is None:
+            self._temp_allow_start = len(self.allow_rules)
         self.allow_rules.append(rule)
         return True
+
+    def clear_temporary_allow_rules(self) -> None:
+        """Called at the start of every new user turn -- drops every rule
+        a Skill's `allowed-tools` added THIS turn (D-CFG: "until the next
+        user message"), never a rule the user granted interactively via
+        `allow_session`/`allow_always` (those call `add_session_allow_rule`
+        with `temporary=False`, the default, and are never in this range)."""
+        if self._temp_allow_start is not None:
+            del self.allow_rules[self._temp_allow_start:]
+            self._temp_allow_start = None
 
     def working_dirs(self) -> list:
         return [self.cwd] + self.extra_dirs
@@ -1295,13 +1315,19 @@ class PermissionEngine:
     def _resolve_ask(self, tool_name: str, tool_input: dict, tool, hit: Rule) -> Decision:
         if self.mode == "dontAsk":
             return Decision("deny", f"dontAsk mode converts ask to deny (matched {hit.raw!r})", source=hit.source, matched_rule=hit)
+        # review finding 3: `suggest_rule` is computed for EVERY ask
+        # outcome now, not just the print-mode denial path -- an
+        # interactive PermissionCard's "2 Yes, session"/"3 Yes, always"
+        # need it to learn/write anything at all (the old code left every
+        # interactive `Decision("ask", ...)` with `suggested_rule=None`).
+        suggestion = self.suggest_rule(tool_name, tool_input)
         if self.print_mode:
-            suggestion = self.suggest_rule(tool_name, tool_input)
             reason = f"matched ask rule {hit.raw!r}"
             denial = {"tool_name": tool_name, "tool_input": tool_input, "reason": reason, "suggested_rule": suggestion}
             return Decision("deny", reason + " -- no interactive prompt in print mode", source=hit.source,
                              matched_rule=hit, suggested_rule=suggestion, permission_denial=denial)
-        return Decision("ask", f"matched ask rule {hit.raw!r}", source=hit.source, matched_rule=hit)
+        return Decision("ask", f"matched ask rule {hit.raw!r}", source=hit.source, matched_rule=hit,
+                         suggested_rule=suggestion)
 
     # ---- the mode table (only reached once no deny/ask/allow rule fired) --
 
@@ -1366,12 +1392,17 @@ class PermissionEngine:
             return Decision("allow", f"{tool_name} is always allowed (no side effects requiring permission)", source="mode")
         category = self._categorize(tool_name, tool_input, tool)
         action = _MODE_TABLE.get(category, _MODE_TABLE["other"]).get(self.mode, "ask")
-        if action == "ask" and self.print_mode:
+        if action == "ask":
+            # review finding 3: computed for every interactive ask too,
+            # same reasoning as `_resolve_ask` above.
             suggestion = self.suggest_rule(tool_name, tool_input)
-            reason = f"mode {self.mode!r} would ask for this {tool_name} call ({category})"
-            denial = {"tool_name": tool_name, "tool_input": tool_input, "reason": reason, "suggested_rule": suggestion}
-            return Decision("deny", reason + " -- no interactive prompt in print mode", source="mode",
-                             suggested_rule=suggestion, permission_denial=denial)
+            if self.print_mode:
+                reason = f"mode {self.mode!r} would ask for this {tool_name} call ({category})"
+                denial = {"tool_name": tool_name, "tool_input": tool_input, "reason": reason, "suggested_rule": suggestion}
+                return Decision("deny", reason + " -- no interactive prompt in print mode", source="mode",
+                                 suggested_rule=suggestion, permission_denial=denial)
+            reason = f"mode {self.mode!r} {action}s {category} calls (no explicit rule matched)"
+            return Decision(action, reason, source="mode", suggested_rule=suggestion)
         reason = f"mode {self.mode!r} {action}s {category} calls (no explicit rule matched)"
         return Decision(action, reason, source="mode")
 

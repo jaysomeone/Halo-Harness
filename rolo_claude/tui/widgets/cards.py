@@ -73,9 +73,14 @@ class ToolCard(Static, can_focus=True):
         self.body_text += chunk
         self._refresh()
 
-    def set_result(self, *, ok: bool, summary: str) -> None:
+    def set_result(self, *, ok: bool, summary: str, content: Optional[str] = None) -> None:
+        # review finding 15: prefer the fuller `content` (still capped
+        # upstream, never the raw uncapped tool output) over the 200-char
+        # `summary` for the card's OWN body/pager text -- the old
+        # unconditional `self.body_text = summary` is what made Ctrl+O
+        # ("complete, untruncated output") never show more than 200 chars.
         self.status = "ok" if ok else "error"
-        self.body_text = summary
+        self.body_text = content if content is not None else summary
         self.remove_class("tool-running")
         self.add_class("tool-ok" if ok else "tool-error")
         self._refresh()
@@ -184,6 +189,25 @@ class PermissionCard(Static, can_focus=True):
         self._finish({"action": "deny", "scope": None, "rule": None, "message": message})
 
 
+def _option_texts(options) -> list:
+    """review finding 5: `options` may be Claude Code's OWN richer shape
+    (`[{"label":.., "description":..}, ...]`, the schema a Claude-trained
+    model reaches for on its own even though this build's tool schema
+    still advertises `options: [str]` -- full adoption is H6 scope) --
+    coercing to plain strings here, once, means `OptionList(*opts)`
+    downstream never receives a raw dict (which Textual can't render and
+    raises `VisualError` for, killing the whole app)."""
+    out: list = []
+    for opt in (options or []):
+        if isinstance(opt, dict):
+            label = opt.get("label") or opt.get("value") or opt.get("name") or ""
+            desc = opt.get("description")
+            out.append(f"{label} -- {desc}" if (label and desc) else (str(label) or str(opt)))
+        else:
+            out.append(str(opt))
+    return out
+
+
 class QuestionCard(Static, can_focus=True):
     """`AskUserQuestion`'s actual schema today is one question + a flat
     list of string options (`rolo_claude/tools/ask_user_question.py`) --
@@ -206,9 +230,10 @@ class QuestionCard(Static, can_focus=True):
         self._on_answer = on_answer
         questions = input_data.get("questions") if isinstance(input_data.get("questions"), list) else None
         if questions:
-            self.questions = [(q.get("question", "?"), list(q.get("options") or [])) for q in questions]
+            self.questions = [(q.get("question", "?"), _option_texts(q.get("options"))) for q in questions
+                               if isinstance(q, dict)] or [("?", [])]
         else:
-            self.questions = [(input_data.get("question", "?"), list(input_data.get("options") or []))]
+            self.questions = [(input_data.get("question", "?"), _option_texts(input_data.get("options")))]
         self.answers: dict = {}
         self.active_index = 0
         self.done = False

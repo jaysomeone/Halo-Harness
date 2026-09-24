@@ -39,6 +39,7 @@ from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
 from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
 from rolo_claude.agent.log import SessionLog
 from rolo_claude.agent.repair import repair_assistant_turn
+from rolo_claude.hooks import HookRunner, build_prompt_caller, load_plugin_hooks, merge_hook_maps, normalize_hooks
 from rolo_claude.model import CostMeter, ModelProfile, ModelRef
 from rolo_claude.permissions import Decision, PermissionEngine
 from rolo_claude.providers.errors import CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, backoff_delay, is_reasoning_replay_bug
@@ -201,6 +202,35 @@ def _rough_estimate(system_text: str, messages: list) -> int:
     return max(1, len(blob) // 4)
 
 
+_PROGRESS_CHUNK_CAP_CHARS = 200_000  # review finding 15: bound, never unbounded
+
+
+class _BoundedChunks:
+    """A `progress_cb`-shaped `.append(chunk)` collector that stops
+    retaining new chunks once `_PROGRESS_CHUNK_CAP_CHARS` is reached (a
+    trailing marker chunk explains the cut) -- the tool itself is
+    unaffected (its OWN full output still reaches `tool_registry.
+    dispatch`'s return value and gets capped/spilled normally by
+    `_finalize_tool_result`; this only bounds the LIVE `tool_progress`
+    event stream a long-running Bash/PowerShell command can produce)."""
+
+    def __init__(self) -> None:
+        self.chunks: list = []
+        self._total = 0
+        self._capped = False
+
+    def append(self, chunk: str) -> None:
+        if self._capped:
+            return
+        self._total += len(chunk)
+        if self._total > _PROGRESS_CHUNK_CAP_CHARS:
+            self.chunks.append("\n[... further live progress output omitted (still streaming to the final "
+                                "result) ...]")
+            self._capped = True
+            return
+        self.chunks.append(chunk)
+
+
 class _StepResult:
     def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None):
         self.assistant_blocks = assistant_blocks
@@ -224,6 +254,7 @@ class Session:
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
         permission_engine: Optional[PermissionEngine] = None,
         session_catalog: Optional[object] = None, mcp_manager: Optional[object] = None,
+        hook_runner: Optional[HookRunner] = None,
     ):
         self.cwd = cwd
         self.model_ref = model_ref
@@ -246,6 +277,19 @@ class Session:
         # in `-p`) sets this; `_step` passes it into `stream_completion`
         # (cuts phase 2 short) and observes it in every retry wait.
         self.abort = threading.Event()
+        # review finding 2: set by Controller.quit() (an atomic attribute
+        # write, safe from any thread) BEFORE it queues run()'s `None`
+        # sentinel -- see run()'s own comment for why this must be a
+        # SEPARATE flag from `abort` (which a fresh turn clears).
+        self._stopping = threading.Event()
+        # scope 0(c): the steering side channel -- a plain list under a
+        # lock, checked "per chunk and per tool" (review finding 6) from
+        # INSIDE the running turn (_step's stream loop, _dispatch_tools'
+        # per-call loop, _turn_body's post-dispatch/post-stream points),
+        # never popped from any other thread.
+        self._busy = threading.Event()
+        self._steer_lock = threading.Lock()
+        self._steer_queue: list = []
         # H2 scope D: ONE PermissionEngine + ONE pair of read_cache/
         # bash_state dicts for the session's WHOLE lifetime -- every
         # ToolContext built in `_dispatch_tools` shares these same dict
@@ -298,6 +342,17 @@ class Session:
         self.mcp_manager = mcp_manager
         if self.session_catalog is not None:
             self.session_catalog.on_grow = self._on_catalog_grow
+        # H4 scope A/B: the hook runner for this session's whole lifetime
+        # (its Stop-cap counter and `once`-dedup state must persist across
+        # calls) -- None for a bare Session (every pre-H4 test, `--bare`,
+        # or a settings tree with no hooks configured at all: every call
+        # site below guards on `self.hook_runner is not None`).
+        self.hook_runner = hook_runner
+        # D-CFG: `stop_hook_active` is True only on a RE-ENTRANT Stop-hook
+        # evaluation within the SAME "the model tried to stop" attempt --
+        # reset at the start of every new turn() call, never carried from
+        # a previous turn.
+        self._stop_hook_active = False
 
         self.log = session_log or SessionLog(cwd)
         existing_nodes = self.log.nodes()
@@ -324,6 +379,7 @@ class Session:
                 self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
             env_text = session_context.environment_snapshot_text(model_label)
             self.log.append_snapshot([{"type": "text", "text": env_text}], kind="environment")
+            self._fire_session_start("startup")
         else:
             # finding 4: RESUMING an existing log -- NEVER re-append
             # meta/system/snapshots (a second system node makes
@@ -340,6 +396,78 @@ class Session:
                     "(tool registry or config changed since the original run) -- keeping the LOGGED text"
                 )
             synthesize_missing_results(self.log, reason="ABORTED_BEFORE_DISPATCH")
+            self._fire_session_start("resume")
+
+    def _fire_session_start(self, source: str) -> None:
+        """H4 scope B: SessionStart(startup|resume|clear|compact) -- `clear`/
+        `compact` are forward-wired call sites for whichever future
+        milestone actually implements `/clear`/compaction; only `startup`/
+        `resume` fire today. Hook-added `additionalContext` becomes a
+        user-role SNAPSHOT in the log (never the system node -- brief B)."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("SessionStart"):
+            return
+        payload = self.hook_runner.payload("SessionStart", extra={"source": source})
+        outcome = self.hook_runner.run("SessionStart", payload, matched=source)
+        if outcome.additional_context:
+            self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+        if source in ("startup", "resume"):
+            from rolo_claude.hooks import env_file_path, read_env_file_exports
+            exports = read_env_file_exports(env_file_path(self.log.session_id))
+            if exports:
+                self.tool_env = {**self.tool_env, **exports}
+
+    def _fire_session_end(self, reason: str) -> None:
+        """H4 scope B: SessionEnd(quit, /clear). Best-effort/observational
+        only -- nothing a SessionEnd hook returns can change anything, the
+        session is already ending."""
+        if self.hook_runner is None:
+            return
+        try:
+            self.hook_runner.run_session_end(reason)
+        except Exception:
+            pass  # a SessionEnd hook must never block process/session teardown
+
+    def _call_model_for_hook(self, prompt_text: str, timeout_s: float) -> str:
+        """The `prompt`/`agent` hook handler types' "small model via the
+        provider layer" call [D-CFG] -- a ONE-SHOT request built directly
+        via `build_request_body` (never through `derive_request`/the
+        session log, so a hook's own model call is NEVER part of the
+        logged conversation). Uses `self.small_model_ref` when configured,
+        else falls back to the main model -- true cross-provider small-
+        model routing (separate creds/profile resolution) is a follow-up
+        refinement; this already gives every hook a real model call today."""
+        ref = self.small_model_ref or self.model_ref
+        route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
+            if ref is not self.model_ref else self.route
+        profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
+        body = build_request_body(
+            system_text="Reply with ONLY a single JSON object {\"ok\": true|false, \"reason\": \"...\"} -- no prose.",
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+            tools=[], route=route, profile=profile, effort=self.effort,
+            context_tokens=self.model_profile.context_tokens,
+            prompt_estimate=_rough_estimate("", []),
+            requested_max_tokens=min(1024, self.model_profile.max_output_tokens or 1024),
+        )
+        req = self._build_request(body)
+        abort = threading.Event()
+        timer = threading.Timer(max(0.1, timeout_s), abort.set)
+        timer.daemon = True
+        timer.start()
+        text_parts: list = []
+        gen = stream_completion(req, abort=abort)
+        try:
+            for ev in gen:
+                kind = ev.get("type")
+                if kind == "content_block_delta":
+                    delta = ev.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        text_parts.append(str(delta.get("text", "")))
+                elif kind == "error":
+                    raise RuntimeError((ev.get("error") or {}).get("message", "hook model call failed"))
+        finally:
+            timer.cancel()
+            gen.close()
+        return "".join(text_parts)
 
     def _on_catalog_grow(self, names: list) -> None:
         """H3 scope C: `SessionCatalog.load()`'s own callback -- a
@@ -445,8 +573,21 @@ class Session:
             harness_meta: dict = {}
             wire_error: Optional[dict] = None
             phase1_failure: Optional[Exception] = None
+            steered_cut = False
             try:
                 for ev in gen:
+                    if self._pending_steer():
+                        # scope 0(c): "the in-flight model generation is
+                        # cut at the next chunk" -- checked BEFORE this
+                        # chunk is applied, so nothing arriving after the
+                        # steer was queued ever reaches the log/UI. Any
+                        # tool_use block still mid-formation (never got its
+                        # own content_block_stop) is dropped below, once
+                        # the loop exits -- only fully-formed blocks (text/
+                        # thinking so far, or a tool_use that JUST closed)
+                        # survive into the result.
+                        steered_cut = True
+                        break
                     kind = ev.get("type")
                     if kind == "message_start":
                         yield events.message_start(turn=turn_no, model=self.model_ref.raw)
@@ -516,11 +657,39 @@ class Session:
                 gen.close()  # always close the upstream generator
 
             if self.abort.is_set():
-                # U2: an interrupt (Esc/Ctrl+C in the TUI, or a UI `quit`)
-                # cut this call short -- never retry and never dress it up
-                # as a provider failure; `_turn_body` reports it as
-                # `turn_done(reason="interrupted")`.
+                # U2/review finding 2: an interrupt (Esc/Ctrl+C in the
+                # TUI, or a UI `quit`) cuts this call short -- never
+                # retried, never dressed up as a provider failure;
+                # `_turn_body` reports it as `turn_done(reason=
+                # "interrupted")`. The old behaviour silently DROPPED
+                # whatever text/thinking had already streamed -- logged
+                # here instead, so the transcript/model both see exactly
+                # what was cut off rather than a gap.
+                partial = [b for b in assistant_blocks if b is not None and b.get("type") in ("text", "thinking")]
+                for b in partial:
+                    if isinstance(b.get("text"), str):
+                        b["text"] = repair_truncated_text(b["text"])
+                if partial:
+                    partial.append({"type": "text", "text": "[Request interrupted by user]"})
+                    self.log.append_assistant(content=partial, stop_reason="interrupted")
                 return None
+
+            if steered_cut:
+                # scope 0(c): the stream was cut for a queued steer, not
+                # an error -- any tool_use block that never reached its
+                # own content_block_stop (input never parsed) is dropped;
+                # a block that DID already close (rare, but the steer may
+                # have been noticed on the very next chunk after one
+                # finished) survives and is dispatched normally by
+                # `_turn_body` -- "running tools allowed to finish" never
+                # applied to it in the first place, since it hadn't
+                # started. Falls straight through to a normal, un-retried
+                # result (never the empty-completion-retry path below --
+                # an intentional cut is not a provider failure).
+                for idx in list(partial_json.keys()):
+                    if idx < len(assistant_blocks):
+                        assistant_blocks[idx] = None
+                break
 
             if phase1_failure is not None:
                 if isinstance(phase1_failure, ContextOverflow):
@@ -659,28 +828,56 @@ class Session:
         # it already fired and abort immediately, before ever streaming a
         # single token. Each turn starts with a clean slate.
         self.abort.clear()
-
-        blocks = [{"type": "text", "text": text}]
-        for img in (images or []):
-            blocks.append(img)
-        self.log.append_user(blocks)
-        yield events.user_message(text, turn=turn_no, images=images)
-        yield events.status(
-            phase="thinking", model=self.model_ref.raw, turn=turn_no,
-            context_limit=self.model_profile.context_tokens,
-            cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None,
-        )
-
+        self._stop_hook_active = False
+        # H4 scope C: a Skill's `allowed-tools` only ever lasts "until the
+        # next user message" -- this IS that next user message.
+        self.permission_engine.clear_temporary_allow_rules()
+        # scope 0(c): `busy` (and therefore whether Controller.submit
+        # routes new input to a fresh turn or to `steer`) is True for the
+        # WHOLE method body below, cleared no matter how it ends.
+        self._busy.set()
         try:
-            yield from self._turn_body(turn_no)
-        except GeneratorExit:
-            # rule 2/scope F: an interrupted turn must never leave a
-            # tool_use without a matching tool_result in the log.
-            synthesize_missing_results(self.log, reason="Tool call interrupted by user")
-            raise
-        except BaseException:
-            synthesize_missing_results(self.log, reason="ABORTED_BEFORE_DISPATCH")
-            raise
+            if self.hook_runner is not None and self.hook_runner.has_hooks("UserPromptSubmit"):
+                payload = self.hook_runner.payload("UserPromptSubmit", prompt_id=f"prompt_{turn_no}",
+                                                     extra={"prompt": text})
+                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="")
+                for msg in outcome.system_messages:
+                    yield events.notification(msg)
+                if outcome.blocked:
+                    # D-CFG/B: "blocked -> prompt dropped + reason shown" --
+                    # the prompt is NEVER appended to the log at all.
+                    reason = outcome.block_reason or "blocked by a UserPromptSubmit hook"
+                    yield events.notification(f"Prompt dropped: {reason}", level="error")
+                    yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
+                                         cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
+                    yield events.turn_done(turn=turn_no, reason="blocked")
+                    return
+                if outcome.additional_context:
+                    self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+
+            blocks = [{"type": "text", "text": text}]
+            for img in (images or []):
+                blocks.append(img)
+            self.log.append_user(blocks)
+            yield events.user_message(text, turn=turn_no, images=images)
+            yield events.status(
+                phase="thinking", model=self.model_ref.raw, turn=turn_no,
+                context_limit=self.model_profile.context_tokens,
+                cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None,
+            )
+
+            try:
+                yield from self._turn_body(turn_no)
+            except GeneratorExit:
+                # rule 2/scope F: an interrupted turn must never leave a
+                # tool_use without a matching tool_result in the log.
+                synthesize_missing_results(self.log, reason="Tool call interrupted by user")
+                raise
+            except BaseException:
+                synthesize_missing_results(self.log, reason="ABORTED_BEFORE_DISPATCH")
+                raise
+        finally:
+            self._busy.clear()
 
     def _turn_body(self, turn_no: int) -> Iterator[events.Event]:
         # finding 9: `--max-turns` counts MODEL CALLS made WITHIN this one
@@ -792,6 +989,31 @@ class Session:
             )
 
             if not tool_use_blocks:
+                applied = yield from self._apply_pending_steers_events(turn_no)
+                if applied:
+                    # scope 0(c): a steer (possibly the very one that cut
+                    # this model call short mid-stream) is waiting -- apply
+                    # it and get the model's reaction immediately, never
+                    # run Stop hooks against what may be a truncated
+                    # non-answer.
+                    continue
+                if self.hook_runner is not None and self.hook_runner.has_hooks("Stop"):
+                    last_text = "".join(b.get("text", "") for b in result.assistant_blocks
+                                         if b.get("type") == "text")
+                    # `run_stop` (hooks.py) owns `stop_hook_active`/the
+                    # consecutive-block CAP itself (its own counter,
+                    # matching Claude Code's exact override message).
+                    stop_outcome = self.hook_runner.run_stop("Stop", last_assistant_message=last_text,
+                                                              prompt_id=f"turn_{self.turn_count}")
+                    for msg in stop_outcome.system_messages:
+                        yield events.notification(msg)
+                    if stop_outcome.blocked:
+                        # D-CFG: stderr/reason becomes a user-role message
+                        # and the loop continues.
+                        continuation = stop_outcome.block_reason or "Please continue."
+                        self.log.append_user([{"type": "text", "text": continuation}])
+                        yield events.user_message(continuation, turn=turn_no)
+                        continue
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no, context_tokens=input_tokens,
                                      context_limit=self.model_profile.context_tokens,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -802,6 +1024,13 @@ class Session:
                 return
 
             ended = yield from self._dispatch_tools(turn_no, tool_use_blocks, result.tool_call_flags)
+            applied = yield from self._apply_pending_steers_events(turn_no)
+            if applied:
+                # scope 0(c): "tools allowed to finish" -- they just did;
+                # a fresh steer overrides even a loop-breaker `end_turn`,
+                # since the user's own redirect makes another identical
+                # call in a row unlikely.
+                continue
             if ended:
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -876,29 +1105,162 @@ class Session:
 
         tool = self.tool_registry.get(name)
         decision: Decision = self.permission_engine.decide(name, tool_input, tool=tool)
+
+        # H4 scope B: PreToolUse fires AFTER decide(), before dispatch, for
+        # EVERY call (must-do: for a run of batched read-only calls this
+        # runs HERE, inside this per-call resolve step, which always
+        # completes before `_dispatch_tools` ever decides to batch anything
+        # -- verdicts are collected up front, never from inside the pool).
+        # `updatedInput` replaces the input regardless of the permission
+        # outcome; a hook `allow`/`ask` can skip/add a prompt the mode
+        # table would otherwise have applied, but an explicit DENY rule
+        # (decision.action == "deny" here already) is never overridden.
+        if self.hook_runner is not None and self.hook_runner.has_hooks("PreToolUse"):
+            payload = self.hook_runner.payload(
+                "PreToolUse", prompt_id=f"turn_{self.turn_count}",
+                extra={"tool_name": name, "tool_input": tool_input, "tool_use_id": tool_id},
+            )
+            pre_outcome = self.hook_runner.run("PreToolUse", payload, matched=name, tool_name=name,
+                                                 tool_input=tool_input, tool=tool, abort=self.abort)
+            for msg in pre_outcome.system_messages:
+                item.setdefault("hook_system_messages", []).append(msg)
+            if pre_outcome.updated_input is not None:
+                tool_input = pre_outcome.updated_input
+                item["input"] = tool_input
+            if pre_outcome.blocked:
+                item["text"] = f"Blocked by a PreToolUse hook: {pre_outcome.block_reason or 'blocked'}"
+                item["permission_denial"] = {"tool_name": name, "tool_input": tool_input,
+                                              "reason": pre_outcome.block_reason or "blocked by a PreToolUse hook",
+                                              "suggested_rule": None}
+                return item
+            if pre_outcome.permission_decision and decision.action != "deny":
+                reason = pre_outcome.permission_decision_reason or f"{pre_outcome.permission_decision}ed by a PreToolUse hook"
+                if pre_outcome.permission_decision in ("allow", "deny", "ask"):
+                    decision = Decision(pre_outcome.permission_decision, reason, source="hook")
+                # "defer": leave `decision` exactly as decide() computed it.
+
         if decision.action == "deny":
             text = f"Permission denied: {decision.reason}"
             if decision.suggested_rule:
                 text += f" (suggested rule: {decision.suggested_rule})"
             item["text"] = text
-            item["permission_denial"] = decision.permission_denial
+            item["permission_denial"] = decision.permission_denial or {
+                "tool_name": name, "tool_input": tool_input, "reason": decision.reason, "suggested_rule": decision.suggested_rule,
+            }
+            self._fire_permission_denied(name, tool_input, decision.reason)
             return item
         if decision.action == "ask":
-            item["ask_reason"] = decision.reason
-            if not self.interactive:
-                # no UI is attached (print mode / a bare Session in a test):
-                # resolve immediately as a denial, H2b's behaviour.
-                item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
+            # H4 scope B: PermissionRequest fires before the UI card would
+            # ever be shown -- a hook's own answer wins outright (D-CFG).
+            if self.hook_runner is not None and self.hook_runner.has_hooks("PermissionRequest"):
+                pr_payload = self.hook_runner.payload(
+                    "PermissionRequest", extra={"tool_name": name, "tool_input": tool_input,
+                                                 "tool_use_id": tool_id, "permission_suggestions": None},
+                )
+                pr_outcome = self.hook_runner.run("PermissionRequest", pr_payload, matched=name, tool_name=name,
+                                                    tool_input=tool_input, tool=tool, abort=self.abort)
+                if pr_outcome.permission_decision in ("allow", "deny"):
+                    reason = pr_outcome.permission_decision_reason or f"{pr_outcome.permission_decision}ed by a PermissionRequest hook"
+                    decision = Decision(pr_outcome.permission_decision, reason, source="hook")
+            if decision.action == "deny":
+                text = f"Permission denied: {decision.reason}"
+                item["text"] = text
+                item["permission_denial"] = decision.permission_denial or {
+                    "tool_name": name, "tool_input": tool_input, "reason": decision.reason, "suggested_rule": None,
+                }
+                self._fire_permission_denied(name, tool_input, decision.reason)
                 return item
-            # interactive: `_dispatch_tools` yields the `permission_request`
-            # and then BLOCKS on this waiter until the UI answers (U2).
-            item["pending_ask"] = True
-            item["suggested_rule"] = decision.suggested_rule
-            self._permission_waiters[tool_id] = {"event": threading.Event(), "decision": None}
-            return item
+            if decision.action == "ask":
+                item["ask_reason"] = decision.reason
+                if not self.interactive:
+                    # no UI is attached (print mode / a bare Session in a test):
+                    # resolve immediately as a denial, H2b's behaviour.
+                    item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
+                    self._fire_permission_denied(name, tool_input, decision.reason)
+                    return item
+                # interactive: `_dispatch_tools` yields the `permission_request`
+                # and then BLOCKS on this waiter until the UI answers (U2).
+                item["pending_ask"] = True
+                item["suggested_rule"] = decision.suggested_rule
+                self._permission_waiters[tool_id] = {"event": threading.Event(), "decision": None}
+                return item
+            # decision.action == "allow" (the PermissionRequest hook just
+            # answered it) -- fall through to item["ready"]=True below.
+            # (decision.action == "deny" is unreachable here -- the plain
+            # `if decision.action == "deny":` above already caught and
+            # returned for every path that could produce it, including a
+            # PreToolUse hook's own reassignment, which runs before it.)
 
         item["ready"] = True
         return item
+
+    def _fire_permission_denied(self, name: str, tool_input: dict, reason: str) -> None:
+        """H4 scope B: PermissionDenied -- observational only (nothing it
+        returns can change an already-final denial)."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("PermissionDenied"):
+            return
+        payload = self.hook_runner.payload("PermissionDenied", extra={"tool_name": name, "tool_input": tool_input,
+                                                                        "reason": reason})
+        try:
+            self.hook_runner.run("PermissionDenied", payload, matched=name, tool_name=name, tool_input=tool_input)
+        except Exception:
+            pass
+
+    def _post_tool_use_response_value(self, content) -> object:
+        """A JSON-safe `tool_response` payload value from a ToolResult's
+        raw `.content` -- a string passes through; a block list is
+        flattened to its text (images/other blocks noted by type, never
+        dropped silently); anything else becomes its `str()`."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif isinstance(b, dict):
+                    parts.append(f"[{b.get('type', 'content')} block]")
+                else:
+                    parts.append(str(b))
+            return "\n".join(parts)
+        return str(content)
+
+    def _apply_post_tool_use_hooks(self, name: str, tool_id: str, tool_input: dict, tr) -> "tuple[object, list]":
+        """H4 scope B/must-do: PostToolUse/PostToolUseFailure, BEFORE
+        `spill_and_truncate`/`_mcp_blocks_for_log` ever run (the hook sees
+        the model's real, full, untruncated output). Returns `(tr,
+        system_messages)` -- `tr` is a NEW ToolResult when a hook added
+        `additionalContext` or hard-blocked (appended as a trailing note;
+        a block also flips `is_error=True`, since the tool already ran and
+        there is nothing left to "not run"), else the original unchanged."""
+        event = "PostToolUseFailure" if tr.is_error else "PostToolUse"
+        if self.hook_runner is None or not self.hook_runner.has_hooks(event):
+            return tr, []
+        response_value = self._post_tool_use_response_value(tr.content)
+        if event == "PostToolUseFailure":
+            payload = self.hook_runner.payload(
+                event, extra={"tool_name": name, "tool_input": tool_input, "tool_use_id": tool_id,
+                               "error": response_value, "error_type": "tool_error", "is_interrupt": False},
+            )
+        else:
+            payload = self.hook_runner.payload(
+                event, extra={"tool_name": name, "tool_input": tool_input, "tool_use_id": tool_id,
+                               "tool_response": response_value},
+            )
+        tool = self.tool_registry.get(name)
+        outcome = self.hook_runner.run(event, payload, matched=name, tool_name=name, tool_input=tool_input, tool=tool)
+        extra_note = ""
+        if outcome.blocked:
+            extra_note = f"\n\n[PostToolUse hook: {outcome.block_reason or 'blocked'}]"
+        elif outcome.additional_context:
+            extra_note = f"\n\n{outcome.additional_context}"
+        if not extra_note:
+            return tr, outcome.system_messages
+        if isinstance(tr.content, list):
+            new_content = tr.content + [{"type": "text", "text": extra_note.strip()}]
+        else:
+            new_content = (tr.content if isinstance(tr.content, str) else str(tr.content)) + extra_note
+        return ToolResult(content=new_content, is_error=(tr.is_error or outcome.blocked)), outcome.system_messages
 
     def _finalize_tool_result(self, turn_no: int, item: dict, session_dir) -> Iterator[events.Event]:
         """Log + yield the `tool_result` for one `_resolve_tool_call` item,
@@ -914,6 +1276,9 @@ class Session:
                 self.permission_denials.append(item["permission_denial"])
             return
         tr = item["result"]
+        tr, hook_system_messages = self._apply_post_tool_use_hooks(name, tool_id, item["input"], tr)
+        for msg in hook_system_messages:
+            yield events.notification(msg)
         if isinstance(tr.content, list):
             # finding 5/H4 must-do: logged AS BLOCKS (vision images stay
             # real image blocks; tool_reference stripped) and capped HERE,
@@ -941,7 +1306,14 @@ class Session:
                 content_for_log += reminder
             summary_text += reminder
         self.log.append_tool_result(tool_use_id=tool_id, content=content_for_log, is_error=tr.is_error)
-        yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200]}, turn=turn_no)
+        # review finding 15: `summary` alone (200 chars) is what Ctrl+O's
+        # pager showed too, since `set_result` used to overwrite the
+        # card's `body_text` with it -- `content` carries the FULLER
+        # (still capped by spill_and_truncate/_mcp_blocks_for_log above,
+        # e.g. tens of KB, never the raw uncapped tool output) text so
+        # the pager has something real to show.
+        yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200],
+                                            "content": summary_text}, turn=turn_no)
 
     # ---- interactive permission handshake (U2) ---------------------------
 
@@ -976,18 +1348,29 @@ class Session:
         """Block the WORKER thread until a UI-thread `resolve_*` call answers
         `request_id` or the session's abort Event is set (the escape hatch:
         Esc/Ctrl+C during a pending prompt). Returns the stored value, or
-        None on abort/timeout/never-registered."""
-        slot = waiters.pop(request_id, None)
+        None on abort/timeout/never-registered.
+
+        review finding 1 (critical): the slot MUST stay registered in
+        `waiters` for the WHOLE wait -- popping it up front (the old bug)
+        meant `resolve_permission`/`resolve_question` (called from the UI
+        thread, which only ever does `waiters.get(request_id)`) found
+        nothing, silently returned False, and every card answer was lost:
+        the worker just sat here until Esc/quit fired `self.abort`. Popped
+        in `finally`, once, after the wait actually ends."""
+        slot = waiters.get(request_id)
         if slot is None:
             return None
-        while not slot["event"].wait(0.1):
-            if self.abort.is_set():
-                return None
-            if timeout is not None:
-                timeout -= 0.1
-                if timeout <= 0:
+        try:
+            while not slot["event"].wait(0.1):
+                if self.abort.is_set():
                     return None
-        return slot["answer"] if "answer" in slot else slot["decision"]
+                if timeout is not None:
+                    timeout -= 0.1
+                    if timeout <= 0:
+                        return None
+            return slot["answer"] if "answer" in slot else slot["decision"]
+        finally:
+            waiters.pop(request_id, None)
 
     def _await_permission_decision(self, request_id: str, *, timeout: Optional[float] = None):
         return self._await_reply(self._permission_waiters, request_id, timeout=timeout)
@@ -1047,7 +1430,9 @@ class Session:
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
-                           mcp_manager=self.mcp_manager)
+                           mcp_manager=self.mcp_manager,
+                           session_allow_rule=lambda rule_text: self.permission_engine.add_session_allow_rule(
+                               rule_text, temporary=True))
         repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
 
         end_turn = False
@@ -1065,12 +1450,37 @@ class Session:
             for it, tr in zip(pending_batch, results):
                 it["result"] = tr
 
-        for tu, outcome in zip(tool_use_blocks, repair_outcomes):
+        for i, (tu, outcome) in enumerate(zip(tool_use_blocks, repair_outcomes)):
+            if self.abort.is_set():
+                # review finding 2: nothing FURTHER starts once
+                # interrupted -- a call already dispatched (solo, or
+                # inside an already-running batch) is allowed to finish;
+                # this and every remaining call become synthesized
+                # interrupted results instead of ever reaching decide()/
+                # dispatch. Flush whatever was already announced first.
+                if pending_batch:
+                    _dispatch_pending_batch()
+                    yield from self._fire_post_tool_batch(turn_no, pending_batch)
+                    for batched_item in pending_batch:
+                        yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
+                    pending_batch = []
+                for remaining_tu in tool_use_blocks[i:]:
+                    r_id, r_name = remaining_tu.get("id"), remaining_tu.get("name")
+                    interrupted_item = {"tool_id": r_id, "name": r_name, "input": remaining_tu.get("input") or {},
+                                         "ready": False, "text": "Tool call interrupted by user", "repaired": False}
+                    yield events.Event("tool_use_ready", {"id": r_id, "name": r_name,
+                                                            "input": interrupted_item["input"], "repaired": False},
+                                        turn=turn_no)
+                    yield from self._finalize_tool_result(turn_no, interrupted_item, ctx.session_dir)
+                return True
+
             item = self._resolve_tool_call(tu, outcome, tool_call_flags)
             tool_id, name = item["tool_id"], item["name"]
 
             yield events.Event("tool_use_ready", {"id": tool_id, "name": name, "input": item["input"],
                                                     "repaired": item["repaired"]}, turn=turn_no)
+            for msg in item.pop("hook_system_messages", None) or []:
+                yield events.notification(msg)
             if "ask_reason" in item:
                 yield events.Event("permission_request", {"id": tool_id, "name": name, "input": item["input"],
                                                             "reason": item["ask_reason"],
@@ -1105,6 +1515,7 @@ class Session:
             # THEN handle the current one the same way.
             if pending_batch:
                 _dispatch_pending_batch()
+                yield from self._fire_post_tool_batch(turn_no, pending_batch)
                 for batched_item in pending_batch:
                     yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                     if batched_item.get("end_turn"):
@@ -1119,31 +1530,78 @@ class Session:
                 # ToolContext, via dataclasses.replace, keeps read_cache/
                 # bash_state/abort/session_dir/registry/env as the SAME
                 # shared objects, only tool_use_id/progress_cb differ.
-                progress_chunks: list = []
+                # review finding 15: `progress_cb` is a plain sync callback
+                # from INSIDE a blocking `dispatch()` call, so truly
+                # streaming each chunk out as its own live event needs a
+                # thread/queue this pass doesn't have time for -- the
+                # bounded collector below at least keeps a 60MB-streaming
+                # Bash command from holding millions of characters in RAM
+                # for the whole run (the old plain list did exactly that,
+                # verified: 8.6M characters retained for a 300k-character
+                # final result), keeping only a head/tail sample.
+                progress_chunks = _BoundedChunks()
                 item_ctx = dataclasses.replace(ctx, tool_use_id=tool_id, progress_cb=progress_chunks.append)
                 item["result"] = self.tool_registry.dispatch(name, item["input"], item_ctx)
-                for chunk in progress_chunks:
+                for chunk in progress_chunks.chunks:
                     yield events.Event("tool_progress", {"id": tool_id, "name": name, "text": chunk}, turn=turn_no)
             yield from self._finalize_tool_result(turn_no, item, ctx.session_dir)
             if item.get("end_turn"):
                 end_turn = True
+            if self._pending_steer():
+                # review finding 6 / scope 0(c): checked per TOOL, not
+                # just once per whole batch -- a steer that arrived while
+                # this call was running stops any FURTHER call in this
+                # same assistant turn from starting; the one that just
+                # finished is kept (it already ran to completion).
+                # `_turn_body`'s own post-dispatch check applies it.
+                break
 
         if pending_batch:
             _dispatch_pending_batch()
+            yield from self._fire_post_tool_batch(turn_no, pending_batch)
             for batched_item in pending_batch:
                 yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                 if batched_item.get("end_turn"):
                     end_turn = True
         return end_turn
 
+    def _fire_post_tool_batch(self, turn_no: int, pending_batch: list) -> Iterator[events.Event]:
+        """H4 scope B: PostToolBatch -- fires once for a whole dispatched
+        read-only batch, observational (its own JSON output is not applied
+        back to the individual results; each item's own PostToolUse/
+        PostToolUseFailure -- fired from `_finalize_tool_result` right
+        after this -- is what can annotate/block ONE result)."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("PostToolBatch"):
+            return
+        tool_calls = [{
+            "tool_name": it["name"], "tool_input": it["input"], "tool_use_id": it["tool_id"],
+            "tool_response": self._post_tool_use_response_value(it["result"].content),
+        } for it in pending_batch if it.get("result") is not None]
+        if not tool_calls:
+            return
+        payload = self.hook_runner.payload("PostToolBatch", extra={"tool_calls": tool_calls})
+        outcome = self.hook_runner.run("PostToolBatch", payload, matched="")
+        for msg in outcome.system_messages:
+            yield events.notification(msg)
+
     # ---- the interactive command pump (U2, D-Contract) -------------------
 
     def set_model(self, model_ref: ModelRef, model_profile: ModelProfile, creds=None) -> None:
         """Swap the active model mid-session (`/model`): the ref, its
         profile and (when given) its credentials, plus the derived Route/
-        provider profile every request builder reads. The LOGGED frozen
-        catalog is deliberately untouched -- `derive_request` keeps
-        reconstructing the tools the session actually started with."""
+        provider profile every request builder reads.
+
+        review finding 14: three things used to go silently stale here --
+        (a) every already-loaded `McpTool.vision` flag (a switch away
+        from a vision model kept sending logged screenshots as
+        `image_url` parts a text-only endpoint rejects), (b) the
+        SessionCatalog's tool-count CAP (OpenRouter 128 -> Databricks 32
+        made every later request fail with `tool_catalog_too_large` once
+        enough ToolSearch loads had accumulated past the new, smaller
+        cap) -- fixed by re-gating vision and LRU-evicting down to fit,
+        and (c) no log record of the switch at all -- a `meta` node now
+        carries the new model + the (possibly just-shrunk) tool list, the
+        same shape `_on_catalog_grow` already logs."""
         self.model_ref = model_ref
         self.model_profile = model_profile
         if creds is not None:
@@ -1151,6 +1609,22 @@ class Session:
         self.model_label = model_ref.raw
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         self.provider_profile = resolve_profile(self.route)
+
+        for name in self.tool_registry.names():
+            tool = self.tool_registry.get(name)
+            if hasattr(tool, "vision"):
+                tool.vision = model_profile.vision
+        if self.session_catalog is not None:
+            from rolo_claude.agent.catalog import host_cap
+            self.session_catalog.cap = host_cap(model_ref.provider)
+            self.session_catalog.vision = model_profile.vision
+            while (len(self.session_catalog.names) > self.session_catalog.cap
+                   and self.session_catalog._evict_one()):
+                pass
+            self.log.append_meta(model=model_ref.raw,
+                                  tools=self.tool_registry.definitions_for(self.session_catalog.names))
+        else:
+            self.log.append_meta(model=model_ref.raw, tools=self.tool_registry.definitions())
 
     def status_event(self, *, phase: str = "idle", context_tokens=None, turn: Optional[int] = None) -> events.Event:
         """The D-Contract `status` payload as THIS session knows it --
@@ -1165,6 +1639,53 @@ class Session:
             cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None,
             permission_mode=self.permission_engine.mode, session_id=self.log.session_id, mcp=mcp,
         )
+
+    @property
+    def busy(self) -> bool:
+        """scope 0(c): True while a turn is actively running -- Controller.
+        submit reads this (a plain Event check, thread-safe) to decide
+        whether new input becomes a fresh turn or a steer."""
+        return self._busy.is_set()
+
+    def steer(self, text: str) -> bool:
+        """Thread-safe, called DIRECTLY (never through the command queue,
+        same reasoning as `interrupt`/`resolve_permission`: the worker is
+        parked inside the running turn's generator and can't read a
+        queue). Just queues `text` -- the actual cut/apply only ever
+        happens from INSIDE the turn (`_step`'s stream loop,
+        `_dispatch_tools`'s per-call loop, `_turn_body`'s post-dispatch/
+        post-stream safe points), never from here. Returns False (nothing
+        queued) when no turn is running to steer."""
+        if not text or not self.busy:
+            return False
+        with self._steer_lock:
+            self._steer_queue.append(text)
+        return True
+
+    def _pending_steer(self) -> bool:
+        with self._steer_lock:
+            return bool(self._steer_queue)
+
+    def _pop_all_steers(self) -> list:
+        with self._steer_lock:
+            texts, self._steer_queue = self._steer_queue, []
+        return texts
+
+    def _apply_pending_steers_events(self, turn_no: int):
+        """Pop every queued steer (in arrival order) and apply each as a
+        user-role message -- called ONLY from a safe point (never mid-
+        stream/mid-dispatch): right after a model call was cut short for a
+        steer, or right after the current tool dispatch finished ("tools
+        allowed to finish", scope 0c). Returns True iff at least one was
+        applied, via the generator's return value (`yield from`) -- the
+        caller must then `continue` its loop instead of ending the turn."""
+        texts = self._pop_all_steers()
+        for text in texts:
+            yield events.steer_queued(text, turn=turn_no)
+            self.log.append_user([{"type": "text", "text": text}])
+            yield events.user_message(text, turn=turn_no)
+            yield events.steer_applied(text, turn=turn_no)
+        return bool(texts)
 
     def _pump_turn(self, text: str, images, out) -> None:
         """Drive ONE turn to completion, pushing every Event straight to
@@ -1199,12 +1720,31 @@ class Session:
             cmd = commands.get()
             if cmd is None:
                 return 0
+            if self._stopping.is_set():
+                # review finding 2: `Controller.quit()` sets this (an
+                # atomic flag, safe to check here) BEFORE queuing its own
+                # `None` sentinel -- a `user_input` a user typed just
+                # before quitting can otherwise sit AHEAD of that sentinel
+                # in the queue and `_pump_turn`'s own `self.abort.clear()`
+                # would silently undo the abort quit() just set, starting
+                # a whole new turn (and its own child processes) during
+                # shutdown. Once stopping, every queued command except the
+                # sentinel itself is drained and ignored.
+                continue
             kind = getattr(cmd, "kind", None)
             data = getattr(cmd, "data", None) or {}
             if kind == "user_input":
                 self._pump_turn(data.get("text", ""), data.get("images"), out)
             elif kind == "interrupt":
                 self.abort.set()
+            elif kind == "steer":
+                # safety net only, mirrors "permission_reply"/"question_
+                # reply" -- the UI/print-mode caller normally calls
+                # Session.steer() directly (unblocks the running turn
+                # immediately); this branch only ever fires for a "steer"
+                # Command that arrived while NO turn was running, where
+                # there is nothing to steer.
+                self.steer(data.get("text", ""))
             elif kind == "set_mode":
                 mode = data.get("mode")
                 if mode:

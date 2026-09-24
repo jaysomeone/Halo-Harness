@@ -105,24 +105,42 @@ def build_controller(args) -> "tuple[Controller, Registry, object]":
         model_ref=model_ref, model_profile=model_profile, bare=bare,
     )
 
+    # H4 scope E: resolved + WebSearch added to `frozen_registry` BEFORE
+    # `ctx` (same reasoning/ordering as headless.py's own call site).
+    creds = _resolve_creds(model_ref, settings)
+    if not bare and model_ref.provider == "openrouter" and creds is not None and frozen_registry.get("WebSearch") is None:
+        from rolo_claude.tools.websearch import build_websearch_tool
+        ws_tool = build_websearch_tool(
+            main_provider=model_ref.provider, creds=creds,
+            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
+        )
+        if ws_tool is not None:
+            frozen_registry.add_tool(ws_tool)
+
     ctx = SessionContext(cwd=cwd, model_label=model_ref.raw, model_family=family,
                           settings_flag=getattr(args, "settings", None), setting_sources=None,
                           append_system_prompt=getattr(args, "append_system_prompt", None), bare=bare,
                           tool_registry=frozen_registry, mcp_servers=mcp_servers_for_prompt)
 
-    creds = _resolve_creds(model_ref, ctx.settings)
     openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
 
     session_id = getattr(args, "session_id", None)
     session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
+    from rolo_claude.headless import build_hook_runner
+    hook_runner = build_hook_runner(
+        settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
+        effort=getattr(args, "effort", None), permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
+    )
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
         model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
         max_turns=getattr(args, "max_turns", None) or 50, openrouter_base_url=openrouter_base_url,
         effort=getattr(args, "effort", None), extra_headers=extra_headers, permission_engine=permission_engine,
-        session_catalog=session_catalog, mcp_manager=mcp_manager,
+        session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
     )
+    if hook_runner is not None:
+        hook_runner.prompt_caller = session._call_model_for_hook
 
     registry = Registry.discover(cwd, home())
     facade = HeadlessFacade(

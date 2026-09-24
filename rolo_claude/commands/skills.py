@@ -76,9 +76,12 @@ def _discover_skills_tree(skills_root: Path, *, exclude_synced: bool) -> list:
         if not name:
             continue
         description = fm.get("description", "") or fm.get("when_to_use", "") or ""
+        allowed = tuple(_allowed_tools_list(fm))
         out.append(SlashCommand(
             name=name, description=description, kind="prompt", argument_hint=fm.get("argument-hint"),
-            source="skill", path=md, run=_make_run(body, _allowed_tools_list(fm)),
+            source="skill", path=md, run=_make_run(body, list(allowed)),
+            model_invocable=fm.get("disable-model-invocation", False) is not True,
+            allowed_tools=allowed, context_mode=(fm.get("context") if fm.get("context") in ("fork", "agent") else None),
         ))
     return out
 
@@ -109,22 +112,24 @@ def _discover_synced(skills_root: Path) -> list:
                 continue
             description = entry.get("description") or fm.get("description", "") or ""
             alias = () if (":" in base_name or base_name.startswith("mcp__")) else (base_name,)
+            allowed = tuple(_allowed_tools_list(fm))
             out.append(SlashCommand(
                 name=f"anthropic-skills:{base_name}", description=description, kind="prompt",
-                aliases=alias, source="skill", path=path, run=_make_run(body, _allowed_tools_list(fm)),
+                aliases=alias, source="skill", path=path, run=_make_run(body, list(allowed)),
+                model_invocable=fm.get("disable-model-invocation", False) is not True,
+                allowed_tools=allowed, context_mode=(fm.get("context") if fm.get("context") in ("fork", "agent") else None),
             ))
     return out
 
 
-def register_skills(reg: Registry, *, cwd: Path, home: Optional[Path] = None) -> None:
-    """Two-phase: collect every skill into a LOCAL name->command map with
-    its own internal precedence (closest project ancestor wins over a
-    farther one; project wins over user; user wins over synced -- later
-    `setdefault` calls in this function never override an already-collected
-    name), then register each into `reg` exactly once via `add_skill` (skill
-    beats a same-named command, never a builtin) -- avoids re-deriving two
-    different "who wins" rules against the shared registry's own mutable
-    state."""
+def discover_all_skills(cwd: Path, *, home: Optional[Path] = None) -> dict:
+    """`{name: SlashCommand}` for every skill visible from `cwd`, with the
+    SAME internal precedence `register_skills` applies to the `/` surface
+    (closest project ancestor > user > synced) -- the ONE traversal both
+    `register_skills` (the slash-command surface) and `tools/skill.py`'s
+    real Skill TOOL (a by-name lookup, never through the shared Registry
+    object a Tool has no reference to) build on, so the two can never
+    disagree about which skill a name resolves to."""
     from rolo_claude.config.paths import claude_config_dir as claude_config_dir_fn, home as home_fn
 
     user_home = Path(home) if home is not None else home_fn()
@@ -156,5 +161,26 @@ def register_skills(reg: Registry, *, cwd: Path, home: Optional[Path] = None) ->
     for cmd in _discover_synced(skills_root):
         _collect(cmd)
 
-    for cmd in collected.values():
+    return collected
+
+
+def find_skill(name: str, cwd: Path, *, home: Optional[Path] = None) -> Optional[SlashCommand]:
+    """By-name lookup for the Skill TOOL (`tools/skill.py`) -- also
+    resolves a synced skill's bare alias (e.g. `docx` for `anthropic-
+    skills:docx`) when it isn't itself a collision, same rule `Registry.
+    resolve` applies to the `/` surface."""
+    skills = discover_all_skills(cwd, home=home)
+    if name in skills:
+        return skills[name]
+    for cmd in skills.values():
+        if name in cmd.aliases:
+            return cmd
+    return None
+
+
+def register_skills(reg: Registry, *, cwd: Path, home: Optional[Path] = None) -> None:
+    """Register every skill `discover_all_skills` finds into `reg` exactly
+    once via `add_skill` (skill beats a same-named command, never a
+    builtin)."""
+    for cmd in discover_all_skills(cwd, home=home).values():
         reg.add_skill(cmd)

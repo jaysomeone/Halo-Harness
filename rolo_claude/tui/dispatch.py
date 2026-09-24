@@ -8,9 +8,12 @@ ever needed.
 
 from __future__ import annotations
 
+import logging
+
 from rolo_claude.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, _summarize_call
 from rolo_claude.tui.widgets.diffview import DiffView
 
+log = logging.getLogger("bridge")
 _SEVERITY = {"error": "error", "warning": "warning"}
 
 
@@ -29,13 +32,29 @@ async def _mount_tool_card(app, data: dict) -> None:
     card = ToolCard(tool_use_id=tool_id, header=_tool_header(app, name, input_data))
     card.set_verbose(app.verbose)
     await app.transcript.mount_tool_card(card)
+    # review finding 5: repair can hand a REJECTED tool_use through to
+    # `tool_use_ready` with its raw, un-coerced input (e.g. `old_string:
+    # null`) -- DiffView's `.splitlines()` on a non-str kills the whole
+    # app. `_as_text` never raises for anything JSON-shaped.
     if name == "Edit" and isinstance(input_data, dict):
-        diff = DiffView(input_data.get("old_string", ""), input_data.get("new_string", ""),
-                         path=input_data.get("file_path", ""))
+        diff = DiffView(_as_text(input_data.get("old_string", "")), _as_text(input_data.get("new_string", "")),
+                         path=_as_text(input_data.get("file_path", "")))
         await app.transcript.mount_widget(diff)
     elif name == "Write" and isinstance(input_data, dict):
-        diff = DiffView("", input_data.get("content", ""), path=input_data.get("file_path", ""))
+        diff = DiffView("", _as_text(input_data.get("content", "")), path=_as_text(input_data.get("file_path", "")))
         await app.transcript.mount_widget(diff)
+
+
+def _as_text(value) -> str:
+    """review finding 5: coerce any tool_use input value to a safe str --
+    a model/repair-rejected call can hand this ANY JSON-shaped value
+    (None, a number, a list, ...), never just the string a card/DiffView
+    assumes."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
 
 
 async def _show_permission_card(app, data: dict) -> None:
@@ -59,7 +78,10 @@ async def _show_question_card(app, data: dict) -> None:
     input_data = data.get("input") or {}
 
     def on_answer(answer) -> None:
-        app.controller.answer_question(request_id, answer)
+        ok = app.controller.answer_question(request_id, answer)
+        if not ok:
+            app.notify("That question is no longer waiting for an answer (already answered or the turn "
+                       "was interrupted).", severity="warning", title="Question")
         app.clear_pending_card()
 
     card = QuestionCard(request_id=request_id, input_data=input_data, on_answer=on_answer)
@@ -103,6 +125,27 @@ async def _apply_replay(app, messages: list) -> None:
 
 
 async def apply_event(app, event) -> None:
+    """review finding 5: NOTHING isolated exceptions here although a
+    handler can raise on perfectly reachable input (a repair-rejected
+    tool_use's raw None/int/list args reaching DiffView, a Claude-Code-
+    shaped question, ...) -- one bad event used to kill the whole TUI,
+    typically leaving a running Bash child orphaned. A failure here
+    becomes an error note + a notify, never a crash."""
+    try:
+        await _apply_event_inner(app, event)
+    except Exception as e:
+        log.exception("apply_event failed for kind=%r", getattr(event, "kind", None))
+        try:
+            await app.transcript.add_note(f"✗ UI error handling {event.kind!r}: {type(e).__name__}: {e}", kind="error")
+        except Exception:
+            pass
+        try:
+            app.notify(f"UI error: {type(e).__name__}: {e}", severity="error", title="Internal error")
+        except Exception:
+            pass
+
+
+async def _apply_event_inner(app, event) -> None:
     kind, data, turn = event.kind, event.data, event.turn
     if kind == "user_message":
         await app.transcript.add_user(data.get("text", ""))
@@ -122,7 +165,7 @@ async def apply_event(app, event) -> None:
     elif kind == "tool_result":
         card = app.transcript.tool_cards.get(data.get("id"))
         if card is not None:
-            card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""))
+            card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"))
     elif kind == "permission_request":
         await _show_permission_card(app, data)
     elif kind == "question":
@@ -154,3 +197,7 @@ async def apply_event(app, event) -> None:
         await _apply_replay(app, data.get("messages") or [])
     elif kind == "notification":
         app.notify(data.get("text", ""), severity=_SEVERITY.get(data.get("level"), "information"))
+    elif kind == "steer_queued":
+        await app.transcript.add_note(f"↳ steering… {data.get('text', '')}", kind="steer")
+    elif kind == "steer_applied":
+        app.status_bar.apply_status({"phase": "thinking"})

@@ -66,6 +66,36 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
     return None  # "ant:" (direct Anthropic) isn't wired into the openai-chat stream_completion path
 
 
+def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: str,
+                       effort: Optional[str], permission_mode: str, mcp_manager, bare: bool):
+    """Shared by `run_print_mode` and `tui/bootstrap.py` (imported from
+    there, same reuse pattern as `_resolve_creds`) -- one `HookRunner` per
+    session, built from `settings.hooks` (already trust-filtered by
+    `config/settings.py`'s own merge) + every enabled plugin's own
+    `hooks/hooks.json`. `--bare`/`disableAllHooks` disable the runner
+    outright (`enabled=False`), so a caller never has to special-case an
+    empty result -- every `HookRunner.has_hooks(...)` call site is then
+    simply always False. `prompt_caller` is left unbound here (the CALLER
+    binds it to the just-constructed Session's own `_call_model_for_hook`,
+    once one exists -- see the call site)."""
+    from rolo_claude.config.plugins import load_installed_plugins, _plugin_roots
+    from rolo_claude.hooks import HookRunner, load_plugin_hooks, merge_hook_maps, normalize_hooks
+
+    disabled = bare or bool(settings is not None and getattr(settings, "disable_all_hooks", False))
+    hooks_by_event: dict = {}
+    if not disabled:
+        if settings is not None:
+            hooks_by_event = normalize_hooks(settings.hooks or {}, default_source="settings")
+        manifest = load_installed_plugins()
+        for _plugin_name, plugin_root in _plugin_roots(manifest):
+            hooks_by_event = merge_hook_maps(hooks_by_event, load_plugin_hooks(plugin_root))
+    return HookRunner(
+        hooks_by_event, cwd=cwd, session_id=session_id, transcript_path=transcript_path,
+        effective_env=(settings.effective_env if settings is not None else None),
+        effort=effort, permission_mode=permission_mode, mcp_manager=mcp_manager, enabled=not disabled,
+    )
+
+
 def _extract_user_text(obj: dict) -> str:
     """One `--input-format stream-json` line's user text, whether
     `content` is a plain string or an Anthropic-shaped block list."""
@@ -92,6 +122,18 @@ def _maybe_run_slash_command(prompt_text: str, *, registry, facade, disable_slas
         return None, None
     output = cmd.run(m.group(2) or "", facade)
     return (output, None) if cmd.kind == "prompt" else (None, output)
+
+
+def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> None:
+    """H4 scope C: a slash-invoked command/skill's EXPANDED body's `@path`
+    mentions, read via the Read tool's own path resolution and appended
+    as snapshots BEFORE the turn that will carry `text` -- a no-op when
+    `text` is None (an ordinary, non-slash prompt was never expanded)."""
+    if not text:
+        return
+    from rolo_claude.commands.registry import read_at_mention_snapshots
+    for path_str, content in read_at_mention_snapshots(text, cwd=cwd):
+        session.log.append_snapshot([{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
 
 
 def _events_for_direct_output(output: str, *, turn_no: int = 1):
@@ -302,6 +344,22 @@ def run_print_mode(
                 for name, h in mcp_manager.handles.items() if h.state == "connected"
             ]
 
+    # H4 scope E: creds resolved HERE (not after SessionContext, the old
+    # position) so WebSearch can be added to `frozen_registry` BEFORE
+    # `ctx`/its byte-stable system prompt are built from it -- added
+    # after, the tool would still dispatch (same registry object) but the
+    # prompt's own tool listing / "WebSearch available" sentence would
+    # never mention it (both computed once, at ctx-construction time).
+    creds = _resolve_creds(model_ref, settings)
+    if not bare and model_ref.provider == "openrouter" and creds is not None and frozen_registry.get("WebSearch") is None:
+        from rolo_claude.tools.websearch import build_websearch_tool
+        ws_tool = build_websearch_tool(
+            main_provider=model_ref.provider, creds=creds,
+            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
+        )
+        if ws_tool is not None:
+            frozen_registry.add_tool(ws_tool)
+
     effective_append = append_system_prompt
     if json_schema:
         note = f"Respond with JSON matching this schema (no prose outside the JSON): {json_schema}"
@@ -315,20 +373,28 @@ def run_print_mode(
     if system_prompt:
         ctx.system_prompt = system_prompt  # --system-prompt[-file]: full replacement
 
-    creds = _resolve_creds(model_ref, ctx.settings)
     openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
 
     # (--session-id already validated at the top of this function, before
     # any MCP server was ever started -- see the must-do note there.)
     session_log = SessionLog(cwd, session_id=session_id or uuid.uuid4().hex)
+    hook_runner = build_hook_runner(
+        settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
+        effort=effort, permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
+    )
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
         model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
         extra_headers=extra_headers, permission_engine=permission_engine,
-        session_catalog=session_catalog, mcp_manager=mcp_manager,
+        session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
     )
+    if hook_runner is not None:
+        # a `prompt`/`agent` hook's one-shot model call is a Session method
+        # (it needs the session's own route/profile/creds) -- bound here,
+        # after construction, to avoid a chicken-and-egg dependency.
+        hook_runner.prompt_caller = session._call_model_for_hook
 
     if verbose:
         print(f"[rolo-claude] model={model_ref.raw} provider={model_ref.provider} "
@@ -391,6 +457,7 @@ def run_print_mode(
                 if direct_output is not None:
                     exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=i + 1))
                 else:
+                    _append_at_mention_snapshots(session, final_prompt, cwd)
                     exit_code = sink.consume(session.turn(final_prompt or turn_text))
                 facade.num_turns += 1
             return exit_code
@@ -401,7 +468,12 @@ def run_print_mode(
         sink = _make_sink()
         if direct_output is not None:
             return sink.consume(_events_for_direct_output(direct_output))
+        _append_at_mention_snapshots(session, final_prompt, cwd)
         return sink.consume(session.turn(final_prompt or prompt_text))
     finally:
+        try:
+            session._fire_session_end("quit")
+        except Exception:
+            pass
         if mcp_manager is not None:
             mcp_manager.close_all()

@@ -133,6 +133,11 @@ class Controller:
         if self.quit_called:
             return self.exit_code
         self.quit_called = True
+        # review finding 2: set BEFORE `abort` / the sentinel is queued --
+        # run()'s command loop checks this first, so a `user_input` typed
+        # just before quitting (sitting ahead of the sentinel in the
+        # queue) is drained without starting a whole new turn.
+        self.session._stopping.set()
         self.session.abort.set()
         self.commands.put(None)
         try:
@@ -140,6 +145,13 @@ class Controller:
                 self._worker.join(QUIT_DEADLINE_S)
         finally:
             self._stopped.set()
+            # H4 scope B: SessionEnd(quit) -- fired here, after the worker
+            # has stopped touching the log but before MCP servers close (a
+            # SessionEnd hook may itself want to reach an MCP server).
+            try:
+                self.session._fire_session_end("quit")
+            except Exception:
+                pass
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         return self.exit_code
@@ -147,6 +159,15 @@ class Controller:
     # ---- UI -> loop (non-blocking) ---------------------------------------
 
     def submit(self, text: str, pasted=None, meta=None) -> None:
+        """scope 0(c): while a turn is running, new input steers it
+        instead of queuing a whole separate turn -- `session.busy` is a
+        plain Event read, safe from this (the UI) thread; `Session.steer`
+        is the same kind of direct, thread-safe call as `interrupt()`/
+        `answer_permission` (the worker is parked inside the running
+        turn's generator and can't read `self.commands`)."""
+        if self.session.busy:
+            self.session.steer(text)
+            return
         self.commands.put(events.Command("user_input", {"text": text, "pasted": pasted, "meta": meta}))
 
     def interrupt(self) -> None:
@@ -156,7 +177,17 @@ class Controller:
         self.session.abort.set()
 
     def set_permission_mode(self, mode: str) -> None:
-        self.commands.put(events.Command("set_mode", {"mode": mode}))
+        """review finding 6: a plain string attribute write is atomic/
+        thread-safe (like `abort.set()`) -- writing it directly, instead
+        of queuing a `set_mode` Command that `run()` only reads BETWEEN
+        turns, is what makes Shift+Tab to `auto` actually skip every
+        remaining permission card of a turn already in progress (`auto` =
+        uninterrupted, scope 0). The status event is emitted from here
+        too, since the worker may be parked deep inside a turn and would
+        otherwise never get a chance to push it."""
+        if mode:
+            self.session.permission_engine.mode = mode
+        self.events.put(self.session.status_event())
 
     def set_model(self, model: str) -> Optional[str]:
         """Resolve `model` and hand the swap to the worker. Returns an error
@@ -242,12 +273,19 @@ class Controller:
         if cmd is None:
             return f"Unknown command: /{name} (try /help)"
         if cmd.kind == "prompt" and cmd.run is not None:
-            from rolo_claude.commands.registry import expand_command_body
+            from rolo_claude.commands.registry import expand_command_body, read_at_mention_snapshots
 
             body = cmd.run(args, self.facade)
             result = expand_command_body(body, args, allowed_tools=getattr(cmd, "allowed_tools", None), cwd=self.cwd)
             if result.error:
                 return result.error
+            # H4 scope C: `@path` attachments in the EXPANDED body -- read
+            # via the Read tool's own path resolution and appended as
+            # snapshots (never inlined into the prompt text itself, same
+            # as CLAUDE.md's own @import convention).
+            for path_str, content in read_at_mention_snapshots(result.text, cwd=self.cwd):
+                self.session.log.append_snapshot(
+                    [{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
             self.submit(result.text)
             return ""
         if cmd.run is None:
@@ -341,9 +379,52 @@ class Controller:
             return [f"MCP support is not connected in this build ({name} unchanged)."]
         try:
             result = self._reconnect_fn(name)
+            # H3b must-do (unwired seam): a reconnected server's tool list
+            # only ever entered the deferred pool once, at session start
+            # (`SessionCatalog` built from `McpManager.all_tools()` THEN) --
+            # without this, `/mcp reconnect` on a server whose tools
+            # changed (or one added mid-session) leaves them permanently
+            # unreachable through ToolSearch even though the reconnect
+            # itself succeeded.
+            catalog = getattr(self.session, "session_catalog", None)
+            if catalog is not None:
+                try:
+                    catalog.refresh_deferred_for_server(name)
+                except Exception:
+                    pass
             return result if isinstance(result, list) else [str(result)]
         except Exception as e:
             return [f"reconnect {name} failed: {type(e).__name__}: {e}"]
+
+    def approve_mcp_server(self, name: str) -> list:
+        """H3b must-do (unwired seam): completes the `.mcp.json`
+        `pending_approval` interactive flow. Persists the approval via
+        `mcp_setup.record_mcp_approval` -- keyed by the entry's own
+        sha256 (D-CFG: an edited/tampered entry needs re-approval), read
+        straight back off `<cwd>/.mcp.json` by name rather than needing a
+        new field threaded through `mcp/manager.py`'s own config objects
+        -- so the server stays approved on the NEXT launch too, not just
+        this session, then reconnects it (which also now refreshes its
+        deferred ToolSearch pool, see `reconnect_mcp`)."""
+        if self.mcp_manager is None:
+            return [f"MCP support is not connected in this build ({name} unchanged)."]
+        handle = self.mcp_manager.handles.get(name)
+        if handle is None:
+            return [f"unknown MCP server: {name}"]
+        if handle.config.scope != "project":
+            return [f"{name} is not a .mcp.json (project-scope) server -- nothing to approve"]
+        import json as _json
+
+        mcp_json_path = self.cwd / ".mcp.json"
+        try:
+            raw = _json.loads(mcp_json_path.read_text(encoding="utf-8-sig"))
+            raw_entry = (raw.get("mcpServers") or {})[name]
+        except (OSError, ValueError, KeyError) as e:
+            return [f"could not read {name}'s .mcp.json entry to approve it: {type(e).__name__}: {e}"]
+        from rolo_claude import mcp_setup
+        mcp_setup.record_mcp_approval(name, raw_entry)
+        handle.config.pending_approval = False
+        return self.reconnect_mcp(name)
 
     def memory_path(self):
         from rolo_claude.config.paths import memory_dir

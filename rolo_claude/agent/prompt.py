@@ -58,8 +58,17 @@ present:
 `~/.claude/CLAUDE.md` and `.claude/rules/*.md`) -- project- and user-level instructions, \
 delivered to you as a user-role message."""
 
-_HARNESS_SELF_DESCRIPTION_TAIL = """- **Skills and slash commands** -- reusable instructions the user or project has set up, listed \
-when available.
+_HARNESS_SELF_DESCRIPTION_TAIL = """- **Skills** -- reusable, packaged instructions for a particular kind of task (the user's own, a \
+project's, or ones synced from Anthropic), reachable through the Skill tool and, when not marked \
+disable-model-invocation, as a `/name` slash command too; listed when any are configured.
+- **Custom slash commands** -- project- or user-defined `/name` shortcuts that expand into a prompt \
+(optionally after running one pre-approved shell command first); available in this session's prompt \
+box, not directly callable by you.
+- **Hooks** -- shell commands, HTTP calls, or small-model checks the user or project configured to \
+run automatically around specific events (before/after a tool call, before a prompt is sent, when a \
+turn is about to end, and more); they can add context, rewrite a tool call's input, or block an \
+action outright. You cannot see or bypass a hook -- its effect (a rewritten input, added context, a \
+block with a reason) is simply what actually happened, not a suggestion.
 - **Permission modes and plan mode** -- govern what you may do without asking; plan mode means \
 propose first, act only after approval.
 - **Sub-agents** -- specialised agents this harness (or Claude Code) can delegate a task to; not \
@@ -131,6 +140,20 @@ def _closing_guidance_sentence(has_write: bool, has_bash: bool) -> str:
             f"back from a real tool call.")
 
 
+def _websearch_capability_sentence(has_websearch: bool) -> Optional[str]:
+    """H4 scope F: registry-driven (finding 14's own rule) -- WebSearch is
+    ONLY ever registered on an OpenRouter-backed session (tools/websearch.
+    py's own `build_websearch_tool`), so this line is simply absent
+    otherwise rather than claiming a capability this build/session
+    doesn't have right now."""
+    if not has_websearch:
+        return None
+    return ("- **WebSearch** -- search the web for current information and return an answer grounded "
+            "in real results, with source URLs; available in this session (only ever offered when the "
+            "configured model provider is OpenRouter, which runs it as a side call to its own search "
+            "plugin).")
+
+
 def build_harness_self_description(tool_definitions: list, mcp_servers: Optional[list] = None) -> str:
     """The whole '## How this harness works' section, built from the
     REGISTRY (`tool_definitions`, name-sorted per rolo_claude.tools.
@@ -147,9 +170,12 @@ def build_harness_self_description(tool_definitions: list, mcp_servers: Optional
         _memory_capability_sentence(has_write),
         _HARNESS_SELF_DESCRIPTION_TAIL,
         _mcp_servers_sentence(mcp_servers),
-        "",
-        _closing_guidance_sentence(has_write, has_bash),
     ]
+    websearch_line = _websearch_capability_sentence("WebSearch" in names)
+    if websearch_line:
+        sections.append(websearch_line)
+    sections.append("")
+    sections.append(_closing_guidance_sentence(has_write, has_bash))
     return "\n".join(sections)
 
 _FAMILY_NOTATION = {

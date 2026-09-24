@@ -33,6 +33,12 @@ class SessionContext:
                  append_system_prompt: Optional[str] = None, bare: bool = False,
                  tool_registry: Optional[ToolRegistry] = None, mcp_servers: Optional[list] = None):
         self.cwd = Path(cwd)
+        # H4: `--bare` disables hooks too (D-CFG: "disableAllHooks/--bare
+        # disable") -- agent/loop.py's Session reads this straight off the
+        # SessionContext it was built from, same as it already does for
+        # `.settings`, rather than plumbing a second `bare=` kwarg through
+        # every Session constructor call site.
+        self.bare = bare
 
         # finding 5/6: real trust, threaded into settings resolution so an
         # untrusted project/local layer's allow/env/hooks/autoMemoryDirectory

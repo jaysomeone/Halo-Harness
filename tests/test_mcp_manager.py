@@ -709,7 +709,40 @@ def running_manager_ctx():
 
 # ---- finding 16 test 5: startup timeout + close_all leaves nothing behind -
 
+def _win_pid_alive(pid: int) -> bool:
+    """H4 fix: `os.kill(pid, 0)` on Windows is NOT a reliable liveness
+    check -- CPython implements it via `OpenProcess`, which can succeed
+    (raising nothing) for a process that has ALREADY exited but whose
+    process object Windows hasn't fully torn down yet (a process object
+    stays open-able until every handle referencing it closes, unlike
+    POSIX's pid-table-based kill(pid,0) semantics) -- verified: `psutil`
+    independently confirms the process is gone (`NoSuchProcess`) at the
+    exact moment `os.kill(pid, 0)` still reports it alive, immediately
+    after `McpManager.close_all()` returns. The correct Windows check
+    (what `psutil` itself does, without adding a project dependency for
+    one test helper) is `OpenProcess` + `GetExitCodeProcess`, comparing
+    against `STILL_ACTIVE` (259) -- an exited process reports its real
+    exit code, never 259, even while its object is still open-able."""
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False  # no such process (or, vanishingly unlikely for our own child, access denied)
+    try:
+        exit_code = ctypes.c_ulong(0)
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True

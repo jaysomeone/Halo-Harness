@@ -199,6 +199,37 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     }
 
 
+def add_fake_skill(skills_root: Path, *, name: str = "deploy", body: Optional[str] = None,
+                    frontmatter_extra: Optional[dict] = None) -> Path:
+    """OPT-IN skill fixture (H4) -- never called by `build_fake_home`
+    itself. Writes `<skills_root>/<name>/SKILL.md` exercising `$0`/`$1`/
+    `$ARGUMENTS`/`` !`echo pre` `` substitution (matching D-CFG's own
+    fixture description), with `allowed-tools: Bash(echo pre)` so the
+    pre-exec span is actually permitted. `skills_root` is normally
+    `<proj>/.claude/skills` (project scope) or `<home>/.claude/skills`
+    (user scope) -- the caller picks which by the path it passes. Returns
+    the written SKILL.md path."""
+    fm = {"description": "A fake deploy skill for tests.", "argument-hint": "<env> <version>",
+          "allowed-tools": "Bash(echo pre)"}
+    if frontmatter_extra:
+        fm.update(frontmatter_extra)
+    lines = ["---"]
+    for k, v in fm.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---")
+    lines.append("")
+    lines.append(body or (
+        "Deploy environment $0 at version $1.\n"
+        "All args: $ARGUMENTS\n"
+        "Pre-exec output: !`echo pre`\n"
+    ))
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / "SKILL.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def add_fake_plugin(claude_dir: Path, *, plugin_name: str = "fake-plugin",
                      server_name: str = "fakeserver", enabled: bool = True,
                      via_plugin_json: bool = False, command: Optional[list] = None) -> dict:

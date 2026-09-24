@@ -73,6 +73,13 @@ class ToolContext:
     # ListMcpResourcesTool/ReadMcpResourceTool only (McpTool itself carries
     # its own manager reference directly, set at construction).
     mcp_manager: Optional[object] = None
+    # H4 scope C: the Skill tool's `allowed-tools` -> session rule (D-CFG:
+    # "until the next user message") -- a callable(rule_text) -> bool, set
+    # by agent/loop.py to `PermissionEngine.add_session_allow_rule(...,
+    # temporary=True)`; None (every existing test's bare ToolContext) just
+    # means a skill's allowed-tools grant its own `` !`cmd` `` pre-exec
+    # (still enforced) but never widens the session's OWN permission rules.
+    session_allow_rule: Optional[Callable[[str], bool]] = None
 
 
 @dataclass

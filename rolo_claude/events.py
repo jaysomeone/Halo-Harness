@@ -28,12 +28,12 @@ EVENT_KINDS = frozenset({
     "tool_use_start", "tool_use_ready", "tool_progress", "tool_result",
     "permission_request", "question", "plan_review", "todos", "status",
     "message_end", "error", "turn_done", "subagent_start", "subagent_end",
-    "replay", "notification",
+    "replay", "notification", "steer_queued", "steer_applied",
 })
 
 COMMAND_KINDS = frozenset({
     "user_input", "interrupt", "set_mode", "set_model", "slash", "permission_reply",
-    "question_reply", "plan_reply",
+    "question_reply", "plan_reply", "steer",
 })
 
 _ids = itertools.count(1)
@@ -154,3 +154,17 @@ def notification(text: str, *, level: str = "info") -> Event:
 def replay(messages: list) -> Event:
     """data: {messages} -- used by --resume to hand a UI the prior transcript."""
     return Event("replay", {"messages": messages})
+
+
+def steer_queued(text: str, *, turn: int = 0) -> Event:
+    """data: {text} -- scope 0(c): a steer was accepted (Controller.submit
+    routed it to Session.steer because the session was busy) and is
+    waiting for the next safe point (a chunk boundary mid-stream, or
+    right after the current tool dispatch finishes) to actually apply."""
+    return Event("steer_queued", {"text": text}, turn=turn)
+
+
+def steer_applied(text: str, *, turn: int = 0) -> Event:
+    """data: {text} -- the queued steer text was just appended as a
+    user-role message and the loop is continuing with it."""
+    return Event("steer_applied", {"text": text}, turn=turn)

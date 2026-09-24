@@ -36,7 +36,21 @@ def run_tui(args) -> int:
         cwd=cwd, theme_name=theme_name, tui_setting=tui_setting,
         initial_prompt=(args.prompt if not args.demo else None),
     )
-    app.run()
+    try:
+        app.run()
+    finally:
+        # review finding 5: `app.run()` returning (or raising) via any
+        # path OTHER than the app's own `_quit_worker` (an uncaught
+        # exception escaping Textual's event loop, e.g.) must still stop
+        # the worker thread and close every MCP subprocess -- `quit()` is
+        # already idempotent (`quit_called`), so a normal exit that
+        # already called it here is a harmless no-op.
+        quit_fn = getattr(controller, "quit", None)
+        if callable(quit_fn):
+            try:
+                quit_fn()
+            except Exception:
+                pass
     return app.return_code if app.return_code is not None else 0
 
 
