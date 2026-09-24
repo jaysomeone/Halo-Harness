@@ -26,6 +26,15 @@ _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
 _MAX_ALIAS_HOPS = 4
 
+# scope J: the home default is the first-party DeepSeek V4 endpoint on
+# OpenRouter (verified live against GET /api/v1/models on 2026-09-23/24 --
+# `deepseek/deepseek-v4.1-flash` exists and is pinned to the `deepseek`
+# provider slug in providers/model_table.json); V3.2 is third-party-only
+# now (per the research report) and is kept only as the documented fallback
+# when V4.1 Flash isn't reachable.
+DEFAULT_MODEL_REF = "or:deepseek/deepseek-v4.1-flash"
+FALLBACK_MODEL_REF = "or:deepseek/deepseek-v3.2"
+
 
 def _dialect_for(bare_model: str) -> str:
     """Same rule as providers.routing._dbx_dialect: passthrough iff 'claude'

@@ -1,0 +1,230 @@
+"""rolo_claude.providers.profiles -- per-provider/model compatibility
+profiles (H1 scope A). The report's central finding is that a gateway's
+behaviour cannot be guessed from its base URL alone ("for an endpoint it
+does not recognize the detection answers as though it were OpenAI itself,
+which is wrong for most OpenAI-compatible gateways") -- so every request
+this harness builds is driven by an explicit `ProviderProfile`, resolved
+from (host, model family) with per-model overrides from `model_table.json`
+(an Aider-shaped data file, not code).
+
+This module is purely additive: nothing in `bridge.py`'s proxy path imports
+it, so the 97 proxy tests are unaffected regardless of what's seeded here.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+_LOCK = threading.Lock()
+_MODEL_TABLE_CACHE: Optional[dict] = None
+
+
+def _model_table_path() -> Path:
+    return Path(__file__).resolve().parent / "model_table.json"
+
+
+def load_model_table() -> dict:
+    """Load providers/model_table.json once per process; {} if missing or
+    unparseable (never raises -- a bad/missing data file degrades to profile
+    defaults, it must never crash request building)."""
+    global _MODEL_TABLE_CACHE
+    with _LOCK:
+        if _MODEL_TABLE_CACHE is None:
+            try:
+                _MODEL_TABLE_CACHE = json.loads(_model_table_path().read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                _MODEL_TABLE_CACHE = {}
+        return _MODEL_TABLE_CACHE
+
+
+def reset_model_table_cache() -> None:
+    """Test seam: force the next load_model_table() to re-read from disk."""
+    global _MODEL_TABLE_CACHE
+    with _LOCK:
+        _MODEL_TABLE_CACHE = None
+
+
+# Strict Databricks body allowlist (scope B/D): an unlisted field is a 400
+# "json: unknown field" on that gateway.
+DATABRICKS_BODY_ALLOWLIST = frozenset({
+    "messages", "max_tokens", "temperature", "top_p", "stop", "stream",
+    "tools", "tool_choice", "reasoning_effort", "stream_options",
+})
+# OpenRouter-only fields, emitted ONLY when the host is openrouter.ai.
+OPENROUTER_EXTRA_FIELDS = frozenset({"provider", "reasoning", "models", "plugins", "usage"})
+
+
+def model_family(model_id: str) -> str:
+    """Coarse model-family classifier from a bare upstream model id/name --
+    drives thinking_format/reasoning_replay/sampling defaults whenever
+    model_table.json has no exact-match row for this id."""
+    low = (model_id or "").lower()
+    if "claude" in low:
+        return "claude"
+    if "deepseek" in low:
+        return "deepseek"
+    if "kimi" in low or "moonshot" in low:
+        return "kimi"
+    if "glm" in low or "z-ai" in low or "zhipu" in low:
+        return "glm"
+    if "qwen" in low:
+        return "qwen"
+    if "gemini" in low:
+        return "gemini"
+    if "grok" in low:
+        return "grok"
+    if "minimax" in low:
+        return "minimax"
+    if "gpt" in low or low.startswith("openai") or "o1" in low or "o3" in low:
+        return "gpt"
+    return "generic"
+
+
+@dataclass(frozen=True)
+class ProviderProfile:
+    system_vs_developer: str = "system"           # "system" | "developer" | "none"
+    max_tokens_field: str = "max_tokens"
+    reasoning_effort_supported: bool = False
+    # none | deepseek_reasoning_content | openrouter_details | anthropic_thinking | fmapi_blocks
+    thinking_format: str = "none"
+    reasoning_replay: str = "empty"                # text | empty | details | thinking
+    stream_usage: bool = True
+    store: bool = False
+    strict: bool = False
+    tool_result_name: bool = False
+    body_allowlist: Optional[frozenset] = None      # None == no restriction
+    tools_max: Optional[int] = None
+    supports_temperature_in_thinking: bool = False
+    host_specific_fields: bool = False              # OpenRouter-only fields allowed
+    family: str = "generic"
+    use_temperature: bool = True
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens_default: Optional[int] = None
+    max_tokens_cap: Optional[int] = None
+    reasoning_default_effort: Optional[str] = None
+    openrouter_pin: Optional[dict] = None
+    edit_format: str = "diff"
+    # DeepSeek V4 thinking mode 400s on tool_choice required/named; Kimi
+    # K2.x/K2.5/K2.6/K2.7 and the WHOLE Qwen/GLM families accept only
+    # auto|none (Kimi K3 adds required back) -- the request builder's
+    # content-side "retry with tool_choice: required" fallback must be
+    # skipped whenever this is False (coordinator research,
+    # research_notes/Open weight model adapter rules/*.md).
+    tool_choice_required_supported: bool = True
+    top_k: Optional[int] = None
+    # GLM-5.3/5.3-Flash (Z.ai + Databricks): thinking.type=disabled -> HTTP
+    # 400 code 1210 -- a resolved effort of None/"none"/"disabled" must be
+    # forced to `reasoning_default_effort` instead of omitted/disabled.
+    reasoning_no_disable: bool = False
+
+
+def _thinking_defaults_for_family(family: str, dialect: str) -> "tuple[str, str, bool]":
+    """(thinking_format, reasoning_replay, reasoning_effort_supported)
+    before model_table.json overrides -- rule 5/6 of the research report's
+    provider tables."""
+    if dialect == "anthropic-passthrough":
+        return "anthropic_thinking", "thinking", True
+    if family in ("deepseek", "kimi", "glm", "grok", "minimax"):
+        # coordinator research (reports/Open weight model adapter rules.md):
+        # GLM/MiniMax/Mistral join the mandatory reasoning-echo list --
+        # MiniMax's <think>/reasoning_details must be replayed unchanged.
+        return "deepseek_reasoning_content", "text", True
+    if family in ("claude", "gpt", "gemini"):
+        return "fmapi_blocks", "text", True
+    return "none", "empty", False
+
+
+def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfile:
+    """Resolve a `ProviderProfile` from a `providers.routing.Route` (duck-
+    typed: anything with `.provider`, `.upstream_model`, `.dialect`) plus
+    `model_table.json` per-model overrides. `route.provider` is
+    "databricks" | "openrouter" | "anthropic"; `route.dialect` is
+    "openai-chat" | "anthropic-passthrough"."""
+    model_table = model_table if model_table is not None else load_model_table()
+    family = model_family(route.upstream_model)
+    host_key = route.provider if route.provider in ("databricks", "openrouter") else None
+    row = ((model_table.get(host_key) or {}).get(route.upstream_model) or {}) if host_key else {}
+
+    if route.dialect == "anthropic-passthrough":
+        return ProviderProfile(
+            system_vs_developer="system", thinking_format="anthropic_thinking",
+            reasoning_replay="thinking", reasoning_effort_supported=True,
+            family=family, edit_format=row.get("edit_format", "diff"),
+        )
+
+    thinking_format, replay, effort_supported = _thinking_defaults_for_family(family, route.dialect)
+    replay = row.get("reasoning_replay", replay)
+    # Qwen (tool_choice "required" unsupported on DashScope) and GLM (auto
+    # only) reject it as a FAMILY rule; a row may still override explicitly.
+    tc_required_default = family not in ("qwen", "qwen-coder", "qwen-qwq", "glm")
+
+    if route.provider == "databricks":
+        default_use_temp = family not in ("deepseek", "kimi", "glm", "qwen", "qwen-coder")
+        return ProviderProfile(
+            system_vs_developer="system", max_tokens_field="max_tokens",
+            reasoning_effort_supported=effort_supported, thinking_format=thinking_format,
+            reasoning_replay=replay, stream_usage=True, store=False, strict=True,
+            tool_result_name=False, body_allowlist=DATABRICKS_BODY_ALLOWLIST, tools_max=32,
+            supports_temperature_in_thinking=False, host_specific_fields=False, family=family,
+            use_temperature=row.get("use_temperature", default_use_temp),
+            temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),
+            max_tokens_default=row.get("max_tokens_default", 16384),
+            max_tokens_cap=row.get("max_tokens_cap", 16384),
+            reasoning_default_effort=row.get("reasoning_default_effort"),
+            reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
+            edit_format=row.get("edit_format", "diff"),
+            tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+        )
+
+    # openrouter (also the fallback for any other openai-chat-dialect host)
+    return ProviderProfile(
+        system_vs_developer="system", max_tokens_field="max_tokens",
+        reasoning_effort_supported=effort_supported, thinking_format="openrouter_details",
+        reasoning_replay=replay if replay != "text" else "details",
+        stream_usage=True, store=False, strict=False,
+        tool_result_name=False, body_allowlist=None, tools_max=None,
+        supports_temperature_in_thinking=False, host_specific_fields=(route.provider == "openrouter"),
+        family=family, use_temperature=row.get("use_temperature", True),
+        temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),
+        max_tokens_default=row.get("max_tokens_default"), max_tokens_cap=row.get("max_tokens_cap"),
+        reasoning_default_effort=row.get("reasoning_default_effort"),
+        reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
+        openrouter_pin=row.get("openrouter_pin"), edit_format=row.get("edit_format", "diff"),
+        tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+    )
+
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+_DISABLING_EFFORTS = frozenset({"none", "disabled", "off", "minimal"})
+
+
+def map_effort(effort: Optional[str], profile: ProviderProfile) -> dict:
+    """--effort -> the field(s) a request body actually needs for this
+    profile (scope J): `reasoning.effort` on OpenRouter, `reasoning_effort`
+    on Databricks/DeepSeek-shaped chat completions, a thinking budget on
+    Messages routes. Returns a dict of EXTRA body keys to merge in (empty
+    if `effort` is None or the profile doesn't support it).
+
+    `profile.reasoning_no_disable` (GLM-5.3/5.3-Flash: `thinking.type:
+    disabled` -> HTTP 400 code 1210) forces an EXPLICITLY disabling
+    `--effort` to the profile's own default instead of turning reasoning
+    off; `effort is None` (no `--effort` given at all) is left alone --
+    that means "omit the field", which safely takes the server's own
+    default, not "send a disabling value"."""
+    if effort and effort.lower() in _DISABLING_EFFORTS and profile.reasoning_no_disable and profile.reasoning_default_effort:
+        effort = profile.reasoning_default_effort
+    if not effort or not profile.reasoning_effort_supported:
+        return {}
+    if profile.thinking_format == "anthropic_thinking":
+        budget_by_effort = {"low": 4096, "medium": 10000, "high": 24000, "xhigh": 32000, "max": 32000}
+        return {"thinking": {"type": "enabled", "budget_tokens": budget_by_effort.get(effort, 10000)}}
+    if profile.host_specific_fields:
+        return {"reasoning": {"effort": effort}}
+    return {"reasoning_effort": effort}

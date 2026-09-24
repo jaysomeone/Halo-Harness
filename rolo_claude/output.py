@@ -49,19 +49,24 @@ class PrintModeSink:
     prints one JSON result object at the end. Returns the process exit code
     (0 success, 1 on an error event)."""
 
-    def __init__(self, *, output_format: str = "text", session_id: str = "", model: str = "", stream=None):
+    def __init__(self, *, output_format: str = "text", session_id: str = "", model: str = "", stream=None,
+                 verbose: bool = False):
         if output_format not in ("text", "json"):
             raise ValueError(f"unsupported output format: {output_format!r} (H0 supports text|json only)")
         self.output_format = output_format
         self.session_id = session_id
         self.model = model
         self.stream = stream or sys.stdout
+        self.verbose = verbose
         self._text_parts: list = []
+        self._final_text_parts: list = []  # only the LAST assistant message's text (a tool loop's
+        # intermediate turns produce text too, but the JSON `result` field is the FINAL reply)
         self._had_error = False
         self._error_message: Optional[str] = None
         self._stop_reason: Optional[str] = None
         self._usage: dict = {}
         self._num_turns = 0
+        self._thinking_open = False
 
     def consume(self, event_iter: Iterator[ev.Event]) -> int:
         for event in event_iter:
@@ -69,9 +74,32 @@ class PrintModeSink:
         return self.finish()
 
     def _handle(self, event: ev.Event) -> None:
-        if event.kind == "text_delta":
+        if event.kind == "message_start":
+            # H1: a tool loop can produce several assistant messages in one
+            # turn; the JSON `result` field must be the FINAL reply's text,
+            # not every intermediate message's text concatenated together
+            # (H0's own bug, per the H1-compatibility review note).
+            if self._thinking_open:
+                self._thinking_open = False
+                if self.output_format == "text" and self.verbose:
+                    self.stream.write("\x1b[0m\n")
+            self._final_text_parts = []
+        elif event.kind == "thinking_delta":
+            text = event.data.get("text", "")
+            if self.output_format == "text" and self.verbose:
+                if not self._thinking_open:
+                    self._thinking_open = True
+                    self.stream.write("\x1b[2m")  # dim
+                self.stream.write(text)
+                self.stream.flush()
+        elif event.kind == "text_delta":
+            if self._thinking_open:
+                self._thinking_open = False
+                if self.output_format == "text" and self.verbose:
+                    self.stream.write("\x1b[0m\n")
             text = event.data.get("text", "")
             self._text_parts.append(text)
+            self._final_text_parts.append(text)
             if self.output_format == "text":
                 self.stream.write(text)
                 self.stream.flush()
@@ -85,7 +113,7 @@ class PrintModeSink:
             self._num_turns = event.turn
 
     def finish(self) -> int:
-        result_text = "".join(self._text_parts)
+        result_text = "".join(self._final_text_parts)
         if self.output_format == "text":
             if self._had_error:
                 print(f"\nerror: {self._error_message}", file=sys.stderr)

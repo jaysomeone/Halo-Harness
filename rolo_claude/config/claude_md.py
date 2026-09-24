@@ -9,11 +9,12 @@ claude_md.md for the full behavioral spec this implements.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rolo_claude.config.paths import home, managed_dir
+from rolo_claude.config.paths import claude_config_dir, home, managed_dir
 
 _MAX_IMPORT_HOPS = 4
 _MAX_FILE_BYTES = 4 * 1024 * 1024  # 4 MiB
@@ -36,14 +37,34 @@ class InstructionFile:
 
 
 @dataclass
+class ScopedRule:
+    """A `.claude/rules/*.md` file whose frontmatter has a `paths:` glob (or
+    comma-separated string) -- loaded on first matching Read/Edit/Glob
+    rather than unconditionally at launch [bin sec.7, finding 9], unlike an
+    unscoped rule (which behaves exactly like a CLAUDE.md and lands in
+    `InstructionBundle.files` instead)."""
+    path: Path
+    text: str
+    patterns: list
+
+
+@dataclass
 class InstructionBundle:
     files: list = field(default_factory=list)
+    scoped_rules: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
 
     def render(self) -> str:
         if not self.files:
             return ""
         return "\n\n".join(f"## {f.path}\n\n{f.text}" for f in self.files)
+
+    def scoped_rules_for(self, touched_path) -> list:
+        """Rules whose `paths:` glob matches `touched_path` (relative-to-cwd
+        semantics aren't re-derived here -- callers pass whatever path shape
+        the rule's own glob was written against, matched via fnmatch)."""
+        touched = str(touched_path).replace("\\", "/")
+        return [r for r in self.scoped_rules if any(fnmatch.fnmatch(touched, pat) for pat in r.patterns)]
 
 
 # ---- fence-aware helpers ----------------------------------------------------
@@ -205,7 +226,7 @@ def _expand_one(
     if hop >= _MAX_IMPORT_HOPS:
         return
 
-    home_claude = (home() / ".claude").resolve()
+    home_claude = claude_config_dir().resolve()
     for token in _find_imports(text):
         target = _resolve_import_target(token, file_path.parent)
         if target in visited:
@@ -245,11 +266,20 @@ def _expand_one(
 
 def _load_one(
     path: Path, source: str, *, cwd: Path, trusted: bool, skip_unapproved_silently: bool,
-    warnings: list, out: list,
+    warnings: list, out: list, seen: set,
 ) -> bool:
     """Load one root-level instruction file (not itself an @import target)
     if it exists and passes the size check; returns True iff it was loaded
-    (used by the AGENTS.md-fallback / CLAUDE.md-presence tracking above)."""
+    (used by the AGENTS.md-fallback / CLAUDE.md-presence tracking above).
+    `seen` is ONE set shared across the WHOLE discover_instructions() call
+    (finding 10) -- a file already loaded anywhere (managed/user/an earlier
+    ancestor/an earlier import) is silently skipped here instead of
+    reappearing, and the same set backs @import cycle-safety in
+    `_expand_one` so an import shared by two different root files is only
+    ever included once."""
+    resolved = path.resolve()
+    if resolved in seen:
+        return False
     if not path.exists() or not path.is_file():
         return False
     try:
@@ -264,20 +294,39 @@ def _load_one(
     except OSError:
         return False
     text = strip_block_html_comments(text)
-    visited = {path.resolve()}
+    seen.add(resolved)
     _expand_one(
         path, text, source, cwd=cwd, trusted=trusted,
         skip_unapproved_silently=skip_unapproved_silently, warnings=warnings,
-        visited=visited, hop=0, out=out,
+        visited=seen, hop=0, out=out,
     )
     return True
 
 
 def _ancestors_root_to_leaf(cwd: Path) -> list:
+    """cwd and every ancestor, root-first, EXCLUDING the bare filesystem
+    root itself (`C:\\`, `/`) -- Claude Code never treats the root as a
+    project directory [finding 9]. Test seam: BRIDGE_TEST_ANCESTOR_ROOT
+    stops the walk at (and includes) that directory instead of the real
+    filesystem root -- otherwise a fixture built under the OS temp dir
+    (e.g. `C:\\Users\\rolo\\AppData\\Local\\Temp\\...`) would also probe
+    real ancestors like the actual `C:\\Users\\rolo` for a CLAUDE.md that
+    has nothing to do with the fixture (finding 14)."""
     cwd = cwd.resolve()
+    boundary = os.environ.get("BRIDGE_TEST_ANCESTOR_ROOT")
     chain = [cwd] + list(cwd.parents)
+    if boundary:
+        boundary_resolved = Path(boundary).resolve()
+        trimmed = []
+        for p in chain:
+            trimmed.append(p)
+            if p == boundary_resolved:
+                break
+        chain = trimmed
+        chain.reverse()
+        return chain
     chain.reverse()  # root first
-    return chain
+    return chain[1:] if len(chain) > 1 else chain
 
 
 def _excluded(path: Path, patterns: list) -> bool:
@@ -287,6 +336,50 @@ def _excluded(path: Path, patterns: list) -> bool:
     return any(fnmatch.fnmatch(norm, pat) for pat in patterns)
 
 
+def _split_paths_field(value) -> list:
+    """A rule's `paths:` frontmatter is documented as "globs (list or comma
+    string, braces)" [bin sec.7] -- accept either shape."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [p.strip() for p in value.split(",") if p.strip()]
+    return []
+
+
+def _load_rules_dir(
+    rules_dir: Path, source: str, *, cwd: Path, trusted: bool, skip_unapproved_silently: bool,
+    warnings: list, out: list, scoped_out: list, seen: set,
+) -> None:
+    """Load every `*.md` under `rules_dir` (recursively): a file with a
+    `paths:` frontmatter key is SCOPED (appended to `scoped_out`, not
+    rendered at launch); an unscoped rule loads immediately like a CLAUDE.md
+    file [bin sec.7: "unscoped rules load at launch like .claude/CLAUDE.md"]."""
+    if not rules_dir.is_dir():
+        return
+    for path in sorted(rules_dir.rglob("*.md")):
+        resolved = path.resolve()
+        if resolved in seen or not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                warnings.append(f"skipped {path} (larger than 4 MiB)")
+                continue
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        from rolo_claude.config.frontmatter import parse as parse_frontmatter
+        fm, body = parse_frontmatter(raw)
+        patterns = _split_paths_field(fm.get("paths")) if isinstance(fm, dict) else []
+        seen.add(resolved)
+        text = strip_block_html_comments(body if fm else raw)
+        if patterns:
+            scoped_out.append(ScopedRule(path=path, text=text, patterns=patterns))
+        else:
+            _expand_one(path, text, source, cwd=cwd, trusted=trusted,
+                        skip_unapproved_silently=skip_unapproved_silently,
+                        warnings=warnings, visited=seen, hop=0, out=out)
+
+
 def discover_instructions(
     cwd,
     settings,
@@ -294,12 +387,16 @@ def discover_instructions(
     bare: bool = False,
     skip_unapproved_silently: bool = False,
 ) -> InstructionBundle:
-    """See wip/harness/spec-H0-config-claude_md.md for the full behavioral
-    spec (managed -> user -> root-to-leaf CLAUDE.md/AGENTS.md walk -> local,
-    with @import expansion, HTML-comment stripping, size cap and
-    claudeMdExcludes applied per file, non-managed tiers only)."""
+    """managed -> ~/.claude/CLAUDE.md + ~/.claude/rules/** -> root-to-leaf
+    walk (CLAUDE.md / .claude/CLAUDE.md / AGENTS.md fallback / .claude/rules/**
+    / CLAUDE.local.md, at EVERY ancestor, filesystem root excluded) [bin
+    sec.7, finding 9]; one `seen` path-set for the whole call dedups a file
+    reachable through more than one route (finding 10, e.g. cwd==home makes
+    `~/.claude/CLAUDE.md` and the home ancestor's `.claude/CLAUDE.md`
+    literally the same file). `instructionFiles=="managed-only"` suppresses
+    everything below the managed tier."""
     if bare:
-        return InstructionBundle([], [])
+        return InstructionBundle(files=[], scoped_rules=[], warnings=[])
 
     cwd = Path(cwd)
     claude_md_excludes = list(getattr(settings, "claude_md_excludes", None) or [])
@@ -307,22 +404,25 @@ def discover_instructions(
 
     warnings: list = []
     files: list = []
+    scoped_rules: list = []
+    seen: set = set()
+    common = dict(cwd=cwd, trusted=trusted, skip_unapproved_silently=skip_unapproved_silently,
+                  warnings=warnings, seen=seen)
 
-    # 1. Managed CLAUDE.md -- never subject to claudeMdExcludes.
-    managed_path = managed_dir() / "CLAUDE.md"
-    _load_one(managed_path, "managed", cwd=cwd, trusted=trusted,
-              skip_unapproved_silently=skip_unapproved_silently, warnings=warnings, out=files)
+    # 1. Managed CLAUDE.md -- never subject to claudeMdExcludes, always loaded.
+    _load_one(managed_dir() / "CLAUDE.md", "managed", out=files, **common)
+    if instruction_files == "managed-only":
+        return InstructionBundle(files=files, scoped_rules=scoped_rules, warnings=warnings)
 
-    # 2. ~/.claude/CLAUDE.md
-    user_path = home() / ".claude" / "CLAUDE.md"
+    # 2. ~/.claude/CLAUDE.md + ~/.claude/rules/** (loaded first [bin sec.7]).
+    user_path = claude_config_dir() / "CLAUDE.md"
     if not _excluded(user_path, claude_md_excludes):
-        _load_one(user_path, "user", cwd=cwd, trusted=trusted,
-                  skip_unapproved_silently=skip_unapproved_silently, warnings=warnings, out=files)
+        _load_one(user_path, "user", out=files, **common)
     elif user_path.exists():
         warnings.append(f"excluded by claudeMdExcludes: {user_path}")
+    _load_rules_dir(claude_config_dir() / "rules", "user:rules", out=files, scoped_out=scoped_rules, **common)
 
-    # 3. Root-to-leaf ancestor walk: CLAUDE.md / .claude/CLAUDE.md (or an
-    #    AGENTS.md fallback per instruction_files) at each level.
+    # 3. Root-to-leaf ancestor walk.
     for directory in _ancestors_root_to_leaf(cwd):
         found_claude_md = False
         for candidate, tag in ((directory / "CLAUDE.md", f"project:{directory}"),
@@ -331,8 +431,7 @@ def discover_instructions(
                 if _excluded(candidate, claude_md_excludes):
                     warnings.append(f"excluded by claudeMdExcludes: {candidate}")
                     continue
-                if _load_one(candidate, tag, cwd=cwd, trusted=trusted,
-                             skip_unapproved_silently=skip_unapproved_silently, warnings=warnings, out=files):
+                if _load_one(candidate, tag, out=files, **common):
                     found_claude_md = True
 
         want_agents = (
@@ -342,20 +441,21 @@ def discover_instructions(
         if want_agents and instruction_files != "claude-md":
             for candidate, tag in ((directory / "AGENTS.md", f"project:{directory}"),
                                     (directory / ".claude" / "AGENTS.md", f"project:{directory}/.claude")):
-                if candidate.exists() and candidate.resolve() not in {f.path.resolve() for f in files}:
+                if candidate.exists() and candidate.resolve() not in seen:
                     if _excluded(candidate, claude_md_excludes):
                         warnings.append(f"excluded by claudeMdExcludes: {candidate}")
                         continue
-                    _load_one(candidate, tag + ":agents", cwd=cwd, trusted=trusted,
-                              skip_unapproved_silently=skip_unapproved_silently, warnings=warnings, out=files)
+                    _load_one(candidate, tag + ":agents", out=files, **common)
 
-    # 4. CLAUDE.local.md at cwd only, appended last.
-    local_path = cwd / "CLAUDE.local.md"
-    if local_path.exists():
-        if _excluded(local_path, claude_md_excludes):
-            warnings.append(f"excluded by claudeMdExcludes: {local_path}")
-        else:
-            _load_one(local_path, "local", cwd=cwd, trusted=trusted,
-                      skip_unapproved_silently=skip_unapproved_silently, warnings=warnings, out=files)
+        # .claude/rules/** at THIS ancestor, then CLAUDE.local.md at THIS
+        # ancestor (finding 9: per-ancestor, not just once at cwd).
+        _load_rules_dir(directory / ".claude" / "rules", f"project:{directory}/.claude/rules",
+                        out=files, scoped_out=scoped_rules, **common)
+        local_path = directory / "CLAUDE.local.md"
+        if local_path.exists():
+            if _excluded(local_path, claude_md_excludes):
+                warnings.append(f"excluded by claudeMdExcludes: {local_path}")
+            else:
+                _load_one(local_path, f"local:{directory}", out=files, **common)
 
-    return InstructionBundle(files=files, warnings=warnings)
+    return InstructionBundle(files=files, scoped_rules=scoped_rules, warnings=warnings)

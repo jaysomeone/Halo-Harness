@@ -1,11 +1,13 @@
 """tests.helpers.fake_home -- builds a temp home directory mirroring rolo's
-real ~/.claude layout (plan D-CFG "Fixtures"), for BRIDGE_TEST_HOME. Copies
-rolo's REAL settings.json/settings.local.json bytes verbatim when they exist
-on the machine running the tests (byte-for-byte, no transcription risk --
-these files contain tricky escaped-parenthesis JSON strings per finding B
-that would be easy to get subtly wrong by hand), falling back to an
-equivalent synthetic copy otherwise so the suite still runs on a machine
-without rolo's real ~/.claude.
+real ~/.claude layout (plan D-CFG "Fixtures"), for BRIDGE_TEST_HOME.
+
+settings.local.json is a byte-for-byte SNAPSHOT of rolo's real 19 rules
+(finding 14: the suite must not depend on whatever settings.local.json
+happens to exist on the machine running it -- a prior version copied the
+live file, which passed only on rolo's own box and read 27+ rules on any
+other machine, incl. the Kali VM this suite ultimately runs on). settings.json
+still falls back to a synthetic stand-in when rolo's real file isn't present,
+since nothing asserts its exact shape/count the way the 19-rules test does.
 """
 
 from __future__ import annotations
@@ -31,13 +33,28 @@ _FALLBACK_SETTINGS_JSON = {
     "autoMode": {"environment": ["### Org-wide", "**Organization**: None configured"]},
 }
 
-_FALLBACK_SETTINGS_LOCAL_JSON = {
+# A FIXED 19-rule snapshot exhibiting the same escaping shapes as rolo's
+# real settings.local.json (escaped parens `\(`/`\)`, doubled backslashes in
+# a Windows path, an admin/elevation-style GetCurrent() one-liner) WITHOUT
+# reproducing his actual personal script names/paths -- synthetic, not a
+# live copy, so the round-trip test is reproducible on any machine, incl.
+# the Kali VM this suite ultimately runs on (finding 14).
+_SETTINGS_LOCAL_JSON = {
     "permissions": {
         "allow": [
             "Bash(netstat -ano)",
             "Bash(ipconfig)",
             "PowerShell(Get-NetConnectionProfile)",
-            r'PowerShell($id=[Security.Principal.WindowsIdentity]::GetCurrent\(\); "x")',
+            r'PowerShell($id=[Security.Principal.WindowsIdentity]::GetCurrent\(\); $p=New-Object Security.Principal.WindowsPrincipal\($id\); "Elevated \(admin\): " + $p.IsInRole\([Security.Principal.WindowsBuiltinRole]::Administrator\))',
+            r"PowerShell(Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','C:\\Users\\example\\fixture-task.ps1'; \"Elevated process launched \(accept the UAC prompt if shown\).\")",
+            r'PowerShell(Start-Sleep -Seconds 2; "Now: " + \(Get-Date -Format \'HH:mm:ss\'\); Get-Process -Id 1111,2222 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName)',
+            r"PowerShell($out='C:\\Users\\example\\downloaded-tool.exe'; try { Invoke-WebRequest -Uri 'https://example.invalid/tool.exe' -OutFile $out -UseBasicParsing -TimeoutSec 120; $f=Get-Item $out; \"Downloaded: {0}  Size: {1:N0} bytes\" -f $f.FullName, $f.Length } catch { \"DOWNLOAD FAILED: \" + $_.Exception.Message })",
+            r"Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\\Users\\example\\dupe-scan.ps1')",
+            r'PowerShell($f=\'C:\\Users\\example\\.claude\\projects\\fixture-slug\\session.jsonl\'; "{0} bytes" -f \(Get-Item $f\).Length; "{0} lines" -f \(Get-Content $f\).Count)',
+            r"Bash(powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\example\\scan-task.ps1)",
+            r"PowerShell(Start-Process -FilePath \"powershell.exe\" -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\Users\\example\\scan-task.ps1' -WindowStyle Hidden -PassThru | Select-Object Id,ProcessName)",
+            r"PowerShell(Get-WinEvent -FilterHashtable @{LogName='System'; Id=41} -MaxEvents 10 -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id)",
+            r'PowerShell($os=Get-CimInstance Win32_OperatingSystem; "LastBoot: "+$os.LastBootUpTime; "Now:      "+\(Get-Date\); "RAM GB: "+[math]::Round\($os.TotalVisibleMemorySize/1MB,1\))',
             "WebFetch(domain:raw.githubusercontent.com)",
             "Bash(where git *)",
             "Bash(git --version)",
@@ -105,10 +122,12 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
 
-    # settings.json / settings.local.json -- verbatim copies of rolo's real
-    # files when present on this machine.
+    # settings.json falls back to a synthetic stand-in when rolo's real file
+    # isn't present on this machine; settings.local.json is ALWAYS the fixed
+    # 19-rule snapshot above, regardless of what's on the machine running the
+    # tests (finding 14 -- this file's own docstring explains why).
     _copy_or_fallback(_REAL_HOME / ".claude" / "settings.json", claude_dir / "settings.json", _FALLBACK_SETTINGS_JSON)
-    _copy_or_fallback(_REAL_HOME / ".claude" / "settings.local.json", claude_dir / "settings.local.json", _FALLBACK_SETTINGS_LOCAL_JSON)
+    _write_json(claude_dir / "settings.local.json", _SETTINGS_LOCAL_JSON)
 
     # ~/.claude.json -- projects keyed in BOTH separator forms, plus a
     # stdio mcpServers entry (finding B: 15 real stdio servers on rolo's

@@ -78,6 +78,19 @@ class CompletionRequest:
     # here because resolve_databricks() already folds its own override
     # (BRIDGE_DBX_BASE_URL) into whatever ProviderCreds the caller builds.
     openrouter_base_url: Optional[str] = None
+    # H1 scope C: opt-in only, default False so the proxy (which never sets
+    # this) is completely unaffected. True only from agent/loop.py's own
+    # request construction -- enables reasoning capture + the strict
+    # length/malformed-JSON tool-call tagging in oai_stream.py.
+    harness_mode: bool = False
+    # H1 scope B: when set, `_run_phase1` uses this OpenAI-dialect body
+    # VERBATIM instead of calling `translate.anthropic_to_openai` on
+    # `req.body` -- lets the harness's profile-driven
+    # `providers.request.build_request_body` supply the wire body while
+    # still reusing stream.py's retry/overflow-clamp/ping/abort machinery
+    # unchanged. None (the proxy's permanent default) preserves the
+    # original translate-from-`req.body` behavior exactly.
+    prebuilt_oai_body: Optional[dict] = None
 
 
 class ContextOverflow(Exception):
@@ -169,7 +182,14 @@ def sse_reader_thread(resp, q: "queue.Queue") -> None:
         resp.close()
 
 
-def _run_phase1(req: CompletionRequest):
+class _Aborted(Exception):
+    """Internal-only: raised from `_run_phase1` when `abort` fires between
+    (not during -- see the module docstring's finding-4 note) retry
+    attempts. Caught in `stream_completion`, which then simply returns
+    without yielding anything, exactly like an abort during phase 2."""
+
+
+def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
     """Translate + call upstream with retries. Returns (oai_body, result) on
     a genuine 2xx. Raises ContextOverflow/UpstreamError/ProviderNotConfigured
     (or lets WebSearchUnavailable from anthropic_to_openai propagate
@@ -177,8 +197,22 @@ def _run_phase1(req: CompletionRequest):
     exactly: translate (may raise WebSearchUnavailable) before the
     credentials check, so an untested-but-real simultaneous
     "web_search tool present AND provider unconfigured" case still reports
-    the same error it always did."""
-    oai_body = anthropic_to_openai(req.body, req.route, profile=req.profile)
+    the same error it always did.
+
+    `abort` (finding 4) is checked before each connect attempt -- a caller
+    that sets it while phase 1 is between attempts (e.g. during the single
+    connect retry) gets `_Aborted` instead of a completed request. A
+    connect/request already blocked INSIDE `_call_upstream()` cannot be
+    interrupted from here: `call_openai_chat`/`call_databricks_chat` open,
+    send, and read response headers as one blocking call with no hook point
+    to hand back an in-flight socket earlier -- documented limitation, not
+    silently ignored; phase 2's long-lived read loop (the actual reported
+    leak: "the daemon reader pulling billed tokens until the model
+    finishes") is fully abort-aware via the socket capture below."""
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    oai_body = (req.prebuilt_oai_body if req.prebuilt_oai_body is not None
+                else anthropic_to_openai(req.body, req.route, profile=req.profile))
 
     if req.route.provider == "databricks":
         cached_limit = dbx_cache_get_max_tokens_limit(req.route.upstream_model, req.state_dir)
@@ -209,6 +243,8 @@ def _run_phase1(req: CompletionRequest):
     overflow_retries = 0
     result = None
     for attempt in range(max_attempts):
+        if abort is not None and abort.is_set():
+            raise _Aborted()
         try:
             result = _call_upstream()
         except UpstreamConnectError as e:
@@ -275,10 +311,20 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
     unblock a reader thread stuck in a blocking read) and stop; a caller
     that wants to interrupt early should also call `gen.close()` once it
     stops consuming so cleanup runs promptly rather than waiting on GC."""
-    oai_body, result = _run_phase1(req)
+    try:
+        oai_body, result = _run_phase1(req, abort=abort)
+    except _Aborted:
+        return
 
     estimate = estimate_tokens(oai_body)
-    sm = OpenAIStreamToAnthropic(req.model_label, estimate)
+    # `req.emit_reasoning` defaults to True and the PROXY never sets
+    # `harness_mode` -- gate the new capture_reasoning/strict_tool_json
+    # behavior on `harness_mode` alone (default False) so `bridge.py`'s own
+    # CompletionRequest construction is completely unaffected regardless of
+    # what emit_reasoning happens to be.
+    harness_mode = getattr(req, "harness_mode", False)
+    sm = OpenAIStreamToAnthropic(req.model_label, estimate,
+                                  capture_reasoning=harness_mode, strict_tool_json=harness_mode)
 
     dumped_lines: list = []
     dumped_events: list = []
@@ -287,12 +333,11 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
     reader.daemon = True
     reader.start()
 
-    def _shutdown_upstream():
-        if result.conn and result.conn.sock:
-            try:
-                result.conn.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+    # finding 4: captured ONCE, right here -- never re-read from
+    # `result.conn.sock` later, which http.client may already have nulled
+    # out by the time a `finally` block gets around to reading it.
+    sock = result.conn.sock if result.conn is not None else None
+    terminal_reached = False
 
     try:
         start_ev = sm.message_start_event()
@@ -356,8 +401,18 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
                 dumped_events.append(ev)
                 yield ev
                 break
+        # Reached only via one of the `break`s above -- every one of them
+        # already delivered a real terminal wire event (done/error/eof/exc)
+        # to the consumer; an `abort`-triggered `return` or an external
+        # `gen.close()`/exception skips this line entirely, which is
+        # exactly the "no terminal event was consumed" case `finally` below
+        # must still clean up after.
+        terminal_reached = True
     finally:
-        if abort is not None and abort.is_set():
-            _shutdown_upstream()
+        if not terminal_reached and sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
         dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})

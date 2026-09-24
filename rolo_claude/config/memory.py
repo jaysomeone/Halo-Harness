@@ -68,13 +68,14 @@ class MemoryStore:
             lines = lines[:200]
             truncated_by_lines = True
 
-        # Check UTF-8 byte length (25KB = 25600 bytes)
+        # Byte cap is 25,000 bytes, not a binary 25,600 (25KiB) [bin sec.12:
+        # "MEMORY.md content exceeds the prompt-index cap" -- finding 13].
         current_text = "".join(lines)
         encoded_bytes = current_text.encode("utf-8")
 
-        if len(encoded_bytes) > 25600:
+        if len(encoded_bytes) > 25000:
             # Truncate further by removing lines from the end
-            while lines and len("".join(lines).encode("utf-8")) > 25600:
+            while lines and len("".join(lines).encode("utf-8")) > 25000:
                 lines.pop()
             truncated_by_bytes = True
 
@@ -118,9 +119,20 @@ class MemoryStore:
 
                 description = frontmatter_dict.get("description", "")
 
-                metadata = frontmatter_dict.get("metadata") or {}
-                type_val = metadata.get("type")
-                modified = metadata.get("modified")
+                # Finding 11: the documented shape is a TOP-LEVEL `type:`/
+                # `modified:` (rolo's real project_vids_1080_reencode.md is
+                # like this); some files instead nest them under `metadata:`
+                # -- read the top-level pair as the base and let a DICT
+                # `metadata` override per-key if present, guarding against a
+                # scalar `metadata:` value (which has no `.get()`).
+                type_val = frontmatter_dict.get("type")
+                modified = frontmatter_dict.get("modified")
+                metadata = frontmatter_dict.get("metadata")
+                if isinstance(metadata, dict):
+                    if "type" in metadata:
+                        type_val = metadata.get("type")
+                    if "modified" in metadata:
+                        modified = metadata.get("modified")
 
                 topic_files.append(
                     TopicFile(

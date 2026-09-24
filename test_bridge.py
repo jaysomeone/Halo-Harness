@@ -1172,20 +1172,27 @@ sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT_CODE", "7")))
 
 
 def make_fake_claude(tmp_root: Path) -> Path:
-    """Writes a fake `claude` as a tiny .cmd shim around a Python script,
-    since bridge.py Popen()s BRIDGE_CLAUDE_EXE directly (no shell) and a
-    .cmd is the standard, well-established way to make that runnable on
-    Windows without touching the real `claude` install."""
+    """Writes a fake `claude` bridge.py can Popen() directly (no shell): a
+    tiny .cmd shim around a Python script on Windows (the standard way to
+    make a script directly executable there without touching the real
+    `claude` install); on POSIX, a single shebang'd, chmod +x script (a
+    .cmd extension means nothing to exec() on Linux/macOS, and Windows-only
+    subprocess creation flags don't apply there either)."""
     py_path = tmp_root / "fake_claude.py"
     py_path.write_text(_FAKE_CLAUDE_PY, encoding="utf-8")
-    cmd_path = tmp_root / "fake_claude.cmd"
-    cmd_path.write_text(
-        "@echo off\r\n"
-        f'"{sys.executable}" "{py_path}" %*\r\n'
-        "exit /b %ERRORLEVEL%\r\n",
-        encoding="utf-8",
-    )
-    return cmd_path
+    if os.name == "nt":
+        cmd_path = tmp_root / "fake_claude.cmd"
+        cmd_path.write_text(
+            "@echo off\r\n"
+            f'"{sys.executable}" "{py_path}" %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n",
+            encoding="utf-8",
+        )
+        return cmd_path
+    sh_path = tmp_root / "fake_claude"
+    sh_path.write_text("#!/usr/bin/env python3\n" + _FAKE_CLAUDE_PY, encoding="utf-8")
+    sh_path.chmod(0o755)
+    return sh_path
 
 
 class LauncherCtx:

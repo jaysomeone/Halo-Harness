@@ -3,11 +3,26 @@ import json
 import os
 from pathlib import Path
 from rolo_claude.config.paths import (
+    bridge_home,
     claude_json_path,
     normalize_cwd,
     lookup_project,
     project_key_candidates,
 )
+
+
+def load_bridge_trust() -> dict:
+    """Load ~/.rolo-claude/trust.json (our OWN trust dialog's storage, never
+    written to by anything but our own future trust-prompt code) fresh every
+    call; {} if missing/invalid. Never raises."""
+    path = bridge_home() / "trust.json"
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def load_claude_json() -> dict:
@@ -29,49 +44,49 @@ def load_claude_json() -> dict:
 
 def is_trusted(cwd: str | Path, claude_json: dict,
                bridge_trust: dict | None = None) -> bool:
-    """Return True if any of the three trust conditions are met."""
-    cwd_path = Path(cwd)
-    # Condition (a): hasTrustDialogAccepted for cwd or ancestor up to git toplevel
+    """Return True if any of the three trust conditions are met. Ports
+    claude.exe 2.1.281's `FD()/lb()/ub()` [finding 5]: the ancestor walk for
+    condition (a) is bounded by the git toplevel WHEN INSIDE a repo, but
+    walks all the way to the filesystem root otherwise (not just cwd itself
+    -- a non-git folder trusted at `D:/notes` must still read as trusted
+    from `D:/notes/sub`)."""
+    cwd_path = Path(cwd).absolute()
+
     def has_trust_in_project(project_cwd: Path) -> bool:
         proj = lookup_project(claude_json, project_cwd)
         return bool(proj.get("hasTrustDialogAccepted"))
 
-    # Walk up to git toplevel
     git_toplevel = None
-    current = cwd_path.absolute()
+    current = cwd_path
     while True:
-        git_check = current / ".git"
-        if git_check.exists() or git_check.is_file():
+        if (current / ".git").exists():
             git_toplevel = current
             break
         parent = current.parent
-        if parent == current:  # reached root
+        if parent == current:  # reached the filesystem root
             break
         current = parent
 
-    if git_toplevel is not None:
-        # Check cwd and ancestors up to git_toplevel inclusive
-        check_path = cwd_path.absolute()
-        while True:
-            if has_trust_in_project(check_path):
-                return True
-            if check_path == git_toplevel:
-                break
-            parent = check_path.parent
-            if parent == check_path:  # should not happen given git_toplevel exists
-                break
-            check_path = parent
-    else:
-        # No git repo, only check cwd itself
-        if has_trust_in_project(cwd_path):
+    # Walk cwd -> ancestors, stopping at git_toplevel (inclusive) when found,
+    # else continuing all the way to the filesystem root.
+    check_path = cwd_path
+    while True:
+        if has_trust_in_project(check_path):
             return True
+        if git_toplevel is not None and check_path == git_toplevel:
+            break
+        parent = check_path.parent
+        if parent == check_path:  # reached the filesystem root
+            break
+        check_path = parent
 
-    # Condition (b): CLAUDE_CODE_SANDBOXED=1
-    if os.environ.get("CLAUDE_CODE_SANDBOXED") == "1":
+    # Condition (b): CLAUDE_CODE_SANDBOXED set to ANY non-empty value counts
+    # (finding 5: not just the literal string "1").
+    if os.environ.get("CLAUDE_CODE_SANDBOXED"):
         return True
 
-    # Condition (c): bridge_trust entry for normalized cwd
-    trust_dict = bridge_trust if bridge_trust is not None else {}
+    # Condition (c): our own trust.json entry for the normalized cwd.
+    trust_dict = bridge_trust if bridge_trust is not None else load_bridge_trust()
     norm_cwd = normalize_cwd(cwd)
     if trust_dict.get(norm_cwd):
         return True

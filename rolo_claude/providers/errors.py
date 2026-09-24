@@ -98,6 +98,7 @@ def parse_context_overflow(status: int, err_msg: str, raw_meta: str | None,
     else:
         for pattern in (
             r"maximum context length is (\d+)",           # OpenAI/vLLM and OpenRouter (superset phrase)
+            r"exceeded model token limit:\s*(\d+)",        # Kimi (coordinator research, deepseek_kimi_adapters.md)
             r"context limit(?: of)?[^\d]{0,20}?(\d+)",     # looser Databricks fallback wording
         ):
             m = re.search(pattern, text)
@@ -117,6 +118,8 @@ def parse_context_overflow(status: int, err_msg: str, raw_meta: str | None,
             prompt_tokens = int(dbx_match.group(1)) if dbx_match else None
 
         total_match = re.search(r"requested about (\d+)", text)
+        if not total_match:
+            total_match = re.search(r"\(requested:\s*(\d+)\)", text)  # Kimi wording
         total = int(total_match.group(1)) if total_match else None
 
         # Fallback (finding 4): a wording that only ever states a total T with
@@ -186,6 +189,138 @@ def map_upstream_error(status: int, body: dict | bytes | str, provider: str,
                 break
     json_body = {"error": {"type": err_type, "message": msg}}
     return client_status, json_body, extra_headers
+
+
+# ---- H1 scope D: error taxonomy, backoff ladder, DeepSeek reasoning-replay
+# bug detector -- ALL additive (new names only, nothing above this line is
+# touched), used by the harness's request/loop layer, never by the proxy.
+
+AUTH = "AUTH"
+RATE_LIMIT = "RATE_LIMIT"
+CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+EMPTY_RESPONSE = "EMPTY_RESPONSE"
+STREAM_CLOSED = "STREAM_CLOSED"
+MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
+PROVIDER_FAILURE = "PROVIDER_FAILURE"
+
+# Wordings that mean "this really is a context/quota overflow" even when no
+# clean limit/prompt-token numbers can be pulled out of them (so
+# `parse_context_overflow` -- which requires numbers -- returns None on
+# them): DeepSeek's terse quota_limit_reached body, Kimi's two prose
+# variants (coordinator research, deepseek_kimi_adapters.md rule 4).
+_OVERFLOW_TAXONOMY_RE = re.compile(
+    r"maximum context length is \d+"
+    r"|exceeded model token limit"
+    r"|input token exceed the limit"
+    r"|input token length too long"
+    r"|prompt tokens \+ max_tokens exceeds"
+    r"|context limit"
+    r"|input token count \(\d+\) exceeds the maximum"       # Gemini
+    r"|maximum prompt length is \d+"                          # xAI
+    r"|context window exceeds limit"                          # MiniMax (error 2013)
+    r"|range of input length should be",                      # Qwen/DashScope
+    re.IGNORECASE,
+)
+
+# Named hooks for behaviours the coordinator's per-family research flags as
+# NOT data-driven (a row's "code_branch" key names one of these). Only the
+# families H1 actually targets (DeepSeek/Kimi/GLM/Qwen/MiniMax) have real
+# logic anywhere in this codebase; every other branch name is intentionally
+# a documented no-op that logs once, per the coordinator's own scoping
+# ("leave the rest as documented no-op branches that log") -- Gemini 3
+# thought-signature replay, Mistral's `^[a-zA-Z0-9]{9}$` tool-id
+# constraint, gpt-oss harmony reasoning rules, Grok encrypted reasoning,
+# and Gemma's system-role/no-native-tools quirks all land here later.
+_CODE_BRANCH_LOGGED: set = set()
+
+
+def run_code_branch(name: Optional[str], **context) -> None:
+    """Look up `name` in a (currently empty) registry of real per-family
+    hooks; if unregistered, log once per process and return -- never
+    raises, so an unimplemented branch degrades to "do nothing extra",
+    never a crash."""
+    if not name:
+        return
+    if name not in _CODE_BRANCH_LOGGED:
+        _CODE_BRANCH_LOGGED.add(name)
+        log.debug("code_branch %r has no implementation yet (documented no-op): %r", name, context)
+
+_REASONING_REPLAY_BUG_RE = re.compile(
+    r"reasoning_content.{0,60}must be passed back"
+    r"|content\[\]\.thinking.{0,60}must be passed back",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+class ReasoningReplayBug(Exception):
+    """The upstream 400'd specifically because we failed to replay
+    `reasoning_content` (DeepSeek exact wording: "The reasoning_content in
+    the thinking mode must be passed back to the API."). This ALWAYS means
+    a bug in OUR OWN request-builder's replay logic (providers/request.py),
+    never a transient condition -- it must surface loudly, never be
+    swallowed or silently retried like an ordinary 400."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+def is_reasoning_replay_bug(message: str) -> bool:
+    return bool(_REASONING_REPLAY_BUG_RE.search(message or ""))
+
+
+def classify_error_category(status: int, message: str) -> str:
+    """Map a wire failure to the dsh-style taxonomy (scope D). Pure
+    classification -- never raises, never mutates the message; distinct
+    from (and doesn't replace) `map_upstream_error`'s client-response
+    shape, which the proxy still owns unchanged."""
+    message = message or ""
+    if is_reasoning_replay_bug(message):
+        return PROVIDER_FAILURE  # named separately via ReasoningReplayBug at the raise site
+    if status in (401, 403):
+        return AUTH
+    if status == 429:
+        return RATE_LIMIT
+    if status == 400 and _OVERFLOW_TAXONOMY_RE.search(message):
+        return CONTEXT_WINDOW_EXCEEDED
+    if status >= 500:
+        return PROVIDER_FAILURE
+    return MALFORMED_RESPONSE if status == 400 else PROVIDER_FAILURE
+
+
+def parse_databricks_rate_limit(body) -> dict:
+    """Extract {limit_type, retry_after, limit, current} from a Databricks
+    429 body `{"error":{"message","type","code","limit_type","limit",
+    "current","retry_after"}}`. {} if `body` doesn't have this shape."""
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = json.loads(body.decode("utf-8", "replace"))
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return {}
+    return {k: err[k] for k in ("limit_type", "retry_after", "limit", "current") if k in err}
+
+
+_BACKOFF_LADDER = (1.0, 2.0, 4.0, 8.0, 16.0)
+MAX_RETRIES = 5
+
+
+def backoff_delay(attempt: int, retry_after=None) -> float:
+    """1-2-4-8-16s ladder (scope D), `attempt` is 0-based and clamps to the
+    ladder's last rung past 5 attempts; a provider-supplied `retry_after`
+    (seconds, string or number) is ADDED on top rather than replacing the
+    ladder, so a 429 with a short Retry-After still backs off at least as
+    much as an ordinary failure would."""
+    base = _BACKOFF_LADDER[max(0, min(attempt, len(_BACKOFF_LADDER) - 1))]
+    extra = 0.0
+    if retry_after is not None:
+        try:
+            extra = max(0.0, float(retry_after))
+        except (TypeError, ValueError):
+            extra = 0.0
+    return base + extra
 
 
 def flatten_content_parts(content) -> str:

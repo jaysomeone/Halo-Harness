@@ -23,6 +23,9 @@ from pathlib import Path
 from typing import Optional
 
 from rolo_claude import __version__
+from rolo_claude.providers.routing import InvalidModelError
+
+_STDIN_CAP_BYTES = 10 * 1024 * 1024  # 10 MB, matches Claude Code's own -p stdin cap
 
 
 def _cmd_proxy(rest: list) -> int:
@@ -37,8 +40,16 @@ def _cmd_proxy(rest: list) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rolo-claude", add_help=True)
-    parser.add_argument("-p", "--print", dest="prompt", metavar="PROMPT", nargs="?", const="", default=None,
-                         help="Run one prompt in print (non-interactive) mode; reads stdin if no PROMPT is given")
+    # finding 7: `-p`/`--print` is a plain boolean flag (like real `claude`),
+    # NOT an option that swallows the next token as its value -- the prompt
+    # is always the separate `prompt` positional, so it works regardless of
+    # whether it comes before or after `-p` (`rolo-claude -p "q"` and
+    # `rolo-claude "q" -p` both worked before this fix only ate one shape;
+    # `-p --output-format json "q"` didn't work at all).
+    parser.add_argument("-p", "--print", dest="print_mode", action="store_true",
+                         help="Run one prompt in print (non-interactive) mode")
+    parser.add_argument("prompt", nargs="?", default=None, metavar="PROMPT",
+                         help="The prompt text; reads stdin (UTF-8, 10 MB cap) if omitted")
     parser.add_argument("--model", default=None, help="Model ref for the main model (or:, dbx:, ant:, vendor/model, or an alias)")
     parser.add_argument("--small-model", default=None, help="Model ref for the small/fast model (accepted, not yet used in H0)")
     parser.add_argument("--cwd", default=None, help="Working directory for config discovery (default: process cwd)")
@@ -47,6 +58,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-turns", type=int, default=50)
     parser.add_argument("--append-system-prompt", default=None, metavar="TEXT")
     parser.add_argument("--settings", default=None, metavar="JSON_OR_PATH")
+    parser.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
+                         help="Reasoning effort, mapped per provider profile (reasoning.effort on "
+                              "OpenRouter, reasoning_effort on Databricks, thinking budget on Messages routes)")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--version", action="store_true")
     return parser
@@ -70,44 +84,94 @@ def _make_streams_utf8_safe() -> None:
                 pass
 
 
+def _read_stdin_prompt() -> "tuple[Optional[str], Optional[str]]":
+    """Read a prompt from stdin as UTF-8 with a 10 MB cap. Returns
+    (text, error_message) -- exactly one is non-None. Never raises: a
+    UnicodeDecodeError from a legacy-codepage terminal reading raw bytes is
+    what finding 7 reproduced (piped UTF-8 prompts turning into mojibake or
+    raising outright) -- reading `.buffer` in bytes mode and decoding
+    ourselves sidesteps the platform's default text-mode codec entirely."""
+    buf = getattr(sys.stdin, "buffer", None)
+    if buf is not None:
+        raw = buf.read(_STDIN_CAP_BYTES + 1)
+        if len(raw) > _STDIN_CAP_BYTES:
+            return None, f"stdin prompt exceeds the {_STDIN_CAP_BYTES // (1024 * 1024)} MB cap"
+        return raw.decode("utf-8", "replace"), None
+    return sys.stdin.read(), None  # fallback for a replaced (non-buffer) stdin, e.g. some test harnesses
+
+
 def main(argv: Optional[list] = None) -> int:
     _make_streams_utf8_safe()
     argv = sys.argv[1:] if argv is None else list(argv)
 
     if argv and argv[0] == "proxy":
         return _cmd_proxy(argv[1:])
+    if argv and argv[0] == "models":
+        from rolo_claude.catalog_cli import cmd_models
+        return cmd_models(argv[1:])
 
     parser = _build_parser()
-    args, _remaining = parser.parse_known_args(argv)
+    try:
+        args = parser.parse_intermixed_args(argv)
+    except TypeError:
+        # parse_intermixed_args raises TypeError on a shape it can't handle
+        # (documented limitation); fall back to plain parsing rather than
+        # crash -- this only changes behavior for argv shapes that would
+        # have been ambiguous anyway.
+        args, _ = parser.parse_known_args(argv)
 
     if args.version:
         print(f"rolo-claude {__version__}")
         return 0
 
-    if args.prompt is None:
+    if not args.print_mode:
         print("TUI not built yet (U2)", file=sys.stderr)
         return 2
 
     prompt_text = args.prompt
-    if not prompt_text:
-        if not sys.stdin.isatty():
-            prompt_text = sys.stdin.read()
+    if prompt_text is None:
+        if sys.stdin.isatty():
+            print("rolo-claude: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
+            return 2
+        prompt_text, err = _read_stdin_prompt()
+        if err is not None:
+            print(f"rolo-claude: {err}", file=sys.stderr)
+            return 2
         if not prompt_text:
             print("rolo-claude: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
             return 2
 
     from rolo_claude.headless import run_print_mode
-    return run_print_mode(
-        prompt=prompt_text,
-        model_ref_raw=args.model,
-        small_model_ref_raw=args.small_model,
-        cwd=Path(args.cwd) if args.cwd else None,
-        output_format=args.output_format,
-        max_turns=args.max_turns,
-        append_system_prompt=args.append_system_prompt,
-        settings_flag=args.settings,
-        verbose=args.verbose,
-    )
+    try:
+        return run_print_mode(
+            prompt=prompt_text,
+            model_ref_raw=args.model,
+            small_model_ref_raw=args.small_model,
+            cwd=Path(args.cwd) if args.cwd else None,
+            output_format=args.output_format,
+            max_turns=args.max_turns,
+            append_system_prompt=args.append_system_prompt,
+            settings_flag=args.settings,
+            verbose=args.verbose,
+            effort=getattr(args, "effort", None),
+        )
+    except InvalidModelError as e:
+        # finding 7: a bad --model/alias must be a clean config error (exit
+        # 2), not an uncaught traceback (which argparse-style CLIs reserve
+        # exit 1 for -- a request that ran and failed, not a bad invocation).
+        print(f"rolo-claude: invalid --model: {e}", file=sys.stderr)
+        if args.model:
+            from rolo_claude.catalog_cli import near_miss_slug
+            from rolo_claude.config.paths import bridge_home
+            from rolo_claude.providers.databricks import load_models_json
+            try:
+                known = load_models_json(bridge_home())
+                matches = near_miss_slug(args.model, known)
+                if matches:
+                    print(f"rolo-claude: did you mean: {', '.join('or:' + m for m in matches)}", file=sys.stderr)
+            except Exception:
+                pass
+        return 2
 
 
 if __name__ == "__main__":

@@ -1,72 +1,93 @@
 """rolo_claude.agent.assemble -- wires config discovery (CLAUDE.md, memory,
-settings) together into what agent/prompt.py and agent/loop.py need. Kept
-separate from prompt.py so prompt.py stays pure-string-building and this
-module owns all the filesystem/config reads.
+settings, trust) together into what agent/prompt.py and agent/loop.py need
+(H1 rewrite: findings 5/6 wire real trust into settings/instructions;
+memory/CLAUDE.md/environment move OUT of the system prompt into user-role
+snapshots per research revision 3).
 """
 
 from __future__ import annotations
 
 import datetime
-import os
 import platform
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.agent.prompt import EnvironmentInfo, build_system_prompt, collect_git_info
+from rolo_claude.agent.prompt import EnvironmentInfo, build_environment_block, build_system_prompt, collect_git_info
 from rolo_claude.config.claude_md import discover_instructions
 from rolo_claude.config.claude_json import is_trusted, load_claude_json
 from rolo_claude.config.memory import MemoryStore
 from rolo_claude.config.settings import resolve_settings
+from rolo_claude.tools.registry import ToolRegistry
 
 
 class SessionContext:
     """Everything agent/loop.py's Session needs that comes from the config
     layer, resolved once at session start (byte-stable inputs to the system
-    prompt for the whole session's lifetime)."""
+    prompt for the whole session's lifetime). `system_prompt` never
+    contains CLAUDE.md/memory/environment content (rev. 3) -- callers fetch
+    those separately (`claude_md_text`, `memory_snapshot_text`,
+    `environment_snapshot_text`) and log them as `snapshot` nodes."""
 
-    def __init__(self, *, cwd: Path, model_label: str, settings_flag: Optional[str] = None,
-                 setting_sources: Optional[list] = None, append_system_prompt: Optional[str] = None,
-                 bare: bool = False):
+    def __init__(self, *, cwd: Path, model_label: str, model_family: str = "generic",
+                 settings_flag: Optional[str] = None, setting_sources: Optional[list] = None,
+                 append_system_prompt: Optional[str] = None, bare: bool = False,
+                 tool_registry: Optional[ToolRegistry] = None):
         self.cwd = Path(cwd)
-        self.settings = resolve_settings(self.cwd, settings_flag=settings_flag, setting_sources=setting_sources)
 
+        # finding 5/6: real trust, threaded into settings resolution so an
+        # untrusted project/local layer's allow/env/hooks/autoMemoryDirectory
+        # never reach anything downstream.
         claude_json = load_claude_json()
-        self.trusted = is_trusted(self.cwd, claude_json, bridge_trust=None)
+        self.trusted = is_trusted(self.cwd, claude_json)
+        self.settings = resolve_settings(
+            self.cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=self.trusted,
+        )
 
         self.instructions = discover_instructions(self.cwd, self.settings, self.trusted, bare=bare)
-
         self.memory_store = MemoryStore(self.cwd, self.settings, bare=bare)
         self.memory_index = self.memory_store.load_index()
+        self.tool_registry = tool_registry or ToolRegistry()
 
-        git_info = collect_git_info(self.cwd)
-        env = EnvironmentInfo(
-            cwd=str(self.cwd),
-            os_name=f"{platform.system()} {platform.release()}",
-            date_str=datetime.date.today().isoformat(),
-            model_label=model_label,
-            **git_info,
-        )
         self.system_prompt = build_system_prompt(
-            env=env,
-            memory_text=self.memory_index.text,
-            memory_index_text=self.memory_store.index_text() if self.memory_index.topics else "",
-            append_system_prompt=append_system_prompt,
+            model_label=model_label, cwd=self.cwd, tool_definitions=self.tool_registry.definitions(),
+            family=model_family, append_system_prompt=append_system_prompt,
         )
 
     def claude_md_text(self) -> str:
-        """The rendered CLAUDE.md/AGENTS.md chain, or "" if none was found --
-        delivered as a separate leading user message (see
-        build_initial_user_message below), matching Claude Code's own
-        documented delivery mechanic (finding C: "delivered as a user
-        message after the system prompt")."""
+        """The rendered CLAUDE.md/AGENTS.md/rules chain, or "" if none --
+        delivered as a snapshot node (agent/loop.py), matching Claude
+        Code's own documented delivery mechanic (a user message after the
+        system prompt)."""
         return self.instructions.render()
+
+    def memory_snapshot_text(self) -> str:
+        """MEMORY.md content (already capped by MemoryStore) plus the
+        topic-file index, as one snapshot block; "" if auto-memory found
+        nothing (or is disabled)."""
+        parts = []
+        if self.memory_index.text:
+            parts.append("# Memory (auto-loaded from MEMORY.md)\n\n" + self.memory_index.text)
+        if self.memory_index.topics:
+            parts.append("## Topic files (read on demand -- not included in full here)\n\n" + self.memory_store.index_text())
+        return "\n\n".join(parts)
+
+    def environment_snapshot_text(self, model_label: str) -> str:
+        """cwd/OS/date/model/git branch+status+log, as one snapshot block
+        -- the dynamic counterpart of what H0 used to bake into the system
+        prompt itself."""
+        git_info = collect_git_info(self.cwd)
+        env = EnvironmentInfo(
+            cwd=str(self.cwd), os_name=f"{platform.system()} {platform.release()}",
+            date_str=datetime.date.today().isoformat(), model_label=model_label, **git_info,
+        )
+        return build_environment_block(env)
 
 
 def build_initial_user_message(claude_md_text: str, first_user_text: str, images: Optional[list] = None) -> dict:
-    """The session's first user-role message: the CLAUDE.md chain (if any)
-    followed by the user's actual first prompt, as separate text blocks in
-    ONE Anthropic user message. Only ever used for turn 1 -- later turns
-    just send the user's text directly (see agent/loop.py)."""
+    """Kept for backward-compat call sites; agent/loop.py's new Session
+    logs CLAUDE.md as its OWN snapshot node instead of prepending it to the
+    first user message, but this helper still builds the equivalent single
+    Anthropic user message for any caller that wants that shape directly."""
     blocks = []
     if claude_md_text:
         blocks.append({"type": "text", "text": claude_md_text})

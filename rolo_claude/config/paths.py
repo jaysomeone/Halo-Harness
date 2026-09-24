@@ -23,7 +23,15 @@ def claude_config_dir() -> Path:
 
 
 def claude_json_path() -> Path:
-    """Return home()/".claude.json"."""
+    """`$CLAUDE_CONFIG_DIR/.claude.json` when CLAUDE_CONFIG_DIR is set (a
+    legacy `<configDir>/.config.json` wins if present there), else
+    home()/".claude.json" [bin sec.8]."""
+    if "CLAUDE_CONFIG_DIR" in os.environ:
+        cfg_dir = claude_config_dir()
+        legacy = cfg_dir / ".config.json"
+        if legacy.exists():
+            return legacy
+        return cfg_dir / ".claude.json"
     return home() / ".claude.json"
 
 
@@ -35,7 +43,13 @@ def bridge_home() -> Path:
 
 
 def managed_dir() -> Path:
-    """Return per-OS managed-settings directory (best effort, may not exist)."""
+    """Return per-OS managed-settings directory (best effort, may not
+    exist). Test seam: BRIDGE_TEST_MANAGED_DIR overrides everything below
+    (finding 14) -- without it, settings/CLAUDE.md tests would read the
+    REAL `C:\\Program Files\\ClaudeCode` or `/etc/claude-code` on whatever
+    machine runs them."""
+    if "BRIDGE_TEST_MANAGED_DIR" in os.environ:
+        return Path(os.environ["BRIDGE_TEST_MANAGED_DIR"])
     if os.name == "nt":
         return Path("C:\\Program Files\\ClaudeCode")
     # POSIX
@@ -64,27 +78,78 @@ def managed_settings_files() -> list[Path]:
     return files
 
 
+def _java_string_hash(s: str) -> int:
+    """Java/JS `String.hashCode()`: h = h*31 + charCode, wrapped to a signed
+    32-bit int, over UTF-16 CODE UNITS (so an astral character is split into
+    a surrogate pair first, matching JS's `charCodeAt`, not Python's
+    code-point iteration) [bin sec.12: `(h<<5)-h+charCode|0`]."""
+    h = 0
+    for ch in s:
+        code = ord(ch)
+        units = (code,)
+        if code > 0xFFFF:
+            v = code - 0x10000
+            units = (0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF))
+        for u in units:
+            h = (h * 31 + u) & 0xFFFFFFFF
+    if h >= 0x80000000:
+        h -= 0x100000000
+    return h
+
+
+def _base36(n: int) -> str:
+    if n == 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
 def project_slug(cwd: str | Path) -> str:
-    """Convert cwd to a filesystem-safe slug, truncated and hashed if >200 chars."""
+    """Convert cwd to a filesystem-safe slug: every non-alphanumeric char ->
+    '-'; slugs over 200 chars are truncated to 200 and get a base-36
+    `abs(javaHash(originalPath))` suffix (over the UNTRUNCATED original
+    string, not the slug) [bin sec.12] -- NOT a sha1 hash."""
     cwd_str = str(cwd)
-    # Replace every non-alphanumeric char with '-'
     slug = re.sub(r"[^a-zA-Z0-9]", "-", cwd_str)
     if len(slug) <= 200:
         return slug
-    # Truncate to 200 chars and append hash suffix
     truncated = slug[:200]
-    suffix = hashlib.sha1(slug.encode()).hexdigest()[:8]
+    suffix = _base36(abs(_java_string_hash(cwd_str)))
     return f"{truncated}-{suffix}"
 
 
+_WIN_DRIVE_RE = re.compile(r"^([a-zA-Z]):[\\/](.*)$", re.DOTALL)
+
+
 def normalize_cwd(path: str | Path) -> str:
-    """Return absolute path with forward slashes and uppercase drive letter."""
-    p = Path(path).absolute()
-    # Convert to forward slashes
-    normalized = str(p).replace("\\", "/")
-    # Uppercase drive letter if pattern matches ^[a-zA-Z]:/
-    if re.match(r"^[a-zA-Z]:/", normalized):
-        normalized = normalized[0].upper() + normalized[1:]
+    """Return an absolute path with forward slashes and an uppercase drive
+    letter. `~/.claude.json`'s `projects` keys can be Windows-shaped
+    (`C:\\Users\\rolo`) regardless of which OS is running THIS process --
+    rolo-claude's primary target is Linux, but it must still recognize a
+    project key copied from a Windows Claude Code install. A Windows-drive-
+    shaped INPUT is therefore detected by pattern (never by host `os.name`)
+    and normalized without ever calling `Path.absolute()`, which on POSIX
+    treats "C:/Users/user" as a relative path and prepends the real cwd
+    (producing garbage like "/home/user/proj/C:/Users/user"). Anything that
+    doesn't match the drive-letter shape falls through to ordinary
+    host-appropriate absolute-path normalization."""
+    s = str(path)
+    m = _WIN_DRIVE_RE.match(s)
+    if m:
+        drive, rest = m.groups()
+        return f"{drive.upper()}:/{rest.replace(chr(92), '/')}"
+    p = Path(s)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    normalized = str(p)
+    if os.name == "nt":
+        normalized = normalized.replace("\\", "/")
+        if re.match(r"^[a-zA-Z]:/", normalized):
+            normalized = normalized[0].upper() + normalized[1:]
     return normalized
 
 
@@ -167,6 +232,21 @@ def plans_dir() -> Path:
     return claude_config_dir() / "plans"
 
 
+def find_git_root(path: str | Path) -> Path | None:
+    """Walk up from `path` looking for a `.git` entry (dir or file, for a
+    worktree/submodule pointer); returns the containing directory, or None
+    if `path` isn't inside a git working tree. Pure filesystem check -- no
+    `git` subprocess, so it works even when `git` isn't on PATH."""
+    current = Path(path).resolve()
+    while True:
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def memory_dir(cwd: str | Path, settings=None) -> Path:
     """Return the memory directory for cwd, honoring an explicit
     autoMemoryDirectory override from `settings` if one is set. `settings`
@@ -174,15 +254,23 @@ def memory_dir(cwd: str | Path, settings=None) -> Path:
     config/settings.py's Settings class): a Settings-like OBJECT exposes it
     as the snake_case attribute `.auto_memory_directory`, while a plain dict
     (e.g. in a simple test) would use the raw JSON key `autoMemoryDirectory`
-    -- both are tried."""
+    -- both are tried (Settings itself is responsible for only ever
+    surfacing a value sourced from policy/flag/local/user, never project
+    [bin sec.12/finding 2] -- this leaf function just consumes whatever it's
+    given and `expanduser()`s it). Absent an override, the slug is built
+    from the git worktree root when `cwd` is inside one, else `cwd` itself
+    [bin sec.12: "git root or cwd", finding 2] -- resolved to an absolute
+    path once so a relative `--cwd .` can't collapse the slug to "-"."""
     auto_dir = None
     if settings is not None:
         auto_dir = getattr(settings, "auto_memory_directory", None)
         if auto_dir is None and isinstance(settings, dict):
             auto_dir = settings.get("autoMemoryDirectory")
     if auto_dir and isinstance(auto_dir, str):
-        return Path(auto_dir)
-    slug = project_slug(cwd)
+        return Path(auto_dir).expanduser()
+    abs_cwd = Path(cwd).resolve()
+    root = find_git_root(abs_cwd) or abs_cwd
+    slug = project_slug(root)
     return claude_config_dir() / "projects" / slug / "memory"
 
 

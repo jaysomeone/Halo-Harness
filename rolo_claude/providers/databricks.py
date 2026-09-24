@@ -38,8 +38,14 @@ def databricks_route_candidates(model: str) -> list[tuple[str, bool]]:
 
 
 def build_databricks_body(oai_body: dict, include_model: bool, model: str) -> dict:
-    """Filter an OpenAI-chat body down to the Databricks-accepted key allowlist, adding/omitting 'model'."""
-    allowed = ("messages", "max_tokens", "temperature", "top_p", "stop", "stream", "tools", "tool_choice")
+    """Filter an OpenAI-chat body down to the Databricks-accepted key
+    allowlist, adding/omitting 'model'. `reasoning_effort`/`stream_options`
+    (scope B/D) are additive: the proxy's own `anthropic_to_openai` never
+    sets either key, so widening this allowlist changes nothing for the
+    unchanged proxy path -- only the harness's new request builder
+    (providers/request.py) ever populates them."""
+    allowed = ("messages", "max_tokens", "temperature", "top_p", "stop", "stream",
+               "tools", "tool_choice", "reasoning_effort", "stream_options")
     result = {key: oai_body[key] for key in allowed if key in oai_body}
     if include_model:
         result["model"] = model
@@ -130,8 +136,12 @@ def dbx_cache_set_max_tokens_limit(model: str, limit: int, state_dir) -> None:
 
 
 
-def probe_databricks_endpoints(root: str, token: str) -> tuple[int, list[str]]:
-    """GET <root>/api/2.0/serving-endpoints; returns (status, endpoint_names). Raises UpstreamConnectError on connect/DNS failure."""
+def _probe_databricks_endpoints_raw(root: str, token: str) -> "tuple[int, list[dict]]":
+    """GET <root>/api/2.0/serving-endpoints; returns (status, raw endpoint
+    dicts). Raises UpstreamConnectError on connect/DNS failure. Shared by
+    `probe_databricks_endpoints` (bare names, unchanged proxy contract) and
+    `probe_databricks_endpoints_full` (scope I catalog refresh, extended
+    fields) so the HTTP call exists exactly once."""
     import urllib.parse
     from rolo_claude.providers.http import open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(root)
@@ -150,10 +160,61 @@ def probe_databricks_endpoints(root: str, token: str) -> tuple[int, list[str]]:
     if resp.status == 200:
         try:
             data = json.loads(raw.decode("utf-8", "replace"))
-            return 200, [e.get("name", "") for e in data.get("endpoints", [])]
+            return 200, list(data.get("endpoints", []))
         except (json.JSONDecodeError, ValueError):
             pass
     return resp.status, []
+
+
+def probe_databricks_endpoints(root: str, token: str) -> tuple[int, list[str]]:
+    """GET <root>/api/2.0/serving-endpoints; returns (status, endpoint_names). Raises UpstreamConnectError on connect/DNS failure."""
+    status, entries = _probe_databricks_endpoints_raw(root, token)
+    return status, [e.get("name", "") for e in entries]
+
+
+def probe_databricks_endpoints_full(root: str, token: str) -> "tuple[int, list[dict]]":
+    """Like `probe_databricks_endpoints` but keeps each endpoint's `name`,
+    `task`, `state.ready` and caller `permission_level` (scope I: "Databricks
+    endpoints list") instead of collapsing to bare names."""
+    status, entries = _probe_databricks_endpoints_raw(root, token)
+    out = []
+    for e in entries:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        state = e.get("state") if isinstance(e.get("state"), dict) else {}
+        out.append({
+            "name": e["name"], "task": e.get("task"),
+            "ready": state.get("ready"), "permission_level": e.get("permission_level"),
+        })
+    return status, out
+
+
+def dbx_endpoints_path(state_dir) -> Path:
+    """dbx-endpoints.json path under state_dir (scope I)."""
+    return Path(state_dir) / "dbx-endpoints.json"
+
+
+def write_dbx_endpoints_json(state_dir, endpoints: list) -> None:
+    """Write dbx-endpoints.json as {"<name>": {"task", "ready", "permission_level"}, ...}. Best-effort."""
+    try:
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        out = {e["name"]: {k: v for k, v in e.items() if k != "name"} for e in endpoints if e.get("name")}
+        with open(dbx_endpoints_path(state_dir), "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2)
+    except OSError:
+        pass
+
+
+def load_dbx_endpoints_json(state_dir) -> dict:
+    """Read dbx-endpoints.json (dict keyed by name); {} if missing/unparseable."""
+    path = dbx_endpoints_path(state_dir)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:

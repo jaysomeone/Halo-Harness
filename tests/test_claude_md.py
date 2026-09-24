@@ -25,6 +25,8 @@ class FakeSettings:
 @test
 def test_bare_mode_returns_empty(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["proj"], FakeSettings(), trusted=True, bare=True)
     ctx.check("bare -> no files", bundle.files == [])
     ctx.check("bare -> no warnings", bundle.warnings == [])
@@ -33,6 +35,8 @@ def test_bare_mode_returns_empty(ctx: Ctx):
 @test
 def test_project_claude_md_and_imports_included(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["proj"], FakeSettings(), trusted=True)
     joined = "\n".join(f.text for f in bundle.files)
     ctx.check("root project text present", "Root project instructions" in joined)
@@ -43,6 +47,8 @@ def test_project_claude_md_and_imports_included(ctx: Ctx):
 @test
 def test_ancestor_walk_excludes_subdirectories(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["proj"], FakeSettings(), trusted=True)
     joined = "\n".join(f.text for f in bundle.files)
     ctx.check("sub/CLAUDE.md is a CHILD of proj, must NOT appear when cwd=proj",
@@ -52,6 +58,8 @@ def test_ancestor_walk_excludes_subdirectories(ctx: Ctx):
 @test
 def test_ancestor_walk_includes_subdir_when_cwd_is_there(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["sub"], FakeSettings(), trusted=True)
     joined = "\n".join(f.text for f in bundle.files)
     ctx.check("proj/CLAUDE.md is an ancestor of proj/sub", "Root project instructions" in joined)
@@ -61,6 +69,8 @@ def test_ancestor_walk_includes_subdir_when_cwd_is_there(ctx: Ctx):
 @test
 def test_block_html_comment_stripped_but_fence_preserved(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["proj"], FakeSettings(), trusted=True)
     proj_file = next(f for f in bundle.files if f.path == fh["proj"] / "CLAUDE.md")
     ctx.check("block HTML comment removed", "that spans two lines" not in proj_file.text)
@@ -81,6 +91,8 @@ def test_strip_block_html_comments_standalone(ctx: Ctx):
 @test
 def test_claude_md_excludes_glob(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     pattern = str(fh["proj"] / "CLAUDE.md").replace("\\", "/")
     bundle = discover_instructions(fh["proj"], FakeSettings(excludes=[pattern]), trusted=True)
     joined_paths = [str(f.path) for f in bundle.files]
@@ -184,9 +196,84 @@ def test_missing_file_never_raises(ctx: Ctx):
 @test
 def test_render_joins_with_headers(ctx: Ctx):
     fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])  # finding 14: never walk the REAL ~/.claude ancestors
+    os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(fh["root"])  # ...nor the real ancestors of the OS temp dir
     bundle = discover_instructions(fh["proj"], FakeSettings(), trusted=True)
     rendered = bundle.render()
     ctx.check("render() includes a '## <path>' header per file", rendered.count("## ") == len(bundle.files))
+
+
+@test
+def test_unscoped_rule_loads_at_launch_scoped_rule_does_not(ctx: Ctx):
+    """finding 9: `.claude/rules/*.md` -- a rule WITHOUT `paths:` frontmatter
+    loads immediately like a CLAUDE.md; one WITH `paths:` goes to
+    `scoped_rules` instead, not into `files`/`render()`."""
+    d = Path(tempfile.mkdtemp(prefix="claude-md-rules-"))
+    rules_dir = d / ".claude" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    (rules_dir / "unscoped.md").write_text("Always-loaded rule content.\n", encoding="utf-8")
+    (rules_dir / "scoped.md").write_text("---\npaths: [\"*.py\"]\n---\nPython-only rule content.\n", encoding="utf-8")
+    bundle = discover_instructions(d, FakeSettings(), trusted=True)
+    joined = "\n".join(f.text for f in bundle.files)
+    ctx.check("unscoped rule loaded into files/render()", "Always-loaded rule content" in joined)
+    ctx.check("scoped rule NOT in files/render()", "Python-only rule content" not in joined)
+    ctx.check("scoped rule present in scoped_rules with its glob", any(
+        "Python-only rule content" in r.text and "*.py" in r.patterns for r in bundle.scoped_rules
+    ))
+    matches = bundle.scoped_rules_for("foo.py")
+    ctx.check("scoped_rules_for() matches a .py path", any("Python-only" in r.text for r in matches))
+    ctx.check("scoped_rules_for() does not match an unrelated path", bundle.scoped_rules_for("foo.txt") == [])
+
+
+@test
+def test_claude_local_md_loaded_per_ancestor(ctx: Ctx):
+    """finding 9: CLAUDE.local.md loads at EVERY ancestor, not just cwd."""
+    root = Path(tempfile.mkdtemp(prefix="claude-md-local-per-ancestor-"))
+    parent = root / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True, exist_ok=True)
+    (parent / "CLAUDE.local.md").write_text("parent-local-content\n", encoding="utf-8")
+    (child / "CLAUDE.local.md").write_text("child-local-content\n", encoding="utf-8")
+    old = os.environ.get("BRIDGE_TEST_ANCESTOR_ROOT")
+    try:
+        os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(root)
+        bundle = discover_instructions(child, FakeSettings(), trusted=True)
+        joined = "\n".join(f.text for f in bundle.files)
+        ctx.check("the PARENT ancestor's CLAUDE.local.md is included, not just cwd's own", "parent-local-content" in joined)
+        ctx.check("cwd's own CLAUDE.local.md is also included", "child-local-content" in joined)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_ANCESTOR_ROOT", None)
+        else:
+            os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = old
+
+
+@test
+def test_dedup_across_discovery_home_equals_cwd(ctx: Ctx):
+    """finding 10: cwd == home must not load ~/.claude/CLAUDE.md twice (once
+    as the "user" tier, once as the home ancestor's .claude/CLAUDE.md)."""
+    home_dir = Path(tempfile.mkdtemp(prefix="claude-md-dedup-home-"))
+    claude_dir = home_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "CLAUDE.md").write_text("shared user claude md content\n", encoding="utf-8")
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_root = os.environ.get("BRIDGE_TEST_ANCESTOR_ROOT")
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(home_dir)
+        os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = str(home_dir)
+        bundle = discover_instructions(home_dir, FakeSettings(), trusted=True)
+        joined = "\n".join(f.text for f in bundle.files)
+        ctx.check("content present", "shared user claude md content" in joined)
+        ctx.check("content appears exactly ONCE, not twice", joined.count("shared user claude md content") == 1)
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+        if old_root is None:
+            os.environ.pop("BRIDGE_TEST_ANCESTOR_ROOT", None)
+        else:
+            os.environ["BRIDGE_TEST_ANCESTOR_ROOT"] = old_root
 
 
 if __name__ == "__main__":

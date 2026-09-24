@@ -1,0 +1,132 @@
+"""tests.test_invariants -- agent/invariants.py: unpaired tool_use
+detection, synthetic result writing, well-formed-text repair.
+"""
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from rolo_claude.agent.log import SessionLog
+from rolo_claude.agent.invariants import (
+    ABORTED_BEFORE_DISPATCH, INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids,
+    repair_truncated_text, synthesize_missing_results, validate_tool_use,
+)
+
+test, TESTS = new_registry()
+
+
+def _fresh_log() -> SessionLog:
+    d = Path(tempfile.mkdtemp(prefix="invariants-test-"))
+    return SessionLog(d, session_id="test-session")
+
+
+@test
+def test_fully_paired_turn_has_no_unpaired_ids(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "hi"}])
+    log.append_assistant(content=[{"type": "tool_use", "id": "call_1", "name": "Read", "input": {}}], stop_reason="tool_use")
+    log.append_tool_result(tool_use_id="call_1", content="file contents")
+    ctx.check("no unpaired ids", find_unpaired_tool_use_ids(log) == [])
+    ctx.check("synthesize is a no-op on an already-paired log", synthesize_missing_results(log) == [])
+
+
+@test
+def test_interrupted_turn_gets_synthetic_results(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "hi"}])
+    log.append_assistant(
+        content=[
+            {"type": "tool_use", "id": "call_1", "name": "Read", "input": {}},
+            {"type": "tool_use", "id": "call_2", "name": "Read", "input": {}},
+        ],
+        stop_reason="tool_use",
+    )
+    # crash/interrupt before either tool_result is written
+    missing = find_unpaired_tool_use_ids(log)
+    ctx.check(f"both ids detected as unpaired, got {missing}", set(missing) == {"call_1", "call_2"})
+
+    synthesized = synthesize_missing_results(log, reason=INTERRUPTED_MESSAGE)
+    ctx.check(f"synthesize_missing_results returns both ids, got {synthesized}", set(synthesized) == {"call_1", "call_2"})
+    ctx.check("no unpaired ids remain", find_unpaired_tool_use_ids(log) == [])
+
+    results = [n for n in log.nodes() if n.get("type") == "tool_result"]
+    ctx.check("two synthetic tool_result nodes written", len(results) == 2)
+    ctx.check("synthetic results are marked is_error", all(r["is_error"] for r in results))
+    ctx.check("synthetic results carry the interrupted message", all(r["content"] == INTERRUPTED_MESSAGE for r in results))
+
+
+@test
+def test_partially_answered_turn_only_synthesizes_the_gap(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "hi"}])
+    log.append_assistant(
+        content=[
+            {"type": "tool_use", "id": "call_a", "name": "Read", "input": {}},
+            {"type": "tool_use", "id": "call_b", "name": "Read", "input": {}},
+        ],
+        stop_reason="tool_use",
+    )
+    log.append_tool_result(tool_use_id="call_a", content="ok")  # call_b never answered (crash mid-dispatch)
+    synthesized = synthesize_missing_results(log, reason=ABORTED_BEFORE_DISPATCH)
+    ctx.check(f"only call_b synthesized, got {synthesized}", synthesized == ["call_b"])
+    total_results = [n for n in log.nodes() if n.get("type") == "tool_result"]
+    ctx.check("exactly 2 tool_result nodes total (1 real + 1 synthetic)", len(total_results) == 2)
+
+
+@test
+def test_only_the_last_assistant_node_is_checked(ctx: Ctx):
+    """An EARLIER assistant turn is, by construction, already fully paired
+    (the loop never advances past it otherwise) -- this proves the
+    function doesn't waste time or misfire on old history."""
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "hi"}])
+    log.append_assistant(content=[{"type": "text", "text": "no tools this turn"}], stop_reason="end_turn")
+    log.append_user([{"type": "text", "text": "again"}])
+    log.append_assistant(content=[{"type": "text", "text": "still no tools"}], stop_reason="end_turn")
+    ctx.check("no unpaired ids across a tool-free history", find_unpaired_tool_use_ids(log) == [])
+
+
+@test
+def test_validate_tool_use(ctx: Ctx):
+    ctx.check("well-formed block passes", validate_tool_use({"id": "x", "name": "Read", "input": {"a": 1}}) is None)
+    ctx.check("empty id rejected", validate_tool_use({"id": "", "name": "Read"}) is not None)
+    ctx.check("missing id rejected", validate_tool_use({"name": "Read"}) is not None)
+    ctx.check("missing name rejected", validate_tool_use({"id": "x"}) is not None)
+    ctx.check("non-dict input rejected", validate_tool_use({"id": "x", "name": "Read", "input": "not-a-dict"}) is not None)
+    ctx.check("non-dict block rejected", validate_tool_use("not-a-dict") is not None)
+
+
+@test
+def test_repair_truncated_text_well_formed_passthrough(ctx: Ctx):
+    ctx.check("ordinary text unchanged", repair_truncated_text("hello world") == "hello world")
+    ctx.check("empty string unchanged", repair_truncated_text("") == "")
+    ctx.check("unicode text unchanged", repair_truncated_text("café \U0001F600") == "café \U0001F600")
+
+
+@test
+def test_repair_truncated_text_lone_surrogate(ctx: Ctx):
+    lone_high_surrogate = "before" + chr(0xD83D) + "after"  # half of an emoji surrogate pair, truncated
+    try:
+        lone_high_surrogate.encode("utf-8")
+        ctx.check("test setup: a lone surrogate must be unencodable in plain utf-8", False)
+    except UnicodeEncodeError:
+        pass
+    repaired = repair_truncated_text(lone_high_surrogate)
+    try:
+        repaired.encode("utf-8")
+        ctx.check("repaired text is now well-formed UTF-8", True)
+    except UnicodeEncodeError:
+        ctx.check("repaired text must be encodable as UTF-8", False)
+    ctx.check("surrounding text survives", "before" in repaired and "after" in repaired)
+
+
+if __name__ == "__main__":
+    ctx = Ctx()
+    results, passed, failed, skipped = run_all(TESTS, ctx)
+    sys.exit(print_results(results, passed, failed, skipped))

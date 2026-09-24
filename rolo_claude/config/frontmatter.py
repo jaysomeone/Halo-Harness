@@ -12,9 +12,11 @@ def parse(text: str) -> tuple[dict, str]:
         parsed key-value pairs and body_text is everything after the closing '---'.
         If no frontmatter is found, returns ({}, text).
     """
-    # Strip BOM and leading whitespace
-    text = text.lstrip('\ufeff').lstrip()
-    
+    # Strip BOM, normalize CRLF/CR -> LF (finding 11: a CRLF file's first
+    # line is "---\r\n", which doesn't start with the literal "---\n" this
+    # parser looks for), then leading whitespace.
+    text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n').lstrip()
+
     # Check for opening delimiter
     if not text.startswith('---\n'):
         return {}, text

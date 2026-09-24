@@ -5,7 +5,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from rolo_claude.config.paths import home, managed_settings_files
+from rolo_claude.config.paths import claude_config_dir, home, managed_settings_files
+
+# autoMemoryDirectory is never sourced from projectSettings, regardless of
+# trust (finding 2, [bin sec.12]: "policy/flag/local/user, never project").
+_PROJECT_EXCLUDED_KEYS = frozenset({"autoMemoryDirectory"})
+
+# Keys dropped from an UNTRUSTED project/local layer before merging (finding
+# 6/D-CFG); deny/ask stay -- only allow/additionalDirectories/env/hooks/
+# autoMemoryDirectory require trust.
+_TRUST_GATED_PERMISSION_KEYS = frozenset({"allow", "additionalDirectories"})
+_TRUST_GATED_TOP_KEYS = frozenset({"env", "hooks", "autoMemoryDirectory"})
 
 
 @dataclass
@@ -70,7 +80,8 @@ class Settings:
 
     @property
     def permissions_default_mode(self) -> Optional[str]:
-        return self._raw.get("permissions", {}).get("defaultMode")
+        mode = self._raw.get("permissions", {}).get("defaultMode")
+        return "default" if mode == "manual" else mode
 
     @property
     def env(self) -> dict[str, str]:
@@ -100,7 +111,37 @@ class Settings:
 
     @property
     def instruction_files(self) -> str:
-        return self._raw.get("instructionFiles", "claude-md-or-agents-md")
+        """`instructionFiles` is an option of the built-in `agents-md`
+        plugin, stored at `pluginConfigs[<plugin>].options.instructionFiles`
+        -- NOT a top-level settings key [bin sec.8, finding 9]. A legacy
+        top-level `projectInstructions` maps onto the same vocabulary. A
+        bare top-level `instructionFiles` (not real Claude Code shape, but
+        convenient for our own tests/settings authors) is tried last."""
+        legacy_map = {
+            "none": "managed-only", "claude": "claude-md",
+            "agents-fallback": "claude-md-or-agents-md", "both": "claude-md-and-agents-md",
+        }
+        legacy = self._raw.get("projectInstructions")
+        default = legacy_map.get(legacy, "claude-md-or-agents-md") if legacy else "claude-md-or-agents-md"
+
+        plugin_configs = self._raw.get("pluginConfigs")
+        if isinstance(plugin_configs, dict):
+            for cfg in plugin_configs.values():
+                if isinstance(cfg, dict):
+                    opts = cfg.get("options")
+                    if isinstance(opts, dict) and "instructionFiles" in opts:
+                        return opts["instructionFiles"]
+        return self._raw.get("instructionFiles", default)
+
+    @property
+    def effective_env(self) -> dict[str, str]:
+        """shell <- user <- trusted project/local <- flag <- policy [D-CFG]:
+        the shell's own environment is the floor, and every value the merged
+        settings chain sets (already trust-filtered by `resolve_settings`)
+        overrides it -- "settings env beats the shell env"."""
+        result = dict(os.environ)
+        result.update({str(k): str(v) for k, v in self.env.items()})
+        return result
 
     @property
     def theme(self) -> Optional[str]:
@@ -127,14 +168,18 @@ class Settings:
 
 
 def _read_json_file(path: Path) -> tuple[dict, Optional[SettingsError]]:
-    """Read JSON file, return (data, error). Missing file is not an error."""
+    """Read JSON file (utf-8-sig -- a PowerShell 5.1 `Out-File` BOM must not
+    make `json.loads` drop the whole file [finding 11]), return (data,
+    error). Missing file is not an error. A syntactically valid JSON
+    document whose ROOT isn't an object (e.g. `[]` or a bare string) is
+    reported as an error and treated as an empty layer rather than handed
+    to callers that assume every layer is dict-shaped [finding 11]."""
     if not path.exists():
         return {}, None
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
-        return data, None
     except json.JSONDecodeError as e:
         error = SettingsError(
             path=path,
@@ -146,16 +191,24 @@ def _read_json_file(path: Path) -> tuple[dict, Optional[SettingsError]]:
     except Exception as e:
         error = SettingsError(path=path, message=str(e))
         return {}, error
+    if not isinstance(data, dict):
+        error = SettingsError(path=path, message=f"settings file must contain a JSON object, got {type(data).__name__}")
+        return {}, error
+    return data, None
 
 
 def _apply_default_mode_filter(layer_data: dict, layer_name: str) -> dict:
-    """Filter defaultMode for project/local layers."""
+    """Filter defaultMode for project/local layers. `manual` is Claude
+    Code's `default` display alias [bin sec.1] -- allowed through here
+    unchanged; `Settings.permissions_default_mode` normalizes it."""
     if layer_name not in ("projectSettings", "localSettings"):
         return layer_data
 
     permissions = layer_data.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return layer_data
     default_mode = permissions.get("defaultMode")
-    if default_mode not in ("default", "acceptEdits", "plan", "dontAsk"):
+    if default_mode not in ("default", "acceptEdits", "plan", "dontAsk", "manual"):
         # Remove the key from a copy
         filtered = layer_data.copy()
         if "permissions" in filtered:
@@ -167,7 +220,26 @@ def _apply_default_mode_filter(layer_data: dict, layer_name: str) -> dict:
     return layer_data
 
 
-def _merge_layers(layers: list[SettingsLayer]) -> dict:
+def _apply_trust_filter(layer_data: dict, layer_name: str, trusted: bool) -> dict:
+    """Drop the keys that require a trusted folder from an untrusted
+    project/local layer before it ever reaches `_merge_layers` (finding 6):
+    `permissions.allow`/`additionalDirectories`, `env`, `hooks`,
+    `autoMemoryDirectory`. `permissions.deny`/`ask` are always kept."""
+    if trusted or layer_name not in ("projectSettings", "localSettings"):
+        return layer_data
+    filtered = dict(layer_data)
+    for key in _TRUST_GATED_TOP_KEYS:
+        filtered.pop(key, None)
+    permissions = filtered.get("permissions")
+    if isinstance(permissions, dict):
+        filtered_perms = dict(permissions)
+        for key in _TRUST_GATED_PERMISSION_KEYS:
+            filtered_perms.pop(key, None)
+        filtered["permissions"] = filtered_perms
+    return filtered
+
+
+def _merge_layers(layers: list[SettingsLayer], trusted: bool = True) -> dict:
     """Merge layers low-to-high precedence (`layers` must already be in that
     order) per the spec's algorithm.
 
@@ -182,6 +254,7 @@ def _merge_layers(layers: list[SettingsLayer]) -> dict:
     filtered_layers = []
     for layer in layers:
         filtered_data = _apply_default_mode_filter(layer.data, layer.name)
+        filtered_data = _apply_trust_filter(filtered_data, layer.name, trusted)
         filtered_layers.append(SettingsLayer(
             name=layer.name,
             path=layer.path,
@@ -224,6 +297,12 @@ def _merge_layers(layers: list[SettingsLayer]) -> dict:
 
     for layer in filtered_layers:
         for key, value in layer.data.items():
+            # autoMemoryDirectory is never sourced from projectSettings,
+            # trusted or not (finding 2) -- simply never applied from there,
+            # so whatever a lower/higher layer set for it is left standing.
+            if key in _PROJECT_EXCLUDED_KEYS and layer.name == "projectSettings":
+                continue
+
             # Whole-value keys (highest wins outright, never merged).
             if key in ("fallbackModel", "modelPicker", "availableModels", "modelSettings"):
                 result[key] = value
@@ -292,15 +371,21 @@ def resolve_settings(
     *,
     settings_flag: Optional[str] = None,
     setting_sources: Optional[list[str]] = None,
+    trusted: bool = True,
 ) -> Settings:
     """
     Resolve settings from all layers.
-    
+
     Args:
         cwd: Current working directory
         settings_flag: Optional JSON string or file path for flagSettings
         setting_sources: Optional list of sources to include from {user, project, local}
-    
+        trusted: whether `cwd` is a trusted folder (finding 6) -- an untrusted
+            project/local layer has its allow/additionalDirectories/env/hooks/
+            autoMemoryDirectory keys dropped before merging; deny/ask survive.
+            Defaults to True so existing callers that don't know about trust
+            yet (or trust it themselves, e.g. tests) see unchanged behavior.
+
     Returns:
         Settings object with merged configuration
     """
@@ -326,9 +411,10 @@ def resolve_settings(
     if setting_sources is not None:
         standard_sources = [s for s in standard_sources if s in setting_sources]
 
-    # userSettings
+    # userSettings (finding 13: routed through claude_config_dir(), which
+    # honors CLAUDE_CONFIG_DIR, not a hardcoded home()/".claude")
     if "user" in standard_sources:
-        user_path = home() / ".claude" / "settings.json"
+        user_path = claude_config_dir() / "settings.json"
         data, error = _read_json_file(user_path)
         add_layer("userSettings", user_path, user_path.parent, data, error)
 
@@ -383,6 +469,6 @@ def resolve_settings(
         add_layer("policySettings", policy_path, policy_path.parent, data, error)
 
     # Merge all layers
-    merged = _merge_layers(layers)
+    merged = _merge_layers(layers, trusted=trusted)
 
     return Settings(raw=merged, layers=layers, errors=errors)
