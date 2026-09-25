@@ -13,3 +13,6 @@ requirements.lock.tmp
 # tools/vendor_wheels.py's output -- vendored dependency wheels for the
 # work box, never committed (see docs/harness/INSTALL.md's "Work box" section).
 wheels/
+
+# pip wheel-build artefacts
+build/
