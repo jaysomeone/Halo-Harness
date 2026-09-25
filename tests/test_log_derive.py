@@ -315,6 +315,116 @@ def test_only_the_latest_compacted_node_matters(ctx: Ctx):
               all_text == ["<compacted-summary>second summary (merged)</compacted-summary>"])
 
 
+# ============================================================================
+# H10 Part A: non-wire telemetry metadata (usage/assistant tool_meta/
+# tool_result) must never change a derived request -- proven at THREE
+# levels: derive_request's own (system_text, messages, tools) tuple, the
+# OpenAI-dialect wire body (providers.request.build_request_body), and the
+# native-Anthropic wire body (build_anthropic_request_body), since that
+# second dialect's own `prepare_anthropic_messages` passes an unrecognized
+# block key through VERBATIM (it only special-cases "thinking"/"text") --
+# the real reason metadata is stored as a SIBLING key on the node rather
+# than inside a tool_use/tool_result content block (see agent/log.py's own
+# append_assistant/append_tool_result docstrings).
+# ============================================================================
+
+def _build_plain_log() -> SessionLog:
+    """One realistic tool-call turn, logged with NONE of H10's new
+    telemetry kwargs -- the "before" log."""
+    log = _fresh_log()
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "list files"}])
+    log.append_assistant(content=[
+        {"type": "text", "text": "sure"},
+        {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "ls"}},
+    ], stop_reason="tool_use")
+    log.append_tool_result(tool_use_id="call_1", content="a.py\nb.py\n", is_error=False)
+    log.append_usage({"input_tokens": 100, "output_tokens": 20}, 0.001)
+    log.append_assistant(content=[{"type": "text", "text": "done: a.py, b.py"}], stop_reason="end_turn")
+    return log
+
+
+def _build_telemetry_log() -> SessionLog:
+    """The exact SAME conversation, but every H10 kwarg populated -- the
+    "after" log."""
+    log = _fresh_log()
+    log.append_system("SYS")
+    log.append_user([{"type": "text", "text": "list files"}])
+    log.append_assistant(
+        content=[
+            {"type": "text", "text": "sure"},
+            {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "ls"}},
+        ], stop_reason="tool_use",
+        tool_meta={"call_1": {"repaired": True, "repair_kind": "rename", "promoted_from_leak": False}},
+    )
+    log.append_tool_result(tool_use_id="call_1", content="a.py\nb.py\n", is_error=False,
+                            tool="Bash", error_class=None, ms=12.5, num_bytes=10, spilled=False)
+    log.append_usage({"input_tokens": 100, "output_tokens": 20}, 0.001, model="or:deepseek/deepseek-v4-flash",
+                      route="or", provider="DeepInfra", finish_reason="tool_use", latency_ms=900.0,
+                      ttft_ms=200.0, retries=2, status="ok")
+    log.append_assistant(content=[{"type": "text", "text": "done: a.py, b.py"}], stop_reason="end_turn")
+    return log
+
+
+@test
+def test_telemetry_metadata_never_changes_derive_request_output(ctx: Ctx):
+    plain = _build_plain_log()
+    rich = _build_telemetry_log()
+    sys_p, msgs_p, tools_p = derive_request(plain)
+    sys_r, msgs_r, tools_r = derive_request(rich)
+    ctx.check("system_text identical", sys_p == sys_r)
+    ctx.check("messages identical (deep equality)", msgs_p == msgs_r)
+    ctx.check("tools identical", tools_p == tools_r)
+    ctx.check("content_hash identical", content_hash(sys_p, msgs_p, tools_p) == content_hash(sys_r, msgs_r, tools_r))
+
+
+@test
+def test_telemetry_metadata_never_changes_openai_dialect_wire_body(ctx: Ctx):
+    import json as _json
+    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
+    from rolo_claude.providers.request import build_request_body
+    from rolo_claude.providers.routing import Route
+
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="deepseek/deepseek-v4-flash", dialect="openai-chat")
+    profile = resolve_profile(route)
+    plain, rich = _build_plain_log(), _build_telemetry_log()
+    sys_p, msgs_p, tools_p = derive_request(plain)
+    sys_r, msgs_r, tools_r = derive_request(rich)
+    body_p = build_request_body(system_text=sys_p, messages=msgs_p, tools=tools_p, route=route, profile=profile)
+    body_r = build_request_body(system_text=sys_r, messages=msgs_r, tools=tools_r, route=route, profile=profile)
+    dump_p = _json.dumps(body_p, sort_keys=True, default=str)
+    dump_r = _json.dumps(body_r, sort_keys=True, default=str)
+    ctx.check("OpenAI-dialect wire body is byte-identical whether or not telemetry metadata was logged",
+              dump_p == dump_r)
+
+
+@test
+def test_telemetry_metadata_never_changes_anthropic_dialect_wire_body(ctx: Ctx):
+    """The at-risk path: `prepare_anthropic_messages` passes an unrecognized
+    tool_use/tool_result block key straight through -- this test is the
+    proof that H10's metadata never lands INSIDE a content block (it lives
+    as a sibling key on the node instead, which derive_request never reads
+    into a message at all)."""
+    import json as _json
+    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
+    from rolo_claude.providers.request import build_anthropic_request_body
+    from rolo_claude.providers.routing import Route
+
+    reset_model_table_cache()
+    route = Route(provider="anthropic", upstream_model="claude-sonnet-5", dialect="anthropic-passthrough")
+    profile = resolve_profile(route)
+    plain, rich = _build_plain_log(), _build_telemetry_log()
+    sys_p, msgs_p, tools_p = derive_request(plain)
+    sys_r, msgs_r, tools_r = derive_request(rich)
+    body_p = build_anthropic_request_body(system_text=sys_p, messages=msgs_p, tools=tools_p, route=route, profile=profile)
+    body_r = build_anthropic_request_body(system_text=sys_r, messages=msgs_r, tools=tools_r, route=route, profile=profile)
+    dump_p = _json.dumps(body_p, sort_keys=True, default=str)
+    dump_r = _json.dumps(body_r, sort_keys=True, default=str)
+    ctx.check("native-Anthropic wire body is byte-identical whether or not telemetry metadata was logged",
+              dump_p == dump_r)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

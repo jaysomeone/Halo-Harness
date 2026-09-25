@@ -1,0 +1,6 @@
+{"type": "meta", "model": "or:z-ai/glm-5.3-flash", "tools": [{"name": "Read"}], "ts": 1790343526.695467, "seq": 0}
+{"type": "system", "text": "You are rolo-claude.", "ts": 1790343526.695467, "seq": 1}
+{"type": "user", "content": [{"type": "text", "text": "read /home/user/other-proj/README.md"}], "ts": 1790343526.695467, "seq": 2}
+{"type": "usage", "usage": {"input_tokens": 500, "output_tokens": 20}, "cost_usd": 0.0002, "model": "or:z-ai/glm-5.3-flash", "route": "or", "provider": "Novita", "finish_reason": "end_turn", "latency_ms": 400.0, "ttft_ms": 100.0, "retries": 0, "status": "ok", "ts": 1790343526.695467, "seq": 3}
+{"type": "assistant", "content": [{"type": "tool_use", "id": "toolu_read_0001", "name": "Read", "input": {"file_path": "/home/user/other-proj/README.md"}}], "stop_reason": "tool_use", "tool_meta": {"toolu_read_0001": {"repaired": false, "repair_kind": "none", "promoted_from_leak": false}}, "ts": 1790343526.6964657, "seq": 4}
+{"type": "tool_result", "tool_use_id": "toolu_read_0001", "content": "# other-proj\n", "is_error": false, "ok": true, "tool": "Read", "ms": 5.0, "bytes": 13, "spilled": false, "ts": 1790343526.6964657, "seq": 5}

@@ -24,6 +24,34 @@ class MemoryIndex:
     topics: list[TopicFile]
 
 
+def render_memory_content(*, name: str, description: str, type: str, body: str,
+                           origin_session_id: "str | None" = None,
+                           provenance_comment: "str | None" = None) -> "tuple[str, str]":
+    """The pure formatting half of `MemoryStore.write` -- extracted so
+    `rolo_claude.improve`'s diff-preview path (an ImproveCard showing what
+    an UPDATE to an already-provenanced memory file would look like) can
+    render the exact same bytes without touching the filesystem. Returns
+    `(content, safe_description)` -- Claude Code's exact frontmatter shape,
+    verified against rolo's own real `~/.claude/projects/*/memory/*.md`
+    files."""
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    modified = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+    safe_description = description.replace('"', "'").replace("\n", " ").strip()
+    lines = ["---", f"name: {name}", f'description: "{safe_description}"', "metadata:",
+             "  node_type: memory", f"  type: {type}"]
+    if origin_session_id:
+        lines.append(f"  originSessionId: {origin_session_id}")
+    lines.append(f"  modified: {modified}")
+    lines.append("---")
+    lines.append("")
+    content = "\n".join(lines) + "\n" + body.strip("\n") + "\n"
+    if provenance_comment:
+        content = content.rstrip("\n") + "\n\n" + provenance_comment.strip() + "\n"
+    return content, safe_description
+
+
 class MemoryStore:
     def __init__(self, cwd, settings, home=None, bare: bool = False):
         self.cwd = cwd
@@ -159,16 +187,64 @@ class MemoryStore:
 
         return "\n".join(lines)
 
-    def write(self, *args, **kwargs):
-        raise NotImplementedError(
-            "MemoryStore.write/update_index: no tool "
-            "exists yet to call this (H0 has no tools; a future milestone wires this "
-            "up to a real Write tool)"
-        )
+    def write(self, *, filename: str, name: str, description: str, type: str, body: str,
+              origin_session_id: "str | None" = None, provenance_comment: "str | None" = None) -> Path:
+        """H10 Part B: the real implementation this stub was waiting on --
+        `/improve`'s own memory candidates are the first caller. Writes a
+        NEW topic file at `<memory_dir>/<filename>` with Claude Code's
+        EXACT frontmatter shape (verified against rolo's own real
+        `~/.claude/projects/*/memory/*.md` files):
 
-    def update_index(self, *args, **kwargs):
-        raise NotImplementedError(
-            "MemoryStore.write/update_index: no tool "
-            "exists yet to call this (H0 has no tools; a future milestone wires this "
-            "up to a real Write tool)"
+            ---
+            name: <name>
+            description: "<description>"
+            metadata:
+              node_type: memory
+              type: <type>
+              originSessionId: <origin_session_id>   # only when given
+              modified: <ISO-8601 UTC, millisecond precision, "Z">
+            ---
+
+            <body>
+
+        then appends one `update_index` line. Raises `FileExistsError` if
+        `filename` already exists -- this is a raw filesystem primitive;
+        "only NEW files, never overwrite a user-authored one" is
+        `rolo_claude.improve.apply`'s policy, enforced before this is ever
+        called."""
+        if not filename.endswith(".md"):
+            filename += ".md"
+        path = self.memory_dir_path / filename
+        if path.exists():
+            raise FileExistsError(str(path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content, safe_description = render_memory_content(
+            name=name, description=description, type=type, body=body,
+            origin_session_id=origin_session_id, provenance_comment=provenance_comment,
         )
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+        self.update_index(filename=filename, title=name, description=safe_description)
+        return path
+
+    def update_index(self, *, filename: str, title: str, description: str) -> Path:
+        """Append one line to MEMORY.md: `- [title](filename) -- description`
+        (the exact shape rolo's own real MEMORY.md index uses). Creates
+        MEMORY.md if it doesn't exist yet. H10 Part B: an existing line
+        that already links `(filename)` is REPLACED in place, never
+        duplicated -- `/improve` re-applying an update to an
+        already-provenanced memory file must not grow a second index line
+        for the same topic file every time it's refreshed."""
+        idx_path = self.memory_dir_path / "MEMORY.md"
+        idx_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = idx_path.read_text(encoding="utf-8") if idx_path.exists() else ""
+        line = f"- [{title}]({filename}) -- {description}"
+        marker = f"]({filename})"
+        lines = [ln for ln in existing.splitlines() if marker not in ln]
+        lines.append(line)
+        new_content = "\n".join(lines) + "\n"
+        tmp = idx_path.with_name(idx_path.name + f".tmp{os.getpid()}")
+        tmp.write_text(new_content, encoding="utf-8")
+        os.replace(tmp, idx_path)
+        return idx_path

@@ -340,10 +340,17 @@ def test_loop_tools_image_result_reaches_the_tool_result_event(ctx: Ctx):
     `ToolCard.set_result(content=...)`, which renders ANY multi-line
     string as the card's body through its existing plain-text pipeline --
     through a REAL Session dispatch, not just the Read tool in isolation."""
+    import os
+
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
 
+    # H10b: never set before -- the real in-process Session below fell
+    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # `or:mock/vision-model` sessions into rolo's real session history
+    # (H10b report).
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="read-img-e2e-home-")))
     d = Path(tempfile.mkdtemp(prefix="read-img-e2e-"))
     png = d / "screenshot.png"
     _write_png(png)

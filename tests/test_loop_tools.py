@@ -231,6 +231,11 @@ def test_h5c_f20_max_steps_wrapup_strips_a_disobedient_tool_use(ctx: Ctx):
     from rolo_claude.providers.stream import ProviderCreds
 
     fh = build_fake_home()
+    # H10b: this test never set BRIDGE_TEST_HOME, so its real in-process
+    # Session fell through to the REAL `~/.rolo-claude/sessions` -- exactly
+    # how `or:mock/page-forever` sessions leaked into rolo's real session
+    # history (H10b report; see the sibling tests just below, which DO set it).
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").write_text("target file\n", encoding="utf-8")
     mock = MockUpstream().start()
     try:

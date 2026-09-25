@@ -23,6 +23,8 @@ async def handle_slash(app, name: str, args: str) -> None:
         "rewind": _handle_rewind, "undo": _handle_undo, "redo": _handle_redo,
         # U5 scope A: keymap.
         "keybindings": _handle_keybindings,
+        # H10 Part B: human-gated /improve.
+        "improve": _handle_improve,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -174,7 +176,20 @@ async def _handle_export(app, args: str) -> None:
                                    kind="command")
 
 
-async def _handle_stats(app, _args: str) -> None:
+async def _handle_stats(app, args: str) -> None:
+    # H10 Part A: bare `/stats` keeps U5's own current-session behaviour
+    # (synchronous, cheap -- one session's own already-in-memory nodes);
+    # `/stats --models`/`--tools` is a NEW, richer cross-session path over
+    # `rolo_claude.telemetry`, run OFF the UI thread (same worker pattern
+    # U5 used for `/resume`'s `list_sessions` -- see `_handle_resume`/
+    # `_resume_list_worker` above) since it globs and parses every session
+    # JSONL under the project.
+    tokens = (args or "").split()
+    if "--models" in tokens or "--tools" in tokens:
+        show_models, show_tools = "--models" in tokens, "--tools" in tokens
+        app.run_worker(lambda: _stats_models_worker(app, show_models, show_tools), thread=True,
+                        name="stats-models")
+        return
     stats_fn = getattr(app.controller, "session_stats", None)
     if not callable(stats_fn):
         app.notify("Stats need a real session.", severity="warning", title="/stats")
@@ -187,6 +202,27 @@ async def _handle_stats(app, _args: str) -> None:
     for name, n in sorted((stats.get("tool_counts") or {}).items()):
         lines.append(f"  tool {name}: {n} call(s)")
     await app.transcript.add_note("\n".join(lines), kind="command")
+
+
+def _stats_models_worker(app, show_models: bool, show_tools: bool) -> None:
+    from rolo_claude import telemetry
+    from rolo_claude.config.paths import project_slug
+
+    cwd = getattr(app.controller, "cwd", None) or "."
+    summaries = telemetry.scan(since="7d", slug=project_slug(cwd))
+    # H10b defect 2: reflects whichever of --models/--tools was actually
+    # asked for -- used to hardcode "--models" even for a bare --tools run.
+    flags = " ".join(f for f, on in (("--models", show_models), ("--tools", show_tools)) if on)
+    lines = [f"/stats {flags} ({len(summaries)} session(s), last 7d):"]
+    if show_models:
+        for r in telemetry.aggregate_by_model(summaries):
+            lines.append(f"  [{r['model']} / {r['provider'] or '-'}] {r['calls']} call(s), "
+                         f"${r['cost_usd']:.4f}, repair-hit%={r['repair_hit_pct']}, "
+                         f"edit-fail%={r['edit_failure_pct']}, tool-err%={r['tool_error_pct']}")
+    if show_tools:
+        for r in telemetry.aggregate_by_tool(summaries):
+            lines.append(f"  tool {r['tool']}: {r['calls']} call(s), error%={r['error_pct']}")
+    app.call_from_thread(app.transcript.add_note, "\n".join(lines), kind="command")
 
 
 # ============================================================================
@@ -286,3 +322,164 @@ async def _handle_keybindings(app, _args: str) -> None:
         for chord in sorted(keymap[ctx]):
             lines.append(f"    {chord:<20} {keymap[ctx][chord]}")
     await app.transcript.add_note("\n".join(lines), kind="command")
+
+
+# ============================================================================
+# H10 Part B: human-gated /improve -- runs the evidence scan + ONE drafting
+# model call off the UI thread, then reviews candidates one ImproveCard at a
+# time (RewindCard's own confirm/cancel pattern, extended to 5 actions).
+# Typed while a turn runs -> queued until the turn ends (handle_slash is
+# only ever invoked between turns, same as every other slash command).
+# ============================================================================
+
+async def _handle_improve(app, _args: str) -> None:
+    session = getattr(app.controller, "session", None)
+    if session is None:
+        app.notify("/improve needs a real session.", severity="warning", title="/improve")
+        return
+    from rolo_claude.improve.config import load_improve_config
+    cfg = load_improve_config()
+    if not cfg.enabled:
+        app.notify("/improve is disabled (improve.enabled=false).", title="/improve")
+        return
+    app.notify("Scanning recent sessions and drafting candidates…", title="/improve")
+    app.run_worker(lambda: _improve_draft_worker(app, session, cfg), thread=True, name="improve-draft")
+
+
+def _improve_draft_worker(app, session, cfg) -> None:
+    from rolo_claude.config.paths import project_slug
+    from rolo_claude.improve import draft as draft_mod
+    from rolo_claude.improve import evidence as evidence_mod
+    from rolo_claude.improve.config import since_str
+
+    clusters, candidates, error = [], [], None
+    try:
+        slug = project_slug(session.cwd)
+        clusters = evidence_mod.build_clusters(since=since_str(cfg), slug=slug)
+        if clusters:
+            candidates, error = draft_mod.draft_candidates(
+                session, clusters, max_candidates=cfg.max_candidates, configured_model=cfg.model)
+        else:
+            error = "no evidence clusters in this window"
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    app.call_from_thread(_start_improve_review, app, session, clusters, candidates, error)
+
+
+def _start_improve_review(app, session, clusters: list, candidates: list, error) -> None:
+    from rolo_claude.improve.dismissed import is_dismissed, load_dismissed
+
+    if not candidates:
+        app.notify(f"/improve: {error or 'no candidates'}", title="/improve")
+        return
+    dismissed = load_dismissed()
+    remaining = [c for c in candidates if not is_dismissed(c, dismissed)]
+    if not remaining:
+        app.notify("/improve: every candidate was already dismissed.", title="/improve")
+        return
+    app._improve_state = {"session": session, "clusters": clusters, "queue": remaining, "index": 0}
+    app.call_next(_show_next_improve_card, app)
+
+
+def _excerpt_text_for(clusters: list, ref: str) -> str:
+    for c in clusters:
+        d = c.to_dict() if hasattr(c, "to_dict") else c
+        for ex in d.get("excerpts", []):
+            if ex.get("ref") == ref:
+                return ex.get("text", "")
+    return ""
+
+
+async def _show_next_improve_card(app) -> None:
+    from rolo_claude.tui.widgets.cards import ImproveCard
+
+    state = getattr(app, "_improve_state", None)
+    if not state:
+        return
+    queue, idx, session = state["queue"], state["index"], state["session"]
+    if idx >= len(queue):
+        app.clear_pending_card()
+        app.notify("/improve: review complete.", title="/improve")
+        app._improve_state = None
+        return
+
+    from rolo_claude.improve import apply as apply_mod
+
+    candidate = queue[idx]
+    settings = getattr(session.session_context, "settings", None)
+    target = apply_mod.resolve_target_path(candidate, cwd=session.cwd, settings=settings)
+    comment = apply_mod.provenance_comment(
+        sessions=[e.split("#")[0] for e in candidate.evidence], evidence_count=len(candidate.evidence),
+        model=session.model_ref.raw, from_tool_output=candidate.from_tool_output)
+    diff_lines = apply_mod.diff_preview(target, candidate, comment) if target.is_update else []
+    excerpt_text = _excerpt_text_for(state["clusters"], candidate.evidence[0]) if candidate.evidence else ""
+
+    def on_action(action: str, _data) -> None:
+        app.clear_pending_card()
+        state["index"] += 1
+        if action == "apply":
+            app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")
+        elif action == "edit":
+            _edit_candidate_then_apply(app, session, candidate)
+        elif action == "dismiss":
+            from rolo_claude.improve.apply import candidate_hash
+            from rolo_claude.improve.dismissed import add_dismissed
+            add_dismissed(candidate_hash(candidate))
+        elif action == "quit":
+            state["index"] = len(queue)
+        app.call_next(_show_next_improve_card, app)
+
+    card = ImproveCard(candidate=candidate, provenance_line=comment, index=idx + 1, total=len(queue),
+                        diff_lines=diff_lines, excerpt_text=excerpt_text, on_action=on_action)
+    await app.transcript.mount_widget(card)
+    app.set_pending_card(card)
+
+
+def _apply_worker(app, session, candidate) -> None:
+    from rolo_claude.improve import apply as apply_mod
+
+    settings = getattr(session.session_context, "settings", None)
+    try:
+        result = apply_mod.apply_candidate(candidate, cwd=session.cwd, settings=settings,
+                                            model_label=session.model_ref.raw, session=session)
+        app.call_from_thread(app.transcript.add_note,
+                              f"✦ /improve applied [{result.kind}] -> {result.path}", kind="command")
+        app.call_from_thread(app.notify, f"Applied: {result.path}", title="/improve")
+    except Exception as e:
+        app.call_from_thread(app.notify, f"/improve apply failed: {type(e).__name__}: {e}",
+                              severity="error", title="/improve")
+
+
+def _edit_candidate_then_apply(app, session, candidate) -> None:
+    """`e`: edit the candidate's own body in `$VISUAL`/`$EDITOR` via
+    `app.suspend()` (the SAME mechanism `app.py`'s own Ctrl+E prompt-editor
+    uses), then apply -- runs on the UI thread (`app.suspend()` is an App
+    method) but the actual file write still happens on a worker."""
+    import os
+    import subprocess as sp
+    import tempfile
+    from pathlib import Path
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        app.notify("No $VISUAL/$EDITOR set -- applying as drafted.", severity="warning", title="/improve")
+        app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")
+        return
+    fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="rolo-claude-improve-")
+    tmp_path = Path(tmp_path_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(candidate.body)
+        with app.suspend():
+            sp.run(f'{editor} "{tmp_path}"', shell=True)
+        new_body = tmp_path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
+        if new_body:
+            candidate.body = new_body
+    except Exception as e:
+        app.notify(f"$EDITOR failed: {type(e).__name__}: {e}", severity="error", title="/improve")
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+    app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")

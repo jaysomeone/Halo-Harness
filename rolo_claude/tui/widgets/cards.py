@@ -396,3 +396,95 @@ class RewindCard(Static, can_focus=True):
     def action_cancel(self) -> None:
         if not self.done:
             self._finish(False)
+
+
+class ImproveCard(Static, can_focus=True):
+    """One drafted `/improve` candidate (H10 Part B3, RewindCard's own
+    confirm/cancel pattern extended to 5 actions): kind badge, target path,
+    rendered body (or a unified diff when the target already carries the
+    rolo-claude provenance comment -- an UPDATE), rationale, evidence list
+    (`session#seq`; `o` opens the first excerpt in a pager), the
+    provenance line itself. `on_action(action, data)` fires exactly once,
+    `action` in `{"apply", "edit", "skip", "dismiss", "quit"}` (`data` is
+    only ever used for "edit", carrying nothing extra today -- the App-side
+    handler owns the actual `$VISUAL`/`$EDITOR` suspend-and-reapply, same
+    as `app.py`'s own `action_open_editor`, since only the App has
+    `self.suspend()`)."""
+
+    BINDINGS = [
+        Binding("a", "do_apply", "Apply", show=False),
+        Binding("e", "do_edit", "Edit, then apply", show=False),
+        Binding("s", "do_skip", "Skip", show=False),
+        Binding("d", "do_dismiss", "Dismiss forever", show=False),
+        Binding("q,escape", "do_quit", "Stop reviewing", show=False),
+        Binding("o", "open_excerpt", "Open first excerpt", show=False),
+    ]
+
+    def __init__(self, *, candidate, provenance_line: str, index: int, total: int,
+                 diff_lines: Optional[list] = None, excerpt_text: str = "", on_action: Callable) -> None:
+        super().__init__("", markup=False, classes="improve-card")
+        self.candidate = candidate
+        self.provenance_line = provenance_line
+        self.index = index
+        self.total = total
+        self.diff_lines = diff_lines or []
+        self.excerpt_text = excerpt_text
+        self._on_action = on_action
+        self.done = False
+        self._refresh()
+
+    def _refresh(self) -> None:
+        c = self.candidate
+        lines = [f"✦ Improve candidate {self.index}/{self.total}: [{c.kind}] {c.title}"]
+        target_note = " (would UPDATE an existing rolo-claude file)" if self.diff_lines else " (new file)"
+        lines.append(f"  target: {c.scope}/{c.path}{target_note}")
+        lines.append(f"  confidence: {c.confidence}")
+        if c.rationale:
+            lines.append(f"  rationale: {c.rationale}")
+        if c.from_tool_output:
+            lines.append("  (derived from tool output)")
+        if c.evidence:
+            lines.append("  evidence: " + ", ".join(c.evidence) + "  (o to open the first excerpt)")
+        lines.append("")
+        if self.diff_lines:
+            lines.append("  --- diff ---")
+            lines.extend(f"  {ln.rstrip(chr(10))}" for ln in self.diff_lines[:40])
+        else:
+            body = c.body if len(c.body) < 1600 else c.body[:1600] + "…"
+            lines.extend(f"  {ln}" for ln in body.splitlines())
+        lines.append("")
+        lines.append(f"  {self.provenance_line}")
+        if not self.done:
+            lines.append("")
+            lines.append("  [a] Apply   [e] Edit, then apply   [s] Skip   [d] Dismiss forever   [q] Stop reviewing")
+        self.update("\n".join(lines))
+
+    def _finish(self, action: str) -> None:
+        self.done = True
+        self._refresh()
+        self._on_action(action, None)
+
+    def action_do_apply(self) -> None:
+        if not self.done:
+            self._finish("apply")
+
+    def action_do_edit(self) -> None:
+        if not self.done:
+            self._finish("edit")
+
+    def action_do_skip(self) -> None:
+        if not self.done:
+            self._finish("skip")
+
+    def action_do_dismiss(self) -> None:
+        if not self.done:
+            self._finish("dismiss")
+
+    def action_do_quit(self) -> None:
+        if not self.done:
+            self._finish("quit")
+
+    def action_open_excerpt(self) -> None:
+        if self.candidate.evidence:
+            self.app.push_screen(PagerScreen(f"Evidence: {self.candidate.evidence[0]}",
+                                              self.excerpt_text or "(excerpt text unavailable)"))

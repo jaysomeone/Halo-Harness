@@ -63,6 +63,13 @@ class OpenAIStreamToAnthropic:
         self.finish_reason = None
         self.usage = {}
         self.done = False
+        # H10 Part A: OpenRouter stamps a top-level `"provider"` key on
+        # every chunk naming which backing inference provider actually
+        # served this request (e.g. "DeepInfra", "Novita") -- captured
+        # here, unconditionally (costs nothing when a chunk doesn't carry
+        # it), and surfaced via `_finalize`'s own harness_meta so
+        # `agent/loop.py` can log it as the `usage` node's `provider` field.
+        self.responding_provider: str | None = None
         # Rough proxy for output size (chars of text + tool-call argument
         # fragments actually emitted), used ONLY as a fallback estimate for
         # message_delta.usage.output_tokens when the upstream never sends a
@@ -137,6 +144,9 @@ class OpenAIStreamToAnthropic:
 
     def feed_chunk(self, chunk: dict) -> dict:
         """Process one upstream chunk, return {"kind":"events"/"error","events":list}."""
+        provider = chunk.get("provider")
+        if isinstance(provider, str) and provider:
+            self.responding_provider = provider
         if "error" in chunk and "choices" not in chunk:
             # finding 6: a mid-stream {"error": "boom"} chunk (bare string,
             # not the usual {"message": ...} dict) crashed this with
@@ -293,6 +303,13 @@ class OpenAIStreamToAnthropic:
                 repaired = args_repair(args_str) if key != truncated_key else None
                 if repaired is not None:
                     parsed = repaired
+                    # H10 Part A: telemetry's own `repair_kind="lenient_json"`
+                    # signal -- args_repair's SECOND, lenient JSON attempt
+                    # (trailing commas, Python-repr True/False/None, single
+                    # quotes) actually fixed something; distinct from a call
+                    # whose JSON parsed cleanly on the first try, which never
+                    # reaches this branch at all.
+                    flags = {"lenient_json_repaired": True}
                 elif self.strict_tool_json:
                     parsed = {}
                     flags = {"malformed_json": True, "raw_input": args_str, "json_error": str(e)}
@@ -337,6 +354,7 @@ class OpenAIStreamToAnthropic:
                 "reasoning_details": self.reasoning_details,
                 "tool_call_flags": self.tool_call_flags,
                 "length_with_minimal_output": self.length_with_minimal_output,
+                "responding_provider": self.responding_provider,
             }
         events.append(message_delta_event(stop_reason, final_usage, harness_meta=harness_meta))
         events.append({"type": "message_stop"})

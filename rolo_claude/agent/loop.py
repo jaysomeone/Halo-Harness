@@ -52,7 +52,7 @@ from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
 from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
 from rolo_claude.agent.log import SessionLog
 from rolo_claude.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
-from rolo_claude.agent.repair import repair_assistant_turn
+from rolo_claude.agent.repair import build_tool_meta, repair_assistant_turn
 from rolo_claude.hooks import HookRunner
 from rolo_claude.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
 from rolo_claude.permissions import Decision, PermissionEngine
@@ -163,6 +163,31 @@ def _mcp_blocks_for_log(blocks: list, *, meta, session_dir, tool_use_id) -> list
     if not filtered:
         filtered = [{"type": "text", "text": "(no content returned)"}]
     return cap_and_spill(filtered, meta=meta, session_dir=session_dir, tool_use_id=tool_use_id)
+
+
+_SPILL_MARKER = "Full output saved to "  # tools/truncate.py + tools/mcp_tool.py's own exact wording
+
+
+def _classify_tool_error_text(name: str, text: str) -> str:
+    """H10 Part A: `tool_result.error_class` for an `is_error=True` result
+    that actually reached a tool (a repair/permission/loop-breaker
+    rejection is classified structurally instead, at `_resolve_tool_call`'s
+    own call sites -- this function only ever sees a REAL tool's own
+    message). Pattern-matched against strings THIS codebase's own tools
+    author (tools/edit.py, tools/read.py, ...), never model or file
+    content, so this is telemetry categorization, not a content classifier
+    over anything a model or the user wrote."""
+    if "has not been read yet" in text or "Read it again before editing" in text:
+        return "read_before_edit"
+    if "Found multiple matches" in text:
+        return "multiple_matches"
+    if "not found" in text or "does not exist" in text:
+        return "not_found"
+    if "timed out" in text or "timeout" in text.lower():
+        return "timeout"
+    if name.startswith("mcp__"):
+        return "mcp_error"
+    return "other"
 
 
 def _human_bytes(n: int) -> str:
@@ -495,13 +520,33 @@ class _BoundedChunks:
 
 
 class _StepResult:
-    def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None):
+    def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None,
+                 finish_reason=None, latency_ms=None, ttft_ms=None, retries=0, status="ok",
+                 responding_provider=None):
         self.assistant_blocks = assistant_blocks
         self.stop_reason = stop_reason
         self.usage = usage
         self.reasoning = reasoning
         self.body = body  # the exact prebuilt_oai_body this step sent (finding 4's hash source)
         self.tool_call_flags = tool_call_flags or {}  # tool_use id -> {truncated_by_length|malformed_json,...}
+        # H10 Part A: telemetry fields for `_account_usage`'s own
+        # `append_usage(...)` call -- `finish_reason` mirrors `stop_reason`
+        # (kept as its own field so a future dialect-specific value can
+        # diverge without touching the Anthropic-shaped `stop_reason` every
+        # other caller already depends on); `retries`/`status` describe
+        # THIS successful call's own attempt ladder (a call that never
+        # succeeds returns None from `_step`, not a `_StepResult` -- see
+        # `_step`'s own `return None` sites for the terminal-failure path).
+        self.finish_reason = finish_reason if finish_reason is not None else stop_reason
+        self.latency_ms = latency_ms
+        self.ttft_ms = ttft_ms
+        self.retries = retries
+        self.status = status
+        # H10 Part A: OpenRouter's own per-chunk "provider" (which backing
+        # inference host actually served this call) -- None for Databricks/
+        # Anthropic-native routes, where `_account_usage` falls back to a
+        # fixed label instead (see its own docstring).
+        self.responding_provider = responding_provider
 
 
 def _assistant_block_is_replayable(b: dict) -> bool:
@@ -596,6 +641,11 @@ class Session:
         # excluded below) -- that stays exclusively the counter above's job.
         self._loop_breaker_history: list = []
         self._loop_breaker_period2: dict = {}
+        # H10 Part B4: `/improve`'s hint -- fires AT MOST once per session
+        # (status-bar text + one `notification` event, never a card, never
+        # a model call); `_maybe_yield_improve_hint` (called from
+        # `_account_usage`) flips this the first time it fires.
+        self._improve_hint_fired = False
         # must-do 5: an interrupt source (Bash kill/Esc -- none exists yet
         # in `-p`) sets this; `_step` passes it into `stream_completion`
         # (cuts phase 2 short) and observes it in every retry wait.
@@ -1045,24 +1095,42 @@ class Session:
 
     def _call_model_for_hook(self, prompt_text: str, timeout_s: float) -> str:
         """The `prompt`/`agent` hook handler types' "small model via the
-        provider layer" call [D-CFG] -- a ONE-SHOT request built directly
-        via `build_request_body` (never through `derive_request`/the
-        session log, so a hook's own model call is NEVER part of the
-        logged conversation). Uses `self.small_model_ref` when configured,
-        else falls back to the main model -- true cross-provider small-
-        model routing (separate creds/profile resolution) is a follow-up
-        refinement; this already gives every hook a real model call today."""
-        ref = self.small_model_ref or self.model_ref
+        provider layer" call [D-CFG]. Uses `self.small_model_ref` when
+        configured, else falls back to the main model -- true cross-
+        provider small-model routing (separate creds/profile resolution)
+        is a follow-up refinement; this already gives every hook a real
+        model call today. Thin wrapper around `call_small_model` (H10 Part
+        B: generalized so `rolo_claude.improve.draft`'s ONE drafting call
+        can reuse the SAME one-shot, never-logged, mock-interceptable
+        plumbing with its own system prompt/model/token budget instead of
+        this method's fixed JSON-verdict shape)."""
+        return self.call_small_model(
+            system_text="Reply with ONLY a single JSON object {\"ok\": true|false, \"reason\": \"...\"} -- no prose.",
+            user_text=prompt_text, max_tokens=min(1024, self.model_profile.max_output_tokens or 1024),
+            timeout_s=timeout_s,
+        )
+
+    def call_small_model(self, *, system_text: str, user_text: str, max_tokens: int = 4096,
+                          timeout_s: float = 60.0, model_ref: Optional[ModelRef] = None) -> str:
+        """A ONE-SHOT request built directly via `build_request_body`
+        (never through `derive_request`/the session log, so this call is
+        NEVER part of the logged conversation) -- shared by
+        `_call_model_for_hook` (title generation, prompt-hook verdicts) and
+        `rolo_claude.improve.draft`'s own drafting call. `model_ref`
+        defaults to `self.small_model_ref or self.model_ref` (unchanged
+        behavior for every existing caller); a caller that resolved its
+        OWN model (e.g. `improve.model` from config) passes it explicitly."""
+        ref = model_ref or self.small_model_ref or self.model_ref
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
         body = build_request_body(
-            system_text="Reply with ONLY a single JSON object {\"ok\": true|false, \"reason\": \"...\"} -- no prose.",
-            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+            system_text=system_text,
+            messages=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
             tools=[], route=route, profile=profile, effort=self.effort,
             context_tokens=self.model_profile.context_tokens,
             prompt_estimate=_rough_estimate("", []),
-            requested_max_tokens=min(1024, self.model_profile.max_output_tokens or 1024),
+            requested_max_tokens=max_tokens,
         )
         req = self._build_request(body)
         abort = threading.Event()
@@ -1079,7 +1147,7 @@ class Session:
                     if delta.get("type") == "text_delta":
                         text_parts.append(str(delta.get("text", "")))
                 elif kind == "error":
-                    raise RuntimeError((ev.get("error") or {}).get("message", "hook model call failed"))
+                    raise RuntimeError((ev.get("error") or {}).get("message", "model call failed"))
         finally:
             timer.cancel()
             gen.close()
@@ -1278,6 +1346,17 @@ class Session:
 
         attempts = 0
         empty_retried = False
+        # H10 Part A: `call_t0` starts once, before the FIRST attempt --
+        # `latency_ms` on a call that only succeeded after a retry ladder
+        # (429/5xx backoff) reports the user-visible wall-clock time for
+        # the whole turn's model call, not just its final attempt.
+        # `ttft_ms` is set the first time ANY content actually streams
+        # (text/thinking/tool_use), on whichever attempt that turns out to
+        # be; stays None for a reply with no streamed content at all
+        # (an immediate tool_use with no preceding text still counts, via
+        # the `content_block_start` branch below).
+        call_t0 = time.monotonic()
+        ttft_ms: Optional[float] = None
         while True:
             attempts += 1
             gen = self._stream(req)
@@ -1304,6 +1383,11 @@ class Session:
                         steered_cut = True
                         break
                     kind = ev.get("type")
+                    # H10 Part A: time-to-first-content-block, measured from
+                    # `call_t0` (the FIRST attempt) so a call that needed a
+                    # 429/5xx retry still reports the real user-visible wait.
+                    if ttft_ms is None and kind == "content_block_start":
+                        ttft_ms = round((time.monotonic() - call_t0) * 1000, 1)
                     if kind == "message_start":
                         yield events.message_start(turn=turn_no, model=self.model_ref.raw)
                         # finding 15 (major, h4-h5-h3c review), point 3:
@@ -1407,6 +1491,7 @@ class Session:
                 if partial:
                     partial.append({"type": "text", "text": "[Request interrupted by user]"})
                     self.log.append_assistant(content=partial, stop_reason="interrupted")
+                self._log_call_failure("aborted", retries=attempts - 1)
                 return None
 
             if steered_cut:
@@ -1441,6 +1526,7 @@ class Session:
                         # SECOND overflow falls through to the terminal
                         # error below instead of looping forever.
                         return _OVERFLOW_NEEDS_COMPACTION
+                    self._log_call_failure("overflow", retries=attempts - 1)
                     yield events.error(
                         f"context window overflow (limit={e.limit} tokens, prompt~={e.prompt_tokens}) -- "
                         f"compaction did not free enough room; try `/compact <instructions>` to focus the "
@@ -1479,6 +1565,7 @@ class Session:
                 # EXCEEDED/PROVIDER_FAILURE/...) alongside the raw
                 # per-source wire err_type, so it can react by KIND of
                 # failure without parsing vendor-specific strings itself.
+                self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
                 yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=e.retryable,
                                     category=overflow_classifier(e.status, e.message))
                 return None
@@ -1500,6 +1587,7 @@ class Session:
                     continue
                 # a wire error drops the partial reply -- never committed to the log
                 wire_status = _WIRE_ERROR_TYPE_TO_STATUS.get(wire_error.get("type"), 500)
+                self._log_call_failure(self._status_label(wire_status), retries=attempts - 1)
                 yield events.error(message, turn=turn_no, err_type=wire_error.get("type", "error"),
                                     category=overflow_classifier(wire_status, message))
                 return None
@@ -1561,7 +1649,54 @@ class Session:
                 b["text"] = repair_truncated_text(b["text"])
             cleaned.append(b)
         return _StepResult(assistant_blocks=cleaned, stop_reason=stop_reason, usage=usage, reasoning=reasoning,
-                            body=body, tool_call_flags=harness_meta.get("tool_call_flags") or {})
+                            body=body, tool_call_flags=harness_meta.get("tool_call_flags") or {},
+                            latency_ms=round((time.monotonic() - call_t0) * 1000, 1), ttft_ms=ttft_ms,
+                            retries=attempts - 1, status="ok",
+                            responding_provider=harness_meta.get("responding_provider"))
+
+    # H10 Part A: "or"|"dbx"|"ant" -- the coarse routing rail
+    # (`ModelRef.provider`), independent of which specific backend actually
+    # answered (that's `_responding_provider_label` below).
+    _ROUTE_LABELS = {"openrouter": "or", "databricks": "dbx", "anthropic": "ant"}
+
+    def _responding_provider_label(self, result: "_StepResult") -> str:
+        """The RESPONDING provider, per route: OpenRouter's own per-chunk
+        `provider` field when captured (falls back to the bare "openrouter"
+        label for a reply that never carried one -- a non-streaming/older
+        response shape, or a scripted test upstream); the Databricks
+        ENDPOINT NAME (the bare upstream model id, Unity Gateway's own
+        naming) for a `dbx:` route; the literal "anthropic" for a native
+        `ant:` route."""
+        if self.model_ref.provider == "openrouter":
+            return result.responding_provider or "openrouter"
+        if self.model_ref.provider == "databricks":
+            return self.model_ref.model
+        return "anthropic"
+
+    @staticmethod
+    def _status_label(code) -> str:
+        """H10 Part A: map an HTTP-ish status code to the `usage.status`
+        enum (`429|5xx|connect_error` -- `ok`/`overflow`/`aborted` are set
+        by their own call sites directly, never through here)."""
+        if code == 429:
+            return "429"
+        if isinstance(code, int) and 500 <= code < 600:
+            return "5xx"
+        return "connect_error"
+
+    def _log_call_failure(self, status: str, *, retries: int = 0) -> None:
+        """H10 Part A: a model call that never produced a `_StepResult` at
+        all (every retry exhausted, or a non-retryable failure) previously
+        left NO trace in the session log -- `_account_usage` is only ever
+        called with a real result. A zero-usage `usage` node with `status`
+        set is enough for telemetry.py to count a 429/5xx/connect_error/
+        overflow without inventing a second node type; `cost_usd=None`
+        (never 0.0) so a stats sum never mistakes "no data" for "free"."""
+        self.log.append_usage(
+            {}, None, model=self.model_ref.raw,
+            route=self._ROUTE_LABELS.get(self.model_ref.provider, self.model_ref.provider),
+            status=status, retries=retries,
+        )
 
     def _account_usage(self, result: "_StepResult") -> None:
         """Record cost/usage/OTPM bookkeeping for ONE model call's real
@@ -1571,7 +1706,15 @@ class Session:
         real tokens against the account, so it must still count here even
         though it never becomes a logged assistant message)."""
         cost = self.cost_meter.add_usage(self.model_ref.provider, result.usage)
-        self.log.append_usage(result.usage, cost)
+        # H10 Part A: telemetry.py's own source of truth -- see
+        # `agent/log.py`'s `append_usage` docstring for why these extra
+        # keys never touch a derived request.
+        self.log.append_usage(
+            result.usage, cost, model=self.model_ref.raw,
+            route=self._ROUTE_LABELS.get(self.model_ref.provider, self.model_ref.provider),
+            provider=self._responding_provider_label(result), finish_reason=result.finish_reason,
+            latency_ms=result.latency_ms, ttft_ms=result.ttft_ms, retries=result.retries, status=result.status,
+        )
         output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
         if self.model_ref.provider == "databricks":
             record_databricks_output_tokens(self.model_ref.raw, output_tokens)
@@ -1590,6 +1733,34 @@ class Session:
         total_prompt_tokens = _total_prompt_tokens(result.usage)
         if total_prompt_tokens is not None:
             self._last_prompt_tokens = total_prompt_tokens
+
+    def _maybe_yield_improve_hint(self) -> Iterator[events.Event]:
+        """H10 Part B4: counters only, no model call, fires AT MOST once
+        per session -- a status-bar hint (`events.status`'s own
+        `improve_hint` field) plus one `notification(level="info")` event.
+        Never a card, never blocks; identical in auto mode (a hint,
+        nothing more) -- called from the SAME place `_account_usage`
+        already runs from, so this can never fire mid-tool-dispatch or
+        interrupt anything already in flight."""
+        if self._improve_hint_fired:
+            return
+        from rolo_claude.improve.config import load_improve_config
+        from rolo_claude.improve.hint import should_hint
+        try:
+            cfg = load_improve_config()
+            count = should_hint(self.log.nodes(), cfg)
+        except Exception:
+            return
+        if count is None:
+            return
+        self._improve_hint_fired = True
+        # Text only (never `events.status`, whose `phase` field the status
+        # bar switches on -- inventing a new phase value there risks
+        # breaking its rendering); the TUI's own notification handler
+        # (tui/dispatch.py) is what actually surfaces this in the status
+        # bar / as a toast, matching every other `notification` event.
+        yield events.notification(f"✦ /improve: {count} candidate cluster(s) ready to review "
+                                   f"(/improve to review)", level="info")
 
     # ---- compaction (H5 scope B) -----------------------------------------
 
@@ -1833,7 +2004,18 @@ class Session:
                             stop_reason = delta.get("stop_reason")
                         if isinstance(ev.get("usage"), dict):
                             cost = self.cost_meter.add_usage(self.model_ref.provider, ev["usage"])
-                            self.log.append_usage(ev["usage"], cost)
+                            # H10 Part A: a compaction summariser call is a
+                            # real model call against the same account --
+                            # `model`/`route`/`finish_reason` cost nothing to
+                            # attach here; `provider`/ttft/latency stay
+                            # unset (this loop never captured per-chunk
+                            # OpenRouter provider info or a call start time,
+                            # unlike `_step`'s own richer instrumentation).
+                            self.log.append_usage(
+                                ev["usage"], cost, model=self.model_ref.raw,
+                                route=self._ROUTE_LABELS.get(self.model_ref.provider, self.model_ref.provider),
+                                finish_reason=stop_reason, status="ok",
+                            )
                     elif kind == "error":
                         wire_error = ev.get("error") or {}
                         break
@@ -2301,6 +2483,7 @@ class Session:
                 yield events.turn_done(turn=turn_no, reason="error")
                 return
             self._account_usage(result)
+            yield from self._maybe_yield_improve_hint()
             yield from self._maybe_auto_compact(turn_no)
 
             # H2 scope B: the repair layer's text-embedded-call handling.
@@ -2376,10 +2559,22 @@ class Session:
             # rule above) -- a genuine tool_use always counts as replayable
             # so a call that already closed before the cut still gets
             # logged (and dispatched) normally.
+            # H10 Part A: repair outcomes computed ONCE here (before the log
+            # write, so `tool_meta` can ride along on the SAME node) and
+            # reused by `_dispatch_tools` below via the `repair_outcomes=`
+            # param -- it no longer recomputes them itself. Safe to compute
+            # this early: `repair_assistant_turn`'s only side effect
+            # (auto-loading a not-yet-loaded `mcp__` tool from
+            # `self.session_catalog`) is idempotent and nothing between here
+            # and the `_dispatch_tools` call below reads catalog state.
+            repair_outcomes = (repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
+                                if tool_use_blocks else [])
+            tool_meta = (build_tool_meta(tool_use_blocks, repair_outcomes, result.tool_call_flags)
+                         if tool_use_blocks else {})
             if any(_assistant_block_is_replayable(b) for b in result.assistant_blocks):
                 self.log.append_assistant(
                     content=result.assistant_blocks, reasoning=result.reasoning,
-                    stop_reason=result.stop_reason, request_hash=req_hash,
+                    stop_reason=result.stop_reason, request_hash=req_hash, tool_meta=tool_meta,
                 )
             prompt_tokens = _total_prompt_tokens(result.usage)
             context_pct = None
@@ -2443,7 +2638,8 @@ class Session:
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
 
-            ended = yield from self._dispatch_tools(turn_no, tool_use_blocks, result.tool_call_flags)
+            ended = yield from self._dispatch_tools(turn_no, tool_use_blocks, result.tool_call_flags,
+                                                     repair_outcomes=repair_outcomes)
             applied = yield from self._apply_pending_steers_events(turn_no)
             if applied:
                 # scope 0(c): "tools allowed to finish" -- they just did;
@@ -2486,16 +2682,25 @@ class Session:
                 json_error = (tool_call_flags.get(tool_id) or {}).get("json_error", "invalid JSON")
                 item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
             item["input"] = {}
+            # H10 Part A: both a length-truncated and an unrecoverably
+            # malformed call are "the model never produced usable args" --
+            # lumped under schema_invalid rather than growing the taxonomy.
+            item["error_class"] = "schema_invalid"
             return item
 
         basic_error = validate_tool_use(tu)
         if basic_error is not None:
             item["text"] = basic_error
+            item["error_class"] = "schema_invalid"
             return item
 
         if not outcome.ok:
             item["text"] = outcome.error_text
             item["repaired"] = outcome.repaired
+            # H10 Part A: a duplicate call is never "invalid" -- classed
+            # "other" so it never inflates schema_invalid/not_found counts.
+            item["error_class"] = {"unknown_tool": "other", "invalid_args": "schema_invalid"}.get(
+                outcome.error_kind, "other")
             return item
 
         name = outcome.block.get("name")  # possibly renamed by repair
@@ -2563,6 +2768,7 @@ class Session:
             else:
                 item["text"] = f"Loop breaker: {name} called with the same arguments {count} times this turn -- ending the turn."
             item["end_turn"] = True
+            item["error_class"] = "loop_breaker"
             return item
         if effective >= _LOOP_BREAKER_DENY_AT:
             if period2_count >= count:
@@ -2570,6 +2776,7 @@ class Session:
                                  f"times -- denied. Try a different approach.")
             else:
                 item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
+            item["error_class"] = "loop_breaker"
             return item
 
         if name in ("EnterPlanMode", "ExitPlanMode"):
@@ -2884,7 +3091,23 @@ class Session:
         tool_id, name = item["tool_id"], item["name"]
         if not item["ready"]:
             text = item["text"]
-            self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True)
+            # H10 Part A: explicit `item["error_class"]` (schema_invalid,
+            # loop_breaker, "other" for a duplicate/unknown-tool) wins;
+            # otherwise a permission_denial marks "denied_by_rule", an
+            # in-flight abort marks "interrupted" (Esc/steer-preemption
+            # both set this before a synthesized result reaches here), and
+            # anything left over (a dismissed AskUserQuestion, ...) is "other".
+            error_class = item.get("error_class")
+            if error_class is None:
+                if item.get("permission_denial") is not None:
+                    error_class = "denied_by_rule"
+                elif self.abort.is_set():
+                    error_class = "interrupted"
+                else:
+                    error_class = "other"
+            self.log.append_tool_result(tool_use_id=tool_id, content=text, is_error=True,
+                                         tool=name, error_class=error_class,
+                                         num_bytes=len(text.encode("utf-8", errors="replace")) if isinstance(text, str) else None)
             yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
             if item.get("permission_denial") is not None:
                 self.permission_denials.append(item["permission_denial"])
@@ -2925,7 +3148,19 @@ class Session:
             else:
                 content_for_log += reminder
             summary_text += reminder
-        self.log.append_tool_result(tool_use_id=tool_id, content=content_for_log, is_error=tr.is_error)
+        # H10 Part A: `spilled` detects tools/truncate.py's and
+        # tools/mcp_tool.py's own shared spill-pointer wording (both write
+        # the exact same "Full output saved to <path>." sentence) rather
+        # than re-deriving "did this get capped" from lengths, which would
+        # need the PRE-cap text this function no longer has by this point.
+        spilled = _SPILL_MARKER in summary_text if isinstance(summary_text, str) else False
+        error_class = (_classify_tool_error_text(name, summary_text) if tr.is_error else None)
+        self.log.append_tool_result(
+            tool_use_id=tool_id, content=content_for_log, is_error=tr.is_error, tool=name,
+            error_class=error_class, ms=tr.duration_ms,
+            num_bytes=len(summary_text.encode("utf-8", errors="replace")) if isinstance(summary_text, str) else None,
+            spilled=spilled,
+        )
         # review finding 15: `summary` alone (200 chars) is what Ctrl+O's
         # pager showed too, since `set_result` used to overwrite the
         # card's `body_text` with it -- `content` carries the FULLER
@@ -3157,7 +3392,8 @@ class Session:
         yield events.text_delta(plan_text, turn=turn_no)
         yield events.message_end(turn=turn_no, stop_reason="end_turn", usage={})
 
-    def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None) -> Iterator[events.Event]:
+    def _dispatch_tools(self, turn_no: int, tool_use_blocks: list, tool_call_flags: Optional[dict] = None,
+                         *, repair_outcomes: Optional[list] = None) -> Iterator[events.Event]:
         """Runs every tool_use in this assistant turn, per call, in order:
         length/malformed short-circuit (finding 3) -> basic shape validate
         (agent/invariants.validate_tool_use) -> repair (agent/repair.py:
@@ -3188,7 +3424,13 @@ class Session:
                                rule_text, temporary=True),
                            env_file=env_file_path(self.log.session_id),
                            permission_engine=self.permission_engine, effort=self.effort)
-        repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
+        # H10 Part A: `_turn_body` (this method's one real caller) now
+        # computes this UP FRONT, so it can log `tool_meta` on the SAME
+        # assistant node before this method ever runs, and passes it in --
+        # a direct unit-test call with no `repair_outcomes=` still gets it
+        # computed here exactly as before.
+        if repair_outcomes is None:
+            repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
 
         end_turn = False
         pending_batch: list = []  # `item` dicts: a run of consecutive READY read-only calls, dispatch deferred

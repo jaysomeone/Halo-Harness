@@ -534,6 +534,14 @@ def run_one_anthropic_native(seed: int, mock: MockAnthropic, *, timeout_s: float
     never touches at all."""
     rng = random.Random(seed)
     fh = build_fake_home()
+    # H10b: this call site was the ONE engine in this file that never set
+    # BRIDGE_TEST_HOME before constructing a real Session -- every sibling
+    # engine (run_one_general/_run_one_compaction/_run_one_permission,
+    # fuzz_h9.run_one) does. Without it, SessionLog falls through to the
+    # REAL `~/.rolo-claude/sessions` (config/paths.bridge_home's own
+    # documented fallback), which is exactly how `ant:claude-h9fuzz-ant-*`
+    # sessions leaked into rolo's real session history (H10b report).
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     run_tmp = Path(tempfile.mkdtemp(prefix=f"fuzz-ant-{seed}-"))
     act = rng.choice(_ANTHROPIC_ACTS)
     scenario_name = f"h9fuzz-ant-{seed}-{next(_run_counter)}"

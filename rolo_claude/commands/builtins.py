@@ -192,6 +192,15 @@ def _cmd_plan(args: str, facade: HeadlessFacade) -> str:
     return f"Plan review needs the interactive TUI. Current permission mode: {facade.permission_mode}."
 
 
+def _cmd_improve(args: str, facade: HeadlessFacade) -> str:
+    """H10 Part B5: `-p "/improve"` NEVER drafts or writes -- it needs the
+    interactive TUI's card review (`a`/`e`/`s`/`d`/`q`); a real `-p`
+    invocation points at the real headless surface instead
+    (`rolo-claude improve [--json] [--apply ...]`, a separate top-level
+    subcommand, never this slash command)."""
+    return "Improve review needs the interactive TUI. Use `rolo-claude improve` for the headless surface."
+
+
 def _cmd_resume(args: str, facade: HeadlessFacade) -> str:
     from rolo_claude.agent import sessions as agent_sessions
 
@@ -431,12 +440,13 @@ _BUILTIN_SPECS = {
     "exit": ("ui", "Exit rolo-claude", None, _cmd_exit),
     "rename": ("ui", "Rename this session", "<title>", _cmd_rename),
     "fork": ("ui", "Fork this session into a new one", None, _cmd_fork),
-    "stats": ("core", "Show tokens/cost per model and tool-call counts", None, _cmd_stats),
+    "stats": ("core", "Show tokens/cost per model and tool-call counts (--models, --tools)", None, _cmd_stats),
     "tasks": ("core", "List background Bash jobs started this session", None, _cmd_tasks),
     "rewind": ("ui", "Restore the working tree to a recorded step", "[step-id]", _cmd_rewind),
     "undo": ("ui", "Rewind one recorded step back", None, _cmd_undo),
     "redo": ("ui", "Rewind one recorded step forward", None, _cmd_redo),
     "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
+    "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
 }
 
 

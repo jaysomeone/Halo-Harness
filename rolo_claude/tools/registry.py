@@ -128,10 +128,18 @@ class ToolRegistry:
         tool = self.get(name)
         if tool is None:
             return ToolResult(f"Unknown tool: {name!r}. Available tools: {', '.join(self.names())}", is_error=True)
+        # H10 Part A: `duration_ms` wraps every tool call -- solo AND
+        # batched (run_read_only_batch below calls THIS same method per
+        # call, on its own worker thread) -- the one choke point every
+        # dispatch goes through, so telemetry's `tool_result.ms` never
+        # needs its own per-tool instrumentation.
+        t0 = time.monotonic()
         try:
-            return tool.run(input if isinstance(input, dict) else {}, ctx)
+            result = tool.run(input if isinstance(input, dict) else {}, ctx)
         except Exception as e:  # a tool must never crash the loop
-            return ToolResult(f"Tool {name!r} raised {type(e).__name__}: {e}", is_error=True)
+            result = ToolResult(f"Tool {name!r} raised {type(e).__name__}: {e}", is_error=True)
+        result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
+        return result
 
 
 def run_read_only_batch(registry: ToolRegistry, calls: list, ctx: ToolContext) -> list:

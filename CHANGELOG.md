@@ -5,6 +5,56 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.3.1] - 2026-09-25
+
+H10: free L0 telemetry from the existing session logs, plus a human-gated
+`/improve` (L1 memory/rules + L3 skills). Nothing here lets a model edit its
+own instructions silently -- every written artifact is approved on a card
+or an explicit headless `--apply`; provenance is information shown on the
+card, never a block or a classifier; nothing drafts or writes in `-p`;
+nothing interrupts a running turn, auto mode included (status-bar/toast
+hint only). Settings tuning, prompt optimisation and code self-edits were
+explicitly declined and are not built.
+
+- **Telemetry (`rolo_claude/telemetry.py`)**: `rolo-claude stats [--models]
+  [--tools] [--since 7d|30d|all] [--all-projects] [--session ID] [--json]`
+  and `/stats --models` in the TUI (run off the UI thread, same worker
+  pattern as `/resume`'s session list) aggregate per-(model,provider) and
+  per-tool counters -- tokens/cost, avg ttft/latency, `finish=length`%,
+  retries/status codes, overflows, tool-call/error rates, repair-hit% by
+  kind, edit-failure%, steers/interrupts/compactions/loop-breaker trips --
+  entirely from non-wire metadata added to existing `usage`/`assistant`/
+  `tool_result` session-log nodes (never a new model-visible field; proved
+  with byte-identical derived-request tests across both the OpenAI-dialect
+  and native-Anthropic wire bodies). Results cache in
+  `~/.rolo-claude/stats-cache.json` keyed by (path, size, mtime); a corrupt
+  log line is skipped and counted, never a crash. `doctor` now shows the
+  sessions count, cache age and the active `/improve` config.
+- **`/improve` (`rolo_claude/improve/`)**: clusters recent failures from the
+  telemetry scan (repeated tool errors, repair-layer hits, loop-breaker
+  trips, user corrections, Read ENOENT/wrong-cwd, a tool sequence recurring
+  across sessions), drafts up to `improve.max_candidates` (8) candidates
+  with ONE model call (config `improve.model` -> the small model -> the
+  session model), and reviews them one `ImproveCard` at a time (`a` apply,
+  `e` edit in `$VISUAL`/`$EDITOR` then apply, `s` skip, `d` dismiss forever,
+  `q` stop). A memory candidate writes Claude Code's exact frontmatter
+  shape plus a MEMORY.md index line; a rule writes `.claude/rules/*.md`
+  (or `~/.claude/rules/`); a skill ships with `disable-model-invocation:
+  true`. Only new files are created unless the target already carries the
+  `<!-- rolo-claude improve: ... -->` provenance comment (a collision with
+  a user-authored file picks a new name instead). Applying appends an
+  `improve_applied` log node and refreshes the next turn's CLAUDE.md/
+  memory-index snapshot (same mechanism as post-compaction re-injection).
+  A session's own counters crossing `improve.hint_threshold` shows a
+  one-time, counters-only hint -- never a model call, never a card.
+  Headless: `rolo-claude improve [--since] [--all-projects] [--json]
+  [--out FILE]` and `rolo-claude improve --apply FILE#ID` (repeatable);
+  `-p` never drafts or writes; `--bare` disables it entirely.
+- **Config**: `~/.rolo-claude/config.json`'s new `improve` key (`enabled`,
+  `hint`, `model`, `since_days`, `max_candidates`, `hint_threshold`),
+  settable with dotted paths (`rolo-claude config set improve.model
+  or:...`).
+
 ## [0.3.0] - 2026-09-25
 
 `rolo-claude` becomes its own standalone, Claude-Code-compatible agent

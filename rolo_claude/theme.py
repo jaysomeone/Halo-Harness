@@ -65,15 +65,51 @@ def set_config_value(key: str, value) -> Path:
     """Write `data[key] = value` into `~/.rolo-claude/config.json` (tmp +
     `os.replace`, preserving every other key already there) -- the generic
     form `persist_theme` and `rolo-claude config set` both build on. Never
-    touches Claude Code's own settings.json."""
+    touches Claude Code's own settings.json.
+
+    H10 Part B: `key` may be dotted (`"improve.model"`, `"improve.
+    hint_threshold.repairs"`) to set a NESTED value -- `rolo-claude config
+    set improve.model or:...` -- without disturbing any sibling key already
+    under `improve`. A plain (undotted) key, every pre-H10 call site
+    (`theme`, `compactionModel`, ...), is unchanged: `data[key] = value`
+    exactly as before."""
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = load_config()
-    data[key] = value
+    if "." in key:
+        parts = key.split(".")
+        cursor = data
+        for part in parts[:-1]:
+            nxt = cursor.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cursor[part] = nxt
+            cursor = nxt
+        cursor[parts[-1]] = value
+    else:
+        data[key] = value
     tmp_path = path.with_name(path.name + f".tmp{os.getpid()}")
     tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp_path, path)
     return path
+
+
+_MISSING = object()
+
+
+def get_config_value(key: str, default=_MISSING):
+    """The dotted-path read counterpart to `set_config_value` -- `key` may
+    be `"improve.model"`; returns `default` (or raises `KeyError` if
+    `default` is left unset) when any segment is missing."""
+    data = load_config()
+    cursor = data
+    for part in key.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        cursor = cursor[part]
+    return cursor
 
 
 def persist_theme(name: str) -> Path:

@@ -162,20 +162,33 @@ def test_missing_memory_dir_returns_empty_not_error(ctx: Ctx):
 
 
 @test
-def test_write_and_update_index_raise_not_implemented(ctx: Ctx):
+def test_write_and_update_index_write_real_files(ctx: Ctx):
+    """H10 Part B: `write`/`update_index` were H0-era stubs ("no tool
+    exists yet to call this") -- `/improve`'s own memory candidates are the
+    first real caller, so this now proves the real implementation instead
+    of the placeholder NotImplementedError."""
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     store = MemoryStore(fh["proj"], FakeSettings())
+    path = store.write(filename="x.md", name="n", description="d", type="feedback", body="body text",
+                        origin_session_id="sess")
+    ctx.check("write() returns the real path", path == store.memory_dir_path / "x.md")
+    ctx.check("the file actually exists", path.exists())
+    content = path.read_text(encoding="utf-8")
+    ctx.check("frontmatter name present", "name: n" in content)
+    ctx.check("frontmatter type: feedback present", "type: feedback" in content)
+    ctx.check("body present", "body text" in content)
+    idx_path = store.update_index(filename="y.md", title="other-topic", description="another one")
+    ctx.check("update_index returns MEMORY.md's path", idx_path == store.memory_dir_path / "MEMORY.md")
+    idx_text = idx_path.read_text(encoding="utf-8")
+    ctx.check("both x.md (from write's own index append) and y.md are indexed",
+              "(x.md)" in idx_text and "(y.md)" in idx_text)
+    # write() refuses to silently overwrite an existing file.
     try:
-        store.write("x.md", "n", "d", "type", "body", "sess")
-        ctx.check("write() must raise NotImplementedError in H0 (no tool exists to call it)", False)
-    except NotImplementedError:
-        ctx.check("write() raises NotImplementedError", True)
-    try:
-        store.update_index("line")
-        ctx.check("update_index() must raise NotImplementedError in H0", False)
-    except NotImplementedError:
-        ctx.check("update_index() raises NotImplementedError", True)
+        store.write(filename="x.md", name="n2", description="d2", type="feedback", body="body2")
+        ctx.check("write() must raise FileExistsError on a name collision", False)
+    except FileExistsError:
+        ctx.check("write() raises FileExistsError on a name collision", True)
 
 
 if __name__ == "__main__":

@@ -241,12 +241,19 @@ def test_h5b_f17_thinking_tool_turn_through_real_session_merges_message_start_us
     replay the first turn's thinking block with the wire's own `thinking`
     key and its signature intact (finding 15 point 1), not just when
     `prepare_anthropic_messages` is called by hand."""
+    import os
+
     from tests.helpers.fake_home import build_fake_home
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
 
     fh = build_fake_home()
+    # H10b: never set before -- the real in-process Session below fell
+    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # `ant:claude-sonnet-4.5-thinking-then-tool-then-reply` sessions into
+    # rolo's real session history (H10b report).
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     mock = MockAnthropic().start()
     try:
         model = "ant:claude-sonnet-4.5-thinking-then-tool-then-reply"
@@ -309,12 +316,19 @@ def test_h5c_f05_steer_mid_thinking_before_signature_delta_logs_no_empty_node(ct
     BEFORE signature_delta -- the exact ordering this finding needs),
     single-stepping the turn generator so the steer lands right after the
     first `thinking_delta` and before anything else."""
+    import os
+
     from tests.helpers.fake_home import build_fake_home
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
 
     fh = build_fake_home()
+    # H10b: never set before -- the real in-process Session below fell
+    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # `ant:claude-h5c-f05-thinking-and-signature` sessions into rolo's real
+    # session history (H10b report).
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     mock = MockAnthropic().start()
     try:
         model = "ant:claude-h5c-f05-thinking-and-signature"

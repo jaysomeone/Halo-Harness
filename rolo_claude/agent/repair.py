@@ -286,6 +286,15 @@ class RepairOutcome:
     # mcp__ auto-load, which never renames anything). None otherwise (incl.
     # every existing caller/test that never looks at this field).
     original_name: Optional[str] = None
+    # H10 Part A: a structured discriminant for agent/loop.py's own
+    # tool_result `error_class` telemetry -- "unknown_tool" (name never
+    # resolved) or "invalid_args" (schema validate_and_coerce rejected the
+    # input); None for every ok=True outcome and for a duplicate (which
+    # never reaches either branch below). Kept as an explicit field rather
+    # than having the caller pattern-match `error_text`'s own wording, so a
+    # future rewording of either message can never silently break the
+    # classification.
+    error_kind: Optional[str] = None
 
 
 def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = None, *, catalog=None) -> RepairOutcome:
@@ -311,7 +320,7 @@ def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = N
         else:
             suggestion = f" Did you mean one of: {', '.join(close)}?" if close else ""
             error_text = f"Unknown tool {name!r}.{suggestion} Available tools: {', '.join(names)}"
-        return RepairOutcome(block=block, ok=False, error_text=error_text)
+        return RepairOutcome(block=block, ok=False, error_text=error_text, error_kind="unknown_tool")
 
     repaired_name = resolved != name
     tool = registry.get(resolved)
@@ -322,13 +331,65 @@ def repair_tool_use_block(block: dict, registry, known_names: Optional[list] = N
         return RepairOutcome(
             block={**block, "name": resolved}, ok=False,
             error_text=f"Invalid arguments for {resolved}: " + "; ".join(errors),
-            repaired=repaired_name, original_name=original_name,
+            repaired=repaired_name, original_name=original_name, error_kind="invalid_args",
         )
 
     repaired_args = coerced != (block.get("input") or {})
     new_block = {**block, "name": resolved, "input": coerced}
     return RepairOutcome(block=new_block, ok=True, repaired=(repaired_name or repaired_args),
                           original_name=original_name)
+
+
+# ---------------------------------------------------------------------------
+# 6. H10 Part A: repair_kind telemetry for agent/log.py's own assistant-node
+#    `tool_meta` -- combines this module's own RepairOutcome with the
+#    stream-level `lenient_json_repaired` flag (providers/oai_stream.py) and
+#    the leak-parser promotion marker (agent/loop.py's own `_turn_body`,
+#    `_promoted_from_leak` on the block) into ONE taxonomy value per call.
+# ---------------------------------------------------------------------------
+
+def repair_kind_for(tu: dict, outcome: "RepairOutcome", tool_call_flags: dict) -> str:
+    """`"leak_parser"|"lenient_json"|"rename"|"args_repair"|"none"` -- checked
+    in that priority order (a leaked call promoted from prose is always
+    "leak_parser" even if its args also needed lenient JSON repair; a
+    renamed call is "rename" even if its args were ALSO coerced, since the
+    name mismatch is the more informative signal). A length-truncated or
+    unrecoverably-malformed call (never repairable JSON at all) is "none"
+    here -- that failure is `tool_result.error_class`'s job, not this
+    taxonomy's, which only ever names a SUCCESSFUL repair."""
+    if isinstance(tu, dict) and tu.get("_promoted_from_leak"):
+        return "leak_parser"
+    tool_id = tu.get("id") if isinstance(tu, dict) else None
+    flags = tool_call_flags.get(tool_id) or {} if tool_id else {}
+    if flags.get("lenient_json_repaired"):
+        return "lenient_json"
+    if outcome.original_name is not None:
+        return "rename"
+    if outcome.repaired:
+        return "args_repair"
+    return "none"
+
+
+def build_tool_meta(tool_use_blocks: list, repair_outcomes: list, tool_call_flags: dict) -> dict:
+    """`{tool_use_id: {"repaired": bool, "repair_kind": str,
+    "promoted_from_leak": bool}}` for every block in `tool_use_blocks` --
+    `agent/loop.py`'s own `_turn_body` computes this ONCE (reusing the same
+    `repair_outcomes` list `_dispatch_tools` goes on to dispatch from,
+    never recomputed) and passes it to `SessionLog.append_assistant`."""
+    tool_call_flags = tool_call_flags or {}
+    meta: dict = {}
+    for tu, outcome in zip(tool_use_blocks, repair_outcomes):
+        tool_id = tu.get("id") if isinstance(tu, dict) else None
+        if not tool_id:
+            continue
+        promoted = bool(isinstance(tu, dict) and tu.get("_promoted_from_leak"))
+        repaired = bool(outcome.repaired) or promoted
+        meta[tool_id] = {
+            "repaired": repaired,
+            "repair_kind": repair_kind_for(tu, outcome, tool_call_flags),
+            "promoted_from_leak": promoted,
+        }
+    return meta
 
 
 def repair_assistant_turn(tool_use_blocks: list, registry, *, catalog=None) -> "list[RepairOutcome]":

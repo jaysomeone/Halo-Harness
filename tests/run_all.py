@@ -29,12 +29,36 @@ def discover_test_modules() -> list:
     return names
 
 
+def _real_sessions_snapshot() -> "set[str]":
+    """H10b: the REAL sessions dir -- literal `Path.home()`, deliberately
+    NOT `rolo_claude.config.paths.bridge_home()` (which would honor
+    whatever BRIDGE_TEST_HOME/BRIDGE_STATE_DIR a test left set in THIS
+    process and so could be fooled into snapshotting a fake home instead).
+    This matches `bridge_home()`'s own fallback branch exactly: a
+    well-behaved test scopes its session log away from here entirely, so
+    the set below should never gain an entry across a whole suite run. It
+    did (H10b report: two fuzz-harness engines and three test files built a
+    real in-process Session without ever setting the seam, leaking
+    `or:mock/page-forever`/`ant:claude-h9fuzz-ant-*`/etc. sessions into
+    rolo's actual session history) -- this is the suite-level guard against
+    that ever happening again unnoticed, independent of any one test's own
+    hygiene."""
+    d = Path.home() / ".rolo-claude" / "sessions"
+    try:
+        if not d.is_dir():
+            return set()
+        return {str(p) for p in d.glob("*/*.jsonl")}
+    except OSError:
+        return set()
+
+
 def main() -> int:
     # NEW (post-H9 acceptance): see runner.py's own docstring on this pair
     # -- every tempfile.mkdtemp() call for the rest of this process (every
     # test module this run imports/executes) is tracked and swept up once,
     # at the very end, instead of leaking a directory per call forever.
     install_temp_dir_tracking()
+    real_sessions_before = _real_sessions_snapshot()
     module_names = discover_test_modules()
     total_passed = total_failed = total_skipped = 0
     any_module_import_failed = False
@@ -74,7 +98,18 @@ def main() -> int:
     removed = cleanup_tracked_temp_dirs()
     print(f"[cleanup] removed {removed} tracked temp dir(s)")
 
-    return 0 if (total_failed == 0 and not any_module_import_failed) else 1
+    real_sessions_leaked = sorted(_real_sessions_snapshot() - real_sessions_before)
+    if real_sessions_leaked:
+        print("-" * 74)
+        print(f"[REAL SESSIONS GUARD] FAIL: {len(real_sessions_leaked)} new file(s) appeared under "
+              f"the REAL ~/.rolo-claude/sessions during this run -- some test built a Session "
+              f"without scoping BRIDGE_TEST_HOME/BRIDGE_STATE_DIR away from the real machine state:")
+        for p in real_sessions_leaked:
+            print(f"    {p}")
+    else:
+        print("[REAL SESSIONS GUARD] ok -- no new files under the real ~/.rolo-claude/sessions")
+
+    return 0 if (total_failed == 0 and not any_module_import_failed and not real_sessions_leaked) else 1
 
 
 if __name__ == "__main__":

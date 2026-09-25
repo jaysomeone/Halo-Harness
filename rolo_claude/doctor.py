@@ -268,6 +268,27 @@ def _check_catalog_ages() -> list:
     return lines
 
 
+def _check_telemetry_and_improve() -> "list[str]":
+    """H10 Part A/B: `stats`'s own sessions count + stats-cache age, and
+    `/improve`'s active config (a plain INFO line, never OK/WARN/MISSING --
+    there is nothing here that can be "missing"; every key has a built-in
+    default). Read-only, same contract as every other check in this
+    module."""
+    from rolo_claude import telemetry
+    from rolo_claude.improve.config import load_improve_config
+
+    n = telemetry.total_sessions_count()
+    age = telemetry.cache_age_seconds()
+    age_str = "never" if age is None else (f"{age:.0f}s ago" if age < 3600 else f"{age / 3600:.1f}h ago")
+    lines = [f"{OK} Sessions: {n} logged under ~/.rolo-claude/sessions; stats cache last written {age_str}"]
+    cfg = load_improve_config()
+    lines.append(
+        f"{OK} /improve: enabled={cfg.enabled} hint={cfg.hint} model={cfg.model or '(small/session model)'} "
+        f"since_days={cfg.since_days} max_candidates={cfg.max_candidates}"
+    )
+    return lines
+
+
 def _dbx_probe_target():
     """`(host, token)` from the real discovery chain, or `(None, None)` --
     shared by every `--work` check below so they never disagree about
@@ -525,6 +546,7 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     lines.append(_check_plugins())
     lines.append(_check_platform())
     lines.extend(_check_catalog_ages())
+    lines.extend(_check_telemetry_and_improve())
     # U5 leftover / H8 cheap must-do: tui/clipboard.py's own
     # clipboard_doctor_line() was written ready-to-call but never actually
     # wired into a real doctor run.

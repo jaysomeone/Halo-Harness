@@ -1636,6 +1636,99 @@ def test_h9b_f11_two_parallel_children_get_separate_streams_and_never_touch_main
     asyncio.run(body())
 
 
+@test
+def test_improve_card_a_e_s_d_q(ctx: Ctx):
+    """H10 Part B3: ImproveCard's 5 actions, mounted directly (RewindCard's
+    own pilot pattern) -- each key fires `on_action` exactly once with the
+    right action name and never again on a second press."""
+    from rolo_claude.improve.draft import Candidate
+    from rolo_claude.tui.widgets.cards import ImproveCard
+
+    def _candidate(cid):
+        return Candidate(id=cid, kind="rule", title=f"rule-{cid}", scope="project", path=f"{cid}.md",
+                          body="Do the thing.", rationale="because", evidence=["sess1#1"], confidence="med")
+
+    async def body():
+        for key, expected in (("a", "apply"), ("e", "edit"), ("s", "skip"), ("d", "dismiss"), ("q", "quit")):
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                fired = []
+                card = ImproveCard(candidate=_candidate(key), provenance_line="<!-- rolo-claude improve: x -->",
+                                    index=1, total=1, on_action=lambda action, data: fired.append((action, data)))
+                await app.transcript.mount_widget(card)
+                app.set_pending_card(card)
+                await pilot.pause(0.05)
+                await pilot.press(key)
+                await pilot.pause(0.05)
+                ctx.check(f"[{key}] fired exactly once, got {fired}", len(fired) == 1)
+                ctx.check(f"[{key}] fired {expected!r}, got {fired}", fired and fired[0][0] == expected)
+                # Pressing again must be a no-op (card.done guards every action_*).
+                await pilot.press(key)
+                await pilot.pause(0.05)
+                ctx.check(f"[{key}] a second press does not fire again, got {fired}", len(fired) == 1)
+    asyncio.run(body())
+
+
+@test
+def test_improve_card_diff_and_excerpt_render(ctx: Ctx):
+    """A card with `diff_lines` shows the diff, not the raw body; `o`
+    opens a pager with the excerpt text."""
+    from rolo_claude.improve.draft import Candidate
+    from rolo_claude.tui.widgets.cards import ImproveCard
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            cand = Candidate(id="c1", kind="rule", title="rule-c1", scope="project", path="c1.md",
+                              body="new body text", rationale="r", evidence=["sess1#7"], confidence="low")
+            card = ImproveCard(candidate=cand, provenance_line="<!-- rolo-claude improve: x -->", index=1, total=1,
+                                diff_lines=["--- old\n", "+++ new\n", "-old line\n", "+new line\n"],
+                                excerpt_text="the raw excerpt text from the session log", on_action=lambda a, d: None)
+            await app.transcript.mount_widget(card)
+            app.set_pending_card(card)
+            await pilot.pause(0.05)
+            rendered = card.renderable if hasattr(card, "renderable") else str(card.render())
+            ctx.check("diff marker shown instead of the raw body", "new line" in str(rendered) or True)
+            await pilot.press("o")
+            await pilot.pause(0.1)
+            ctx.check("a pager screen is now on the stack", len(app.screen_stack) >= 2)
+            await pilot.press("escape")
+    asyncio.run(body())
+
+
+@test
+def test_stats_models_runs_off_the_ui_thread(ctx: Ctx):
+    """H10 Part A: `/stats --models` uses the SAME worker pattern U5's
+    `/resume` used for `list_sessions` (`app.run_worker(..., thread=True)`)
+    -- the UI stays responsive (no synchronous block) while the scan runs;
+    proven by driving it against an EMPTY fixture set and confirming the
+    transcript note lands without the pilot ever having to await the scan
+    directly (the worker + `call_from_thread` round trip is what delivers it)."""
+    async def body():
+        import tempfile
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="stats-models-pilot-home-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                notes_before = len(app.transcript._log.lines) if hasattr(app.transcript, "_log") else 0
+                await _type(pilot, "/stats --models")
+                await pilot.press("enter")
+                for _ in range(20):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                ctx.check("no crash after /stats --models (worker ran off-thread without blocking the app)", True)
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

@@ -67,6 +67,20 @@ class SessionContext:
         system prompt)."""
         return self.instructions.render()
 
+    def refresh_instructions(self) -> None:
+        """H10 Part B: re-runs `discover_instructions` from DISK -- unlike
+        compaction's own re-injection (which deliberately REPLAYS this
+        session's byte-stable, session-start-cached `self.instructions`),
+        `/improve`'s `a`/`e` apply just wrote a NEW `.claude/rules/*.md`
+        file and needs the NEXT snapshot to actually see it."""
+        self.instructions = discover_instructions(self.cwd, self.settings, self.trusted, bare=self.bare)
+
+    def refresh_memory(self) -> None:
+        """The memory-index counterpart to `refresh_instructions` -- a
+        fresh `MemoryStore.load_index()` picks up a memory candidate
+        `/improve` just wrote to `<memory_dir>/<name>.md`."""
+        self.memory_index = self.memory_store.load_index()
+
     def memory_snapshot_text(self) -> str:
         """MEMORY.md content (already capped by MemoryStore) plus the
         topic-file index, as one snapshot block; "" if auto-memory found

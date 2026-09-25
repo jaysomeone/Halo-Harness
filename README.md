@@ -255,6 +255,31 @@ versions of the TUI's own `/export`/`/stats` slash commands -- the former
 redacts API keys/tokens/secrets from a session log before handing it to
 someone else, the latter aggregates turn/cost/token stats across sessions.
 
+## Telemetry and `/improve`
+
+`rolo-claude stats --models [--tools] [--since 7d|30d|all] [--all-projects]
+[--session ID] [--json]` (and `/stats --models` in the TUI, off the UI
+thread) aggregates per-model/provider and per-tool counters -- tokens,
+cost, avg ttft/latency, retries, overflows, tool error rates, repair-layer
+hit rates, edit failures -- from the existing session logs; nothing here
+adds a model-visible field. `doctor` shows the sessions count, stats-cache
+age and the active `/improve` config.
+
+`/improve` is human-gated self-improvement: it clusters recent failures
+(repeated tool errors, repair-layer hits, loop-breaker trips, user
+corrections, Read ENOENT, a recurring tool sequence), drafts candidate
+memory notes / `.claude/rules/*.md` entries / skills with ONE model call,
+and reviews them one card at a time -- `a` apply, `e` edit in
+`$VISUAL`/`$EDITOR` then apply, `s` skip, `d` dismiss forever, `q` stop.
+Nothing is written without that approval (or an explicit headless
+`rolo-claude improve --apply FILE#ID`); provenance (source sessions,
+evidence count, drafting model, whether an excerpt came from tool output)
+is shown on the card, never used to block anything. `rolo-claude improve
+[--since] [--all-projects] [--json]` prints/saves candidates without
+applying; `-p` sessions never draft or write on their own. Configured via
+`~/.rolo-claude/config.json`'s `improve` key, e.g. `rolo-claude config set
+improve.model or:deepseek/deepseek-v4-flash`.
+
 ## Troubleshooting
 
 - **VPN hint**: any Databricks connect failure (`doctor --work`, `models

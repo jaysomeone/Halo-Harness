@@ -148,9 +148,13 @@ class ToolContext:
 class ToolResult:
     """`content` is a plain string or a list of Anthropic content blocks
     (a Read of an image, later); `is_error` maps to the tool_result
-    block's own `is_error` flag."""
+    block's own `is_error` flag. `duration_ms` (H10 Part A) is set by
+    `tools.registry.ToolRegistry.dispatch` AFTER a tool's own `run()`
+    returns -- None for a ToolResult a caller builds directly (plan mode,
+    AskUserQuestion's answer, ...), which never went through `dispatch()`."""
     content: Any
     is_error: bool = False
+    duration_ms: Optional[float] = None
 
 
 class Tool:

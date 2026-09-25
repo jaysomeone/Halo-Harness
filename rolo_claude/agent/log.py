@@ -30,7 +30,7 @@ from rolo_claude.config.paths import bridge_home, project_slug
 NODE_TYPES = frozenset({
     "meta", "system", "user", "assistant", "tool_result",
     "snapshot", "usage", "error", "interrupted", "compacted", "rewind",
-    "prune_commit",
+    "prune_commit", "improve_applied",
 })
 
 
@@ -99,18 +99,60 @@ class SessionLog:
         return self._append({"type": "snapshot", "kind": kind, "content": content})
 
     def append_assistant(self, *, content: list, reasoning: Optional[dict] = None,
-                          stop_reason: Optional[str] = None, request_hash: Optional[str] = None) -> dict:
+                          stop_reason: Optional[str] = None, request_hash: Optional[str] = None,
+                          tool_meta: Optional[dict] = None) -> dict:
+        """H10 Part A: `tool_meta`, when given, is `{tool_use_id: {"repaired":
+        bool, "repair_kind": "leak_parser"|"lenient_json"|"rename"|
+        "args_repair"|"none", "promoted_from_leak": bool}}` -- repair-layer
+        telemetry for the tool_use blocks in THIS content list, kept as a
+        SIBLING key on the node rather than inside the content blocks
+        themselves. `agent/derive.py`'s `derive_request` only ever reads
+        `node["content"]`/`node["reasoning"]` off an assistant node, so a
+        sibling key here is automatically invisible to every derived
+        request (never a new model-visible field, never needs stripping) --
+        unlike a key embedded IN a tool_use block, which would ride along
+        verbatim through `providers.request.prepare_anthropic_messages`'s
+        catch-all passthrough for a native Anthropic wire body."""
         node: dict = {"type": "assistant", "content": content, "stop_reason": stop_reason}
         if reasoning is not None:
             node["reasoning"] = reasoning
         if request_hash is not None:
             node["request_hash"] = request_hash
+        if tool_meta:
+            node["tool_meta"] = tool_meta
         return self._append(node)
 
-    def append_tool_result(self, *, tool_use_id: str, content, is_error: bool = False) -> dict:
-        return self._append({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
+    def append_tool_result(self, *, tool_use_id: str, content, is_error: bool = False,
+                            tool: Optional[str] = None, error_class: Optional[str] = None,
+                            ms: Optional[float] = None, num_bytes: Optional[int] = None,
+                            spilled: Optional[bool] = None) -> dict:
+        """H10 Part A: `tool`/`error_class`/`ms`/`num_bytes`/`spilled` are
+        non-wire telemetry -- `derive_request` reconstructs a `tool_result`
+        wire block from ONLY `tool_use_id`/`content`/`is_error` (see its own
+        docstring: "non-wire keys stripped"), so any other key stored here
+        is already invisible to every derived request; nothing to strip,
+        nothing to prove byte-identical beyond the existing reconstruction.
+        `num_bytes` (not `bytes`, a builtin) is stored under the JSON key
+        `"bytes"` for telemetry.py's own reading convenience."""
+        node: dict = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error,
+                      "ok": not is_error}
+        if tool is not None:
+            node["tool"] = tool
+        if error_class is not None:
+            node["error_class"] = error_class
+        if ms is not None:
+            node["ms"] = ms
+        if num_bytes is not None:
+            node["bytes"] = num_bytes
+        if spilled is not None:
+            node["spilled"] = spilled
+        return self._append(node)
 
-    def append_usage(self, usage: dict, cost_usd=None, *, agent_id: Optional[str] = None) -> dict:
+    def append_usage(self, usage: dict, cost_usd=None, *, agent_id: Optional[str] = None,
+                      model: Optional[str] = None, route: Optional[str] = None,
+                      provider: Optional[str] = None, finish_reason: Optional[str] = None,
+                      latency_ms: Optional[float] = None, ttft_ms: Optional[float] = None,
+                      retries: Optional[int] = None, status: Optional[str] = None) -> dict:
         """H9 whole-tree review finding 13: `agent_id`, when given, tags
         this usage node as a SUB-AGENT's rolled-up total (agent/subagent.py
         calls this on the PARENT's own log once a child finishes) rather
@@ -120,10 +162,33 @@ class SessionLog:
         to `/stats` and `stats` entirely -- logged only in the child's own,
         separately-globbed `subagents/*.jsonl`), but keeps the tag so a
         reader of the raw log can tell a rolled-up child total apart from
-        one of the parent's own real model calls."""
+        one of the parent's own real model calls.
+
+        H10 Part A: `model`/`route`/`provider`/`finish_reason`/`latency_ms`/
+        `ttft_ms`/`retries`/`status` are telemetry.py's own source of truth
+        for per-model/per-provider aggregation -- never read by
+        `derive_request` (a `usage` node contributes no message at all), so
+        adding them is automatically wire-safe. `status` is one of
+        "ok"|"429"|"5xx"|"overflow"|"aborted"|"connect_error"."""
         node = {"type": "usage", "usage": usage, "cost_usd": cost_usd}
         if agent_id is not None:
             node["agent_id"] = agent_id
+        if model is not None:
+            node["model"] = model
+        if route is not None:
+            node["route"] = route
+        if provider is not None:
+            node["provider"] = provider
+        if finish_reason is not None:
+            node["finish_reason"] = finish_reason
+        if latency_ms is not None:
+            node["latency_ms"] = latency_ms
+        if ttft_ms is not None:
+            node["ttft_ms"] = ttft_ms
+        if retries is not None:
+            node["retries"] = retries
+        if status is not None:
+            node["status"] = status
         return self._append(node)
 
     def append_error(self, message: str, *, err_type: str = "error") -> dict:
@@ -179,6 +244,16 @@ class SessionLog:
         small. Stored sorted so two processes committing the exact same
         set always log byte-identical JSON."""
         return self._append({"type": "prune_commit", "stub_ids": sorted(stub_ids)})
+
+    def append_improve_applied(self, *, kind: str, path: str, candidate_id: str, sha256: str) -> dict:
+        """H10 Part B: a pure marker node (never read by `derive_request`,
+        same as `rewind`/`prune_commit` above) recording that `/improve`'s
+        `a`/`e` key (or headless `improve --apply`) actually wrote
+        `path` -- `kind` is "memory"|"rule"|"skill", `sha256` is the
+        applied body's own hash (the same one `~/.rolo-claude/improve/
+        dismissed.json` keys a `d` dismissal by)."""
+        return self._append({"type": "improve_applied", "kind": kind, "path": path,
+                              "candidate_id": candidate_id, "sha256": sha256})
 
     # ---- reading ---------------------------------------------------------
 

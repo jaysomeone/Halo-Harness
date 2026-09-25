@@ -250,7 +250,9 @@ def test_version_flag(ctx: Ctx):
     result = subprocess.run([sys.executable, "-m", "rolo_claude", "--version"], env=env, cwd=str(REPO_DIR),
                              capture_output=True, text=True, timeout=15)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    ctx.check(f"prints rolo-claude 0.3.0, got {result.stdout!r}", result.stdout.strip() == "rolo-claude 0.3.0")
+    from rolo_claude import __version__
+    ctx.check(f"prints rolo-claude {__version__}, got {result.stdout!r}",
+              result.stdout.strip() == f"rolo-claude {__version__}")
 
 
 if __name__ == "__main__":
