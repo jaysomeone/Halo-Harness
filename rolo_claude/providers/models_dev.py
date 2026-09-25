@@ -140,4 +140,13 @@ def databricks_profile_fields_from_models_dev(entry: dict) -> dict:
         out["price_in"] = cost["input"] / 1_000_000
     if isinstance(cost.get("output"), (int, float)):
         out["price_out"] = cost["output"] / 1_000_000
+    # H5c Extra (from the H8 must-do list): models.dev's databricks provider
+    # entries carry a real cache_read/cache_write breakdown for every Claude
+    # row (confirmed in providers/catalog/models_dev_databricks_fallback.json
+    # -- e.g. sonnet-4-5: input 3, output 15, cache_read 0.3, cache_write
+    # 3.75, same USD-per-million units as input/output above).
+    if isinstance(cost.get("cache_read"), (int, float)):
+        out["price_cache_read"] = cost["cache_read"] / 1_000_000
+    if isinstance(cost.get("cache_write"), (int, float)):
+        out["price_cache_write"] = cost["cache_write"] / 1_000_000
     return out

@@ -29,18 +29,52 @@ def _allowed_tools_list(fm: dict) -> list:
     return allowed if isinstance(allowed, list) else []
 
 
-def _make_run(body: str, allowed_tools: list):
+def _make_run(body: str, allowed_tools: list, skill_path: "Optional[Path]" = None):
     def _run(args_text: str, facade) -> str:
         # finding 9: see commands/custom.py's own identical comment.
         session = getattr(facade, "session", None)
+        # H5c finding 15: `/skill-name` used to build NONE of what
+        # `tools/skill.py`'s own Skill TOOL gives a model-invoked skill --
+        # a skill whose body uses `${CLAUDE_SKILL_DIR}/scripts/x.py` sent
+        # the literal, unsubstituted variable name (expanding to an empty
+        # string inside `` !`...` ``, so the command ran `python
+        # /scripts/x.py`), and there was no "Base directory for this
+        # skill:" line or sibling-file listing either. Built here from the
+        # SAME inputs `SkillTool.run` uses (`skill_path`, closed over from
+        # discovery time; `session.log.session_id`/`session.effort` at
+        # invocation time), so the two paths can never disagree.
+        claude_vars = None
+        skill_dir_abs = None
+        if skill_path is not None:
+            skill_dir_abs = str(skill_path.parent.resolve())
+            session_log = getattr(session, "log", None)
+            session_id = getattr(session_log, "session_id", None) if session_log is not None else None
+            claude_vars = {
+                "CLAUDE_SKILL_DIR": skill_dir_abs,
+                "CLAUDE_SESSION_ID": session_id,
+                "CLAUDE_PROJECT_DIR": str(facade.cwd),
+                "CLAUDE_EFFORT": getattr(session, "effort", None),
+            }
         result = expand_command_body(
             body, args_text, allowed_tools=allowed_tools, cwd=facade.cwd,
             permission_engine=getattr(session, "permission_engine", None),
-            env=getattr(session, "tool_env", None),
+            env=getattr(session, "tool_env", None), claude_vars=claude_vars,
         )
         if result.error:
             return f"rolo-claude: {result.error}"
-        return result.text
+        text = result.text
+        if skill_dir_abs is not None:
+            from rolo_claude.tools.skill import _sibling_files
+
+            text = f"Base directory for this skill: {skill_dir_abs}\n\n" + text
+            siblings = _sibling_files(skill_path)
+            if siblings:
+                text += ("\n\n---\nOther files in this skill's own directory (read them directly, at the "
+                         "absolute paths below, if the instructions above reference them):\n")
+                text += "\n".join(f"- {p}" for p in siblings)
+            if allowed_tools:
+                text += f"\n\n(This skill's own allowed-tools: {', '.join(allowed_tools)}.)"
+        return text
     return _run
 
 
@@ -85,7 +119,7 @@ def _discover_skills_tree(skills_root: Path, *, exclude_synced: bool) -> list:
         allowed = tuple(_allowed_tools_list(fm))
         out.append(SlashCommand(
             name=name, description=description, kind="prompt", argument_hint=fm.get("argument-hint"),
-            source="skill", path=md, run=_make_run(body, list(allowed)),
+            source="skill", path=md, run=_make_run(body, list(allowed), skill_path=md),
             model_invocable=fm.get("disable-model-invocation", False) is not True,
             allowed_tools=allowed, context_mode=(fm.get("context") if fm.get("context") in ("fork", "agent") else None),
         ))
@@ -121,7 +155,7 @@ def _discover_synced(skills_root: Path) -> list:
             allowed = tuple(_allowed_tools_list(fm))
             out.append(SlashCommand(
                 name=f"anthropic-skills:{base_name}", description=description, kind="prompt",
-                aliases=alias, source="skill", path=path, run=_make_run(body, list(allowed)),
+                aliases=alias, source="skill", path=path, run=_make_run(body, list(allowed), skill_path=path),
                 model_invocable=fm.get("disable-model-invocation", False) is not True,
                 allowed_tools=allowed, context_mode=(fm.get("context") if fm.get("context") in ("fork", "agent") else None),
             ))

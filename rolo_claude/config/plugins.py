@@ -205,12 +205,20 @@ def _plugin_roots(manifest: dict, settings_raw: Optional[dict] = None, *, cwd: O
                 if root is not None and root.is_dir():
                     out.append((plugin_name, root))
         else:
+            # finding 21 (h5b review): a V1 record uses the same
+            # `<name>@<marketplace>` key and `installPath` field as a V2
+            # one -- only the outer shape differs (a single dict, never an
+            # array of scoped records). Reading the invented `path` field
+            # (never written by the real binary) instead of `installPath`,
+            # and keeping the `@marketplace` suffix on `plugin_name`, meant
+            # a V1 manifest 2.1.28x has not yet migrated to V2 discovered
+            # no plugins at all.
             entry = entry if isinstance(entry, dict) else {}
-            plugin_name = key
+            plugin_name = key.split("@", 1)[0]
             if entry.get("enabled") is False:
                 continue
-            explicit_path = entry.get("path")
-            root = Path(explicit_path) if explicit_path else (cache_dir / plugin_name)
+            install_path = entry.get("installPath")
+            root = Path(install_path) if install_path else (cache_dir / plugin_name)
             if root.is_dir():
                 out.append((plugin_name, root))
     return out

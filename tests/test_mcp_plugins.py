@@ -336,6 +336,87 @@ def test_v2_manifest_disabled_via_enabled_plugins_settings(ctx: Ctx):
             os.environ["CLAUDE_CONFIG_DIR"] = old
 
 
+def _write_v1_manifest(claude_dir: Path, key: str, *, install_path=None, enabled=None) -> None:
+    """H5c finding 21: writes a REAL (not yet 2.1.28x-migrated) V1
+    installed_plugins.json record -- a single dict per key (no top-level
+    `"version": 2`), using the SAME `<name>@<marketplace>` key shape and
+    `installPath` field a V2 record uses; only the array-of-scoped-records
+    wrapping is V2-only."""
+    from rolo_claude.config.plugins import installed_plugins_manifest_path
+    manifest_path = installed_plugins_manifest_path()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {}
+    if install_path is not None:
+        record["installPath"] = str(install_path)
+    if enabled is not None:
+        record["enabled"] = enabled
+    manifest_path.write_text(json.dumps({"plugins": {key: record}}), encoding="utf-8")
+
+
+@test
+def test_h5c_f21_v1_manifest_installpath_and_marketplace_suffix_stripped(ctx: Ctx):
+    """H5c finding 21: `config/plugins.py`'s V1 branch (no top-level
+    `"version": 2`) used to read an invented `path` field (the real binary
+    never writes one) and kept the `@marketplace` suffix on the plugin
+    name -- a V1 manifest that 2.1.28x has not yet migrated to V2 therefore
+    discovered NO plugins at all. The fix reads `installPath` (the SAME
+    field name a V2 record uses) and strips the suffix exactly like the
+    V2 branch does."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        # Deliberately NOT under plugins/cache/<key> -- only reachable via
+        # `installPath`, proving the fix reads that field rather than
+        # falling back to the cache-dir-by-name guess (which would also
+        # fail here since the guess would use the UNSTRIPPED "foo@some-
+        # marketplace" as the directory name).
+        plugin_root = claude_dir.parent / "v1plugin-elsewhere"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {
+                "command": sys.executable, "args": ["-m", "tests.helpers.fake_mcp_server"]}}}),
+            encoding="utf-8")
+        _write_v1_manifest(claude_dir, "foo@some-marketplace", install_path=plugin_root)
+        servers, notices = discover_plugin_mcp_servers(env={})
+        expected_name = plugin_server_name("foo", "fakeserver")
+        ctx.check(f"V1 plugin discovered via installPath, name has NO @marketplace suffix, got {list(servers)}",
+                  expected_name in servers)
+        ctx.check(f"no notices for a clean discovery, got {notices}", notices == [])
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_h5c_f21_v1_manifest_disabled_flag_still_honoured(ctx: Ctx):
+    """The F21 fix only changes the root-path field (`path` -> `installPath`)
+    and strips the @marketplace suffix -- it must not disturb the
+    pre-existing per-record `enabled: False` gate that real V1 manifests
+    use (V2 gates via settings `enabledPlugins` instead; V1 does not)."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v1plugin-off"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {"command": "x"}}}), encoding="utf-8")
+        _write_v1_manifest(claude_dir, "foo@mp", install_path=plugin_root, enabled=False)
+        servers, _ = discover_plugin_mcp_servers(env={})
+        expected_name = plugin_server_name("foo", "fakeserver")
+        ctx.check("enabled: False on a V1 record -> not discovered", expected_name not in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
 @test
 def test_v2_manifest_defaults_enabled_when_settings_say_nothing(ctx: Ctx):
     """A freshly-cloned/installed V2 plugin the settings' `enabledPlugins`

@@ -297,6 +297,80 @@ def test_h5b_f17_thinking_tool_turn_through_real_session_merges_message_start_us
         mock.stop()
 
 
+@test
+def test_h5c_f05_steer_mid_thinking_before_signature_delta_logs_no_empty_node(ctx: Ctx):
+    """H5b/H5c finding 5: a steer noticed WHILE a native thinking block is
+    still streaming, before its `signature_delta` ever arrives, used to
+    log that block anyway (`{"type": "thinking", "text": "...", "signature":
+    ""}`), which `prepare_anthropic_messages` then drops -- leaving an
+    assistant node with EMPTY content permanently in the log, 400ing every
+    later request on this route. Drives a REAL `Session` against
+    `MockAnthropic`'s own `thinking-and-signature` scenario (thinking_delta
+    BEFORE signature_delta -- the exact ordering this finding needs),
+    single-stepping the turn generator so the steer lands right after the
+    first `thinking_delta` and before anything else."""
+    from tests.helpers.fake_home import build_fake_home
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+
+    fh = build_fake_home()
+    mock = MockAnthropic().start()
+    try:
+        model = "ant:claude-h5c-f05-thinking-and-signature"
+        session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
+        session = Session(
+            cwd=fh["proj"], model_ref=parse_model_ref(model), model_profile=ModelProfile(),
+            creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+            state_dir=Path(tempfile.mkdtemp(prefix="f05-thinking-steer-")), model_label=model,
+            session_context=session_ctx, max_turns=10,
+        )
+        gen = session.turn("please think it over")
+        seen = []
+        for _ in range(50):
+            ev = next(gen)
+            seen.append(ev)
+            if ev.kind == "thinking_delta":
+                break
+        else:
+            raise AssertionError(f"never saw a thinking_delta, got {[e.kind for e in seen]}")
+
+        queued = session.steer("stop thinking, redirect now")
+        ctx.check("steer() accepted right after the first thinking_delta", queued is True)
+
+        kinds = []
+        for ev in gen:
+            kinds.append(ev.kind)
+        ctx.check(f"no signature_delta-derived content ever streamed after the steer, got {kinds}",
+                   "steer_applied" in kinds)
+        ctx.check(f"the model was called a second time, got {len(mock.requests)} requests", len(mock.requests) == 2)
+
+        assistant_nodes = [n for n in session.log.nodes() if n.get("type") == "assistant"]
+        ctx.check(f"no empty-content assistant node was ever logged, got {[n.get('content') for n in assistant_nodes]}",
+                   all(n.get("content") for n in assistant_nodes))
+        ctx.check(f"exactly one assistant node logged (the cut call logged nothing), got "
+                  f"{[n.get('type') for n in session.log.nodes()]}", len(assistant_nodes) == 1)
+
+        # The SECOND request's own wire body must never carry a broken
+        # (empty-content, or unsigned-thinking-only) assistant message --
+        # `prepare_anthropic_messages` must have dropped it and merged the
+        # two adjacent user turns into one.
+        second_body = mock.requests[1]["body"]
+        for m in second_body.get("messages", []):
+            if m.get("role") == "assistant":
+                ctx.check(f"every replayed assistant message has real content, got {m}", bool(m.get("content")))
+        roles = [m.get("role") for m in second_body.get("messages", [])]
+        ctx.check(f"no two adjacent user messages in the replayed wire body, got roles={roles}",
+                   all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)))
+
+        user_texts = [b.get("text") for n in session.log.nodes() if n.get("type") == "user"
+                      for b in (n.get("content") or []) if isinstance(b, dict)]
+        ctx.check(f"the steer text is logged as a user message, got {user_texts}",
+                   "stop thinking, redirect now" in user_texts)
+    finally:
+        mock.stop()
+
+
 # ---------------------------------------------------------------------------
 # build_anthropic_request_body / cache_control / effort mapping (unit-level)
 # ---------------------------------------------------------------------------
@@ -394,34 +468,108 @@ def test_h5b_f15_thinking_block_text_renamed_to_thinking_field_on_replay(ctx: Ct
 
 
 @test
-def test_h5b_f15_unsigned_or_empty_thinking_and_empty_text_blocks_dropped(ctx: Ctx):
+def test_h5b_f15_unsigned_thinking_and_empty_text_blocks_dropped(ctx: Ctx):
     """finding 15: a partial block a steer/abort/interrupt cut short
-    before it ever finished forming (no signature yet, or genuinely
-    empty) must be DROPPED from the replay, not sent as malformed."""
+    before it ever finished forming (no signature yet, or a genuinely
+    empty text block) must be DROPPED from the replay, not sent as
+    malformed. H5b finding 16 (this overrides the OLD, wrong assumption
+    that ANY empty-text thinking block should be dropped): a SIGNED block
+    with empty text is the normal "display omitted" shape and must be kept
+    and echoed back unchanged, never dropped just because `text` is empty."""
     from rolo_claude.providers.request import prepare_anthropic_messages
 
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
         {"role": "assistant", "content": [
-            {"type": "thinking", "text": "cut short mid-thought", "signature": ""},  # no signature yet
-            {"type": "thinking", "text": "", "signature": "SIG"},  # empty text
-            {"type": "text", "text": ""},  # empty text block
+            {"type": "thinking", "text": "cut short mid-thought", "signature": ""},  # no signature yet -- dropped
+            {"type": "thinking", "text": "", "signature": "SIG"},  # signed, empty text -- KEPT (finding 16)
+            {"type": "text", "text": ""},  # empty text block -- dropped
             {"type": "text", "text": "the real answer"},
         ]},
     ]
     prepared = prepare_anthropic_messages(messages)
     content = prepared[1]["content"]
-    ctx.check(f"unsigned/empty blocks dropped, only the real answer survives, got {content}",
-              content == [{"type": "text", "text": "the real answer"}])
+    ctx.check(f"unsigned thinking and empty text blocks dropped, signed-empty thinking kept, got {content}",
+              content == [{"type": "thinking", "thinking": "", "signature": "SIG"},
+                          {"type": "text", "text": "the real answer"}])
+
+
+@test
+def test_h5c_f05_empty_assistant_message_dropped_and_adjacent_user_turns_merged(ctx: Ctx):
+    """H5c finding 5: an assistant message whose ONLY block was an unsigned
+    thinking block (a steer cut it short before signature_delta, or the log
+    predates the H5c loop.py fix that stops this from being logged at all)
+    ends up with NO content once the unsigned block is dropped -- the whole
+    message must be dropped too (Anthropic rejects empty assistant
+    content), and the two now-adjacent user messages either side of it
+    merged into one (Anthropic requires alternating roles)."""
+    from rolo_claude.providers.request import prepare_anthropic_messages
+
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "original prompt"}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "text": "cut short mid-thought", "signature": ""},  # unsigned -- only block
+        ]},
+        {"role": "user", "content": [{"type": "text", "text": "steer text"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "real reply"}]},
+    ]
+    prepared = prepare_anthropic_messages(messages)
+    ctx.check(f"the empty assistant message was dropped entirely, got {prepared}",
+              not any(m.get("role") == "assistant" and not m.get("content") for m in prepared))
+    roles = [m.get("role") for m in prepared]
+    ctx.check(f"roles now strictly alternate (no two adjacent user messages), got {roles}",
+              all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)))
+    ctx.check(f"exactly 2 messages remain (merged user+user, then the real reply), got {len(prepared)}",
+              len(prepared) == 2)
+    ctx.check(f"the merged user message carries BOTH original texts, got {prepared[0]}",
+              prepared[0] == {"role": "user", "content": [
+                  {"type": "text", "text": "original prompt"}, {"type": "text", "text": "steer text"}]})
 
 
 @test
 def test_build_body_output_config_effort_for_opus(ctx: Ctx):
+    """H5c finding 16: an adaptive-capable model (Opus, unconditionally)
+    gets BOTH `thinking: {type: "adaptive"}` AND `output_config.effort`
+    together -- never `budget_tokens` (which these models reject with a
+    400)."""
     body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                                          tools=None, route=_route("claude-opus-4"), profile=_profile(), effort="high")
     ctx.check(f"output_config.effort for an Opus-class id, got {body.get('output_config')}",
               body.get("output_config") == {"effort": "high"})
-    ctx.check("no thinking.budget_tokens on the Opus/output_config path", "thinking" not in body)
+    ctx.check(f"thinking is the adaptive shape, got {body.get('thinking')}",
+              body.get("thinking") == {"type": "adaptive"})
+    ctx.check("no budget_tokens anywhere on the adaptive path",
+              "budget_tokens" not in (body.get("thinking") or {}))
+
+
+@test
+def test_h5c_f16_sonnet_5_gets_adaptive_thinking_not_budget_tokens(ctx: Ctx):
+    """H5c finding 16: `map_effort_anthropic` used to send `thinking.
+    budget_tokens` to every non-opus, non-fable id -- including Sonnet 5,
+    which REJECTS `budget_tokens` with a 400 (it has no budget-based
+    thinking mode at all, only adaptive). Sonnet 4.6 gets the same
+    treatment (recommended per Anthropic's own docs), while Sonnet 4.5
+    (older, budget_tokens-only) must be UNAFFECTED by this fix."""
+    for model_id in ("claude-sonnet-5", "claude-sonnet-4.6"):
+        body = build_anthropic_request_body(
+            system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=None, route=_route(model_id), profile=_profile(), effort="high",
+        )
+        ctx.check(f"{model_id}: thinking is adaptive, got {body.get('thinking')}",
+                  body.get("thinking") == {"type": "adaptive"})
+        ctx.check(f"{model_id}: output_config.effort present too, got {body.get('output_config')}",
+                  body.get("output_config") == {"effort": "high"})
+        ctx.check(f"{model_id}: no budget_tokens anywhere, got {body.get('thinking')}",
+                  "budget_tokens" not in (body.get("thinking") or {}))
+
+    # Sonnet 4.5 (older, pre-4.6) is UNCHANGED -- still budget_tokens.
+    old_body = build_anthropic_request_body(
+        system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        tools=None, route=_route("claude-sonnet-4.5"), profile=_profile(), effort="high",
+    )
+    ctx.check(f"claude-sonnet-4.5: still budget_tokens-based (unaffected), got {old_body.get('thinking')}",
+              old_body.get("thinking", {}).get("type") == "enabled"
+              and "budget_tokens" in old_body.get("thinking", {}))
 
 
 @test

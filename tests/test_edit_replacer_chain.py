@@ -385,6 +385,54 @@ def test_h5b_f02_edit_tool_replace_all_rewrites_every_fuzzy_occurrence(ctx: Ctx)
     ctx.check("reports 2 replacements", "2 replacement(s)" in result.content)
 
 
+@test
+def test_h5c_f17_overlapping_fuzzy_candidates_are_never_all_accepted(ctx: Ctx):
+    """H5c finding 17: `IndentationFlexible` against a repeated single line
+    produces OVERLAPPING sliding-window candidates (a 2-line pattern over
+    3 identical lines matches at line-index 0 AND line-index 1 -- the
+    second window starts INSIDE the first). Accepting both under
+    `replace_all` corrupted the file (`EditTool.run`'s own splice loop
+    silently drops the real content between two overlapping matches) --
+    verified: `find_replacement` returned 2 "matches" whose 2nd start was
+    BEFORE the 1st's end."""
+    content = "a = 1\na = 1\na = 1\n"
+    old = "  a = 1\n  a = 1"  # fake leading indent -- forces the IndentationFlexible stage
+    matches, stage, err = find_replacement(content, old, replace_all=True)
+    ctx.check(f"find_replacement returned some matches, got {matches!r} err={err!r}", matches)
+    ctx.check(f"the overlapping candidate was dropped -- exactly ONE non-overlapping match survives, "
+              f"got {[(m.start, m.end) for m in matches]}", len(matches) == 1)
+
+
+@test
+def test_h5c_f17_edit_tool_replace_all_never_corrupts_the_file_on_overlap(ctx: Ctx):
+    """H5c finding 17, end to end through the real tool: the review's own
+    verified repro -- `"a = 1\\na = 1\\na = 1\\n"` with old `"  a = 1\\n  a
+    = 1"` and `replace_all` used to become `"BB\\n"` (silently dropping
+    the third line and mis-reporting "2 replacement(s)"). Must now either
+    make exactly ONE (non-overlapping) replacement -- with NO file content
+    lost -- or refuse outright; corruption is the only unacceptable
+    outcome."""
+    d = _tmpdir("edit-f17-overlap-")
+    initial = "a = 1\na = 1\na = 1\n"
+    f, result = _read_then_edit(d, "overlap.py", initial, "  a = 1\n  a = 1", "B", replace_all=True)
+    if result.is_error:
+        # Refusing outright is an acceptable outcome too -- the file must
+        # be untouched in that case.
+        ctx.check("refused -> file untouched", f.read_text(encoding="utf-8") == initial)
+        return
+    updated = f.read_text(encoding="utf-8")
+    ctx.check(f"exactly one replacement was reported, got {result.content!r}", "1 replacement(s)" in result.content)
+    # The old, corrupted behaviour dropped the trailing "a = 1" line
+    # entirely (result was "BB\n", 3 bytes, from an 18-byte file) -- the
+    # untouched third line (or whatever legitimately remains outside the
+    # ONE replaced window) must still be present.
+    ctx.check(f"no content was silently dropped -- the untouched trailing line survives, got {updated!r}",
+              "a = 1" in updated)
+    ctx.check(f"the replacement text is present, got {updated!r}", "B" in updated)
+    ctx.check(f"nothing resembling the old corrupted 'BB' double-collapse happened, got {updated!r}",
+              updated != "BB\n")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

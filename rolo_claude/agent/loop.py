@@ -31,6 +31,7 @@ import dataclasses
 import json
 import logging
 import os
+import queue
 import threading
 import time
 import uuid
@@ -43,7 +44,7 @@ from rolo_claude.agent.planmode import PLAN_MODE_NOTE, ensure_plan_file, write_p
 from rolo_claude.agent.jobs import JobRegistry
 from rolo_claude.agent.subagent import AgentRuntime
 from rolo_claude.agent.compact import (
-    build_files_read_snapshot, build_summary_instruction, resolve_knobs, select_verbatim_tail,
+    CHARS_PER_TOKEN, build_files_read_snapshot, build_summary_instruction, resolve_knobs, select_verbatim_tail,
     should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
 )
 from rolo_claude.agent.compact import opencode_usable as _opencode_usable
@@ -354,6 +355,30 @@ def _total_prompt_tokens(usage: Optional[dict]) -> Optional[int]:
 # shape rules a provider might otherwise reject.
 _SUMMARY_TOOL_RESULT_CHARS = 2000
 
+# H5c finding 22: the OLD `_serialize_transcript_for_summary` flattened the
+# WHOLE (already-pruned) transcript with no bound on the TOTAL result size --
+# each individual tool_result was capped at `_SUMMARY_TOOL_RESULT_CHARS`, but
+# a transcript with hundreds of turns/short results could still overflow the
+# fallback call's own (small) context window a second time. Bounded to a
+# SHARE of the model's context window (never a flat constant, so a huge-
+# context model still gets a generous fallback), between a floor that is
+# never useless and an absolute ceiling that keeps the fallback body itself
+# reasonably sized regardless of context window. "Serialise only the HEAD" --
+# this is a last-resort emergency fallback with no further retry, so the
+# earliest content (the original request/intent, most likely to matter to a
+# summary) is kept and any excess tail is dropped, never the reverse.
+_SUMMARY_FALLBACK_HEAD_SHARE = 0.5
+_SUMMARY_FALLBACK_MIN_CHARS = 20_000
+_SUMMARY_FALLBACK_MAX_CHARS = 400_000
+_SUMMARY_FALLBACK_TRUNCATED_MARKER = "\n\n[... transcript truncated to fit the context window ...]"
+
+# H5c finding 22: after a FAILED auto-compaction attempt (exhausted the
+# summarisation call's own retry ladder, or the overflow fallback also
+# failed), `_maybe_auto_compact` skips this many FURTHER steps before trying
+# again, instead of repeating the whole (potentially slow, wait-heavy) attempt
+# on every single step.
+_COMPACTION_FAILURE_BACKOFF_STEPS = 5
+
 
 def _content_text_for_serialize(content) -> str:
     if isinstance(content, str):
@@ -369,15 +394,25 @@ def _content_text_for_serialize(content) -> str:
     return str(content) if content is not None else ""
 
 
-def _serialize_transcript_for_summary(messages: list) -> str:
+def _serialize_transcript_for_summary(messages: list, *, max_chars: Optional[int] = None) -> str:
     """Flatten `messages` (Anthropic-shaped) to OpenCode's own plain-text
     head serialisation: `[User]: ...`, `[Assistant]: ...`, `[Assistant
     reasoning]: ...`, `[Assistant tool call]: name({...})`, `[Tool
     result]: <first 2000 chars>\\n[truncated]` -- one line group per
     message, in order. Used ONLY as the fallback body for the
     summarisation call itself (never logged, never sent as the ordinary
-    per-step request) when the exact structured prefix overflows."""
+    per-step request) when the exact structured prefix overflows.
+
+    H5c finding 22: `max_chars`, when given, bounds the TOTAL returned
+    string (never just each individual tool_result) -- keeping only the
+    HEAD (a message-group boundary is never split mid-group) and dropping
+    any excess tail, with a trailing marker noting the cut. Without this,
+    a transcript with many turns/short results could overflow the
+    fallback call's OWN small context window a second time, with no
+    further retry available."""
     lines: list = []
+    truncated = False
+    running_chars = 0
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -385,33 +420,49 @@ def _serialize_transcript_for_summary(messages: list) -> str:
         content = msg.get("content")
         if not isinstance(content, list):
             continue
+        group: list = []
         if role == "user":
             for b in content:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "text" and b.get("text"):
-                    lines.append(f"[User]: {b['text']}")
+                    group.append(f"[User]: {b['text']}")
                 elif b.get("type") == "tool_result":
                     text = _content_text_for_serialize(b.get("content"))
                     head = text[:_SUMMARY_TOOL_RESULT_CHARS]
                     suffix = "\n[truncated]" if len(text) > _SUMMARY_TOOL_RESULT_CHARS else ""
-                    lines.append(f"[Tool result]: {head}{suffix}")
+                    group.append(f"[Tool result]: {head}{suffix}")
         elif role == "assistant":
             for b in content:
                 if not isinstance(b, dict):
                     continue
                 btype = b.get("type")
                 if btype == "text" and b.get("text"):
-                    lines.append(f"[Assistant]: {b['text']}")
+                    group.append(f"[Assistant]: {b['text']}")
                 elif btype == "thinking" and b.get("text"):
-                    lines.append(f"[Assistant reasoning]: {b['text']}")
+                    group.append(f"[Assistant reasoning]: {b['text']}")
                 elif btype == "tool_use":
                     try:
                         args = json.dumps(b.get("input") or {}, ensure_ascii=False)
                     except (TypeError, ValueError):
                         args = str(b.get("input"))
-                    lines.append(f"[Assistant tool call]: {b.get('name')}({args})")
-    return "\n".join(lines)
+                    group.append(f"[Assistant tool call]: {b.get('name')}({args})")
+        if not group:
+            continue
+        group_chars = sum(len(g) + 1 for g in group)
+        # H5c finding 22: cap the TOTAL size -- keep the HEAD, never split a
+        # message's own group of lines in half. Always keep at least the
+        # very first non-empty group even if it alone exceeds the budget
+        # (an empty fallback body helps no one).
+        if max_chars is not None and lines and running_chars + group_chars > max_chars:
+            truncated = True
+            break
+        lines.extend(group)
+        running_chars += group_chars
+    text = "\n".join(lines)
+    if truncated:
+        text += _SUMMARY_FALLBACK_TRUNCATED_MARKER
+    return text
 
 
 _PROGRESS_CHUNK_CAP_CHARS = 200_000  # review finding 15: bound, never unbounded
@@ -453,6 +504,29 @@ class _StepResult:
         self.tool_call_flags = tool_call_flags or {}  # tool_use id -> {truncated_by_length|malformed_json,...}
 
 
+def _assistant_block_is_replayable(b: dict) -> bool:
+    """H5b finding 5: would this ONE block survive
+    `providers.request.prepare_anthropic_messages`'s own replay filter (or
+    is it simply worth keeping) -- used to decide whether a whole step's
+    `assistant_blocks` are worth logging at all. A `tool_use` always
+    survives (dispatch needs it logged so its `tool_result` has something
+    to pair with). A `text` block survives only with real (non-whitespace)
+    text -- a steer noticed at/before `message_start` never streamed any.
+    A `thinking` block survives iff it has a real `signature` (finding 16:
+    a SIGNED block with EMPTY text is the normal "display omitted" shape
+    and must be kept; only an UNSIGNED block -- cut short before
+    `signature_delta`, e.g. a steer mid-thinking -- is not replayable).
+    Any other block type (an image, ...) is never filtered here."""
+    btype = b.get("type") if isinstance(b, dict) else None
+    if btype == "tool_use":
+        return True
+    if btype == "text":
+        return bool((b.get("text") or "").strip())
+    if btype == "thinking":
+        return bool(b.get("signature"))
+    return True
+
+
 class Session:
     """One conversation against one model. `session_context.system_prompt`
     is computed ONCE by the caller and logged as the session's single
@@ -482,7 +556,9 @@ class Session:
         self.max_turns = max_turns
         # H5 scope D: per-family fallback pricing (model.CostMeter._fallback_cost)
         # for whenever a response has no usage.cost of its own.
-        self.cost_meter = CostMeter(price_in=model_profile.price_in, price_out=model_profile.price_out)
+        self.cost_meter = CostMeter(price_in=model_profile.price_in, price_out=model_profile.price_out,
+                                     price_cache_read=model_profile.price_cache_read,
+                                     price_cache_write=model_profile.price_cache_write)
         self.tool_registry: ToolRegistry = session_context.tool_registry
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         self.provider_profile: ProviderProfile = resolve_profile(self.route)
@@ -500,6 +576,18 @@ class Session:
         # with no new logic of its own. Every other caller keeps getting a
         # fresh, private Event exactly as before (this param is additive).
         self.abort = abort if abort is not None else threading.Event()
+        # H5c finding 7: only the Session that OWNS its abort Event (no
+        # `abort=` was passed in -- every top-level Session) may `.clear()`
+        # it at the start of a turn. A sub-agent shares the PARENT's own
+        # Event object (see the comment above) so it observes the SAME
+        # Esc/Ctrl+C signal -- but every child's `turn()` used to call
+        # `self.abort.clear()` unconditionally too, on that SAME shared
+        # object: verified with 5 concurrent Agent calls (a pool of 4 queues
+        # one) -- Esc at +0.89s correctly interrupted children 0-3, but
+        # child 4 started at +1.09s, ITS OWN `turn()` cleared the shared
+        # Event, and both child 4 AND the parent's own next model call then
+        # ran to completion as if Esc had never happened.
+        self._owns_abort = abort is None
         # review finding 2: set by Controller.quit() (an atomic attribute
         # write, safe from any thread) BEFORE it queues run()'s `None`
         # sentinel -- see run()'s own comment for why this must be a
@@ -519,6 +607,14 @@ class Session:
         # (no lock needed for THIS attribute: the write happens-before the
         # read, same thread, `_pump_turn` -> `run()` is fully sequential).
         self._leftover_steer_texts: list = []
+        # H5c finding 14: `@file` mentions ingested from a steer, `@path`
+        # snapshots from a prompt-kind slash command, and an inline `!cmd`
+        # pair are all UI-thread (or a Textual worker thread, for `!cmd`)
+        # writes to `self.log` that must never race the SESSION's own
+        # worker thread mid-turn -- queued here (same `_steer_lock`) while
+        # busy, applied by `_apply_pending_steers_events` at the SAME safe
+        # point a steer's own text is (see `queue_log_write`).
+        self._pending_worker_writes: list = []
         # H2 scope D: ONE PermissionEngine + ONE pair of read_cache/
         # bash_state dicts for the session's WHOLE lifetime -- every
         # ToolContext built in `_dispatch_tools` shares these same dict
@@ -565,6 +661,10 @@ class Session:
         # trigger), which would otherwise loop forever re-summarising the
         # same freshly-compacted history.
         self._just_compacted: bool = False
+        # H5c finding 3/22: how many MORE steps to skip auto-compaction for
+        # after a FAILED attempt (never retried immediately -- see
+        # `_maybe_auto_compact`'s own docstring).
+        self._compaction_backoff_remaining: int = 0
         # print-mode `ask` denials accumulate here for the json result's
         # `permission_denials` (rolo_claude/output.py reads this list).
         self.permission_denials: list = []
@@ -575,6 +675,16 @@ class Session:
         # non-blocking "unavailable in this session" denial stays the
         # behaviour for `-p` and for a bare Session in a unit test.
         self.interactive = False
+        # H5c finding 8: a FOREGROUND sub-agent of an interactive parent
+        # gets a live, answerable permission card too, WITHOUT flipping
+        # `self.interactive` itself (which also gates AskUserQuestion/
+        # ExitPlanMode below -- out of this finding's scope, and would
+        # hang a child forever on those since only `_permission_waiters`,
+        # not `_question_waiters`/`_plan_waiters`, is ever shared with the
+        # parent). Set by `agent/subagent.py`'s `_build_child_session`;
+        # every other Session (including a print-mode/background child)
+        # leaves this False and keeps the old immediate-denial fallback.
+        self._subagent_live_asks = False
         self._permission_waiters: dict = {}
         # U2: the AskUserQuestion round trip parks here, keyed by tool_use
         # id, exactly like `_permission_waiters`.
@@ -726,7 +836,10 @@ class Session:
         if self.hook_runner is None or not self.hook_runner.has_hooks("SessionStart"):
             return
         payload = self.hook_runner.payload("SessionStart", extra={"source": source})
-        outcome = self.hook_runner.run("SessionStart", payload, matched=source)
+        # H5c finding 12: `abort` threaded through -- Esc during a slow
+        # SessionStart command hook (startup/resume/clear/compact) used to
+        # be completely ignored.
+        outcome = self.hook_runner.run("SessionStart", payload, matched=source, abort=self.abort)
         if outcome.additional_context:
             self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
         # finding 6: re-read on EVERY SessionStart source, not just
@@ -769,10 +882,27 @@ class Session:
         self._fire_session_end("clear")
         self._reset_prune_state()  # H5b finding 2: no old log left for these ids to refer to
         self.log = SessionLog(self.cwd)
+        if self.hook_runner is not None:
+            # H5c finding 11: update EVERY session-keyed value the hook
+            # runner carries BEFORE firing SessionStart(clear) below --
+            # otherwise the hook's own payload (session_id/transcript_path)
+            # AND the CLAUDE_ENV_FILE path a command hook is launched with
+            # (hooks.py's `env_file_path(self.session_id)`, derived from
+            # THIS attribute) both still name the OLD session. A clear
+            # hook's own `export FOO=bar` then lands in a file nobody ever
+            # reads back -- `_fire_session_start`'s own post-hook re-read a
+            # few lines below already correctly uses the FRESH
+            # `self.log.session_id`, but that only helps once the hook
+            # itself was actually told to write to the SAME file.
+            self.hook_runner.session_id = self.log.session_id
+            self.hook_runner.transcript_path = str(self.log.path)
         self.turn_count = 0
         self._last_prompt_tokens = None
         self._just_compacted = False
-        self.cost_meter = CostMeter(price_in=self.cost_meter.price_in, price_out=self.cost_meter.price_out)
+        self._compaction_backoff_remaining = 0
+        self.cost_meter = CostMeter(price_in=self.cost_meter.price_in, price_out=self.cost_meter.price_out,
+                                     price_cache_read=self.cost_meter.price_cache_read,
+                                     price_cache_write=self.cost_meter.price_cache_write)
         self.permission_denials = []
 
         initial_tools = (self.tool_registry.definitions_for(self.session_catalog.names)
@@ -1158,12 +1288,17 @@ class Session:
                 # own content_block_stop (input never parsed) is dropped;
                 # a block that DID already close (rare, but the steer may
                 # have been noticed on the very next chunk after one
-                # finished) survives and is dispatched normally by
-                # `_turn_body` -- "running tools allowed to finish" never
-                # applied to it in the first place, since it hadn't
-                # started. Falls straight through to a normal, un-retried
-                # result (never the empty-completion-retry path below --
-                # an intentional cut is not a provider failure).
+                # finished) still SURVIVES into the logged assistant
+                # message (it must be, to keep wire pairing valid -- see
+                # `_assistant_block_is_replayable`), but H5c finding 6:
+                # `_dispatch_tools`' own top-of-loop `_pending_steer()`
+                # check now stops it from ever being DISPATCHED -- "running
+                # tools allowed to finish" never applied to it in the first
+                # place, since `dispatch()` was never actually called for
+                # it (it hadn't started, just finished FORMING). Falls
+                # straight through to a normal, un-retried result (never
+                # the empty-completion-retry path below -- an intentional
+                # cut is not a provider failure).
                 for idx in list(partial_json.keys()):
                     if idx < len(assistant_blocks):
                         assistant_blocks[idx] = None
@@ -1419,11 +1554,11 @@ class Session:
             self._compaction_knobs,
         )
         # finding 1: never auto-compact twice in a row with no successful
-        # real model step between -- see `self._just_compacted`'s own
-        # docstring. `_just_compacted` is reset unconditionally right after
-        # this check so the NEXT `_step`'s usage update starts a fresh
-        # decision (a compaction that DID free enough room naturally clears
-        # the trigger anyway; this guard only bites when it didn't).
+        # real model step between -- `_just_compacted` is reset
+        # unconditionally right after this ONE check so the NEXT step's
+        # usage update starts a fresh decision (a compaction that DID free
+        # enough room naturally clears the trigger anyway; this guard only
+        # bites when it didn't).
         if do_it and self._just_compacted:
             log.warning(
                 "skipping back-to-back auto-compaction: prompt still ~%d tokens (trigger ~%d) "
@@ -1438,9 +1573,46 @@ class Session:
                                      reason="still over the trigger right after the previous compaction")
             do_it = False
         self._just_compacted = False
-        if do_it:
-            compacted = yield from self._run_compaction(turn_no, trigger="auto")
-            self._just_compacted = bool(compacted)
+        if not do_it:
+            return
+        # H5c finding 22: never retry immediately after a FAILED
+        # auto-compaction attempt (a persistent 429, or a summariser
+        # failure) -- back off for a few steps instead of repeating the
+        # whole summarisation call (plus its own retry ladder/waits) on
+        # every single step. Also armed below when a compaction RAN but
+        # (finding 3) left the log's estimate still at/above the trigger --
+        # both cases mean "that attempt bought us nothing, don't repeat it
+        # right away". Ticks down by one every step it suppresses.
+        if self._compaction_backoff_remaining > 0:
+            self._compaction_backoff_remaining -= 1
+            yield events.compaction(phase="skipped", trigger="auto", turn=turn_no,
+                                     reason=(f"backing off after a failed/ineffective auto-compaction attempt "
+                                             f"({self._compaction_backoff_remaining} more step(s) before retrying)"))
+            return
+        compacted = yield from self._run_compaction(turn_no, trigger="auto")
+        self._just_compacted = bool(compacted)
+        if not compacted:
+            self._compaction_backoff_remaining = _COMPACTION_FAILURE_BACKOFF_STEPS
+            return
+        # H5b/H5c finding 3: a compaction that RAN but left the log's own
+        # estimate STILL at or above the SAME trigger achieved nothing
+        # useful for this decision -- the unavoidable retained tail (plus
+        # system prompt/re-injected snapshots) alone already exceeds a
+        # trigger this tight, so an immediate retry next step would just
+        # repeat the identical doomed summarisation call. Treated the same
+        # as an outright failure for throttling purposes (back off, rather
+        # than the OLD one-shot-only guard's every-OTHER-step retry cadence
+        # -- verified: a 32,768/29,491 profile made 3 summariser calls, at
+        # steps 1, 3 and 5, for one 5-step Read turn).
+        after_system, after_messages, _ = derive_request(self.log, tools=None)
+        tokens_after = _rough_estimate(after_system, after_messages)
+        if tokens_after >= trigger_tokens:
+            log.warning(
+                "auto-compaction ran but the log is still ~%d tokens (trigger ~%d) -- the retained "
+                "tail may be structurally too big for this window; backing off %d step(s)",
+                tokens_after, trigger_tokens, _COMPACTION_FAILURE_BACKOFF_STEPS,
+            )
+            self._compaction_backoff_remaining = _COMPACTION_FAILURE_BACKOFF_STEPS
 
     def _compaction_model_override(self):
         """H8: `compactionModel` (settings.json/config.json, resolved by
@@ -1603,7 +1775,9 @@ class Session:
         if self.hook_runner is not None and self.hook_runner.has_hooks("PreCompact"):
             payload = self.hook_runner.payload("PreCompact", extra={"trigger": trigger,
                                                                       "custom_instructions": custom_instructions})
-            outcome = self.hook_runner.run("PreCompact", payload, matched=trigger)
+            # H5c finding 12: `abort` threaded through -- Esc during a slow
+            # PreCompact command hook used to be completely ignored.
+            outcome = self.hook_runner.run("PreCompact", payload, matched=trigger, abort=self.abort)
             if outcome.additional_context:
                 self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
 
@@ -1630,8 +1804,19 @@ class Session:
                         # once more with that far smaller/simpler shape
                         # before giving up.
                         tried_fallback = True
+                        # H5c finding 22: bound the fallback body itself to a
+                        # share of THIS model's own context window (chars,
+                        # via the same 4-chars/token rule of thumb used
+                        # everywhere else in this module) -- never unbounded,
+                        # so it cannot overflow the SAME small window a
+                        # second time with no further retry left.
+                        fallback_cap = min(
+                            _SUMMARY_FALLBACK_MAX_CHARS,
+                            max(_SUMMARY_FALLBACK_MIN_CHARS,
+                                int(self.model_profile.context_tokens * CHARS_PER_TOKEN * _SUMMARY_FALLBACK_HEAD_SHARE)),
+                        )
                         call_messages_base = [{"role": "user", "content": [
-                            {"type": "text", "text": _serialize_transcript_for_summary(messages)},
+                            {"type": "text", "text": _serialize_transcript_for_summary(messages, max_chars=fallback_cap)},
                         ]}]
                         call_tools = []
                         log.warning("compaction (%s): summarisation call overflowed on the exact prefix; "
@@ -1724,7 +1909,22 @@ class Session:
             if msg.get("role") == "user":
                 self.log.append_user(msg.get("content") or [])
             elif msg.get("role") == "assistant":
-                self.log.append_assistant(content=msg.get("content") or [], reasoning=msg.get("reasoning"))
+                # H5c finding 16: a thinking block's signature is bound to
+                # the EXACT prefix that preceded it when the model produced
+                # it (Anthropic's "preserved thinking" check) -- the tail
+                # is about to be re-appended right after a brand-new
+                # `<compacted-summary>` node, a COMPLETELY different
+                # prefix, so any signature here is now stale and would
+                # fail that check on the very next request (verified
+                # against the Claude API docs; on Fable 5.1/Opus 5.5, a
+                # replayed signature that doesn't match invalidates the
+                # request outright). Stripped here, once, rather than
+                # replayed and rejected forever after every future
+                # compaction of an already-compacted session.
+                stripped = [b for b in (msg.get("content") or [])
+                            if not (isinstance(b, dict) and b.get("type") == "thinking")]
+                if any(_assistant_block_is_replayable(b) for b in stripped):
+                    self.log.append_assistant(content=stripped, reasoning=msg.get("reasoning"))
 
         if self.hook_runner is not None and self.hook_runner.has_hooks("PostCompact"):
             payload = self.hook_runner.payload("PostCompact", extra={"trigger": trigger, "compact_summary": summary_text})
@@ -1757,7 +1957,14 @@ class Session:
         # `self.abort` set -- reused unchanged, a brand new turn would see
         # it already fired and abort immediately, before ever streaming a
         # single token. Each turn starts with a clean slate.
-        self.abort.clear()
+        # H5c finding 7: but ONLY when this Session OWNS the Event --
+        # a sub-agent shares the PARENT's own abort Event (see `__init__`),
+        # and clearing a SHARED Event here would silently undo an Esc the
+        # user fired for the whole session, from whichever child (or a
+        # queued one that starts after the pool frees a worker) happens to
+        # begin its own turn() next.
+        if self._owns_abort:
+            self.abort.clear()
         self._stop_hook_active = False
         # H4 scope C: a Skill's `allowed-tools` only ever lasts "until the
         # next user message" -- this IS that next user message.
@@ -1770,7 +1977,11 @@ class Session:
             if self.hook_runner is not None and self.hook_runner.has_hooks("UserPromptSubmit"):
                 payload = self.hook_runner.payload("UserPromptSubmit", prompt_id=f"prompt_{turn_no}",
                                                      extra={"prompt": text})
-                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="")
+                # H5c finding 12: `abort` threaded through -- Esc during a
+                # slow UserPromptSubmit command hook used to be completely
+                # ignored (the WHOLE turn couldn't even start until it
+                # returned).
+                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="", abort=self.abort)
                 for msg in outcome.system_messages:
                     yield events.notification(msg)
                 if outcome.blocked:
@@ -1849,10 +2060,27 @@ class Session:
                 final_result = yield from self._step(turn_no, tool_choice="none", no_tools=False)
                 if final_result is not None and final_result is not _OVERFLOW_NEEDS_COMPACTION:
                     self._account_usage(final_result)
-                    self.log.append_assistant(
-                        content=final_result.assistant_blocks, stop_reason=final_result.stop_reason,
-                        request_hash=content_hash_from_oai_body(final_result.body),
-                    )
+                    # H5c finding 20: `tool_choice: "none"` is a REQUEST,
+                    # not a guarantee -- a provider that ignores or
+                    # downgrades it can still return `tool_use` blocks
+                    # here, and this wrap-up call never dispatches
+                    # anything (the turn just ends), so a logged tool_use
+                    # would stay unpaired forever: every LATER request
+                    # carries it with no matching tool_result, which
+                    # OpenAI-dialect routes paper over with a "(no result)"
+                    # placeholder and Anthropic routes 400 on outright.
+                    # Stripped rather than dispatched or synthesized a
+                    # result for -- the model was told not to call tools
+                    # this turn at all.
+                    wrap_up_blocks = [b for b in final_result.assistant_blocks if b.get("type") != "tool_use"]
+                    # H5b finding 5: never persist an empty/unreplayable
+                    # assistant node (a steer can cut this wrap-up call
+                    # short too) -- see `_assistant_block_is_replayable`.
+                    if any(_assistant_block_is_replayable(b) for b in wrap_up_blocks):
+                        self.log.append_assistant(
+                            content=wrap_up_blocks, stop_reason=final_result.stop_reason,
+                            request_hash=content_hash_from_oai_body(final_result.body),
+                        )
                     # Mirrors the ordinary per-step message_end (see below)
                     # so a print-mode JSON result reflects the WRAP-UP
                     # call's own stop_reason/usage, not a stale earlier one.
@@ -1964,10 +2192,22 @@ class Session:
                     # prose-only result rather than silently losing the turn.
 
             req_hash = content_hash_from_oai_body(result.body)  # finding 4: hash the body ACTUALLY SENT
-            self.log.append_assistant(
-                content=result.assistant_blocks, reasoning=result.reasoning,
-                stop_reason=result.stop_reason, request_hash=req_hash,
-            )
+            # H5b finding 5: a steer noticed before any block finished (or
+            # mid-thinking, before signature_delta) leaves NOTHING
+            # replayable in `result.assistant_blocks` -- logging it anyway
+            # used to write `content: []` (or an unsigned thinking-only
+            # block `prepare_anthropic_messages` then drops) permanently
+            # into the log; Anthropic 400s on every LATER request once that
+            # node is there. Log nothing for this step instead (mirrors the
+            # abort path's own "nothing to log if there's no partial text"
+            # rule above) -- a genuine tool_use always counts as replayable
+            # so a call that already closed before the cut still gets
+            # logged (and dispatched) normally.
+            if any(_assistant_block_is_replayable(b) for b in result.assistant_blocks):
+                self.log.append_assistant(
+                    content=result.assistant_blocks, reasoning=result.reasoning,
+                    stop_reason=result.stop_reason, request_hash=req_hash,
+                )
             prompt_tokens = _total_prompt_tokens(result.usage)
             context_pct = None
             if prompt_tokens is not None and self.model_profile.context_tokens:
@@ -1998,8 +2238,14 @@ class Session:
                     # `run_stop` (hooks.py) owns `stop_hook_active`/the
                     # consecutive-block CAP itself (its own counter,
                     # matching Claude Code's exact override message).
+                    # H5c finding 12: `abort` threaded through -- Esc during
+                    # a slow (up to the default 600s) Stop command hook
+                    # used to be completely ignored; the hook process group
+                    # is now killed and `run_stop` returns almost
+                    # immediately once Esc fires (the `reason` computed
+                    # below then correctly reports "interrupted").
                     stop_outcome = self.hook_runner.run_stop("Stop", last_assistant_message=last_text,
-                                                              prompt_id=f"turn_{self.turn_count}")
+                                                              prompt_id=f"turn_{self.turn_count}", abort=self.abort)
                     for msg in stop_outcome.system_messages:
                         yield events.notification(msg)
                     if stop_outcome.blocked:
@@ -2014,7 +2260,13 @@ class Session:
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
                 # finding 3: a message's OWN max_tokens cutoff is not the
                 # SESSION hitting --max-turns -- report it as what it is.
-                reason = "max_tokens" if result.stop_reason == "max_tokens" else "end_turn"
+                # H5c finding 12: an Esc that cut a slow Stop hook short
+                # (above) must be reported honestly too, not as a plain
+                # "end_turn".
+                if self.abort.is_set():
+                    reason = "interrupted"
+                else:
+                    reason = "max_tokens" if result.stop_reason == "max_tokens" else "end_turn"
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
 
@@ -2029,7 +2281,14 @@ class Session:
             if ended:
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
-                yield events.turn_done(turn=turn_no, reason="end_turn")
+                # H5c finding 9: `_dispatch_tools` also returns True when it
+                # ended because `self.abort` fired mid-dispatch (an Esc, or
+                # now a PermissionRequest hook's own `interrupt: true`) --
+                # report that honestly as `reason="interrupted"`, not the
+                # same generic "end_turn" a loop-breaker/plan-mode call
+                # dispatch uses for an ordinary stop.
+                reason = "interrupted" if self.abort.is_set() else "end_turn"
+                yield events.turn_done(turn=turn_no, reason=reason)
                 return
             # else: loop back for another _step() call with the new tool_results
 
@@ -2172,9 +2431,47 @@ class Session:
                 )
                 pr_outcome = self.hook_runner.run("PermissionRequest", pr_payload, matched=name, tool_name=name,
                                                     tool_input=tool_input, tool=tool, abort=self.abort)
-                if pr_outcome.permission_decision in ("allow", "deny"):
+                for msg in pr_outcome.system_messages:
+                    item.setdefault("hook_system_messages", []).append(msg)
+                if pr_outcome.updated_input is not None:
+                    # H5c finding 9: apply `updatedInput`, THEN re-run
+                    # decide() against it -- same pattern (and same
+                    # reasoning) as PreToolUse's own rewrite above: a
+                    # decision computed against the ORIGINAL input must
+                    # never silently survive a rewrite that now matches one
+                    # of the user's own deny/ask rules.
+                    tool_input = pr_outcome.updated_input
+                    item["input"] = tool_input
+                    decision = self.permission_engine.decide(name, tool_input, tool=tool)
+                # H5c finding 9: `updatedPermissions` (2.1.281's real LIST
+                # shape -- hooks.py's own `_apply_updated_permissions_list`
+                # already rejected anything else with a warning) applies
+                # regardless of this call's own allow/deny outcome, exactly
+                # like a live PermissionCard's "session" answer would.
+                if pr_outcome.set_mode:
+                    self.permission_engine.mode = pr_outcome.set_mode
+                for rule_update in pr_outcome.updated_permissions:
+                    self.permission_engine.add_session_rule(rule_update["rule"], rule_update.get("behavior", "allow"))
+                if decision.action != "deny" and pr_outcome.permission_decision in ("allow", "deny"):
                     reason = pr_outcome.permission_decision_reason or f"{pr_outcome.permission_decision}ed by a PermissionRequest hook"
                     decision = Decision(pr_outcome.permission_decision, reason, source="hook")
+                if pr_outcome.continue_ is False:
+                    # H5c finding 9: `interrupt: true` ends the WHOLE TURN,
+                    # not just this one call -- reusing the SAME `self.abort`
+                    # signal Esc itself sets means every existing check
+                    # already threaded through dispatch/streaming reacts
+                    # with no new plumbing: this call (and every remaining
+                    # one in this batch) is synthesized as not-run by
+                    # `_dispatch_tools`'s own top-of-loop abort check, and
+                    # `_turn_body` reports the turn `reason="interrupted"`.
+                    self.abort.set()
+                    text = (pr_outcome.permission_decision_reason
+                            or "Permission denied and the turn was interrupted by a PermissionRequest hook")
+                    item["text"] = text
+                    item["permission_denial"] = {"tool_name": name, "tool_input": tool_input,
+                                                  "reason": text, "suggested_rule": None}
+                    self._fire_permission_denied(name, tool_input, text)
+                    return item
             if decision.action == "deny":
                 text = f"Permission denied: {decision.reason}"
                 item["text"] = text
@@ -2185,32 +2482,36 @@ class Session:
                 return item
             if decision.action == "ask":
                 item["ask_reason"] = decision.reason
-                if not self.interactive:
-                    # no UI is attached (print mode / a bare Session in a test):
+                # H5c finding 8 (closes the H6 v1 gap / D10 must-do): a
+                # FOREGROUND sub-agent of an interactive parent ALSO takes
+                # the live, blocking path below -- `_subagent_live_asks`
+                # (set by `agent/subagent.py`'s `_build_child_session`,
+                # only when the parent is interactive and this child is
+                # not backgrounded) plus a `_permission_waiters` dict
+                # SHARED with the parent (same pattern as the shared
+                # `abort` Event) is what makes this safe: the parent's own
+                # `resolve_permission` (the UI's `Controller.
+                # answer_permission`) already reads from that exact dict,
+                # so it can resolve a CHILD's waiter with no changes on
+                # its side. This only works because `_run_child_to_
+                # completion`/`_run_agent_batch_live` now stream every
+                # child event LIVE (an `on_event` callback, never buffered
+                # until the whole child turn ends) -- the `permission_
+                # request` this method is about to yield reaches the
+                # parent's live stream (and therefore the TUI) BEFORE the
+                # child's own thread blocks on the waiter below.
+                if not (self.interactive or self._subagent_live_asks):
+                    # no UI is attached (print mode / a bare Session in a
+                    # test), OR a BACKGROUND sub-agent (its events are never
+                    # forwarded to any live stream, so a live card for it
+                    # would have nowhere to be shown and would just hang):
                     # resolve immediately as a denial, H2b's behaviour.
-                    #
-                    # H6 known v1 gap (D10) / B must-do: this is ALSO the
-                    # path a non-interactive SUB-AGENT session's own "ask"
-                    # decision takes (`_build_child_session` sets
-                    # `child.interactive = False` outright -- a live,
-                    # blocking permission card mid-sub-agent-run would need
-                    # child event streaming to interleave with the PARENT's
-                    # own live event stream, which `_run_child_to_completion`/
-                    # `_dispatch_agent_batch` do not do today: a child's
-                    # WHOLE turn is drained to a list before any of its
-                    # events reach the parent's `out()` at all, so there is
-                    # no live channel to pause on). `item["permission_denial"]`
-                    # is now populated here too (previously only the "deny"
-                    # paths were) -- this session's own `permission_denials`
-                    # list is what surfaces it, agent-tagged, to the user:
-                    # print mode via the top-level result's own field
-                    # (`run_agent_call` merges a completed child's list into
-                    # the parent's), and the TUI via the `permission_request`
-                    # event `_dispatch_tools` already yields unconditionally
-                    # whenever `ask_reason` is set (subagent.py's `_tag`
-                    # stamps it with `agent_id` on replay) -- rendered as an
-                    # informational note, not a live actionable card, since
-                    # the decision is already final by the time it arrives.
+                    # `item["permission_denial"]` is populated here too
+                    # (previously only the "deny" paths were) -- this
+                    # session's own `permission_denials` list is what
+                    # surfaces it, agent-tagged, to the user: print mode via
+                    # the top-level result's own field (`run_agent_call`
+                    # merges a completed child's list into the parent's).
                     item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
                     item["permission_denial"] = decision.permission_denial or {
                         "tool_name": name, "tool_input": tool_input, "reason": decision.reason,
@@ -2218,8 +2519,9 @@ class Session:
                     }
                     self._fire_permission_denied(name, tool_input, decision.reason)
                     return item
-                # interactive: `_dispatch_tools` yields the `permission_request`
-                # and then BLOCKS on this waiter until the UI answers (U2).
+                # interactive (or a live-asking sub-agent): `_dispatch_tools`
+                # yields the `permission_request` and then BLOCKS on this
+                # waiter until the UI answers (U2).
                 item["pending_ask"] = True
                 item["suggested_rule"] = decision.suggested_rule
                 self._permission_waiters[tool_id] = {"event": threading.Event(), "decision": None}
@@ -2305,7 +2607,12 @@ class Session:
                                "tool_response": response_value},
             )
         tool = self.tool_registry.get(name)
-        outcome = self.hook_runner.run(event, payload, matched=name, tool_name=name, tool_input=tool_input, tool=tool)
+        # H5c finding 12: `abort` threaded through here too -- Esc during a
+        # slow PostToolUse/PostToolUseFailure command hook used to be
+        # completely ignored (no way to notice Esc until the hook's own
+        # (default 600s) timeout elapsed).
+        outcome = self.hook_runner.run(event, payload, matched=name, tool_name=name, tool_input=tool_input, tool=tool,
+                                        abort=self.abort)
         extra_note = ""
         if outcome.blocked:
             extra_note = f"\n\n[PostToolUse hook: {outcome.block_reason or 'blocked'}]"
@@ -2631,32 +2938,68 @@ class Session:
         pending_batch: list = []  # `item` dicts: a run of consecutive READY read-only calls, dispatch deferred
         agent_batch: list = []    # `item` dicts: a run of consecutive READY Agent/Task calls, <=4 concurrent (H6 scope B)
 
-        def _dispatch_agent_batch() -> None:
-            """Runs every item in `agent_batch` via agent/subagent.py's
-            `run_agent_call` DIRECTLY (never `tool_registry.dispatch`, so
-            the child's own tagged events come back for replay) -- a
-            dedicated pool, never the read-only one (whose fixed 30s
-            per-call cap is far too short for a real multi-turn child)."""
-            from rolo_claude.agent.subagent import run_agent_call
+        def _run_agent_batch() -> Iterator[events.Event]:
+            """H5c finding 8: replaces the old pair (`_dispatch_agent_batch`
+            running the whole pool synchronously, THEN `_flush_agent_batch_
+            items` yielding every child's BUFFERED events all at once) with
+            ONE streaming generator: every child's events -- most
+            importantly a `permission_request`, which the child's OWN
+            thread then blocks on, waiting for a live answer -- now reach
+            THIS generator's caller (and therefore the live TUI) the
+            INSTANT they happen, via one worker thread per concurrent
+            child pushing into a shared queue this generator drains as it
+            runs (`ThreadPoolExecutor.submit`, not the old blocking `.map`,
+            still capped at `MAX_CONCURRENT_AGENTS`). A child blocked
+            waiting for its own permission answer could never finish
+            "buffering" under the old scheme, so its ask would never have
+            reached anything -- `agent/subagent.py`'s `_run_child_to_
+            completion` streaming every event via an `on_event` callback
+            (never buffering first) is what makes this whole fix possible.
+            Each item's `tool_result` is finalized (in ORIGINAL order) only
+            once every child in this batch has actually finished."""
+            nonlocal end_turn
+            from rolo_claude.agent.subagent import MAX_CONCURRENT_AGENTS, run_agent_call
+            from rolo_claude.tools.base import ToolResult
+
+            q: "queue.Queue" = queue.Queue()
+            _DONE = object()
 
             def _run_one(it: dict) -> None:
-                child_events, tr = run_agent_call(
-                    runtime=self.agent_runtime, tool_id=it["tool_id"], tool_input=it["input"], tool_name=it["name"],
-                )
-                it["_agent_events"] = child_events
-                it["result"] = tr
+                try:
+                    # H5c finding 7: a call QUEUED behind the pool's
+                    # `MAX_CONCURRENT_AGENTS` limit (a 5th Agent call when
+                    # only 4 workers are free) must not start a child
+                    # session at all once Esc/Ctrl+C already fired while it
+                    # was waiting -- checked here, on the worker thread,
+                    # right before it would otherwise begin (never before
+                    # the pool even starts, which would also block the
+                    # calls that DID already get a slot).
+                    if self.abort.is_set():
+                        it["result"] = ToolResult("Sub-agent not started: interrupted by the user.", is_error=True)
+                        return
+                    _, tr = run_agent_call(
+                        runtime=self.agent_runtime, tool_id=it["tool_id"], tool_input=it["input"],
+                        tool_name=it["name"], on_event=q.put,
+                    )
+                    it["result"] = tr
+                except Exception as e:  # run_agent_call is documented "never raises" -- defense in depth anyway
+                    log.exception("sub-agent dispatch failed for tool_id=%r", it.get("tool_id"))
+                    it["result"] = ToolResult(f"Sub-agent dispatch failed: {type(e).__name__}: {e}", is_error=True)
+                finally:
+                    q.put((_DONE, it))
 
-            if len(agent_batch) == 1:
-                _run_one(agent_batch[0])
-            else:
-                with ThreadPoolExecutor(max_workers=min(4, len(agent_batch))) as pool:
-                    list(pool.map(_run_one, agent_batch))
+            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_AGENTS, len(agent_batch))) as pool:
+                for it in agent_batch:
+                    pool.submit(_run_one, it)
+                remaining = len(agent_batch)
+                while remaining > 0:
+                    got = q.get()
+                    if isinstance(got, tuple) and len(got) == 2 and got[0] is _DONE:
+                        remaining -= 1
+                        continue
+                    yield got
 
-        def _flush_agent_batch_items():
-            nonlocal end_turn
             for it in agent_batch:
-                for child_ev in it.pop("_agent_events", None) or []:
-                    yield child_ev
                 yield from self._finalize_tool_result(turn_no, it, ctx.session_dir)
                 if it.get("_plan_as_final_text") is not None:
                     yield from self._emit_plan_as_final_text(turn_no, it["_plan_as_final_text"])
@@ -2690,13 +3033,44 @@ class Session:
                         yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                     pending_batch = []
                 if agent_batch:
-                    _dispatch_agent_batch()
-                    yield from _flush_agent_batch_items()
+                    yield from _run_agent_batch()
                     agent_batch = []
                 yield from self._synthesize_unrun_tool_results(
                     turn_no, tool_use_blocks[i:], ctx.session_dir, reason="Tool call interrupted by user",
                 )
                 return True
+
+            if self._pending_steer():
+                # H5c finding 6: a steer already queued BEFORE this
+                # iteration starts (typed during the stream tail, during
+                # `_maybe_auto_compact`, or during a PreToolUse/permission
+                # hook for an EARLIER call in this same turn) must stop
+                # every call from here on, INCLUDING whatever is sitting in
+                # `pending_batch`/`agent_batch` -- unlike an Esc/abort,
+                # those are never flushed: `dispatch()` was never actually
+                # called for any of them (only accumulated, dispatch
+                # deferred until the run breaks), so none of them count as
+                # "a running tool" yet -- "running tools finish" (scope
+                # 0(c)) only ever meant a call whose `dispatch()` genuinely
+                # started. Each already got its own `tool_use_ready` when
+                # first queued into the batch, so they are finalized
+                # directly here (not via `_synthesize_unrun_tool_results`,
+                # which would re-announce them with a second event).
+                reason = "not run: the user sent a new message first"
+                for batched_item in pending_batch:
+                    batched_item["ready"] = False
+                    batched_item["text"] = reason
+                    yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
+                pending_batch = []
+                for agent_item in agent_batch:
+                    agent_item["ready"] = False
+                    agent_item["text"] = reason
+                    yield from self._finalize_tool_result(turn_no, agent_item, ctx.session_dir)
+                agent_batch = []
+                yield from self._synthesize_unrun_tool_results(
+                    turn_no, tool_use_blocks[i:], ctx.session_dir, reason=reason,
+                )
+                break
 
             item = self._resolve_tool_call(tu, outcome, tool_call_flags)
             tool_id, name = item["tool_id"], item["name"]
@@ -2719,8 +3093,7 @@ class Session:
                         yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
                     pending_batch = []
                 if agent_batch:
-                    _dispatch_agent_batch()
-                    yield from _flush_agent_batch_items()
+                    yield from _run_agent_batch()
                     agent_batch = []
                 yield from self._synthesize_unrun_tool_results(
                     turn_no, tool_use_blocks[i:], ctx.session_dir, reason="Tool call interrupted by user",
@@ -2766,8 +3139,7 @@ class Session:
                 continue  # deferred -- dispatched together (<=4 concurrent) when this run breaks
 
             if agent_batch:
-                _dispatch_agent_batch()
-                yield from _flush_agent_batch_items()
+                yield from _run_agent_batch()
                 agent_batch = []
 
             if item["ready"] and self.tool_registry.is_read_only(name):
@@ -2847,8 +3219,7 @@ class Session:
                 if batched_item.get("end_turn"):
                     end_turn = True
         if agent_batch:
-            _dispatch_agent_batch()
-            yield from _flush_agent_batch_items()
+            yield from _run_agent_batch()
         return end_turn
 
     def _synthesize_unrun_tool_results(self, turn_no: int, remaining_blocks: list, session_dir, *,
@@ -2889,7 +3260,9 @@ class Session:
         if not tool_calls:
             return
         payload = self.hook_runner.payload("PostToolBatch", extra={"tool_calls": tool_calls})
-        outcome = self.hook_runner.run("PostToolBatch", payload, matched="")
+        # H5c finding 12: `abort` threaded through -- Esc during a slow
+        # PostToolBatch command hook used to be completely ignored.
+        outcome = self.hook_runner.run("PostToolBatch", payload, matched="", abort=self.abort)
         for msg in outcome.system_messages:
             yield events.notification(msg)
 
@@ -2987,6 +3360,55 @@ class Session:
             self._steer_queue.append(text)
         return True
 
+    def queue_log_write(self, kind: str, payload: dict) -> bool:
+        """H5c finding 14: thread-safe way for a caller OUTSIDE the
+        session's own worker thread (the UI thread's `@file`-mention
+        ingestion, a prompt-kind slash command's own `@path` snapshot, or
+        a Textual worker thread's inline `!cmd`) to write to `self.log`
+        WITHOUT racing the worker thread's own writes while a turn is
+        running -- the exact bug verified with `ant:`: a steer carrying
+        `@b.txt`, typed while a Read tool is running, made the NEXT
+        request's user message `['text', 'tool_result', 'text']` (text
+        before tool_result, which Anthropic 400s on), and a `!cmd` landing
+        between an assistant `tool_use` and its own `tool_result` broke
+        pairing on every route.
+
+        Applied immediately (synchronously, on the CALLING thread) when
+        idle -- correct and safe, since nothing else can be touching the
+        log at the same time; this is also the ordinary case (nothing
+        running to race with). While BUSY, queued instead (the SAME
+        `_steer_lock` `steer()` uses) and applied later by
+        `_apply_pending_steers_events`, at the SAME safe point a steer's
+        own text is -- always AFTER whatever tool_result is already
+        logged for a call that was allowed to finish (that method is only
+        ever invoked from such a safe point), and ahead of the steer text
+        itself, so `[..., tool_result, mention-or-!cmd, steer text]` stays
+        correctly ordered.
+
+        `kind`/`payload` mirror `_apply_log_write`'s own dispatch: `kind`
+        is `"snapshot"` (`payload = {"blocks": [...], "snapshot_kind":
+        str}`) or `"inline_shell"` (`payload = {"tool_use_id", "command",
+        "content", "is_error"}`). Returns True iff queued (the caller may
+        want to tell the user it will show up once the turn reaches a
+        safe point), False iff applied immediately."""
+        with self._steer_lock:
+            if self._busy.is_set():
+                self._pending_worker_writes.append((kind, payload))
+                return True
+        self._apply_log_write(kind, payload)
+        return False
+
+    def _apply_log_write(self, kind: str, payload: dict) -> None:
+        if kind == "snapshot":
+            self.log.append_snapshot(payload["blocks"], kind=payload.get("snapshot_kind", "at_mention"))
+        elif kind == "inline_shell":
+            self.log.append_assistant(content=[
+                {"type": "tool_use", "id": payload["tool_use_id"], "name": "Bash",
+                 "input": {"command": payload["command"]}},
+            ])
+            self.log.append_tool_result(tool_use_id=payload["tool_use_id"], content=payload["content"],
+                                         is_error=payload["is_error"])
+
     def _pending_steer(self) -> bool:
         with self._steer_lock:
             return bool(self._steer_queue)
@@ -3001,16 +3423,72 @@ class Session:
         user-role message -- called ONLY from a safe point (never mid-
         stream/mid-dispatch): right after a model call was cut short for a
         steer, or right after the current tool dispatch finished ("tools
-        allowed to finish", scope 0c). Returns True iff at least one was
-        applied, via the generator's return value (`yield from`) -- the
-        caller must then `continue` its loop instead of ending the turn."""
+        allowed to finish", scope 0c). Returns True iff at least one STEER
+        was applied, via the generator's return value (`yield from`) -- the
+        caller must then `continue` its loop instead of ending the turn
+        (a pending WRITE with no accompanying steer text -- an inline
+        `!cmd` run mid-turn with no redirect message -- must never force
+        that; the ongoing turn continues undisturbed, and the next model
+        call simply sees the new log content via the usual full re-derive).
+
+        H5c finding 14: pending `@mention`/`@path`/inline-`!cmd` log
+        writes (`queue_log_write`, queued while busy from OUTSIDE this
+        session's own worker thread) are applied FIRST, at this exact safe
+        point -- see that method's own docstring for why this ordering is
+        what keeps tool_result-before-text correct."""
+        with self._steer_lock:
+            writes, self._pending_worker_writes = self._pending_worker_writes, []
+        for kind, payload in writes:
+            self._apply_log_write(kind, payload)
         texts = self._pop_all_steers()
-        for text in texts:
+        applied_any = False
+        for i, text in enumerate(texts):
+            # H5c finding 19: for an INTERACTIVE (Controller-driven) caller,
+            # this is a SECOND `steer_queued` -- `Controller.submit` already
+            # pushed one straight to the UI the instant the user submitted
+            # (deliberately, for instant feedback -- see its own docstring),
+            # so the TUI's own dispatch handler is what deduplicates the
+            # resulting note (see `tui/dispatch.py`'s `_steering_notes_
+            # pending` counter) rather than this method dropping the event
+            # outright -- a bare `Session`/print-mode caller (headless.py's
+            # stream-json reader, every test that drives `session.turn()`
+            # directly with no Controller at all) has NO other path to ever
+            # see `steer_queued`, and print mode's own documented contract
+            # is "the same via --input-format stream-json ... Events:
+            # steer_queued, steer_applied" -- removing this here would
+            # silently drop it for both.
             yield events.steer_queued(text, turn=turn_no)
+            # H5c finding 23: a steer becomes a user-role message exactly
+            # like the FIRST message of a turn does (see `turn()`'s own
+            # UserPromptSubmit handling above) -- it must run through the
+            # SAME gate. Before this fix, typing while a turn ran was a
+            # standing bypass of a user's own UserPromptSubmit hook (a
+            # prompt filter/annotator that only ever fired for the first
+            # message of a turn). `steer_applied` is still yielded on the
+            # blocked branch (never `continue`d past) -- it's the TUI's
+            # only signal that this queued steer finished processing (see
+            # the dedup note above); only the LOG WRITE and `user_message`
+            # are skipped.
+            blocked_reason = None
+            if self.hook_runner is not None and self.hook_runner.has_hooks("UserPromptSubmit"):
+                payload = self.hook_runner.payload("UserPromptSubmit", prompt_id=f"prompt_{turn_no}_steer_{i}",
+                                                     extra={"prompt": text})
+                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="", abort=self.abort)
+                for msg in outcome.system_messages:
+                    yield events.notification(msg)
+                if outcome.blocked:
+                    blocked_reason = outcome.block_reason or "blocked by a UserPromptSubmit hook"
+                elif outcome.additional_context:
+                    self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+            if blocked_reason is not None:
+                yield events.notification(f"Steer dropped: {blocked_reason}", level="error")
+                yield events.steer_applied(text, turn=turn_no)
+                continue
             self.log.append_user([{"type": "text", "text": text}])
             yield events.user_message(text, turn=turn_no)
             yield events.steer_applied(text, turn=turn_no)
-        return bool(texts)
+            applied_any = True
+        return applied_any
 
     def _pump_turn(self, text: str, images, out) -> None:
         """Drive ONE turn to completion, pushing every Event straight to

@@ -116,6 +116,46 @@ def test_resolve_profile_from_models_json(ctx: Ctx):
 
 
 @test
+def test_h5c_extra_resolve_profile_from_models_json_parses_cache_pricing(ctx: Ctx):
+    """H5c Extra (from the H8 must-do list): OpenRouter's own `pricing`
+    object names the two cache fields `input_cache_read`/`input_cache_write`
+    -- same per-TOKEN USD units as `prompt`/`completion` (never per-million),
+    so no /1_000_000 conversion here (unlike the models.dev databricks
+    fallback, which IS per-million -- see the vendored-databricks test)."""
+    state_dir = Path(tempfile.mkdtemp(prefix="model-profile-cache-"))
+    write_models_json(state_dir, [{
+        "id": "anthropic/claude-sonnet-4.5", "context_length": 200000, "max_output_tokens": 8192,
+        "pricing": {"prompt": "0.000003", "completion": "0.000015",
+                    "input_cache_read": "0.0000003", "input_cache_write": "0.00000375"},
+    }])
+    ref = parse_model_ref("or:anthropic/claude-sonnet-4.5")
+    profile = resolve_model_profile(ref, state_dir)
+    ctx.check(f"price_cache_read parsed, got {profile.price_cache_read!r}",
+              profile.price_cache_read is not None and abs(profile.price_cache_read - 0.0000003) < 1e-15)
+    ctx.check(f"price_cache_write parsed, got {profile.price_cache_write!r}",
+              profile.price_cache_write is not None and abs(profile.price_cache_write - 0.00000375) < 1e-15)
+
+
+@test
+def test_h5c_extra_resolve_profile_from_models_json_missing_cache_pricing_is_none(ctx: Ctx):
+    """A model entry with ordinary pricing but NO cache breakdown (most
+    models) must leave price_cache_read/write as None, not 0.0 or a
+    KeyError -- CostMeter's own fallback then knows to approximate at
+    price_in rather than treating "no data" as "free"."""
+    state_dir = Path(tempfile.mkdtemp(prefix="model-profile-no-cache-"))
+    write_models_json(state_dir, [{
+        "id": "deepseek/deepseek-v3.2", "context_length": 163840,
+        "pricing": {"prompt": "0.00000027", "completion": "0.0000011"},
+    }])
+    ref = parse_model_ref("or:deepseek/deepseek-v3.2")
+    profile = resolve_model_profile(ref, state_dir)
+    ctx.check(f"price_cache_read is None when absent, got {profile.price_cache_read!r}",
+              profile.price_cache_read is None)
+    ctx.check(f"price_cache_write is None when absent, got {profile.price_cache_write!r}",
+              profile.price_cache_write is None)
+
+
+@test
 def test_resolve_profile_from_routes_json_when_no_models_json_entry(ctx: Ctx):
     state_dir = Path(tempfile.mkdtemp(prefix="model-profile-routes-"))
     ref = parse_model_ref("or:some/unknown-model")
@@ -232,6 +272,53 @@ def test_cost_meter_databricks_still_na_even_with_pricing(ctx: Ctx):
     ctx.check("has_cost_data flips False", meter.has_cost_data is False)
 
 
+@test
+def test_h5c_extra_cost_meter_fallback_prices_cache_tokens_at_their_own_rate(ctx: Ctx):
+    """H5c Extra (from the H8 must-do list): cache_read_input_tokens/
+    cache_creation_input_tokens are SEPARATE fields from input_tokens (see
+    agent/loop.py's own _total_prompt_tokens, which sums all three for
+    context-window accounting) -- before this fix the fallback formula only
+    ever read input_tokens/output_tokens, so cache tokens were silently
+    dropped from the bill entirely, not merely mispriced. Deliberately uses
+    a cache_read rate LOWER than price_in and a cache_write rate HIGHER
+    than price_in (the real-world shape for every vendor) so a test that
+    accidentally fell back to price_in for either would produce a visibly
+    wrong total, not one that could coincidentally match."""
+    meter = CostMeter(price_in=0.000001, price_out=0.000002,
+                       price_cache_read=0.0000001, price_cache_write=0.0000015)
+    cost = meter.add_usage("openrouter", {
+        "input_tokens": 1000, "output_tokens": 500,
+        "cache_read_input_tokens": 10000, "cache_creation_input_tokens": 2000,
+    })
+    expected = (1000 * 0.000001 + 500 * 0.000002
+                + 10000 * 0.0000001 + 2000 * 0.0000015)
+    ctx.check(f"cache tokens billed at their OWN rates, got {cost}", cost is not None and abs(cost - expected) < 1e-12)
+    # The wrong-but-plausible answer if cache tokens were priced at price_in
+    # instead (the pre-fix "folded into input_tokens" approximation) --
+    # proves this test would have caught that regression.
+    wrong = (1000 * 0.000001 + 500 * 0.000002 + 10000 * 0.000001 + 2000 * 0.000001)
+    ctx.check("not the price_in-for-everything approximation", cost is not None and abs(cost - wrong) > 1e-9)
+
+
+@test
+def test_h5c_extra_cost_meter_fallback_cache_tokens_default_to_price_in_when_unknown(ctx: Ctx):
+    """A meter with ordinary price_in/price_out but NO cache-specific rates
+    (most vendored/fallback rows) must still COUNT cache tokens -- at the
+    ordinary input rate, the documented approximation -- never treat them
+    as free just because the specific rate wasn't known."""
+    meter = CostMeter(price_in=0.000001, price_out=0.000002)  # no price_cache_read/write
+    cost = meter.add_usage("openrouter", {
+        "input_tokens": 1000, "output_tokens": 500,
+        "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100,
+    })
+    expected = 1000 * 0.000001 + 500 * 0.000002 + 300 * 0.000001 + 100 * 0.000001
+    ctx.check(f"cache tokens still counted, priced at price_in, got {cost}",
+              cost is not None and abs(cost - expected) < 1e-12)
+    without_cache = 1000 * 0.000001 + 500 * 0.000002
+    ctx.check("cache tokens are NOT silently dropped (cost is higher than ignoring them entirely)",
+              cost is not None and cost > without_cache)
+
+
 # ---- H8 scope C: the vendored fallback tier ------------------------------
 
 @test
@@ -269,6 +356,40 @@ def test_vendored_databricks_fallback_used_when_nothing_cached(ctx: Ctx):
     if expected_context:
         ctx.check(f"context_tokens came from models.dev's databricks entry, got {profile.context_tokens}",
                   profile.context_tokens == expected_context)
+
+
+@test
+def test_h5c_extra_vendored_databricks_fallback_parses_cache_pricing(ctx: Ctx):
+    """H5c Extra: models.dev's databricks provider entries carry a REAL
+    cache_read/cache_write breakdown for Claude models (confirmed against
+    providers/catalog/models_dev_databricks_fallback.json's own
+    databricks-claude-sonnet-4-5 row: input 3, output 15, cache_read 0.3,
+    cache_write 3.75 USD per MILLION tokens) -- resolved end to end through
+    `resolve_model_profile` (no models.json cache, no routes.json profile),
+    exactly the path a fresh install with no network yet takes."""
+    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    vendored = load_vendored_databricks_fallback()
+    entry = vendored.get("databricks-claude-sonnet-4-5")
+    ctx.check("the vendored fixture still has this row (fixture drift guard)", entry is not None)
+    cost = (entry or {}).get("cost") or {}
+    ctx.check(f"fixture still has a cache_read/cache_write breakdown, got {cost}",
+              isinstance(cost.get("cache_read"), (int, float)) and isinstance(cost.get("cache_write"), (int, float)))
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-vendored-dbx-cache-"))
+    ref = parse_model_ref("dbx:databricks-claude-sonnet-4-5")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check(f"price_in from cost.input/1e6, got {profile.price_in!r}",
+              profile.price_in is not None and abs(profile.price_in - cost["input"] / 1_000_000) < 1e-15)
+    ctx.check(f"price_cache_read from cost.cache_read/1e6, got {profile.price_cache_read!r}",
+              profile.price_cache_read is not None
+              and abs(profile.price_cache_read - cost["cache_read"] / 1_000_000) < 1e-15)
+    ctx.check(f"price_cache_write from cost.cache_write/1e6, got {profile.price_cache_write!r}",
+              profile.price_cache_write is not None
+              and abs(profile.price_cache_write - cost["cache_write"] / 1_000_000) < 1e-15)
+    ctx.check("cache_read is priced BELOW the ordinary input rate (every real vendor prices it that way)",
+              profile.price_cache_read < profile.price_in)
+    ctx.check("cache_write is priced ABOVE the ordinary input rate (every real vendor prices it that way)",
+              profile.price_cache_write > profile.price_in)
 
 
 @test

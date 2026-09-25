@@ -184,39 +184,57 @@ def test_compaction_events_render_start_and_done_notes_and_status(ctx: Ctx):
 
 @test
 def test_steer_queued_note_never_embeds_the_steer_text_only_the_user_bubble_does(ctx: Ctx):
-    """U5 must-do: the OLD `steer_queued` note repeated the steer's own
-    text, and a `user_message` event for the SAME steer followed moments
-    later with an identical bubble -- one steer showed up TWICE. The fix
-    makes the note permanently text-free (`"..." steering..."`, never the
-    steer's own words) regardless of how many times `steer_queued` fires
-    for one logical steer (submit time, then again when applied) -- the
-    actual text appears exactly once, only in the `user_message` bubble."""
+    """U5 must-do: the note is permanently text-free (`"↳ steering…"`,
+    never the steer's own words) -- the actual text appears exactly once,
+    only in the `user_message` bubble.
+
+    H5c finding 19: `steer_queued` genuinely fires TWICE for one logical
+    steer (`Controller.submit`'s own instant-feedback push at submit time,
+    then again from the session's own turn-event stream when it actually
+    applies -- kept there too, since a bare `Session`/print-mode caller
+    with no Controller has no other path to ever see it and print mode's
+    own contract promises it) -- the OLD code showed a SEPARATE note for
+    each firing (two notes for one steer). Fixed by deduplicating on the
+    TEXT against a steer still awaiting its matching `steer_applied` --
+    this test now asserts exactly ONE note for that duplicate pair, and
+    that a SECOND, genuinely DIFFERENT steer queued afterward still gets
+    its own note (never a session-wide "only one note ever" regression)."""
     from rolo_claude.tui.dispatch import apply_event
 
     STEER_TEXT = "please use a different approach entirely"
+    SECOND_STEER_TEXT = "actually, do something else instead"
 
     async def body():
         fake = FakeController()
         app = await _mounted(fake)
         async with app.run_test(size=(100, 40)) as pilot:
             # Fires once at submit time, once again when the turn actually
-            # applies it -- both text-free, per the comment in dispatch.py.
-            await apply_event(app, ev.Event("steer_queued", {}, turn=1))
-            await apply_event(app, ev.Event("steer_queued", {}, turn=1))
+            # applies it -- the SAME text both times for one logical steer.
+            await apply_event(app, ev.Event("steer_queued", {"text": STEER_TEXT}, turn=1))
+            await apply_event(app, ev.Event("steer_queued", {"text": STEER_TEXT}, turn=1))
             await apply_event(app, ev.Event("user_message", {"text": STEER_TEXT}, turn=1))
 
             notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
-            ctx.check(f"two steer_queued notes were added, got {len(notes)}", len(notes) == 2)
-            for n in notes:
-                text = str(n.content)
-                ctx.check(f"note is the generic text-free indicator, got {text!r}",
-                          STEER_TEXT not in text and "steering" in text.lower())
+            ctx.check(f"exactly ONE note for the duplicate submit+apply pair, got {len(notes)}", len(notes) == 1)
+            ctx.check(f"note is the generic text-free indicator, got {str(notes[0].content)!r}",
+                      STEER_TEXT not in str(notes[0].content) and "steering" in str(notes[0].content).lower())
+
+            # The matching steer_applied clears the dedup entry -- a
+            # DIFFERENT steer queued afterward must still get its own note.
+            await apply_event(app, ev.Event("steer_applied", {"text": STEER_TEXT}, turn=1))
+            await apply_event(app, ev.Event("steer_queued", {"text": SECOND_STEER_TEXT}, turn=2))
+            await apply_event(app, ev.Event("user_message", {"text": SECOND_STEER_TEXT}, turn=2))
+
+            notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"a second, DIFFERENT steer gets its own note too, got {len(notes)}", len(notes) == 2)
 
             user_messages = [w for w in app.transcript.children if isinstance(w, UserMessage)]
-            ctx.check(f"exactly ONE user bubble carries the steer text, got {len(user_messages)}",
-                      len(user_messages) == 1)
-            ctx.check(f"the bubble has the real text, got {user_messages[0].content!r}",
+            ctx.check(f"exactly TWO user bubbles (one per real steer), got {len(user_messages)}",
+                      len(user_messages) == 2)
+            ctx.check(f"the first bubble has the real text, got {user_messages[0].content!r}",
                       STEER_TEXT in str(user_messages[0].content))
+            ctx.check(f"the second bubble has the SECOND steer's real text, got {user_messages[1].content!r}",
+                      SECOND_STEER_TEXT in str(user_messages[1].content))
     asyncio.run(body())
 
 
@@ -1070,6 +1088,23 @@ def _real_controller(cwd: Path, *, mode: str = "bypassPermissions"):
         def _fire_session_end(self, _reason) -> None:
             pass
 
+        def queue_log_write(self, kind: str, payload: dict) -> bool:
+            # H5c finding 14: `busy` is always False here (no real turn
+            # ever runs in these pilots), so this mirrors the real
+            # `Session.queue_log_write`'s OWN "idle -> apply immediately"
+            # branch verbatim -- never the "busy -> queue" one, which this
+            # stub has no need to model.
+            if kind == "snapshot":
+                self.log.append_snapshot(payload["blocks"], kind=payload.get("snapshot_kind", "at_mention"))
+            elif kind == "inline_shell":
+                self.log.append_assistant(content=[
+                    {"type": "tool_use", "id": payload["tool_use_id"], "name": "Bash",
+                     "input": {"command": payload["command"]}},
+                ])
+                self.log.append_tool_result(tool_use_id=payload["tool_use_id"], content=payload["content"],
+                                             is_error=payload["is_error"])
+            return False
+
     return Controller(session=_MinimalSession(), cwd=cwd)
 
 
@@ -1306,29 +1341,21 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
     fired on the old one, `SessionStart(clear)` on the fresh one -- instead
     of only clearing the TUI's own transcript widget while the underlying
     context (everything the next request would derive from) stayed
-    completely untouched."""
+    completely untouched.
+
+    H5c finding 11 / F24 (this test used to drive a hand-written FAKE hook
+    runner with no `session_id`/`transcript_path` of its own at all, so it
+    could never have caught the bug): a REAL `hooks.HookRunner`, with a
+    REAL SessionStart(clear) command hook that writes to `CLAUDE_ENV_FILE`
+    -- `hook_runner.session_id`/`transcript_path` must be updated to the
+    NEW session BEFORE that hook fires, or its own env-file write lands in
+    a file keyed to the OLD (stale) session_id that nothing ever reads
+    back, and `session.tool_env` never sees `FROM_CLEAR_HOOK`."""
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
+    from rolo_claude.hooks import HookDef, HookRunner
     from rolo_claude.model import ModelProfile, parse_model_ref
     from rolo_claude.providers.stream import ProviderCreds
-
-    class _RecordingHookRunner:
-        def __init__(self):
-            self.calls = []
-
-        def has_hooks(self, event):
-            return True
-
-        def payload(self, event, *, extra=None, **kw):
-            return {"hook_event_name": event, **(extra or {})}
-
-        def run(self, event, payload, matched="", **kw):
-            from rolo_claude.hooks import HookOutcome
-            self.calls.append({"event": event, "source": payload.get("source")})
-            return HookOutcome()
-
-        def run_session_end(self, reason):
-            self.calls.append({"event": "SessionEnd", "reason": reason})
 
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
@@ -1336,7 +1363,19 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
         try:
             session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
             model_ref = parse_model_ref("or:mock/model")
-            hooks = _RecordingHookRunner()
+            initial_session_id = "h5c-f11-initial-session"
+            session_end_counter = cwd / "session_end_counter.txt"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parent)
+            env["HOOK_ONCE_COUNTER_FILE"] = str(session_end_counter)
+            hooks = HookRunner(
+                {"SessionStart": [HookDef(type="command",
+                                            args=[sys.executable, "-m", "tests.helpers.hook_scripts", "env_file_writer"])],
+                 "SessionEnd": [HookDef(type="command",
+                                          args=[sys.executable, "-m", "tests.helpers.hook_scripts", "once_counter"])]},
+                cwd=cwd, session_id=initial_session_id, transcript_path=str(cwd / f"{initial_session_id}.jsonl"),
+                effective_env=env,
+            )
             session = Session(
                 cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(),
                 creds=ProviderCreds(base_url="http://x", api_key="k"),
@@ -1344,6 +1383,9 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
                 hook_runner=hooks,
             )
             old_session_id = session.log.session_id
+            ctx.check("the real session_id differs from the hook runner's own hard-coded startup id "
+                      "(Session.__init__ builds its OWN SessionLog independently)",
+                      old_session_id != initial_session_id)
             session.log.append_user([{"type": "text", "text": "old conversation content"}])
             session.turn_count = 5
 
@@ -1357,10 +1399,23 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
             all_text = json.dumps(messages)
             ctx.check(f"the old conversation content is GONE from the new log, got {all_text!r}",
                       "old conversation content" not in all_text)
-            ctx.check(f"SessionEnd(clear) fired on the old session, got {hooks.calls}",
-                      any(c.get("event") == "SessionEnd" and c.get("reason") == "clear" for c in hooks.calls))
-            ctx.check(f"SessionStart(clear) fired on the new session, got {hooks.calls}",
-                      any(c.get("event") == "SessionStart" and c.get("source") == "clear" for c in hooks.calls))
+
+            # H5c finding 11: the hook runner's OWN session-keyed
+            # attributes must now match the NEW log, not the old one.
+            ctx.check(f"hook_runner.session_id updated to the NEW session, got {hooks.session_id!r} "
+                      f"(new log session_id={session.log.session_id!r})",
+                      hooks.session_id == session.log.session_id)
+            ctx.check(f"hook_runner.transcript_path updated to the NEW log's path, got {hooks.transcript_path!r} "
+                      f"(new log path={session.log.path!r})",
+                      hooks.transcript_path == str(session.log.path))
+            # The SessionStart(clear) hook's own env-file write must be
+            # visible in the session's tool env -- proving it was told the
+            # CORRECT (new) CLAUDE_ENV_FILE path, not a stale one.
+            ctx.check(f"the clear hook's own env-file export reached session.tool_env, got "
+                      f"HOOK_SCRIPT_VAR={session.tool_env.get('HOOK_SCRIPT_VAR')!r}",
+                      session.tool_env.get("HOOK_SCRIPT_VAR") == "from-env-file-writer")
+            ctx.check(f"SessionEnd(clear) genuinely fired (a real subprocess ran and wrote its counter), "
+                      f"got exists={session_end_counter.exists()}", session_end_counter.exists())
         finally:
             os.environ.pop("BRIDGE_TEST_HOME", None)
 

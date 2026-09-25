@@ -160,6 +160,180 @@ def test_h5b_f13_pretooluse_rewrite_is_re_decided_against_a_deny_rule(ctx: Ctx):
         mock.stop()
 
 
+def _bash_call_scenario(scenario_name: str, *, command: str, call_id: str = "call_r"):
+    return lambda h, body: _finish(
+        h,
+        [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+         {"choices": [{"index": 0, "delta": {"content": "done"}}]},
+         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
+        if any(m.get("role") == "tool" for m in (body or {}).get("messages") or [])
+        else [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+              {"choices": [{"index": 0, "delta": {"tool_calls": [
+                  {"index": 0, "id": call_id, "type": "function",
+                   "function": {"name": "Bash", "arguments": json.dumps({"command": command})}},
+              ]}}]},
+              {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}],
+    )
+
+
+@test
+def test_h5c_f09_permission_request_updated_input_is_redecided_against_a_deny_rule(ctx: Ctx):
+    """H5c finding 9: PermissionRequest's own `updatedInput` used to be
+    parsed by hooks.py and then never applied anywhere -- the loop read
+    only `permission_decision`. A hook that rewrites the command (with NO
+    `behavior` of its own) into something a real deny rule matches must
+    still get denied, exactly like PreToolUse's own equivalent case
+    (`test_h5b_f13_pretooluse_rewrite_is_re_decided_against_a_deny_rule`)
+    -- proving `decide()` re-runs against the REWRITTEN input rather than
+    trusting the ask decision computed for the original one."""
+    from rolo_claude.hooks import HookDef
+    from rolo_claude.permissions import PermissionEngine, parse_rule
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    SCENARIOS["hook-permreq-redecide"] = _bash_call_scenario("hook-permreq-redecide", command="echo harmless")
+    try:
+        hooks_by_event = {"PermissionRequest": [HookDef(type="command", matcher="Bash",
+                                                          args=_HOOK_SCRIPT_ARGV + ["permission_request_updated_input_redecide"])]}
+        ask_rule = parse_rule("Bash(echo harmless:*)", source="settings", base_dir=fh["proj"], action="ask")
+        deny_rule = parse_rule("Bash(rm -rf /rewritten-by-hook:*)", source="settings", base_dir=fh["proj"], action="deny")
+        session = _new_session(fh, mock, model="or:mock/hook-permreq-redecide",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+        session.permission_engine = PermissionEngine(mode="auto", cwd=fh["proj"], ask_rules=[ask_rule], deny_rules=[deny_rule])
+
+        results = []
+        for ev in session.turn("run echo harmless"):
+            if ev.kind == "tool_result":
+                results.append(ev.data)
+            ctx.check("no live permission_request card shown (redecide hit a deny before the ask path)",
+                      ev.kind != "permission_request")
+        ctx.check(f"a tool_result was logged, got {results}", len(results) == 1)
+        ctx.check(f"the call was DENIED (never dispatched), got {results}", results[0].get("ok") is False)
+        tool_result_node = next(n for n in session.log.nodes() if n.get("type") == "tool_result")
+        ctx.check(f"tool_result is_error True, got {tool_result_node}", tool_result_node.get("is_error") is True)
+    finally:
+        mock.stop()
+
+
+@test
+def test_h5c_f09_permission_request_updated_permissions_list_applies_setmode_and_addrules(ctx: Ctx):
+    """H5c finding 9: `updatedPermissions` is the binary's real LIST shape
+    (`[{type: "setMode"|"addRules", ...}]`), never the dict the old code
+    parsed (and which therefore never matched anything real). Proves BOTH
+    entries land on the session's own live `PermissionEngine`: `setMode`
+    changes `self.permission_engine.mode`, and `addRules` teaches it a new
+    deny rule that a LATER call in the SAME turn is denied by."""
+    from rolo_claude.hooks import HookDef
+    from rolo_claude.permissions import PermissionEngine, parse_rule
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    call_count = {"n": 0}
+
+    def _scn(h, body):
+        call_count["n"] += 1
+        has_tool = any(m.get("role") == "tool" for m in (body or {}).get("messages") or [])
+        if not has_tool:
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_first", "type": "function",
+                     "function": {"name": "Bash", "arguments": json.dumps({"command": "echo first"})}},
+                ]}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ])
+            return
+        # Second round trip: the model tries the now-denied command.
+        tool_msgs = [m for m in body["messages"] if m.get("role") == "tool"]
+        if len(tool_msgs) == 1:
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_second", "type": "function",
+                     "function": {"name": "Bash", "arguments": json.dumps({"command": "rm -rf *"})}},
+                ]}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ])
+            return
+        _finish(h, [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                    {"choices": [{"index": 0, "delta": {"content": "done"}}]},
+                    {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}])
+
+    SCENARIOS["hook-permreq-setmode-addrules"] = _scn
+    try:
+        hooks_by_event = {"PermissionRequest": [HookDef(type="command", matcher="Bash",
+                                                          args=_HOOK_SCRIPT_ARGV + ["permission_request_allow_setmode_addrules"])]}
+        ask_rule = parse_rule("Bash(*)", source="settings", base_dir=fh["proj"], action="ask")
+        session = _new_session(fh, mock, model="or:mock/hook-permreq-setmode-addrules",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+        session.permission_engine = PermissionEngine(mode="default", cwd=fh["proj"], ask_rules=[ask_rule])
+
+        results = []
+        for ev in session.turn("run some commands"):
+            if ev.kind == "tool_result":
+                results.append(ev.data)
+        ctx.check(f"the FIRST call was allowed by the hook, got {results}",
+                  len(results) >= 1 and results[0].get("ok") is True)
+        ctx.check(f"setMode was applied live to the session's own engine, got {session.permission_engine.mode!r}",
+                  session.permission_engine.mode == "acceptEdits")
+        ctx.check(f"addRules taught the engine a new deny rule, got {[r.raw if hasattr(r,'raw') else r for r in session.permission_engine.deny_rules]}",
+                  len(session.permission_engine.deny_rules) == 1)
+        ctx.check(f"the SECOND call (now matching the new deny rule) was denied, got {results}",
+                  len(results) == 2 and results[1].get("ok") is False)
+    finally:
+        mock.stop()
+
+
+@test
+def test_h5c_f09_permission_request_interrupt_ends_the_turn_as_interrupted(ctx: Ctx):
+    """H5c finding 9: `interrupt: true` on a PermissionRequest deny must
+    end the WHOLE turn, not just refuse this one call -- `turn_done` fires
+    with `reason="interrupted"`, and the model is never called again this
+    turn (no follow-up "the tool was denied, let me try something else")."""
+    from rolo_claude.hooks import HookDef
+    from rolo_claude.permissions import PermissionEngine, parse_rule
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    call_count = {"n": 0}
+
+    def _scn(h, body):
+        call_count["n"] += 1
+        _finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call_interrupt", "type": "function",
+                 "function": {"name": "Bash", "arguments": json.dumps({"command": "echo interrupt-me"})}},
+            ]}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+        ])
+
+    SCENARIOS["hook-permreq-interrupt"] = _scn
+    try:
+        hooks_by_event = {"PermissionRequest": [HookDef(type="command", matcher="Bash",
+                                                          args=_HOOK_SCRIPT_ARGV + ["permission_request_interrupt"])]}
+        ask_rule = parse_rule("Bash(*)", source="settings", base_dir=fh["proj"], action="ask")
+        session = _new_session(fh, mock, model="or:mock/hook-permreq-interrupt",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+        session.permission_engine = PermissionEngine(mode="default", cwd=fh["proj"], ask_rules=[ask_rule])
+
+        results = []
+        turn_done_events = []
+        for ev in session.turn("run echo interrupt-me"):
+            if ev.kind == "tool_result":
+                results.append(ev.data)
+            if ev.kind == "turn_done":
+                turn_done_events.append(ev)
+        ctx.check(f"exactly one model call happened (never retried after the interrupt), got {call_count['n']}",
+                  call_count["n"] == 1)
+        ctx.check(f"the call was denied, got {results}", len(results) == 1 and results[0].get("ok") is False)
+        ctx.check(f"exactly one turn_done fired, got {turn_done_events}", len(turn_done_events) == 1)
+        ctx.check(f"the turn ends reason=interrupted (not the generic end_turn), got {turn_done_events[0].data}",
+                  turn_done_events and turn_done_events[0].data.get("reason") == "interrupted")
+    finally:
+        mock.stop()
+
+
 @test
 def test_userpromptsubmit_hook_context_is_visible_in_the_session_log(ctx: Ctx):
     """A UserPromptSubmit hook's `additionalContext` becomes a user-role
@@ -220,6 +394,116 @@ def test_stop_hook_exits_2_once_makes_the_model_continue_one_more_step(ctx: Ctx)
                    any(k == "turn_done" for k in kinds))
     finally:
         os.environ.pop("HOOK_STOP_COUNTER_FILE", None)
+        mock.stop()
+
+
+@test
+def test_h5c_f12_esc_during_a_slow_stop_hook_ends_the_turn_interrupted_within_1s(ctx: Ctx):
+    """H5c finding 12: `run_stop` had NO `abort` parameter at all -- Esc
+    during a slow Stop command hook (up to the default 600s timeout) did
+    nothing until the hook returned on its own. With a 12s `sleep` Stop
+    hook, Esc ~0.5s in must end the turn `reason="interrupted"` within
+    about a second (the hook's own process group killed, not waited out)."""
+    import threading
+    import time
+    from rolo_claude.hooks import HookDef
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    SCENARIOS["hook-stop-slow"] = lambda h, body: _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"content": "answer"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ])
+    try:
+        os.environ["HOOK_SLEEP_S"] = "12"
+        hooks_by_event = {"Stop": [HookDef(type="command", args=_HOOK_SCRIPT_ARGV + ["sleep"])]}
+        session = _new_session(fh, mock, model="or:mock/hook-stop-slow",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("go"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.5)  # let the model reply land and the Stop hook actually start sleeping
+        session.abort.set()
+        done.wait(timeout=10)
+        dt = time.monotonic() - t0
+
+        ctx.check("the turn finished", done.is_set())
+        ctx.check(f"it finished in well under the hook's own 12s sleep, got dt={dt:.2f}s", dt < 3.0)
+        turn_done_events = [ev for ev in events_seen if ev.kind == "turn_done"]
+        ctx.check(f"exactly one turn_done fired, got {turn_done_events}", len(turn_done_events) == 1)
+        ctx.check(f"reason=interrupted (not end_turn), got {turn_done_events[0].data if turn_done_events else None}",
+                  turn_done_events and turn_done_events[0].data.get("reason") == "interrupted")
+    finally:
+        os.environ.pop("HOOK_SLEEP_S", None)
+        mock.stop()
+
+
+@test
+def test_h5c_f12_esc_during_a_slow_posttooluse_hook_also_cuts_it_short(ctx: Ctx):
+    """H5c finding 12, the second path: PostToolUse's own hook_runner.run()
+    call also used to omit `abort=` -- Esc during a slow PostToolUse
+    command hook (fired after a real Bash call completes) must cut it
+    short too, not just Stop's own path."""
+    import threading
+    import time
+    from rolo_claude.hooks import HookDef
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    SCENARIOS["hook-posttooluse-slow"] = lambda h, body: _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "call_slow_post", "type": "function",
+             "function": {"name": "Bash", "arguments": json.dumps({"command": "echo hi"})}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+    try:
+        os.environ["HOOK_SLEEP_S"] = "12"
+        hooks_by_event = {"PostToolUse": [HookDef(type="command", matcher="Bash", args=_HOOK_SCRIPT_ARGV + ["sleep"])]}
+        session = _new_session(fh, mock, model="or:mock/hook-posttooluse-slow",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("run echo hi"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t0 = time.monotonic()
+        t.start()
+        # `tool_result` itself is only logged/yielded AFTER PostToolUse
+        # finishes (`_finalize_tool_result` runs the hook BEFORE logging
+        # the result) -- so it can't be used as a "the hook has started
+        # sleeping" marker. A short fixed wait (the real Bash call and the
+        # hook subprocess launch are both near-instant) is enough.
+        time.sleep(0.5)
+        ctx.check("still mid-turn (the slow PostToolUse hook is what's blocking it)", not done.is_set())
+        session.abort.set()
+        done.wait(timeout=10)
+        dt = time.monotonic() - t0
+
+        ctx.check("the turn finished", done.is_set())
+        ctx.check(f"it finished in well under the hook's own 12s sleep, got dt={dt:.2f}s", dt < 3.0)
+    finally:
+        os.environ.pop("HOOK_SLEEP_S", None)
         mock.stop()
 
 

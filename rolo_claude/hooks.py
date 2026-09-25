@@ -624,10 +624,71 @@ class HookOutcome:
     system_messages: list = field(default_factory=list)
     continue_: bool = True
     set_mode: Optional[str] = None
+    # H5c finding 9: `updatedPermissions` entries with `type: "addRules"`
+    # (2.1.281's real wire shape is a LIST of `{type, ...}` entries, never
+    # a dict) -- `{"rule": "Bash(git push:*)", "behavior": "allow"|"deny"|
+    # "ask"}` per entry, concatenated across every matched hook (same
+    # "contexts concatenated" spirit as `additional_context`, not
+    # last-wins like `set_mode`).
+    updated_permissions: list = field(default_factory=list)
     raw_json: Optional[dict] = None
 
 
 _CONTEXT_ONLY_EVENTS = frozenset({"UserPromptSubmit", "UserPromptExpansion", "SessionStart", "PostModelSwitch"})
+
+
+def _rule_text_from_permission_rule_value(value) -> Optional[str]:
+    """One entry of an `addRules` update's own `rules` array -> this
+    harness's own `Tool(content)` rule-text form. The real shape (Claude
+    Code's `PermissionRuleValue`) is `{"toolName": str, "ruleContent"?:
+    str}`; a bare string is also accepted defensively (some hook authors
+    hand-build the JSON). Never raises -- an unusable entry is simply
+    skipped (`None`), never lets one bad rule drop the whole batch."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, dict):
+        tool_name = value.get("toolName")
+        if not isinstance(tool_name, str) or not tool_name:
+            return None
+        content = value.get("ruleContent")
+        if isinstance(content, str) and content:
+            return f"{tool_name}({content})"
+        return tool_name
+    return None
+
+
+def _apply_updated_permissions_list(outcome: HookOutcome, updated_perms, *, event: str) -> None:
+    """H5c finding 9: 2.1.281's REAL `updatedPermissions` shape is a LIST
+    of `{type: "setMode"|"addRules"|…, destination}` entries -- the old
+    code here parsed it as a single dict (`updated_perms.get("setMode")`),
+    which never matches the real wire shape at all, so `setMode`/`addRules`
+    from a real Claude Code hook were silently no-ops. A non-list value
+    (including the old dict shape) is rejected with a warning, never
+    crashes and never partially applies. Unrecognised entry types
+    (`removeRules`, `replaceRules`, `addDirectories`, `removeDirectories`)
+    are not modelled -- silently skipped, not an error."""
+    if updated_perms is None:
+        return
+    if not isinstance(updated_perms, list):
+        log.warning("%s hook's updatedPermissions must be a list of {type,...} entries (2.1.281's own "
+                    "shape) -- got %s, ignoring", event, type(updated_perms).__name__)
+        return
+    for entry in updated_perms:
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        if etype == "setMode":
+            mode = entry.get("mode")
+            if isinstance(mode, str) and mode:
+                outcome.set_mode = mode  # last wins, matching the existing set_mode semantics
+        elif etype == "addRules":
+            behavior = entry.get("behavior")
+            behavior = behavior if behavior in ("allow", "deny", "ask") else "allow"
+            for raw_rule in (entry.get("rules") or []):
+                rule_text = _rule_text_from_permission_rule_value(raw_rule)
+                if rule_text:
+                    outcome.updated_permissions.append({"rule": rule_text, "behavior": behavior})
+        # else: an unmodelled update type -- ignored, never an error.
 
 
 def _apply_json_fields(outcome: HookOutcome, parsed: dict, event: str) -> None:
@@ -668,11 +729,7 @@ def _apply_json_fields(outcome: HookOutcome, parsed: dict, event: str) -> None:
                 updated_input = decision_obj.get("updatedInput")
                 if isinstance(updated_input, dict):
                     outcome.updated_input = updated_input
-                updated_perms = decision_obj.get("updatedPermissions")
-                if isinstance(updated_perms, dict):
-                    mode = updated_perms.get("setMode")
-                    if isinstance(mode, str) and mode:
-                        outcome.set_mode = mode
+                _apply_updated_permissions_list(outcome, decision_obj.get("updatedPermissions"), event=event)
                 # `interrupt: true` on a deny means "stop the turn
                 # outright", not just refuse this one tool -- mirrors
                 # `outcome.continue_ = False`'s own existing meaning
@@ -698,11 +755,7 @@ def _apply_json_fields(outcome: HookOutcome, parsed: dict, event: str) -> None:
         if isinstance(extra_ctx, str) and extra_ctx:
             merged = f"{outcome.additional_context}\n{extra_ctx}" if outcome.additional_context else extra_ctx
             outcome.additional_context = merged[:ADDITIONAL_CONTEXT_CAP]
-        updated_perms = hso.get("updatedPermissions")
-        if isinstance(updated_perms, dict):
-            mode = updated_perms.get("setMode")
-            if isinstance(mode, str) and mode:
-                outcome.set_mode = mode
+        _apply_updated_permissions_list(outcome, hso.get("updatedPermissions"), event=event)
 
 
 def interpret_hook_result(event: str, result: HookResult) -> HookOutcome:
@@ -767,6 +820,7 @@ def combine_outcomes(outcomes: list) -> HookOutcome:
         combined.system_messages.extend(o.system_messages)
         if o.set_mode is not None:
             combined.set_mode = o.set_mode  # last wins (iteration order)
+        combined.updated_permissions.extend(o.updated_permissions)  # concatenated, like additional_context
     combined.additional_context = "\n\n".join(contexts)[:ADDITIONAL_CONTEXT_CAP]
     return combined
 
@@ -907,16 +961,22 @@ class HookRunner:
                 outcomes = [f.result() for f in futures]
         return combine_outcomes(outcomes)
 
-    def run_stop(self, event: str, *, last_assistant_message: str = "", prompt_id: Optional[str] = None) -> HookOutcome:
+    def run_stop(self, event: str, *, last_assistant_message: str = "", prompt_id: Optional[str] = None,
+                 abort=None) -> HookOutcome:
         """`event` in ("Stop", "SubagentStop"). Applies the consecutive-
         block cap (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`, default 8 [bin]): the
         (cap+1)th consecutive block force-ends the turn instead of blocking
-        again, with Claude Code's own exact override message."""
+        again, with Claude Code's own exact override message.
+
+        H5c finding 12: `abort`, when given, is threaded through to `run()`
+        exactly like every other event -- the old signature had no such
+        parameter at all, so Esc during a slow (up to the default 600s)
+        Stop hook could do nothing until it returned on its own."""
         payload = self.payload(event, prompt_id=prompt_id, extra={
             "stop_hook_active": self.stop_block_count > 0,
             "last_assistant_message": last_assistant_message,
         })
-        outcome = self.run(event, payload)
+        outcome = self.run(event, payload, abort=abort)
         cap = _env_positive_int("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", STOP_HOOK_BLOCK_CAP_DEFAULT)
         if outcome.blocked:
             self.stop_block_count += 1

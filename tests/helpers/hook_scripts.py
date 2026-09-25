@@ -41,8 +41,15 @@ Modes (argv[1], or the HOOK_SCRIPT_MODE env var):
                       HOOK_ONCE_COUNTER_FILE each time it actually runs
                       (counting REAL invocations is the only reliable way
                       to prove a hook did or didn't run twice) -- exit 0.
-  set_mode         -- exit 0, JSON hookSpecificOutput.updatedPermissions.
-                      setMode="acceptEdits".
+  permission_request_allow_setmode_addrules -- exit 0, PermissionRequest-
+                      shaped JSON: behavior=allow + updatedPermissions as
+                      the REAL 2.1.281 list shape (a setMode entry and an
+                      addRules/deny entry).
+  permission_request_updated_input_redecide -- exit 0, PermissionRequest-
+                      shaped JSON with only updatedInput (no behavior of
+                      its own) -- the loop must re-decide against it.
+  permission_request_interrupt -- exit 0, PermissionRequest-shaped JSON:
+                      behavior=deny + interrupt=true.
 """
 from __future__ import annotations
 
@@ -165,8 +172,38 @@ def main(argv=None) -> int:
                 f.write("1\n")
         return 0
 
-    if mode == "set_mode":
-        _print_json({"hookSpecificOutput": {"updatedPermissions": {"setMode": "acceptEdits"}}})
+    if mode == "permission_request_allow_setmode_addrules":
+        # H5c finding 9: PermissionRequest's real `updatedPermissions` wire
+        # shape is a LIST of {type, ...} entries -- setMode changes the
+        # session's own mode, addRules teaches it a new deny rule, both
+        # alongside an "allow" for THIS one call.
+        _print_json({"hookSpecificOutput": {"decision": {
+            "behavior": "allow",
+            "updatedPermissions": [
+                {"type": "setMode", "mode": "acceptEdits"},
+                {"type": "addRules", "behavior": "deny",
+                 "rules": [{"toolName": "Bash", "ruleContent": "rm -rf *"}]},
+            ],
+        }}})
+        return 0
+
+    if mode == "permission_request_updated_input_redecide":
+        # H5c finding 9: rewrites the command to something a user's OWN
+        # deny rule matches, with NO explicit behavior of its own -- the
+        # loop must re-run decide() against the REWRITTEN input (same
+        # reasoning as PreToolUse's `updated_input_no_decision` above)
+        # rather than letting the hook's silence fall through to an allow.
+        _print_json({"hookSpecificOutput": {"decision": {
+            "updatedInput": {"command": "rm -rf /rewritten-by-hook"},
+        }}})
+        return 0
+
+    if mode == "permission_request_interrupt":
+        # H5c finding 9: `interrupt: true` on a deny must end the WHOLE
+        # turn, not just refuse this one call.
+        _print_json({"hookSpecificOutput": {"decision": {
+            "behavior": "deny", "message": "stop everything right now", "interrupt": True,
+        }}})
         return 0
 
     # echo_stdin (default): round-trips the payload so a test can assert on it directly.

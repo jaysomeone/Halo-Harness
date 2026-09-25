@@ -219,6 +219,102 @@ def test_parent_abort_reaches_a_running_childs_in_flight_stream(ctx: Ctx):
         mock.stop()
 
 
+@test
+def test_h5c_f07_five_agents_esc_after_four_started_all_end_interrupted(ctx: Ctx):
+    """H5c finding 7: every child `turn()` used to call `self.abort.clear()`
+    UNCONDITIONALLY, even though a sub-agent shares the PARENT's own Event
+    object -- verified with exactly this repro: 5 Agent calls, so the pool
+    of 4 (`MAX_CONCURRENT_AGENTS`) queues one. Esc fired once 4 children's
+    own requests are genuinely streaming interrupted children 0-3 (their
+    `_step`/streaming already observe the SHARED Event), but the 5th
+    started LATER, its own `turn()` cleared the shared Event, and it (plus
+    the parent's own next model call) then ran to completion as if Esc had
+    never happened. Fixed via `Session._owns_abort` (only the OWNER clears
+    at turn start) and an explicit abort check in the agent-batch pool's
+    `_run_one`, right before a QUEUED call would otherwise start. All 5
+    children must end up interrupted (4 genuinely cut mid-stream, the 5th
+    never even started) and the PARENT's own turn must end
+    `reason="interrupted"`, not silently succeed."""
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-parent-five-agents"] = ScriptedTurns([
+            _multi_tool_call_step([
+                ("Task", {"description": f"slow-{i}", "prompt": f"do slow thing {i}",
+                           "subagent_type": "general-purpose", "model": "or:mock/long-abort"}, f"call_{i}")
+                for i in range(5)
+            ]),
+        ])
+        session = _new_session(mock=mock, model="or:mock/h6-parent-five-agents",
+                                agents={"general-purpose": _general_purpose_spec()})
+
+        events_seen: list = []
+        errors: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("run five slow sub-agents"):
+                    events_seen.append(ev)
+            except Exception as e:  # pragma: no cover -- would fail the check below
+                errors.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t0 = time.monotonic()
+        t.start()
+
+        # Wait until 4 children's own requests have reached the mock (1
+        # parent request + 4 concurrent children -- the pool's own cap) and
+        # let a few 0.1s-spaced chunks genuinely stream, so the 5th is
+        # provably still queued (never started) when we interrupt.
+        deadline = time.monotonic() + 10
+        while len(mock.requests) < 5 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        ctx.check(f"exactly 4 children's requests reached the mock (the pool cap), got {len(mock.requests)}",
+                  len(mock.requests) == 5)
+        time.sleep(0.3)
+
+        session.abort.set()
+        done.wait(timeout=10)
+        dt = time.monotonic() - t0
+        t.join(timeout=1)
+
+        ctx.check(f"no exception propagated out of turn(), got {errors}", errors == [])
+        ctx.check(f"the whole turn finished promptly (well under the ~6s an un-aborted child "
+                  f"takes), got dt={dt:.2f}s -- this is the bug: the OLD code let child 5 (and the "
+                  f"parent's own continuation) run to completion", dt < 3.0)
+        # The 5th child must NEVER have started its own request at all --
+        # proves the abort check inside the pool's `_run_one` caught it
+        # before it ever built a child Session.
+        ctx.check(f"the 5th child's request never reached the mock, still exactly 5 total, got {len(mock.requests)}",
+                  len(mock.requests) == 5)
+
+        tool_results = {e.data.get("id"): e.data for e in events_seen if e.kind == "tool_result"}
+        ctx.check(f"all 5 Task calls got a result (none left unpaired), got {sorted(tool_results)}",
+                  len(tool_results) == 5)
+        # Every one of the 5 shows the interrupt somewhere: the 4 that
+        # genuinely started stream a normal (non-error) result carrying the
+        # child's own "[Request interrupted by user]" marker (same shape as
+        # `test_parent_abort_reaches_a_running_childs_in_flight_stream`);
+        # the 5th, caught by the pool's own abort check before ever
+        # building a child Session, is a real `is_error` result instead.
+        never_started = [cid for cid, data in tool_results.items()
+                          if data.get("ok") is False]
+        ctx.check(f"exactly one call never started at all (the queued 5th), got {never_started}",
+                  len(never_started) == 1)
+        for call_id, data in tool_results.items():
+            summary = data.get("summary") or data.get("content") or ""
+            ctx.check(f"{call_id}: shows the interrupt one way or another, got {data}",
+                      "interrupted" in summary.lower() or "not started" in summary.lower())
+
+        ctx.check(f"the PARENT's OWN turn ends interrupted, got kinds={[e.kind for e in events_seen][-6:]}",
+                  any(e.kind == "turn_done" and e.agent_id is None and e.data.get("reason") == "interrupted"
+                      for e in events_seen))
+    finally:
+        mock.stop()
+
+
 # ---- two parallel agents in one turn -----------------------------------------
 
 @test
@@ -355,47 +451,155 @@ def test_background_agent_completion_notice_on_next_turn(ctx: Ctx):
         mock.stop()
 
 
-# ---- a permission ask inside a child is denied and tagged ----------------------
+# ---- a permission ask inside a child is surfaced LIVE and tagged ---------------
 
 @test
-def test_child_permission_ask_is_denied_and_tagged_with_agent_id(ctx: Ctx):
+def test_h5c_f08_child_permission_ask_is_live_answerable_and_tagged_with_agent_id(ctx: Ctx):
+    """H5c finding 8 (closes the H6/D10 v1 gap this test used to pin as
+    correct): a FOREGROUND sub-agent's own "ask" decision, when the PARENT
+    is interactive, is now a LIVE, answerable `permission_request` --
+    agent-tagged -- not an immediate, non-interactive denial. Drives the
+    turn on a background thread (same pattern as
+    `test_parent_abort_reaches_a_running_childs_in_flight_stream`), waits
+    for the child's own `permission_request` to arrive tagged with its
+    `agent_id`, answers it via `session.resolve_permission` (the SAME
+    top-level entry point the UI's `Controller.answer_permission` uses --
+    proving the child's waiter really is parked on the PARENT's own
+    `_permission_waiters`), and confirms the Write actually ran."""
+    from rolo_claude.permissions import Decision
+
     mock = MockUpstream().start()
     try:
         SCENARIOS["h6-parent-askchild"] = ScriptedTurns([
             _tool_call_step("Task", {"description": "write", "prompt": "write a file",
                                       "subagent_type": "writer", "model": "or:mock/h6-child-askchild"}),
-            _text_step("the sub-agent was blocked from writing"),
+            _text_step("the sub-agent wrote the file"),
         ])
+        cwd = Path(tempfile.mkdtemp(prefix="rc-agent-e2e-askchild-"))
+        target = cwd / "new_file.txt"
         SCENARIOS["h6-child-askchild"] = ScriptedTurns([
-            _tool_call_step("Write", {"file_path": "new_file.txt", "content": "hi"}),
+            _tool_call_step("Write", {"file_path": str(target), "content": "hi"}, "call_write_1"),
+            _text_step("done writing"),
         ])
         # permission_mode="default" on the SPEC forces a real "ask" decision
         # for the child even though the PARENT session itself is "auto".
         spec = _general_purpose_spec(name="writer", permission_mode="default")
         session = _new_session(mock=mock, model="or:mock/h6-parent-askchild", agents={"writer": spec},
-                                permission_mode="auto",
-                                interactive=True)  # even an INTERACTIVE parent -- v1: children never block on a human
-        events = _drain(session, "have the writer sub-agent write a file")
+                                permission_mode="auto", cwd=cwd,
+                                interactive=True)  # H5c finding 8: a live card now reaches even a sub-agent's ask
 
-        tagged_denials = [e for e in events if e.kind == "tool_result" and e.agent_id and not e.data.get("ok")]
-        ctx.check("a denial event exists, tagged with the child's agent_id", len(tagged_denials) >= 1)
-        denial_text = tagged_denials[0].data.get("content") or tagged_denials[0].data.get("summary") or ""
-        ctx.check("denial mentions permission", "permission" in denial_text.lower())
-        # The ask is still surfaced (informational, "surfaced ... with the
-        # agent tag" per the brief) -- it just resolves to an immediate
-        # deny rather than genuinely blocking, since v1 children always run
-        # non-interactively regardless of the PARENT's own interactive flag.
-        tagged_asks = [e for e in events if e.kind == "permission_request" and e.agent_id]
-        ctx.check("the ask itself was surfaced tagged with the agent_id too", len(tagged_asks) >= 1)
-        ctx.check("the turn completed (never actually blocked waiting on a human)",
-                  any(e.kind == "turn_done" for e in events))
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("have the writer sub-agent write a file"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t.start()
+
+        deadline = time.monotonic() + 10
+        while not any(e.kind == "permission_request" for e in events_seen) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        cards = [e for e in events_seen if e.kind == "permission_request"]
+        ctx.check(f"a permission_request arrived, got kinds={[e.kind for e in events_seen]}", len(cards) == 1)
+        card = cards[0]
+        ctx.check(f"it is tagged with the CHILD's own agent_id (not None -- the parent never asks here), "
+                  f"got {card.agent_id!r}", card.agent_id is not None)
+        ctx.check(f"it names the gated tool, got {card.data}", card.data.get("name") == "Write")
+
+        # It must be genuinely LIVE -- not already resolved/denied before we
+        # get a chance to answer it.
+        ctx.check("no tool_result for this call yet (still waiting on a real answer)",
+                  not any(e.kind == "tool_result" and e.data.get("id") == card.data.get("id") for e in events_seen))
+
+        resolved = session.resolve_permission(card.data.get("id"), Decision("allow", "test allow, live sub-agent ask"))
+        ctx.check("the top-level Session.resolve_permission -- same entry point the UI uses -- found the "
+                  "child's waiter and resolved it", resolved is True)
+
+        done.wait(timeout=10)
+        ctx.check("the turn finished", done.is_set())
+
+        write_results = [e for e in events_seen if e.kind == "tool_result" and e.data.get("id") == "call_write_1"]
+        ctx.check(f"the Write call got a result, got {[e.data for e in write_results]}", len(write_results) == 1)
+        ctx.check(f"it succeeded (the live 'allow' answer actually ran the tool), got {write_results[0].data}",
+                  write_results[0].data.get("ok") is True)
+        ctx.check(f"the successful result is STILL agent-tagged, got agent_id={write_results[0].agent_id!r}",
+                  write_results[0].agent_id is not None)
+        ctx.check(f"the file was genuinely written to disk, got exists={target.exists()}", target.exists())
+    finally:
+        mock.stop()
+
+
+@test
+def test_h5c_f08_child_permission_ask_denied_live_still_tagged_and_merged(ctx: Ctx):
+    """H5c finding 8, the deny half: a live sub-agent ask that the user
+    genuinely denies (not just auto-denied) must still behave like every
+    other denial -- an agent-tagged `is_error` tool_result, and merged into
+    the PARENT's own `permission_denials` (H6/D10: print mode's top-level
+    JSON result only ever reads the PARENT's list)."""
+    from rolo_claude.permissions import Decision
+
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-parent-askchild-deny"] = ScriptedTurns([
+            _tool_call_step("Task", {"description": "write", "prompt": "write a file",
+                                      "subagent_type": "writer", "model": "or:mock/h6-child-askchild-deny"}),
+            _text_step("the sub-agent was blocked from writing"),
+        ])
+        cwd = Path(tempfile.mkdtemp(prefix="rc-agent-e2e-askchild-deny-"))
+        target = cwd / "denied_file.txt"
+        SCENARIOS["h6-child-askchild-deny"] = ScriptedTurns([
+            _tool_call_step("Write", {"file_path": str(target), "content": "hi"}, "call_write_deny_1"),
+            # A second scripted step for the child's OWN post-denial reply
+            # -- without one, `ScriptedTurns` replays the SAME Write call
+            # again (a second, never-answered ask that hangs the child's
+            # thread forever, since `_await_permission_decision` has no
+            # timeout of its own).
+            _text_step("understood, I will not write that file"),
+        ])
+        spec = _general_purpose_spec(name="writer", permission_mode="default")
+        session = _new_session(mock=mock, model="or:mock/h6-parent-askchild-deny", agents={"writer": spec},
+                                permission_mode="auto", cwd=cwd, interactive=True)
+
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("have the writer sub-agent write a file"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t.start()
+
+        deadline = time.monotonic() + 10
+        while not any(e.kind == "permission_request" for e in events_seen) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        cards = [e for e in events_seen if e.kind == "permission_request"]
+        ctx.check(f"a permission_request arrived, tagged with the child's agent_id, got {cards}",
+                  len(cards) == 1 and cards[0].agent_id is not None)
+
+        resolved = session.resolve_permission(cards[0].data.get("id"), Decision("deny", "no, don't write that"))
+        ctx.check("resolve_permission found the child's waiter", resolved is True)
+        done.wait(timeout=10)
+        ctx.check("the turn finished", done.is_set())
+
+        write_results = [e for e in events_seen if e.kind == "tool_result" and e.data.get("id") == "call_write_deny_1"]
+        ctx.check(f"the Write call got a result, got {[e.data for e in write_results]}", len(write_results) == 1)
+        ctx.check(f"it was genuinely denied, got {write_results[0].data}", write_results[0].data.get("ok") is False)
+        ctx.check("the denial mentions why", "don't write that" in (write_results[0].data.get("summary") or ""))
+        ctx.check(f"the file was never written, got exists={target.exists()}", not target.exists())
         # H6 known v1 gap (D10) / B must-do: the child's own denial is
         # merged into the PARENT's `permission_denials` -- print mode's
         # top-level JSON result reads ONLY the parent's list, so a sub-
         # agent's denied tool call used to be invisible there entirely.
         ctx.check(f"the sub-agent's denial reached the PARENT's own permission_denials, got {session.permission_denials}",
-                  len(session.permission_denials) >= 1)
-        ctx.check("the merged denial names the actually-denied tool",
                   any(d.get("tool_name") == "Write" for d in session.permission_denials))
     finally:
         mock.stop()

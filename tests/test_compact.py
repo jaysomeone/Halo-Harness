@@ -172,15 +172,10 @@ def test_h5b_f03_floor_and_reserve_both_hold(ctx: Ctx):
 
 @test
 def test_h5b_f03_small_window_open_weight_shapes_no_longer_zero(ctx: Ctx):
-    """The class of real row this finding names (`z-ai/glm-5.2:free`,
-    `deepseek-r1-distill-llama-70b`, and three Qwen 2.5 rows: 32k-64k-class
-    context with an advertised max_output close to or equal to the whole
-    context, which is what OpenRouter reports for a model whose provider
-    listing gives no SEPARATE, smaller completion cap) -- exact current
-    published context/max_output pairs for those 5 specific ids were not
-    re-verified here (no network access to OpenRouter or the user's own
-    cached models.json in this sandbox); this covers the STRUCTURAL shape
-    the finding describes instead, which is what actually drives the bug."""
+    """The class of real row this finding names: 32k-64k-class context with
+    an advertised max_output close to or equal to the whole context, which
+    is what OpenRouter reports for a model whose provider listing gives no
+    SEPARATE, smaller completion cap."""
     # (65_536, 65_536) reproduces the finding's OWN separately-quoted "nine
     # more rows sit under 50%, for example 65,536-window rows at 13,536"
     # number exactly (old_usable == 13_536 below) -- a DIFFERENT, less
@@ -193,6 +188,44 @@ def test_h5b_f03_small_window_open_weight_shapes_no_longer_zero(ctx: Ctx):
         ctx.check(f"({context},{max_out}): fixed trigger is sane, got {trigger}", trigger >= int(context * 0.5))
     ctx.check(f"the 65,536-window row's old `usable` was 13,536 (the finding's own quoted number), "
               f"got {old_usables[(65_536, 65_536)]}", old_usables[(65_536, 65_536)] == 13_536)
+
+
+@test
+def test_h5c_f24_the_exact_zero_trigger_rows_the_finding_names_are_fixed(ctx: Ctx):
+    """H5c finding 24: `test_h5b_f01_real_models_json_zero_trigger_rows...`
+    only covers finding 1's 8 LARGE-window rows (Kimi/Qwen3.5/MiniMax/
+    GLM-5/DeepSeek-v3.2) -- never the actual ZERO-trigger rows finding 3
+    itself names. These 5 exact (context_length, max_output_tokens) pairs
+    are copied verbatim from rolo's real ~/.rolo-claude/models.json on
+    2026-09-24 for the finding's own named ids, and verified below to
+    genuinely give the OLD formula a trigger of exactly 0 (matching
+    finding 3's "21 of 458 real models.json rows still have a trigger of
+    0... Five of them are in the target families") before asserting the
+    FIXED trigger is sane for every one of them."""
+    real_zero_trigger_rows = {
+        "z-ai/glm-5.2:free": (32_768, 29_491),
+        "deepseek/deepseek-r1-distill-llama-70b": (8_192, 7_372),
+        "qwen/qwen-2.5-coder-32b-instruct": (32_768, 29_491),
+        "qwen/qwen-2.5-7b-instruct": (32_768, 29_491),
+        "qwen/qwen-2.5-72b-instruct": (32_768, 16_384),
+    }
+    for name, (context, max_out) in real_zero_trigger_rows.items():
+        old_dsh = max(0, int(0.8 * (context - min(32_000, max_out) - 65_536)))
+        old_usable = max(0, (context - min(32_000, max_out)) - min(20_000, min(32_000, max_out)))
+        old_trigger = min(old_dsh, old_usable)
+        ctx.check(f"{name}: sanity -- this really is one of the verified zero-trigger rows, got old={old_trigger}",
+                  old_trigger == 0)
+
+        trigger = compaction_trigger_tokens(context, max_out)
+        ctx.check(f"{name}: trigger is no longer 0, got {trigger}", trigger > 0)
+        # The ~70% floor is capped by the min-viable-reserve ceiling for a
+        # TINY context (deepseek-r1-distill-llama-70b's 8,192-token window):
+        # the real invariant that holds for every row is "at least the
+        # floor, unless the reserve ceiling caps it lower first".
+        expected_floor = min(int(context * 0.65), context - MIN_VIABLE_RESERVE_TOKENS)
+        ctx.check(f"{name}: trigger meets the floor (or the reserve ceiling that caps it), got {trigger} of {context}",
+                  trigger >= expected_floor)
+        ctx.check(f"{name}: trigger stays below the context window, got {trigger}", trigger < context)
 
 
 @test
@@ -244,14 +277,93 @@ def test_auto_compact_enabled_false_disables(ctx: Ctx):
 
 @test
 def test_compaction_model_from_settings_raw(ctx: Ctx):
+    """H5c finding 18: settings.raw is only the FALLBACK -- isolated with
+    an empty `BRIDGE_TEST_HOME` (never the real machine's own
+    `~/.rolo-claude/config.json`) so this stays deterministic regardless
+    of what that file happens to contain wherever the suite runs."""
+    import os
+    import tempfile
+
     class FakeSettings:
         auto_compact_window = None
         auto_compact_enabled = True
         compaction_model = None
         raw = {"compactionModel": "or:some/small-model"}
 
-    knobs = resolve_knobs(FakeSettings(), {})
-    ctx.check("compactionModel read from settings.raw", knobs.compaction_model == "or:some/small-model")
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-empty-")
+    try:
+        knobs = resolve_knobs(FakeSettings(), {})
+        ctx.check("compactionModel read from settings.raw (no config.json override present)",
+                  knobs.compaction_model == "or:some/small-model")
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
+
+
+@test
+def test_h5c_f18_compaction_model_from_rolo_claude_config_json_wins_over_settings(ctx: Ctx):
+    """H5c finding 18: `~/.rolo-claude/config.json`'s own `compactionModel`
+    key (brief D: "can point at the small one") wins over Claude Code's
+    settings chain -- the OLD code read settings ONLY, silently ignoring
+    it. Driven through the REAL config path (`theme.set_config_value` ->
+    `~/.rolo-claude/config.json`, redirected to an isolated
+    `BRIDGE_TEST_HOME`), never an injected knob."""
+    import os
+    import tempfile
+
+    from rolo_claude import theme as theme_mod
+
+    class FakeSettings:
+        auto_compact_window = None
+        auto_compact_enabled = True
+        compaction_model = None
+        raw = {"compactionModel": "or:from-settings/should-lose"}
+
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-")
+    try:
+        theme_mod.set_config_value("compactionModel", "or:from-config-json/should-win")
+        knobs = resolve_knobs(FakeSettings(), {})
+        ctx.check(f"config.json's compactionModel wins over settings.raw, got {knobs.compaction_model!r}",
+                  knobs.compaction_model == "or:from-config-json/should-win")
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
+
+
+@test
+def test_h5c_f18_compaction_model_falls_back_to_settings_when_config_json_has_no_key(ctx: Ctx):
+    """H5c finding 18: an empty/missing `~/.rolo-claude/config.json` (or
+    one with unrelated keys) must still fall back to settings -- config.json
+    winning is a PRIORITY rule, not a requirement that it be set at all."""
+    import os
+    import tempfile
+
+    from rolo_claude import theme as theme_mod
+
+    class FakeSettings:
+        auto_compact_window = None
+        auto_compact_enabled = True
+        compaction_model = None
+        raw = {"compactionModel": "or:some/small-model"}
+
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-unrelated-")
+    try:
+        theme_mod.set_config_value("theme", "claude-dark")  # a real key, just not compactionModel
+        knobs = resolve_knobs(FakeSettings(), {})
+        ctx.check(f"falls back to settings.raw, got {knobs.compaction_model!r}",
+                  knobs.compaction_model == "or:some/small-model")
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
 
 
 @test

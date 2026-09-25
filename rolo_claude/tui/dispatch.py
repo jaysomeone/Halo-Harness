@@ -102,17 +102,28 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
         pass
 
 
-async def _show_permission_card(app, data: dict) -> None:
+async def _show_permission_card(app, data: dict, *, agent_id: "str | None" = None) -> None:
+    """H5c finding 8: `agent_id`, when given, means this ask came from a
+    sub-agent, not the main session -- the SAME live, answerable card
+    (never an informational note), just tagged so the user knows which
+    sub-agent is asking. `app.resolve_permission_decision` -> `Controller.
+    answer_permission` -> `Session.resolve_permission` on the TOP-level
+    session works unchanged for a sub-agent's own ask: the child's waiter
+    is parked in the SAME `_permission_waiters` dict (see `agent/
+    subagent.py`'s `_build_child_session`)."""
     request_id = data.get("id")
     name = data.get("name") or "?"
     input_data = data.get("input") or {}
     suggested = data.get("suggested_rule")
+    summary = _tool_header(app, name, input_data)[2:]
+    if agent_id:
+        summary = f"[sub-agent {agent_id}] {summary}"
 
     def on_decide(decision: dict) -> None:
         app.resolve_permission_decision(request_id, decision, suggested_rule=suggested)
         app.clear_pending_card()
 
-    card = PermissionCard(request_id=request_id, summary=_tool_header(app, name, input_data)[2:],
+    card = PermissionCard(request_id=request_id, summary=summary,
                            reason=data.get("reason", ""), suggested_rule=suggested, on_decide=on_decide)
     await app.transcript.mount_widget(card)
     app.set_pending_card(card)
@@ -213,25 +224,14 @@ async def _apply_event_inner(app, event) -> None:
             card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"))
         _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")))
     elif kind == "permission_request":
-        if event.agent_id:
-            # H6 known v1 gap (D10) / B must-do: a SUB-AGENT's own "ask"
-            # decision (agent/loop.py's `_resolve_tool_call`, the non-
-            # interactive fallback -- sub-agents run with
-            # `interactive=False`: their whole turn is drained to a list
-            # before any of their events reach this live stream at all,
-            # so there is no channel left to pause on for a real answer
-            # by the time this arrives) is ALREADY final -- rendered as an
-            # informational note, agent-tagged, never a live actionable
-            # card that would misleadingly imply the user can still change
-            # the outcome.
-            await app.transcript.add_note(
-                f"⚠ sub-agent (agent_id={event.agent_id}) needed permission for "
-                f"{data.get('name', '?')} and was denied (no live approval for sub-agents "
-                f"in this build): {data.get('reason', '')}",
-                kind="error",
-            )
-        else:
-            await _show_permission_card(app, data)
+        # H5c finding 8: a FOREGROUND sub-agent's own "ask" (when its
+        # parent session is interactive) is now a LIVE, answerable card
+        # too, agent-tagged -- never an informational "already denied"
+        # note. A BACKGROUND sub-agent's ask (or any ask in print mode)
+        # never reaches here at all: `agent/loop.py`'s own
+        # `_subagent_live_asks` gate resolves those immediately instead
+        # of ever yielding this event.
+        await _show_permission_card(app, data, agent_id=event.agent_id)
     elif kind == "question":
         await _show_question_card(app, data)
     elif kind == "plan_review":
@@ -272,15 +272,35 @@ async def _apply_event_inner(app, event) -> None:
         # U5 must-do: the steer's own TEXT is never embedded in this note
         # -- it shows up exactly once, moments later, as an ordinary user
         # bubble (the `user_message` event `_apply_pending_steers_events`
-        # yields right before `steer_applied`). The old note repeated the
-        # full text here too, so a single steer showed up TWICE (a note,
-        # then a user bubble with identical text). This event can fire
-        # twice for one logical steer -- once immediately at submit time
-        # (Controller.submit, for instant feedback) and once again when
-        # the turn actually applies it -- both are just this same generic,
-        # text-free indicator, never a second copy of the text.
-        await app.transcript.add_note("↳ steering…", kind="steer")
+        # yields right before `steer_applied`).
+        #
+        # H5c finding 19: this event genuinely fires TWICE for one logical
+        # steer -- once immediately at submit time (`Controller.submit`,
+        # for instant feedback the moment the turn reaches a safe point
+        # to actually apply it -- which can be much later) and once again
+        # from the session's OWN turn-event stream when it actually
+        # applies (kept there too: a bare `Session`/print-mode caller with
+        # no Controller at all has no OTHER path to ever see this event,
+        # and print mode's own documented contract promises it). Rather
+        # than dropping the event at its source (breaking that other
+        # path), the note is deduplicated HERE, by text, against a steer
+        # still awaiting its matching `steer_applied` -- a SECOND, GENUINELY
+        # DIFFERENT steer queued before the first applies still gets its
+        # own note.
+        pending = app._pending_steer_note_texts if hasattr(app, "_pending_steer_note_texts") else None
+        if pending is None:
+            pending = app._pending_steer_note_texts = []
+        text = data.get("text")
+        if text in pending:
+            pass  # the same steer's own second (apply-time) emission
+        else:
+            pending.append(text)
+            await app.transcript.add_note("↳ steering…", kind="steer")
     elif kind == "steer_applied":
+        pending = getattr(app, "_pending_steer_note_texts", None)
+        text = data.get("text")
+        if pending and text in pending:
+            pending.remove(text)
         app.status_bar.apply_status({"phase": "thinking"})
     elif kind == "compaction":
         # U5 must-do: no handler existed at all before -- a "Compacting…"

@@ -210,6 +210,60 @@ def test_max_turns_wrap_up_call_gets_a_text_reply(ctx: Ctx):
 
 
 @test
+def test_h5c_f20_max_steps_wrapup_strips_a_disobedient_tool_use(ctx: Ctx):
+    """H5c finding 20: `tool_choice: "none"` on the MAX_STEPS wrap-up call is
+    only a REQUEST -- a model (or a provider silently downgrading it) can
+    still reply with a tool_use block anyway. That wrap-up call never
+    dispatches anything (the turn ends right after it), so if the tool_use
+    were logged as-is it would sit UNPAIRED in the transcript forever,
+    corrupting every later request on `ant:`/Databricks Claude routes (400:
+    "tool_use ... must define tools") and papered over on OpenAI-dialect
+    routes with a synthetic "(no result)". `mock/page-forever` always
+    replies with a tool_call no matter what `tool_choice` says (see
+    `_scn_page_forever` above, and test_max_turns_caps_model_calls_per_turn
+    which uses the same scenario over the CLI) -- driven here as a real
+    in-process Session so the LOG ITSELF can be inspected after the turn,
+    not just the CLI's stdout summary."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").write_text("target file\n", encoding="utf-8")
+    mock = MockUpstream().start()
+    try:
+        session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/page-forever")
+        model_ref = parse_model_ref("or:mock/page-forever")
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        session = Session(
+            cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(), creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+            state_dir=Path(tempfile.mkdtemp(prefix="f20-wrapup-test-")), model_label="mock/page-forever",
+            session_context=session_ctx, openrouter_base_url=mock.base_url, max_turns=2,
+        )
+        events_seen = list(session.turn("page through the file"))
+        ctx.check(f"upstream called max_turns + 1 wrap-up call (3), got {len(mock.requests)}", len(mock.requests) == 3)
+        wrap_up_body = mock.requests[-1].get("body") or {}
+        ctx.check(f"the wrap-up call forbids a new call via tool_choice: none, got {wrap_up_body.get('tool_choice')!r}",
+                  wrap_up_body.get("tool_choice") == "none")
+        ctx.check("no unanswered tool_use ids remain anywhere in the log after the disobedient wrap-up reply "
+                  "(the wrap-up call dispatches nothing, so a logged tool_use here would be unpaired forever)",
+                  find_unpaired_tool_use_ids(session.log) == [])
+        turn_done_events = [e for e in events_seen if e.kind == "turn_done"]
+        ctx.check(f"exactly one turn_done event, got {len(turn_done_events)}", len(turn_done_events) == 1)
+        ctx.check(f"turn ends via the max_turns path, got reason={turn_done_events[0].data.get('reason')!r}",
+                  turn_done_events[0].data.get("reason") == "max_turns")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+        try:
+            (Path(tempfile.gettempdir()) / "loop-breaker-target.txt").unlink()
+        except OSError:
+            pass
+
+
+@test
 def test_loop_breaker_unit_level_thresholds(ctx: Ctx):
     """Exercise Session._dispatch_tools directly against a fresh in-process
     Session so the exact remind/deny/end wording and thresholds (3/5/8) are

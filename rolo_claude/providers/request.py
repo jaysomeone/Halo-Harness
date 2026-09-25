@@ -14,6 +14,7 @@ copies drifting apart.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from rolo_claude.providers.hooks import host_allowlist, reasoning_echo, system_normalize
@@ -372,12 +373,54 @@ def apply_anthropic_cache_control(system_text: str, messages: list) -> "tuple[li
 _ANTHROPIC_MIN_THINKING_BUDGET = 1024  # Anthropic's own documented floor for budget_tokens
 
 
+_ADAPTIVE_ALWAYS_FAMILIES = ("opus", "fable", "mythos")  # always adaptive-capable, whatever the version
+_ADAPTIVE_VERSION_GATED_FAMILIES = ("sonnet",)  # adaptive only from _ADAPTIVE_MIN_VERSION onward
+_ADAPTIVE_MIN_VERSION = 4.6  # sonnet: adaptive from 4.6 onward (4.5 and older stay budget_tokens)
+
+
+def _anthropic_model_supports_adaptive_thinking(model_id: str) -> bool:
+    """H5c finding 16: `{type: "adaptive"}` (never `budget_tokens`, which
+    Sonnet 5 rejects with a 400) is required on Sonnet 4.6 onward, in
+    addition to every Opus/Fable/Mythos id (unconditionally adaptive-
+    capable already, unchanged from before this fix) -- the OLD check
+    (`"opus" in low or "fable" in low`) missed Sonnet 5 (and Sonnet 4.6)
+    entirely, routing it into the `budget_tokens` branch below, which it
+    does not accept. Haiku (any version) and Sonnet 4.5 or older are the
+    opposite: no adaptive mode at all, always `budget_tokens`. Parses a
+    trailing `<family>-<version>` (`claude-sonnet-4.6` -> ("sonnet", 4.6));
+    an unparseable id (or an unrecognised family) falls back to the
+    ORIGINAL substring check (a dated/legacy snapshot id that still names
+    "opus"/"fable" somewhere) rather than guessing wrong either way."""
+    low = (model_id or "").lower()
+    m = re.search(r"(opus|sonnet|haiku|fable|mythos)[-_](\d+(?:\.\d+)?)", low)
+    if m is None:
+        return "opus" in low or "fable" in low
+    family, version_str = m.group(1), m.group(2)
+    if family in _ADAPTIVE_ALWAYS_FAMILIES:
+        return True
+    if family not in _ADAPTIVE_VERSION_GATED_FAMILIES:
+        return False  # haiku, or any other recognised-but-never-adaptive family
+    try:
+        version = float(version_str)
+    except ValueError:
+        return "opus" in low or "fable" in low
+    return version >= _ADAPTIVE_MIN_VERSION
+
+
 def map_effort_anthropic(effort: Optional[str], model_id: str, *, max_tokens: Optional[int] = None) -> dict:
-    """`{"thinking": {...}}` (Sonnet/DeepSeek-class: a token budget) or
-    `{"output_config": {"effort": ...}}` (Opus/Fable-class: a named level,
-    per the brief's "output_config.effort for Opus/Fable-class") from
-    `--effort`. Returns {} when `effort` is falsy (omit -> provider
-    default, never a disabling value sent blindly).
+    """`{"thinking": {"type": "adaptive"}, "output_config": {"effort":
+    ...}}` (Fable/Mythos, Opus/Sonnet 4.6+ -- `budget_tokens` is REMOVED
+    on these and rejected with a 400) or `{"thinking": {"type": "enabled",
+    "budget_tokens": N}}` (Haiku 4.5 and any older Sonnet/Opus, which have
+    no adaptive mode at all and REQUIRE a budget) from `--effort`. Returns
+    {} when `effort` is falsy (omit -> provider default, never a disabling
+    value sent blindly).
+
+    H5c finding 16: the OLD model check (`"opus" in low or "fable" in
+    low`) sent `budget_tokens` to every OTHER id, including Sonnet 5 --
+    which rejects it outright (400 on the very first `--effort` call on
+    that model). `_anthropic_model_supports_adaptive_thinking` is the
+    correct, version-aware split (see its own docstring).
 
     finding 15 (major, h4-h5-h3c review): Anthropic REQUIRES
     `budget_tokens < max_tokens` -- the pre-fix version picked
@@ -392,9 +435,8 @@ def map_effort_anthropic(effort: Optional[str], model_id: str, *, max_tokens: Op
     entirely for this call rather than sent invalid."""
     if not effort:
         return {}
-    low = (model_id or "").lower()
-    if "opus" in low or "fable" in low:
-        return {"output_config": {"effort": effort}}
+    if _anthropic_model_supports_adaptive_thinking(model_id):
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}}
     budget_by_effort = {"low": 4096, "medium": 10000, "high": 24000, "xhigh": 32000, "max": 32000}
     budget = budget_by_effort.get(effort, 10000)
     if isinstance(max_tokens, int) and max_tokens > 0:
@@ -463,10 +505,26 @@ def prepare_anthropic_messages(messages: list) -> list:
         never be replayed as a native thinking block, which needs a real
         signature that was never produced for it), that text survives as
         a plain, visibly-labelled TEXT block instead of vanishing.
-      * A `thinking` block with an empty `signature` or empty `text`, or
-        a `text` block with empty text, is DROPPED outright -- a partial
+      * A `thinking` block with an empty `signature` is DROPPED outright --
+        a partial block a steer/abort/interrupt cut short BEFORE
+        `signature_delta` ever arrived, which Anthropic rejects as
+        malformed if replayed. H5b finding 16: a SIGNED block with EMPTY
+        text is NOT the same thing -- it is the normal shape when
+        `display` defaults to "omitted" (Opus 5/5.5, Fable, Sonnet 5, which
+        think by default) and must be echoed back unchanged, never dropped
+        just because `text` is empty.
+      * A `text` block with empty text is DROPPED outright -- a partial
         block a steer/abort/interrupt cut short before it ever finished
-        forming, which Anthropic rejects as malformed if replayed."""
+        forming, which Anthropic rejects as malformed if replayed.
+      * H5b finding 5: an ASSISTANT message that ends up with NO content
+        blocks at all once the two rules above are applied (every block it
+        had was an unsigned thinking/empty-text partial) is DROPPED
+        ENTIRELY -- Anthropic rejects a non-final assistant message with
+        empty content outright. Dropping it can leave two adjacent
+        user-role messages (the turn's own user message, immediately
+        followed by a steer's user message that used to have the now-gone
+        assistant reply between them) -- merged into one afterwards, since
+        Anthropic requires alternating roles."""
     out = []
     for msg in messages:
         if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
@@ -488,12 +546,11 @@ def prepare_anthropic_messages(messages: list) -> list:
                 continue
             btype = block.get("type")
             if btype == "thinking":
-                text = block.get("text") or ""
                 signature = block.get("signature") or ""
-                if not text or not signature:
-                    continue  # unsigned/empty -- cut short, never valid to replay
+                if not signature:
+                    continue  # unsigned -- cut short before signature_delta, never valid to replay
                 new_block = {k: v for k, v in block.items() if k != "text"}
-                new_block["thinking"] = text
+                new_block["thinking"] = block.get("text") or ""
                 new_content.append(new_block)
             elif btype == "text":
                 if not (block.get("text") or ""):
@@ -501,9 +558,24 @@ def prepare_anthropic_messages(messages: list) -> list:
                 new_content.append(block)
             else:
                 new_content.append(block)
+        if msg.get("role") == "assistant" and not new_content:
+            continue  # finding 5: nothing replayable survived -- drop the whole message
         new_msg["content"] = new_content
         out.append(new_msg)
-    return out
+
+    # finding 5: dropping an empty assistant message above can leave two
+    # adjacent user-role messages where it used to sit between them --
+    # merge their content into one (Anthropic requires strictly alternating
+    # user/assistant roles).
+    merged: list = []
+    for msg in out:
+        if (merged and isinstance(msg, dict) and msg.get("role") == "user"
+                and isinstance(merged[-1], dict) and merged[-1].get("role") == "user"
+                and isinstance(merged[-1].get("content"), list) and isinstance(msg.get("content"), list)):
+            merged[-1] = {**merged[-1], "content": merged[-1]["content"] + msg["content"]}
+            continue
+        merged.append(msg)
+    return merged
 
 
 def build_anthropic_request_body(

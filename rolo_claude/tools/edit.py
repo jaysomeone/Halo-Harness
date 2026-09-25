@@ -117,6 +117,32 @@ class Match:
         self.start, self.end, self.indent = start, end, indent
 
 
+def _drop_overlapping_matches(matches: list) -> list:
+    """H5c finding 17: a fuzzy stage's sliding window can yield OVERLAPPING
+    candidates (e.g. `"a = 1\\na = 1\\na = 1\\n"` against a 2-line pattern
+    matches at line-index 0 AND line-index 1 -- the second window starts
+    inside the first). `EditTool.run`'s own splice loop walks matches in
+    start order with `cursor = m.end` after each one; an overlapping
+    SECOND match has `m.start < cursor`, so `content[cursor:m.start]`
+    silently slices backward-to-empty (Python never raises on that) and
+    `cursor` then jumps to the overlapping match's OWN end, silently
+    dropping whatever real file content sat between the two matches --
+    verified: `"a = 1\\na = 1\\na = 1\\n"` with old `"  a = 1\\n  a = 1"`
+    (fuzzy `IndentationFlexible`) and `replace_all` corrupted the file to
+    `"BB\\n"` instead of replacing two independent, non-overlapping lines.
+    Keeps the FIRST (earliest-starting) match of any overlapping cluster,
+    in file order, and drops every match that starts before the
+    previously-kept one's own `end` -- "the first non-overlapping set"."""
+    kept: list = []
+    cursor = -1
+    for m in sorted(matches, key=lambda mm: (mm.start, mm.end)):
+        if m.start < cursor:
+            continue  # overlaps the previously-kept match -- drop it
+        kept.append(m)
+        cursor = m.end
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Stage 1: Simple -- exact substring (handled directly in EditTool.run, not
 # here, since it needs the fast/common `str.count`/`str.replace` path).
@@ -342,7 +368,13 @@ def find_replacement(content: str, old: str, *, replace_all: bool = False) -> "t
             if ambiguous_stage is None:
                 ambiguous_stage = name
             continue
-        chosen = candidates if (replace_all and len(candidates) > 1) else [candidates[0]]
+        if replace_all and len(candidates) > 1:
+            # H5c finding 17: never accept overlapping candidates from a
+            # fuzzy stage -- see `_drop_overlapping_matches`'s own
+            # docstring for the exact corruption this prevents.
+            chosen = _drop_overlapping_matches(candidates)
+        else:
+            chosen = [candidates[0]]
         guard_error = None
         for m in chosen:
             guard_error = _check_span_guard(old, content[m.start:m.end])

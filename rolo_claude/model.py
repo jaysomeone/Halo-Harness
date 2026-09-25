@@ -101,6 +101,16 @@ class ModelProfile:
     reasoning_passback: bool = False
     price_in: Optional[float] = None  # USD per token, prompt side
     price_out: Optional[float] = None  # USD per token, completion side
+    # H5c Extra (from the H8 must-do list): USD per token for a prompt-cache
+    # HIT (cache_read_input_tokens) and a cache-CREATION write
+    # (cache_creation_input_tokens) respectively -- distinct from price_in
+    # since every real vendor prices these well below the ordinary input
+    # rate (a cache read is typically ~10% of price_in; a cache write is
+    # typically ~125% of it). None when a source has no such breakdown --
+    # CostMeter then falls back to pricing those tokens at the ordinary
+    # price_in rate (the pre-H5c approximation), never at $0.
+    price_cache_read: Optional[float] = None
+    price_cache_write: Optional[float] = None
 
 
 def _profile_from_models_json_entry(entry: dict) -> ModelProfile:
@@ -117,7 +127,7 @@ def _profile_from_models_json_entry(entry: dict) -> ModelProfile:
     if isinstance(supported, list) and any(p in supported for p in ("reasoning", "include_reasoning")):
         reasoning = "openai"
 
-    price_in = price_out = None
+    price_in = price_out = price_cache_read = price_cache_write = None
     pricing = entry.get("pricing")
     if isinstance(pricing, dict):
         try:
@@ -128,10 +138,24 @@ def _profile_from_models_json_entry(entry: dict) -> ModelProfile:
             price_out = float(pricing["completion"]) if pricing.get("completion") is not None else None
         except (TypeError, ValueError):
             price_out = None
+        # H5c Extra: OpenRouter's own `/api/v1/models` pricing object names
+        # these two fields `input_cache_read`/`input_cache_write` (same
+        # per-token USD units as `prompt`/`completion` -- never per-million).
+        try:
+            price_cache_read = (float(pricing["input_cache_read"])
+                                 if pricing.get("input_cache_read") is not None else None)
+        except (TypeError, ValueError):
+            price_cache_read = None
+        try:
+            price_cache_write = (float(pricing["input_cache_write"])
+                                  if pricing.get("input_cache_write") is not None else None)
+        except (TypeError, ValueError):
+            price_cache_write = None
 
     return ModelProfile(
         context_tokens=context_tokens, max_output_tokens=max_output_tokens, vision=vision,
         reasoning=reasoning, price_in=price_in, price_out=price_out,
+        price_cache_read=price_cache_read, price_cache_write=price_cache_write,
     )
 
 
@@ -148,6 +172,8 @@ def _profile_from_vendored_databricks_entry(entry: dict) -> ModelProfile:
         reasoning=fields.get("reasoning", "none"),
         price_in=fields.get("price_in"),
         price_out=fields.get("price_out"),
+        price_cache_read=fields.get("price_cache_read"),
+        price_cache_write=fields.get("price_cache_write"),
     )
 
 
@@ -187,6 +213,8 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             reasoning_passback=bool(raw_entry.get("reasoning_passback", False)),
             price_in=raw_entry.get("price_in"),
             price_out=raw_entry.get("price_out"),
+            price_cache_read=raw_entry.get("price_cache_read"),
+            price_cache_write=raw_entry.get("price_cache_write"),
         )
 
     # H8 scope C: the vendored fallback tier -- consulted only once neither
@@ -226,22 +254,29 @@ class CostMeter:
     Claude passthrough, a plain openai-chat gateway with no cost field),
     `_fallback_cost` applies OpenCode's own formula (Appendix G) --
     `input*price_in + output*price_out + reasoning*price_out` (reasoning
-    billed at the OUTPUT rate; `ModelProfile` has no per-field cache
-    pricing to add `cache_read`/`cache_write` as separate line items, so
-    those tokens are left priced at the ordinary input rate, folded into
-    `input_tokens` -- a documented approximation, not the tiered-pricing/
-    `context_over_200k` version of the formula) -- but ONLY when this
-    meter was actually constructed with real per-token pricing
+    billed at the OUTPUT rate), plus, since H5c, `cache_read*price_cache_read
+    + cache_write*price_cache_write` as their OWN line items -- but ONLY
+    when this meter was actually constructed with real per-token pricing
     (`price_in`/`price_out`, normally `ModelProfile.price_in`/`price_out`
     from models.json); with neither `usage.cost` nor pricing, behaviour is
-    unchanged from before (`has_cost_data` flips False -- "n/a")."""
+    unchanged from before (`has_cost_data` flips False -- "n/a"). H5c Extra
+    (from the H8 must-do list): `price_cache_read`/`price_cache_write` are
+    optional independently of `price_in`/`price_out` -- a source with plain
+    input/output pricing but no cache breakdown (most vendored/fallback
+    rows) still gets a real fallback cost, with cache tokens folded into
+    the ordinary `price_in` rate (never $0 -- the documented approximation
+    this replaces only when the SPECIFIC cache rate isn't known); not the
+    tiered-pricing/`context_over_200k` version of the formula."""
 
-    def __init__(self, *, price_in: Optional[float] = None, price_out: Optional[float] = None) -> None:
+    def __init__(self, *, price_in: Optional[float] = None, price_out: Optional[float] = None,
+                 price_cache_read: Optional[float] = None, price_cache_write: Optional[float] = None) -> None:
         self.total_usd: float = 0.0
         self.turns: int = 0
         self.has_cost_data: bool = True
         self.price_in = price_in
         self.price_out = price_out
+        self.price_cache_read = price_cache_read
+        self.price_cache_write = price_cache_write
 
     def _fallback_cost(self, usage) -> Optional[float]:
         if not isinstance(usage, dict) or self.price_in is None or self.price_out is None:
@@ -252,7 +287,21 @@ class CostMeter:
             return None
         reasoning = usage.get("reasoning_tokens")
         reasoning = reasoning if isinstance(reasoning, int) else 0
-        return input_tokens * self.price_in + (output_tokens + reasoning) * self.price_out
+        # H5c Extra: cache_read_input_tokens/cache_creation_input_tokens are
+        # SEPARATE fields from input_tokens (see agent/loop.py's own
+        # _total_prompt_tokens, which sums all three for context-window
+        # accounting) -- before this fix they were silently left out of the
+        # fallback formula entirely (not merely mispriced). Billed at their
+        # OWN rate when this model's source supplied one, else at the
+        # ordinary price_in rate (still billed, just approximated).
+        cache_read = usage.get("cache_read_input_tokens")
+        cache_read = cache_read if isinstance(cache_read, int) else 0
+        cache_write = usage.get("cache_creation_input_tokens")
+        cache_write = cache_write if isinstance(cache_write, int) else 0
+        cache_read_rate = self.price_cache_read if self.price_cache_read is not None else self.price_in
+        cache_write_rate = self.price_cache_write if self.price_cache_write is not None else self.price_in
+        return (input_tokens * self.price_in + (output_tokens + reasoning) * self.price_out
+                + cache_read * cache_read_rate + cache_write * cache_write_rate)
 
     def add_usage(self, provider: str, usage: Optional[dict]) -> Optional[float]:
         """Record one turn's usage; returns this turn's cost in USD, or None

@@ -13,10 +13,12 @@ actual prompt text instead.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -118,6 +120,47 @@ def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: 
         effective_env=(settings.effective_env if settings is not None else None),
         effort=effort, permission_mode=permission_mode, mcp_manager=mcp_manager, enabled=not disabled,
     )
+
+
+class _TurnLineQueue:
+    """H5c finding 13: a `--input-format stream-json` turn queue that lets
+    a LEFTOVER steer (`Session.turn()`'s own `finally` -- a steer accepted
+    after the turn's last internal checkpoint, e.g. during a slow Stop
+    hook) be re-queued AHEAD of whatever the stdin reader thread already
+    pushed, including its terminal `None` EOF sentinel. A plain FIFO
+    `queue.Queue` cannot do this: verified with the CLI -- a line written
+    during turn 1's 3s Stop hook, followed by closing stdin, never ran
+    (exit 0, a single result, none of the requests carried the line). The
+    reader thread's `None` (pushed the moment stdin closes, independent of
+    whether the CURRENT turn has finished yet) can land in the queue
+    BEFORE the main loop gets a chance to re-queue that turn's own
+    leftover once it finishes -- FIFO then reads `None` first and stops,
+    leaving the leftover sitting unread right behind it. `put_urgent`
+    (`appendleft`) is what the leftover re-queue uses instead of a plain
+    `put` (`append`), so it is always read before an already-queued `None`
+    -- or before any other already-queued line, for that matter."""
+
+    def __init__(self) -> None:
+        self._deque = collections.deque()
+        self._cond = threading.Condition()
+
+    def put(self, item) -> None:
+        with self._cond:
+            self._deque.append(item)
+            self._cond.notify()
+
+    def put_urgent(self, item) -> None:
+        """Ahead of everything already queued, including a `None` EOF
+        sentinel a concurrent reader thread already pushed."""
+        with self._cond:
+            self._deque.appendleft(item)
+            self._cond.notify()
+
+    def get(self):
+        with self._cond:
+            while not self._deque:
+                self._cond.wait()
+            return self._deque.popleft()
 
 
 def _stream_json_stdin_reader(session, out_queue) -> None:
@@ -821,9 +864,6 @@ def run_print_mode(
                                   max_budget_usd=max_budget_usd)
 
         if input_format == "stream-json":
-            import queue as _queue_mod
-            import threading as _threading_mod
-
             if stdin_lines is not None:
                 # Backward-compat path: a caller (a test, or any future
                 # embedder) that already collected the lines itself --
@@ -840,7 +880,7 @@ def run_print_mode(
                     print("rolo-claude: --input-format stream-json requires at least one user message on stdin",
                           file=sys.stderr)
                     return 2
-                line_queue: "_queue_mod.Queue" = _queue_mod.Queue()
+                line_queue = _TurnLineQueue()
                 _remaining_known_turns = list(turns)
                 line_queue.put(_remaining_known_turns.pop(0))
 
@@ -857,8 +897,8 @@ def run_print_mode(
                 # steer; otherwise it's queued as the next turn. The
                 # reader thread is a daemon: an unread EOF never blocks
                 # process exit.
-                line_queue = _queue_mod.Queue()
-                reader = _threading_mod.Thread(
+                line_queue = _TurnLineQueue()
+                reader = threading.Thread(
                     target=_stream_json_stdin_reader, args=(session, line_queue), daemon=True,
                     name="rolo-claude-stdin-reader",
                 )
@@ -892,8 +932,18 @@ def run_print_mode(
                     # loop does for the interactive/TUI path.
                     if session._leftover_steer_texts:
                         leftover, session._leftover_steer_texts = session._leftover_steer_texts, []
-                        for t in leftover:
-                            line_queue.put(t)
+                        # H5c finding 13: `put_urgent` (never a plain
+                        # `put`) -- the reader thread may have ALREADY
+                        # pushed a `None` EOF sentinel onto this queue
+                        # while this turn's own slow Stop hook was still
+                        # running (stdin closing is independent of when
+                        # the turn itself finishes). A plain FIFO put would
+                        # land the leftover BEHIND that `None`, where it is
+                        # never read once the loop below sees the `None`
+                        # and stops. Reversed so multiple leftovers keep
+                        # their original relative order ahead of it.
+                        for t in reversed(leftover):
+                            line_queue.put_urgent(t)
                 if _feed_next_known_turn is not None:
                     _feed_next_known_turn()
                 facade.num_turns += 1

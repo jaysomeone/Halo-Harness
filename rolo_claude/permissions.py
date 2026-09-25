@@ -1129,6 +1129,25 @@ class PermissionEngine:
         attribute for the same reason)."""
         self.plan_file = Path(path) if path else None
 
+    def add_session_rule(self, rule_text: str, action: str = "allow", *, temporary: bool = False) -> bool:
+        """H5c finding 9: general form of `add_session_allow_rule` below --
+        a PermissionRequest hook's own `updatedPermissions` `addRules`
+        entry can add a deny/ask rule too, not just allow (Claude Code's
+        real `PermissionUpdate` shape carries its own `behavior`). In-
+        memory only, same as `add_session_allow_rule` (never written to
+        disk -- that stays the UI's "always" -> `add_allow_rule` path).
+        Returns True when the text parsed into a usable rule for `action`."""
+        rule = parse_rule(rule_text, source="session", base_dir=self.cwd, action=action)
+        if rule is None or rule.kind == "invalid":
+            return False
+        target = {"allow": self.allow_rules, "deny": self.deny_rules, "ask": self.ask_rules}.get(action)
+        if target is None:
+            return False
+        if action == "allow" and temporary and self._temp_allow_start is None:
+            self._temp_allow_start = len(self.allow_rules)
+        target.append(rule)
+        return True
+
     def add_session_allow_rule(self, rule_text: str, *, temporary: bool = False) -> bool:
         """Teach THIS session one more allow rule (U2's `allow_session` /
         `allow_always` answers, or -- `temporary=True` -- a Skill's own

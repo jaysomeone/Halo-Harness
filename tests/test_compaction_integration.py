@@ -122,7 +122,7 @@ class _FakeHookRunner:
         self.calls.append({"event": "SessionEnd", "reason": reason})
 
 
-def _new_session(fh, mock, *, model, hook_runner=None, max_turns=10):
+def _new_session(fh, mock, *, model, hook_runner=None, max_turns=10, model_profile=None):
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
@@ -133,7 +133,8 @@ def _new_session(fh, mock, *, model, hook_runner=None, max_turns=10):
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
     model_ref = parse_model_ref(model)
     return Session(
-        cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(context_tokens=200_000, max_output_tokens=8192),
+        cwd=fh["proj"], model_ref=model_ref,
+        model_profile=model_profile or ModelProfile(context_tokens=200_000, max_output_tokens=8192),
         creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
         state_dir=Path(tempfile.mkdtemp(prefix="compact-int-")), model_label=model, session_context=session_ctx,
         openrouter_base_url=mock.base_url, max_turns=max_turns,
@@ -187,6 +188,57 @@ def test_run_compaction_end_to_end_shrinks_the_log_and_logs_a_compacted_node(ctx
         all_text = " ".join(b.get("text", "") for m in after_messages for b in m["content"] if isinstance(b, dict))
         ctx.check("the wrapped compacted-summary made it into the derived transcript", "<compacted-summary>" in all_text)
         ctx.check("early question content is gone (shadowed)", "question number 0" not in all_text)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5c_f16_compaction_strips_thinking_blocks_from_the_reappended_tail(ctx: Ctx):
+    """H5c finding 16: a thinking block's `signature` is cryptographically
+    bound to the EXACT prefix that preceded it when the model produced it
+    (Anthropic's "preserved thinking" check). Compaction re-appends the
+    verbatim tail right after a brand-new `<compacted-summary>` node -- a
+    completely different prefix -- so any signature surviving in that tail
+    is now stale and would fail signature validation on the very next
+    request. The thinking block must be STRIPPED when the tail is
+    re-appended; the tail's own real text/tool_use content must survive
+    untouched."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/compaction-good-summary")
+        session.model_profile = session.model_profile.__class__(context_tokens=10_000, max_output_tokens=1_000)
+
+        filler = "x" * 400
+        for i in range(60):
+            session.log.append_user([{"type": "text", "text": f"question number {i} -- {filler}"}])
+            session.log.append_assistant(content=[{"type": "text", "text": f"answer number {i}. {filler}"}], stop_reason="end_turn")
+        # The LAST exchange -- guaranteed to survive in the verbatim tail
+        # (select_verbatim_tail always keeps at least the last unit) --
+        # carries a real, signed thinking block.
+        session.log.append_user([{"type": "text", "text": "one final question"}])
+        session.log.append_assistant(content=[
+            {"type": "thinking", "text": "reasoning about the final question", "signature": "sig-bound-to-old-prefix"},
+            {"type": "text", "text": "the final answer"},
+        ], stop_reason="end_turn")
+
+        events_seen = list(session._run_compaction(1, trigger="auto"))
+        ctx.check("compaction completed", any(e.kind == "compaction" and e.data["phase"] == "done" for e in events_seen))
+
+        from rolo_claude.agent.derive import derive_request
+        _system, messages, _tools = derive_request(session.log, tools=None)
+        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+        ctx.check(f"the final answer's assistant message survived in the tail, got {assistant_msgs}",
+                  any(any(b.get("type") == "text" and "the final answer" in (b.get("text") or "") for b in m["content"])
+                      for m in assistant_msgs))
+        thinking_blocks = [b for m in assistant_msgs for b in m["content"]
+                           if isinstance(b, dict) and b.get("type") == "thinking"]
+        ctx.check(f"NO thinking block survived the re-append (stale signature), got {thinking_blocks}",
+                  thinking_blocks == [])
+        ctx.check("the stale signature text is nowhere in the derived transcript",
+                  "sig-bound-to-old-prefix" not in json.dumps(messages))
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)
@@ -296,6 +348,47 @@ def test_h5b_f04_overflow_on_exact_prefix_falls_back_to_flattened_serialisation(
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5c_f22_serialize_transcript_for_summary_bounds_total_size_keeping_the_head(ctx: Ctx):
+    """H5c finding 22: the overflow fallback used to flatten the WHOLE
+    (already-pruned) transcript with NO bound on the total size -- each
+    individual tool_result was capped, but hundreds of turns could still
+    add up to more than the fallback call's own small context window,
+    overflowing a SECOND time with no further retry left. `max_chars`
+    bounds the TOTAL string, keeping the HEAD (never splitting a message's
+    own group of lines) and marking the cut."""
+    from rolo_claude.agent.loop import _SUMMARY_FALLBACK_TRUNCATED_MARKER, _serialize_transcript_for_summary
+
+    messages = []
+    for i in range(500):
+        messages.append({"role": "user", "content": [{"type": "text", "text": f"user turn number {i}"}]})
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": f"assistant reply number {i}"}]})
+
+    unbounded = _serialize_transcript_for_summary(messages)
+    ctx.check(f"sanity: the unbounded serialisation really is large, got {len(unbounded)} chars",
+              len(unbounded) > 20_000)
+
+    bounded = _serialize_transcript_for_summary(messages, max_chars=5_000)
+    ctx.check(f"bounded output stays within a small overhead of the cap, got {len(bounded)} chars",
+              len(bounded) <= 5_000 + len(_SUMMARY_FALLBACK_TRUNCATED_MARKER) + 200)
+    ctx.check("the truncation marker is present", bounded.endswith(_SUMMARY_FALLBACK_TRUNCATED_MARKER))
+    ctx.check("the HEAD (earliest turns) is kept, not the tail", "[User]: user turn number 0" in bounded)
+    ctx.check("the tail (latest turns) was dropped", "[User]: user turn number 499" not in bounded)
+
+    # A single message-group bigger than the whole budget is still kept in
+    # full (never an empty fallback body) -- "always keep at least the
+    # first non-empty group".
+    huge_first = [{"role": "user", "content": [{"type": "text", "text": "x" * 10_000}]}]
+    single = _serialize_transcript_for_summary(huge_first, max_chars=100)
+    ctx.check(f"a single oversized group is kept whole rather than producing an empty body, got {len(single)} chars",
+              len(single) >= 10_000)
+
+    # No cap given at all -- unchanged, unbounded behaviour (existing
+    # per-tool_result-only capping still applies, just no TOTAL cap).
+    ctx.check("max_chars=None means no total cap (back-compatible default)",
+              _serialize_transcript_for_summary(messages, max_chars=None) == unbounded)
 
 
 @test
@@ -538,32 +631,192 @@ def test_h5b_f18_environment_and_deferred_tools_and_plan_reinjected_after_compac
 
 
 @test
-def test_h5b_f01_no_back_to_back_auto_compaction(ctx: Ctx):
-    """finding 1: `_maybe_auto_compact` must never run a SECOND compaction
-    immediately after one that just ran, with no real model step in
-    between -- guards against looping forever when a single compaction
-    doesn't free enough room."""
+def test_h5c_f03_no_back_to_back_auto_compaction_driven_through_real_gate(ctx: Ctx):
+    """H5b finding 1: `_maybe_auto_compact` must never run a SECOND
+    compaction immediately after one that just ran, with no real step in
+    between. Unlike the wrong-reason test this replaces (which hand-set
+    `session._just_compacted = True` to FAKE "a compaction just ran"
+    instead of driving it through a real `_maybe_auto_compact` call), this
+    drives an ACTUAL compaction first, then proves the very next call is
+    skipped (non-failure phase), and a fresh one is allowed again once the
+    prompt genuinely drops below trigger."""
+    from rolo_claude.agent.compact import compaction_trigger_tokens
+    from rolo_claude.model import ModelProfile
+
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        session = _new_session(fh, mock, model="or:mock/compaction-good-summary")
+        profile = ModelProfile(context_tokens=200_000, max_output_tokens=8192)
+        trigger = compaction_trigger_tokens(profile.context_tokens, profile.max_output_tokens)
+        session = _new_session(fh, mock, model="or:mock/compaction-good-summary", model_profile=profile)
         session.log.append_user([{"type": "text", "text": "hello"}])
         session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
 
-        session._last_prompt_tokens = 999_999_999  # force should_compact() True regardless of trigger math
-        session._just_compacted = True  # simulate "a compaction JUST ran"
+        # Step 1: a REAL compaction runs (this profile's tail easily fits
+        # under its own trigger once compacted, so no backoff gets armed).
+        session._last_prompt_tokens = trigger + 5000
+        step1 = list(session._maybe_auto_compact(1))
+        ctx.check("step 1: a real compaction ran", any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step1))
+        ctx.check("step 1: _just_compacted set after a successful compaction", session._just_compacted is True)
+        ctx.check("step 1: no backoff armed (this compaction WAS effective)", session._compaction_backoff_remaining == 0)
 
-        events_seen = list(session._maybe_auto_compact(1))
-        ctx.check("no compaction actually ran (skipped as back-to-back)", not any(
-            e.kind == "compaction" and e.data["phase"] in ("start", "done") for e in events_seen))
-        # H5b finding 3: a deliberate skip is NOT a failure -- nothing was
-        # attempted and nothing went wrong, so this is phase="skipped", not
-        # "failed" (which used to make the TUI show "Compaction failed"
-        # for something that never even ran).
-        ctx.check("a 'skipped' event explains the skip (not 'failed' -- nothing was attempted)", any(
-            e.kind == "compaction" and e.data["phase"] == "skipped" for e in events_seen))
-        ctx.check("no compacted node was written", not any(n.get("type") == "compacted" for n in session.log.nodes()))
-        ctx.check("_just_compacted is cleared so the NEXT call can compact again", session._just_compacted is False)
+        # Step 2: even though the caller reports the SAME still-over-trigger
+        # size again (as if nothing had changed), the back-to-back guard
+        # skips it -- non-failure phase, no second compacted node.
+        session._last_prompt_tokens = trigger + 5000
+        step2 = list(session._maybe_auto_compact(2))
+        ctx.check("step 2: no compaction ran (back-to-back)", not any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step2))
+        ctx.check("step 2: a non-failure 'skipped' event explains it (not 'failed')", any(
+            e.kind == "compaction" and e.data["phase"] == "skipped" for e in step2))
+        ctx.check("step 2: _just_compacted cleared after the one skip", session._just_compacted is False)
+        ctx.check("only ONE compacted node was ever written", sum(
+            1 for n in session.log.nodes() if n.get("type") == "compacted") == 1)
+
+        # Step 3: a genuinely NEW real step's usage still reports over
+        # trigger (real new content, not "the same failed attempt") -- a
+        # FRESH compaction is correctly allowed (this is NOT "back-to-back
+        # with no real step between": steps 1 and 3 have step 2's real
+        # decision point between them, and finding 1 only forbids
+        # compacting twice with NOTHING in between).
+        session._last_prompt_tokens = trigger + 7000
+        step3 = list(session._maybe_auto_compact(3))
+        ctx.check("step 3: a fresh compaction runs again for genuinely new growth", any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step3))
+        ctx.check("two compacted nodes total now (step 1 and step 3)", sum(
+            1 for n in session.log.nodes() if n.get("type") == "compacted") == 2)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5c_f03_ineffective_compaction_backs_off_instead_of_retrying_every_other_step(ctx: Ctx):
+    """H5b/H5c finding 3: "skip when the post-compaction estimate is still
+    at or above the trigger" -- with the finding's own 32,768/29,491
+    small-window profile and a trailing exchange too big to ever fit under
+    that window's tiny trigger even after compacting (the verbatim tail
+    alone still exceeds it), the OLD code's one-shot-only guard re-ran a
+    full summarisation call every OTHER step forever (verified: a 5-step
+    Read turn made 3 summariser calls, at steps 1, 3 and 5). Proves a
+    compaction that runs but achieves nothing useful now backs off for
+    `_COMPACTION_FAILURE_BACKOFF_STEPS` steps, the same as an outright
+    failure, instead of retrying next-available-step forever."""
+    from rolo_claude.agent.compact import compaction_trigger_tokens
+    from rolo_claude.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
+    from rolo_claude.model import ModelProfile
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        profile = ModelProfile(context_tokens=32_768, max_output_tokens=29_491)
+        trigger = compaction_trigger_tokens(profile.context_tokens, profile.max_output_tokens)
+        session = _new_session(fh, mock, model="or:mock/compaction-good-summary", model_profile=profile)
+        session.log.append_user([{"type": "text", "text": "read a huge file"}])
+        # A single trailing exchange bigger than the trigger itself (by
+        # chars/4) -- `select_verbatim_tail` always keeps at least the last
+        # unit even when it alone exceeds the tail budget, so the retained
+        # tail alone guarantees the post-compaction estimate stays >= trigger.
+        huge_text = "x" * (trigger * 4 + 40_000)
+        session.log.append_assistant(content=[{"type": "text", "text": huge_text}], stop_reason="end_turn")
+        session._last_prompt_tokens = trigger + 5000
+
+        step1 = list(session._maybe_auto_compact(1))
+        ctx.check("step 1: a real compaction ran", any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step1))
+        ctx.check("step 1: it did NOT fail outright (real summary text was produced)", not any(
+            e.kind == "compaction" and e.data["phase"] == "failed" for e in step1))
+        ctx.check(f"step 1: backoff armed because the retained tail alone is still >= trigger, "
+                  f"got {session._compaction_backoff_remaining}",
+                  session._compaction_backoff_remaining == _COMPACTION_FAILURE_BACKOFF_STEPS)
+
+        # Step 2: the ordinary one-shot back-to-back guard fires FIRST (as
+        # in the test above) -- the backoff counter is not even consulted
+        # yet, so it has not ticked down.
+        step2 = list(session._maybe_auto_compact(2))
+        ctx.check("step 2: skipped (back-to-back), not a fresh attempt", not any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step2))
+        ctx.check(f"step 2: backoff counter untouched by the one-shot guard, got {session._compaction_backoff_remaining}",
+                  session._compaction_backoff_remaining == _COMPACTION_FAILURE_BACKOFF_STEPS)
+
+        # Steps 3..(2+N): the backoff itself ticks down, one skip per step,
+        # with NO further summarisation call attempted at all.
+        for i in range(_COMPACTION_FAILURE_BACKOFF_STEPS):
+            step = list(session._maybe_auto_compact(3 + i))
+            ctx.check(f"backoff step {i}: no compaction attempted", not any(
+                e.kind == "compaction" and e.data["phase"] in ("start", "failed") for e in step))
+            ctx.check(f"backoff step {i}: a 'backing off' skip explains it", any(
+                e.kind == "compaction" and e.data["phase"] == "skipped"
+                and "backing off" in e.data.get("reason", "") for e in step))
+        ctx.check("backoff counter reached zero", session._compaction_backoff_remaining == 0)
+        ctx.check("still only ONE compacted node written across the whole backoff window", sum(
+            1 for n in session.log.nodes() if n.get("type") == "compacted") == 1)
+
+        # Once exhausted, a fresh attempt is allowed again (and, since the
+        # huge tail is still there, re-arms the backoff once more).
+        step_final = list(session._maybe_auto_compact(999))
+        ctx.check("after the backoff window, a real attempt runs again", any(
+            e.kind == "compaction" and e.data["phase"] == "start" for e in step_final))
+        ctx.check("backoff re-armed after the new (still ineffective) attempt",
+                  session._compaction_backoff_remaining == _COMPACTION_FAILURE_BACKOFF_STEPS)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5c_f22_failed_auto_compaction_backs_off_instead_of_retrying_every_step(ctx: Ctx):
+    """H5c finding 22: after a FAILED auto-compaction attempt (the
+    summarisation call fails outright, even after the overflow fallback),
+    the very next steps must NOT immediately retry the whole (potentially
+    slow) attempt again -- back off for `_COMPACTION_FAILURE_BACKOFF_STEPS`
+    steps first."""
+    from rolo_claude.agent.compact import compaction_trigger_tokens
+    from rolo_claude.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
+    from rolo_claude.model import ModelProfile
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+
+    def _scn_always_overflow(h, body):
+        send_json_response(h, 400, _OVERFLOW_400)
+
+    SCENARIOS["compaction-always-overflow"] = _scn_always_overflow
+    try:
+        profile = ModelProfile(context_tokens=200_000, max_output_tokens=8192)
+        trigger = compaction_trigger_tokens(profile.context_tokens, profile.max_output_tokens)
+        session = _new_session(fh, mock, model="or:mock/compaction-always-overflow", model_profile=profile)
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+        session._last_prompt_tokens = trigger + 5000
+
+        step1 = list(session._maybe_auto_compact(1))
+        ctx.check("step 1: the attempt genuinely failed (phase=failed)", any(
+            e.kind == "compaction" and e.data["phase"] == "failed" for e in step1))
+        ctx.check("step 1: _just_compacted is false after a failure", session._just_compacted is False)
+        ctx.check(f"backoff armed for {_COMPACTION_FAILURE_BACKOFF_STEPS} steps, got {session._compaction_backoff_remaining}",
+                  session._compaction_backoff_remaining == _COMPACTION_FAILURE_BACKOFF_STEPS)
+
+        # Every step during the backoff window skips WITHOUT attempting a
+        # new (doomed) compaction call.
+        for i in range(_COMPACTION_FAILURE_BACKOFF_STEPS):
+            step = list(session._maybe_auto_compact(2 + i))
+            ctx.check(f"backoff step {i}: no compaction attempted (no start/failed event)", not any(
+                e.kind == "compaction" and e.data["phase"] in ("start", "failed") for e in step))
+            ctx.check(f"backoff step {i}: a 'skipped' backoff event explains it", any(
+                e.kind == "compaction" and e.data["phase"] == "skipped" and "backing off" in e.data.get("reason", "")
+                for e in step))
+        ctx.check("backoff counter reached zero", session._compaction_backoff_remaining == 0)
+
+        # Once the backoff is exhausted, a real attempt runs again (and
+        # fails again, re-arming the backoff).
+        step_final = list(session._maybe_auto_compact(999))
+        ctx.check("after the backoff window, a real attempt runs again", any(
+            e.kind == "compaction" and e.data["phase"] == "failed" for e in step_final))
+        ctx.check("backoff re-armed after the new failure", session._compaction_backoff_remaining == _COMPACTION_FAILURE_BACKOFF_STEPS)
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)

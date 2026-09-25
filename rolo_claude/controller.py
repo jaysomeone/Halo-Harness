@@ -354,15 +354,23 @@ class Controller:
             # via the Read tool's own path resolution and appended as
             # snapshots (never inlined into the prompt text itself, same
             # as CLAUDE.md's own @import convention).
+            # H5c finding 14: `queue_log_write` (never a direct
+            # `self.session.log.append_snapshot`) -- this runs on the UI
+            # thread, BEFORE `self.submit(result.text)` below decides
+            # steer-vs-new-turn; a direct write here would race the worker
+            # thread's own concurrent log writes while the session is busy,
+            # same bug as `ingest_at_mentions`'s own two loops.
             for path_str, content in read_at_mention_snapshots(result.text, cwd=self.cwd):
-                self.session.log.append_snapshot(
-                    [{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
+                self.session.queue_log_write(
+                    "snapshot", {"blocks": [{"type": "text", "text": f"@{path_str}\n{content}"}],
+                                 "snapshot_kind": "at_mention"})
             # H8 scope E: `@server:resource` mentions in the expanded body.
             from rolo_claude.mcp.mentions import read_server_resource_snapshots
             for label, content in read_server_resource_snapshots(
                     result.text, mcp_manager=getattr(self.session, "mcp_manager", None)):
-                self.session.log.append_snapshot(
-                    [{"type": "text", "text": f"@{label}\n{content}"}], kind="at_mention")
+                self.session.queue_log_write(
+                    "snapshot", {"blocks": [{"type": "text", "text": f"@{label}\n{content}"}],
+                                 "snapshot_kind": "at_mention"})
             self.submit(result.text)
             return ""
         if cmd.run is None:
@@ -555,8 +563,17 @@ class Controller:
         for res_label, res_content in read_server_resource_snapshots(
                 text, mcp_manager=getattr(self.session, "mcp_manager", None)):
             try:
-                self.session.log.append_snapshot(
-                    [{"type": "text", "text": f"@{res_label}\n{res_content}"}], kind="at_mention")
+                # H5c finding 14: `queue_log_write` (never a direct
+                # `self.session.log.append_snapshot`) -- this runs on the UI
+                # thread, BEFORE `submit()` decides steer-vs-new-turn; while
+                # the session is busy, a direct write here would race the
+                # worker thread's own concurrent log writes (verified: a
+                # steer carrying `@mention` typed while a Read tool runs
+                # made the NEXT request's user message
+                # `['text','tool_result','text']`, which Anthropic 400s on).
+                self.session.queue_log_write(
+                    "snapshot", {"blocks": [{"type": "text", "text": f"@{res_label}\n{res_content}"}],
+                                 "snapshot_kind": "at_mention"})
             except Exception:
                 pass
 
@@ -603,7 +620,9 @@ class Controller:
                 content = result.content if isinstance(result.content, str) else str(result.content)
                 blocks = [{"type": "text", "text": f"@{label}\n{content}"}]
             try:
-                self.session.log.append_snapshot(blocks, kind="at_mention")
+                # H5c finding 14: see the `@server:resource` loop above --
+                # same race, same fix.
+                self.session.queue_log_write("snapshot", {"blocks": blocks, "snapshot_kind": "at_mention"})
             except Exception:
                 pass
 
@@ -621,12 +640,18 @@ class Controller:
 
     def run_inline_shell(self, command: str) -> "tuple[str, object]":
         """Execute `command` via the real Bash tool. Synchronous -- always
-        called from a worker thread (`tui/app.py`, same pattern as
-        `_git_branch_worker`), never the UI thread. Returns `(tool_use_id,
-        ToolResult)` and best-effort appends a synthetic tool_use/
-        tool_result pair to the session log, so the NEXT turn's request
-        still carries the command + its output as context, same as a
-        model-issued Bash call would."""
+        called from a Textual worker THREAD (`tui/app.py`'s `run_worker
+        (thread=True)`, same pattern as `_git_branch_worker`) -- a
+        DIFFERENT thread from the session's OWN dedicated worker thread,
+        and nothing here checks `session.busy` before running (by design:
+        `!cmd` runs OUTSIDE the model loop entirely, on demand, regardless
+        of whether a turn happens to be in flight). Returns `(tool_use_id,
+        ToolResult)`; the command runs immediately either way, but H5c
+        finding 14: the resulting tool_use/tool_result pair is queued
+        (never written directly) so it can never race the session's own
+        worker thread's concurrent log writes -- verified: an inline
+        `!cmd` landing between an assistant `tool_use` and its own
+        `tool_result` broke pairing on every route."""
         from rolo_claude.tools.base import ToolContext
         from rolo_claude.tools.bash import BashTool
         from rolo_claude.hooks import env_file_path
@@ -643,11 +668,10 @@ class Controller:
         )
         tool_use_id = f"inline_{uuid.uuid4().hex[:12]}"
         try:
-            self.session.log.append_assistant(content=[
-                {"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {"command": command}},
-            ])
-            self.session.log.append_tool_result(tool_use_id=tool_use_id, content=result.content,
-                                                  is_error=result.is_error)
+            self.session.queue_log_write("inline_shell", {
+                "tool_use_id": tool_use_id, "command": command,
+                "content": result.content, "is_error": result.is_error,
+            })
         except Exception:
             pass  # logging is best-effort -- the command already ran either way
         return tool_use_id, result

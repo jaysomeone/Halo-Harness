@@ -239,8 +239,19 @@ def resolve_knobs(settings, env: Optional[dict] = None) -> CompactionKnobs:
     if settings is not None:
         auto_enabled = bool(getattr(settings, "auto_compact_enabled", True))
 
-    compaction_model = None
-    if settings is not None:
+    # H5c finding 18: `~/.rolo-claude/config.json`'s own `compactionModel`
+    # key wins FIRST (brief D: "compactionModel in ~/.rolo-claude/
+    # config.json can point at the small one") -- Claude Code's settings
+    # chain (`settings.compaction_model`/`settings.raw["compactionModel"]`)
+    # is only ever the FALLBACK, for a user who set it there instead. The
+    # old code read settings only, so a `compactionModel` in config.json
+    # was silently ignored.
+    from rolo_claude.theme import load_config as _load_rolo_config
+
+    compaction_model = _load_rolo_config().get("compactionModel")
+    if not isinstance(compaction_model, str) or not compaction_model:
+        compaction_model = None
+    if compaction_model is None and settings is not None:
         compaction_model = getattr(settings, "compaction_model", None)
         if not compaction_model:
             raw = getattr(settings, "raw", None)

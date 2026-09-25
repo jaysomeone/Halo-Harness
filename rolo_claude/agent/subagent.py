@@ -19,17 +19,32 @@ the SAME function as a correctness fallback for any caller that dispatches
 it generically instead (a unit test, or a future caller) -- it still does
 the real work, just without the intermediate child events being visible.
 
-v1 scope decision: a child session always runs with `interactive=False`,
-regardless of the parent's own mode. Claude Code's Controller (owned by
-U5) has no mechanism yet to route a UI reply to a SPECIFIC child session
-(only the top-level Session), so a child's own permission "ask" decisions
-resolve through the existing non-interactive fallback ("Permission
-requires interactive approval, unavailable in this session") exactly like
-`-p` -- matching the brief's own "print mode -> deny" wording for every
-session, not just `-p`, and avoiding a real hang risk in the TUI. The
-denial is still tagged with the child's `agent_id` when forwarded to the
-parent's event stream, so it IS visibly "surfaced with the agent tag",
-just never blocks waiting for a human.
+H5c finding 8: a FOREGROUND child session's own permission "ask" is now
+surfaced LIVE (an agent-tagged, answerable `permission_request` card),
+never auto-denied, whenever the PARENT is interactive -- `child.
+_subagent_live_asks` (set below, deliberately never `child.interactive`
+itself, which also gates AskUserQuestion/ExitPlanMode -- out of this
+finding's scope and would otherwise hang a child forever on those, since
+only `_permission_waiters` is shared, not `_question_waiters`/
+`_plan_waiters`) and a shared `_permission_waiters` dict (same pattern as
+the shared `abort` Event) are what make this possible: the child's own
+`_resolve_tool_call` parks its waiter in the SAME dict the PARENT's
+`resolve_permission` (the UI's `Controller.answer_permission`) already
+reads from, so the existing card-answer plumbing needs no changes at all.
+This REQUIRES `_run_child_to_completion` to stream every child event live
+(the `on_event` callback below) rather than buffer the whole turn into a
+list first -- a child blocked waiting for its own permission answer would
+never finish "buffering" in the first place, so its `permission_request`
+would never reach anything. A BACKGROUND child (`run_in_background`/
+`spec.background`) is deliberately EXCLUDED (`_subagent_live_asks` stays
+False for it): its events are never forwarded to any live stream at all
+(see `_bg_run`'s own `del child_events` below), so a live card for it
+would have nowhere to be shown and would just hang the background thread
+-- it keeps the old immediate-denial fallback instead. Print mode (`-p`,
+`parent.interactive` False) also keeps the old fallback for every child,
+foreground or not: deny + `permission_denials`, exactly like Claude
+Code's own "print mode -> deny" rule for every session, not just `-p`
+itself.
 """
 
 from __future__ import annotations
@@ -106,7 +121,7 @@ def _write_meta(meta_path: Path, data: dict) -> None:
 
 
 def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: str,
-                          model_override: Optional[str], parent_tool_use_id: str):
+                          model_override: Optional[str], parent_tool_use_id: str, background: bool = False):
     """A real `agent.loop.Session` for `spec`: its OWN fresh (or resumed)
     log, a tool subset frozen from the PARENT's own catalog (never grows
     it -- brief B), its `body` as the full system prompt (CLAUDE.md/memory
@@ -187,7 +202,11 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
-    child.interactive = False  # v1 scope decision -- see module docstring
+    child.interactive = False  # deliberately NEVER True -- see module docstring (AskUserQuestion/ExitPlanMode stay out of scope)
+    # H5c finding 8: a live, answerable permission card, only for a
+    # FOREGROUND child of an interactive parent -- see module docstring.
+    child._subagent_live_asks = bool(parent.interactive) and not background
+    child._permission_waiters = parent._permission_waiters
     child.agent_runtime = AgentRuntime(parent=child, agents=runtime.agents, routes=runtime.routes,
                                         depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock)
     _write_meta(meta_path, {
@@ -217,10 +236,23 @@ def _tag(ev, *, agent_id: str, parent_tool_use_id: str):
     return ev
 
 
-def _run_child_to_completion(child, prompt_text: str, *, agent_id: str, parent_tool_use_id: str) -> list:
+def _run_child_to_completion(child, prompt_text: str, *, agent_id: str, parent_tool_use_id: str,
+                              on_event=None) -> list:
+    """H5c finding 8: `on_event`, when given, is called SYNCHRONOUSLY on
+    THIS thread with each tagged event the INSTANT it is produced -- never
+    buffered -- so a live caller (loop.py's `_run_agent_batch_live`) can
+    forward it (most importantly a `permission_request`, right before the
+    child's OWN thread then blocks waiting for that exact card's answer)
+    to a live stream while the child is still mid-turn. The full list is
+    still returned too (unchanged contract: `tools/agent.py`'s direct-call
+    fallback, and a background child's own parity/debuggability copy,
+    still just want the whole thing at the end, no live channel needed)."""
     out = []
     for ev in child.turn(prompt_text):
-        out.append(_tag(ev, agent_id=agent_id, parent_tool_use_id=parent_tool_use_id))
+        tagged = _tag(ev, agent_id=agent_id, parent_tool_use_id=parent_tool_use_id)
+        out.append(tagged)
+        if on_event is not None:
+            on_event(tagged)
     return out
 
 
@@ -243,10 +275,15 @@ def _wrap_task_result(text: str, task_id: str) -> str:
     return f'<task_result task_id="{task_id}">\n{text}\n</task_result>'
 
 
-def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str) -> "tuple[list, object]":
+def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str,
+                    on_event=None) -> "tuple[list, object]":
     """`(events, ToolResult)` for ONE Agent/Task tool_use. Never raises --
     every failure mode becomes an `is_error` ToolResult so a sub-agent's
-    own bug can never crash the parent's turn."""
+    own bug can never crash the parent's turn. `on_event` (H5c finding 8):
+    forwarded to the FOREGROUND child's own `_run_child_to_completion` so
+    its events (most importantly `permission_request`) reach a live caller
+    the instant they happen -- never used for a background child (see
+    `_bg_run`, whose events are not forwarded to any live stream)."""
     from rolo_claude.tools.base import ToolResult
     from rolo_claude.tools.truncate import spill_and_truncate
 
@@ -260,7 +297,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     parent = runtime.parent
     task_id = tool_input.get("task_id")
     if task_id:
-        return _resume_task(runtime, task_id, tool_input, tool_id)
+        return _resume_task(runtime, task_id, tool_input, tool_id, on_event=on_event)
 
     subagent_type = tool_input.get("subagent_type") or "general-purpose"
     spec = runtime.agents.get(subagent_type)
@@ -279,6 +316,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     agent_id = _new_agent_id()
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
+        background=background,
     )
     new_task_id = uuid.uuid4().hex[:12]
     with runtime.lock:
@@ -289,6 +327,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                                                  "parent_tool_use_id": tool_id, "task_id": new_task_id})
     start_ev.agent_id = agent_id
     _fire_subagent_hook(child, "SubagentStart")
+    if on_event is not None:
+        # H5c finding 8: emitted LIVE too (not just in the returned list),
+        # so a streaming caller's UI shows "sub-agent started" before the
+        # child's own first event, not only once the whole call returns.
+        on_event(start_ev)
 
     if background:
         _write_meta(meta_path, {"status": "background"})
@@ -316,7 +359,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
         )
         return [start_ev], result
 
-    child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id)
+    child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
+                                             on_event=on_event)
     text = _final_text_from_log(child)
     _fire_subagent_hook(child, "SubagentStop")
     _write_meta(meta_path, {"status": "completed"})
@@ -331,6 +375,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": spec.name, "parent_tool_use_id": tool_id,
                                              "task_id": new_task_id})
     end_ev.agent_id = agent_id
+    if on_event is not None:
+        on_event(end_ev)  # H5c finding 8: live too, same reasoning as start_ev above
 
     wrapped = _wrap_task_result(text, new_task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
@@ -338,7 +384,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     return [start_ev, *child_events, end_ev], ToolResult(capped)
 
 
-def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str):
+def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str, *, on_event=None):
     from rolo_claude.tools.base import ToolResult
     from rolo_claude.tools.truncate import spill_and_truncate
 
@@ -354,10 +400,11 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
         else record["child_session_id"]
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=tool_input.get("model"),
-        parent_tool_use_id=tool_id,
+        parent_tool_use_id=tool_id, background=False,  # a resume always runs in the foreground
     )
     prompt = tool_input.get("prompt") or "Please continue."
-    child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id)
+    child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
+                                             on_event=on_event)
     text = _final_text_from_log(child)
     _write_meta(meta_path, {"status": "completed"})
     parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment

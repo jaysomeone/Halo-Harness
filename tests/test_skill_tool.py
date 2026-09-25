@@ -221,6 +221,69 @@ def test_h5b_f12_unresolved_var_left_untouched_when_no_session_dir(ctx: Ctx):
     ctx.check(f"left unsubstituted, got {result.content!r}", "${CLAUDE_SESSION_ID}" in result.content)
 
 
+class _FakeSessionForSlash:
+    """Just enough of a real `agent.loop.Session` for `commands/skills.py`'s
+    `_make_run` to build the same `claude_vars` `tools/skill.py` does."""
+
+    def __init__(self, *, session_id: str, effort: str = "high"):
+        class _Log:
+            pass
+
+        self.log = _Log()
+        self.log.session_id = session_id
+        self.effort = effort
+        self.permission_engine = None
+        self.tool_env = {}
+
+
+class _FakeFacadeForSlash:
+    def __init__(self, cwd: Path, session):
+        self.cwd = cwd
+        self.session = session
+
+
+@test
+def test_h5c_f15_slash_skill_path_builds_the_same_claude_vars_base_dir_and_siblings(ctx: Ctx):
+    """H5c finding 15: `/skill-name` (`commands/skills.py`'s `_make_run`)
+    used to build NONE of what the model-invoked Skill TOOL gives a skill
+    -- no `claude_vars` substitution (`${CLAUDE_SKILL_DIR}` reached a
+    `` !`...` `` pre-exec as a literal, empty-expanding string), no "Base
+    directory for this skill:" line, no sibling-file listing. Drives the
+    REAL `SlashCommand.run` a `/varskill` invocation would call (via
+    `discover_all_skills`, never `SkillTool` at all) and asserts it now
+    matches the tool path's own three behaviors exactly."""
+    root = Path(tempfile.mkdtemp(prefix="rolo-claude-slash-skill-vars-"))
+    proj = root / "proj"
+    home = root / "home"
+    (proj / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    add_fake_skill(
+        proj / ".claude" / "skills", name="varskill",
+        body="Skill dir: ${CLAUDE_SKILL_DIR}\nSession: ${CLAUDE_SESSION_ID}\nProject: ${CLAUDE_PROJECT_DIR}\n",
+    )
+    skill_dir = (proj / ".claude" / "skills" / "varskill").resolve()
+    (skill_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    (skill_dir / "scripts" / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+    skills = discover_all_skills(proj, home=home)
+    cmd = skills.get("varskill")
+    ctx.check(f"the skill is discovered as a slash command, got {list(skills)}", cmd is not None)
+
+    facade = _FakeFacadeForSlash(proj, _FakeSessionForSlash(session_id="abc123session"))
+    text = cmd.run("", facade)
+
+    ctx.check(f"CLAUDE_SKILL_DIR substituted to the real absolute dir, got {text!r}",
+              f"Skill dir: {skill_dir}" in text)
+    ctx.check(f"CLAUDE_SESSION_ID substituted from the real session's log.session_id, got {text!r}",
+              "Session: abc123session" in text)
+    ctx.check(f"CLAUDE_PROJECT_DIR substituted to cwd, got {text!r}", f"Project: {proj}" in text)
+    ctx.check("no literal ${CLAUDE_...} placeholder survives", "${CLAUDE_" not in text)
+    ctx.check(f"the base-directory line is present and FIRST, got {text!r}",
+              text.startswith(f"Base directory for this skill: {skill_dir}"))
+    run_sh_abs = str((skill_dir / "scripts" / "run.sh").resolve())
+    ctx.check(f"the sibling script is listed as an absolute path, got {text!r}", run_sh_abs in text)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

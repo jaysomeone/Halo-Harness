@@ -253,7 +253,13 @@ def test_h5b_f13_permission_request_decision_behavior_schema(ctx: Ctx):
     allow_result = H.HookResult(0, json.dumps({
         "hookSpecificOutput": {"decision": {
             "behavior": "allow", "updatedInput": {"command": "echo hi"},
-            "updatedPermissions": {"setMode": "acceptEdits"},
+            # H5c finding 9: the REAL 2.1.281 wire shape is a LIST of
+            # {type, ...} entries -- never a bare {"setMode": ...} dict
+            # (the old shape this test used to pin, which never matched
+            # anything a real hook could actually send).
+            "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits"},
+                                    {"type": "addRules", "behavior": "deny",
+                                     "rules": [{"toolName": "Bash", "ruleContent": "rm -rf *"}]}],
         }},
     }), "")
     o_allow = H.interpret_hook_result("PermissionRequest", allow_result)
@@ -261,8 +267,17 @@ def test_h5b_f13_permission_request_decision_behavior_schema(ctx: Ctx):
               o_allow.permission_decision == "allow")
     ctx.check(f"updatedInput read from decision.updatedInput, got {o_allow.updated_input}",
               o_allow.updated_input == {"command": "echo hi"})
-    ctx.check(f"updatedPermissions.setMode read from decision.updatedPermissions, got {o_allow.set_mode!r}",
+    ctx.check(f"updatedPermissions[setMode] read from the LIST shape, got {o_allow.set_mode!r}",
               o_allow.set_mode == "acceptEdits")
+    ctx.check(f"updatedPermissions[addRules] parsed into a rule/behavior pair, got {o_allow.updated_permissions}",
+              o_allow.updated_permissions == [{"rule": "Bash(rm -rf *)", "behavior": "deny"}])
+
+    old_dict_shape = H.HookResult(0, json.dumps({
+        "hookSpecificOutput": {"decision": {"behavior": "allow", "updatedPermissions": {"setMode": "acceptEdits"}}},
+    }), "")
+    o_old_shape = H.interpret_hook_result("PermissionRequest", old_dict_shape)
+    ctx.check(f"a non-list updatedPermissions (the old, wrong dict shape) is rejected, not silently "
+              f"misapplied, got set_mode={o_old_shape.set_mode!r}", o_old_shape.set_mode is None)
 
     deny_result = H.HookResult(0, json.dumps({
         "hookSpecificOutput": {"decision": {"behavior": "deny", "message": "no way"}},

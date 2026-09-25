@@ -198,13 +198,19 @@ def test_h5b_f10_stdin_held_open_does_not_deadlock(ctx: Ctx):
 
 
 @test
-def test_h5b_f10_line_written_while_a_turn_is_in_flight_is_never_lost(ctx: Ctx):
-    """finding 10: a line arriving WHILE session.busy is True is applied
-    as a steer (folded into the SAME turn); this test doesn't assert
-    exactly which of "steer" vs "queued as the next turn" won the race
-    (inherently timing-dependent) -- it asserts the invariant finding 10
-    actually promises: the text is NEVER LOST and the process never
-    hangs, regardless of which path fired."""
+def test_h5c_f10_line_written_while_a_turn_is_in_flight_is_a_real_steer(ctx: Ctx):
+    """H5c finding 24 (test-quality): the OLD version of this test (named
+    `test_h5b_f10_line_written_while_a_turn_is_in_flight_is_never_lost`)
+    deliberately accepted EITHER "steer" or "queued as the next turn" as
+    passing, papering over which one actually happened. The line is
+    written well inside the slow scenario's ~1.2s of remaining streaming
+    time (right after the FIRST delta, with 3 more 0.4s-spaced chunks
+    still to come) -- with finding 10 correctly implemented, `session.
+    busy` is unambiguously still True at that point, so this must
+    deterministically be a STEER folded into turn 1, never a second,
+    independent turn: exactly ONE `result` line for the whole run (a
+    second turn would produce two), and exactly 2 upstream requests (the
+    original slow one, cut short, plus the steered-in one) -- never 3."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     env = dict(os.environ)
@@ -244,9 +250,79 @@ def test_h5b_f10_line_written_while_a_turn_is_in_flight_is_never_lost(ctx: Ctx):
         remaining_out, remaining_err = proc.communicate(timeout=25)
         ctx.check(f"process exits cleanly, got {proc.returncode} stderr={remaining_err[-500:]!r}", proc.returncode == 0)
         whole_output = remaining_out
-        ctx.check(f"the steer/second-turn text reached the real upstream, got {len(mock.requests)} requests",
+        ctx.check(f"the steer text reached the real upstream, got {len(mock.requests)} requests",
                   any("steer-please" in json.dumps(r["body"]) for r in mock.requests))
-        ctx.check("the steered/second reply text made it into the output", "steered" in whole_output)
+        ctx.check("the steered reply text made it into the output", "steered" in whole_output)
+        ctx.check(f"exactly 2 upstream requests (the cut-short original + the steer), got {len(mock.requests)}",
+                  len(mock.requests) == 2)
+        all_lines = [json.loads(l) for l in whole_output.strip().splitlines()]
+        result_lines = [l for l in all_lines if l.get("type") == "result"]
+        ctx.check(f"exactly ONE result line for the whole run (a steer within turn 1, never a second turn), "
+                  f"got {len(result_lines)}", len(result_lines) == 1)
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        mock.stop()
+
+
+@test
+def test_h5c_f13_line_written_during_a_stop_hook_then_stdin_closed_still_runs(ctx: Ctx):
+    """H5c finding 13: the stream-json reader queues `None` at stdin EOF
+    independently of whether the CURRENT turn has finished yet. A line
+    written while that turn's own Stop hook is still sleeping becomes a
+    LEFTOVER steer (the per-step steer check runs BEFORE the Stop hook,
+    so a steer arriving DURING it is never applied within the turn --
+    `Session.turn()`'s own `finally` moves it to `_leftover_steer_texts`
+    once the hook finally returns and the turn ends) -- if stdin is
+    closed in that same instant, the reader thread's `None` can land in
+    the queue BEFORE the main loop re-queues that leftover, and a plain
+    FIFO queue would then stop at `None` without ever reading it.
+    Verified with the CLI: exit 0, a single result, and the line was
+    dropped entirely. A real `.claude/settings.json` Stop hook (the
+    `sleep` test script) makes this deterministic -- the turn cannot end
+    until the hook itself returns, so the write is provably DURING it."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    (fh["proj"] / ".claude").mkdir(parents=True, exist_ok=True)
+    (fh["proj"] / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"Stop": [{"matcher": "", "hooks": [
+            {"type": "command", "args": [sys.executable, "-m", "tests.helpers.hook_scripts", "sleep"]},
+        ]}]},
+    }), encoding="utf-8")
+    SCENARIOS["hook-stop-sleep-reply"] = lambda h, body: _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"content": "first done"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ])
+    env = dict(os.environ)
+    env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+                "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR), "HOOK_SLEEP_S": "3"})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/hook-stop-sleep-reply",
+         "--cwd", str(fh["proj"]), "--input-format", "stream-json", "--output-format", "stream-json"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
+    )
+    try:
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "first turn"}}) + "\n")
+        proc.stdin.flush()
+        # The model's own reply is near-instant; the Stop hook is what
+        # takes 3s. Give the reply time to land and the hook time to
+        # actually start sleeping, then write the second line and close
+        # stdin immediately -- reproducing "a line written during a Stop
+        # hook, followed by closing stdin" as closely as a black-box CLI
+        # test can.
+        import time as _time
+        _time.sleep(1.0)
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "second line during stop hook"}}) + "\n")
+        proc.stdin.flush()
+        remaining_out, remaining_err = proc.communicate(timeout=25)
+        ctx.check(f"process exits cleanly, got {proc.returncode} stderr={remaining_err[-500:]!r}", proc.returncode == 0)
+        ctx.check(f"the second line was NEVER dropped -- it reached the real upstream, got "
+                  f"{len(mock.requests)} requests", any(
+                      "second line during stop hook" in json.dumps(r["body"]) for r in mock.requests))
     finally:
         try:
             proc.kill()
