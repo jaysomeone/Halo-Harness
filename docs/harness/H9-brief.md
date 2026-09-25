@@ -86,3 +86,15 @@ safety language).
 - Fuzz: send Esc or a steer at EVERY event boundary — including during hooks, compaction, and
   retry waits — and after each turn assert that every `tool_use` in the log has a `tool_result`
   and that no assistant node is empty.
+
+## Must-dos carried over from `review-findings-h5b.md` (H9 section) — added 2026-09-24
+- Linux re-runs of the H5b review repros on Kali and Ubuntu: SessionStart env file through a
+  real Session (finding 10); a 600-line Read checking what the model actually receives on the
+  next request (finding 1); a 32k-window profile and the zero-trigger models.json rows (finding
+  3); stream-json late steer + EOF (finding 13); Esc during Stop and PostToolUse hooks (finding
+  12); more than 4 sub-agents and background sub-agents with Esc (finding 7).
+- Fuzz additions: steer or Esc at every event including retry waits, hooks, auto-compaction and
+  permission cards; after each turn assert every tool_use has exactly one result, no assistant
+  message is empty after `prepare_anthropic_messages`, tool_result blocks come first in the user
+  message that follows a tool_use, and nothing is written to `session.log` from a non-worker
+  thread while `busy`.
