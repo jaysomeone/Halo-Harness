@@ -186,6 +186,31 @@ def test_max_retries_constant(ctx: Ctx):
     ctx.check("Appendix B's max retries is 5", RETRY_MAX_RETRIES == 5)
 
 
+@test
+def test_h8_retry_after_rfc3339_anthropic_ratelimit_reset_header(ctx: Ctx):
+    """H8 cheap must-do: `anthropic-ratelimit-*-reset` is an RFC 3339
+    timestamp ("2024-01-01T00:00:05Z"-shaped) copied into the SAME
+    `Retry-After` slot an ordinary HTTP-date header would use (see
+    providers/stream.py's 429 handling) -- `parsedate_to_datetime` (RFC
+    2822 HTTP-date) rejects that format outright, so it must fall back to
+    `datetime.fromisoformat`."""
+    import datetime as _dt
+    future = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=5)
+    rfc3339 = future.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    d = retry_delay_ms(1, {"retry-after": rfc3339})
+    ctx.check(f"RFC 3339 'Z' timestamp parsed to ~5000ms, got {d}", 3500 <= d <= 6500)
+
+    rfc3339_offset = future.strftime("%Y-%m-%dT%H:%M:%S") + "+00:00"
+    d2 = retry_delay_ms(1, {"retry-after": rfc3339_offset})
+    ctx.check(f"RFC 3339 explicit-offset timestamp also parsed, got {d2}", 3500 <= d2 <= 6500)
+
+    ctx.check("an ordinary HTTP-date Retry-After still works (regression check)",
+              retry_delay_ms(1, {"retry-after": "5"}) == 5000)
+
+    ctx.check("a genuinely unparseable value falls back to the exponential-backoff default, not a crash",
+              retry_delay_ms(1, {"retry-after": "not-a-date-at-all"}) > 0)
+
+
 # ---------------------------------------------------------------------------
 # SSE watchdog constants
 # ---------------------------------------------------------------------------

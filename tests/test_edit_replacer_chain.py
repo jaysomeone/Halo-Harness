@@ -286,6 +286,105 @@ def test_find_replacement_returns_none_on_total_miss(ctx: Ctx):
     ctx.check("no guard error either (there was nothing to guard)", err == "")
 
 
+# ---------------------------------------------------------------------------
+# finding 2 (critical, h4-h5-h3c review): an ambiguous fuzzy stage must
+# never silently narrow to candidates[0] (the FIRST occurrence in the
+# file) -- verified regressions from the review, reproduced exactly.
+# ---------------------------------------------------------------------------
+
+@test
+def test_h5b_f02_line_trimmed_two_near_duplicate_blocks_is_ambiguous(ctx: Ctx):
+    """The review's own verified repro: two identical `x = 1` / `return x`
+    blocks, an old_string indented by 2 instead of 4 spaces (so Simple/
+    exact misses and LineTrimmed is the first stage that can match at
+    all) -- LineTrimmed finds BOTH blocks and must refuse rather than
+    silently edit the FIRST one and report success."""
+    content = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x\n"
+    old = "  x = 1\n  return x"  # 2-space indent, file uses 4
+    matches = stage_line_trimmed(content, old)
+    ctx.check(f"LineTrimmed finds both near-duplicate blocks, got {len(matches)}", len(matches) == 2)
+    found, stage, err = find_replacement(content, old)
+    ctx.check("ambiguous LineTrimmed hit is refused, not silently resolved", found is None)
+    ctx.check(f"OpenCode-style multiple-matches wording, got {err!r}", "Found multiple matches" in err)
+
+
+@test
+def test_h5b_f02_edit_tool_refuses_ambiguous_near_duplicate_blocks(ctx: Ctx):
+    """End-to-end: EditTool.run on the same two-block file must return an
+    error (never silently edit the first block) -- this is the exact
+    "wrong-location edit reported as success" failure mode the finding
+    verified."""
+    d = _tmpdir("edit-f02-ambiguous-")
+    initial = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x\n"
+    f, result = _read_then_edit(d, "dup.py", initial, "  x = 1\n  return x", "  x = 2\n  return x")
+    ctx.check(f"the ambiguous fuzzy match is refused, got is_error={result.is_error!r} content={result.content!r}",
+              result.is_error is True)
+    ctx.check("wording names the ambiguity", "multiple matches" in result.content.lower())
+    ctx.check("the file was NOT modified", f.read_text(encoding="utf-8") == initial)
+
+
+@test
+def test_h5b_f02_trimmed_boundary_needle_present_twice_is_ambiguous(ctx: Ctx):
+    """The review's second verified repro: a TrimmedBoundary needle
+    ("\\nfoo\\n"-shaped -- whitespace/newlines around the boundary trimmed
+    before an exact substring search) that occurs at more than one
+    position in the file must refuse rather than editing the first `foo`
+    anywhere in the file."""
+    content = "alpha\nfoo\nbeta\nfoo\ngamma\n"
+    old = "  \nfoo\n  "  # extra whitespace/newlines around the boundary, per stage 7's own docstring
+    matches = stage_trimmed_boundary(content, old)
+    ctx.check(f"TrimmedBoundary finds both occurrences of the trimmed needle, got {len(matches)}", len(matches) == 2)
+    found, stage, err = find_replacement(content, old)
+    ctx.check("ambiguous TrimmedBoundary hit is refused, not silently resolved to the first occurrence",
+              found is None)
+    ctx.check(f"OpenCode-style multiple-matches wording, got {err!r}", "Found multiple matches" in err)
+
+
+@test
+def test_h5b_f02_ambiguous_stage_is_skipped_in_favor_of_a_later_unique_one(ctx: Ctx):
+    """An earlier stage being ambiguous must not stop the chain outright --
+    `find_replacement` moves PAST it and keeps trying later stages, so a
+    case that is ambiguous under LineTrimmed but resolves uniquely under a
+    later, stricter-anchored stage still succeeds."""
+    # LineTrimmed/BlockAnchor/WhitespaceNormalized all see two candidates
+    # here (both blocks' lines are identical once trimmed/collapsed), but
+    # IndentationFlexible compares each window against its OWN common
+    # indent without stripping anything from a zero-indent anchor line
+    # (`if a:`), so only the block whose second line ALSO keeps old_string's
+    # exact 4-space indent (never the 1-space block) matches -- unique.
+    content = "if a:\n pass\nif a:\n    pass\n"
+    old = "if a:\n    pass"
+    ws_matches = stage_whitespace_normalized(content, old)
+    ctx.check(f"WhitespaceNormalized alone is ambiguous here, got {len(ws_matches)}", len(ws_matches) == 2)
+    found, stage, err = find_replacement(content, old)
+    ctx.check(f"a later unique stage still resolves the edit, got stage={stage!r} err={err!r}",
+              found is not None and err == "")
+
+
+@test
+def test_h5b_f02_replace_all_accepts_every_fuzzy_candidate(ctx: Ctx):
+    """`replace_all=True` is the one case where a multi-candidate fuzzy
+    stage is accepted outright (every candidate replaced), per the
+    finding's own fix text ("or all of them with replace_all")."""
+    content = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x\n"
+    old = "  x = 1\n  return x"
+    matches, stage, err = find_replacement(content, old, replace_all=True)
+    ctx.check(f"replace_all accepts both LineTrimmed candidates, got {matches!r} err={err!r}",
+              matches is not None and len(matches) == 2 and err == "")
+
+
+@test
+def test_h5b_f02_edit_tool_replace_all_rewrites_every_fuzzy_occurrence(ctx: Ctx):
+    d = _tmpdir("edit-f02-replaceall-")
+    initial = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x\n"
+    f, result = _read_then_edit(d, "dup2.py", initial, "  x = 1\n  return x", "  x = 2\n  return x",
+                                 replace_all=True)
+    ctx.check(f"replace_all succeeds across both ambiguous blocks, got {result.content!r}", result.is_error is False)
+    updated = f.read_text(encoding="utf-8")
+    ctx.check("both occurrences updated", updated.count("x = 2") == 2)
+    ctx.check("reports 2 replacements", "2 replacement(s)" in result.content)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

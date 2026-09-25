@@ -86,7 +86,7 @@ class StatusBar(Static):
         self._refresh_display()
 
     def tick_spinner(self) -> None:
-        if self.phase in ("thinking", "running"):
+        if self.phase in ("thinking", "running", "compacting"):
             self.spinner_index = (self.spinner_index + 1) % len(SPINNER_FRAMES)
         self._refresh_display()
 
@@ -124,7 +124,11 @@ class StatusBar(Static):
         text.append("│ ", style="dim")
         mcp_style = "green" if (self.mcp_total and self.mcp_connected == self.mcp_total) else "yellow"
         text.append(f"MCP {self.mcp_connected}/{self.mcp_total} ", style=mcp_style)
-        if self.phase in ("thinking", "running"):
+        if self.phase in ("thinking", "running", "compacting"):
+            # U5 must-do: "compacting" (Session._run_compaction's own
+            # "Compacting..." indicator, via the new `compaction` event
+            # handler in tui/dispatch.py) gets the SAME live spinner a
+            # running turn already does.
             elapsed = time.monotonic() - self._phase_started_at
             text.append("│ ", style="dim")
             text.append(f"{SPINNER_FRAMES[self.spinner_index]} {elapsed:.0f}s ", style="bold yellow")

@@ -241,6 +241,57 @@ def test_defer_only_applies_on_pretooluse(ctx: Ctx):
 
 
 @test
+def test_h5b_f13_permission_request_decision_behavior_schema(ctx: Ctx):
+    """finding 13 (major, h4-h5-h3c review): PermissionRequest's OWN
+    schema is `hookSpecificOutput.decision.behavior` (allow with
+    updatedInput/updatedPermissions, or deny with message/interrupt) --
+    NOT the PreToolUse-shaped top-level `permissionDecision` this
+    function reads for every other event. A real Claude Code
+    PermissionRequest auto-approve hook used to be silently ignored
+    entirely (the card still appeared) since this schema was never
+    parsed at all."""
+    allow_result = H.HookResult(0, json.dumps({
+        "hookSpecificOutput": {"decision": {
+            "behavior": "allow", "updatedInput": {"command": "echo hi"},
+            "updatedPermissions": {"setMode": "acceptEdits"},
+        }},
+    }), "")
+    o_allow = H.interpret_hook_result("PermissionRequest", allow_result)
+    ctx.check(f"behavior:allow parsed as permission_decision=allow, got {o_allow.permission_decision!r}",
+              o_allow.permission_decision == "allow")
+    ctx.check(f"updatedInput read from decision.updatedInput, got {o_allow.updated_input}",
+              o_allow.updated_input == {"command": "echo hi"})
+    ctx.check(f"updatedPermissions.setMode read from decision.updatedPermissions, got {o_allow.set_mode!r}",
+              o_allow.set_mode == "acceptEdits")
+
+    deny_result = H.HookResult(0, json.dumps({
+        "hookSpecificOutput": {"decision": {"behavior": "deny", "message": "no way"}},
+    }), "")
+    o_deny = H.interpret_hook_result("PermissionRequest", deny_result)
+    ctx.check(f"behavior:deny parsed as permission_decision=deny, got {o_deny.permission_decision!r}",
+              o_deny.permission_decision == "deny")
+    ctx.check(f"message read as the permission_decision_reason, got {o_deny.permission_decision_reason!r}",
+              o_deny.permission_decision_reason == "no way")
+
+    interrupt_result = H.HookResult(0, json.dumps({
+        "hookSpecificOutput": {"decision": {"behavior": "deny", "message": "stop", "interrupt": True}},
+    }), "")
+    o_interrupt = H.interpret_hook_result("PermissionRequest", interrupt_result)
+    ctx.check(f"interrupt:true stops the whole turn (continue_=False), got {o_interrupt.continue_!r}",
+              o_interrupt.continue_ is False)
+
+    # The OLD (wrong) top-level shape must NOT be read for this event --
+    # proves the fix isn't just "also accept the new shape" but genuinely
+    # uses the RIGHT one.
+    old_shape_result = H.HookResult(0, json.dumps({
+        "hookSpecificOutput": {"permissionDecision": "allow"},
+    }), "")
+    o_old_shape = H.interpret_hook_result("PermissionRequest", old_shape_result)
+    ctx.check(f"the old top-level permissionDecision shape is NOT read for PermissionRequest, got "
+              f"{o_old_shape.permission_decision!r}", o_old_shape.permission_decision is None)
+
+
+@test
 def test_caps_reason_system_message_additional_context(ctx: Ctx):
     long_reason = "x" * 3000
     long_sysmsg = "y" * 5000
@@ -267,6 +318,117 @@ def test_command_hook_timeout_is_non_blocking(ctx: Ctx):
     ctx.check("timeout is non-blocking (never exit 2)", result.exit_code != 2)
     outcome = H.interpret_hook_result("PreToolUse", result)
     ctx.check("not blocked", outcome.blocked is False)
+
+
+@test
+def test_h5b_f14_command_hook_timeout_kills_the_whole_process_group(ctx: Ctx):
+    """finding 14 (major, h4-h5-h3c review), point 2: a timeout must kill
+    the WHOLE process group, not just the direct child -- a background
+    subshell that keeps writing well past the hook's own timeout used to
+    survive (the pre-fix `subprocess.run(..., timeout=...)` only ever
+    killed the direct child it started)."""
+    tmp = tempfile.mkdtemp(prefix="hooks-pg-")
+    marker = str(Path(tmp) / "marker.txt")
+    command = f'(i=0; while [ $i -lt 20 ]; do echo x >> "{marker}"; sleep 0.2; i=$((i+1)); done) & sleep 5'
+    hookdef = H.HookDef(type="command", command=command, timeout_s=0.5)
+    t0 = time.monotonic()
+    result = H.run_command_hook(hookdef, {}, cwd=tmp, env=dict(os.environ))
+    elapsed = time.monotonic() - t0
+    ctx.check(f"returns promptly after the timeout, got {elapsed:.2f}s", elapsed < 3.0)
+    ctx.check(f"reports the timeout, got {result.stderr!r}", "timed out" in result.stderr)
+    size_at_return = Path(marker).stat().st_size if Path(marker).exists() else 0
+    time.sleep(1.0)  # give a SURVIVING grandchild time to keep writing, if it escaped the kill
+    size_after_wait = Path(marker).stat().st_size if Path(marker).exists() else 0
+    ctx.check(f"the background grandchild was ALSO killed (marker stopped growing), "
+              f"got {size_at_return} then {size_after_wait} bytes", size_after_wait == size_at_return)
+
+
+@test
+def test_h5b_f14_command_hook_respects_abort(ctx: Ctx):
+    """finding 14, point 3: Esc during a slow command hook must actually
+    interrupt it (kill the process group) instead of waiting for its own
+    timeout/natural completion."""
+    import threading as _threading_mod
+
+    tmp = tempfile.mkdtemp(prefix="hooks-abort-")
+    hook = H.HookDef(type="command", args=_SCRIPT_ARGS("sleep"), timeout_s=30)
+    env = dict(os.environ)
+    env["HOOK_SLEEP_S"] = "30"
+    abort = _threading_mod.Event()
+
+    def _fire_abort_soon():
+        time.sleep(0.3)
+        abort.set()
+
+    _threading_mod.Thread(target=_fire_abort_soon, daemon=True).start()
+    t0 = time.monotonic()
+    result = H.run_command_hook(hook, {}, cwd=tmp, env=env, abort=abort)
+    elapsed = time.monotonic() - t0
+    ctx.check(f"returned promptly once aborted (well under the 30s sleep/timeout), got {elapsed:.2f}s", elapsed < 3.0)
+    ctx.check(f"reports interruption, got {result.stderr!r}", "interrupted" in result.stderr)
+
+
+@test
+def test_h5b_f14_command_hook_env_strips_provider_secrets(ctx: Ctx):
+    """finding 14, point 1: hook CHILD PROCESSES get `tool_child_env()`-
+    stripped env, never the raw, unstripped `effective_env` -- a plugin/
+    user hook used to be able to read every provider API key straight out
+    of its own environment."""
+    tmp = tempfile.mkdtemp(prefix="hooks-envstrip-")
+    hooks_by_event = {"PreToolUse": [_hookdef("echo_stdin")]}
+    raw_env = dict(os.environ)
+    raw_env["OPENROUTER_API_KEY"] = "sk-super-secret-openrouter"
+    raw_env["DATABRICKS_TOKEN"] = "dbx-super-secret-token"
+    runner = _runner(hooks_by_event, tmp, effective_env=raw_env)
+    # `_env_for` is what actually builds a hook child's environment --
+    # exercised directly (echo_stdin only ever echoes the JSON PAYLOAD,
+    # not its own env, so this checks the env-building function itself).
+    built_env = runner._env_for(hooks_by_event["PreToolUse"][0], "PreToolUse")
+    ctx.check(f"OPENROUTER_API_KEY stripped, got {'OPENROUTER_API_KEY' in built_env}",
+              "OPENROUTER_API_KEY" not in built_env)
+    ctx.check(f"DATABRICKS_TOKEN stripped, got {'DATABRICKS_TOKEN' in built_env}",
+              "DATABRICKS_TOKEN" not in built_env)
+    ctx.check("CLAUDE_PROJECT_DIR still present (a normal, non-secret var)", "CLAUDE_PROJECT_DIR" in built_env)
+
+
+@test
+def test_h5b_f14_shell_bash_runs_real_bash_never_sh(ctx: Ctx):
+    """finding 14, point 5: an EXPLICIT `shell: "bash"` must produce a
+    real bash invocation (`/bin/bash` on POSIX, Git Bash on win32) --
+    never `/bin/sh` (dash on Kali/Debian: `[[ ... ]]` and other bashisms
+    fail there)."""
+    explicit_bash = H.HookDef(type="command", command="echo hi", shell="bash")
+    default_shell = H.HookDef(type="command", command="echo hi", shell=None)
+    argv_bash = H._shell_argv(explicit_bash, "echo hi")
+    argv_default = H._shell_argv(default_shell, "echo hi")
+    if sys.platform == "win32":
+        ctx.check(f"win32 explicit bash uses Git Bash, got {argv_bash}", argv_bash[0].lower().endswith("bash.exe"))
+        ctx.check(f"win32 default ALSO uses Git Bash (no native /bin/sh on Windows), got {argv_default}",
+                  argv_default[0].lower().endswith("bash.exe"))
+    else:
+        ctx.check(f"POSIX explicit bash uses /bin/bash, got {argv_bash}", argv_bash[0] == "/bin/bash")
+        ctx.check(f"POSIX default (no explicit shell) uses /bin/sh, got {argv_default}", argv_default[0] == "/bin/sh")
+
+
+@test
+def test_h5b_f14_session_end_budget_ignores_implicit_type_defaults(ctx: Ctx):
+    """finding 14, point 4: only EXPLICIT `timeout` values count towards
+    the SessionEnd budget -- a hook with none must contribute its type's
+    own implicit default (600s for a command hook), not inflate the
+    budget up to the 60s cap the way `effective_timeout_s()` would."""
+    old = os.environ.pop("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS", None)
+    try:
+        no_explicit_timeout = [H.HookDef(type="command", command="echo hi")]  # timeout_s=None
+        budget = H.session_end_budget_s(no_explicit_timeout)
+        ctx.check(f"falls back to the 1.5s default, not the 600s command-hook implicit default, got {budget}",
+                  budget == H.SESSION_END_DEFAULT_BUDGET_S)
+
+        with_explicit_timeout = [H.HookDef(type="command", command="echo hi", timeout_s=10.0)]
+        budget2 = H.session_end_budget_s(with_explicit_timeout)
+        ctx.check(f"an explicit timeout DOES raise the budget, got {budget2}", budget2 == 10.0)
+    finally:
+        if old is not None:
+            os.environ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"] = old
 
 
 @test

@@ -79,10 +79,10 @@ def test_partially_answered_turn_only_synthesizes_the_gap(ctx: Ctx):
 
 
 @test
-def test_only_the_last_assistant_node_is_checked(ctx: Ctx):
-    """An EARLIER assistant turn is, by construction, already fully paired
-    (the loop never advances past it otherwise) -- this proves the
-    function doesn't waste time or misfire on old history."""
+def test_a_fully_paired_multi_turn_history_has_no_unpaired_ids(ctx: Ctx):
+    """A normal, tool-free (or fully-paired) multi-turn history never
+    false-positives, regardless of how many assistant nodes precede the
+    current one."""
     log = _fresh_log()
     log.append_system("sys")
     log.append_user([{"type": "text", "text": "hi"}])
@@ -90,6 +90,44 @@ def test_only_the_last_assistant_node_is_checked(ctx: Ctx):
     log.append_user([{"type": "text", "text": "again"}])
     log.append_assistant(content=[{"type": "text", "text": "still no tools"}], stop_reason="end_turn")
     ctx.check("no unpaired ids across a tool-free history", find_unpaired_tool_use_ids(log) == [])
+
+
+@test
+def test_h5b_f03_an_earlier_non_last_assistant_node_left_unpaired_is_still_detected(ctx: Ctx):
+    """finding 3 (h4-h5-h3c review): the pre-fix version only ever checked
+    the LAST assistant node, reasoning every earlier one is a completed,
+    already-paired turn by construction. That reasoning broke once a steer
+    noticed mid-`_dispatch_tools` could leave an EARLIER assistant node's
+    tool_use unanswered while the turn kept going and appended FURTHER
+    turns afterward (finding 3's own steering fix) -- this is the case
+    that broke silently before: an unpaired id sitting behind later,
+    unrelated assistant/user turns, never self-healed by
+    `synthesize_missing_results` (which itself calls this function),
+    corrupting every subsequent request on `ant:`/Databricks Claude
+    routes forever after."""
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "first"}])
+    log.append_assistant(
+        content=[
+            {"type": "tool_use", "id": "call_early_1", "name": "Write", "input": {}},
+            {"type": "tool_use", "id": "call_early_2", "name": "Write", "input": {}},
+        ],
+        stop_reason="tool_use",
+    )
+    # Only the FIRST call got a result -- the second was never dispatched
+    # (the bug finding 3 fixes) -- then the turn kept going regardless.
+    log.append_tool_result(tool_use_id="call_early_1", content="wrote a")
+    log.append_user([{"type": "text", "text": "a later, unrelated turn"}])
+    log.append_assistant(content=[{"type": "text", "text": "a normal reply, no tools"}], stop_reason="end_turn")
+
+    missing = find_unpaired_tool_use_ids(log)
+    ctx.check(f"the EARLIER node's dangling tool_use is still found, got {missing}", missing == ["call_early_2"])
+
+    synthesized = synthesize_missing_results(log, reason=ABORTED_BEFORE_DISPATCH)
+    ctx.check(f"synthesize_missing_results fixes it even though it isn't in the last assistant node, got {synthesized}",
+              synthesized == ["call_early_2"])
+    ctx.check("nothing left unpaired afterward", find_unpaired_tool_use_ids(log) == [])
 
 
 @test

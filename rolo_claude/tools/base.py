@@ -102,6 +102,30 @@ class ToolContext:
     # collecting" -- AgentTool.run() still works, it just has no live
     # side-channel to report through.
     agent_event_cb: Optional[Callable[[object], None]] = None
+    # finding 6: the session's own CLAUDE_ENV_FILE path (hooks.env_file_
+    # path(session_id)) -- the Bash tool sources it FRESH, in its own
+    # shell, before every command (never just a one-time literal-parse
+    # merged into `env`), so a LATER SessionStart/Setup/CwdChanged/
+    # FileChanged hook that appends more `export` lines takes effect on
+    # the very next Bash call with no restart needed, and `$VAR`
+    # expansion/`export PATH="$PATH:/x"`-style appends behave like a real
+    # shell script instead of a literal string. None (every pre-finding-6
+    # test, a bare ToolContext, or a hookless session) just means no
+    # `source` line is added -- unchanged prior behaviour.
+    env_file: Optional[Path] = None
+    # finding 9: the owning Session's PermissionEngine -- the Skill tool's
+    # OWN `` !`cmd` `` pre-execution (commands/registry.run_preexec_
+    # commands) needs it to route through `decide()` instead of the old
+    # strict-frontmatter-only gate. Untyped for the same reverse-import
+    # reason as `registry`/`catalog` (permissions.py has no reason to
+    # import this module, but keeping the pattern consistent). None
+    # (every pre-finding-9 test, or a bare ToolContext) falls back to
+    # `run_preexec_commands`'s own old behaviour.
+    permission_engine: Optional[object] = None
+    # finding 12: the session's current --effort, for the Skill tool's own
+    # ${CLAUDE_EFFORT} substitution -- None (every pre-finding-12 test)
+    # just means that variable is left unsubstituted in a skill body.
+    effort: Optional[str] = None
 
 
 @dataclass

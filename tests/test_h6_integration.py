@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -86,6 +88,156 @@ def test_ask_user_question_multi_select_flag_accepted(ctx: Ctx):
     ]}
     result = tool.run(input_data, ToolContext(cwd=_P(".")))
     ctx.check("multiSelect input is accepted without raising", result.is_error is True)
+
+
+# ---- AskUserQuestion's interactive branch must go through decide() ------
+# (H6 scope B must-do: "verify AskUserQuestion has Claude Code's schema and
+# its interactive branch goes through PreToolUse/decide (dontAsk -> no
+# card)" -- `Session._resolve_tool_call` used to hardcode a `self.
+# interactive` early-return straight to `item["pending_question"]=True`
+# BEFORE decide() was ever consulted, so `permissions.py`'s own
+# `_mode_table_decision` dontAsk-mode branch ("AskUserQuestion errors on a
+# tool call in dontAsk mode") was dead code no session could ever reach.)
+
+_ASK_QUESTION_INPUT = {
+    "questions": [
+        {"question": "Which database?", "header": "DB", "multiSelect": False,
+         "options": [{"label": "Postgres", "description": "relational"}, {"label": "SQLite", "description": "embedded"}]},
+    ],
+}
+
+
+def _ask_question_scenario(h, body):
+    """Asks exactly ONCE: once a `call_ask` tool result (denial or a real
+    answer, either way) is already in the replayed messages, reply with
+    plain text instead of repeating the identical call -- otherwise the
+    harness's OWN (correct, unrelated) loop-breaker kicks in after a few
+    identical repeats, which would defeat this scenario's purpose."""
+    import json as _json
+    from tests.helpers.mock_openai import _finish as _mo_finish
+    already_asked = any(m.get("role") == "tool" and m.get("tool_call_id") == "call_ask"
+                         for m in (body.get("messages") or []))
+    if already_asked:
+        _mo_finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "got it, thanks"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ])
+        return
+    _mo_finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "call_ask", "type": "function",
+             "function": {"name": "AskUserQuestion", "arguments": _json.dumps(_ASK_QUESTION_INPUT)}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
+def _new_ask_question_session(fh, mock, *, permission_engine):
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+    model = "or:mock/h6-ask-question"
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+    session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
+    session = Session(
+        cwd=fh["proj"], model_ref=parse_model_ref(model), model_profile=ModelProfile(),
+        creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+        state_dir=Path(tempfile.mkdtemp(prefix="h6-askq-")), model_label=model,
+        session_context=session_ctx, max_turns=10, permission_engine=permission_engine,
+    )
+    session.interactive = True
+    return session
+
+
+@test
+def test_ask_user_question_dontask_mode_denies_without_ever_showing_a_card(ctx: Ctx):
+    """dontAsk mode: decide() denies BEFORE the pending_question path is
+    ever reached -- no `question` event, nothing left parked on a UI
+    reply, and the denial is recorded exactly like any other permission
+    denial (surfaced via `session.permission_denials`, print mode's own
+    documented surface for this)."""
+    from tests.helpers.fake_home import build_fake_home
+    from tests.helpers.mock_openai import MockUpstream, SCENARIOS
+    from rolo_claude.permissions import PermissionEngine
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-ask-question"] = _ask_question_scenario
+        engine = PermissionEngine(mode="dontAsk", cwd=fh["proj"])
+        session = _new_ask_question_session(fh, mock, permission_engine=engine)
+
+        events_seen = list(session.turn("ask me something"))
+        kinds = [e.kind for e in events_seen]
+        ctx.check(f"NO question event was ever emitted (no card), got kinds={kinds}", "question" not in kinds)
+        ctx.check(f"nothing left waiting on a UI reply, got {session._question_waiters}",
+                  session._question_waiters == {})
+
+        tool_results = [n for n in session.log.nodes() if n.get("type") == "tool_result"]
+        ctx.check(f"exactly one tool_result (the denial), got {tool_results}", len(tool_results) == 1)
+        ctx.check(f"it's an error, got {tool_results[0]}", tool_results[0].get("is_error") is True)
+        ctx.check(f"denial names dontAsk mode, got {tool_results[0].get('content')!r}",
+                  "dontAsk" in (tool_results[0].get("content") or ""))
+        ctx.check(f"session.permission_denials recorded it, got {session.permission_denials}",
+                  len(session.permission_denials) == 1)
+    finally:
+        mock.stop()
+
+
+@test
+def test_ask_user_question_default_mode_still_shows_a_card(ctx: Ctx):
+    """Regression guard for the fix above: every mode OTHER than dontAsk
+    must still show the real question card -- decide() returning "allow"
+    for AskUserQuestion must fall through to `pending_question`, never to
+    `item["ready"]=True` (which would incorrectly dispatch straight to the
+    tool's own run(), print mode's error path)."""
+    from tests.helpers.fake_home import build_fake_home
+    from tests.helpers.mock_openai import MockUpstream, SCENARIOS
+    from rolo_claude.permissions import PermissionEngine
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-ask-question"] = _ask_question_scenario
+        engine = PermissionEngine(mode="default", cwd=fh["proj"])
+        session = _new_ask_question_session(fh, mock, permission_engine=engine)
+
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("ask me something"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 10
+        while not any(e.kind == "question" for e in events_seen) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        ctx.check(f"a question event (the card) appeared, got kinds={[e.kind for e in events_seen]}",
+                  any(e.kind == "question" for e in events_seen))
+        ctx.check("call_ask is parked waiting for a reply", "call_ask" in session._question_waiters)
+
+        resolved = session.resolve_question("call_ask", "Postgres")
+        ctx.check(f"the answer was accepted, got {resolved}", resolved is True)
+        done.wait(timeout=10)
+        t.join(timeout=1)
+
+        tool_results = [n for n in session.log.nodes() if n.get("type") == "tool_result"]
+        ctx.check(f"the question resolved to a real tool_result, got {tool_results}", len(tool_results) == 1)
+        ctx.check(f"never a permission denial in this mode, got {tool_results[0]}",
+                  tool_results[0].get("is_error") is not True)
+        ctx.check(f"the chosen answer reached the tool_result content, got {tool_results[0].get('content')!r}",
+                  "Postgres" in (tool_results[0].get("content") or ""))
+    finally:
+        mock.stop()
 
 
 # ---- stream-json nested tagging -----------------------------------------

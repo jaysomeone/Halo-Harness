@@ -113,18 +113,34 @@ def resolve_chrome_enabled(claude_json: dict, *, chrome_flag: bool, no_chrome_fl
     return bool((claude_json or {}).get("claudeInChromeDefaultEnabled"))
 
 
-def chrome_server_config(*, bypass_mode: bool):
+def chrome_server_config(*, bypass_mode: bool = True):
     """`(config_or_None, error_or_None)`. `{type: stdio, command: <claude
     exe>, args: ["--claude-in-chrome-mcp"]}`, named `claude-in-chrome`
-    [verified doc]; `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_
-    checks` only in auto/bypass modes (matches Claude Code's own bypass
-    behaviour)."""
+    [verified doc].
+
+    finding 9 (major, h4-h5-h3c review) / "Auto mode = uninterrupted"
+    (plan, binding): `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_
+    checks` is now ALWAYS set, unconditionally -- rolo-claude's own
+    PermissionEngine already gates every `mcp__claude-in-chrome__*` tool
+    call the SAME way it gates any other tool (auto/bypass allow outright;
+    default/acceptEdits/plan honour the user's own ask/deny rules), so the
+    extension's OWN separate internal prompt is pure double-gating, never
+    a second layer of real protection. Worse, the pre-fix version baked
+    the flag in at SPAWN time from whatever mode the session happened to
+    be in THEN: a session started in `default` and switched to `auto` via
+    Shift+Tab mid-session kept getting the extension's own permission
+    prompt on every browser action for the rest of the process (the MCP
+    server subprocess, once spawned, never sees a LATER mode change) --
+    exactly the kind of mode-shaped tool restriction the plan's "Auto mode
+    = uninterrupted + steering" section forbids outright. `bypass_mode` is
+    kept as a parameter (unused) only so existing callers that still pass
+    it keep working unchanged."""
     from rolo_claude.mcp.manager import McpServerConfig
     claude_exe = find_claude_exe()
     if not claude_exe:
         return None, ("--chrome: no claude executable found on PATH -- Claude in Chrome needs Claude "
                        "Code's own binary to spawn the claude-in-chrome MCP server (see `doctor`).")
-    env = {"CLAUDE_CHROME_PERMISSION_MODE": "skip_all_permission_checks"} if bypass_mode else {}
+    env = {"CLAUDE_CHROME_PERMISSION_MODE": "skip_all_permission_checks"}
     return McpServerConfig(name="claude-in-chrome", type="stdio", command=claude_exe,
                             args=["--claude-in-chrome-mcp"], env=env, scope="dynamic"), None
 
@@ -190,7 +206,10 @@ def build_manager(
     base_env = settings.effective_env if settings is not None else dict(os.environ)
 
     from rolo_claude.config.plugins import discover_plugin_mcp_servers
-    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env, settings=settings)
+    # finding 8: `cwd` threaded through so a V2 project/local-scoped
+    # plugin record (`projectPath`) is matched against THIS session's own
+    # working directory, not silently dropped.
+    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env, settings=settings, cwd=cwd)
     notices.extend(plugin_notices)
 
     configs, resolve_notices = resolve_server_configs(

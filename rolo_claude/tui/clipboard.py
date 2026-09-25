@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from typing import Optional
 
 # Checked in order; the first one found on PATH is used.
@@ -57,12 +58,22 @@ def copy_via_external_tool(text: str, *, timeout_s: float = 3.0) -> bool:
 
 
 def clipboard_doctor_line() -> str:
-    """One `doctor`-style line reporting whether an external clipboard
+    """U5 leftover / H8 must-do (now wired into `doctor.run_checks()`):
+    one `doctor`-style line reporting whether an external clipboard
     fallback tool is available (OSC 52 itself is always attempted first
     and needs no external tool, so this is purely informational -- never
-    a MISSING/failure line)."""
+    a MISSING/failure line). Reports the platform-native backend on
+    win32/macOS (both always have a real system clipboard mechanism,
+    `clip.exe`/`pbcopy`, so there's nothing to detect there -- only Linux
+    genuinely varies by desktop/compositor and needs `find_clipboard_
+    tool()`'s own PATH probe)."""
+    if sys.platform == "win32":
+        return "[OK] Clipboard backend: win32 (OSC 52, plus the native Windows clipboard via clip.exe)"
+    if sys.platform == "darwin":
+        return "[OK] Clipboard backend: pbcopy (plus OSC 52)"
     found = find_clipboard_tool()
     if found is not None:
-        return f"[OK] Clipboard fallback: {found[0]} found (OSC 52 is tried first; this backs it up)"
-    return ("[WARN] Clipboard fallback: no xclip/wl-copy/xsel on PATH -- OSC 52 (Ctrl+C on a "
-            "selection) still works on terminals that support it, but there's no fallback if not")
+        return f"[OK] Clipboard backend: OSC 52, backed up by {found[0]} (found on PATH)"
+    return ("[WARN] Clipboard backend: OSC 52 only -- no xclip/wl-copy/xsel on PATH for a fallback "
+            "(Ctrl+C on a selection still works on terminals that relay OSC 52, but there's no "
+            "backup if the terminal/multiplexer doesn't)")

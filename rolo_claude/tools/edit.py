@@ -152,7 +152,20 @@ def stage_whitespace_normalized(content: str, old: str) -> list:
 def stage_block_anchor(content: str, old: str) -> list:
     """First/last lines (trimmed) anchor the window; middle lines scored by
     average Levenshtein SIMILARITY, threshold >= 0.65; the single BEST
-    scoring candidate wins (not just the first)."""
+    scoring candidate wins (not just the first).
+
+    finding 2 (h4-h5-h3c review): "single best candidate" only means
+    something when there IS a single best -- a short old_string (2 lines,
+    no middle content at all: `old_middle` is empty and `score` is
+    trivially 1.0 for EVERY window whose first/last line matches, the
+    review's own repro case) can produce a genuine TIE at the top score.
+    The old `score > best_score` strict comparison silently kept whichever
+    tied window was found FIRST, which is the exact same "wrong-location
+    edit reported as success" bug finding 2 targets, just hidden one level
+    deeper than the stages it names explicitly. When multiple windows tie
+    for the best score, ALL of them are returned instead of an arbitrary
+    one, so `find_replacement`'s own ambiguity handling (skip this stage,
+    or accept every one of them under `replace_all`) applies here too."""
     old_lines = old.splitlines()
     if len(old_lines) < 2:
         return []
@@ -162,7 +175,8 @@ def stage_block_anchor(content: str, old: str) -> list:
         return []
     first_anchor, last_anchor = old_lines[0].strip(), old_lines[-1].strip()
     old_middle = [l.strip() for l in old_lines[1:-1]]
-    best, best_score = None, -1.0
+    best_score = -1.0
+    tied: list = []
     for i in range(0, n - m + 1):
         window = [w.rstrip("\r\n") for w in lines[i:i + m]]
         if window[0].strip() != first_anchor or window[-1].strip() != last_anchor:
@@ -170,10 +184,12 @@ def stage_block_anchor(content: str, old: str) -> list:
         mid = [w.strip() for w in window[1:-1]]
         score = 1.0 if not old_middle else sum(_similarity(a, b) for a, b in zip(old_middle, mid)) / len(old_middle)
         if score > best_score:
-            best_score, best = score, i
-    if best is None or best_score < BLOCK_ANCHOR_SIMILARITY:
+            best_score, tied = score, [i]
+        elif score == best_score:
+            tied.append(i)
+    if not tied or best_score < BLOCK_ANCHOR_SIMILARITY:
         return []
-    return [Match(*_window_span(lines, offsets, best, m))]
+    return [Match(*_window_span(lines, offsets, i, m)) for i in tied]
 
 
 def stage_indentation_flexible(content: str, old: str) -> list:
@@ -288,16 +304,32 @@ def _check_span_guard(old: str, matched_text: str) -> Optional[str]:
     return None
 
 
-def find_replacement(content: str, old: str) -> "tuple[Optional[list], Optional[str], str]":
+def find_replacement(content: str, old: str, *, replace_all: bool = False) -> "tuple[Optional[list], Optional[str], str]":
     """Try each fuzzy stage in Appendix C order; the FIRST stage that
-    yields exactly one match wins. Returns (matches_or_None, stage_name,
-    error) -- `error` is only set when every stage that DID produce
-    candidate(s) also failed the span guard on all of them (still reported
-    as "not found", per Appendix C: a fuzzy hit that fails the guard is
-    refused, not silently promoted). `matches` is a length-1 list on
-    success (the chain never returns MULTIPLE candidates as a success --
-    an ambiguous stage already resolves to its own single best candidate,
-    per stage 3/8's own "single best candidate" rule, or is skipped)."""
+    yields either exactly one candidate, or (with `replace_all=True`) any
+    number of candidates, wins. Returns (matches_or_None, stage_name,
+    error).
+
+    finding 2 (critical, h4-h5-h3c review): a stage that yields MULTIPLE
+    candidates while `replace_all` is False is never silently narrowed to
+    `candidates[0]` (the first occurrence in the file, a wrong-location
+    edit that reports success) -- it is skipped ("move past ambiguous
+    stages"), and the search continues to the next stage in the chain.
+    BlockAnchor/ContextAware's own "single best/first-window" internals
+    already keep them naturally unique in the common case, but
+    LineTrimmed/WhitespaceNormalized/IndentationFlexible/EscapeNormalized/
+    TrimmedBoundary all collect EVERY matching window/position, so any of
+    them can legitimately be ambiguous (two near-identical blocks, or a
+    short boilerplate line like `return x` appearing twice).
+
+    If every stage that produced candidates was ambiguous and none ever
+    resolved uniquely (nor, with `replace_all`, was accepted as a whole
+    set), `error` carries an OpenCode-style "Found multiple matches..."
+    message instead of the plain empty-string "not found" case -- an
+    ambiguous fuzzy hit is a REFUSAL, never a silent guess at the first
+    occurrence, and never conflated with "no candidate existed at all"."""
+    saw_ambiguous = False
+    ambiguous_stage: Optional[str] = None
     for name, stage_fn in STAGES:
         try:
             candidates = stage_fn(content, old)
@@ -305,12 +337,26 @@ def find_replacement(content: str, old: str) -> "tuple[Optional[list], Optional[
             continue
         if not candidates:
             continue
-        m = candidates[0]
-        matched_text = content[m.start:m.end]
-        guard_error = _check_span_guard(old, matched_text)
+        if len(candidates) > 1 and not replace_all:
+            saw_ambiguous = True
+            if ambiguous_stage is None:
+                ambiguous_stage = name
+            continue
+        chosen = candidates if (replace_all and len(candidates) > 1) else [candidates[0]]
+        guard_error = None
+        for m in chosen:
+            guard_error = _check_span_guard(old, content[m.start:m.end])
+            if guard_error:
+                break
         if guard_error:
             return None, name, guard_error
-        return [m], name, ""
+        return chosen, name, ""
+    if saw_ambiguous:
+        return None, ambiguous_stage, (
+            f"Found multiple matches for oldString (fuzzy match via {ambiguous_stage}). Provide more "
+            f"surrounding context to make oldString unique, or set replace_all to true to change every "
+            f"occurrence."
+        )
     return None, None, ""
 
 
@@ -424,8 +470,14 @@ class EditTool(Tool):
 
         count = normalized_content.count(normalized_old)
         stage_used = "Simple"
+        replaced_count = 1
         if count == 0:
-            matches, stage_name, guard_error = find_replacement(normalized_content, normalized_old)
+            # finding 2: `replace_all` is threaded into the fuzzy chain too
+            # -- a stage that finds several candidates is accepted (ALL of
+            # them replaced) only when the caller asked for that; otherwise
+            # it is skipped as ambiguous (find_replacement's own doc).
+            matches, stage_name, guard_error = find_replacement(normalized_content, normalized_old,
+                                                                  replace_all=replace_all)
             if guard_error:
                 return ToolResult(guard_error, is_error=True)
             if not matches:
@@ -434,13 +486,19 @@ class EditTool(Tool):
                     f"and indentation: {file_path}",
                     is_error=True,
                 )
-            m = matches[0]
-            matched_text = normalized_content[m.start:m.end]
             old_first_indent = _leading_ws(normalized_old.splitlines()[0]) if normalized_old.splitlines() else ""
-            reindented = _reindent_new_string(normalized_new, old_first_indent=old_first_indent, file_first_indent=m.indent)
-            new_content = normalized_content[:m.start] + reindented + normalized_content[m.end:]
+            ordered = sorted(matches, key=lambda mm: mm.start)
+            pieces: list = []
+            cursor = 0
+            for m in ordered:
+                pieces.append(normalized_content[cursor:m.start])
+                pieces.append(_reindent_new_string(normalized_new, old_first_indent=old_first_indent,
+                                                     file_first_indent=m.indent))
+                cursor = m.end
+            pieces.append(normalized_content[cursor:])
+            new_content = "".join(pieces)
+            replaced_count = len(ordered)
             stage_used = stage_name
-            _ = matched_text  # kept for clarity/debugging symmetry with the guard check above
         elif count > 1 and not replace_all:
             return ToolResult(
                 f"Found multiple matches for oldString: {count} matches in {file_path}. Provide more "
@@ -452,8 +510,10 @@ class EditTool(Tool):
             if replace_all:
                 new_content = normalized_content.replace(normalized_old, normalized_new)
                 stage_used = "MultiOccurrence" if count > 1 else "Simple"
+                replaced_count = count
             else:
                 new_content = normalized_content.replace(normalized_old, normalized_new, 1)
+                replaced_count = 1
 
         if newline == "\r\n":
             new_content = new_content.replace("\n", "\r\n")
@@ -475,7 +535,5 @@ class EditTool(Tool):
         except OSError:
             pass
 
-        occurrences = count if count > 0 else 1
-        replaced = occurrences if replace_all else 1
         note = "" if stage_used == "Simple" else f" (matched via {stage_used})"
-        return ToolResult(f"The file {file_path} has been updated ({replaced} replacement(s)){note}.")
+        return ToolResult(f"The file {file_path} has been updated ({replaced_count} replacement(s)){note}.")

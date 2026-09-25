@@ -104,6 +104,63 @@ def test_pretooluse_hook_rewrites_bash_command_and_the_rewritten_one_actually_ru
 
 
 @test
+def test_h5b_f13_pretooluse_rewrite_is_re_decided_against_a_deny_rule(ctx: Ctx):
+    """finding 13 (major, h4-h5-h3c review): `decision` used to be
+    computed against the ORIGINAL tool_input, before the PreToolUse hook
+    ever ran -- a hook that rewrites the command (via `updatedInput`)
+    WITHOUT also setting its own `permissionDecision` let that STALE
+    decision survive even when the REWRITTEN command now matches one of
+    the user's own deny rules, routing straight around the one gate this
+    harness keeps ("no cyber blocks" means deny rules are the ONLY
+    restriction, but they must actually restrict). The model's original
+    command is harmless and would be allowed; the hook rewrites it into
+    something a real deny rule matches -- the call must be DENIED, never
+    dispatched."""
+    from rolo_claude.hooks import HookDef
+    from rolo_claude.permissions import PermissionEngine, parse_rule
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    SCENARIOS["hook-pretooluse-redecide"] = lambda h, body: _finish(
+        h,
+        [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+         {"choices": [{"index": 0, "delta": {"content": "done"}}]},
+         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
+        if any(m.get("role") == "tool" for m in (body or {}).get("messages") or [])
+        else [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+              {"choices": [{"index": 0, "delta": {"tool_calls": [
+                  {"index": 0, "id": "call_r", "type": "function",
+                   "function": {"name": "Bash", "arguments": json.dumps({"command": "echo harmless"})}},
+              ]}}]},
+              {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}],
+    )
+    try:
+        hooks_by_event = {"PreToolUse": [HookDef(type="command", matcher="Bash",
+                                                   args=_HOOK_SCRIPT_ARGV + ["updated_input_no_decision"])]}
+        deny_rule = parse_rule("Bash(echo rewritten-dangerous:*)", source="settings", base_dir=fh["proj"], action="deny")
+        session = _new_session(fh, mock, model="or:mock/hook-pretooluse-redecide",
+                                hook_runner=_hook_runner(fh, hooks_by_event=hooks_by_event))
+        session.permission_engine = PermissionEngine(mode="auto", cwd=fh["proj"], deny_rules=[deny_rule])
+
+        results = []
+        for ev in session.turn("run echo harmless"):
+            if ev.kind == "tool_result":
+                results.append(ev.data)
+        ctx.check(f"a tool_result was logged, got {results}", len(results) == 1)
+        ctx.check(f"the call was DENIED (never dispatched), got {results}", results[0].get("ok") is False)
+
+        tool_result_node = next(n for n in session.log.nodes() if n.get("type") == "tool_result")
+        ctx.check(f"tool_result is_error True, got {tool_result_node}", tool_result_node.get("is_error") is True)
+        content = tool_result_node.get("content")
+        text = content if isinstance(content, str) else json.dumps(content)
+        ctx.check(f"denial names the deny rule, got {text!r}", "Permission denied" in text)
+        ctx.check("the rewritten command never actually ran (no real Bash output)",
+                  "rewritten-dangerous" not in text or "Permission denied" in text)
+    finally:
+        mock.stop()
+
+
+@test
 def test_userpromptsubmit_hook_context_is_visible_in_the_session_log(ctx: Ctx):
     """A UserPromptSubmit hook's `additionalContext` becomes a user-role
     snapshot in the log (never the system node) -- visible alongside the

@@ -44,6 +44,34 @@ DSH_HEADROOM_TOKENS = 65_536
 # OpenCode Appendix D: reserved = min(20_000, max_output).
 OPENCODE_RESERVED_CAP = 20_000
 
+# finding 1 (h4-h5-h3c review): OpenCode caps the MODEL's own advertised
+# output limit at 32,000 before it is used anywhere in `usable` --
+# `max_output_tokens(model, cap=32_000) = min(model.limit.output, cap) or
+# cap`. rolo-claude's `opencode_usable` below used to skip this cap
+# entirely and subtract models.json's raw, often-enormous
+# `max_output_tokens` (OpenRouter's advertised max COMPLETION, which for
+# many DeepSeek/Kimi/GLM/Qwen/MiniMax rows sits close to the whole context
+# window) straight from `context_tokens` -- verified against rolo's real
+# ~/.rolo-claude/models.json: 29 of 105 rows collapsed to a trigger of 0
+# (Kimi K2.5/K2.6/K2.7-code, Qwen3-Coder-next, Qwen3.5-397B, MiniMax-M2)
+# and 21 more sat under 40k, so a two-step turn triggered TWO full
+# summarisation passes. Capping here fixes it at the source for every
+# caller of `opencode_usable`/`compaction_trigger_tokens`.
+OPENCODE_OUTPUT_CAP = 32_000
+
+# finding 1 fix: an explicit MINIMUM share of the context window the
+# trigger may never fall below, regardless of how a model's advertised
+# max_output_tokens/context_tokens combination works out ("floor the
+# trigger at ~=70% of the window" -- H5b brief scope A). This is a
+# defensive backstop on top of the dsh/OpenCode formulas above: those
+# formulas alone already fix the verified zero/near-zero rows once the
+# 32k output cap is applied, but a hard floor keeps ANY future model.json
+# shape (e.g. a row with a legitimately huge advertised context but a
+# small max_output that still crushes `dsh_trigger_tokens` via the flat
+# 65,536-token headroom subtraction) from silently regressing back to
+# "compact on almost every turn".
+TRIGGER_FLOOR_PCT = 0.70
+
 # OpenCode Appendix D tail-retention formula (adopted per H5 scope F item 5,
 # REPLACING dsh's flat "retain 16%"): min(15k, max(2k, 25% of usable)).
 TAIL_MIN_TOKENS = 2_000
@@ -64,38 +92,67 @@ def _estimate_tokens(obj) -> int:
 
 def opencode_usable(context_tokens: int, max_output_tokens: int, *, input_limit: Optional[int] = None) -> int:
     """`usable = (limit.input or context - max_output) - reserved`,
-    `reserved = min(20_000, max_output)` -- OpenCode Appendix D, verbatim.
-    `input_limit` is this profile's own separately-reported INPUT limit when
-    a provider publishes one distinct from the combined context window
-    (rolo-claude's `ModelProfile` doesn't distinguish them today, so callers
-    normally omit it and get `context_tokens - max_output_tokens`)."""
-    reserved = min(OPENCODE_RESERVED_CAP, max(0, max_output_tokens))
-    base = input_limit if input_limit else max(0, context_tokens - max_output_tokens)
+    `reserved = min(20_000, max_output)` -- OpenCode Appendix D, verbatim,
+    with OpenCode's own `max_output_tokens(model, cap=32_000)` cap applied
+    to the model's advertised output limit FIRST (finding 1): the model's
+    raw `max_output_tokens` is never used un-capped, so a row that
+    advertises an output limit close to its whole context window (e.g.
+    Kimi K2.6's 235,929-token max_output against a 262,144 context) can no
+    longer crush `usable`/the trigger down to (near) zero. `input_limit` is
+    this profile's own separately-reported INPUT limit when a provider
+    publishes one distinct from the combined context window (rolo-claude's
+    `ModelProfile` doesn't distinguish them today, so callers normally omit
+    it and get `context_tokens - capped_max_output`)."""
+    capped_output = min(OPENCODE_OUTPUT_CAP, max(0, max_output_tokens)) or OPENCODE_OUTPUT_CAP
+    reserved = min(OPENCODE_RESERVED_CAP, capped_output)
+    base = input_limit if input_limit else max(0, context_tokens - capped_output)
     return max(0, base - reserved)
 
 
 def dsh_trigger_tokens(context_tokens: int, max_output_tokens: int, *, pct: float = DSH_TRIGGER_PCT) -> int:
     """dsh's own 80%-of-headroom trigger, before the OpenCode floor is
-    applied. Clamped at 0 (a tiny `context_tokens` override -- e.g. a test's
-    `CLAUDE_CODE_AUTO_COMPACT_WINDOW=20000` against the 65,536 headroom
-    constant -- legitimately drives this negative, meaning "compact on the
-    very next usage update", which is exactly the desired fast-forcing
-    behaviour for that knob)."""
-    return max(0, int(pct * (context_tokens - max_output_tokens - DSH_HEADROOM_TOKENS)))
+    applied. `max_output_tokens` is capped at `OPENCODE_OUTPUT_CAP` first
+    (finding 1 -- same reasoning as `opencode_usable`: an advertised output
+    limit close to the whole context window must never be allowed to crush
+    this to (near) zero/negative). Clamped at 0 (a tiny `context_tokens`
+    override -- e.g. a test's `CLAUDE_CODE_AUTO_COMPACT_WINDOW=20000`
+    against the 65,536 headroom constant -- legitimately drives this
+    negative, meaning "compact on the very next usage update", which is
+    exactly the desired fast-forcing behaviour for that knob)."""
+    capped_output = min(OPENCODE_OUTPUT_CAP, max(0, max_output_tokens)) or OPENCODE_OUTPUT_CAP
+    return max(0, int(pct * (context_tokens - capped_output - DSH_HEADROOM_TOKENS)))
 
 
 def compaction_trigger_tokens(context_tokens: int, max_output_tokens: int, *, pct_override: Optional[int] = None) -> int:
     """The number of prompt tokens at/above which compaction should fire:
     `min(dsh_trigger_tokens(...), opencode_usable(...))` -- OpenCode's gate
-    is the floor the 80% rule must never exceed (H5 brief scope F item 5).
-    `pct_override` is `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (1-100, "can only
-    lower" -- D-CFG): only ever LOWERS the effective percentage below 80%,
-    never raises it."""
+    is the ceiling the 80% rule must never exceed (H5 brief scope F item 5)
+    -- floored (finding 1) at `TRIGGER_FLOOR_PCT` (~=70%) of the context
+    window so no models.json shape can collapse the trigger back down to
+    (near) zero the way the missing 32k output cap used to: verified,
+    29 of 105 real rows had a trigger of exactly 0 and 21 more sat under
+    40k before this floor (and the output cap above) existed. `pct_override`
+    is `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (1-100, "can only lower" -- D-CFG):
+    only ever LOWERS the effective dsh percentage below 80%, never raises
+    it -- a value >= 80 clamps to the SAME 80% used with no override at all
+    (`pct == DSH_TRIGGER_PCT` either way) and is therefore floored exactly
+    like the no-override case; only a value that genuinely lowers `pct`
+    below 80% is treated as an explicit request the floor must not fight
+    (the floor exists to catch models.json DATA problems, never to
+    override a knob the user deliberately set to something smaller)."""
     pct = DSH_TRIGGER_PCT
     if isinstance(pct_override, int) and 1 <= pct_override <= 100:
         pct = min(pct, pct_override / 100.0)
+    floor_applies = pct >= DSH_TRIGGER_PCT
     dsh = dsh_trigger_tokens(context_tokens, max_output_tokens, pct=pct)
-    return min(dsh, opencode_usable(context_tokens, max_output_tokens))
+    usable = opencode_usable(context_tokens, max_output_tokens)
+    floored = max(dsh, int(TRIGGER_FLOOR_PCT * max(0, context_tokens))) if floor_applies else dsh
+    # The floor only ever RAISES the trigger -- `usable` (OpenCode's own
+    # ceiling: the point past which the NEXT reply's reserved output/buffer
+    # no longer fits) still wins if the floor would push the trigger past
+    # it, so auto-compaction never proactively fires later than the point
+    # a real ContextOverflow becomes possible.
+    return min(usable, floored)
 
 
 def tail_retention_tokens(usable: int) -> int:

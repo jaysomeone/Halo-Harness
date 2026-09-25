@@ -139,8 +139,14 @@ def test_skill_tool_lists_sibling_files(ctx: Ctx):
     finally:
         os.environ.pop("BRIDGE_TEST_HOME", None)
     ctx.check(f"not an error, got {result.content!r}", not result.is_error)
-    ctx.check(f"scripts/run.sh listed, got {result.content!r}", "scripts/run.sh" in result.content)
-    ctx.check(f"template.txt listed, got {result.content!r}", "template.txt" in result.content)
+    # finding 12 (h4-h5-h3c review): siblings are listed as ABSOLUTE paths
+    # now, not cwd/skill-dir-relative ones.
+    run_sh_abs = str((skill_dir / "scripts" / "run.sh").resolve())
+    template_abs = str((skill_dir / "template.txt").resolve())
+    ctx.check(f"scripts/run.sh listed as an absolute path, got {result.content!r}", run_sh_abs in result.content)
+    ctx.check(f"template.txt listed as an absolute path, got {result.content!r}", template_abs in result.content)
+    ctx.check(f"the base-directory line is present, got {result.content!r}",
+              result.content.startswith(f"Base directory for this skill: {skill_dir.resolve()}"))
 
 
 @test
@@ -161,6 +167,58 @@ def test_skill_tool_summary_and_permission_content(ctx: Ctx):
     tool = SkillTool()
     ctx.check("summary", tool.summary({"skill": "deploy"}) == "Skill(deploy)")
     ctx.check("permission_content", tool.permission_content({"skill": "deploy"}) == "deploy")
+
+
+@test
+def test_h5b_f12_claude_skill_dir_and_session_id_and_project_dir_substituted(ctx: Ctx):
+    """finding 12 (major, h4-h5-h3c review): `${CLAUDE_SKILL_DIR}`,
+    `${CLAUDE_SESSION_ID}` and `${CLAUDE_PROJECT_DIR}` are substituted in
+    the skill's own body -- a skill referencing its own scripts by
+    `${CLAUDE_SKILL_DIR}/scripts/x.py` used to send the model to a
+    literal, unresolved string."""
+    root = Path(tempfile.mkdtemp(prefix="rolo-claude-skilltool-vars-"))
+    proj = root / "proj"
+    home = root / "home"
+    (proj / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    add_fake_skill(
+        proj / ".claude" / "skills", name="varskill",
+        body="Skill dir: ${CLAUDE_SKILL_DIR}\nSession: ${CLAUDE_SESSION_ID}\nProject: ${CLAUDE_PROJECT_DIR}\n",
+    )
+    skill_dir = (proj / ".claude" / "skills" / "varskill").resolve()
+
+    import os
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        ctx_obj = ToolContext(cwd=proj, session_dir=Path("/tmp/rolo-claude-sessions/proj-slug/abc123session"))
+        result = SkillTool().run({"skill": "varskill"}, ctx_obj)
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+    ctx.check(f"not an error, got {result.content!r}", not result.is_error)
+    ctx.check(f"CLAUDE_SKILL_DIR substituted to the real absolute dir, got {result.content!r}",
+              f"Skill dir: {skill_dir}" in result.content)
+    ctx.check(f"CLAUDE_SESSION_ID substituted from ctx.session_dir's basename, got {result.content!r}",
+              "Session: abc123session" in result.content)
+    ctx.check(f"CLAUDE_PROJECT_DIR substituted to cwd, got {result.content!r}",
+              f"Project: {proj}" in result.content)
+    ctx.check("no literal ${CLAUDE_...} placeholder survives", "${CLAUDE_" not in result.content)
+
+
+@test
+def test_h5b_f12_unresolved_var_left_untouched_when_no_session_dir(ctx: Ctx):
+    """A variable this build genuinely can't resolve (no `session_dir` on
+    a bare ToolContext, e.g. a unit test) is left as the literal
+    `${CLAUDE_SESSION_ID}` text rather than silently becoming an empty
+    string -- so a skill author can tell "not wired up" from "genuinely
+    blank"."""
+    proj, home = _project_skills_setup(body="Session: ${CLAUDE_SESSION_ID}\n")
+    import os
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        result = SkillTool().run({"skill": "deploy"}, ToolContext(cwd=proj))  # no session_dir at all
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+    ctx.check(f"left unsubstituted, got {result.content!r}", "${CLAUDE_SESSION_ID}" in result.content)
 
 
 if __name__ == "__main__":

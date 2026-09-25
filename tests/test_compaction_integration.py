@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
-from tests.helpers.mock_openai import MockUpstream, SCENARIOS, _finish
+from tests.helpers.mock_openai import MockUpstream, SCENARIOS, _finish, send_json_response
 
 test, TESTS = new_registry()
 
@@ -34,6 +34,62 @@ def _scn_good_summary(h, body):
 
 
 SCENARIOS["compaction-good-summary"] = _scn_good_summary
+
+# finding 4: an Anthropic-shaped "prompt is too long" wording is ALWAYS
+# unfixable (providers/errors.py's own parse_context_overflow hard-codes
+# `fixable=False` for this wording), so it raises ContextOverflow on the
+# very first attempt with no max_tokens-clamped retry in between -- the
+# simplest reliable way to script a summarisation call that overflows.
+_OVERFLOW_400 = {"error": {"message": "prompt is too long: 999999 tokens > 100000 maximum",
+                            "type": "invalid_request_error"}}
+
+
+def _scn_overflow_on_exact_prefix_then_flatten_succeeds(h, body):
+    """The exact-prefix summarisation attempt (this session's own frozen
+    tool catalog still attached as `tools`) always overflows; the
+    OpenCode-style flattened fallback (finding 4: `tools: []`, no
+    catalog) succeeds with a good summary."""
+    if (body or {}).get("tools"):
+        send_json_response(h, 400, _OVERFLOW_400)
+        return
+    _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"content": _GOOD_SUMMARY}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ])
+
+
+SCENARIOS["compaction-overflow-then-flatten"] = _scn_overflow_on_exact_prefix_then_flatten_succeeds
+
+
+def _scn_overflow_always(h, body):
+    """Every summarisation attempt overflows, including the flattened
+    fallback (finding 4's total-failure path: no marker may be written)."""
+    send_json_response(h, 400, _OVERFLOW_400)
+
+
+SCENARIOS["compaction-overflow-always"] = _scn_overflow_always
+
+
+def _scn_429_once_then_good_summary(h, body):
+    """finding 4: the summarisation call reuses `_step`'s OWN transport
+    retry ladder -- a single retryable 429 must be retried (with backoff),
+    never treated as a content-validation failure. Keyed on a module-level
+    counter since MockUpstream's own per-scenario state doesn't otherwise
+    track call count within one test run."""
+    _scn_429_once_then_good_summary.calls += 1
+    if _scn_429_once_then_good_summary.calls == 1:
+        send_json_response(h, 429, {"error": {"message": "rate limited, try again"}}, {"Retry-After": "0"})
+        return
+    _finish(h, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"content": _GOOD_SUMMARY}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ])
+
+
+_scn_429_once_then_good_summary.calls = 0
+SCENARIOS["compaction-429-then-good"] = _scn_429_once_then_good_summary
 
 
 class _FakeHookRunner:
@@ -193,6 +249,242 @@ def test_compact_command_runs_a_real_compaction_through_the_facade(ctx: Ctx):
         ctx.check(f"/compact reports a result, got {out!r}", "Compacted the conversation" in out)
         ctx.check("a compacted node landed in the log via the command",
                   any(n.get("type") == "compacted" for n in session.log.nodes()))
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+def _fill_history(session, n=60):
+    filler = "x" * 400
+    for i in range(n):
+        session.log.append_user([{"type": "text", "text": f"question number {i}, look at file_{i}.py -- {filler}"}])
+        session.log.append_assistant(content=[{"type": "text", "text": f"answer number {i}: did the thing. {filler}"}],
+                                      stop_reason="end_turn")
+
+
+@test
+def test_h5b_f04_overflow_on_exact_prefix_falls_back_to_flattened_serialisation(ctx: Ctx):
+    """finding 4: when the EXACT structured prefix itself overflows on the
+    summarisation call, compaction retries ONCE with OpenCode's flattened,
+    tool-less plain-text serialisation instead of giving up -- a real
+    Session, a real (mocked) overflow, driven through the real
+    _run_compaction generator."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/compaction-overflow-then-flatten")
+        session.model_profile = session.model_profile.__class__(context_tokens=10_000, max_output_tokens=1_000)
+        _fill_history(session)
+
+        events_seen = list(session._run_compaction(1, trigger="auto"))
+        ctx.check("compaction still reports 'done' after falling back", any(
+            e.kind == "compaction" and e.data["phase"] == "done" for e in events_seen))
+        ctx.check("no 'failed' phase was emitted", not any(
+            e.kind == "compaction" and e.data["phase"] == "failed" for e in events_seen))
+        nodes = session.log.nodes()
+        ctx.check("a compacted marker WAS written (the fallback succeeded)",
+                  any(n.get("type") == "compacted" for n in nodes))
+        # The flattened fallback request is scenario-verifiable: exactly
+        # one request had `tools` present (the failed exact-prefix
+        # attempt) and at least one had `tools` absent/empty (the
+        # successful flattened retry).
+        tool_less_calls = [r for r in mock.requests if not (r.get("body") or {}).get("tools")]
+        ctx.check(f"at least one call went out with no tools (the flattened fallback), got {len(tool_less_calls)}",
+                  len(tool_less_calls) >= 1)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f04_total_failure_never_writes_the_compacted_marker(ctx: Ctx):
+    """finding 4 (critical): a compaction that fails completely (overflow
+    even after the flattened-serialisation fallback) must NEVER write the
+    `compacted` marker with "(summary unavailable)" -- the old bug. The
+    session log must be byte-for-byte unchanged and a phase="failed"
+    compaction event with a human reason must be emitted instead."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/compaction-overflow-always")
+        session.model_profile = session.model_profile.__class__(context_tokens=10_000, max_output_tokens=1_000)
+        _fill_history(session)
+        nodes_before = session.log.nodes()
+
+        events_seen = list(session._run_compaction(1, trigger="auto"))
+
+        failed = [e for e in events_seen if e.kind == "compaction" and e.data["phase"] == "failed"]
+        ctx.check(f"a 'failed' compaction event was emitted, got phases={[e.data['phase'] for e in events_seen if e.kind == 'compaction']}",
+                  len(failed) == 1)
+        ctx.check("the failure reason is a real string", bool(failed[0].data.get("reason")))
+        ctx.check("no 'done' phase was ever emitted", not any(
+            e.kind == "compaction" and e.data["phase"] == "done" for e in events_seen))
+
+        nodes_after = session.log.nodes()
+        ctx.check(f"NO compacted marker was written, got {[n.get('type') for n in nodes_after if n.get('type') == 'compacted']}",
+                  not any(n.get("type") == "compacted" for n in nodes_after))
+        ctx.check("the log is completely unchanged (same node count)", len(nodes_after) == len(nodes_before))
+        ctx.check("nothing mentions the old '(summary unavailable)' placeholder anywhere in the log",
+                  not any("summary unavailable" in json.dumps(n) for n in nodes_after))
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f04_retryable_429_reuses_the_step_retry_ladder(ctx: Ctx):
+    """finding 4: a single retryable 429 during summarisation is retried
+    (with backoff via `_step`'s own ladder), never treated as a content-
+    validation failure -- the summary still succeeds and the marker is
+    written, with no "(summary unavailable)" fallback text."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        _scn_429_once_then_good_summary.calls = 0  # test isolation
+        session = _new_session(fh, mock, model="or:mock/compaction-429-then-good")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        events_seen = list(session._run_compaction(1, trigger="manual"))
+        ctx.check("compaction succeeded despite the one 429", any(
+            e.kind == "compaction" and e.data["phase"] == "done" for e in events_seen))
+        ctx.check(f"the upstream really was called twice (429 then success), got {_scn_429_once_then_good_summary.calls}",
+                  _scn_429_once_then_good_summary.calls == 2)
+        nodes = session.log.nodes()
+        ctx.check("a compacted marker was written", any(n.get("type") == "compacted" for n in nodes))
+        ctx.check("no '(summary unavailable)' placeholder anywhere",
+                  not any("summary unavailable" in json.dumps(n) for n in nodes))
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f04_prune_is_wired_into_every_ordinary_step(ctx: Ctx):
+    """finding 4: agent/prune.py used to be wired ONLY into `/context` --
+    `_derive_and_build` (every real model call) must ALSO prune a huge
+    tool_result before it goes out over the wire."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        from rolo_claude.agent.prune import PRUNE_CHAR_THRESHOLD
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "run the huge command"}])
+        huge = "y" * (PRUNE_CHAR_THRESHOLD * 3)
+        session.log.append_assistant(
+            content=[{"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "huge"}}],
+            stop_reason="tool_use",
+        )
+        session.log.append_tool_result(tool_use_id="call_1", content=huge, is_error=False)
+
+        _system_text, messages, _tools, body = session._derive_and_build()
+        wire_blob = json.dumps(body.get("messages") or [])
+        ctx.check(f"the huge tool_result was pruned before hitting the wire, got {len(wire_blob)} chars for the whole body",
+                  len(huge) not in (len(wire_blob),) and "[... " not in huge and "chars pruned" in wire_blob)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f18_environment_and_deferred_tools_and_plan_reinjected_after_compaction(ctx: Ctx):
+    """finding 18: compaction used to re-inject only CLAUDE.md/memory/
+    files-read -- the environment snapshot, the deferred-tool-names
+    reminder, and (when this session is in plan mode) the active plan
+    file/note all vanished from the model's view after the FIRST
+    compaction. All three must now be re-attached."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/compaction-good-summary")
+        session.model_profile = session.model_profile.__class__(context_tokens=10_000, max_output_tokens=1_000)
+
+        # A fake SessionCatalog with a deferred tool name, and plan mode
+        # active with a real plan file -- both re-injection paths exercised
+        # in one pass.
+        class _FakeCatalog:
+            deferred = {"mcp__kb__kb_search"}
+        session.session_catalog = _FakeCatalog()
+        session.permission_engine.mode = "plan"
+        plan_path = Path(tempfile.mkdtemp(prefix="compact-plan-")) / "plan.md"
+        plan_path.write_text("## Step 1\nDo the thing.\n", encoding="utf-8")
+        session.permission_engine.set_plan_file(plan_path)
+
+        _fill_history(session)
+        list(session._run_compaction(1, trigger="auto"))
+
+        from rolo_claude.agent.derive import derive_request
+        _system, messages, _tools = derive_request(session.log, tools=None)
+        all_text = " ".join(b.get("text", "") for m in messages for b in (m.get("content") or [])
+                             if isinstance(b, dict) and b.get("type") == "text")
+        ctx.check("environment snapshot re-injected (cwd/OS/git block)", "cwd" in all_text.lower() or "working directory" in all_text.lower())
+        ctx.check("deferred-tool-names reminder re-injected", "mcp__kb__kb_search" in all_text)
+        ctx.check("the active plan note is re-attached", "Plan mode is active" in all_text)
+        ctx.check("the plan file's own content is re-attached", "Do the thing." in all_text)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f01_no_back_to_back_auto_compaction(ctx: Ctx):
+    """finding 1: `_maybe_auto_compact` must never run a SECOND compaction
+    immediately after one that just ran, with no real model step in
+    between -- guards against looping forever when a single compaction
+    doesn't free enough room."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/compaction-good-summary")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        session._last_prompt_tokens = 999_999_999  # force should_compact() True regardless of trigger math
+        session._just_compacted = True  # simulate "a compaction JUST ran"
+
+        events_seen = list(session._maybe_auto_compact(1))
+        ctx.check("no compaction actually ran (skipped as back-to-back)", not any(
+            e.kind == "compaction" and e.data["phase"] in ("start", "done") for e in events_seen))
+        ctx.check("a 'failed' event explains the skip", any(
+            e.kind == "compaction" and e.data["phase"] == "failed" for e in events_seen))
+        ctx.check("no compacted node was written", not any(n.get("type") == "compacted" for n in session.log.nodes()))
+        ctx.check("_just_compacted is cleared so the NEXT call can compact again", session._just_compacted is False)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
+    """H8 cheap must-do: `compactionModel` (settings.json/config.json,
+    resolved by agent/compact.resolve_knobs) is actually used to route the
+    summarisation call, instead of being resolved and never read. Both
+    models are on the SAME mock provider/creds (the documented same-
+    provider-only limitation) but are DISTINCT model ids the mock can
+    tell apart."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        from rolo_claude.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model="or:mock/compaction-good-summary")
+
+        list(session._run_compaction(1, trigger="manual"))
+        models_called = {r.get("body", {}).get("model") for r in mock.requests}
+        ctx.check(f"the summarisation call used compactionModel, got {models_called}",
+                  "mock/compaction-good-summary" in models_called)
+        ctx.check("the session's own model_ref is restored after the summary call",
+                  session.model_ref.raw == "or:mock/model")
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)

@@ -130,6 +130,36 @@ def test_exit_plan_mode_interactive_approve_flips_mode(ctx: Ctx):
         mock.stop()
 
 
+@test
+def test_exit_plan_mode_approve_with_no_mode_after_defaults_to_accept_edits(ctx: Ctx):
+    """D8 (`~/.claude/plans/typed-tickling-squirrel.md`): `plan_reply{approved,
+    mode_after}` defaults `mode_after` to acceptEdits -- distinct from the
+    sibling test above, which always passed an EXPLICIT "acceptEdits" and so
+    never actually exercised `decision.get("mode_after") or "acceptEdits"`'s
+    own default branch. A UI that omits `mode_after` entirely (or sends
+    `None`) on approval must still land in acceptEdits, not stay in `plan`
+    or fall back to `default`."""
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-plan-approve-default-mode"] = ScriptedTurns([
+            _tool_call_step("ExitPlanMode", {"plan": "## Plan\n\nDo the other thing."}),
+            _text_step("implementing now"),
+        ])
+        session = _new_session(mock=mock, model="or:mock/h6-plan-approve-default-mode", interactive=True,
+                                plans_dir=Path(tempfile.mkdtemp(prefix="rc-plans-a-default-")))
+        turn = _ThreadedTurn(session, "please plan it")
+        turn.wait_for("plan_review")
+
+        ok = session.resolve_plan({"approved": True, "feedback": ""})  # mode_after omitted entirely
+        ctx.check("resolve_plan found the waiter", ok is True)
+        turn.join()
+
+        ctx.check(f"mode defaulted to acceptEdits, got {session.permission_engine.mode!r}",
+                  session.permission_engine.mode == "acceptEdits")
+    finally:
+        mock.stop()
+
+
 # ---- interactive round trip: reject with feedback -------------------------------
 
 @test

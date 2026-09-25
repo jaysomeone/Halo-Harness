@@ -103,8 +103,15 @@ def test_auto_honours_a_user_written_ask_rule_as_a_prompt(ctx: Ctx):
 
 @test
 def test_chrome_server_config_sets_skip_all_permission_checks_in_auto(ctx: Ctx):
-    """scope 0(a): `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_
-    checks` for the claude-in-chrome MCP server in auto/bypass."""
+    """finding 9 (h4-h5-h3c review): `CLAUDE_CHROME_PERMISSION_MODE=
+    skip_all_permission_checks` for the claude-in-chrome MCP server is
+    now ALWAYS set, regardless of the launch-time mode -- rolo-claude's
+    OWN PermissionEngine already gates every `mcp__claude-in-chrome__*`
+    call the same way it gates any other tool, so the extension's own
+    separate internal prompt is pure double-gating; the old
+    bypass_mode-conditional version also meant a session that switched
+    to auto/bypass AFTER the server was already spawned (Shift+Tab)
+    never got the flag at all for the rest of the process."""
     from rolo_claude.mcp_setup import chrome_server_config
 
     cfg, err = chrome_server_config(bypass_mode=True)
@@ -116,7 +123,8 @@ def test_chrome_server_config_sets_skip_all_permission_checks_in_auto(ctx: Ctx):
 
     cfg2, _err2 = chrome_server_config(bypass_mode=False)
     if cfg2 is not None:
-        ctx.check("NOT set for a manual (non-auto/bypass) mode", "CLAUDE_CHROME_PERMISSION_MODE" not in cfg2.env)
+        ctx.check(f"ALSO set for a manual (non-auto/bypass) mode -- the engine gates it either way, "
+                  f"got env={cfg2.env}", cfg2.env.get("CLAUDE_CHROME_PERMISSION_MODE") == "skip_all_permission_checks")
 
 
 @test

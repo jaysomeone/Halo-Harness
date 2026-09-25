@@ -61,12 +61,16 @@ SCENARIOS["page-forever"] = _scn_page_forever
 
 
 def _scn_page_until_no_tools(h, body):
-    """Like `_scn_page_forever`, but a COMPLIANT model: once a request
-    arrives with no `tools` field at all (H5's MAX_STEPS_PROMPT wrap-up
-    call withholds it), reply with a plain text summary instead of another
-    tool call -- proving the wrap-up call, when the model actually behaves,
-    ends the turn with real text rather than another tool_use."""
-    if not (body or {}).get("tools"):
+    """Like `_scn_page_forever`, but a COMPLIANT model: once a request's
+    own `tool_choice` is `"none"` (finding 18: the MAX_STEPS_PROMPT
+    wrap-up call keeps the full `tools` catalog on the wire -- an Anthropic
+    route 400s on "tool_use ... must define tools" if history has tool_use
+    blocks but the request's own `tools` is empty/absent -- and instead
+    forbids a NEW call via `tool_choice: "none"`), reply with a plain text
+    summary instead of another tool call -- proving the wrap-up call, when
+    the model actually behaves, ends the turn with real text rather than
+    another tool_use."""
+    if (body or {}).get("tool_choice") == "none":
         _finish(h, [
             {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
             {"choices": [{"index": 0, "delta": {"content": "Reached the maximum number of steps; summary: paged through the file."}}]},
@@ -142,13 +146,16 @@ def test_max_turns_caps_model_calls_per_turn(ctx: Ctx):
     the identical-args loop breaker, so ONLY --max-turns can stop it here.
 
     H5 scope F item 9 (OpenCode Appendix H): once the cap is hit, the loop
-    now makes ONE MORE call -- MAX_STEPS_PROMPT injected, `tools` withheld
-    from the wire entirely -- so the model gets a real chance to summarise
-    instead of just being cut off; --max-turns=4 therefore means 5 upstream
-    calls (4 tool-calling + 1 wrap-up), and that final call's request must
-    carry no `tools` field at all. This mock always scripts a tool_use
-    reply regardless of what it's asked (it doesn't simulate a model that
-    reads MAX_STEPS_PROMPT), so `stop_reason` is still "tool_use" here --
+    now makes ONE MORE call -- MAX_STEPS_PROMPT injected -- so the model
+    gets a real chance to summarise instead of just being cut off;
+    --max-turns=4 therefore means 5 upstream calls (4 tool-calling + 1
+    wrap-up). finding 18: the wrap-up call's request keeps the FULL
+    `tools` catalog on the wire (an Anthropic route 400s on "tool_use ...
+    must define tools" if history has tool_use blocks but the request's
+    own `tools` is empty/absent) and instead forbids a new call via
+    `tool_choice: "none"`. This mock always scripts a tool_use reply
+    regardless of what it's asked (it doesn't simulate a model that reads
+    MAX_STEPS_PROMPT), so `stop_reason` is still "tool_use" here --
     test_max_turns_wrap_up_call_gets_a_text_reply below covers the case
     where the model DOES comply."""
     fh = build_fake_home()
@@ -159,8 +166,11 @@ def test_max_turns_caps_model_calls_per_turn(ctx: Ctx):
                            model="or:mock/page-forever", max_turns=4)
         ctx.check(f"process exits cleanly, got {result.returncode}", result.returncode in (0, 1))
         ctx.check(f"upstream called max_turns + 1 wrap-up call (5), got {len(mock.requests)}", len(mock.requests) == 5)
-        ctx.check("the wrap-up call's own request body carries no tools field",
-                  "tools" not in (mock.requests[-1].get("body") or {}))
+        wrap_up_body = mock.requests[-1].get("body") or {}
+        ctx.check("the wrap-up call's own request body still carries the full tools catalog",
+                  bool(wrap_up_body.get("tools")))
+        ctx.check(f"the wrap-up call forbids a new call via tool_choice: none, got {wrap_up_body.get('tool_choice')!r}",
+                  wrap_up_body.get("tool_choice") == "none")
         obj = json.loads(result.stdout)
         ctx.check(f"json result reports a stop_reason, got {obj.get('stop_reason')!r}",
                    obj.get("stop_reason") in ("tool_use", "end_turn"))

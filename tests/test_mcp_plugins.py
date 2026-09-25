@@ -258,13 +258,22 @@ def test_plugin_server_survives_a_real_connection_with_namespaced_tool_names(ctx
 
 # ---- finding 11: installed_plugins.json V2 (installPath + enabledPlugins) -
 
-def _write_v2_manifest(claude_dir: Path, key: str, install_path: Path, *, extra_entry_fields=None) -> None:
+def _write_v2_manifest(claude_dir: Path, key: str, install_path: Path, *, extra_entry_fields=None,
+                        scope: str = "user") -> None:
+    """finding 8/17 (h4-h5-h3c review): writes the REAL binary shape --
+    `plugins[key]` is a LIST of scoped install records, not a single
+    dict (the pre-finding-8 version of this helper invented the single-
+    dict shape, which is exactly why the bug it should have caught
+    shipped). Defaults to a `scope: "user"` record (always applies,
+    regardless of cwd) so every EXISTING caller of this helper keeps
+    working unchanged; `scope="project"`/`"local"` callers (finding 8's
+    own new tests) pass `projectPath` via `extra_entry_fields`."""
     from rolo_claude.config.plugins import installed_plugins_manifest_path
     manifest_path = installed_plugins_manifest_path()
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"installPath": str(install_path)}
-    entry.update(extra_entry_fields or {})
-    manifest_path.write_text(json.dumps({"version": 2, "plugins": {key: entry}}), encoding="utf-8")
+    record = {"scope": scope, "installPath": str(install_path), "version": "1.0.0"}
+    record.update(extra_entry_fields or {})
+    manifest_path.write_text(json.dumps({"version": 2, "plugins": {key: [record]}}), encoding="utf-8")
 
 
 def _fake_settings(raw: dict):
@@ -347,6 +356,171 @@ def test_v2_manifest_defaults_enabled_when_settings_say_nothing(ctx: Ctx):
             expected_name = plugin_server_name("foo", "fakeserver")
             ctx.check(f"defaults to enabled with settings={settings!r}, got {list(servers)}",
                       expected_name in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+# ---- finding 8: the REAL V2 shape is an ARRAY of scoped records ----------
+
+def _write_v2_manifest_multi(claude_dir: Path, key: str, records: list) -> None:
+    from rolo_claude.config.plugins import installed_plugins_manifest_path
+    manifest_path = installed_plugins_manifest_path()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({"version": 2, "plugins": {key: records}}), encoding="utf-8")
+
+
+@test
+def test_h5b_f08_v2_manifest_is_an_array_of_records_not_a_single_dict(ctx: Ctx):
+    """finding 8 (major, h4-h5-h3c review): the REAL binary shape --
+    plugins[key] = [{scope, installPath, version, ...}, ...] -- a real
+    `claude plugin install` manifest. The pre-fix version read `entry` as
+    a single dict; a real array made `isinstance(entry, dict)` False,
+    `entry` silently became `{}`, and the plugin's servers/hooks were
+    skipped entirely."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin-array"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {"command": "x"}}}), encoding="utf-8")
+        _write_v2_manifest_multi(claude_dir, "foo@mp", [
+            {"scope": "user", "installPath": str(plugin_root), "version": "2.1.0"},
+        ])
+        settings = _fake_settings({})
+        servers, notices = discover_plugin_mcp_servers(env={}, settings=settings)
+        expected_name = plugin_server_name("foo", "fakeserver")
+        ctx.check(f"a REAL array-shaped V2 manifest is discovered, got {list(servers)} notices={notices}",
+                  expected_name in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_h5b_f08_project_scoped_record_only_applies_when_cwd_matches(ctx: Ctx):
+    """finding 8: a `scope: "project"`/`"local"` record's `projectPath`
+    must match the CURRENT session's cwd -- a plugin installed for one
+    repo must not leak into an unrelated one, and a project-scoped record
+    for THIS repo must be discovered when cwd is inside it."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin-project"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fakeserver": {"command": "x"}}}), encoding="utf-8")
+        my_project = claude_dir.parent / "my-repo"
+        my_project.mkdir(parents=True, exist_ok=True)
+        other_project = claude_dir.parent / "other-repo"
+        other_project.mkdir(parents=True, exist_ok=True)
+        _write_v2_manifest_multi(claude_dir, "foo@mp", [
+            {"scope": "project", "projectPath": str(my_project), "installPath": str(plugin_root), "version": "1.0"},
+        ])
+        expected_name = plugin_server_name("foo", "fakeserver")
+
+        servers_in, _ = discover_plugin_mcp_servers(env={}, settings=_fake_settings({}), cwd=my_project)
+        ctx.check(f"discovered when cwd matches projectPath, got {list(servers_in)}", expected_name in servers_in)
+
+        servers_out, _ = discover_plugin_mcp_servers(env={}, settings=_fake_settings({}), cwd=other_project)
+        ctx.check(f"NOT discovered from an unrelated cwd, got {list(servers_out)}", expected_name not in servers_out)
+
+        servers_none, _ = discover_plugin_mcp_servers(env={}, settings=_fake_settings({}))
+        ctx.check(f"NOT discovered with no cwd given at all, got {list(servers_none)}", expected_name not in servers_none)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_h5b_f08_multiple_scoped_records_for_one_plugin_all_considered(ctx: Ctx):
+    """A plugin installed at BOTH user scope and a project scope (two
+    records in the same array) is discovered via either applicable
+    record -- the whole array is walked, not just records[0]."""
+    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        user_root = claude_dir.parent / "v2plugin-user-copy"
+        user_root.mkdir(parents=True, exist_ok=True)
+        (user_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"userserver": {"command": "x"}}}), encoding="utf-8")
+        proj_root = claude_dir.parent / "v2plugin-project-copy"
+        proj_root.mkdir(parents=True, exist_ok=True)
+        (proj_root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"projserver": {"command": "x"}}}), encoding="utf-8")
+        my_project = claude_dir.parent / "my-repo-2"
+        my_project.mkdir(parents=True, exist_ok=True)
+        _write_v2_manifest_multi(claude_dir, "foo@mp", [
+            {"scope": "user", "installPath": str(user_root), "version": "1.0"},
+            {"scope": "project", "projectPath": str(my_project), "installPath": str(proj_root), "version": "1.0"},
+        ])
+        servers, _ = discover_plugin_mcp_servers(env={}, settings=_fake_settings({}), cwd=my_project)
+        ctx.check(f"the user-scope record's server is discovered, got {list(servers)}",
+                  plugin_server_name("foo", "userserver") in servers)
+        ctx.check(f"the project-scope record's server is ALSO discovered, got {list(servers)}",
+                  plugin_server_name("foo", "projserver") in servers)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
+@test
+def test_h5b_f08_cache_fallback_uses_the_real_marketplace_plugin_version_layout(ctx: Ctx):
+    """A record missing `installPath` (defensive fallback only -- the
+    binary always writes one in practice) must resolve against the REAL
+    cache layout, `cache/<marketplace>/<plugin>/<version>`, never the old
+    invented `cache/<plugin>`."""
+    from rolo_claude.config.plugins import _v2_record_root, plugins_dir
+    root = _v2_record_root("foo@some-mp", "foo", {"scope": "user", "version": "3.2.1"}, cwd=None)
+    ctx.check(f"cache path is cache/<marketplace>/<plugin>/<version>, got {root}",
+              root == plugins_dir() / "cache" / "some-mp" / "foo" / "3.2.1")
+
+
+@test
+def test_h5b_f08_build_hook_runner_respects_enabled_plugins_gate(ctx: Ctx):
+    """finding 8: `build_hook_runner` used to call `_plugin_roots(manifest)`
+    with NO settings at all, so a plugin explicitly turned OFF via
+    `enabledPlugins` still had its hooks/hooks.json loaded and run."""
+    from rolo_claude.config.settings import Settings
+    from rolo_claude.headless import build_hook_runner
+    claude_dir = _fake_claude_dir()
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+    try:
+        plugin_root = claude_dir.parent / "v2plugin-hooks"
+        (plugin_root / "hooks").mkdir(parents=True, exist_ok=True)
+        (plugin_root / "hooks" / "hooks.json").write_text(json.dumps({
+            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "echo hi"}]}],
+        }), encoding="utf-8")
+        _write_v2_manifest_multi(claude_dir, "foo@mp", [
+            {"scope": "user", "installPath": str(plugin_root), "version": "1.0"},
+        ])
+        settings_off = Settings(raw={"enabledPlugins": {"foo@mp": False}}, layers=[], errors=[])
+        runner_off = build_hook_runner(settings=settings_off, cwd=claude_dir.parent, session_id="s1",
+                                        transcript_path="", effort=None, permission_mode="auto",
+                                        mcp_manager=None, bare=False)
+        ctx.check("disabled plugin's hooks are NOT loaded", runner_off.has_hooks("PreToolUse") is False)
+
+        settings_on = Settings(raw={"enabledPlugins": {"foo@mp": True}}, layers=[], errors=[])
+        runner_on = build_hook_runner(settings=settings_on, cwd=claude_dir.parent, session_id="s1",
+                                       transcript_path="", effort=None, permission_mode="auto",
+                                       mcp_manager=None, bare=False)
+        ctx.check("enabled plugin's hooks ARE loaded", runner_on.has_hooks("PreToolUse") is True)
     finally:
         if old is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)

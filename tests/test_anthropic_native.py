@@ -174,14 +174,125 @@ def test_databricks_route_tries_ai_gateway_path_first(ctx: Ctx):
     try:
         body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                                              tools=None, route=_route("claude-sonnet-ok", provider="databricks"), profile=_profile())
-        result = call_anthropic_native(mock.base_url, "k", body, {"Authorization": "Bearer k",
-                                        "x-databricks-use-coding-agent-mode": "true"},
+        # finding 16/17 (h4-h5-h3c review): `extra_headers` here is EXACTLY
+        # what `headless.py.build_session` really produces for a databricks
+        # route -- `{"x-databricks-use-coding-agent-mode": "true"}`, NO
+        # Authorization header (the pre-fix version of this test added one
+        # by hand, which meant it kept passing even though
+        # `call_anthropic_native` itself never added it and every real
+        # Databricks Claude passthrough call 401/403'd).
+        result = call_anthropic_native(mock.base_url, "k", body, {"x-databricks-use-coding-agent-mode": "true"},
                                         Path(tempfile.mkdtemp(prefix="ant-dbx-")), route_provider="databricks")
         ctx.check(f"200 status, got {result.status}", result.status == 200)
         ctx.check(f"hit the ai-gateway anthropic path, got {mock.requests[-1]['path']}",
                   mock.requests[-1]["path"].startswith("/ai-gateway/anthropic/v1/messages"))
         ctx.check("Databricks gateway ?beta=true flag present", "beta=true" in mock.requests[-1]["path"])
         ctx.check("coding-agent-mode header forwarded", mock.requests[-1]["headers"].get("x-databricks-use-coding-agent-mode") == "true")
+        ctx.check(f"h5b finding 16: Authorization: Bearer <api_key> was added by call_anthropic_native ITSELF, "
+                  f"got {mock.requests[-1]['headers'].get('authorization')!r}",
+                  mock.requests[-1]["headers"].get("authorization") == "Bearer k")
+    finally:
+        mock.stop()
+
+
+@test
+def test_h5b_f16_databricks_bearer_header_survives_the_ai_gateway_404_fallback(ctx: Ctx):
+    """The Authorization header must be present on BOTH attempts -- the
+    ai-gateway path (which may 404 on some workspaces) and the
+    serving-endpoints fallback -- not just the first one tried."""
+    mock = MockAnthropic().start()
+    try:
+        # Force the ai-gateway path to 404 so the fallback path actually runs.
+        mock.force_404_paths = {"/ai-gateway/anthropic/v1/messages"}
+        body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                                             tools=None, route=_route("claude-sonnet-ok", provider="databricks"), profile=_profile())
+        result = call_anthropic_native(mock.base_url, "k", body, {"x-databricks-use-coding-agent-mode": "true"},
+                                        Path(tempfile.mkdtemp(prefix="ant-dbx-fallback-")), route_provider="databricks")
+        ctx.check(f"eventually 200, got {result.status}", result.status == 200)
+        ctx.check(f"fell back to serving-endpoints, got {mock.requests[-1]['path']}",
+                  mock.requests[-1]["path"].startswith("/serving-endpoints/anthropic/v1/messages"))
+        ctx.check("Authorization header present on the FALLBACK attempt too",
+                  mock.requests[-1]["headers"].get("authorization") == "Bearer k")
+        # And also on the FIRST (404'd) attempt.
+        ai_gateway_reqs = [r for r in mock.requests if r["path"].startswith("/ai-gateway/anthropic/v1/messages")]
+        ctx.check(f"at least one ai-gateway attempt recorded, got {len(ai_gateway_reqs)}", len(ai_gateway_reqs) >= 1)
+        ctx.check("Authorization header present on the FIRST (404) attempt too",
+                  all(r["headers"].get("authorization") == "Bearer k" for r in ai_gateway_reqs))
+    finally:
+        mock.stop()
+
+
+@test
+def test_h5b_f17_thinking_tool_turn_through_real_session_merges_message_start_usage(ctx: Ctx):
+    """finding 17 (test-quality): every OTHER item on finding 17's own
+    8-case list is already covered by its matching finding's pinning test
+    (Edit near-duplicates -> f02, compaction trigger -> f01, steer during
+    dispatch -> f03, steer after checkpoint -> f05, stdin held open ->
+    f10, WebSearch in the first meta node -> f07, env-file PATH export ->
+    f06) -- this is the ONE case with no coverage anywhere else: "a
+    two-request ant: thinking+tool turn through Session with message_start
+    usage". Drives a REAL `agent.loop.Session` (not `call_anthropic_native`
+    called directly, which is all the rest of this file does) through a
+    full thinking + tool_use + tool_result + final-reply round trip against
+    `MockAnthropic`, proving -- end to end, not just at the
+    `prepare_anthropic_messages` unit level the other f15 tests use -- that
+    (a) message_start's usage really does reach the logged `usage` node
+    (finding 15 point 3), and (b) the SECOND real wire request really does
+    replay the first turn's thinking block with the wire's own `thinking`
+    key and its signature intact (finding 15 point 1), not just when
+    `prepare_anthropic_messages` is called by hand."""
+    from tests.helpers.fake_home import build_fake_home
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+
+    fh = build_fake_home()
+    mock = MockAnthropic().start()
+    try:
+        model = "ant:claude-sonnet-4.5-thinking-then-tool-then-reply"
+        session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
+        session = Session(
+            cwd=fh["proj"], model_ref=parse_model_ref(model), model_profile=ModelProfile(),
+            creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+            state_dir=Path(tempfile.mkdtemp(prefix="f17-session-")), model_label=model,
+            session_context=session_ctx, max_turns=10, effort="high",
+        )
+
+        list(session.turn("please read the file and summarize it"))
+
+        ctx.check(f"exactly two requests reached the mock, got {len(mock.requests)}", len(mock.requests) == 2)
+
+        # (a) message_start's usage reached the logged usage node -- not
+        # just message_delta's bare output_tokens (finding 15 point 3).
+        usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]
+        ctx.check(f"at least one usage node logged, got {len(usage_nodes)}", len(usage_nodes) >= 1)
+        first_usage = (usage_nodes[0].get("usage") or {}) if usage_nodes else {}
+        ctx.check(f"first step's usage carries message_start's input_tokens (321), got {first_usage}",
+                  first_usage.get("input_tokens") == 321)
+
+        # (b) the SECOND real wire request replays the thinking block with
+        # the wire's own `thinking` key (not the log's internal `text`
+        # key) and the original signature -- proved against the actual
+        # HTTP body MockAnthropic received, not a hand-called helper.
+        second_body = mock.requests[1]["body"]
+        assistant_messages = [m for m in second_body.get("messages", []) if m.get("role") == "assistant"]
+        ctx.check(f"an assistant message was replayed in request 2, got {len(assistant_messages)}",
+                  len(assistant_messages) >= 1)
+        thinking_blocks = [b for m in assistant_messages for b in (m.get("content") or [])
+                           if isinstance(b, dict) and b.get("type") == "thinking"]
+        ctx.check(f"exactly one replayed thinking block, got {thinking_blocks}", len(thinking_blocks) == 1)
+        tb = thinking_blocks[0] if thinking_blocks else {}
+        ctx.check(f"replayed with the wire's 'thinking' key, got {tb}",
+                  tb.get("thinking") == "need to read the file first")
+        ctx.check(f"no stray internal 'text' key on the wire, got {tb}", "text" not in tb)
+        ctx.check(f"signature preserved byte-for-byte on replay, got {tb.get('signature')!r}",
+                  tb.get("signature") == "sig_f17")
+
+        # The turn actually finished (tool_use handled, final reply logged).
+        final_texts = [b.get("text") for m in session.log.nodes() if m.get("type") == "assistant"
+                       for b in (m.get("content") or []) if isinstance(b, dict) and b.get("type") == "text"]
+        ctx.check(f"the final reply text made it into the log, got {final_texts}",
+                  any("done" in (t or "") for t in final_texts))
     finally:
         mock.stop()
 
@@ -192,10 +303,116 @@ def test_databricks_route_tries_ai_gateway_path_first(ctx: Ctx):
 
 @test
 def test_build_body_thinking_from_effort(ctx: Ctx):
+    # finding 15 (h4-h5-h3c review): budget_tokens is clamped BELOW
+    # max_tokens (here profile.max_tokens_default=8192, no explicit
+    # requested_max_tokens) -- 24,000 would 400 on the real API
+    # ("budget_tokens must be < max_tokens"), the exact verified repro.
     body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                                          tools=None, route=_route("claude-sonnet-4.5"), profile=_profile(), effort="high")
-    ctx.check(f"thinking.budget_tokens from --effort=high, got {body.get('thinking')}",
-              body.get("thinking") == {"type": "enabled", "budget_tokens": 24000})
+    ctx.check(f"thinking.budget_tokens from --effort=high, clamped below max_tokens, got {body.get('thinking')}",
+              body.get("thinking") == {"type": "enabled", "budget_tokens": 8191})
+    ctx.check(f"budget_tokens < max_tokens (the real Anthropic wire constraint), got "
+              f"budget={body['thinking']['budget_tokens']} max_tokens={body['max_tokens']}",
+              body["thinking"]["budget_tokens"] < body["max_tokens"])
+
+
+@test
+def test_h5b_f15_thinking_budget_clamped_below_a_small_max_tokens(ctx: Ctx):
+    """finding 15's own verified repro: --effort high sending max_tokens
+    16,384 with a 24,000 budget 400s on the first call -- and the
+    summariser's 4,096 max_tokens is even tighter."""
+    body = build_anthropic_request_body(
+        system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        tools=None, route=_route("claude-sonnet-4.5"), profile=_profile(), effort="high",
+        requested_max_tokens=16384,
+    )
+    ctx.check(f"budget stays below max_tokens=16384, got {body.get('thinking')}",
+              body["thinking"]["budget_tokens"] < 16384)
+
+
+@test
+def test_h5b_f15_thinking_omitted_entirely_when_max_tokens_too_small(ctx: Ctx):
+    """A max_tokens too small for even the 1,024-token minimum viable
+    budget (the summariser's own 4,096 max_tokens against a genuinely
+    tiny cap, or any call under ~1,024) omits thinking outright rather
+    than sending an invalid budget."""
+    body = build_anthropic_request_body(
+        system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        tools=None, route=_route("claude-sonnet-4.5"), profile=_profile(), effort="high",
+        requested_max_tokens=1000,
+    )
+    ctx.check(f"thinking omitted entirely, got {body.get('thinking')}", "thinking" not in body)
+
+
+@test
+def test_h5b_f15_message_level_reasoning_key_never_reaches_the_anthropic_wire(ctx: Ctx):
+    """finding 15: a stray message-level `reasoning` key (OpenAI-dialect
+    bookkeeping -- agent/derive.py attaches it to EVERY assistant node
+    that logged one, regardless of which model produced it) must never
+    reach Anthropic's wire body -- an unrecognized field on a message
+    object. Its text is downgraded to a plain, visible text block
+    instead of being silently dropped (a mid-session /model switch from
+    an OpenAI-dialect model must not lose the model's own prior
+    reasoning outright)."""
+    from rolo_claude.providers.request import prepare_anthropic_messages
+
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "the answer"}],
+         "reasoning": {"text": "I thought about this carefully."}},
+    ]
+    prepared = prepare_anthropic_messages(messages)
+    assistant_msg = prepared[1]
+    ctx.check(f"no stray 'reasoning' key survives, got {list(assistant_msg.keys())}", "reasoning" not in assistant_msg)
+    all_text = " ".join(b.get("text", "") for b in assistant_msg["content"] if isinstance(b, dict))
+    ctx.check(f"the reasoning text is downgraded to a visible text block, not dropped, got {all_text!r}",
+              "I thought about this carefully." in all_text)
+    ctx.check(f"the original answer text is still there too, got {all_text!r}", "the answer" in all_text)
+
+
+@test
+def test_h5b_f15_thinking_block_text_renamed_to_thinking_field_on_replay(ctx: Ctx):
+    """finding 15: the harness logs a thinking block's content under
+    `text` (its own internal storage convention) -- Anthropic's wire
+    needs the field named `thinking`. A genuine native thinking block
+    (with a real signature) must be renamed, never dropped."""
+    from rolo_claude.providers.request import prepare_anthropic_messages
+
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "text": "reasoning content here", "signature": "SIG123"},
+            {"type": "text", "text": "the answer"},
+        ]},
+    ]
+    prepared = prepare_anthropic_messages(messages)
+    thinking_block = prepared[1]["content"][0]
+    ctx.check(f"renamed to 'thinking', got {thinking_block}", thinking_block.get("thinking") == "reasoning content here")
+    ctx.check("no stray 'text' key survives on the thinking block", "text" not in thinking_block)
+    ctx.check(f"signature preserved byte-for-byte, got {thinking_block.get('signature')!r}",
+              thinking_block.get("signature") == "SIG123")
+
+
+@test
+def test_h5b_f15_unsigned_or_empty_thinking_and_empty_text_blocks_dropped(ctx: Ctx):
+    """finding 15: a partial block a steer/abort/interrupt cut short
+    before it ever finished forming (no signature yet, or genuinely
+    empty) must be DROPPED from the replay, not sent as malformed."""
+    from rolo_claude.providers.request import prepare_anthropic_messages
+
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "text": "cut short mid-thought", "signature": ""},  # no signature yet
+            {"type": "thinking", "text": "", "signature": "SIG"},  # empty text
+            {"type": "text", "text": ""},  # empty text block
+            {"type": "text", "text": "the real answer"},
+        ]},
+    ]
+    prepared = prepare_anthropic_messages(messages)
+    content = prepared[1]["content"]
+    ctx.check(f"unsigned/empty blocks dropped, only the real answer survives, got {content}",
+              content == [{"type": "text", "text": "the real answer"}])
 
 
 @test

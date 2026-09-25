@@ -213,7 +213,25 @@ async def _apply_event_inner(app, event) -> None:
             card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"))
         _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")))
     elif kind == "permission_request":
-        await _show_permission_card(app, data)
+        if event.agent_id:
+            # H6 known v1 gap (D10) / B must-do: a SUB-AGENT's own "ask"
+            # decision (agent/loop.py's `_resolve_tool_call`, the non-
+            # interactive fallback -- sub-agents run with
+            # `interactive=False`: their whole turn is drained to a list
+            # before any of their events reach this live stream at all,
+            # so there is no channel left to pause on for a real answer
+            # by the time this arrives) is ALREADY final -- rendered as an
+            # informational note, agent-tagged, never a live actionable
+            # card that would misleadingly imply the user can still change
+            # the outcome.
+            await app.transcript.add_note(
+                f"⚠ sub-agent (agent_id={event.agent_id}) needed permission for "
+                f"{data.get('name', '?')} and was denied (no live approval for sub-agents "
+                f"in this build): {data.get('reason', '')}",
+                kind="error",
+            )
+        else:
+            await _show_permission_card(app, data)
     elif kind == "question":
         await _show_question_card(app, data)
     elif kind == "plan_review":
@@ -251,6 +269,37 @@ async def _apply_event_inner(app, event) -> None:
     elif kind == "notification":
         app.notify(data.get("text", ""), severity=_SEVERITY.get(data.get("level"), "information"))
     elif kind == "steer_queued":
-        await app.transcript.add_note(f"↳ steering… {data.get('text', '')}", kind="steer")
+        # U5 must-do: the steer's own TEXT is never embedded in this note
+        # -- it shows up exactly once, moments later, as an ordinary user
+        # bubble (the `user_message` event `_apply_pending_steers_events`
+        # yields right before `steer_applied`). The old note repeated the
+        # full text here too, so a single steer showed up TWICE (a note,
+        # then a user bubble with identical text). This event can fire
+        # twice for one logical steer -- once immediately at submit time
+        # (Controller.submit, for instant feedback) and once again when
+        # the turn actually applies it -- both are just this same generic,
+        # text-free indicator, never a second copy of the text.
+        await app.transcript.add_note("↳ steering…", kind="steer")
     elif kind == "steer_applied":
         app.status_bar.apply_status({"phase": "thinking"})
+    elif kind == "compaction":
+        # U5 must-do: no handler existed at all before -- a "Compacting…"
+        # indicator never appeared and a failure was invisible.
+        phase = data.get("phase")
+        if phase == "start":
+            app.status_bar.apply_status({"phase": "compacting"})
+            await app.transcript.add_note("⧗ Compacting the conversation…", kind="compaction")
+        elif phase == "retry":
+            missing = ", ".join(data.get("headings_missing") or [])
+            await app.transcript.add_note(f"⧗ Compaction retrying (incomplete: {missing})", kind="compaction")
+        elif phase == "done":
+            before, after = data.get("tokens_before"), data.get("tokens_after")
+            saved = f", freed ~{before - after} tokens" if isinstance(before, int) and isinstance(after, int) else ""
+            await app.transcript.add_note(f"✓ Compacted the conversation (~{before} -> ~{after} tokens{saved})",
+                                           kind="compaction")
+            app.status_bar.apply_status({"phase": "idle"})
+        elif phase == "failed":
+            reason = data.get("reason") or "see logs"
+            await app.transcript.add_note(f"✗ Compaction failed: {reason} (the conversation is unchanged)",
+                                           kind="error")
+            app.status_bar.apply_status({"phase": "idle"})

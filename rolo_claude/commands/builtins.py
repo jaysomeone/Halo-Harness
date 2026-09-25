@@ -79,10 +79,20 @@ def _cmd_compact(args: str, facade: HeadlessFacade) -> str:
     if session is None:
         return "Nothing to compact: a single -p turn has no prior history to summarize."
     custom = args.strip() or None
-    done = None
+    done = failed = None
     for ev in session._run_compaction(session.turn_count, trigger="manual", custom_instructions=custom):
-        if ev.kind == "compaction" and ev.data.get("phase") == "done":
+        if ev.kind != "compaction":
+            continue
+        if ev.data.get("phase") == "done":
             done = ev.data
+        elif ev.data.get("phase") == "failed":
+            failed = ev.data
+    # finding 4: a manual /compact can genuinely fail (overflow even after
+    # the flattened-serialisation fallback, an exhausted-retries upstream
+    # failure, Esc) -- the log is then left byte-for-byte unchanged, so say
+    # so plainly instead of the old blanket "reported no result (see logs)".
+    if failed is not None:
+        return f"Compaction failed: {failed.get('reason') or 'see logs'}. The conversation is unchanged."
     if done is None:
         return "Compaction ran but reported no result (see logs)."
     before, after = done.get("tokens_before"), done.get("tokens_after")
@@ -128,6 +138,14 @@ def _cmd_context(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_model(args: str, facade: HeadlessFacade) -> str:
+    # U5 must-do: read from the LIVE session when one is attached, not the
+    # facade's construction-time snapshot -- a `/model` switch earlier in
+    # the same session used to never show up here.
+    session = getattr(facade, "session", None)
+    if session is not None:
+        model_id = getattr(getattr(session, "model_ref", None), "raw", None) or facade.model_ref or "?"
+        effort = getattr(session, "effort", None) or facade.effort or "default"
+        return f"Current model: {model_id}\nEffort: {effort}"
     return f"Current model: {facade.model_ref or '?'}\nEffort: {facade.effort or 'default'}"
 
 
@@ -197,15 +215,23 @@ def _cmd_status(args: str, facade: HeadlessFacade) -> str:
     from rolo_claude import __version__
     mcp_n = len(facade.mcp_servers)
     session = getattr(facade, "session", None)
+    # U5 must-do: model/permission-mode also read from the LIVE session
+    # (a `/model` switch or a plan-mode/Shift+Tab mode change mid-session
+    # used to never show up in `/status`, only the facade's snapshot).
+    model_id = facade.model_ref or "?"
+    permission_mode = facade.permission_mode
     if session is not None:
         cm = session.cost_meter
         cost_line = f"Cost so far: ${cm.total_usd:.4f} ({cm.turns} turn(s))" if cm.has_cost_data else "Cost so far: n/a"
+        model_id = getattr(getattr(session, "model_ref", None), "raw", None) or model_id
+        engine = getattr(session, "permission_engine", None)
+        permission_mode = getattr(engine, "mode", None) or permission_mode
     else:
         cost_line = f"Cost so far: ${facade.cost_usd:.4f} ({facade.num_turns} turn(s))"
     return (f"rolo-claude {__version__}\n"
-            f"Model: {facade.model_ref or '?'}\n"
+            f"Model: {model_id}\n"
             f"cwd: {facade.cwd}\n"
-            f"Permission mode: {facade.permission_mode}\n"
+            f"Permission mode: {permission_mode}\n"
             f"MCP servers: {mcp_n}\n"
             f"Theme: {facade.theme or '?'}\n"
             f"{cost_line}")

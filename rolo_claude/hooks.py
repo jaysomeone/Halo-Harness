@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -357,44 +358,88 @@ class HookResult:
 
 
 def _shell_argv(hook: HookDef, command_text: str) -> list:
+    """finding 14 (major, h4-h5-h3c review), point 5: an EXPLICIT
+    `shell: "bash"` must run `/bin/bash` on POSIX, never `/bin/sh` --
+    the pre-fix version's condition (`hook.shell == "bash" or sys.platform
+    != "win32"`) meant `shell: "bash"` and "no shell specified at all"
+    took the SAME branch on POSIX, both falling through to `/bin/sh`
+    (`dash` on Kali/Debian: `[[ ... ]]` and other bashisms fail). The
+    "no explicit shell" default genuinely IS `/bin/sh` on POSIX [D-CFG]
+    -- only a REQUEST for bash specifically must get real bash."""
     if hook.shell == "powershell":
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_text]
-    if hook.shell == "bash" or sys.platform != "win32":
-        if sys.platform == "win32":
-            from rolo_claude.config.paths import git_bash
-            bash = git_bash()
-            if bash is not None:
-                return [str(bash), "-c", command_text]
-            log.warning("hook requested shell=bash but no Git Bash was found -- falling back to PowerShell")
-            return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_text]
-        return ["/bin/sh", "-c", command_text]
-    # default (no explicit `shell`): Git Bash on win32, /bin/sh on POSIX [D-CFG].
-    from rolo_claude.config.paths import git_bash
-    bash = git_bash()
-    if bash is not None:
-        return [str(bash), "-c", command_text]
-    log.warning("hook: no Git Bash found on PATH -- falling back to PowerShell")
-    return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_text]
+    if sys.platform == "win32" and hook.shell in (None, "bash"):
+        # Git Bash on win32 for both the default and an explicit "bash"
+        # request (there is no separate native POSIX /bin/sh on Windows).
+        from rolo_claude.config.paths import git_bash
+        bash = git_bash()
+        if bash is not None:
+            return [str(bash), "-c", command_text]
+        log.warning("hook: no Git Bash found on PATH -- falling back to PowerShell")
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_text]
+    if hook.shell == "bash":
+        return ["/bin/bash", "-c", command_text]
+    return ["/bin/sh", "-c", command_text]  # default (no explicit `shell`) on POSIX [D-CFG]
 
 
-def run_command_hook(hook: HookDef, payload: dict, *, cwd, env: dict) -> HookResult:
+def run_command_hook(hook: HookDef, payload: dict, *, cwd, env: dict, abort=None) -> HookResult:
     """`args` (exec form) spawns WITHOUT a shell; else `command` (shell
     text) runs through `shell: powershell` or the platform default (Git
     Bash `bash -c` on win32, `/bin/sh -c` on POSIX) [D-CFG]. stdin = the
-    payload JSON; timeout -> process-tree kill (subprocess.run's own,
-    non-blocking -- exit code 1, never a hard block)."""
+    payload JSON; exit code 1 (never a hard block) on timeout OR abort.
+
+    finding 14 (major, h4-h5-h3c review), points 2+3: `subprocess.run(...,
+    timeout=...)` only ever kills the DIRECT child on a timeout -- a
+    grandchild the hook's own shell spawned (`sh -c "sleep 100 &"`, or any
+    shell hook that forks) survived. The process now starts its own
+    session/process group (`start_new_session` POSIX / `CREATE_NEW_
+    PROCESS_GROUP` Windows) and a timeout OR an `abort` Event firing (Esc
+    during a slow PreToolUse hook -- previously ignored completely, so
+    Esc did nothing until the hook returned and the gated call ran
+    anyway) kills the WHOLE group via `tools._proc._kill_process_group`
+    (the SAME helper the Bash tool itself already uses)."""
+    from rolo_claude.tools._proc import _kill_process_group
+
     timeout_s = hook.effective_timeout_s()
     stdin_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
         argv = [str(a) for a in hook.args] if hook.args else _shell_argv(hook, hook.command or "")
-        proc = subprocess.run(argv, input=stdin_bytes, capture_output=True, cwd=str(cwd),
-                               env=env, timeout=timeout_s)
-        return HookResult(proc.returncode, proc.stdout.decode("utf-8", "replace"),
-                           proc.stderr.decode("utf-8", "replace"))
-    except subprocess.TimeoutExpired:
-        return HookResult(1, "", f"hook timed out after {timeout_s:.0f}s")
+        proc = subprocess.Popen(
+            argv, cwd=str(cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+            start_new_session=(os.name != "nt"),
+        )
     except OSError as e:
         return HookResult(1, "", f"failed to launch hook: {e}")
+
+    box: dict = {}
+
+    def _communicate() -> None:
+        try:
+            out, err = proc.communicate(input=stdin_bytes)
+            box["out"], box["err"] = out, err
+        except Exception as e:  # a killed/broken pipe raises here -- captured, never crashes the thread silently
+            box["exc"] = e
+
+    worker = threading.Thread(target=_communicate, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    while worker.is_alive():
+        if deadline is not None and time.monotonic() >= deadline:
+            _kill_process_group(proc)
+            worker.join(timeout=2.0)
+            return HookResult(1, "", f"hook timed out after {timeout_s:.0f}s")
+        if abort is not None and abort.is_set():
+            _kill_process_group(proc)
+            worker.join(timeout=2.0)
+            return HookResult(1, "", "hook process interrupted by user")
+        worker.join(timeout=0.1)
+
+    if "exc" in box:
+        return HookResult(1, "", f"hook process error: {box['exc']}")
+    return HookResult(proc.returncode, (box.get("out") or b"").decode("utf-8", "replace"),
+                       (box.get("err") or b"").decode("utf-8", "replace"))
 
 
 def _interpolate_allowed_env(value, allowed: list, env: dict):
@@ -410,12 +455,22 @@ def _interpolate_allowed_env(value, allowed: list, env: dict):
     return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", _sub, value)
 
 
-def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict) -> HookResult:
+def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict, abort=None) -> HookResult:
     """POST JSON; headers interpolate ONLY `allowedEnvVars` names (a
     credential-named var never interpolates, whether allowed or not is
     irrelevant -- the CALLER is responsible for never putting a credential
     name in `allowedEnvVars` in the first place, same trust model as the
-    rest of this harness's env handling)."""
+    rest of this harness's env handling).
+
+    finding 14, point 3 (best-effort): `urlopen` is a single blocking call
+    urllib gives no way to truly interrupt from another thread once the
+    socket read has started -- this polls `abort` on a background thread
+    and RETURNS EARLY (as an abort-shaped failure) the moment it fires,
+    which is what the caller (a PreToolUse/PermissionRequest wait) needs
+    to make Esc responsive; the underlying request keeps running to its
+    own `timeout_s` in the background rather than actually being killed
+    (network hooks are rarer than command hooks and already timeout-
+    bounded, so this asymmetry is an accepted, documented trade-off)."""
     import urllib.error
     import urllib.request
 
@@ -423,18 +478,36 @@ def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict) 
     headers.setdefault("Content-Type", "application/json")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(hook.url or "", data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            text = resp.read().decode("utf-8", "replace")
-            return HookResult(0, text, "")
-    except urllib.error.HTTPError as e:
+
+    box: dict = {}
+
+    def _do_request() -> None:
         try:
-            body_text = e.read().decode("utf-8", "replace")
-        except Exception:
-            body_text = ""
-        return HookResult(1, body_text, f"HTTP {e.code}: {e.reason}")
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return HookResult(1, "", f"http hook failed: {e}")
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                box["result"] = HookResult(0, resp.read().decode("utf-8", "replace"), "")
+        except urllib.error.HTTPError as e:
+            try:
+                body_text = e.read().decode("utf-8", "replace")
+            except Exception:
+                body_text = ""
+            box["result"] = HookResult(1, body_text, f"HTTP {e.code}: {e.reason}")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            box["result"] = HookResult(1, "", f"http hook failed: {e}")
+
+    if abort is None:
+        _do_request()
+        return box["result"]
+
+    worker = threading.Thread(target=_do_request, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout_s + 1.0  # a little past urlopen's own timeout, as a hard backstop
+    while worker.is_alive():
+        if abort.is_set():
+            return HookResult(1, "", "http hook interrupted by user")
+        if time.monotonic() >= deadline:
+            return HookResult(1, "", f"http hook timed out after {timeout_s:.0f}s")
+        worker.join(timeout=0.1)
+    return box.get("result") or HookResult(1, "", "http hook produced no result")
 
 
 def run_mcp_tool_hook(hook: HookDef, payload: dict, *, mcp_manager, timeout_s: float, abort=None) -> HookResult:
@@ -520,6 +593,42 @@ def _apply_json_fields(outcome: HookOutcome, parsed: dict, event: str) -> None:
             outcome.block_reason = str(parsed.get("reason") or "blocked by hook")[:REASON_CAP]
     hso = parsed.get("hookSpecificOutput")
     if isinstance(hso, dict):
+        if event == "PermissionRequest":
+            # finding 13 (major, h4-h5-h3c review): PermissionRequest's
+            # OWN schema is `hookSpecificOutput.decision.behavior`
+            # ("allow" with `updatedInput`/`updatedPermissions`, or "deny"
+            # with `message`/`interrupt`) -- NOT the PreToolUse-shaped
+            # top-level `permissionDecision`/`updatedInput` fields this
+            # function reads for every other event. A real Claude Code
+            # PermissionRequest auto-approve hook used to be silently
+            # ignored entirely (this branch didn't exist), so the card
+            # still appeared regardless of what the hook decided.
+            decision_obj = hso.get("decision")
+            if isinstance(decision_obj, dict):
+                behavior = decision_obj.get("behavior")
+                if behavior in ("allow", "deny"):
+                    outcome.permission_decision = behavior
+                message = decision_obj.get("message")
+                if isinstance(message, str) and message:
+                    outcome.permission_decision_reason = message[:REASON_CAP]
+                    if behavior == "deny":
+                        outcome.block_reason = outcome.block_reason or message[:REASON_CAP]
+                updated_input = decision_obj.get("updatedInput")
+                if isinstance(updated_input, dict):
+                    outcome.updated_input = updated_input
+                updated_perms = decision_obj.get("updatedPermissions")
+                if isinstance(updated_perms, dict):
+                    mode = updated_perms.get("setMode")
+                    if isinstance(mode, str) and mode:
+                        outcome.set_mode = mode
+                # `interrupt: true` on a deny means "stop the turn
+                # outright", not just refuse this one tool -- mirrors
+                # `outcome.continue_ = False`'s own existing meaning
+                # (checked by the SAME "continue" field every other event
+                # already uses) rather than inventing a second mechanism.
+                if behavior == "deny" and decision_obj.get("interrupt") is True:
+                    outcome.continue_ = False
+            return
         pd = hso.get("permissionDecision")
         # PreToolUse-only vocabulary member -- elsewhere, "defer" means
         # exactly what "no decision at all" means (never overrides).
@@ -652,7 +761,15 @@ class HookRunner:
         )
 
     def _env_for(self, hook: HookDef, event: Optional[str] = None) -> dict:
-        env = dict(self.effective_env)
+        # finding 14 (major, h4-h5-h3c review): hook CHILD PROCESSES get
+        # `tool_child_env()`-stripped env (minus every provider secret the
+        # harness loaded -- OPENROUTER_API_KEY, DATABRICKS_TOKEN,
+        # ANTHROPIC_API_KEY, ... -- same as Bash/PowerShell/MCP child
+        # processes already get, per the H3 must-do), never the raw
+        # `self.effective_env` -- a plugin/user hook could otherwise read
+        # every provider key straight out of its own environment.
+        from rolo_claude.providers.config import tool_child_env
+        env = tool_child_env(self.effective_env)
         env["CLAUDE_PROJECT_DIR"] = str(self.cwd)
         env["CLAUDE_CODE_REMOTE"] = "false"
         if hook.plugin_root:
@@ -702,9 +819,9 @@ class HookRunner:
             self._once_ran.add(hook.dedup_key())
         env = self._env_for(hook, event)
         if hook.type == "command":
-            result = run_command_hook(hook, payload, cwd=self.cwd, env=env)
+            result = run_command_hook(hook, payload, cwd=self.cwd, env=env, abort=abort)
         elif hook.type == "http":
-            result = run_http_hook(hook, payload, timeout_s=hook.effective_timeout_s(), env=env)
+            result = run_http_hook(hook, payload, timeout_s=hook.effective_timeout_s(), env=env, abort=abort)
         elif hook.type == "mcp_tool":
             result = run_mcp_tool_hook(hook, payload, mcp_manager=self.mcp_manager,
                                         timeout_s=hook.effective_timeout_s(), abort=abort)
@@ -787,13 +904,21 @@ class HookRunner:
 
 
 def session_end_budget_s(hooks: list) -> float:
+    """finding 14 (major, h4-h5-h3c review): the budget counts only
+    EXPLICIT `timeout` values (`h.timeout_s`, raw) -- the pre-fix version
+    used `h.effective_timeout_s()`, which falls back to each hook TYPE's
+    own implicit default (600s for a command hook) when no `timeout` was
+    ever configured, so quitting with an ordinary SessionEnd hook that
+    had no `timeout` field at all could block for up to 60s (the cap)
+    instead of the binary's own 1.5s default for that common case."""
     override = os.environ.get("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS")
     if override:
         try:
             return max(0.0, float(int(override)) / 1000.0)
         except ValueError:
             pass
-    largest = max((h.effective_timeout_s() for h in hooks), default=0.0)
+    explicit = [float(h.timeout_s) for h in hooks if h.timeout_s]
+    largest = max(explicit, default=0.0)
     return min(max(SESSION_END_DEFAULT_BUDGET_S, largest), SESSION_END_MAX_BUDGET_S)
 
 

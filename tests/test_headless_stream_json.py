@@ -33,6 +33,34 @@ def _scn_cost_reply(h, body):
     ])
 
 
+def _scn_slow_then_reply(h, body):
+    """A deliberately slow, multi-chunk stream (finding 10's own test
+    need: a real wall-clock window during which a second stdin line can
+    be written while the FIRST turn is still in flight) -- once the
+    request's messages mention "steer-please", replies immediately and
+    briefly instead, so the SECOND (steered-in) request resolves fast."""
+    import time as _time
+    whole = json.dumps(body)
+    if "steer-please" in whole:
+        _finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "steered"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ])
+        return
+    from tests.helpers.mock_openai import start_sse, write_sse_chunk, end_sse
+    start_sse(h)
+    write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+    for piece in ("slow ", "streaming ", "reply "):
+        _time.sleep(0.4)
+        write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"content": piece}}]})
+    write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    end_sse(h)
+
+
+SCENARIOS["slow-then-reply"] = _scn_slow_then_reply
+
+
 def _scn_json_reply(h, body):
     _finish(h, [
         {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
@@ -105,6 +133,125 @@ def test_input_format_stream_json_two_turns(ctx: Ctx):
         ctx.check(f"two result lines (one per turn), got {len(results)}", len(results) == 2)
         ctx.check(f"mock upstream saw both turns, got {len(mock.requests)} requests", len(mock.requests) >= 2)
     finally:
+        mock.stop()
+
+
+@test
+def test_h5b_f10_stdin_held_open_does_not_deadlock(ctx: Ctx):
+    """finding 10 (major, h4-h5-h3c review): an SDK-style client that
+    writes ONE stream-json line and waits for that turn's own `result`
+    line before writing the next one must NOT deadlock -- the old code
+    read stdin to EOF (i.e. until the pipe is CLOSED) before running
+    anything at all, so a client holding stdin open like this would hang
+    forever with the old code, never seeing turn 1's result."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    env = dict(os.environ)
+    env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+                "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/model", "--cwd", str(fh["proj"]),
+         "--input-format", "stream-json", "--output-format", "stream-json"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
+    )
+    try:
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "first turn"}}) + "\n")
+        proc.stdin.flush()
+        # Read stdout lines until turn 1's own "result" line -- with a
+        # hard deadline, so a genuine deadlock fails the test instead of
+        # hanging the whole suite forever.
+        import time as _time
+        deadline = _time.monotonic() + 20
+        got_result = False
+        while _time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            obj = json.loads(line)
+            if obj.get("type") == "result":
+                got_result = True
+                break
+        ctx.check("turn 1's result arrived WITHOUT closing stdin first (no deadlock)", got_result is True)
+
+        # Stdin is STILL open at this point -- prove a second line still
+        # works (queued as turn 2, since turn 1 already finished by now).
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "second turn"}}) + "\n")
+        proc.stdin.flush()
+        # NOTE: don't manually .close() proc.stdin here -- communicate()
+        # (called with no `input`) already flushes+closes stdin itself so
+        # the child still sees EOF, but CPython's own POSIX _communicate
+        # calls stdin.flush() unguarded before closing, while its Windows
+        # _communicate only calls the idempotent .close(); a pre-emptive
+        # manual close here is fine on Windows (repeat-close is a no-op)
+        # but raises ValueError: I/O operation on closed file on POSIX
+        # (Linux/WSL) -- a stdlib platform difference, not a product bug.
+        remaining_out, remaining_err = proc.communicate(timeout=20)
+        ctx.check(f"process exits cleanly, got {proc.returncode} stderr={remaining_err[-500:]!r}", proc.returncode == 0)
+        ctx.check(f"mock upstream saw both turns, got {len(mock.requests)} requests", len(mock.requests) >= 2)
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        mock.stop()
+
+
+@test
+def test_h5b_f10_line_written_while_a_turn_is_in_flight_is_never_lost(ctx: Ctx):
+    """finding 10: a line arriving WHILE session.busy is True is applied
+    as a steer (folded into the SAME turn); this test doesn't assert
+    exactly which of "steer" vs "queued as the next turn" won the race
+    (inherently timing-dependent) -- it asserts the invariant finding 10
+    actually promises: the text is NEVER LOST and the process never
+    hangs, regardless of which path fired."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    env = dict(os.environ)
+    env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+                "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/slow-then-reply", "--cwd", str(fh["proj"]),
+         "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
+    )
+    try:
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "do the slow thing"}}) + "\n")
+        proc.stdin.flush()
+        # Wait for the FIRST streamed text chunk (proof the slow turn has
+        # genuinely started, i.e. session.busy is True), THEN write the
+        # second line while it is still streaming.
+        import time as _time
+        deadline = _time.monotonic() + 20
+        saw_first_delta = False
+        while _time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            obj = json.loads(line)
+            if obj.get("type") == "stream_event":
+                saw_first_delta = True
+                break
+        ctx.check("saw the slow turn actually start streaming", saw_first_delta is True)
+
+        proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "steer-please"}}) + "\n")
+        proc.stdin.flush()
+        # NOTE: see the sibling test above -- communicate() already
+        # closes stdin itself; a manual close first is a stdlib platform
+        # trap (ValueError on POSIX, silent no-op on Windows), not a
+        # product bug.
+        remaining_out, remaining_err = proc.communicate(timeout=25)
+        ctx.check(f"process exits cleanly, got {proc.returncode} stderr={remaining_err[-500:]!r}", proc.returncode == 0)
+        whole_output = remaining_out
+        ctx.check(f"the steer/second-turn text reached the real upstream, got {len(mock.requests)} requests",
+                  any("steer-please" in json.dumps(r["body"]) for r in mock.requests))
+        ctx.check("the steered/second reply text made it into the output", "steered" in whole_output)
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
         mock.stop()
 
 

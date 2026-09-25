@@ -32,7 +32,7 @@ from rolo_claude.testing.fake_controller import FakeController, default_demo_tur
 from rolo_claude.tui.app import BridgeApp
 from rolo_claude.tui.events import drain_queue
 from rolo_claude.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, ToolCard
-from rolo_claude.tui.widgets.transcript import AssistantText, UserMessage
+from rolo_claude.tui.widgets.transcript import AssistantText, SystemNote, UserMessage
 
 test, TESTS = new_registry()
 
@@ -148,6 +148,75 @@ def test_tool_card_same_widget_start_to_result_plus_ctrl_o(ctx: Ctx):
             await pilot.press("ctrl+o")
             ctx.check("real Ctrl+O keypress expands the card", card.expanded is True)
             ctx.check("app.verbose toggled on", app.verbose is True)
+    asyncio.run(body())
+
+
+@test
+def test_compaction_events_render_start_and_done_notes_and_status(ctx: Ctx):
+    """U5 must-do: no `compaction` handler existed at all before -- a
+    "Compacting..." indicator never appeared and a failure was invisible.
+    Drives `dispatch.apply_event` directly with the real event shapes
+    `agent/loop.py`'s `_run_compaction` actually yields."""
+    from rolo_claude.tui.dispatch import apply_event
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await apply_event(app, ev.Event("compaction", {"phase": "start"}, turn=1))
+            ctx.check(f"status bar shows compacting, got {app.status_bar.phase!r}",
+                      app.status_bar.phase == "compacting")
+            notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"exactly one note so far, got {len(notes)}", len(notes) == 1)
+            ctx.check(f"start note mentions compacting, got {notes[0].content!r}",
+                      "Compacting" in str(notes[0].content))
+
+            await apply_event(app, ev.Event(
+                "compaction", {"phase": "done", "tokens_before": 1000, "tokens_after": 200}, turn=1,
+            ))
+            notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"a second note was added for the done phase, got {len(notes)}", len(notes) == 2)
+            done_text = str(notes[1].content)
+            ctx.check(f"done note reports the before/after token counts, got {done_text!r}",
+                      "1000" in done_text and "200" in done_text)
+    asyncio.run(body())
+
+
+@test
+def test_steer_queued_note_never_embeds_the_steer_text_only_the_user_bubble_does(ctx: Ctx):
+    """U5 must-do: the OLD `steer_queued` note repeated the steer's own
+    text, and a `user_message` event for the SAME steer followed moments
+    later with an identical bubble -- one steer showed up TWICE. The fix
+    makes the note permanently text-free (`"..." steering..."`, never the
+    steer's own words) regardless of how many times `steer_queued` fires
+    for one logical steer (submit time, then again when applied) -- the
+    actual text appears exactly once, only in the `user_message` bubble."""
+    from rolo_claude.tui.dispatch import apply_event
+
+    STEER_TEXT = "please use a different approach entirely"
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            # Fires once at submit time, once again when the turn actually
+            # applies it -- both text-free, per the comment in dispatch.py.
+            await apply_event(app, ev.Event("steer_queued", {}, turn=1))
+            await apply_event(app, ev.Event("steer_queued", {}, turn=1))
+            await apply_event(app, ev.Event("user_message", {"text": STEER_TEXT}, turn=1))
+
+            notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"two steer_queued notes were added, got {len(notes)}", len(notes) == 2)
+            for n in notes:
+                text = str(n.content)
+                ctx.check(f"note is the generic text-free indicator, got {text!r}",
+                          STEER_TEXT not in text and "steering" in text.lower())
+
+            user_messages = [w for w in app.transcript.children if isinstance(w, UserMessage)]
+            ctx.check(f"exactly ONE user bubble carries the steer text, got {len(user_messages)}",
+                      len(user_messages) == 1)
+            ctx.check(f"the bubble has the real text, got {user_messages[0].content!r}",
+                      STEER_TEXT in str(user_messages[0].content))
     asyncio.run(body())
 
 
@@ -1175,6 +1244,125 @@ def test_rename_fork_export_stats_via_fake_controller(ctx: Ctx):
             ctx.check(f"/stats rendered a note mentioning Turns, got plain_log tail={app.transcript.plain_log[-3:]}",
                       any("Turns" in line for line in app.transcript.plain_log))
     asyncio.run(body())
+
+
+@test
+def test_h5b_f11_compact_is_queued_off_the_ui_thread_not_run_synchronously(ctx: Ctx):
+    """finding 11 (major, h4-h5-h3c review) / U5 must-do: `/compact` must
+    be queued as a worker `Command` (`run_compact`), never drained
+    synchronously on the calling (UI) thread via `Controller.run_slash`
+    (documented "UI thread, synchronous, cheap" -- the old path ran the
+    ENTIRE summarisation call there, freezing the whole TUI). `run_slash`
+    must return immediately ("") and leave the actual work for
+    `Session.run()`'s own worker-thread command loop to pick up."""
+    from rolo_claude.commands.registry import Registry
+    from rolo_claude.commands.builtins import register_builtins
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp)
+        controller = _real_controller(cwd)
+        reg = Registry()
+        register_builtins(reg)
+        controller.registry = reg
+        result = controller.run_slash("compact", "focus on file paths")
+        ctx.check(f"run_slash returns immediately (never blocks draining the summary here), got {result!r}",
+                  result == "")
+        queued = []
+        while True:
+            try:
+                queued.append(controller.commands.get_nowait())
+            except Exception:
+                break
+        ctx.check(f"exactly one run_compact Command was queued, got {[c.kind for c in queued]}",
+                  len(queued) == 1 and queued[0].kind == "run_compact")
+        ctx.check(f"the custom instructions were threaded through, got {queued[0].data}",
+                  queued[0].data.get("instructions") == "focus on file paths")
+
+
+@test
+def test_h5b_f11_compact_refused_while_a_turn_is_already_running(ctx: Ctx):
+    """finding 11: a compaction and an ordinary turn must never race over
+    the same log -- /compact while `session.busy` is True is refused
+    outright (D-TUI: "reject or defer it while busy"), not queued to run
+    concurrently."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp)
+        controller = _real_controller(cwd)
+        controller.session.busy = True
+        result = controller.run_compact("")
+        ctx.check(f"refused with an explanatory message, got {result!r}", "already running" in result)
+        queued = []
+        while True:
+            try:
+                queued.append(controller.commands.get_nowait())
+            except Exception:
+                break
+        ctx.check(f"nothing was queued, got {[c.kind for c in queued]}", queued == [])
+
+
+@test
+def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx):
+    """U5 must-do: `/clear` starts a NEW session log -- `SessionEnd(clear)`
+    fired on the old one, `SessionStart(clear)` on the fresh one -- instead
+    of only clearing the TUI's own transcript widget while the underlying
+    context (everything the next request would derive from) stayed
+    completely untouched."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    class _RecordingHookRunner:
+        def __init__(self):
+            self.calls = []
+
+        def has_hooks(self, event):
+            return True
+
+        def payload(self, event, *, extra=None, **kw):
+            return {"hook_event_name": event, **(extra or {})}
+
+        def run(self, event, payload, matched="", **kw):
+            from rolo_claude.hooks import HookOutcome
+            self.calls.append({"event": event, "source": payload.get("source")})
+            return HookOutcome()
+
+        def run_session_end(self, reason):
+            self.calls.append({"event": "SessionEnd", "reason": reason})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp)
+        os.environ["BRIDGE_TEST_HOME"] = str(cwd / "home")
+        try:
+            session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
+            model_ref = parse_model_ref("or:mock/model")
+            hooks = _RecordingHookRunner()
+            session = Session(
+                cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(),
+                creds=ProviderCreds(base_url="http://x", api_key="k"),
+                state_dir=cwd / "state", model_label=model_ref.raw, session_context=session_ctx,
+                hook_runner=hooks,
+            )
+            old_session_id = session.log.session_id
+            session.log.append_user([{"type": "text", "text": "old conversation content"}])
+            session.turn_count = 5
+
+            session.clear()
+
+            ctx.check(f"a NEW session_id was created, got old={old_session_id!r} new={session.log.session_id!r}",
+                      session.log.session_id != old_session_id)
+            ctx.check("turn_count reset", session.turn_count == 0)
+            from rolo_claude.agent.derive import derive_request
+            _system, messages, _tools = derive_request(session.log, tools=None)
+            all_text = json.dumps(messages)
+            ctx.check(f"the old conversation content is GONE from the new log, got {all_text!r}",
+                      "old conversation content" not in all_text)
+            ctx.check(f"SessionEnd(clear) fired on the old session, got {hooks.calls}",
+                      any(c.get("event") == "SessionEnd" and c.get("reason") == "clear" for c in hooks.calls))
+            ctx.check(f"SessionStart(clear) fired on the new session, got {hooks.calls}",
+                      any(c.get("event") == "SessionStart" and c.get("source") == "clear" for c in hooks.calls))
+        finally:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
 
 
 @test

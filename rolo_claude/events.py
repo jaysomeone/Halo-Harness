@@ -34,7 +34,7 @@ EVENT_KINDS = frozenset({
 
 COMMAND_KINDS = frozenset({
     "user_input", "interrupt", "set_mode", "set_model", "slash", "permission_reply",
-    "question_reply", "plan_reply", "steer",
+    "question_reply", "plan_reply", "steer", "run_compact", "run_clear",
 })
 
 _ids = itertools.count(1)
@@ -153,16 +153,19 @@ def notification(text: str, *, level: str = "info") -> Event:
 
 
 def compaction(*, phase: str, trigger: str = "auto", turn: int = 0, tokens_before: Optional[int] = None,
-               tokens_after: Optional[int] = None, headings_missing: Optional[list] = None) -> Event:
-    """data: {phase, trigger, tokens_before, tokens_after, headings_missing}
-    (H5 scope B) -- `phase` is "start"|"retry"|"done"|"failed"; `trigger` is
-    "manual"|"auto"|"overflow" (mirrors the `compacted` log node's own
-    field and the PreCompact hook's `trigger`). Emitted by
+               tokens_after: Optional[int] = None, headings_missing: Optional[list] = None,
+               reason: Optional[str] = None) -> Event:
+    """data: {phase, trigger, tokens_before, tokens_after, headings_missing,
+    reason} (H5 scope B) -- `phase` is "start"|"retry"|"done"|"failed";
+    `trigger` is "manual"|"auto"|"overflow" (mirrors the `compacted` log
+    node's own field and the PreCompact hook's `trigger`). Emitted by
     `Session._run_compaction` so a UI can show a "Compacting..." indicator
-    and, on "done", how much room was freed."""
+    and, on "done", how much room was freed. finding 4: `phase="failed"`
+    (with a human-readable `reason`) means compaction gave up WITHOUT
+    writing a `compacted` log node -- the history is unchanged."""
     return Event("compaction", {
         "phase": phase, "trigger": trigger, "tokens_before": tokens_before,
-        "tokens_after": tokens_after, "headings_missing": headings_missing or [],
+        "tokens_after": tokens_after, "headings_missing": headings_missing or [], "reason": reason,
     }, turn=turn)
 
 

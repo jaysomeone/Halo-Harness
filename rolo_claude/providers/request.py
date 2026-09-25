@@ -369,19 +369,39 @@ def apply_anthropic_cache_control(system_text: str, messages: list) -> "tuple[li
     return system_blocks, out
 
 
-def map_effort_anthropic(effort: Optional[str], model_id: str) -> dict:
+_ANTHROPIC_MIN_THINKING_BUDGET = 1024  # Anthropic's own documented floor for budget_tokens
+
+
+def map_effort_anthropic(effort: Optional[str], model_id: str, *, max_tokens: Optional[int] = None) -> dict:
     """`{"thinking": {...}}` (Sonnet/DeepSeek-class: a token budget) or
     `{"output_config": {"effort": ...}}` (Opus/Fable-class: a named level,
     per the brief's "output_config.effort for Opus/Fable-class") from
     `--effort`. Returns {} when `effort` is falsy (omit -> provider
-    default, never a disabling value sent blindly)."""
+    default, never a disabling value sent blindly).
+
+    finding 15 (major, h4-h5-h3c review): Anthropic REQUIRES
+    `budget_tokens < max_tokens` -- the pre-fix version picked
+    `budget_tokens` from `--effort` alone (24,000 for "high") with no
+    regard for what `max_tokens` this particular call was actually
+    sending (16,384 for an ordinary turn, 4,096 for the summariser),
+    400ing on the very first `--effort high` call and on EVERY
+    compaction. `max_tokens` is now clamped against here: the budget
+    never reaches or exceeds it, floored at Anthropic's own documented
+    1,024-token minimum -- if even THAT can't fit under `max_tokens`
+    (the summariser's small budget, most notably), thinking is omitted
+    entirely for this call rather than sent invalid."""
     if not effort:
         return {}
     low = (model_id or "").lower()
     if "opus" in low or "fable" in low:
         return {"output_config": {"effort": effort}}
     budget_by_effort = {"low": 4096, "medium": 10000, "high": 24000, "xhigh": 32000, "max": 32000}
-    return {"thinking": {"type": "enabled", "budget_tokens": budget_by_effort.get(effort, 10000)}}
+    budget = budget_by_effort.get(effort, 10000)
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        if max_tokens <= _ANTHROPIC_MIN_THINKING_BUDGET:
+            return {}  # no room for even the minimum viable budget -- omit thinking outright
+        budget = min(budget, max_tokens - 1)
+    return {"thinking": {"type": "enabled", "budget_tokens": budget}}
 
 
 def map_tool_choice_anthropic(tool_choice) -> Optional[dict]:
@@ -393,10 +413,97 @@ def map_tool_choice_anthropic(tool_choice) -> Optional[dict]:
         return None  # omit -> Anthropic's own default (auto)
     if tool_choice == "required":
         return {"type": "any"}
+    if tool_choice == "none":
+        # finding 18: the MAX_STEPS wrap-up call keeps the full frozen tool
+        # catalog in `tools` (Anthropic 400s on "tool_use ... must define
+        # tools" if history has tool_use blocks but the request omits
+        # `tools`) while still forbidding a NEW call this turn.
+        return {"type": "none"}
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
         name = (tool_choice.get("function") or {}).get("name")
         return {"type": "tool", "name": name} if name else {"type": "any"}
     return None
+
+
+def _reasoning_text_for_downgrade(reasoning: dict) -> str:
+    text = reasoning.get("text") if isinstance(reasoning, dict) else None
+    if isinstance(text, str) and text:
+        return text
+    details = reasoning.get("details") if isinstance(reasoning, dict) else None
+    if isinstance(details, list):
+        parts = []
+        for entry in details:
+            if isinstance(entry, dict):
+                t = entry.get("text") or entry.get("summary")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
+def prepare_anthropic_messages(messages: list) -> list:
+    """finding 15 (major, h4-h5-h3c review): the derived transcript
+    (agent/derive.py) is dialect-agnostic -- an assistant message can
+    carry shapes that are only ever valid INTERNALLY, never on
+    Anthropic's real wire. Applied to a fresh copy; the derived list (and
+    the log underneath it) is never mutated.
+
+      * A logged `thinking` block stores its content under `text` (this
+        harness's own storage convention, shared with plain `text`
+        blocks) -- renamed to `thinking` here, the field Anthropic's wire
+        actually needs (the pre-fix version replayed `text` verbatim,
+        400ing on the very first thinking+tool-loop turn).
+      * A message-level `reasoning` key (OpenAI-dialect's own
+        reasoning_content/reasoning_details bookkeeping -- providers.
+        hooks.reasoning_echo) is meaningless to Anthropic's schema and is
+        DROPPED -- but never silently: if it carries real text and this
+        message has no genuine native `thinking` block of its own (i.e.
+        it was captured from a DIFFERENT, OpenAI-dialect model earlier in
+        this same session -- a mid-session `/model` switch -- and so can
+        never be replayed as a native thinking block, which needs a real
+        signature that was never produced for it), that text survives as
+        a plain, visibly-labelled TEXT block instead of vanishing.
+      * A `thinking` block with an empty `signature` or empty `text`, or
+        a `text` block with empty text, is DROPPED outright -- a partial
+        block a steer/abort/interrupt cut short before it ever finished
+        forming, which Anthropic rejects as malformed if replayed."""
+    out = []
+    for msg in messages:
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            out.append(msg)
+            continue
+        content = msg["content"]
+        new_msg = {k: v for k, v in msg.items() if k != "reasoning"}
+        new_content: list = []
+        reasoning = msg.get("reasoning")
+        has_native_thinking = any(isinstance(b, dict) and b.get("type") == "thinking" for b in content)
+        if isinstance(reasoning, dict) and not has_native_thinking:
+            reasoning_text = _reasoning_text_for_downgrade(reasoning)
+            if reasoning_text:
+                new_content.append({"type": "text",
+                                     "text": f"[Reasoning carried over from a prior model]\n{reasoning_text}"})
+        for block in content:
+            if not isinstance(block, dict):
+                new_content.append(block)
+                continue
+            btype = block.get("type")
+            if btype == "thinking":
+                text = block.get("text") or ""
+                signature = block.get("signature") or ""
+                if not text or not signature:
+                    continue  # unsigned/empty -- cut short, never valid to replay
+                new_block = {k: v for k, v in block.items() if k != "text"}
+                new_block["thinking"] = text
+                new_content.append(new_block)
+            elif btype == "text":
+                if not (block.get("text") or ""):
+                    continue  # empty -- cut short before any content streamed
+                new_content.append(block)
+            else:
+                new_content.append(block)
+        new_msg["content"] = new_content
+        out.append(new_msg)
+    return out
 
 
 def build_anthropic_request_body(
@@ -406,16 +513,19 @@ def build_anthropic_request_body(
 ) -> dict:
     """Build a native Anthropic Messages body. `messages`/`tools` are
     ALREADY Anthropic-shaped (agent/derive.py's own canonical form) --
-    passed through essentially verbatim, including any `thinking` block's
-    `signature` (Anthropic requires it replayed byte-for-byte; nothing
-    here strips or rewrites it). `apply_cache_control` is True for every
+    passed through `prepare_anthropic_messages` first (finding 15: fixes
+    up the harness's own internal storage shapes into what Anthropic's
+    wire actually needs), including any `thinking` block's `signature`
+    (Anthropic requires it replayed byte-for-byte; nothing here strips or
+    rewrites a genuine one). `apply_cache_control` is True for every
     caller except a Databricks Claude passthrough row that opts out (none
     do today; the flag exists for a future host that rejects the field)."""
+    prepared_messages = prepare_anthropic_messages(messages)
     if apply_cache_control:
-        system_blocks, out_messages = apply_anthropic_cache_control(system_text, messages)
+        system_blocks, out_messages = apply_anthropic_cache_control(system_text, prepared_messages)
     else:
         system_blocks = [{"type": "text", "text": system_text}] if system_text else []
-        out_messages = list(messages)
+        out_messages = prepared_messages
 
     max_tokens = requested_max_tokens or profile.max_tokens_default or 8192
     body: dict = {
@@ -431,5 +541,5 @@ def build_anthropic_request_body(
         if tc is not None:
             body["tool_choice"] = tc
 
-    body.update(map_effort_anthropic(effort, route.upstream_model))
+    body.update(map_effort_anthropic(effort, route.upstream_model, max_tokens=max_tokens))
     return body

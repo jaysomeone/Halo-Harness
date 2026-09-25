@@ -222,6 +222,42 @@ def test_finding_7_loop_honours_databricks_429_retry_after(ctx: Ctx):
         os.environ.pop("BRIDGE_TEST_HOME", None)
 
 
+@test
+def test_h8_retry_wait_cap_raised_to_300s_and_logged(ctx: Ctx):
+    """H8 cheap must-do: `_step`'s per-wait cap is 300s (raised from 60s)
+    -- a provider's own longer `Retry-After` (a real 429 body can
+    legitimately ask for several minutes) is honoured up to 5 minutes
+    instead of being silently clipped to one."""
+    import logging
+    from rolo_claude.agent.loop import _MAX_RETRY_WAIT_S, _capped_retry_delay
+
+    ctx.check(f"the cap constant itself is 300s, got {_MAX_RETRY_WAIT_S}", _MAX_RETRY_WAIT_S == 300.0)
+
+    # A 90s Retry-After used to be clipped to 60s -- now passes through unchanged.
+    ctx.check("a 90s Retry-After is honoured in full (was silently clipped to 60s before)",
+              _capped_retry_delay(1, {"retry-after": "90"}) == 90.0)
+
+    # A Retry-After longer than the new 300s cap is still clipped, and the clip is logged.
+    class _CaptureHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record.getMessage())
+
+    handler = _CaptureHandler()
+    logger = logging.getLogger("bridge")
+    logger.addHandler(handler)
+    try:
+        delay = _capped_retry_delay(1, {"retry-after": "600"})
+    finally:
+        logger.removeHandler(handler)
+    ctx.check(f"a 600s Retry-After is still clipped to the 300s cap, got {delay}", delay == 300.0)
+    ctx.check(f"the clip is logged, got {handler.records}",
+              any("capped" in r and "600" in r for r in handler.records))
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

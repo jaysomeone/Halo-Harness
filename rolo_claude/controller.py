@@ -172,10 +172,24 @@ class Controller:
         plain Event read, safe from this (the UI) thread; `Session.steer`
         is the same kind of direct, thread-safe call as `interrupt()`/
         `answer_permission` (the worker is parked inside the running
-        turn's generator and can't read `self.commands`)."""
+        turn's generator and can't read `self.commands`).
+
+        finding 5: `session.busy` here and the busy check INSIDE
+        `steer()` are two separate reads -- the turn can finish in the
+        (tiny) window between them, in which case `steer()` now correctly
+        returns False (see its own docstring) instead of silently queuing
+        text nothing will ever drain. That False is handled here by
+        falling through to an ordinary fresh turn, so the text is never
+        dropped either way. On success, `steer_queued` is pushed to
+        `self.events` immediately (U5: shown the instant the user submits,
+        not only once the turn reaches a safe point to actually apply
+        it -- which can be much later, e.g. mid-tool-call)."""
         if self.session.busy:
-            self.session.steer(text)
-            return
+            if self.session.steer(text):
+                self.events.put(events.steer_queued(text, turn=self.session.turn_count))
+                return
+            # else: the turn finished in the race window above -- fall
+            # through and start a fresh turn instead of dropping the text.
         self.commands.put(events.Command("user_input", {"text": text, "pasted": pasted, "meta": meta}))
 
     def interrupt(self) -> None:
@@ -267,12 +281,44 @@ class Controller:
 
     # ---- slash commands ---------------------------------------------------
 
+    def run_compact(self, instructions: str = "") -> str:
+        """finding 11 (major, h4-h5-h3c review) / U5 must-do: `/compact`
+        queued as a worker `Command` (`run_compact`) instead of running
+        `session._run_compaction` to completion synchronously ON THIS (the
+        UI) thread -- the old path froze the whole TUI (no repaint, no
+        Esc) for the entire summarisation call. Deferred/refused outright
+        while a turn is already running (`self.session.busy`), matching
+        "handled between turns, deferred while busy" -- a compaction and
+        an ordinary turn must never race over the same log. Its
+        `compaction` events stream through the normal event pipe, so
+        `tui/dispatch.py`'s new handler renders live progress instead of
+        the UI just hanging."""
+        if self.session.busy:
+            return "A turn is already running -- /compact will need to wait until it finishes."
+        self.commands.put(events.Command("run_compact", {"instructions": instructions.strip() or None}))
+        return ""
+
+    def clear_session(self) -> str:
+        """U5 must-do: `/clear` queued onto the worker thread (`run_clear`)
+        -- `Session.clear()` fires real `SessionEnd(clear)`/
+        `SessionStart(clear)` hooks (arbitrary user scripts) and builds a
+        fresh log, so it gets the same off-the-UI-thread treatment as
+        `run_compact`. The OLD behaviour only cleared the TUI's own
+        transcript WIDGET -- the underlying log/context the next request
+        would still derive from was completely untouched."""
+        if self.session.busy:
+            return "A turn is already running -- /clear will need to wait until it finishes."
+        self.commands.put(events.Command("run_clear", {}))
+        return ""
+
     def run_slash(self, name: str, args: str = "") -> str:
         """Resolve `name` through the U0 registry.
 
         * a `prompt`-kind command (custom command / skill) is expanded and
           submitted as the next user turn -- text comes back "" and the
           caller should not print anything;
+        * `/compact` (finding 11) is queued onto the worker thread via
+          `run_compact` instead of running synchronously here;
         * anything else runs through the TUI facade right here (it is local
           and fast) and its returned text is handed back as the result.
         """
@@ -281,11 +327,20 @@ class Controller:
         cmd = self.registry.resolve(name)
         if cmd is None:
             return f"Unknown command: /{name} (try /help)"
+        if name == "compact" and cmd.source == "builtin":
+            return self.run_compact(args)
         if cmd.kind == "prompt" and cmd.run is not None:
             from rolo_claude.commands.registry import expand_command_body, read_at_mention_snapshots
 
             body = cmd.run(args, self.facade)
-            result = expand_command_body(body, args, allowed_tools=getattr(cmd, "allowed_tools", None), cwd=self.cwd)
+            # finding 9: route through the real session's permission
+            # engine + stripped tool env (see commands/registry.py's
+            # `run_preexec_commands` docstring).
+            result = expand_command_body(
+                body, args, allowed_tools=getattr(cmd, "allowed_tools", None), cwd=self.cwd,
+                permission_engine=getattr(self.session, "permission_engine", None),
+                env=getattr(self.session, "tool_env", None),
+            )
             if result.error:
                 return result.error
             # H4 scope C: `@path` attachments in the EXPANDED body -- read
@@ -534,8 +589,18 @@ class Controller:
         model-issued Bash call would."""
         from rolo_claude.tools.base import ToolContext
         from rolo_claude.tools.bash import BashTool
+        from rolo_claude.hooks import env_file_path
 
-        result = BashTool().run({"command": command}, ToolContext(cwd=self.cwd, bash_state=self._inline_bash_state))
+        # finding 9: the session's own stripped tool_env (never a raw
+        # os.environ read, which used to leak every provider API key into
+        # an inline `!cmd`'s subprocess) + CLAUDE_ENV_FILE (finding 6),
+        # same as a model-issued Bash call gets via _dispatch_tools.
+        result = BashTool().run(
+            {"command": command},
+            ToolContext(cwd=self.cwd, bash_state=self._inline_bash_state,
+                        env=getattr(self.session, "tool_env", None),
+                        env_file=env_file_path(self.session.log.session_id)),
+        )
         tool_use_id = f"inline_{uuid.uuid4().hex[:12]}"
         try:
             self.session.log.append_assistant(content=[

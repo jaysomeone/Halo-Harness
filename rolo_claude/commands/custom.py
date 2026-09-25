@@ -30,7 +30,17 @@ def _allowed_tools_list(fm: dict) -> list:
 
 def _make_run(body: str, allowed_tools: list):
     def _run(args_text: str, facade) -> str:
-        result = expand_command_body(body, args_text, allowed_tools=allowed_tools, cwd=facade.cwd)
+        # finding 9: route `!cmd` pre-execution through the REAL session's
+        # permission engine + stripped tool env when one is attached
+        # (every real -p/TUI invocation); a bare/unit-test facade with no
+        # session falls back to expand_command_body's own old strict-
+        # frontmatter-only gate.
+        session = getattr(facade, "session", None)
+        result = expand_command_body(
+            body, args_text, allowed_tools=allowed_tools, cwd=facade.cwd,
+            permission_engine=getattr(session, "permission_engine", None),
+            env=getattr(session, "tool_env", None),
+        )
         if result.error:
             return f"rolo-claude: {result.error}"
         return result.text

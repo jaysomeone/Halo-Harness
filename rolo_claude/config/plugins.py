@@ -14,30 +14,39 @@ facts. The real layout:
   <configDir>/plugins/installed_plugins.json
       V1 (this module's original, still accepted):
           {"plugins": {"<plugin-name>": {"enabled": bool, "path"?: str}}}
-      V2 (2.1.281's real shape):
-          {"version": 2, "plugins": {"<name>@<marketplace>": {
-              "installPath": str, ...}}}
-      -- V1's plugin root is an explicit "path", else `cache/<name>`; V2's
-      is `installPath` (no fallback -- the binary always writes one). A V2
-      key's `@<marketplace>` suffix is stripped for the PLUGIN NAME (wire
-      server naming, doctor output, etc. all use the bare name) but kept
-      verbatim for the `enabledPlugins` settings lookup below (two
-      marketplaces can offer a same-named plugin without colliding).
-      Detected PER MANIFEST via a top-level `"version": 2` -- V1 has none.
+      V2 (2.1.281's real shape -- finding 8, h4-h5-h3c review, supersedes
+      the single-dict shape this module originally guessed at):
+          {"version": 2, "plugins": {"<name>@<marketplace>": [
+              {"scope": "user"|"project"|"local", "projectPath"?: str,
+               "installPath": str, "version": str, ...}, ...]}}
+      -- `plugins[key]` is an ARRAY of SCOPED install records, one per
+      scope the plugin is installed at, NOT a single dict. A "user"-scope
+      record always applies; a "project"/"local" one only applies when
+      its own `projectPath` matches the CURRENT session's cwd (a plugin
+      installed for one repo must not leak into an unrelated one). Each
+      record's own `installPath` is its root (no fallback -- the binary
+      always writes one; a defensive fallback for a record missing it
+      uses the real cache layout, `cache/<marketplace>/<plugin>/
+      <version>`, never V1's `cache/<name>`). A V2 key's `@<marketplace>`
+      suffix is stripped for the PLUGIN NAME (wire server naming, doctor
+      output, etc. all use the bare name) but kept verbatim for the
+      `enabledPlugins` settings lookup below (two marketplaces can offer a
+      same-named plugin without colliding). Detected PER MANIFEST via a
+      top-level `"version": 2` -- V1 has none.
   Enablement:
       V1: the entry's own `"enabled"` field (missing == on, matching
       "installed == on unless explicitly toggled off"); `"enabled": false`
       skips it.
-      V2: gated by the resolved settings' `enabledPlugins` (a `{"<name>@
-      <marketplace>": bool}` map Claude Code itself writes when a plugin
-      is installed/toggled) -- a key PRESENT there is authoritative; a
-      plugin the settings say nothing about at all falls back to the
-      manifest entry's own optional `"enabled"` field, default True (same
-      "installed == on" default as V1, since a freshly-cloned marketplace
-      plugin with no settings entry yet must not silently vanish).
-  A manifest entry whose resolved root directory doesn't exist on disk is
-  skipped (a stale/half-removed install must never crash a session or try
-  to spawn nothing).
+      V2: gated ENTIRELY by the resolved settings' `enabledPlugins` (a
+      `{"<name>@<marketplace>": bool}` map Claude Code itself writes when
+      a plugin is installed/toggled) -- a key PRESENT there is
+      authoritative; a plugin the settings say nothing about at all
+      defaults to True ("installed == on", same default as V1) -- the
+      real V2 record shape carries no per-record `"enabled"` field to
+      fall back to.
+  A record whose resolved root directory doesn't exist on disk is skipped
+  (a stale/half-removed install must never crash a session or try to
+  spawn nothing).
   <plugin_root>/.mcp.json                    -- EITHER shape:
       {"mcpServers": {"<server>": {...}}}        (wrapped, a project's own
                                                    .mcp.json shape), OR
@@ -100,29 +109,82 @@ def load_installed_plugins() -> dict:
         return {}
 
 
-def _v2_plugin_enabled(key: str, entry: dict, settings_raw: dict) -> bool:
-    """finding 11: V2 enablement gate = settings `enabledPlugins` (a
+def _v2_plugin_enabled(key: str, settings_raw: dict) -> bool:
+    """finding 8/11: V2 enablement gate = settings `enabledPlugins` (a
     `{"<name>@<marketplace>": bool}` map). A key the settings mention at
     all is AUTHORITATIVE (even to explicitly turn a plugin off); a key
-    they say nothing about falls back to the manifest entry's own
-    optional `"enabled"` field, default True -- so a plugin the binary
-    just cloned/installed, before the user ever touched a settings
-    toggle, is still discovered (parity with V1's own "installed == on"
-    default) rather than silently invisible until some settings write
-    happens to mention it."""
+    they say nothing about defaults to True -- "installed == on" until the
+    user (or the binary itself, on install) actually toggles it, matching
+    V1's own default. finding 8: the real V2 record shape (`{scope,
+    projectPath?, installPath, version, …}`, an ARRAY per plugin -- see
+    `_plugin_roots`) carries no per-record `"enabled"` field at all, so
+    (unlike the pre-finding-8 version) this never falls back to reading
+    one off an invented single-dict entry."""
     enabled_plugins = settings_raw.get("enabledPlugins")
     if isinstance(enabled_plugins, dict) and key in enabled_plugins:
         return bool(enabled_plugins[key])
     if isinstance(enabled_plugins, list):
         return key in enabled_plugins
-    return entry.get("enabled", True) is not False
+    return True
 
 
-def _plugin_roots(manifest: dict, settings_raw: Optional[dict] = None) -> "list[tuple[str, Path]]":
+def _v2_record_root(key: str, plugin_name: str, record: dict, *, cwd: Optional[Path]) -> Optional[Path]:
+    """One scoped install record's own root directory, or None if this
+    record doesn't apply to the CURRENT session (`scope` is "project"/
+    "local" and its `projectPath` doesn't match `cwd`) or is malformed.
+    finding 8: `scope == "user"` records always apply; "project"/"local"
+    records only apply when `projectPath` resolves to the SAME directory
+    as `cwd` (a project-scoped plugin installed in one repo must not leak
+    into an unrelated one)."""
+    if not isinstance(record, dict):
+        return None
+    scope = record.get("scope")
+    if scope in ("project", "local"):
+        project_path = record.get("projectPath")
+        if not project_path or cwd is None:
+            return None
+        try:
+            if Path(project_path).resolve() != Path(cwd).resolve():
+                return None
+        except OSError:
+            return None
+    elif scope != "user":
+        return None  # an unrecognised scope is skipped defensively, never guessed at
+    install_path = record.get("installPath")
+    if install_path:
+        return Path(install_path)
+    # finding 8: the binary always writes installPath in practice, but a
+    # defensive fallback still uses the REAL cache layout --
+    # cache/<marketplace>/<plugin>/<version> -- never the old invented
+    # cache/<plugin> (V1's own layout, wrong for V2).
+    marketplace = key.split("@", 1)[1] if "@" in key else ""
+    version = record.get("version")
+    if not marketplace or not version:
+        return None
+    return plugins_dir() / "cache" / marketplace / plugin_name / str(version)
+
+
+def _plugin_roots(manifest: dict, settings_raw: Optional[dict] = None, *, cwd: Optional[Path] = None) -> "list[tuple[str, Path]]":
     """`[(plugin_name, root_dir), ...]` for every enabled plugin whose
     root directory actually exists on disk -- `plugin_name` already has
     any `@<marketplace>` suffix stripped. Detects V1 vs V2 per-manifest
-    via a top-level `"version": 2` (V1 manifests never set it)."""
+    via a top-level `"version": 2` (V1 manifests never set it).
+
+    finding 8 (major, h4-h5-h3c review): a V2 manifest's `plugins[key]` is
+    an ARRAY of SCOPED install records (`[{scope, projectPath?,
+    installPath, version, …}, ...]`, per the binary's own V1->V2
+    converter), never a single dict -- the pre-fix version read it as one
+    dict, so `isinstance(entry, dict)` was always False for a real
+    `claude plugin install` manifest, `entry` silently became `{}`, and
+    the root fell back to the WRONG cache layout (`cache/<name>` instead
+    of `cache/<marketplace>/<plugin>/<version>`), meaning every plugin's
+    MCP servers AND hooks were silently skipped end to end. A plugin can
+    have several applicable records (e.g. a "user" one plus a "project"
+    one for the CURRENT repo) -- every one that applies gets its own
+    `(plugin_name, root)` entry (a plugin installed at more than one
+    applicable scope just gets discovered twice, same servers/hooks
+    merged twice -- harmless, `merge_hook_maps`/dict-keyed MCP configs are
+    naturally idempotent)."""
     plugins = manifest.get("plugins")
     if not isinstance(plugins, dict):
         return []
@@ -133,21 +195,24 @@ def _plugin_roots(manifest: dict, settings_raw: Optional[dict] = None) -> "list[
     for key, entry in plugins.items():
         if not isinstance(key, str) or not key:
             continue
-        entry = entry if isinstance(entry, dict) else {}
         if is_v2:
             plugin_name = key.split("@", 1)[0]
-            if not _v2_plugin_enabled(key, entry, settings_raw):
+            if not _v2_plugin_enabled(key, settings_raw):
                 continue
-            install_path = entry.get("installPath")
-            root = Path(install_path) if install_path else (cache_dir / plugin_name)
+            records = entry if isinstance(entry, list) else ([entry] if isinstance(entry, dict) else [])
+            for record in records:
+                root = _v2_record_root(key, plugin_name, record, cwd=cwd)
+                if root is not None and root.is_dir():
+                    out.append((plugin_name, root))
         else:
+            entry = entry if isinstance(entry, dict) else {}
             plugin_name = key
             if entry.get("enabled") is False:
                 continue
             explicit_path = entry.get("path")
             root = Path(explicit_path) if explicit_path else (cache_dir / plugin_name)
-        if root.is_dir():
-            out.append((plugin_name, root))
+            if root.is_dir():
+                out.append((plugin_name, root))
     return out
 
 
@@ -212,16 +277,18 @@ def plugin_server_name(plugin: str, server: str) -> str:
     return f"plugin_{sanitize_name(plugin)}_{sanitize_name(server)}"
 
 
-def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object = None) -> "tuple[dict, list]":
+def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object = None,
+                                 cwd: Optional[Path] = None) -> "tuple[dict, list]":
     """`(name -> McpServerConfig, notices)` for every MCP server every
     installed, enabled plugin declares. `env` is the caller's own
     effective env (settings-resolved) for `${VAR}` expansion, augmented
     per-plugin with `CLAUDE_PLUGIN_ROOT`. `settings` (a `config.settings.
     Settings`, or anything with a `.raw` dict, optional) is where a V2
-    manifest's `enabledPlugins` gate is read from -- omitted, a V2
-    manifest falls back to each entry's own optional `"enabled"` field
-    (see `_v2_plugin_enabled`). Never raises -- a malformed plugin entry
-    is skipped with a notice, not a crashed session."""
+    manifest's `enabledPlugins` gate is read from. `cwd` (finding 8) is
+    matched against a V2 project/local-scoped record's own `projectPath`
+    -- omitted, only `scope == "user"` records are ever discovered. Never
+    raises -- a malformed plugin entry is skipped with a notice, not a
+    crashed session."""
     from rolo_claude.mcp.manager import expand_config, parse_server
 
     notices: list = []
@@ -229,7 +296,7 @@ def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object 
     settings_raw = getattr(settings, "raw", None)
     settings_raw = settings_raw if isinstance(settings_raw, dict) else {}
     manifest = load_installed_plugins()
-    for plugin_name, plugin_root in _plugin_roots(manifest, settings_raw):
+    for plugin_name, plugin_root in _plugin_roots(manifest, settings_raw, cwd=cwd):
         servers = _read_plugin_mcp_servers(plugin_root)
         if not servers:
             continue

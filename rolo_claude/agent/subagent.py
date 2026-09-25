@@ -173,6 +173,17 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         # happens to match but is not guaranteed to (`providers/stream.py`:
         # "base_url = req.openrouter_base_url or req.creds.base_url").
         openrouter_base_url=parent.openrouter_base_url, extra_headers=dict(parent.extra_headers),
+        # H6 scope B must-do ("sub-agents reuse steer/abort/... plumbing"):
+        # share the PARENT's own abort Event rather than letting Session's
+        # default (a fresh, private Event) leave the child deaf to it --
+        # `_run_child_to_completion` below is a bare drain loop with no
+        # abort check of its own, so without this an Esc/kill during a
+        # running sub-agent had NO effect at all until the child finished
+        # organically; sharing the object means every existing
+        # `self.abort.is_set()` check already threaded through the
+        # child's own `_step`/retry waits/streaming now reacts to the
+        # SAME signal, with no new logic needed on either side.
+        abort=parent.abort,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
@@ -287,6 +298,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
             text = _final_text_from_log(child)
             _fire_subagent_hook(child, "SubagentStop")
             _write_meta(meta_path, {"status": "completed"})
+            # H6/D10 (see the foreground path's own comment): merge even
+            # for a background sub-agent, under the same lock its own
+            # pending-notice append already uses.
+            with parent._agent_notices_lock:
+                parent.permission_denials.extend(child.permission_denials)
             notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id})]\n"
                       f"{_wrap_task_result(text, new_task_id)}")
             with parent._agent_notices_lock:
@@ -304,6 +320,14 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     text = _final_text_from_log(child)
     _fire_subagent_hook(child, "SubagentStop")
     _write_meta(meta_path, {"status": "completed"})
+    # H6 known v1 gap (D10) / B must-do: a non-interactive child's own
+    # "ask" denials (agent/loop.py's `_resolve_tool_call`) land in the
+    # CHILD's own `permission_denials` list, which nothing outside this
+    # function would otherwise ever read -- merged into the PARENT's here
+    # so print mode's top-level result (headless.py reads `session.
+    # permission_denials`, the TOP session only) actually surfaces a
+    # sub-agent's denied tool calls instead of silently losing them.
+    parent.permission_denials.extend(child.permission_denials)
     end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": spec.name, "parent_tool_use_id": tool_id,
                                              "task_id": new_task_id})
     end_ev.agent_id = agent_id
@@ -336,6 +360,7 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id)
     text = _final_text_from_log(child)
     _write_meta(meta_path, {"status": "completed"})
+    parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment
     wrapped = _wrap_task_result(text, task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)

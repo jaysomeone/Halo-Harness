@@ -101,14 +101,62 @@ def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: 
     if not disabled:
         if settings is not None:
             hooks_by_event = normalize_hooks(settings.hooks or {}, default_source="settings")
+        # finding 8: `settings.raw` (the `enabledPlugins` gate) and `cwd`
+        # (project/local-scoped V2 records) are now threaded through here
+        # too -- this call used to use NEITHER, so a plugin the user had
+        # explicitly DISABLED via `enabledPlugins` still had its
+        # `hooks/hooks.json` loaded and run (the MCP-server discovery path
+        # already respected the gate; this one, using the SAME
+        # `_plugin_roots`, silently didn't).
+        settings_raw = getattr(settings, "raw", None) if settings is not None else None
         manifest = load_installed_plugins()
-        for _plugin_name, plugin_root in _plugin_roots(manifest):
+        for _plugin_name, plugin_root in _plugin_roots(manifest, settings_raw, cwd=cwd):
             hooks_by_event = merge_hook_maps(hooks_by_event, load_plugin_hooks(plugin_root))
     return HookRunner(
         hooks_by_event, cwd=cwd, session_id=session_id, transcript_path=transcript_path,
         effective_env=(settings.effective_env if settings is not None else None),
         effort=effort, permission_mode=permission_mode, mcp_manager=mcp_manager, enabled=not disabled,
     )
+
+
+def _stream_json_stdin_reader(session, out_queue) -> None:
+    """finding 10 (major, h4-h5-h3c review): runs on its OWN thread for
+    the whole `--input-format stream-json` run -- reads stdin LINE BY
+    LINE (never all of it up front, which used to deadlock an SDK-style
+    client that writes one line and waits for that turn's `result` before
+    writing the next one) and, for each line that resolves to real user
+    text: if a turn is CURRENTLY running (`session.busy`), applies it as a
+    steer via `Session.steer` directly (thread-safe by design -- see its
+    own docstring); otherwise pushes it onto `out_queue` as the next
+    turn's prompt. `session.steer`'s own atomic busy-check+enqueue (finding
+    5) is what makes the `session.busy` read here safe despite being a
+    plain, unlocked check from a second thread: if the turn finishes in
+    the tiny window between that read and the `steer()` call itself,
+    `steer()` correctly returns False and this falls through to queuing a
+    fresh turn instead of losing the text. `None` on `out_queue` marks
+    stdin EOF (no more turns will ever start)."""
+    try:
+        while True:
+            raw_line = sys.stdin.readline()
+            if raw_line == "":
+                return  # EOF
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            text = _extract_user_text(obj)
+            if not text:
+                continue
+            if session.busy and session.steer(text):
+                continue
+            out_queue.put(text)
+    finally:
+        out_queue.put(None)
 
 
 def _extract_user_text(obj: dict) -> str:
@@ -292,6 +340,44 @@ def build_session(
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
 
+    # finding 7 (major, h4-h5-h3c review): WebSearch must be registered
+    # BEFORE `session_catalog = SessionCatalog(..., names=frozen_registry.
+    # names())` below snapshots the wire-catalog ORDER (agent/loop.py's
+    # Session.__init__ uses `session_catalog.names`, never a later re-read
+    # of the live registry, for the first `meta` node it logs) -- added
+    # here, before the MCP block, so `frozen_registry.names()` already
+    # includes it by the time that snapshot is taken. The OLD position
+    # (after the MCP block) meant WebSearch was in the registry (so the
+    # system prompt, built straight from `tool_registry.definitions()`,
+    # still described it) but missing from the actual wire `tools` field
+    # of every request -- never offered to the model at all.
+    # finding 7 follow-up: WebSearch is a tool `freeze_tool_registry`
+    # never saw (it's added straight to the registry after the fact), so
+    # it must apply the SAME `--tools`/`--disallowedTools`/deny-rule gate
+    # that call already applied to every BUILT-IN tool -- otherwise
+    # `--tools Bash,Read` or `--tools ""` silently fails to restrict it
+    # (verified once finding 7's own fix stopped ALSO accidentally hiding
+    # WebSearch from the wire catalog for an unrelated reason -- the two
+    # bugs previously masked each other for exactly this case).
+    websearch_allowed = True
+    if tools is not None and tools.strip() not in ("", "default") and "WebSearch" not in split_tool_rule_list(tools):
+        websearch_allowed = False
+    elif tools is not None and tools.strip() == "":
+        websearch_allowed = False
+    if "WebSearch" in bare_deny_tool_names(deny_rules) or "WebSearch" in cli_disallow:
+        websearch_allowed = False
+
+    creds = _resolve_creds(model_ref, settings)
+    if (not bare and websearch_allowed and model_ref.provider == "openrouter" and creds is not None
+            and frozen_registry.get("WebSearch") is None):
+        from rolo_claude.tools.websearch import build_websearch_tool
+        ws_tool = build_websearch_tool(
+            main_provider=model_ref.provider, creds=creds,
+            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
+        )
+        if ws_tool is not None:
+            frozen_registry.add_tool(ws_tool)
+
     mcp_manager = None
     mcp_notices: list = []
     session_catalog = None
@@ -361,16 +447,6 @@ def build_session(
                 {"name": name, "instructions": h.instructions}
                 for name, h in mcp_manager.handles.items() if h.state == "connected"
             ]
-
-    creds = _resolve_creds(model_ref, settings)
-    if not bare and model_ref.provider == "openrouter" and creds is not None and frozen_registry.get("WebSearch") is None:
-        from rolo_claude.tools.websearch import build_websearch_tool
-        ws_tool = build_websearch_tool(
-            main_provider=model_ref.provider, creds=creds,
-            small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
-        )
-        if ws_tool is not None:
-            frozen_registry.add_tool(ws_tool)
 
     effective_append = append_system_prompt
     if json_schema:
@@ -614,29 +690,89 @@ def run_print_mode(
                                   max_budget_usd=max_budget_usd)
 
         if input_format == "stream-json":
-            turns = [_extract_user_text(obj) for obj in (stdin_lines or [])]
-            turns = [t for t in turns if t]
-            if not turns:
-                print("rolo-claude: --input-format stream-json requires at least one user message on stdin", file=sys.stderr)
-                return 2
+            import queue as _queue_mod
+            import threading as _threading_mod
+
+            if stdin_lines is not None:
+                # Backward-compat path: a caller (a test, or any future
+                # embedder) that already collected the lines itself --
+                # replay them synchronously, exactly as before. Real CLI
+                # runs never take this branch any more (cli.py no longer
+                # pre-reads stdin for stream-json -- see its own comment).
+                # `None` is queued only after every pre-known turn (and
+                # any leftover steer each one generates -- see the shared
+                # loop below) has actually been drained, mirroring a real
+                # reader thread's EOF timing (never queued UP FRONT, which
+                # would race ahead of a same-turn leftover re-queue).
+                turns = [t for t in (_extract_user_text(obj) for obj in stdin_lines) if t]
+                if not turns:
+                    print("rolo-claude: --input-format stream-json requires at least one user message on stdin",
+                          file=sys.stderr)
+                    return 2
+                line_queue: "_queue_mod.Queue" = _queue_mod.Queue()
+                _remaining_known_turns = list(turns)
+                line_queue.put(_remaining_known_turns.pop(0))
+
+                def _feed_next_known_turn():
+                    if _remaining_known_turns:
+                        line_queue.put(_remaining_known_turns.pop(0))
+                    else:
+                        line_queue.put(None)
+            else:
+                _feed_next_known_turn = None
+                # finding 10: read stdin INCREMENTALLY on a background
+                # thread -- the first line starts the first turn; a line
+                # arriving while the session is busy is applied as a
+                # steer; otherwise it's queued as the next turn. The
+                # reader thread is a daemon: an unread EOF never blocks
+                # process exit.
+                line_queue = _queue_mod.Queue()
+                reader = _threading_mod.Thread(
+                    target=_stream_json_stdin_reader, args=(session, line_queue), daemon=True,
+                    name="rolo-claude-stdin-reader",
+                )
+                reader.start()
+
             exit_code = 0
             sink = _make_sink()  # ONE sink for the whole run: `init` (stream-json) is per-SESSION, not per-turn
-            for i, turn_text in enumerate(turns):
+            turn_no = 0
+            saw_any_turn = False
+            while True:
+                turn_text = line_queue.get()
+                if turn_text is None:
+                    break  # stdin EOF, no more turns
+                saw_any_turn = True
+                turn_no += 1
                 if replay_user_messages:
                     print(json.dumps({"type": "user", "message": {"role": "user", "content": turn_text}}))
                 facade.cost_usd = session.cost_meter.total_usd if session.cost_meter.has_cost_data else facade.cost_usd
                 final_prompt, direct_output = _maybe_run_slash_command(
                     turn_text, registry=registry, facade=facade, disable_slash_commands=disable_slash_commands)
                 if direct_output is not None:
-                    exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=i + 1))
+                    exit_code = sink.consume(_events_for_direct_output(direct_output, turn_no=turn_no))
                 else:
                     _append_at_mention_snapshots(session, final_prompt, cwd)
                     _append_agent_mention_snapshot(session, final_prompt or turn_text, build.agents)
                     exit_code = sink.consume(session.turn(final_prompt or turn_text))
+                    # finding 5/10: a steer that landed after the turn's
+                    # very last checkpoint (session.turn()'s own `finally`
+                    # -- see agent/loop.py) is queued right back here as
+                    # the NEXT turn, same as Session.run()'s own worker
+                    # loop does for the interactive/TUI path.
+                    if session._leftover_steer_texts:
+                        leftover, session._leftover_steer_texts = session._leftover_steer_texts, []
+                        for t in leftover:
+                            line_queue.put(t)
+                if _feed_next_known_turn is not None:
+                    _feed_next_known_turn()
                 facade.num_turns += 1
                 agent_sessions.record_session_turn(
                     cwd, session_log.session_id,
                     cost_usd=(session.cost_meter.total_usd if session.cost_meter.has_cost_data else None))
+            if not saw_any_turn:
+                print("rolo-claude: --input-format stream-json requires at least one user message on stdin",
+                      file=sys.stderr)
+                return 2
             return exit_code
 
         prompt_text = prompt or ""

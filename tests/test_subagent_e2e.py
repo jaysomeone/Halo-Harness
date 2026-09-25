@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -139,6 +140,81 @@ def test_agent_tool_child_answers_parent_continues(ctx: Ctx):
         tool_results = [e.data for e in events if e.kind == "tool_result"]
         agent_result = next(r for r in tool_results if "task_id" in (r.get("content") or ""))
         ctx.check("result is <task_result>-wrapped", "<task_result" in agent_result["content"])
+    finally:
+        mock.stop()
+
+
+@test
+def test_parent_abort_reaches_a_running_childs_in_flight_stream(ctx: Ctx):
+    """H6 scope B must-do ("sub-agents reuse steer/abort/... plumbing"):
+    `_run_child_to_completion` is a bare drain loop with no abort check of
+    its own -- before `Session.__init__` grew a shared `abort` param, a
+    child always got its OWN private Event, so an Esc/kill during a
+    running sub-agent (`Controller.interrupt()`/`quit()`, which just call
+    `session.abort.set()` on the PARENT) had ZERO effect until the child's
+    entire turn finished organically, no matter how long that took.
+    `or:mock/long-abort` streams ~60 chunks 0.1s apart (~6s total) -- with
+    the fix, setting the PARENT's abort mid-stream must cut the CHILD's
+    in-flight call short well before that, because the child now observes
+    the SAME Event object through its own existing `self.abort.is_set()`
+    checks (no new logic needed inside `_run_child_to_completion` itself)."""
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h6-parent-long-child"] = ScriptedTurns([
+            _tool_call_step("Task", {"description": "slow", "prompt": "do a slow thing",
+                                      "subagent_type": "general-purpose", "model": "or:mock/long-abort"}),
+        ])
+        session = _new_session(mock=mock, model="or:mock/h6-parent-long-child",
+                                agents={"general-purpose": _general_purpose_spec()})
+
+        events_seen: list = []
+        errors: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("use a sub-agent to do a slow thing"):
+                    events_seen.append(ev)
+            except Exception as e:  # pragma: no cover -- would fail the check below
+                errors.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t0 = time.monotonic()
+        t.start()
+
+        # Wait until the CHILD's own request has actually reached the mock
+        # (request 1 = parent's, request 2 = the child's `long-abort` call),
+        # then let a few 0.1s-spaced chunks genuinely stream before
+        # interrupting -- a real mid-flight cut, not "aborted before it
+        # ever started".
+        deadline = time.monotonic() + 10
+        while len(mock.requests) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        ctx.check(f"the child's own request reached the mock, got {len(mock.requests)} requests",
+                  len(mock.requests) >= 2)
+        time.sleep(0.3)
+
+        session.abort.set()
+        done.wait(timeout=10)
+        dt = time.monotonic() - t0
+        t.join(timeout=1)
+
+        ctx.check(f"no exception propagated out of turn(), got {errors}", errors == [])
+        ctx.check(f"the whole parent+child turn finished promptly (well under the "
+                  f"~6s the un-aborted stream would take), got dt={dt:.2f}s", dt < 3.0)
+        # Two turn_done events are expected and correct here: the CHILD's
+        # own (nested, tagged, forwarded by `_run_child_to_completion`)
+        # plus the PARENT's own top-level one -- the point of this check
+        # is that the pair fired at ALL (a clean finish, not a hang).
+        kinds = [e.kind for e in events_seen]
+        ctx.check(f"turn_done fired (a clean finish, not a hang), got kinds={kinds}",
+                  kinds.count("turn_done") >= 1)
+        text_deltas = kinds.count("text_delta")
+        ctx.check(f"the child's stream was genuinely cut short, NOT run to the full ~60 "
+                  f"chunks a completed long-abort scenario sends, got {text_deltas} text_delta events",
+                  text_deltas < 30)
     finally:
         mock.stop()
 
@@ -313,6 +389,14 @@ def test_child_permission_ask_is_denied_and_tagged_with_agent_id(ctx: Ctx):
         ctx.check("the ask itself was surfaced tagged with the agent_id too", len(tagged_asks) >= 1)
         ctx.check("the turn completed (never actually blocked waiting on a human)",
                   any(e.kind == "turn_done" for e in events))
+        # H6 known v1 gap (D10) / B must-do: the child's own denial is
+        # merged into the PARENT's `permission_denials` -- print mode's
+        # top-level JSON result reads ONLY the parent's list, so a sub-
+        # agent's denied tool call used to be invisible there entirely.
+        ctx.check(f"the sub-agent's denial reached the PARENT's own permission_denials, got {session.permission_denials}",
+                  len(session.permission_denials) >= 1)
+        ctx.check("the merged denial names the actually-denied tool",
+                  any(d.get("tool_name") == "Write" for d in session.permission_denials))
     finally:
         mock.stop()
 

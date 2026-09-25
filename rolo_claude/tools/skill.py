@@ -90,7 +90,27 @@ class SkillTool(Tool):
 
         from rolo_claude.commands.registry import expand_command_body
 
-        result = expand_command_body(body, args_text, allowed_tools=list(cmd.allowed_tools), cwd=Path(ctx.cwd))
+        # finding 12 (major, h4-h5-h3c review): the documented ${CLAUDE_...}
+        # variables a skill body may reference -- CLAUDE_SESSION_ID comes
+        # off ctx.session_dir's own basename (agent/loop.py sets
+        # `session_dir=log.dir / log.session_id`) rather than a new field,
+        # since that value is already guaranteed present whenever a real
+        # session is running.
+        skill_dir_abs = str(cmd.path.parent.resolve())
+        session_id = Path(ctx.session_dir).name if getattr(ctx, "session_dir", None) is not None else None
+        claude_vars = {
+            "CLAUDE_SKILL_DIR": skill_dir_abs,
+            "CLAUDE_SESSION_ID": session_id,
+            "CLAUDE_PROJECT_DIR": str(Path(ctx.cwd)),
+            "CLAUDE_EFFORT": getattr(ctx, "effort", None),
+        }
+
+        # finding 9: route through the real session's permission engine +
+        # stripped tool env (ctx.env is already tool_child_env()-stripped
+        # -- see agent/loop.py's ToolContext construction) instead of the
+        # old strict-frontmatter-only gate + raw os.environ.
+        result = expand_command_body(body, args_text, allowed_tools=list(cmd.allowed_tools), cwd=Path(ctx.cwd),
+                                      permission_engine=ctx.permission_engine, env=ctx.env, claude_vars=claude_vars)
         if result.error:
             return ToolResult(f"Skill {skill_name!r}: {result.error}", is_error=True)
 
@@ -104,11 +124,16 @@ class SkillTool(Tool):
             for rule_text in cmd.allowed_tools:
                 ctx.session_allow_rule(rule_text)
 
-        text = result.text
+        # finding 12: "Base directory for this skill: <abs>" as the FIRST
+        # line (Claude Code's own convention) -- a skill whose
+        # instructions reference its own sibling files with a cwd-relative
+        # path used to send the model somewhere that doesn't exist; siblings
+        # themselves are now listed as ABSOLUTE paths for the same reason.
+        text = f"Base directory for this skill: {skill_dir_abs}\n\n" + result.text
         siblings = _sibling_files(cmd.path)
         if siblings:
-            text += ("\n\n---\nOther files in this skill's own directory (read them directly, "
-                     "relative to that directory, if the instructions above reference them):\n")
+            text += ("\n\n---\nOther files in this skill's own directory (read them directly, at the "
+                     "absolute paths below, if the instructions above reference them):\n")
             text += "\n".join(f"- {p}" for p in siblings)
         if cmd.allowed_tools:
             text += f"\n\n(This skill's own allowed-tools: {', '.join(cmd.allowed_tools)}.)"
@@ -117,9 +142,12 @@ class SkillTool(Tool):
 
 def _sibling_files(skill_md_path: Path, *, limit: int = _SIBLING_LIMIT) -> list:
     """Every OTHER file under the skill's own directory (recursive),
-    SKILL.md itself excluded, relative posix-style paths, sorted, capped
-    at `limit` (a safety valve, not expected to bite for a normal skill).
-    Never raises -- an unreadable directory just yields an empty list."""
+    SKILL.md itself excluded, listed as ABSOLUTE paths (finding 12 --
+    Claude Code's own convention; a cwd-relative path sent a model
+    looking in the wrong place entirely once the harness's own cwd
+    differed from the skill's directory), sorted, capped at `limit` (a
+    safety valve, not expected to bite for a normal skill). Never raises
+    -- an unreadable directory just yields an empty list."""
     skill_dir = skill_md_path.parent
     out: list = []
     try:
@@ -127,9 +155,10 @@ def _sibling_files(skill_md_path: Path, *, limit: int = _SIBLING_LIMIT) -> list:
         for p in sorted(skill_dir.rglob("*")):
             if not p.is_file():
                 continue
-            if p.resolve() == resolved_md:
+            resolved_p = p.resolve()
+            if resolved_p == resolved_md:
                 continue
-            out.append(str(p.relative_to(skill_dir)).replace("\\", "/"))
+            out.append(str(resolved_p))
             if len(out) >= limit:
                 break
     except OSError:

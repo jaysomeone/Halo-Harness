@@ -52,11 +52,31 @@ def test_tiny_context_window_clamps_to_zero_not_negative(ctx: Ctx):
 
 @test
 def test_opencode_usable_formula(ctx: Ctx):
-    # usable = (context - max_output) - min(20_000, max_output)
+    # usable = (context - capped_max_output) - min(20_000, capped_max_output),
+    # capped_max_output = min(32_000, max_output) -- finding 1 (h4-h5-h3c
+    # review): the model's advertised max_output is capped at 32,000
+    # BEFORE it is used anywhere in this formula, same as OpenCode's own
+    # `max_output_tokens(model, cap=32_000)`.
     u = opencode_usable(200_000, 8_192)
     ctx.check(f"usable matches the formula exactly, got {u}", u == (200_000 - 8_192) - min(20_000, 8_192))
-    u2 = opencode_usable(100_000, 50_000)  # reserved caps at 20_000, not 50_000
-    ctx.check(f"reserved caps at 20,000 even when max_output is bigger, got {u2}", u2 == (100_000 - 50_000) - 20_000)
+    u2 = opencode_usable(100_000, 50_000)  # 50_000 > the 32_000 output cap
+    ctx.check(f"max_output is capped at 32,000 before reserved/base both use it, got {u2}",
+              u2 == (100_000 - 32_000) - min(20_000, 32_000))
+
+
+@test
+def test_h5b_f01_opencode_usable_caps_advertised_output_at_32k(ctx: Ctx):
+    """finding 1's own verified repro, reproduced directly: Kimi K2.6's
+    real models.json shape (262,144 context / 235,929 advertised
+    max_output) used to collapse `usable` to a low single-digit-thousands
+    value (and the dsh trigger to 0, clamped) because the whole advertised
+    max_output was subtracted un-capped. Capped at 32,000, `usable` must
+    be a large, sane fraction of the context window."""
+    kimi_context, kimi_max_output = 262_144, 235_929
+    u = opencode_usable(kimi_context, kimi_max_output)
+    expected = (kimi_context - 32_000) - min(20_000, 32_000)
+    ctx.check(f"usable uses the capped output, got {u} (expected {expected})", u == expected)
+    ctx.check(f"usable is now a large share of the window, got {u} of {kimi_context}", u > kimi_context * 0.5)
 
 
 @test
@@ -75,6 +95,42 @@ def test_disable_compact_env_wins(ctx: Ctx):
     should, trigger = should_compact(999_999_999, 200_000, 8192, knobs)
     ctx.check("should_compact is False when disabled regardless of usage", should is False)
     ctx.check("trigger reported as 0 when disabled", trigger == 0)
+
+
+@test
+def test_h5b_f01_real_models_json_zero_trigger_rows_now_get_a_sane_trigger(ctx: Ctx):
+    """finding 1: 29 of 105 real DeepSeek/Kimi/GLM/Qwen/MiniMax rows in
+    rolo's own ~/.rolo-claude/models.json got a trigger of EXACTLY 0 (21
+    more under 40k) because the gate subtracted the model's raw advertised
+    max_output_tokens -- often close to the whole context window -- with
+    no 32k cap. Fixture = the exact (context_length, max_output_tokens)
+    pairs copied from the real file for the rows the finding names by
+    name. Every one must now land at a large, usable fraction of its own
+    context window, never anywhere near 0."""
+    # name -> (context_length, max_output_tokens), copied verbatim from
+    # ~/.rolo-claude/models.json on 2026-09-24.
+    real_rows = {
+        "moonshotai/kimi-k2.5": (262_144, 235_929),
+        "moonshotai/kimi-k2.6": (262_144, 235_929),
+        "moonshotai/kimi-k2.7-code": (262_144, 235_929),
+        "qwen/qwen3-coder-next": (262_144, 235_929),
+        "qwen/qwen3.5-397b-a17b": (262_144, 235_929),
+        "minimax/minimax-m2": (204_800, 176_947),
+        "z-ai/glm-5": (204_800, 128_000),
+        "deepseek/deepseek-v3.2": (163_840, 65_536),
+    }
+    for name, (context, max_out) in real_rows.items():
+        # The OLD (buggy) formula, for documentation/contrast only -- NOT
+        # asserted as today's behaviour, just proof this fixture really is
+        # one of the verified zero/near-zero rows.
+        old_dsh = max(0, int(0.8 * (context - max_out - 65_536)))
+        old_usable = max(0, (context - max_out) - min(20_000, max_out))
+        old_trigger = min(old_dsh, old_usable)
+
+        trigger = compaction_trigger_tokens(context, max_out)
+        ctx.check(f"{name}: trigger is a large share of context, got {trigger} of {context} "
+                  f"(old buggy formula gave {old_trigger})", trigger >= int(context * 0.5))
+        ctx.check(f"{name}: trigger stays below the context window, got {trigger}", trigger < context)
 
 
 @test

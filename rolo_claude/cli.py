@@ -299,11 +299,14 @@ def main(argv: Optional[list] = None) -> int:
     stdin_lines = None
     prompt_text = args.prompt
     if args.input_format == "stream-json":
-        raw, err = _read_stdin_prompt()
-        if err is not None:
-            print(f"rolo-claude: {err}", file=sys.stderr)
-            return 2
-        stdin_lines = _parse_stream_json_lines(raw)
+        # finding 10 (major, h4-h5-h3c review): stdin is read
+        # INCREMENTALLY, on a background thread, by run_print_mode itself
+        # -- reading it all here, to EOF, before the first turn even
+        # starts, deadlocked an SDK-style client that writes one line and
+        # waits for that turn's `result` before writing the next one.
+        # `stdin_lines=None` for stream-json now just means "headless.py
+        # owns stdin for this run", not "nothing was piped".
+        pass
     elif prompt_text is None:
         if sys.stdin.isatty():
             print("rolo-claude: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)

@@ -47,6 +47,27 @@ def test_doctor_runs_and_exits_cleanly(ctx: Ctx):
 
 
 @test
+def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
+    """U5's own leftover / H8 cheap must-do: tui/clipboard.py's
+    `clipboard_doctor_line()` was written ready-to-call but never actually
+    wired into a real `doctor` run -- `run_checks()` must now include it."""
+    from rolo_claude.doctor import run_checks
+    lines, _ok = run_checks()
+    ctx.check(f"a clipboard backend line is present, got {lines}",
+              any("Clipboard backend" in line for line in lines))
+    clipboard_lines = [l for l in lines if "Clipboard backend" in l]
+    ctx.check(f"names at least one real backend (OSC 52/xclip/wl-copy/xsel/pbcopy/win32), got {clipboard_lines}",
+              any(any(name in l for name in ("OSC 52", "xclip", "wl-copy", "xsel", "pbcopy", "win32"))
+                  for l in clipboard_lines))
+
+    # Also exercised through the real `doctor` CLI subprocess.
+    home = _fresh_home()
+    result = _run(["doctor"], home)
+    ctx.check(f"the real doctor CLI also mentions the clipboard backend, got exit={result.returncode}",
+              "Clipboard backend" in result.stdout)
+
+
+@test
 def test_mcp_list_no_servers(ctx: Ctx):
     home = _fresh_home()
     result = _run(["mcp", "list"], home)

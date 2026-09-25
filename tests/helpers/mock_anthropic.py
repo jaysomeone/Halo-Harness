@@ -125,6 +125,54 @@ def _scn_tool_use(h, body):
     ])
 
 
+def _scn_thinking_then_tool_then_reply(h, body):
+    """finding 17 (test-quality): the one item on its own 8-case list with
+    NO coverage anywhere else -- a real two-request `ant:`/Databricks-
+    passthrough turn (thinking + tool_use, then a plain final reply after
+    the tool result comes back) driven through a REAL `Session`, not a
+    provider-layer helper called directly. Dispatches on whether the
+    INCOMING request already carries a `tool_result` block (request 2)
+    rather than on call count, so it works no matter how many times a
+    retry ladder might re-send request 1."""
+    has_tool_result = any(
+        isinstance(m.get("content"), list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"]
+        )
+        for m in (body.get("messages") or [])
+    )
+    if has_tool_result:
+        _finish(h, [
+            {"type": "message_start", "message": {"id": "msg_f17_final", "type": "message", "role": "assistant",
+             "content": [], "model": body.get("model", "claude"), "usage": _usage(input_tokens=900, output_tokens=0)}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}},
+            {"type": "content_block_stop", "index": 0},
+            # Real Anthropic message_delta.usage carries only output_tokens
+            # (input_tokens never changes mid-stream so the wire never
+            # repeats it here) -- NOT `_usage()`'s helper default shape,
+            # which would otherwise clobber message_start's input_tokens
+            # once `_step` does its finding-15 `usage.update(...)` merge.
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
+            {"type": "message_stop"},
+        ])
+        return
+    _finish(h, [
+        {"type": "message_start", "message": {"id": "msg_f17_think_tool", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"), "usage": _usage(input_tokens=321, output_tokens=0)}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "need to read the file first"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_f17"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_f17", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"file_path"'}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ':"/x-f17.py"}'}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 18}},
+        {"type": "message_stop"},
+    ])
+
+
 def _scn_ping(h, body):
     _start_sse(h)
     _sse_event(h, {"type": "message_start", "message": {"id": "msg_4", "type": "message", "role": "assistant",
@@ -168,6 +216,7 @@ SCENARIOS = {
     "ok": _scn_ok,
     "thinking-and-signature": _scn_thinking_and_signature,
     "tool-use": _scn_tool_use,
+    "thinking-then-tool-then-reply": _scn_thinking_then_tool_then_reply,
     "ping": _scn_ping,
     "mid-stream-error": _scn_mid_stream_error,
     "rate-limit-429": _scn_rate_limit_429,
@@ -196,6 +245,15 @@ class _Handler(BaseHTTPRequestHandler):
         with mock._lock:
             mock.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
 
+        # finding 16 test support: a caller can force a 404 for any request
+        # whose path starts with one of these prefixes (query string and
+        # all) -- used to exercise the ai-gateway -> serving-endpoints
+        # Databricks fallback dance deterministically, regardless of what
+        # scenario the model name would otherwise select.
+        if any(self.path.startswith(p) for p in (mock.force_404_paths or ())):
+            _send_json(self, 404, {"type": "error", "error": {"type": "not_found_error", "message": "not found"}})
+            return
+
         # Scenario name travels as a suffix of the model name (matches
         # mock_databricks.py's own convention) -- e.g.
         # "claude-3-5-sonnet-ok" dispatches to "ok".
@@ -218,6 +276,8 @@ class MockAnthropic:
         self._thread = None
         self.requests: list = []
         self._lock = threading.Lock()
+        # finding 16 test support -- see _Handler.do_POST's own comment.
+        self.force_404_paths: set = set()
 
     @property
     def port(self) -> int:

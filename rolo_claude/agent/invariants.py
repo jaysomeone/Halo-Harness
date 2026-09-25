@@ -57,26 +57,34 @@ def repair_truncated_text(text: str) -> str:
 
 
 def find_unpaired_tool_use_ids(log) -> list:
-    """Walk the log's nodes and return the ids of every `tool_use` block in
-    the LAST assistant node that has no matching `tool_result` node
-    anywhere after it. Only the last assistant node is ever checked because
-    every earlier one is a completed, already-paired turn by construction
-    (the loop never advances to a new assistant node until the previous
-    turn's tool_results are all written) -- this function exists precisely
-    for the case where that invariant was interrupted (crash/cancel)."""
+    """Walk EVERY assistant node in the log (finding 3, h4-h5-h3c review)
+    and return the ids of every `tool_use` block with no matching
+    `tool_result` node anywhere in the log. The pre-finding-3 version
+    checked only the LAST assistant node, reasoning that every earlier one
+    is a completed, already-paired turn by construction -- true as long as
+    the only way to leave a gap was a crash/cancel BETWEEN the last
+    assistant node and now. A steer noticed mid-`_dispatch_tools` used to
+    break out of that loop without synthesizing results for the remaining
+    calls and then let the turn continue (a NEW user node, then further
+    turns/assistant nodes), which is exactly the case this whole-log scan
+    catches and the last-node-only version could never self-heal: once an
+    EARLIER node was left unpaired, `synthesize_missing_results` (run on
+    every later crash/interrupt) kept missing it forever, corrupting every
+    subsequent request on `ant:`/Databricks Claude routes. Order is not
+    re-checked (a `tool_use` id is unique and its `tool_result` is always
+    appended immediately after it by construction, so "exists anywhere in
+    the log" is equivalent to "exists after it" for a well-formed log)."""
     nodes = log.nodes()
-    last_assistant_idx = None
-    for i in range(len(nodes) - 1, -1, -1):
-        if nodes[i].get("type") == "assistant":
-            last_assistant_idx = i
-            break
-    if last_assistant_idx is None:
-        return []
-    pending_ids = [b["id"] for b in tool_use_blocks(nodes[last_assistant_idx].get("content")) if b.get("id")]
-    if not pending_ids:
-        return []
-    answered = {n.get("tool_use_id") for n in nodes[last_assistant_idx + 1:] if n.get("type") == "tool_result"}
-    return [tid for tid in pending_ids if tid not in answered]
+    answered = {n.get("tool_use_id") for n in nodes if n.get("type") == "tool_result"}
+    missing = []
+    for node in nodes:
+        if node.get("type") != "assistant":
+            continue
+        for b in tool_use_blocks(node.get("content")):
+            tid = b.get("id")
+            if tid and tid not in answered:
+                missing.append(tid)
+    return missing
 
 
 def synthesize_missing_results(log, *, reason: str = INTERRUPTED_MESSAGE) -> list:

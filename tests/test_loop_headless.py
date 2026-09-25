@@ -72,6 +72,33 @@ def test_memory_md_content_reaches_the_upstream_request(ctx: Ctx):
 
 
 @test
+def test_h5b_f07_websearch_reaches_the_first_wire_tools_catalog(ctx: Ctx):
+    """finding 7 (major, h4-h5-h3c review): `SessionCatalog(names=
+    frozen_registry.names())` used to be snapshotted BEFORE WebSearch was
+    added to the registry -- WebSearch ended up in the tool REGISTRY (so
+    the system prompt, built straight off it, still described it) but
+    missing from the actual wire `tools` field of the FIRST request, since
+    agent/loop.py's Session.__init__ logs `tool_registry.definitions_for(
+    session_catalog.names)` for its initial `meta` node -- so the model
+    was never actually offered WebSearch at all. Verified against a real
+    `-p` subprocess (a real Session, finding 17) with the mock upstream,
+    zero MCP servers configured (fake_home's default) -- OpenRouter creds
+    present is the only gate `build_session` checks."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "reply with the single word pong")
+        ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-500:]!r})", result.returncode == 0)
+        ctx.check("at least one request recorded", len(mock.requests) >= 1)
+        first_body = mock.requests[0]["body"] or {}
+        tool_names = [((t or {}).get("function") or {}).get("name") for t in (first_body.get("tools") or [])]
+        ctx.check(f"WebSearch is in the FIRST request's own wire tools catalog, got {tool_names}",
+                  "WebSearch" in tool_names)
+    finally:
+        mock.stop()
+
+
+@test
 def test_finding_14_memory_snapshot_includes_directory_path(ctx: Ctx):
     """finding 14: the memory directory's real path is included in the
     memory snapshot itself (rather than the system prompt CLAIMING a

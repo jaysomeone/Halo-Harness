@@ -128,6 +128,72 @@ def test_bash_result_cap_is_30000_chars(ctx: Ctx):
     ctx.check("Bash.result_cap == 30000", BashTool().result_cap == 30_000)
 
 
+# ---------------------------------------------------------------------------
+# finding 6 (major, h4-h5-h3c review): CLAUDE_ENV_FILE is SOURCED (a real
+# shell script, $VAR expansion, `export PATH="$PATH:/x"` genuinely
+# appends) in the Bash tool's own shell before EVERY command, not parsed
+# into literal NAME=value pairs once.
+# ---------------------------------------------------------------------------
+
+@test
+def test_h5b_f06_env_file_export_with_var_expansion_actually_expands(ctx: Ctx):
+    """The Claude Code docs' own SessionStart example: `export
+    PATH="$PATH:/some/dir"` must APPEND to the shell's real inherited
+    PATH via `$VAR` expansion, never overwrite it with the literal
+    string `$PATH:/some/dir` (which a plain NAME=value parse would)."""
+    d = _tmpdir("bash-envfile-expand-")
+    env_file = d / "env.sh"
+    env_file.write_text('export PATH="$PATH:/totally/made/up/extra/dir"\n', encoding="utf-8")
+    result = BashTool().run({"command": "echo PATH=$PATH"},
+                             ToolContext(cwd=d, bash_state={"cwd": d}, env_file=env_file))
+    ctx.check(f"no error, got {result.content!r}", result.is_error is False)
+    ctx.check("PATH was genuinely APPENDED to (still contains a real system dir, not just the literal string)",
+              "/totally/made/up/extra/dir" in result.content and len(result.content) > len("PATH=/totally/made/up/extra/dir"))
+    ctx.check("the appended dir is really there, at the END", result.content.rstrip().endswith("/totally/made/up/extra/dir"))
+
+
+@test
+def test_h5b_f06_env_file_missing_is_a_silent_noop(ctx: Ctx):
+    """A `ctx.env_file` pointing at a file that does not exist yet (no
+    SessionStart hook has written one) must never break an ordinary Bash
+    call -- the `[ -f ... ] &&` guard makes sourcing it a silent no-op."""
+    d = _tmpdir("bash-envfile-missing-")
+    never_written = d / "does-not-exist.sh"
+    result = BashTool().run({"command": "echo still-works"},
+                             ToolContext(cwd=d, bash_state={"cwd": d}, env_file=never_written))
+    ctx.check(f"no error despite the missing env file, got {result.content!r}", result.is_error is False)
+    ctx.check("the command still ran normally", "still-works" in result.content)
+
+
+@test
+def test_h5b_f06_env_file_reread_every_call_not_just_once(ctx: Ctx):
+    """The env file is sourced FRESH on every call (never just merged
+    once at session start) -- a value written between two calls is picked
+    up by the SECOND call with no restart."""
+    d = _tmpdir("bash-envfile-live-")
+    env_file = d / "env.sh"
+    ctx_obj = ToolContext(cwd=d, bash_state={"cwd": d}, env_file=env_file)
+    result1 = BashTool().run({"command": "echo MY_VAR=${MY_VAR:-unset}"}, ctx_obj)
+    ctx.check(f"unset before the file exists, got {result1.content!r}", "MY_VAR=unset" in result1.content)
+    env_file.write_text('export MY_VAR="written between calls"\n', encoding="utf-8")
+    result2 = BashTool().run({"command": "echo MY_VAR=$MY_VAR"}, ctx_obj)
+    ctx.check(f"picked up on the VERY NEXT call, got {result2.content!r}",
+              "MY_VAR=written between calls" in result2.content)
+
+
+@test
+def test_h5b_f06_claude_env_file_var_is_set_in_the_subprocess_env(ctx: Ctx):
+    """`CLAUDE_ENV_FILE` itself is exported into the Bash child's own env
+    (matching Claude Code's own convention), so a nested script the
+    model's command invokes can find and re-source it too."""
+    d = _tmpdir("bash-envfile-var-")
+    env_file = d / "env.sh"
+    result = BashTool().run({"command": "echo CLAUDE_ENV_FILE=$CLAUDE_ENV_FILE"},
+                             ToolContext(cwd=d, bash_state={"cwd": d}, env_file=env_file))
+    ctx.check(f"CLAUDE_ENV_FILE is set in the subprocess env, got {result.content!r}",
+              "CLAUDE_ENV_FILE=" in result.content and str(env_file.name) in result.content)
+
+
 @test
 def test_new_6_backgrounded_command_returns_promptly(ctx: Ctx):
     """finding 7: completion must be keyed on the WRAPPER process exiting,

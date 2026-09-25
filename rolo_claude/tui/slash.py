@@ -63,11 +63,22 @@ async def _handle_mcp(app, _args: str) -> None:
 
 
 async def _handle_clear(app, _args: str) -> None:
+    # U5 must-do: /clear now actually starts a NEW session log
+    # (SessionEnd(clear) + SessionStart(clear), off the UI thread via
+    # Controller.clear_session) -- the old version only wiped the visible
+    # transcript WIDGET, leaving the underlying context (and everything
+    # the next request would derive from it) completely untouched.
+    clear = getattr(app.controller, "clear_session", None)
+    if not callable(clear):
+        await app.transcript.clear_view()
+        await app.transcript.add_note("Conversation view cleared.", kind="note")
+        return
+    error = clear()
+    if error:
+        await app.transcript.add_note(error, kind="error")
+        return
     await app.transcript.clear_view()
-    await app.transcript.add_note(
-        "Conversation view cleared (this session's context is unchanged -- /clear is view-only "
-        "in this build).", kind="note",
-    )
+    await app.transcript.add_note("Conversation cleared -- starting a new session context.", kind="note")
 
 
 async def _handle_resume(app, _args: str) -> None:

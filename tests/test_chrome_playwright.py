@@ -120,7 +120,11 @@ def test_chrome_server_config_shape(ctx: Ctx):
         ctx.check("command is the resolved exe", cfg.command == "/fake/claude")
         ctx.check("args = --claude-in-chrome-mcp [verified doc]", cfg.args == ["--claude-in-chrome-mcp"])
         ctx.check("dynamic scope", cfg.scope == "dynamic")
-        ctx.check("no bypass env when not in auto/bypass mode", "CLAUDE_CHROME_PERMISSION_MODE" not in cfg.env)
+        # finding 9: ALWAYS set now, regardless of bypass_mode -- see
+        # chrome_server_config's own docstring (rolo-claude's engine
+        # already gates every mcp__claude-in-chrome__* call itself).
+        ctx.check("bypass env set even when bypass_mode=False (the engine gates it either way)",
+                  cfg.env.get("CLAUDE_CHROME_PERMISSION_MODE") == "skip_all_permission_checks")
     finally:
         if old is None:
             os.environ.pop("BRIDGE_CLAUDE_EXE", None)

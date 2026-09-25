@@ -207,6 +207,11 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     lines.append(_check_playwright())
     lines.append(_check_plugins())
     lines.append(_check_platform())
+    # U5 leftover / H8 cheap must-do: tui/clipboard.py's own
+    # clipboard_doctor_line() was written ready-to-call but never actually
+    # wired into a real doctor run.
+    from rolo_claude.tui.clipboard import clipboard_doctor_line
+    lines.append(clipboard_doctor_line())
     ok = not any(line.startswith(MISSING) for line in lines)
     return lines, ok
 

@@ -193,6 +193,94 @@ def test_custom_command_bang_cmd_requires_allowed_tools(ctx: Ctx):
         env.close()
 
 
+class _StubSession:
+    """The minimal shape commands/custom.py & friends read off `facade.
+    session` for `!cmd` pre-execution (finding 9) -- `.permission_engine`
+    and `.tool_env` only, never a full agent.loop.Session."""
+    def __init__(self, permission_engine, tool_env=None):
+        self.permission_engine = permission_engine
+        self.tool_env = tool_env or {}
+
+
+@test
+def test_h5b_f09_bang_cmd_not_in_frontmatter_still_runs_in_auto_mode(ctx: Ctx):
+    """finding 9 (major, h4-h5-h3c review): with a REAL session attached
+    (permission_engine in `auto` mode), a `` !`cmd` `` NOT named in the
+    command's own frontmatter `allowed-tools` must still run -- auto mode
+    allows everything except the user's own deny/ask rules; it is never
+    restricted to a command's self-declared allowlist the way the old
+    strict-frontmatter-only gate enforced in EVERY mode, including auto/
+    bypassPermissions ("a skill whose `` !`git status` `` isn't in its
+    frontmatter fails even in bypassPermissions" -- the review's own
+    verified repro)."""
+    from rolo_claude.permissions import PermissionEngine
+    env = _Env()
+    try:
+        env.write("proj/.claude/commands/ungated.md", "---\ndescription: no grant at all\n---\nOutput: !`echo auto-mode-works`\n")
+        reg = env.discover()
+        facade = env.facade(reg)
+        facade.session = _StubSession(PermissionEngine(mode="auto", cwd=env.cwd))
+        result = reg.resolve("ungated").run("", facade)
+        ctx.check(f"runs successfully under auto mode despite no frontmatter grant, got {result!r}",
+                  "auto-mode-works" in result and "not permitted" not in result)
+    finally:
+        env.close()
+
+
+@test
+def test_h5b_f09_bang_cmd_denied_by_an_explicit_user_deny_rule(ctx: Ctx):
+    """Auto mode still honours the user's OWN explicit deny rules -- "auto
+    mode allows everything except the user's own deny/ask rules" is not
+    "auto mode allows literally everything no matter what"."""
+    from rolo_claude.permissions import PermissionEngine, parse_rule
+    env = _Env()
+    try:
+        env.write("proj/.claude/commands/denied.md", "---\ndescription: should be denied\n---\nOutput: !`echo should-not-run`\n")
+        reg = env.discover()
+        facade = env.facade(reg)
+        deny_rule = parse_rule("Bash(echo:*)", source="settings", base_dir=env.cwd, action="deny")
+        engine = PermissionEngine(mode="auto", cwd=env.cwd, deny_rules=[deny_rule])
+        facade.session = _StubSession(engine)
+        result = reg.resolve("denied").run("", facade)
+        # The denial message itself names the refused command text, so
+        # check for the DENIAL wording and that "Output: " (the body's own
+        # literal prefix, only ever followed by real substituted stdout on
+        # success) never got the command's actual output appended.
+        ctx.check(f"a real user deny rule still blocks it, got {result!r}",
+                  "not permitted" in result and "denied by rule" in result and "Output: should-not-run" not in result)
+    finally:
+        env.close()
+
+
+@test
+def test_h5b_f09_bang_cmd_uses_the_session_stripped_env_not_raw_os_environ(ctx: Ctx):
+    """finding 9: no provider secrets (or any other harness-internal
+    env var) leak into a `!cmd`'s subprocess -- it gets the SESSION's own
+    stripped `tool_env`, never a raw `os.environ` read."""
+    from rolo_claude.permissions import PermissionEngine
+    env = _Env()
+    try:
+        env.write("proj/.claude/commands/envcheck.md",
+                   "---\ndescription: env check\n---\nOutput: !`echo MARKER=${SUPER_SECRET_TOKEN:-absent}`\n")
+        reg = env.discover()
+        facade = env.facade(reg)
+        stripped_env = {"PATH": os.environ.get("PATH", "")}  # deliberately missing SUPER_SECRET_TOKEN
+        old = os.environ.get("SUPER_SECRET_TOKEN")
+        os.environ["SUPER_SECRET_TOKEN"] = "leaked-if-raw-os-environ-were-used"
+        try:
+            facade.session = _StubSession(PermissionEngine(mode="auto", cwd=env.cwd), tool_env=stripped_env)
+            result = reg.resolve("envcheck").run("", facade)
+        finally:
+            if old is None:
+                os.environ.pop("SUPER_SECRET_TOKEN", None)
+            else:
+                os.environ["SUPER_SECRET_TOKEN"] = old
+        ctx.check(f"the session's stripped env was used, not raw os.environ, got {result!r}",
+                  "MARKER=absent" in result and "leaked-if-raw-os-environ" not in result)
+    finally:
+        env.close()
+
+
 # =============================================================================
 # Skills.
 # =============================================================================

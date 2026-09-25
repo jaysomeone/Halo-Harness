@@ -33,6 +33,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Iterator, Optional
 
 from rolo_claude import events
@@ -46,9 +47,10 @@ from rolo_claude.agent.compact import opencode_usable as _opencode_usable
 from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
 from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
 from rolo_claude.agent.log import SessionLog
+from rolo_claude.agent.prune import prune_messages
 from rolo_claude.agent.repair import repair_assistant_turn
 from rolo_claude.hooks import HookRunner, build_prompt_caller, load_plugin_hooks, merge_hook_maps, normalize_hooks
-from rolo_claude.model import CostMeter, ModelProfile, ModelRef
+from rolo_claude.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
 from rolo_claude.permissions import Decision, PermissionEngine
 from rolo_claude.providers.errors import (
     CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
@@ -60,7 +62,7 @@ from rolo_claude.providers.hooks import (
 from rolo_claude.providers.config import tool_child_env
 from rolo_claude.providers.profiles import ProviderProfile, resolve_profile
 from rolo_claude.providers.request import ToolCatalogTooLarge, build_anthropic_request_body, build_request_body
-from rolo_claude.providers.routing import Route
+from rolo_claude.providers.routing import InvalidModelError, Route
 from rolo_claude.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
     UpstreamError, stream_anthropic_completion, stream_completion,
@@ -71,7 +73,10 @@ from rolo_claude.tools.truncate import spill_and_truncate
 
 log = logging.getLogger("bridge")
 
-_MAX_RETRY_WAIT_S = 60.0  # per-wait cap, never the uncapped `time.sleep(Retry-After)` H0 had
+_MAX_RETRY_WAIT_S = 300.0  # H8 cheap must-do: raised from 60s -- a provider's own longer
+# Retry-After (a real 429 body can legitimately ask for several minutes) is now honoured up
+# to 5 minutes instead of being silently clipped to one; still never the fully-uncapped
+# `time.sleep(Retry-After)` H0 had (that could be RETRY_MAX_DELAY_MS, effectively forever).
 
 # H5 scope F item 9 (OpenCode Appendix H, verbatim): injected as the FINAL
 # user-role text when `--max-turns`/max_turns is exhausted, so the model
@@ -117,6 +122,18 @@ _WIRE_ERROR_TYPE_TO_STATUS = {
     "invalid_request_error": 400, "rate_limit_error": 429, "api_error": 500,
     "overloaded_error": 503,
 }
+
+
+def _capped_retry_delay(attempts: int, hdrs: dict) -> float:
+    """`retry_delay_ms` (Appendix B) capped at `_MAX_RETRY_WAIT_S` (H8
+    cheap must-do: 300s, raised from 60s -- log it whenever a provider's
+    own longer `Retry-After` actually gets clipped, so a wait that looks
+    short in the log is never silently hiding a provider that asked for
+    much longer)."""
+    raw_s = retry_delay_ms(attempts, hdrs) / 1000.0
+    if raw_s > _MAX_RETRY_WAIT_S:
+        log.warning("retry wait capped at %.0fs (provider asked for %.0fs)", _MAX_RETRY_WAIT_S, raw_s)
+    return min(raw_s, _MAX_RETRY_WAIT_S)
 
 
 def _mcp_blocks_for_log(blocks: list, *, meta, session_dir, tool_use_id) -> list:
@@ -244,6 +261,78 @@ def _rough_estimate(system_text: str, messages: list) -> int:
     return max(1, len(blob) // 4)
 
 
+# finding 4: OpenCode's own fallback shape (reports/OpenCode harness deep
+# review.md Appendix D) for when the EXACT structured prefix a normal
+# summarisation call replays is itself too big to send (a real
+# `ContextOverflow` on the summariser call, not just the ordinary "trigger
+# auto-compaction" case -- this only ever runs as a SECOND attempt, after
+# the structured replay already failed once). Every message is flattened to
+# plain text with no `tools` offered, which is both far smaller (no JSON
+# schema/tool-call structure) and, unlike the structured replay, immune to
+# the "history itself contains an unresolved tool_use/tool_result pairing"
+# shape rules a provider might otherwise reject.
+_SUMMARY_TOOL_RESULT_CHARS = 2000
+
+
+def _content_text_for_serialize(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+            elif isinstance(block, dict):
+                parts.append(f"[{block.get('type', 'content')} block]")
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _serialize_transcript_for_summary(messages: list) -> str:
+    """Flatten `messages` (Anthropic-shaped) to OpenCode's own plain-text
+    head serialisation: `[User]: ...`, `[Assistant]: ...`, `[Assistant
+    reasoning]: ...`, `[Assistant tool call]: name({...})`, `[Tool
+    result]: <first 2000 chars>\\n[truncated]` -- one line group per
+    message, in order. Used ONLY as the fallback body for the
+    summarisation call itself (never logged, never sent as the ordinary
+    per-step request) when the exact structured prefix overflows."""
+    lines: list = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        if role == "user":
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text" and b.get("text"):
+                    lines.append(f"[User]: {b['text']}")
+                elif b.get("type") == "tool_result":
+                    text = _content_text_for_serialize(b.get("content"))
+                    head = text[:_SUMMARY_TOOL_RESULT_CHARS]
+                    suffix = "\n[truncated]" if len(text) > _SUMMARY_TOOL_RESULT_CHARS else ""
+                    lines.append(f"[Tool result]: {head}{suffix}")
+        elif role == "assistant":
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                btype = b.get("type")
+                if btype == "text" and b.get("text"):
+                    lines.append(f"[Assistant]: {b['text']}")
+                elif btype == "thinking" and b.get("text"):
+                    lines.append(f"[Assistant reasoning]: {b['text']}")
+                elif btype == "tool_use":
+                    try:
+                        args = json.dumps(b.get("input") or {}, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        args = str(b.get("input"))
+                    lines.append(f"[Assistant tool call]: {b.get('name')}({args})")
+    return "\n".join(lines)
+
+
 _PROGRESS_CHUNK_CAP_CHARS = 200_000  # review finding 15: bound, never unbounded
 
 
@@ -298,7 +387,7 @@ class Session:
         session_catalog: Optional[object] = None, mcp_manager: Optional[object] = None,
         hook_runner: Optional[HookRunner] = None,
         agents: Optional[dict] = None, routes: Optional[dict] = None, agent_depth: int = 0,
-        agent_type_restriction: Optional[set] = None,
+        agent_type_restriction: Optional[set] = None, abort: Optional[threading.Event] = None,
     ):
         self.cwd = cwd
         self.model_ref = model_ref
@@ -322,7 +411,14 @@ class Session:
         # must-do 5: an interrupt source (Bash kill/Esc -- none exists yet
         # in `-p`) sets this; `_step` passes it into `stream_completion`
         # (cuts phase 2 short) and observes it in every retry wait.
-        self.abort = threading.Event()
+        # H6 scope B must-do ("sub-agents reuse steer/abort/... plumbing"):
+        # a caller (subagent.py's `_build_child_session`) may share the
+        # PARENT's own Event here instead -- a child then observes the
+        # SAME abort signal through every existing `self.abort.is_set()`
+        # check already threaded through `_step`/retry waits/streaming,
+        # with no new logic of its own. Every other caller keeps getting a
+        # fresh, private Event exactly as before (this param is additive).
+        self.abort = abort if abort is not None else threading.Event()
         # review finding 2: set by Controller.quit() (an atomic attribute
         # write, safe from any thread) BEFORE it queues run()'s `None`
         # sentinel -- see run()'s own comment for why this must be a
@@ -336,6 +432,12 @@ class Session:
         self._busy = threading.Event()
         self._steer_lock = threading.Lock()
         self._steer_queue: list = []
+        # finding 5: steer text still queued when `turn()`'s `finally` runs
+        # (never reached a safe point to apply) -- drained there, read and
+        # cleared by `run()` right after, worker-thread-only on both ends
+        # (no lock needed for THIS attribute: the write happens-before the
+        # read, same thread, `_pump_turn` -> `run()` is fully sequential).
+        self._leftover_steer_texts: list = []
         # H2 scope D: ONE PermissionEngine + ONE pair of read_cache/
         # bash_state dicts for the session's WHOLE lifetime -- every
         # ToolContext built in `_dispatch_tools` shares these same dict
@@ -374,6 +476,14 @@ class Session:
         # check falls back to a rough estimate of the about-to-be-sent
         # request instead (see `_maybe_auto_compact`).
         self._last_prompt_tokens: Optional[int] = None
+        # finding 1: set True whenever `_maybe_auto_compact` just ran a
+        # compaction, cleared at the top of its NEXT call -- guards against
+        # back-to-back auto-compaction (two compactions with no real model
+        # step in between) when a single compaction didn't free enough room
+        # (e.g. one oversized verbatim-tail unit that alone exceeds the
+        # trigger), which would otherwise loop forever re-summarising the
+        # same freshly-compacted history.
+        self._just_compacted: bool = False
         # print-mode `ask` denials accumulate here for the json result's
         # `permission_denials` (rolo_claude/output.py reads this list).
         self.permission_denials: list = []
@@ -506,10 +616,9 @@ class Session:
             self._fire_session_start("resume")
 
     def _fire_session_start(self, source: str) -> None:
-        """H4 scope B: SessionStart(startup|resume|clear|compact) -- `clear`/
-        `compact` are forward-wired call sites for whichever future
-        milestone actually implements `/clear`/compaction; only `startup`/
-        `resume` fire today. Hook-added `additionalContext` becomes a
+        """H4 scope B: SessionStart(startup|resume|clear|compact) -- `resume`
+        fires from `__init__`, `compact` from `_run_compaction`, `clear`
+        from `/clear` (U5). Hook-added `additionalContext` becomes a
         user-role SNAPSHOT in the log (never the system node -- brief B)."""
         if self.hook_runner is None or not self.hook_runner.has_hooks("SessionStart"):
             return
@@ -517,11 +626,17 @@ class Session:
         outcome = self.hook_runner.run("SessionStart", payload, matched=source)
         if outcome.additional_context:
             self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
-        if source in ("startup", "resume"):
-            from rolo_claude.hooks import env_file_path, read_env_file_exports
-            exports = read_env_file_exports(env_file_path(self.log.session_id))
-            if exports:
-                self.tool_env = {**self.tool_env, **exports}
+        # finding 6: re-read on EVERY SessionStart source, not just
+        # startup/resume -- a SessionStart(compact)/(clear) hook that
+        # writes/rewrites CLAUDE_ENV_FILE must take effect immediately too.
+        # This snapshot-merge is the fallback path for tools that don't
+        # get a live per-call `source` (PowerShell, MCP stdio spawns,
+        # other hook subprocesses); the Bash tool's OWN per-call sourcing
+        # (tools/bash.py, via `ctx.env_file`) never depends on this at all.
+        from rolo_claude.hooks import env_file_path, read_env_file_exports
+        exports = read_env_file_exports(env_file_path(self.log.session_id))
+        if exports:
+            self.tool_env = {**self.tool_env, **exports}
 
     def _fire_session_end(self, reason: str) -> None:
         """H4 scope B: SessionEnd(quit, /clear). Best-effort/observational
@@ -533,6 +648,55 @@ class Session:
             self.hook_runner.run_session_end(reason)
         except Exception:
             pass  # a SessionEnd hook must never block process/session teardown
+
+    def clear(self) -> None:
+        """U5 must-do: `/clear` starts a genuinely NEW session log --
+        `SessionEnd(clear)` fired on the OLD one, a fresh `SessionLog`
+        (new session_id) built the same way `__init__` builds a brand-new
+        session's (meta/system/CLAUDE.md/memory/environment snapshots),
+        then `SessionStart(clear)` fired on it -- instead of the old
+        "view-only" behaviour (the TUI's own transcript widget was wiped
+        but the underlying log/context, and everything the NEXT request
+        would still derive from it, was completely untouched). Model/
+        settings/permission engine/tool registry are all kept as-is --
+        only the CONVERSATION resets, same as Claude Code's own `/clear`.
+        Never called while `self.busy` (the caller -- Controller.clear_
+        session -- checks first; calling it mid-turn would race the
+        worker thread's own log writes)."""
+        self._fire_session_end("clear")
+        self.log = SessionLog(self.cwd)
+        self.turn_count = 0
+        self._last_prompt_tokens = None
+        self._just_compacted = False
+        self.cost_meter = CostMeter(price_in=self.cost_meter.price_in, price_out=self.cost_meter.price_out)
+        self.permission_denials = []
+
+        initial_tools = (self.tool_registry.definitions_for(self.session_catalog.names)
+                          if self.session_catalog is not None else self.tool_registry.definitions())
+        self.log.append_meta(
+            model=self.model_ref.raw, cwd=str(self.cwd),
+            system_prompt_bytes=len(self.session_context.system_prompt.encode("utf-8")),
+            tools=initial_tools,
+        )
+        self.log.append_system(self.session_context.system_prompt)
+        claude_md = self.session_context.claude_md_text()
+        if claude_md:
+            self.log.append_snapshot([{"type": "text", "text": claude_md}], kind="claude_md")
+        memory_text = self.session_context.memory_snapshot_text()
+        if memory_text:
+            self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
+        env_text = self.session_context.environment_snapshot_text(self.model_label)
+        self.log.append_snapshot([{"type": "text", "text": env_text}], kind="environment")
+        if self.session_catalog is not None and self.session_catalog.deferred:
+            deferred_names = sorted(self.session_catalog.deferred)
+            reminder = (
+                "The following deferred tools are now available via ToolSearch. Their schemas "
+                "are NOT loaded -- calling them directly will fail with InputValidationError. Use "
+                "ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before "
+                "calling them:\n" + "\n".join(deferred_names)
+            )
+            self.log.append_snapshot([{"type": "text", "text": reminder}], kind="deferred_tools")
+        self._fire_session_start("clear")
 
     def _call_model_for_hook(self, prompt_text: str, timeout_s: float) -> str:
         """The `prompt`/`agent` hook handler types' "small model via the
@@ -601,6 +765,15 @@ class Session:
         # actually-empty wire `tools` field, not just prompt text the model
         # could ignore.
         system_text, messages, tools = derive_request(self.log, tools=([] if no_tools else None))
+        # finding 4: `agent/prune.py` used to be wired ONLY into `/context`
+        # (its "pruned ~N tokens" report never actually shrank anything a
+        # real request sent) -- applied here, AFTER derive_request and
+        # BEFORE the wire body is built, so every ordinary step benefits
+        # from dsh's head/tail + protection-window pruning, not just an
+        # auto/manual/overflow compaction pass. The LOGGED transcript is
+        # untouched (prune_messages never mutates its input and this
+        # session never writes the pruned copy back to the log).
+        messages = prune_messages(messages)
         requested_max_tokens = max_tokens_budget(
             self.provider_profile, model_key=self.model_ref.raw, requested=None, abort=self.abort,
         )
@@ -728,6 +901,21 @@ class Session:
                     kind = ev.get("type")
                     if kind == "message_start":
                         yield events.message_start(turn=turn_no, model=self.model_ref.raw)
+                        # finding 15 (major, h4-h5-h3c review), point 3:
+                        # Anthropic's OWN initial usage (input_tokens,
+                        # cache_creation_input_tokens, cache_read_
+                        # input_tokens) arrives ONLY on message_start, not
+                        # message_delta (which typically only ever updates
+                        # output_tokens) -- ignored entirely before, so a
+                        # native-dialect turn's usage/cost/context%
+                        # reporting was missing everything but output
+                        # tokens. `.update()` here, `.update()` again on
+                        # message_delta below: the delta's own later keys
+                        # (a growing output_tokens as the reply streams)
+                        # correctly win over this initial snapshot.
+                        start_usage = (ev.get("message") or {}).get("usage")
+                        if isinstance(start_usage, dict):
+                            usage.update(start_usage)
                     elif kind == "content_block_start":
                         block = ev.get("content_block") or {}
                         idx = ev.get("index", len(assistant_blocks))
@@ -755,7 +943,12 @@ class Session:
                             assistant_blocks[idx]["text"] += text
                             yield events.text_delta(text, index=idx, turn=turn_no)
                         elif dtype == "thinking_delta":
-                            text = delta.get("text", "")
+                            # finding 15 (major, h4-h5-h3c review), point 1:
+                            # the wire key is `thinking`, not `text` --
+                            # every native Anthropic thinking_delta event's
+                            # actual content was silently dropped (read as
+                            # "" every time) before this fix.
+                            text = delta.get("thinking", "")
                             text = text if isinstance(text, str) else str(text)
                             assistant_blocks[idx]["text"] += text
                             yield events.thinking_delta(text, index=idx, turn=turn_no)
@@ -867,7 +1060,7 @@ class Session:
                 )
                 if merged_retryable and attempts <= MAX_RETRIES:
                     hdrs = {"retry-after": e.retry_after} if e.retry_after else {}
-                    delay = min(retry_delay_ms(attempts, hdrs) / 1000.0, _MAX_RETRY_WAIT_S)
+                    delay = _capped_retry_delay(attempts, hdrs)
                     if self._abort_sleep(delay):
                         return None
                     continue
@@ -891,7 +1084,7 @@ class Session:
                 )
                 if merged_retryable and attempts <= MAX_RETRIES:
                     hdrs = {"retry-after": wire_error.get("retry_after")} if wire_error.get("retry_after") else {}
-                    delay = min(retry_delay_ms(attempts, hdrs) / 1000.0, _MAX_RETRY_WAIT_S)
+                    delay = _capped_retry_delay(attempts, hdrs)
                     if self._abort_sleep(delay):
                         return None
                     continue
@@ -982,25 +1175,33 @@ class Session:
     # ---- compaction (H5 scope B) -----------------------------------------
 
     def _build_body_for_messages(self, system_text: str, messages: list, tools, *,
-                                  tool_choice=None, requested_max_tokens: Optional[int] = None) -> dict:
+                                  tool_choice=None, requested_max_tokens: Optional[int] = None,
+                                  no_thinking: bool = False) -> dict:
         """Build a wire body for an ARBITRARY (system_text, messages, tools)
         triple using this session's own route/profile/effort -- shared by
         `_derive_and_build` (derives straight from the log) and
         `_run_compaction` (derives from the log too, then appends one extra
         instruction message before building, so it cannot reuse
-        `_derive_and_build` itself)."""
+        `_derive_and_build` itself). `no_thinking` (finding 15, h4-h5-h3c
+        review): the summariser call never requests thinking, regardless
+        of `self.effort` -- its `max_tokens` (4,096) is too small for even
+        the minimum viable thinking budget, and OpenCode's own rule is a
+        tool/thinking-less summarisation call outright; the pre-fix
+        version passed `self.effort` through unchanged, 400ing on Anthropic
+        routes for every compaction whenever any `--effort` was set."""
         if requested_max_tokens is None:
             requested_max_tokens = max_tokens_budget(self.provider_profile, model_key=self.model_ref.raw,
                                                        requested=None, abort=self.abort)
+        effort = None if no_thinking else self.effort
         if self.route.dialect == "anthropic-passthrough":
             return build_anthropic_request_body(
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
-                profile=self.provider_profile, effort=self.effort,
+                profile=self.provider_profile, effort=effort,
                 requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
             )
         return build_request_body(
             system_text=system_text, messages=messages, tools=tools, route=self.route,
-            profile=self.provider_profile, effort=self.effort,
+            profile=self.provider_profile, effort=effort,
             context_tokens=self.model_profile.context_tokens,
             prompt_estimate=_rough_estimate(system_text, messages),
             requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
@@ -1016,47 +1217,98 @@ class Session:
         else:
             system_text, messages, _ = derive_request(self.log, tools=None)
             prompt_tokens = _rough_estimate(system_text, messages)
-        do_it, _trigger_tokens = should_compact(
+        do_it, trigger_tokens = should_compact(
             prompt_tokens, self.model_profile.context_tokens, self.model_profile.max_output_tokens,
             self._compaction_knobs,
         )
+        # finding 1: never auto-compact twice in a row with no successful
+        # real model step between -- see `self._just_compacted`'s own
+        # docstring. `_just_compacted` is reset unconditionally right after
+        # this check so the NEXT `_step`'s usage update starts a fresh
+        # decision (a compaction that DID free enough room naturally clears
+        # the trigger anyway; this guard only bites when it didn't).
+        if do_it and self._just_compacted:
+            log.warning(
+                "skipping back-to-back auto-compaction: prompt still ~%d tokens (trigger ~%d) "
+                "immediately after the previous auto-compaction -- it did not free enough room",
+                prompt_tokens, trigger_tokens,
+            )
+            yield events.compaction(phase="failed", trigger="auto", turn=turn_no,
+                                     reason="skipped: still over the trigger right after the previous compaction")
+            do_it = False
+        self._just_compacted = False
         if do_it:
-            yield from self._run_compaction(turn_no, trigger="auto")
+            compacted = yield from self._run_compaction(turn_no, trigger="auto")
+            self._just_compacted = bool(compacted)
 
-    def _run_compaction(self, turn_no: int, *, trigger: str, custom_instructions: Optional[str] = None) -> Iterator[events.Event]:
-        """The dsh replay: one summarisation call whose prefix is the EXACT
-        current derived request, plus one final user instruction demanding
-        the 8-section checkpoint; validated with one corrective retry; new
-        transcript = `<compacted-summary>` (merging any prior one, via the
-        replay prefix -- see agent/derive.py) + a verbatim tail + re-injected
-        snapshots + a files-read list, logged behind a `compacted` marker so
-        `derive_request` skips everything before it. Never raises on a
-        validation failure -- falls back to the best-effort text (a
-        compaction that itself errors must never crash the turn it was
-        trying to save room for)."""
-        system_text, messages, tools = derive_request(self.log, tools=None)
-        tokens_before = self._last_prompt_tokens or _rough_estimate(system_text, messages)
-        yield events.compaction(phase="start", trigger=trigger, turn=turn_no, tokens_before=tokens_before)
+    def _compaction_model_override(self):
+        """H8: `compactionModel` (settings.json/config.json, resolved by
+        `agent/compact.resolve_knobs`) actually used by the summariser --
+        it used to be resolved and then never read anywhere. Returns a
+        `(saved_state_or_None)` token for `_restore_compaction_model`;
+        temporarily swaps `self.route`/`self.provider_profile`/
+        `self.model_profile`/`self.model_ref` (everything `_build_request`/
+        `_build_body_for_messages` read off `self`) to the resolved
+        override for the DURATION of the summarisation call(s) only.
+        Same-provider only (falls back to the main model otherwise) --
+        `self.creds` is a single set for the whole Session, same documented
+        limitation as `_call_model_for_hook`'s own `small_model_ref` (true
+        cross-provider routing needs separate credential resolution, a
+        follow-up refinement, not this one-liner)."""
+        raw = self._compaction_knobs.compaction_model
+        if not raw or raw == self.model_ref.raw:
+            return None
+        try:
+            routes = self.agent_runtime.routes or {}
+            ref = parse_model_ref(raw, routes)
+        except InvalidModelError:
+            log.warning("compactionModel %r did not resolve to a valid model ref; using the session's main model", raw)
+            return None
+        if ref.provider != self.model_ref.provider:
+            log.warning("compactionModel %r is on a different provider (%s) than the session's own creds (%s); "
+                        "using the session's main model for this summary", raw, ref.provider, self.model_ref.provider)
+            return None
+        route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
+        profile = resolve_profile(route)
+        model_profile = resolve_model_profile(ref, self.state_dir, routes)
+        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref)
+        self.route, self.provider_profile, self.model_profile, self.model_ref = route, profile, model_profile, ref
+        return saved
 
-        if self.hook_runner is not None and self.hook_runner.has_hooks("PreCompact"):
-            payload = self.hook_runner.payload("PreCompact", extra={"trigger": trigger,
-                                                                      "custom_instructions": custom_instructions})
-            outcome = self.hook_runner.run("PreCompact", payload, matched=trigger)
-            if outcome.additional_context:
-                self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+    def _restore_compaction_model(self, saved) -> None:
+        if saved is not None:
+            self.route, self.provider_profile, self.model_profile, self.model_ref = saved
 
-        instruction = build_summary_instruction(custom_instructions)
-        summary_text, stop_reason, ok, missing = "", None, False, []
-        for _attempt in range(2):  # one corrective retry (scope B)
-            call_messages = messages + [{"role": "user", "content": [{"type": "text", "text": instruction}]}]
+    def _run_summary_call(self, system_text: str, call_messages: list, tools, requested_max_tokens: int):
+        """One streamed summarisation-call attempt, reusing `_step`'s OWN
+        transport retry ladder (finding 4: the old code funnelled a
+        retryable 429/5xx through the CONTENT-validation corrective retry
+        instead, which resends immediately with no backoff and treats a
+        transient failure exactly like a badly-shaped reply). Returns
+        `(text, stop_reason, outcome)` where `outcome` is one of:
+          * "ok" -- a clean reply; `text`/`stop_reason` are real.
+          * "overflow" -- phase 1 raised ContextOverflow on THIS shape (the
+            caller falls back to a smaller/flatter shape, or gives up).
+          * "aborted" -- Esc/Ctrl+C fired mid-call; never retried.
+          * "failed" -- a non-retryable (or retry-exhausted) upstream
+            failure; never retried further by this method.
+        Never raises -- every exception path this generator's callers care
+        about is translated into one of the outcomes above."""
+        attempts = 0
+        while True:
+            attempts += 1
             body = self._build_body_for_messages(system_text, call_messages, tools,
-                                                  requested_max_tokens=min(4096, self.model_profile.max_output_tokens or 4096))
+                                                  requested_max_tokens=requested_max_tokens, no_thinking=True)
             req = self._build_request(body)
+            gen = self._stream(req)
             text_parts: list = []
             stop_reason = None
-            gen = self._stream(req)
+            wire_error: Optional[dict] = None
+            phase1_failure: Optional[Exception] = None
             try:
                 for ev in gen:
+                    if self.abort.is_set():
+                        break
                     kind = ev.get("type")
                     if kind == "content_block_delta":
                         delta = ev.get("delta") or {}
@@ -1070,41 +1322,163 @@ class Session:
                             cost = self.cost_meter.add_usage(self.model_ref.provider, ev["usage"])
                             self.log.append_usage(ev["usage"], cost)
                     elif kind == "error":
-                        stop_reason = "error"
-            except (ContextOverflow, UpstreamError, ProviderNotConfigured) as e:
-                # OpenCode's own rule: the summarisation call itself can
-                # overflow (a genuinely enormous history) or hit an
-                # ordinary upstream failure -- never let that escape
-                # uncaught (it would crash the very turn compaction was
-                # trying to save room for). Treated as a validation
-                # failure below, which drives the same corrective-retry-
-                # then-best-effort-fallback path an empty/invalid reply
-                # would; on total failure the TAIL + snapshots + marker
-                # still get written (a real shrink even with no summary
-                # text), giving `_turn_body`'s retry a real chance.
-                log.warning("compaction summarisation call failed (%s: %s); treating as validation failure", type(e).__name__, e)
-                stop_reason = "error"
+                        wire_error = ev.get("error") or {}
+                        break
+            except (ContextOverflow, ProviderNotConfigured, UpstreamError) as e:
+                phase1_failure = e
             finally:
                 gen.close()
-            summary_text = "".join(text_parts)
-            ok, missing = validate_summary(summary_text, stop_reason)
-            if ok:
-                break
-            yield events.compaction(phase="retry", trigger=trigger, turn=turn_no, headings_missing=missing)
-            instruction = build_summary_instruction(
-                custom_instructions, corrective=True,
-                problem=(f"missing sections: {', '.join(missing)}" if missing else "the reply was cut off"),
-            )
-        if not ok:
-            log.warning("compaction summary failed validation twice (missing=%s); using it anyway", missing)
 
-        wrapped = wrap_compacted_summary(summary_text or "(summary unavailable)")
+            if self.abort.is_set():
+                return "".join(text_parts), "aborted", "aborted"
+
+            if phase1_failure is not None:
+                if isinstance(phase1_failure, ContextOverflow):
+                    return "", None, "overflow"
+                if isinstance(phase1_failure, ProviderNotConfigured):
+                    return "", None, "failed"
+                e = phase1_failure  # UpstreamError
+                merged_retryable = e.retryable or is_retryable_message(
+                    e.status, e.message, host=self.model_ref.provider,
+                )
+                if merged_retryable and attempts <= MAX_RETRIES:
+                    hdrs = {"retry-after": e.retry_after} if e.retry_after else {}
+                    delay = _capped_retry_delay(attempts, hdrs)
+                    if self._abort_sleep(delay):
+                        return "", "aborted", "aborted"
+                    continue
+                return "", None, "failed"
+
+            if wire_error is not None:
+                message = wire_error.get("message", "unknown upstream error")
+                retryable = wire_error.get("type") in ("overloaded_error", "rate_limit_error", "api_error")
+                merged_retryable = retryable or is_retryable_message(
+                    wire_error.get("status"), message, host=self.model_ref.provider,
+                )
+                if merged_retryable and attempts <= MAX_RETRIES:
+                    hdrs = {"retry-after": wire_error.get("retry_after")} if wire_error.get("retry_after") else {}
+                    delay = _capped_retry_delay(attempts, hdrs)
+                    if self._abort_sleep(delay):
+                        return "", "aborted", "aborted"
+                    continue
+                return "", None, "failed"
+
+            return "".join(text_parts), stop_reason, "ok"
+
+    def _run_compaction(self, turn_no: int, *, trigger: str, custom_instructions: Optional[str] = None) -> Iterator[events.Event]:
+        """The dsh replay: one summarisation call whose prefix is the EXACT
+        current derived request (pruned first -- finding 4), plus one final
+        user instruction demanding the 8-section checkpoint; validated with
+        one corrective retry; new transcript = `<compacted-summary>`
+        (merging any prior one, via the replay prefix -- see agent/
+        derive.py) + a verbatim tail + re-injected snapshots (CLAUDE.md,
+        memory, environment, deferred-tool names, the active plan file --
+        finding 18) + a files-read list, logged behind a `compacted` marker
+        so `derive_request` skips everything before it.
+
+        finding 4: NEVER writes the `compacted` marker on a failure with no
+        usable summary text (a hard ContextOverflow on the summarisation
+        call itself even after the OpenCode-style flattened-serialisation
+        fallback, an exhausted-retries/non-retryable upstream failure, or
+        Esc) -- returns False (via the generator's return value) instead,
+        leaving the session log byte-for-byte unchanged, and yields
+        `phase="failed"` with a human-readable `reason` so a caller/UI can
+        react. Returns True iff the marker + replacement content were
+        actually written."""
+        system_text, messages, tools = derive_request(self.log, tools=None)
+        # finding 4: prune_messages used to be wired ONLY into `/context` --
+        # applied here too, so the summarisation call's own prefix benefits
+        # from the same head/tail + protection-window shrink an ordinary
+        # step now gets (`_derive_and_build`), making the exact-prefix
+        # attempt below less likely to need the flattened fallback at all.
+        messages = prune_messages(messages)
+        tokens_before = self._last_prompt_tokens or _rough_estimate(system_text, messages)
+        yield events.compaction(phase="start", trigger=trigger, turn=turn_no, tokens_before=tokens_before)
+
+        if self.hook_runner is not None and self.hook_runner.has_hooks("PreCompact"):
+            payload = self.hook_runner.payload("PreCompact", extra={"trigger": trigger,
+                                                                      "custom_instructions": custom_instructions})
+            outcome = self.hook_runner.run("PreCompact", payload, matched=trigger)
+            if outcome.additional_context:
+                self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+
+        saved_model = self._compaction_model_override()
+        try:
+            instruction = build_summary_instruction(custom_instructions)
+            summary_text, stop_reason, ok, missing = "", None, False, []
+            call_messages_base, call_tools = messages, tools
+            tried_fallback = False
+            fatal_reason: Optional[str] = None
+            content_retries = 0
+            max_content_retries = 1  # "one corrective retry" (unchanged from before finding 4)
+            while True:
+                call_messages = call_messages_base + [{"role": "user", "content": [{"type": "text", "text": instruction}]}]
+                text, stop_reason, outcome = self._run_summary_call(
+                    system_text, call_messages, call_tools,
+                    min(4096, self.model_profile.max_output_tokens or 4096),
+                )
+                if outcome == "overflow":
+                    if not tried_fallback:
+                        # finding 4: OpenCode-style fallback -- flatten the
+                        # WHOLE (already-pruned) transcript to plain text in
+                        # ONE user message, no `tools` offered, and retry
+                        # once more with that far smaller/simpler shape
+                        # before giving up.
+                        tried_fallback = True
+                        call_messages_base = [{"role": "user", "content": [
+                            {"type": "text", "text": _serialize_transcript_for_summary(messages)},
+                        ]}]
+                        call_tools = []
+                        log.warning("compaction (%s): summarisation call overflowed on the exact prefix; "
+                                    "retrying once with a flattened, tool-less serialisation", trigger)
+                        continue
+                    fatal_reason = ("the summarisation call overflowed even after falling back to a "
+                                     "flattened, tool-less serialisation of the conversation")
+                    break
+                if outcome == "aborted":
+                    fatal_reason = "interrupted by the user"
+                    break
+                if outcome == "failed":
+                    fatal_reason = "the summarisation call failed (see logs)"
+                    break
+                # outcome == "ok": real text -- validate its shape as before.
+                summary_text = text
+                ok, missing = validate_summary(summary_text, stop_reason)
+                if ok or content_retries >= max_content_retries:
+                    break
+                content_retries += 1
+                yield events.compaction(phase="retry", trigger=trigger, turn=turn_no, headings_missing=missing)
+                instruction = build_summary_instruction(
+                    custom_instructions, corrective=True,
+                    problem=(f"missing sections: {', '.join(missing)}" if missing else "the reply was cut off"),
+                )
+
+            if fatal_reason is not None or not summary_text.strip():
+                reason = fatal_reason or "the model returned no usable summary text"
+                log.warning("compaction (%s) failed: %s -- leaving the session log unchanged", trigger, reason)
+                yield events.compaction(phase="failed", trigger=trigger, turn=turn_no,
+                                         tokens_before=tokens_before, reason=reason)
+                return False
+            if not ok:
+                log.warning("compaction summary failed validation twice (missing=%s); using it anyway", missing)
+        finally:
+            self._restore_compaction_model(saved_model)
+
+        wrapped = wrap_compacted_summary(summary_text)
         usable = _opencode_usable(self.model_profile.context_tokens, self.model_profile.max_output_tokens)
         tail = select_verbatim_tail(messages, tail_retention_tokens(usable))
 
         self.log.append_compacted(trigger=trigger, custom_instructions=custom_instructions)
         self.log.append_user([{"type": "text", "text": wrapped}])
 
+        # finding 18: re-inject EVERY session-start snapshot kind, not just
+        # CLAUDE.md/memory/files-read -- environment and the deferred-tool-
+        # names reminder used to be logged ONCE, at session start, and
+        # never again, so they silently vanished from the model's view
+        # after the FIRST compaction (derive_request skips everything
+        # before the `compacted` marker just written above). The active
+        # plan file (if this session is in plan mode) is re-attached the
+        # same way EnterPlanMode originally logged it.
         ctx_obj = self.session_context
         claude_md = ctx_obj.claude_md_text() if ctx_obj is not None else ""
         if claude_md:
@@ -1112,6 +1486,27 @@ class Session:
         memory_text = ctx_obj.memory_snapshot_text() if ctx_obj is not None else ""
         if memory_text:
             self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
+        env_text = ctx_obj.environment_snapshot_text(self.model_label) if ctx_obj is not None else ""
+        if env_text:
+            self.log.append_snapshot([{"type": "text", "text": env_text}], kind="environment")
+        if self.session_catalog is not None and self.session_catalog.deferred:
+            deferred_names = sorted(self.session_catalog.deferred)
+            reminder = (
+                "The following deferred tools are now available via ToolSearch. Their schemas "
+                "are NOT loaded -- calling them directly will fail with InputValidationError. Use "
+                "ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before "
+                "calling them:\n" + "\n".join(deferred_names)
+            )
+            self.log.append_snapshot([{"type": "text", "text": reminder}], kind="deferred_tools")
+        if self.permission_engine.mode == "plan" and self.permission_engine.plan_file is not None:
+            plan_note = PLAN_MODE_NOTE
+            try:
+                plan_text = Path(self.permission_engine.plan_file).read_text(encoding="utf-8")
+            except OSError:
+                plan_text = ""
+            if plan_text.strip():
+                plan_note += f"\n\nCurrent plan file ({self.permission_engine.plan_file}):\n\n{plan_text}"
+            self.log.append_snapshot([{"type": "text", "text": plan_note}], kind="plan_mode")
         files_text = build_files_read_snapshot(list(self._read_cache.keys()))
         if files_text:
             self.log.append_snapshot([{"type": "text", "text": files_text}], kind="files_read")
@@ -1132,6 +1527,7 @@ class Session:
         self._last_prompt_tokens = None  # unknown until the next real reply's usage lands
         yield events.compaction(phase="done", trigger=trigger, turn=turn_no,
                                  tokens_before=tokens_before, tokens_after=tokens_after)
+        return True
 
     # ---- the turn: model call(s) + tool dispatch ------------------------
 
@@ -1197,7 +1593,21 @@ class Session:
                 synthesize_missing_results(self.log, reason="ABORTED_BEFORE_DISPATCH")
                 raise
         finally:
-            self._busy.clear()
+            # finding 5 (major, h4-h5-h3c review): a steer that lands AFTER
+            # the turn's last internal checkpoint -- during Stop hooks, the
+            # final status/turn_done yields, or an error/Esc unwind -- was
+            # accepted by `steer()` (busy was still True) but then never
+            # applied by anything, and silently vanished once `_busy.clear()`
+            # ran. Drained here and `_busy.clear()` under the SAME
+            # `_steer_lock`, atomically with `steer()`'s own busy-check +
+            # enqueue (see its docstring) so there is no window where a
+            # steer can be accepted after this drain already ran. `run()`
+            # resubmits whatever's left as the NEXT `user_input`, right
+            # after this call returns.
+            with self._steer_lock:
+                self._leftover_steer_texts.extend(self._steer_queue)
+                self._steer_queue = []
+                self._busy.clear()
 
     def _turn_body(self, turn_no: int) -> Iterator[events.Event]:
         # finding 9: `--max-turns` counts MODEL CALLS made WITHIN this one
@@ -1214,7 +1624,14 @@ class Session:
                 # (tool-less) call to close out with a real summary instead
                 # of just silently ending mid-tool-loop.
                 self.log.append_snapshot([{"type": "text", "text": MAX_STEPS_PROMPT}], kind="max_steps")
-                final_result = yield from self._step(turn_no, tool_choice=None, no_tools=True)
+                # finding 18: keep the full frozen tool catalog in `tools`
+                # (an Anthropic route 400s on "tool_use ... must define
+                # tools" if the history already has tool_use blocks but this
+                # request's own `tools` field is empty/absent) and instead
+                # forbid a NEW call via `tool_choice: "none"` -- backs
+                # "Tools are disabled until next user input" with a real
+                # wire constraint on every dialect, not just prompt text.
+                final_result = yield from self._step(turn_no, tool_choice="none", no_tools=False)
                 if final_result is not None and final_result is not _OVERFLOW_NEEDS_COMPACTION:
                     self._account_usage(final_result)
                     self.log.append_assistant(
@@ -1241,7 +1658,20 @@ class Session:
             model_calls += 1
             if result is _OVERFLOW_NEEDS_COMPACTION:
                 # H5 scope B: overflow -> compact -> retry ONCE.
-                yield from self._run_compaction(turn_no, trigger="overflow")
+                # finding 4: if compaction itself could not free any room
+                # (it already yielded its own `phase="failed"` event and
+                # wrote nothing to the log), retrying `_step` would just
+                # overflow again on the IDENTICAL history -- report the
+                # error and end the turn instead of a doomed retry.
+                compacted = yield from self._run_compaction(turn_no, trigger="overflow")
+                if not compacted:
+                    yield events.error(
+                        "context window overflow and compaction could not free enough room -- "
+                        "try `/compact <instructions>` to focus the summary, or start a new session",
+                        turn=turn_no, err_type="context_overflow", category=CONTEXT_WINDOW_EXCEEDED,
+                    )
+                    yield events.turn_done(turn=turn_no, reason="error")
+                    return
                 result = yield from self._step(turn_no, overflow_handled=True)
                 model_calls += 1
             if result is None:
@@ -1446,23 +1876,14 @@ class Session:
             # H6 scope C: both are special-cased entirely in
             # `_dispatch_tools` (a mode switch / a plan-review round trip,
             # neither of which the generic permission-decide pipeline
-            # models) -- exactly like AskUserQuestion just below, this
-            # bypasses decide() outright rather than asking "may this tool
-            # run" about a tool whose own body already handles user
-            # confirmation on its own terms.
+            # models) -- this bypasses decide() outright rather than asking
+            # "may this tool run" about a tool whose own body already
+            # handles user confirmation on its own terms. AskUserQuestion
+            # is DIFFERENT (see below): it DOES go through decide(), since
+            # permissions.py's own mode table gives it real dontAsk-mode
+            # semantics that must not be skipped.
             item["special"] = name
             item["ready"] = True
-            return item
-
-        if name == "AskUserQuestion" and self.interactive:
-            # U2: the question IS the interaction -- it is never a permission
-            # decision. `_dispatch_tools` emits `question` and parks this
-            # call on the reply from `answer_question` instead of ever
-            # reaching the tool's own run() (which stays print mode's error
-            # path: agent/loop.py only takes this branch when a UI is
-            # actually attached).
-            item["pending_question"] = True
-            self._question_waiters[tool_id] = {"event": threading.Event(), "answer": None}
             return item
 
         tool = self.tool_registry.get(name)
@@ -1489,6 +1910,21 @@ class Session:
             if pre_outcome.updated_input is not None:
                 tool_input = pre_outcome.updated_input
                 item["input"] = tool_input
+                # finding 13 (major, h4-h5-h3c review): re-run the deny/ask
+                # gate against the REWRITTEN input -- `decision` above was
+                # computed against the ORIGINAL input, before this hook
+                # ever ran; a hook that only rewrites the command (and
+                # never sets its own `permission_decision`) must not let
+                # that stale decision silently survive into a command that
+                # NOW matches one of the user's own deny/ask rules (deny
+                # rules are the only gate this harness keeps -- a rewrite
+                # must never be able to route around one). The very next
+                # `if pre_outcome.permission_decision and decision.action
+                # != "deny":` block below still lets an EXPLICIT hook
+                # decision override this fresh one, same as before, except
+                # a genuine deny match on the NEW input now correctly wins
+                # over it either way.
+                decision = self.permission_engine.decide(name, tool_input, tool=tool)
             if pre_outcome.blocked:
                 item["text"] = f"Blocked by a PreToolUse hook: {pre_outcome.block_reason or 'blocked'}"
                 item["permission_denial"] = {"tool_name": name, "tool_input": tool_input,
@@ -1537,7 +1973,34 @@ class Session:
                 if not self.interactive:
                     # no UI is attached (print mode / a bare Session in a test):
                     # resolve immediately as a denial, H2b's behaviour.
+                    #
+                    # H6 known v1 gap (D10) / B must-do: this is ALSO the
+                    # path a non-interactive SUB-AGENT session's own "ask"
+                    # decision takes (`_build_child_session` sets
+                    # `child.interactive = False` outright -- a live,
+                    # blocking permission card mid-sub-agent-run would need
+                    # child event streaming to interleave with the PARENT's
+                    # own live event stream, which `_run_child_to_completion`/
+                    # `_dispatch_agent_batch` do not do today: a child's
+                    # WHOLE turn is drained to a list before any of its
+                    # events reach the parent's `out()` at all, so there is
+                    # no live channel to pause on). `item["permission_denial"]`
+                    # is now populated here too (previously only the "deny"
+                    # paths were) -- this session's own `permission_denials`
+                    # list is what surfaces it, agent-tagged, to the user:
+                    # print mode via the top-level result's own field
+                    # (`run_agent_call` merges a completed child's list into
+                    # the parent's), and the TUI via the `permission_request`
+                    # event `_dispatch_tools` already yields unconditionally
+                    # whenever `ask_reason` is set (subagent.py's `_tag`
+                    # stamps it with `agent_id` on replay) -- rendered as an
+                    # informational note, not a live actionable card, since
+                    # the decision is already final by the time it arrives.
                     item["text"] = f"Permission requires interactive approval, unavailable in this session: {decision.reason}"
+                    item["permission_denial"] = decision.permission_denial or {
+                        "tool_name": name, "tool_input": tool_input, "reason": decision.reason,
+                        "suggested_rule": decision.suggested_rule,
+                    }
                     self._fire_permission_denied(name, tool_input, decision.reason)
                     return item
                 # interactive: `_dispatch_tools` yields the `permission_request`
@@ -1552,6 +2015,23 @@ class Session:
             # `if decision.action == "deny":` above already caught and
             # returned for every path that could produce it, including a
             # PreToolUse hook's own reassignment, which runs before it.)
+
+        if name == "AskUserQuestion" and self.interactive:
+            # U2 + finding "AskUserQuestion dontAsk gap": reached only once
+            # decide() (and any PreToolUse hook) has already confirmed this
+            # ISN'T dontAsk mode -- permissions.py's own mode table denies
+            # AskUserQuestion outright in dontAsk (caught by the plain
+            # `if decision.action == "deny":` above, well before here), so
+            # dontAsk mode never shows a card at all, matching Claude
+            # Code's own "AskUserQuestion errors on a tool call in dontAsk
+            # mode" behavior. In every OTHER mode the question IS the
+            # interaction, never itself a permission decision: park this
+            # call on the UI's reply instead of dispatching to the tool's
+            # own run() (which stays print mode's error path -- this
+            # branch only runs when a UI is actually attached).
+            item["pending_question"] = True
+            self._question_waiters[tool_id] = {"event": threading.Event(), "answer": None}
+            return item
 
         item["ready"] = True
         return item
@@ -1906,12 +2386,15 @@ class Session:
         session. Returns True (via the generator's return value) iff the
         turn should end now rather than call the model again."""
         tool_call_flags = tool_call_flags or {}
+        from rolo_claude.hooks import env_file_path
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
                            mcp_manager=self.mcp_manager, agent_runtime=self.agent_runtime,
                            session_allow_rule=lambda rule_text: self.permission_engine.add_session_allow_rule(
-                               rule_text, temporary=True))
+                               rule_text, temporary=True),
+                           env_file=env_file_path(self.log.session_id),
+                           permission_engine=self.permission_engine, effort=self.effort)
         repair_outcomes = repair_assistant_turn(tool_use_blocks, self.tool_registry, catalog=self.session_catalog)
 
         end_turn = False
@@ -1980,18 +2463,39 @@ class Session:
                     _dispatch_agent_batch()
                     yield from _flush_agent_batch_items()
                     agent_batch = []
-                for remaining_tu in tool_use_blocks[i:]:
-                    r_id, r_name = remaining_tu.get("id"), remaining_tu.get("name")
-                    interrupted_item = {"tool_id": r_id, "name": r_name, "input": remaining_tu.get("input") or {},
-                                         "ready": False, "text": "Tool call interrupted by user", "repaired": False}
-                    yield events.Event("tool_use_ready", {"id": r_id, "name": r_name,
-                                                            "input": interrupted_item["input"], "repaired": False},
-                                        turn=turn_no)
-                    yield from self._finalize_tool_result(turn_no, interrupted_item, ctx.session_dir)
+                yield from self._synthesize_unrun_tool_results(
+                    turn_no, tool_use_blocks[i:], ctx.session_dir, reason="Tool call interrupted by user",
+                )
                 return True
 
             item = self._resolve_tool_call(tu, outcome, tool_call_flags)
             tool_id, name = item["tool_id"], item["name"]
+
+            if self.abort.is_set():
+                # finding 14 (major, h4-h5-h3c review): Esc that fired
+                # WHILE `_resolve_tool_call` was running (most notably: a
+                # slow PreToolUse/PermissionRequest hook -- both now poll
+                # `abort` themselves mid-wait and return early, see
+                # `run_command_hook`/`run_http_hook`'s own docstrings) must
+                # stop THIS call from ever dispatching too, not just the
+                # NEXT iteration's own top-of-loop check -- the old code
+                # only checked `abort` there, so a hook that noticed the
+                # interrupt and returned early still let the gated Write
+                # run anyway.
+                if pending_batch:
+                    _dispatch_pending_batch()
+                    yield from self._fire_post_tool_batch(turn_no, pending_batch)
+                    for batched_item in pending_batch:
+                        yield from self._finalize_tool_result(turn_no, batched_item, ctx.session_dir)
+                    pending_batch = []
+                if agent_batch:
+                    _dispatch_agent_batch()
+                    yield from _flush_agent_batch_items()
+                    agent_batch = []
+                yield from self._synthesize_unrun_tool_results(
+                    turn_no, tool_use_blocks[i:], ctx.session_dir, reason="Tool call interrupted by user",
+                )
+                return True
 
             yield events.Event("tool_use_ready", {"id": tool_id, "name": name, "input": item["input"],
                                                     "repaired": item["repaired"]}, turn=turn_no)
@@ -2087,6 +2591,22 @@ class Session:
                 # same assistant turn from starting; the one that just
                 # finished is kept (it already ran to completion).
                 # `_turn_body`'s own post-dispatch check applies it.
+                #
+                # finding 3 (critical): the OLD code broke out of this loop
+                # right here with NO result for tool_use_blocks[i+1:] --
+                # `_apply_pending_steers_events` (called right after
+                # `_dispatch_tools` returns) then appended the steer as the
+                # very next user-role message, so the log carried an
+                # assistant turn with unanswered tool_use blocks followed
+                # directly by a new user turn: invariant rule 2 broken,
+                # 400s on `ant:`/Databricks Claude routes forever after.
+                # Every call that didn't get a chance to run is synthesized
+                # an `is_error` result right here, before the break, same
+                # as the abort branch above already does for an interrupt.
+                yield from self._synthesize_unrun_tool_results(
+                    turn_no, tool_use_blocks[i + 1:], ctx.session_dir,
+                    reason="not run: the user sent a new message first",
+                )
                 break
 
         if pending_batch:
@@ -2100,6 +2620,29 @@ class Session:
             _dispatch_agent_batch()
             yield from _flush_agent_batch_items()
         return end_turn
+
+    def _synthesize_unrun_tool_results(self, turn_no: int, remaining_blocks: list, session_dir, *,
+                                        reason: str) -> Iterator[events.Event]:
+        """finding 3 (major, h4-h5-h3c review): every `tool_use` block that
+        never got a chance to run (the turn ended early -- an interrupt, or
+        a steer noticed mid-dispatch) must still get a synthesized
+        `is_error` `tool_result` right here, before `_dispatch_tools`
+        returns -- otherwise the NEXT request violates "every tool_use has
+        exactly one tool_result before the next assistant turn"
+        (`agent/invariants.py`'s own rule 2) and `translate.py`'s
+        `("call_2", "(no result)")` placeholder tells the model a write
+        that never ran produced empty output; on `ant:`/Databricks Claude
+        routes the next request 400s outright, and so does EVERY later
+        turn in the process (`find_unpaired_tool_use_ids` only ever checks
+        the LAST assistant node, so a gap here is never self-healed by a
+        later call)."""
+        for remaining_tu in remaining_blocks:
+            r_id, r_name = remaining_tu.get("id"), remaining_tu.get("name")
+            item = {"tool_id": r_id, "name": r_name, "input": remaining_tu.get("input") or {},
+                     "ready": False, "text": reason, "repaired": False}
+            yield events.Event("tool_use_ready", {"id": r_id, "name": r_name, "input": item["input"],
+                                                    "repaired": False}, turn=turn_no)
+            yield from self._finalize_tool_result(turn_no, item, session_dir)
 
     def _fire_post_tool_batch(self, turn_no: int, pending_batch: list) -> Iterator[events.Event]:
         """H4 scope B: PostToolBatch -- fires once for a whole dispatched
@@ -2191,10 +2734,26 @@ class Session:
         happens from INSIDE the turn (`_step`'s stream loop,
         `_dispatch_tools`'s per-call loop, `_turn_body`'s post-dispatch/
         post-stream safe points), never from here. Returns False (nothing
-        queued) when no turn is running to steer."""
-        if not text or not self.busy:
+        queued) when no turn is running to steer.
+
+        finding 5: the busy CHECK and the enqueue are one atomic operation
+        under `_steer_lock` -- the old code checked `self.busy` OUTSIDE the
+        lock, so a turn could finish (`turn()`'s `finally` clearing `_busy`)
+        in the window between that check and actually appending to
+        `_steer_queue`, silently queuing text for a turn that had already
+        ended (never drained by anything, since the old `finally` never
+        looked). `turn()`'s own `finally` now clears `_busy` under this
+        SAME lock, so the two are fully serialized: either this call's
+        enqueue is visible to that drain (and `run()` resubmits it), or
+        this call runs after the drain and correctly sees `_busy` already
+        cleared, returning False -- callers (`Controller.submit`,
+        headless.py's stream-json reader) must treat False as "start a new
+        turn instead" rather than silently dropping the text."""
+        if not text:
             return False
         with self._steer_lock:
+            if not self._busy.is_set():
+                return False
             self._steer_queue.append(text)
         return True
 
@@ -2238,6 +2797,39 @@ class Session:
             out(events.turn_done(turn=self.turn_count, reason="error"))
             return
 
+    def _pump_compaction(self, instructions: Optional[str], out) -> None:
+        """finding 11 (major, h4-h5-h3c review) / U5 must-do: drives a
+        MANUAL `/compact` on the WORKER thread, same as `_pump_turn` does
+        for an ordinary turn -- the old code ran `session._run_compaction`
+        to completion synchronously ON THE TEXTUAL EVENT LOOP itself (via
+        `Controller.run_slash`, documented as "UI thread, synchronous,
+        cheap"), freezing the whole UI (no repaint, no Esc) for the entire
+        summarisation call. `_run_compaction`'s own `compaction` events
+        stream through `out` exactly like any turn event, so the TUI's new
+        `compaction` handler (tui/dispatch.py) can render a live
+        "Compacting..." indicator instead of the screen just hanging."""
+        self.abort.clear()
+        try:
+            for event in self._run_compaction(self.turn_count, trigger="manual", custom_instructions=instructions):
+                out(event)
+        except BaseException as e:  # never let a worker thread die silently, the UI would just hang
+            log.exception("manual /compact failed")
+            out(events.compaction(phase="failed", trigger="manual", reason=f"{type(e).__name__}: {e}"))
+
+    def _pump_clear(self, out) -> None:
+        """U5 must-do: `/clear` runs on the worker thread too, same
+        reasoning as `_pump_compaction` -- `SessionStart`/`SessionEnd`
+        hooks are arbitrary user scripts and must never block the UI
+        thread. Emits a `status` (fresh idle state, new session_id) so the
+        TUI immediately reflects the new log."""
+        self.abort.clear()
+        try:
+            self.clear()
+            out(self.status_event(phase="idle"))
+        except BaseException as e:  # never let a worker thread die silently, the UI would just hang
+            log.exception("/clear failed")
+            out(events.notification(f"/clear failed: {type(e).__name__}: {e}", level="error"))
+
     def run(self, commands, out, *, mcp_status_fn=None) -> int:
         """The worker-thread command pump (D-Contract): consume `Command`s
         from `commands` (a `queue.Queue`) until a `None` sentinel arrives,
@@ -2271,6 +2863,27 @@ class Session:
             data = getattr(cmd, "data", None) or {}
             if kind == "user_input":
                 self._pump_turn(data.get("text", ""), data.get("images"), out)
+                # finding 5: whatever `turn()`'s own `finally` drained as
+                # "never got applied" is resubmitted here, on THIS same
+                # worker thread, as the next `user_input` Command -- run()
+                # picks it right back up on the NEXT loop iteration (a
+                # fresh turn, since `_busy` is already clear by now), so a
+                # steer that missed every internal checkpoint still isn't
+                # silently lost, it just becomes the next turn instead.
+                if self._leftover_steer_texts:
+                    leftover, self._leftover_steer_texts = self._leftover_steer_texts, []
+                    for leftover_text in leftover:
+                        commands.put(events.Command("user_input", {"text": leftover_text}))
+            elif kind == "run_clear":
+                self._pump_clear(out)
+            elif kind == "run_compact":
+                # finding 11 / U5: handled BETWEEN turns, same slot in this
+                # loop as user_input -- Controller.run_compact (below) is
+                # the only enqueuer and already refuses to queue this while
+                # `self.busy` is True, so this branch never actually runs
+                # concurrently with a turn; it's still safe either way
+                # (this loop only ever does one Command at a time).
+                self._pump_compaction(data.get("instructions"), out)
             elif kind == "interrupt":
                 self.abort.set()
             elif kind == "steer":

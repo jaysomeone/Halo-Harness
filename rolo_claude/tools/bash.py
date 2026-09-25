@@ -12,7 +12,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from rolo_claude.config.paths import from_posix, git_bash
+from rolo_claude.config.paths import from_posix, git_bash, to_posix
 from rolo_claude.tools._proc import run_streamed
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
 
@@ -141,7 +141,25 @@ class BashTool(Tool):
         # (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\n'` used to
         # hijack the session's cwd).
         nonce = uuid.uuid4().hex
+        # finding 6: SOURCE CLAUDE_ENV_FILE in THIS shell, before the
+        # model's own command, every call -- 2.1.281 sources it as a real
+        # shell script ("Session environment script ready"), not a
+        # literal NAME=value parse. `export PATH="$PATH:/x"` (Claude
+        # Code's own SessionStart docs example) then genuinely appends to
+        # the shell's OWN inherited PATH via `$VAR` expansion, instead of
+        # overwriting it with the literal string "$PATH:/x". The `[ -f ]`
+        # guard makes this a silent no-op before any hook has written one,
+        # and re-sourcing every call (not just once at session start)
+        # picks up a LATER hook's own additional exports with no restart.
+        # `to_posix` handles the win32/Git-Bash drive-letter form
+        # unconditionally (a no-op on real POSIX paths).
+        env_file = getattr(ctx, "env_file", None)
+        source_prefix = ""
+        if env_file is not None:
+            env_file_posix = to_posix(str(env_file))
+            source_prefix = f'[ -f "{env_file_posix}" ] && . "{env_file_posix}"\n'
         wrapped = (
+            f"{source_prefix}"
             f"{command}\n"
             f"__rc=$?\n"
             # `pwd -W` (Git Bash/MSYS only -- a real POSIX bash rejects -W
@@ -155,6 +173,8 @@ class BashTool(Tool):
         )
         env = dict(ctx.env) if isinstance(ctx.env, dict) else dict(os.environ)
         env["CLAUDECODE"] = "1"
+        if env_file is not None:
+            env["CLAUDE_ENV_FILE"] = str(env_file)
 
         raw_output, exit_code, timed_out, aborted = run_streamed(
             [str(shell_path), "-lc", wrapped], cwd=cwd, env=env, timeout_s=timeout_ms / 1000.0,

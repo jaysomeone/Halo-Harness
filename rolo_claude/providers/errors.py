@@ -435,6 +435,17 @@ def is_retryable_message(status: Optional[int], message: str, *, body_text: str 
 
 
 def _parse_retry_after_seconds(value) -> Optional[float]:
+    """H8 cheap must-do: `anthropic-ratelimit-*-reset` is an RFC 3339
+    timestamp (e.g. "2024-01-01T00:00:00Z"), which `email.utils.
+    parsedate_to_datetime` (RFC 2822 HTTP-date, e.g. "Wed, 21 Oct 2015
+    07:28:00 GMT" -- the ordinary `Retry-After` header's own format)
+    rejects outright -- `stream.py`'s own 429 handling copies that header's
+    raw value into the SAME `Retry-After` slot this function parses
+    whenever the response used the Anthropic-specific header instead of
+    (or in addition to) the standard one, so both shapes have to work
+    here. Tried as a fallback, never instead of, the HTTP-date parse
+    (which stays tried first since it's what the vast majority of real
+    `Retry-After` headers actually send)."""
     from email.utils import parsedate_to_datetime
     import datetime as _dt
     if value is None:
@@ -444,10 +455,20 @@ def _parse_retry_after_seconds(value) -> Optional[float]:
         return None
     if text.isdigit():
         return float(text)
+    dt = None
     try:
         dt = parsedate_to_datetime(text)
     except (TypeError, ValueError):
-        return None
+        dt = None
+    if dt is None:
+        try:
+            # `datetime.fromisoformat` doesn't accept a bare trailing "Z"
+            # on every Python version this harness supports -- normalized
+            # to the equivalent explicit "+00:00" offset first.
+            iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+            dt = _dt.datetime.fromisoformat(iso_text)
+        except (TypeError, ValueError):
+            return None
     if dt is None:
         return None
     if dt.tzinfo is None:

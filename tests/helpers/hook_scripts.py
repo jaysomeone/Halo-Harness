@@ -25,6 +25,10 @@ Modes (argv[1], or the HOOK_SCRIPT_MODE env var):
                       own contract).
   updated_input    -- exit 0, JSON hookSpecificOutput.updatedInput that
                       rewrites tool_input["command"] to "echo rewritten".
+  updated_input_no_decision -- exit 0, updatedInput rewrites the command to
+                      "echo rewritten-dangerous", with NO permissionDecision
+                      of its own (finding 13: the loop must re-decide
+                      against the rewritten input).
   block_decision   -- exit 0, JSON {"decision": "block", "reason": "..."}
                       (the generic block shape, not permissionDecision).
   stop_block_once  -- exit 2 the FIRST time it's called (tracked via the
@@ -113,6 +117,14 @@ def main(argv=None) -> int:
     if mode == "updated_input":
         _print_json({"hookSpecificOutput": {"permissionDecision": "allow",
                                              "updatedInput": {"command": "echo rewritten"}}})
+        return 0
+
+    if mode == "updated_input_no_decision":
+        # finding 13 (h4-h5-h3c review): rewrites the command but sets NO
+        # permission_decision of its own -- the loop must re-run decide()
+        # against the REWRITTEN input rather than trusting whatever was
+        # decided for the ORIGINAL one.
+        _print_json({"hookSpecificOutput": {"updatedInput": {"command": "echo rewritten-dangerous"}}})
         return 0
 
     if mode == "block_decision":

@@ -333,9 +333,22 @@ def call_anthropic_native(base_url: str, api_key: str, body: dict, extra_headers
         headers.update(extra_headers)
         return proxy_anthropic(base_url, api_key, body, headers, state_dir,
                                 path="/v1/messages", query_suffix="", on_connect=on_connect)
+    # finding 16 (major, h4-h5-h3c review): the databricks branch never
+    # added `Authorization: Bearer <token>` -- this docstring (and
+    # headless.py's own extra_headers construction) CLAIMED it was
+    # "already merged into extra_headers by the caller", but `build_session`
+    # only ever adds `x-databricks-use-coding-agent-mode` there; every
+    # Databricks Claude passthrough call (`dbx:databricks-claude-*`/
+    # `dbx:system.ai.claude-*`) went out with no auth at all and 401/403'd.
+    # `proxy_anthropic` itself never uses its own `api_key` parameter for
+    # anything (it just relays whatever `headers` it's given), so the
+    # header has to be added HERE, same as the "anthropic" branch above
+    # does for `x-api-key`.
+    headers = {"Authorization": f"Bearer {api_key}"}
+    headers.update(extra_headers)
     # databricks: try the ai-gateway path first, fall back to serving-endpoints on 404.
     for path in ("/ai-gateway/anthropic/v1/messages", "/serving-endpoints/anthropic/v1/messages"):
-        result = proxy_anthropic(base_url, api_key, body, extra_headers, state_dir,
+        result = proxy_anthropic(base_url, api_key, body, headers, state_dir,
                                   path=path, query_suffix="?beta=true", on_connect=on_connect)
         if result.status != 404:
             return result

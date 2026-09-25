@@ -289,6 +289,71 @@ def test_generate_title_small_model_failure_falls_back(ctx: Ctx):
 
 
 @test
+def test_h5b_b_resume_twice_loads_existing_nodes_both_times(ctx: Ctx):
+    """B must-do: "--resume/--continue/--session-id must load the existing
+    nodes into SessionLog._nodes" (H6) -- verified here with a session
+    resumed TWICE in a row (build -> quit -> resume -> quit -> resume
+    again), proving the second resume doesn't re-append a duplicate
+    system/meta node (which would make derive_request raise
+    LogAssemblyError on every later call) and both resumes actually see
+    the FULL prior history, not just what the most recent process wrote."""
+    import tempfile
+    from pathlib import Path
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.derive import derive_request
+    from rolo_claude.agent.log import SessionLog
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    cwd = Path(tempfile.mkdtemp(prefix="resume-twice-"))
+    os.environ["BRIDGE_TEST_HOME"] = str(cwd / "home")
+    session_id = "11111111-1111-1111-1111-111111111111"
+    try:
+        def _build_or_resume(existing_session_id):
+            log = SessionLog(cwd, session_id=existing_session_id)
+            log._nodes = log.read_all()  # exactly how a real --resume loads it
+            ctx_obj = SessionContext(cwd=cwd, model_label="or:mock/model")
+            model_ref = parse_model_ref("or:mock/model")
+            return Session(
+                cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(),
+                creds=ProviderCreds(base_url="http://x", api_key="k"),
+                state_dir=cwd / "state", model_label=model_ref.raw, session_context=ctx_obj,
+                session_log=log,
+            )
+
+        # 1) brand-new session (this process "starts" it).
+        s1 = _build_or_resume(session_id)
+        s1.log.append_user([{"type": "text", "text": "first turn content"}])
+        s1.log.append_assistant(content=[{"type": "text", "text": "first reply"}], stop_reason="end_turn")
+        del s1  # simulate the process exiting
+
+        # 2) first --resume: must see turn 1's content, no LogAssemblyError.
+        s2 = _build_or_resume(session_id)
+        system_text, messages, _tools = derive_request(s2.log, tools=None)
+        ctx.check("first resume sees turn 1's content",
+                  "first turn content" in json.dumps(messages) and "first reply" in json.dumps(messages))
+        s2.log.append_user([{"type": "text", "text": "second turn content"}])
+        s2.log.append_assistant(content=[{"type": "text", "text": "second reply"}], stop_reason="end_turn")
+        del s2  # simulate the process exiting again
+
+        # 3) SECOND --resume in a row: must see BOTH turns, still no
+        # duplicate system/meta node, still no LogAssemblyError.
+        s3 = _build_or_resume(session_id)
+        system_text3, messages3, _tools3 = derive_request(s3.log, tools=None)
+        whole = json.dumps(messages3)
+        ctx.check(f"second resume sees turn 1's content too, got {whole!r}", "first turn content" in whole)
+        ctx.check(f"second resume sees turn 2's content, got {whole!r}", "second turn content" in whole)
+        system_nodes = [n for n in s3.log.nodes() if n.get("type") == "system"]
+        ctx.check(f"exactly one system node after TWO resumes (never re-appended), got {len(system_nodes)}",
+                  len(system_nodes) == 1)
+        s3.log.append_user([{"type": "text", "text": "third turn"}])  # would raise LogAssemblyError if malformed
+        derive_request(s3.log, tools=None)  # must not raise
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
 def test_zzz_restore_env(ctx: Ctx):
     """Not a real test -- see the module-level comment by
     `_ORIGINAL_BRIDGE_STATE_DIR`. Must stay the LAST `@test` in this file."""
