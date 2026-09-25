@@ -19,7 +19,7 @@ from rolo_claude.providers.errors import parse_context_overflow
 from rolo_claude.providers.http import call_anthropic_native
 from rolo_claude.providers.profiles import ProviderProfile
 from rolo_claude.providers.request import (
-    apply_anthropic_cache_control, build_anthropic_request_body, map_effort_anthropic, map_tool_choice_anthropic,
+    apply_anthropic_cache_control, build_anthropic_request_body, map_tool_choice_anthropic,
 )
 from rolo_claude.providers.routing import Route
 from rolo_claude.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, stream_anthropic_completion

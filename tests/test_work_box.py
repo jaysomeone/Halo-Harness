@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -50,6 +49,95 @@ def test_load_ucode_settings_missing_or_incomplete_is_none(ctx: Ctx):
     garbage = d / "garbage.json"
     garbage.write_text("{not json", encoding="utf-8")
     ctx.check("unparseable JSON -> None", load_ucode_settings(garbage) is None)
+
+
+@test
+def test_h9b_f31_load_ucode_settings_reads_claude_settings_shaped_env_block(ctx: Ctx):
+    """H9 whole-tree review finding 31: a ucode-settings.json shaped like a
+    Claude Code `--settings` file (nested `env` block, ANTHROPIC_* names)
+    must resolve, not just the gateway-config key spellings."""
+    from rolo_claude.providers.config import load_ucode_settings
+    d = Path(tempfile.mkdtemp(prefix="ucode-env-"))
+    p = d / "ucode-settings.json"
+    p.write_text(json.dumps({"env": {
+        "ANTHROPIC_BASE_URL": "https://z.cloud.databricks.com",
+        "ANTHROPIC_AUTH_TOKEN": "env-tok-1",
+    }}), encoding="utf-8")
+    cfg = load_ucode_settings(p)
+    ctx.check("parsed a config from the env block", cfg is not None)
+    ctx.check("host from env.ANTHROPIC_BASE_URL", cfg.host == "https://z.cloud.databricks.com")
+    ctx.check("token from env.ANTHROPIC_AUTH_TOKEN", cfg.token == "env-tok-1")
+
+
+@test
+def test_h9b_f31_load_ucode_settings_top_level_anthropic_keys_also_resolve(ctx: Ctx):
+    """H9 finding 31: ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN are plain
+    candidate key names now, so they resolve top-level too, not only when
+    nested under "env" -- some hand-edited or non-Claude-Code writer of
+    this file could plausibly put them at either level."""
+    from rolo_claude.providers.config import load_ucode_settings
+    d = Path(tempfile.mkdtemp(prefix="ucode-env-top-"))
+    p = d / "ucode-settings.json"
+    p.write_text(json.dumps({
+        "ANTHROPIC_BASE_URL": "https://w.cloud.databricks.com",
+        "ANTHROPIC_AUTH_TOKEN": "env-tok-2",
+    }), encoding="utf-8")
+    cfg = load_ucode_settings(p)
+    ctx.check("parsed a config", cfg is not None)
+    ctx.check("host from top-level ANTHROPIC_BASE_URL", cfg.host == "https://w.cloud.databricks.com")
+    ctx.check("token from top-level ANTHROPIC_AUTH_TOKEN", cfg.token == "env-tok-2")
+
+
+@test
+def test_h9b_f31_load_ucode_settings_runs_api_key_helper_when_token_missing(ctx: Ctx):
+    """H9 finding 31: an `apiKeyHelper` command (Claude Code `--settings`
+    shape) is run and its stdout used as the token when no key-spelling
+    candidate supplies one directly."""
+    from rolo_claude.providers.config import load_ucode_settings
+    d = Path(tempfile.mkdtemp(prefix="ucode-helper-"))
+    p = d / "ucode-settings.json"
+    p.write_text(json.dumps({
+        "host": "helper.cloud.databricks.com",
+        "apiKeyHelper": "echo helper-tok-3",
+    }), encoding="utf-8")
+    cfg = load_ucode_settings(p)
+    ctx.check("parsed a config via apiKeyHelper", cfg is not None)
+    ctx.check("host unaffected", cfg.host == "helper.cloud.databricks.com")
+    ctx.check("token from apiKeyHelper stdout, stripped", cfg.token == "helper-tok-3")
+
+
+@test
+def test_h9b_f31_load_ucode_settings_api_key_helper_failure_is_none(ctx: Ctx):
+    """H9 finding 31: a failing (nonzero exit) apiKeyHelper must leave the
+    token unset -- same "None if incomplete" contract as a missing key,
+    never a raised exception from the subprocess call."""
+    from rolo_claude.providers.config import load_ucode_settings
+    d = Path(tempfile.mkdtemp(prefix="ucode-helper-fail-"))
+    p = d / "ucode-settings.json"
+    p.write_text(json.dumps({
+        "host": "helper-fail.cloud.databricks.com",
+        "apiKeyHelper": "this-command-does-not-exist-h9bf31",
+    }), encoding="utf-8")
+    ctx.check("failing helper -> None overall", load_ucode_settings(p) is None)
+
+
+@test
+def test_h9b_f31_load_ucode_settings_does_not_run_helper_when_key_token_found(ctx: Ctx):
+    """H9 finding 31: apiKeyHelper is a LAST resort -- if any key-spelling
+    candidate already supplied a token, the helper must never run (and
+    must never override that token even if it would produce a different
+    value)."""
+    from rolo_claude.providers.config import load_ucode_settings
+    d = Path(tempfile.mkdtemp(prefix="ucode-helper-skip-"))
+    p = d / "ucode-settings.json"
+    p.write_text(json.dumps({
+        "host": "skip.cloud.databricks.com",
+        "token": "key-tok-wins",
+        "apiKeyHelper": "echo should-never-be-used",
+    }), encoding="utf-8")
+    cfg = load_ucode_settings(p)
+    ctx.check("parsed a config", cfg is not None)
+    ctx.check("key-spelling token wins over apiKeyHelper", cfg.token == "key-tok-wins")
 
 
 @test
@@ -166,6 +254,93 @@ def test_doctor_work_unreachable_host_reports_vpn_hint(ctx: Ctx):
         os.environ.pop("BRIDGE_TEST_HOME", None)
         os.environ.pop("BRIDGE_DBX_BASE_URL", None)
         os.environ.pop("BRIDGE_DBX_TOKEN", None)
+
+
+# ---- H9 whole-tree review finding 33: probe the CONFIGURED model, with
+# the production header -- never a real network call in these either. ----
+
+@test
+def test_h9b_f33_configured_databricks_thinking_model_reads_routes_json_default(ctx: Ctx):
+    from rolo_claude.doctor import _configured_databricks_thinking_model
+
+    state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state-"))
+    (state_dir / "routes.json").write_text(
+        json.dumps({"default": "dbx:databricks-deepseek-v4-1-flash"}), encoding="utf-8")
+    got = _configured_databricks_thinking_model(state_dir)
+    ctx.check(f"resolved the configured thinking-family model, got {got!r}",
+              got == "databricks-deepseek-v4-1-flash")
+
+
+@test
+def test_h9b_f33_configured_model_none_when_not_databricks_or_not_thinking_family(ctx: Ctx):
+    from rolo_claude.doctor import _configured_databricks_thinking_model
+
+    state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state2-"))
+    (state_dir / "routes.json").write_text(json.dumps({"default": "or:some-vendor/model"}), encoding="utf-8")
+    ctx.check("an OpenRouter default is not a databricks thinking model -- None",
+              _configured_databricks_thinking_model(state_dir) is None)
+
+    state_dir2 = Path(tempfile.mkdtemp(prefix="work-f33-state3-"))
+    (state_dir2 / "routes.json").write_text(
+        json.dumps({"default": "dbx:databricks-claude-sonnet-4-5"}), encoding="utf-8")
+    ctx.check("a non-thinking-family databricks model (Claude) is not thinking-family -- None",
+              _configured_databricks_thinking_model(state_dir2) is None)
+
+
+@test
+def test_h9b_f33_reasoning_replay_probe_uses_the_configured_model_and_production_header(ctx: Ctx):
+    """Monkeypatches the two live-network call sites (never a real VPN
+    call, matching this file's own policy) to capture what candidate model
+    and headers the probe actually used -- must be the CONFIGURED model
+    (routes.json's default), not the catalog's first thinking-family
+    match, and must carry x-databricks-use-coding-agent-mode."""
+    import rolo_claude.doctor as doctor_mod
+    import rolo_claude.providers.databricks as dbx_mod
+    import rolo_claude.providers.http as http_mod
+
+    state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state4-"))
+    (state_dir / "routes.json").write_text(
+        json.dumps({"default": "dbx:databricks-kimi-k3"}), encoding="utf-8")
+
+    def _fake_probe_full(root, token):
+        # The catalog's FIRST thinking-family match is a DIFFERENT model --
+        # proves the configured one wins, not this.
+        return 200, [{"name": "databricks-glm-5-2"}, {"name": "databricks-kimi-k3"}]
+
+    captured = {}
+
+    def _fake_call_databricks_chat(root, token, body, extra_headers, state_dir_arg, model, on_connect=None):
+        captured["model"] = model
+        captured["extra_headers"] = dict(extra_headers)
+        return type("Result", (), {"status": 200, "resp": None})()
+
+    def _fake_route_candidates(model):
+        return [("invocations", False)]
+
+    def _fake_cache_get_route(model, state_dir_arg):
+        return None
+
+    old_probe = dbx_mod.probe_databricks_endpoints_full
+    old_call = http_mod.call_databricks_chat
+    old_candidates = dbx_mod.databricks_route_candidates
+    old_cache_get = dbx_mod.dbx_cache_get_route
+    dbx_mod.probe_databricks_endpoints_full = _fake_probe_full
+    http_mod.call_databricks_chat = _fake_call_databricks_chat
+    dbx_mod.databricks_route_candidates = _fake_route_candidates
+    dbx_mod.dbx_cache_get_route = _fake_cache_get_route
+    try:
+        lines = doctor_mod._work_check_reasoning_replay_after_tool_call("fake-host", "fake-token", state_dir)
+    finally:
+        dbx_mod.probe_databricks_endpoints_full = old_probe
+        http_mod.call_databricks_chat = old_call
+        dbx_mod.databricks_route_candidates = old_candidates
+        dbx_mod.dbx_cache_get_route = old_cache_get
+
+    ctx.check(f"probed the CONFIGURED model (databricks-kimi-k3), not the catalog's first match "
+              f"(databricks-glm-5-2), got {captured.get('model')!r}", captured.get("model") == "databricks-kimi-k3")
+    ctx.check(f"carried the production header, got {captured.get('extra_headers')!r}",
+              captured.get("extra_headers", {}).get("x-databricks-use-coding-agent-mode") == "true")
+    ctx.check("output names the configured model as such", any("CONFIGURED model" in l for l in lines))
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ from pathlib import Path
 
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.fuzz_h9 import (
-    UNICODE_EDGE_SNIPPETS, _finish_ascii_safe, _overflow_body, _role_chunk, run_one as _run_one_general,
+    UNICODE_EDGE_SNIPPETS, _finish_ascii_safe, _role_chunk, run_one as _run_one_general,
     _sse_chunk_ascii_safe, _raw_sse_garbage, _stop_chunk, _text_chunk, _tool_call_chunks,
 )
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, _finish, abrupt_disconnect, send_json_response, start_sse

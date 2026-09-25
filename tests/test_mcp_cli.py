@@ -158,7 +158,7 @@ def test_claude_json_add_remove_byte_identical_on_non_ascii_no_trailing_newline_
         (home / ".claude.json").write_bytes(fixture.encode("utf-8"))
         before = (home / ".claude.json").read_bytes()
 
-        dest = C._store_entry(scope="user", name="tmp-server", entry={"type": "stdio", "command": "c"}, cwd=home)
+        C._store_entry(scope="user", name="tmp-server", entry={"type": "stdio", "command": "c"}, cwd=home)
         after_add = (home / ".claude.json").read_bytes()
         ctx.check("non-ASCII characters are NOT re-escaped to \\uXXXX",
                   "café".encode("utf-8") in after_add and b"\\u00e9" not in after_add)

@@ -356,6 +356,38 @@ def test_config_get_missing_key(ctx: Ctx):
     ctx.check(f"exit 1, got {result.returncode}", result.returncode == 1)
 
 
+@test
+def test_h9b_f33_doctor_python_check_matches_pyprojects_real_minimum(ctx: Ctx):
+    """H9 whole-tree review finding 33: `_check_python` hardcoded (3, 9) as
+    its OK/WARN threshold, one full minor version below pyproject.toml's
+    real `requires-python = ">=3.10"` -- a 3.9 interpreter reported [OK]
+    despite not meeting the package's own declared minimum."""
+    import collections
+    import re
+    import sys
+    from rolo_claude.doctor import _check_python, OK, WARN
+
+    # A plain regex, not tomllib (stdlib only since 3.11 -- pyproject.toml's
+    # OWN declared minimum is 3.10, so this test must not itself need 3.11).
+    text = (REPO_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'requires-python\s*=\s*"([^"]+)"', text)
+    ctx.check("fixture drift guard: pyproject.toml has a requires-python line", m is not None)
+    requires = m.group(1) if m else ""
+    ctx.check(f"fixture drift guard: pyproject.toml still requires >=3.10, got {requires!r}",
+              requires.strip() == ">=3.10")
+
+    FakeVersion = collections.namedtuple("FakeVersion", "major minor micro")
+    old = sys.version_info
+    try:
+        sys.version_info = FakeVersion(3, 9, 0)
+        ctx.check(f"3.9 is WARN (below the real minimum), got {_check_python()!r}",
+                  _check_python().startswith(WARN))
+        sys.version_info = FakeVersion(3, 10, 0)
+        ctx.check(f"3.10 is OK (the real minimum), got {_check_python()!r}", _check_python().startswith(OK))
+    finally:
+        sys.version_info = old
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

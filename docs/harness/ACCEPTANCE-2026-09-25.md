@@ -391,3 +391,86 @@ file) -- both were re-sync artifacts (the platform running the check had an olde
 than the one the fix had already landed on), confirmed resolved by re-syncing and re-running, not
 real regressions. `python -X dev -W error::ResourceWarning tests/run_all.py` is clean on Windows
 (see "Part C" above).
+
+## H9b re-verification (2026-09-25, same day, follow-on worker)
+
+H9b closed the 26 findings this report's own "Final suite verification" numbers above still had
+open (3-5, 9, 11-15, 17-33 -- 1, 2, 6-8, 10, 16 and 34 were already closed by H9 itself, above),
+plus several "NEW from H9" cleanup items
+(temp-dir tracking/cleanup, a ResourceWarning-clean run, a `ruff --select F,E9,B` pass, MCP stdio
+server subprocess lifecycle). Every finding closed here has a real-`Session`/real-CLI pinning test
+named `test_h9b_f<NN>_...` in `tests/test_h9b_findings.py` (plus a few finding-adjacent tests
+folded into the existing files they extend, e.g. `tests/test_work_box.py` for finding 31). Base
+tree for this pass: the working tree this file's own H9 numbers above already describe, unchanged
+except by this pass's own edits (no commit was made by either worker; still no tag).
+
+**Environment**: Windows 11 (build/test host); WSL Ubuntu (`~/rolo-claude-wt-venv`, pointed at a
+live `/mnt/c/...` mount of the SAME working tree via `PYTHONPATH`, NOT the separate, stale
+`~/rolo-claude-wt` checkout that predates this pass -- that checkout's own editable pip install
+was silently shadowing the live tree and had to be `pip uninstall`-ed first, see "gotchas" below);
+the Kali VM (`linux-vm.lan`, reachable this time), synced via a `tar` pipe over `ssh` into a
+fresh `~/rolo-claude-h9b/rolo-claude` (the repo is private with no stored credentials on the VM,
+same limitation the original H9 pass hit), with the SAME stale-editable-install gotcha fixed the
+same way.
+
+**Live-Linux checks actually run (not just code-reviewed)**:
+- `pgrep`-confirmed on BOTH WSL and Kali: a background Bash job and a real MCP stdio server
+  subprocess are both gone after a normal `-p` exit, and after `SIGHUP` (`test_h9b_f03_sighup_...`,
+  `test_h9b_mcp_stdio_server_dies_with_the_process_normal_exit_and_sighup`).
+- Finding 12 (Linux PATH), on BOTH WSL and Kali, using the review's own reproduction technique:
+  `unshare -rm` (no sudo) bind-mounting the REAL Debian/Kali `/etc/profile` (fetched verbatim from
+  the Kali VM into `tests/helpers/debian_etc_profile.txt`) over the test host's own `/etc/profile`,
+  then running the real CLI inside that namespace -- a PATH-entry tool (`rvtool`, the review's own
+  example name) is found by BOTH the foreground and the background Bash path despite the profile's
+  unconditional PATH reassignment (`test_h9b_f12_session_path_survives_a_debian_profile_login_shell_reset`).
+  This specific pinning test did not exist before this pass -- the finding-12 CODE fix (restoring
+  `$PATH` from a harness-private var as the wrapped script's own first line) was already in place,
+  but nothing had run the brief's own `unshare -rm` verification for real until now.
+- `test_mcp_compat_matrix.py`'s `claude mcp add` <-> `rolo-claude mcp add` interop tests
+  (items 6/7/8) against the REAL `claude` binary on WSL: fixed a genuine (if minor) test bug found
+  by this verification -- a bare `"python"` command isn't on `$PATH` on a stock Debian/Ubuntu box
+  (only `python3` is), so the real `claude mcp list`'s own health check reported `ENOENT`; switched
+  to `sys.executable` everywhere in that file (still one argv element, no shell, same round-trip-
+  fidelity intent) and confirmed items 6/7/8 pass for real, not skipped.
+- `tests/test_tools_read.py::test_read_oversized_image_is_resized_or_omitted` failed for real on a
+  Pillow-less WSL venv: its own fixture size (`MAX_IMAGE_DIM + 400` = 1968px) predates finding 19's
+  own fix, which deliberately moved the omit-without-Pillow gate from the soft 1568px threshold to
+  the hard 8000px one -- so that image now correctly passes through unresized either way, and the
+  "no Pillow -> omitted" branch this test wanted to exercise was never reachable any more (masked
+  on Windows dev boxes that happen to have Pillow installed). Fixed the fixture to size past
+  `MAX_IMAGE_HARD_DIM` instead, which now genuinely exercises both branches on every platform.
+
+**Suites, closing numbers for this pass** (all three green, run at least twice per platform):
+
+| Suite | Windows | WSL Ubuntu | Kali VM |
+|---|---|---|---|
+| `python tests/run_all.py` | 1458 tests, 1450 passed, 0 failed, 8 skipped, exit 0 | 1458 tests, 1452 passed, 0 failed, 6 skipped, exit 0 | 1458 tests, 1453 passed, 0 failed, 5 skipped, exit 0 |
+| `python test_bridge.py` | 97/97 (391 checks), exit 0 | 97/97 (391 checks), exit 0 | 97/97 (391 checks), exit 0 |
+| `python test_tui.py` | 43/43, exit 0 | 43/43, exit 0 | 43/43, exit 0 |
+
+The skip-count spread (7/6/5) is platform capability, not flakiness: Windows skips every
+POSIX-only `unshare`/`pgrep`/`SIGHUP` test (3 tests) that WSL and Kali both run for real; the
+WSL/Kali difference is one pre-existing, unrelated optional-dependency skip. `python -X dev -W
+error::ResourceWarning tests/run_all.py` stays clean on Windows after this pass's own fixes too
+(same 0-failed count as the plain run, confirming no new unclosed sockets/pipes/files).
+
+**Gotchas hit and fixed while verifying, worth recording for the next Linux pass**: (1) both the
+WSL and Kali `~-venv`s had a STALE editable `pip install` of `rolo_claude` pointing at an old,
+out-of-sync checkout (`~/rolo-claude-wt`) that silently shadowed `PYTHONPATH` -- always `pip
+uninstall rolo_claude` from those venvs before trusting a `PYTHONPATH`-based run against a freshly
+synced tree, or re-`pip install -e` against the fresh path. (2) A background job's own marker text
+inside a shell COMMENT (`sleep 30 # marker`) never reaches `pgrep -f` on real Linux: a single
+simple command as a `bash -lc` script gets bash's own "one command" exec optimization, replacing
+`bash` with a bare `sleep 30` and dropping the comment (and "bash") from the process's own argv
+entirely -- confirmed empirically with `ps`. A compound script (`sleep 30; : marker`) defeats that
+optimization since bash must stay alive to run the second command. (3) A PRE-EXISTING, unrelated
+test (`tests/test_cli_flags.py::test_real_sigint_delivers_exit_130_posix`) flaked ONCE on a WSL run
+right after a fresh tar re-sync (cold filesystem cache): its own fixed `time.sleep(0.5)` before
+sending SIGINT assumed the child process would have finished importing and reached the mock
+server by then, which isn't true on a loaded/cold box -- SIGINT arrived before the harness's own
+`signal.signal(SIGINT, ...)` installed, so Python's default disposition killed it (`returncode -2`,
+not the deliberate `exit(130)` the test wants). Fixed by polling `mock.requests` (populated the
+INSTANT a request is received, before the scenario's own artificial delay) instead of a fixed
+sleep -- reproduced the original flake was gone across 5 repeats on WSL after the fix, and it
+never reproduced on Kali at all (this was a timing race exposed by a cold cache, not a platform-
+specific defect).

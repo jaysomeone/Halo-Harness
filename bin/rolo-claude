@@ -8,10 +8,23 @@
 # entry pointing back here would recurse); falls back to
 # `python3 -m rolo_claude` from this checkout otherwise (docs/harness/
 # INSTALL.md's `pip install --user -e .` path, or no install at all yet).
-here="$(cd "$(dirname "$0")" && pwd)"
+# H9 whole-tree review finding 24: `dirname "$0"` alone only ever gives
+# the directory of WHATEVER PATH INVOKED THIS SCRIPT -- for a real file
+# that's this checkout's own bin/, correct; for a SYMLINK (the documented
+# "no install at all" recipe: `ln -s .../bin/rolo-claude ~/bin/`), it's
+# ~/bin, the symlink's OWN directory, NEVER the checkout the symlink
+# actually points at. `repo_root` was then computed as `dirname ~/bin`
+# (i.e. $HOME) and PYTHONPATH pointed nowhere near rolo_claude at all --
+# verified on WSL: both a copy AND a symlink failed from any directory
+# outside the checkout with "No module named rolo_claude". `readlink -f`
+# resolves the symlink chain to the REAL underlying file first (a no-op
+# for an ordinary, non-symlinked copy -- returns that file's own absolute
+# path unchanged), matching the fix this finding names.
+resolved="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+here="$(cd "$(dirname "$resolved")" && pwd)"
 installed="$HOME/.local/bin/rolo-claude"
 
-if [ -x "$installed" ] && [ "$(cd "$(dirname "$installed")" 2>/dev/null && pwd)/$(basename "$installed")" != "$here/$(basename "$0")" ]; then
+if [ -x "$installed" ] && [ "$(cd "$(dirname "$installed")" 2>/dev/null && pwd)/$(basename "$installed")" != "$here/$(basename "$resolved")" ]; then
     exec "$installed" "$@"
 fi
 

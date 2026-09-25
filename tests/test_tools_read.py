@@ -224,7 +224,7 @@ def test_registry_dispatch_and_unknown_tool(ctx: Ctx):
 
 @test
 def test_registry_dispatch_never_raises_on_tool_exception(ctx: Ctx):
-    from rolo_claude.tools.base import Tool, ToolResult
+    from rolo_claude.tools.base import Tool
 
     class BoomTool(Tool):
         name = "Boom"
@@ -294,12 +294,24 @@ def test_read_oversized_image_is_resized_or_omitted(ctx: Ctx):
     """Environment-adaptive (see test_imageutil.py's own note): a REAL,
     decodable oversized PNG is resized when Pillow is installed, omitted
     with OpenCode's exact note text when it isn't -- either way Read must
-    never error out or crash on it."""
-    from rolo_claude.tools.imageutil import MAX_IMAGE_DIM
+    never error out or crash on it.
+
+    NEW from H9 (verified WSL failure): must exceed MAX_IMAGE_HARD_DIM
+    (8000), NOT the older MAX_IMAGE_DIM (1568) this test used before H9
+    whole-tree review finding 19 -- that finding moved the omit-without-
+    Pillow gate from the soft (1568px, Anthropic's own auto-resize
+    threshold) to the hard (8000px) dimension limit on purpose (a plain
+    1920x1080 screenshot was being omitted for no real reason). Sizing
+    this at only MAX_IMAGE_DIM + 400 now passes through BOTH with and
+    without Pillow -- a real image block either way -- so the "no Pillow"
+    branch below was never actually reachable on a Pillow-less box after
+    that fix landed (masked on Windows dev boxes that happen to have
+    Pillow installed; caught for real on a fresh WSL venv without it)."""
+    from rolo_claude.tools.imageutil import MAX_IMAGE_HARD_DIM
     from tests.test_imageutil import _pillow_available
     d = Path(tempfile.mkdtemp(prefix="read-img-huge-"))
     png = d / "huge.png"
-    _write_png(png, width=MAX_IMAGE_DIM + 400, height=10)
+    _write_png(png, width=MAX_IMAGE_HARD_DIM + 400, height=10)
     result = ReadTool().run({"file_path": str(png)}, ToolContext(cwd=d, vision=True))
     ctx.check("not an error either way", result.is_error is False)
     if _pillow_available():
@@ -359,6 +371,54 @@ def test_loop_tools_image_result_reaches_the_tool_result_event(ctx: Ctx):
     logged = tool_result_node.get("content")
     ctx.check("the log keeps the REAL image block, not the placeholder",
               isinstance(logged, list) and any(b.get("type") == "image" for b in logged))
+
+
+@test
+def test_h9b_f19_media_type_comes_from_sniffed_bytes_not_the_extension(ctx: Ctx):
+    """Verified bug: `shot.jpg` holding real PNG bytes was sent to the API
+    labeled `image/jpeg` (from the extension), which the Anthropic API
+    rejects since the declared media_type must match the real content."""
+    d = Path(tempfile.mkdtemp(prefix="read-tool-img-mismatch-"))
+    f = d / "shot.jpg"  # extension says JPEG
+    f.write_bytes(_TINY_PNG)  # content is really PNG
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d, vision=True))
+    ctx.check(f"no error, got {result.content!r}", not result.is_error)
+    block = result.content[0] if isinstance(result.content, list) else None
+    ctx.check(f"a real image block, got {result.content!r}", block is not None and block.get("type") == "image")
+    ctx.check(f"media_type reflects the REAL sniffed content (png), not the extension (jpg), "
+              f"got {block['source']['media_type']!r}", block["source"]["media_type"] == "image/png")
+
+
+@test
+def test_h9b_f18_continue_offset_hint_matches_what_was_actually_shown_and_cuts_on_a_line_boundary(ctx: Ctx):
+    """Verified bug: a 2,500-line CSV showed about line 1,218 (the char cap
+    cut mid-line-count), and the hint said "pass offset=2000" (computed
+    from how many lines were READ before the cap, not how many were
+    actually SHOWN) -- skipping 782 real lines the model never saw."""
+    d = Path(tempfile.mkdtemp(prefix="read-tool-offset-hint-"))
+    f = d / "wide.csv"
+    # Each line is long enough that the ~100k-char result cap cuts well
+    # before all 2000 requested lines fit -- forces the size-truncation
+    # path this fix targets.
+    f.write_text("\n".join(f"{i},{'x' * 90}" for i in range(2500)) + "\n", encoding="utf-8")
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f), "limit": 2000}, ToolContext(cwd=d))
+    ctx.check("size-truncated (the scenario this bug needs)", "truncated at ~25000 tokens" in result.content)
+    import re
+    m = re.search(r"pass offset=(\d+) to continue", result.content)
+    ctx.check(f"a continue hint is present, got {result.content[-200:]!r}", m is not None)
+    hinted_offset = int(m.group(1))
+    # The body (minus the trailing hint line) must have EXACTLY hinted_offset
+    # numbered lines in it -- proving the hint matches what was truly shown,
+    # and that the cut landed on a real line boundary (a mid-line cut would
+    # make the last "line" not start with a clean "NNNNNN\t" numbering).
+    body_lines = [ln for ln in result.content.splitlines() if ln[:1].isdigit() or (ln[:6].strip().isdigit())]
+    ctx.check(f"the hint's offset ({hinted_offset}) matches the real number of shown lines "
+              f"({len(body_lines)})", hinted_offset == len(body_lines))
+    last_line = body_lines[-1]
+    ctx.check(f"the last shown line is a clean, complete numbered line (never cut mid-line), "
+              f"got {last_line!r}", "\t" in last_line and last_line.split("\t", 1)[1].count(",") == 1)
 
 
 if __name__ == "__main__":

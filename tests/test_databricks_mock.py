@@ -125,7 +125,6 @@ def test_429_body_with_retry_after_honoured(ctx: Ctx):
     mock = MockDatabricks().start()
     try:
         req = _dbx_req(mock, "databricks-glm-rate-limit-429")
-        t0 = time.monotonic()
         try:
             list(stream_completion(req))
             ctx.check("a 429 must surface as UpstreamError", False)

@@ -598,7 +598,7 @@ def test_h5c_f06_batched_read_only_calls_ahead_of_a_queued_steer_do_not_run(ctx:
         queued = session.steer("STOP-BEFORE-READING")
         ctx.check("steer accepted right at message_end, before the batch is dispatched", queued is True)
 
-        for ev in gen:
+        for _ev in gen:
             pass  # drain to completion
 
         nodes = session.log.nodes()

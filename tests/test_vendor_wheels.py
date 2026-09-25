@@ -5,8 +5,10 @@ a Windows build host vendoring wheels for a Linux work box must EXCLUDE
 targets the requested Linux env, not whatever platform this process is
 actually running on).
 """
+import io
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -101,6 +103,24 @@ def test_main_missing_lock_file_is_a_clean_error_not_a_crash(ctx: Ctx):
             ctx.check("a clean non-zero exit, no traceback", rc == 1)
     finally:
         vendor_wheels.LOCK_FILE = old_lock
+
+
+@test
+def test_h9b_f23_default_python_versions_includes_cp313(ctx: Ctx):
+    """H9 whole-tree review finding 23: only cp311/cp312 were vendored by
+    default, but Debian 13 ships Python 3.13, and so does Kali rolling
+    (which tracks it) -- a work box on either got NO matching wheels at
+    all for its own interpreter unless someone remembered `--python-
+    versions 311,312,313` by hand."""
+    import vendor_wheels
+    with tempfile.TemporaryDirectory() as d:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = vendor_wheels.main(["--out", d, "--dry-run"])
+        ctx.check(f"exit 0 (dry-run), got {rc}", rc == 0)
+        out = buf.getvalue()
+        for tag in ("cp311", "cp312", "cp313"):
+            ctx.check(f"{tag} is in the default plan, got:\n{out}", f"] {tag} /" in out)
 
 
 if __name__ == "__main__":

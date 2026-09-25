@@ -484,7 +484,14 @@ def test_item6_server_added_by_real_claude_mcp_add_is_picked_up_by_rolo_claude(c
         config_dir = Path(td) / "cfg"
         empty_cwd = Path(td) / "cwd"
         empty_cwd.mkdir()
-        add = _run_claude(["mcp", "add", "--scope", "user", "rc-test", "--", "python",
+        # NEW from H9: a bare "python" is NOT on $PATH on every Linux box
+        # (Debian/Ubuntu without python-is-python3 only has python3) --
+        # verified failure: `claude mcp list`'s own health check reported
+        # ENOENT for it on a real WSL Ubuntu install. sys.executable is the
+        # SAME kind of "a simple command string" round-trip case (still no
+        # shell, still one argv element) but guaranteed to actually exist
+        # and run on whatever box this test executes on.
+        add = _run_claude(["mcp", "add", "--scope", "user", "rc-test", "--", sys.executable,
                             str(REPO_DIR / "tests" / "helpers" / "fake_mcp_server.py")],
                            config_dir=config_dir, cwd=empty_cwd)
         ctx.check(f"real `claude mcp add` succeeds, got {add.returncode} stderr={add.stderr!r}",
@@ -502,7 +509,9 @@ def test_item7_server_added_by_rolo_claude_mcp_add_is_listed_by_real_claude(ctx:
         config_dir = Path(td) / "cfg"
         empty_cwd = Path(td) / "cwd"
         empty_cwd.mkdir()
-        add = _run_rolo_mcp(["add", "--scope", "user", "rc-test2", "--", "python",
+        # NEW from H9: sys.executable, not a bare "python" -- see item 6's
+        # own comment (not every Linux box has "python" on $PATH).
+        add = _run_rolo_mcp(["add", "--scope", "user", "rc-test2", "--", sys.executable,
                               str(REPO_DIR / "tests" / "helpers" / "fake_mcp_server.py")],
                              config_dir=config_dir, cwd=empty_cwd)
         ctx.check(f"rolo-claude mcp add succeeds, got {add.returncode} stderr={add.stderr!r}",
@@ -510,7 +519,7 @@ def test_item7_server_added_by_rolo_claude_mcp_add_is_listed_by_real_claude(ctx:
         claude_json = json.loads((config_dir / ".claude.json").read_text(encoding="utf-8"))
         entry = claude_json["mcpServers"]["rc-test2"]
         ctx.check(f"schema matches Claude Code's own shape (binary-facts sec.9): type/command/args, got {entry}",
-                  entry.get("type") == "stdio" and entry.get("command") == "python"
+                  entry.get("type") == "stdio" and entry.get("command") == sys.executable
                   and isinstance(entry.get("args"), list))
         # H9 fix (item 7's literal "byte-for-byte" ask): the real `claude
         # mcp add` always writes an explicit "env": {} even with no -e
@@ -533,8 +542,9 @@ def test_item8_mcp_remove_both_directions_agree_between_both_clis(ctx: Ctx):
         fake_path = str(REPO_DIR / "tests" / "helpers" / "fake_mcp_server.py")
 
         # direction A: claude adds -> rolo-claude sees it -> rolo-claude
-        # removes -> BOTH clis agree it's gone.
-        _run_claude(["mcp", "add", "--scope", "user", "a-server", "--", "python", fake_path],
+        # removes -> BOTH clis agree it's gone. sys.executable, not a bare
+        # "python" -- see item 6's own comment.
+        _run_claude(["mcp", "add", "--scope", "user", "a-server", "--", sys.executable, fake_path],
                     config_dir=config_dir, cwd=empty_cwd)
         seen = _run_rolo_mcp(["list", "--cwd", str(empty_cwd)], config_dir=config_dir, cwd=empty_cwd)
         ctx.check(f"rolo-claude sees claude's server, got {seen.stdout!r}", "a-server" in (seen.stdout or ""))
@@ -549,7 +559,7 @@ def test_item8_mcp_remove_both_directions_agree_between_both_clis(ctx: Ctx):
 
         # direction B: rolo-claude adds -> claude sees it -> claude removes
         # -> BOTH clis agree it's gone.
-        _run_rolo_mcp(["add", "--scope", "user", "b-server", "--", "python", fake_path],
+        _run_rolo_mcp(["add", "--scope", "user", "b-server", "--", sys.executable, fake_path],
                        config_dir=config_dir, cwd=empty_cwd)
         seen2 = _run_claude(["mcp", "list"], config_dir=config_dir, cwd=empty_cwd)
         ctx.check(f"claude sees rolo-claude's server, got {seen2.stdout!r}", "b-server" in (seen2.stdout or ""))

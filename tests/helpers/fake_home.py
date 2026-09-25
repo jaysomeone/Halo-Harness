@@ -124,7 +124,7 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     # ~/.claude.json -- projects keyed in BOTH separator forms, plus a
     # stdio mcpServers entry (finding B: 15 real stdio servers on rolo's
     # box; one representative entry is enough for these fixtures).
-    proj_dir = home_proj = root / "proj"
+    proj_dir = root / "proj"
     claude_json = {
         "mcpServers": {
             "expanded-models": {

@@ -1,0 +1,3121 @@
+{
+  "openrouter": {
+    "deepseek/deepseek-chat-v3.1": {
+      "family": "deepseek-v3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 163840,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 147456,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "deepseek_v31_tokens",
+        "dsml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "siliconflow",
+          "novita",
+          "coreweave",
+          "deepinfra"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "fp4"
+        ],
+        "ignore": [
+          "atlas-cloud",
+          "mara",
+          "sambanova",
+          "google-vertex"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v3.1-terminus": {
+      "family": "deepseek-v3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 163840,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 147456,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "deepseek_v31_tokens",
+        "dsml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "siliconflow",
+          "novita",
+          "atlas-cloud"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8"
+        ],
+        "ignore": [
+          "streamlake"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v3.2-exp": {
+      "family": "deepseek-v3",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 163840,
+      "max_tokens_default": 65536,
+      "max_tokens_cap": 147456,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "siliconflow",
+          "novita",
+          "atlas-cloud"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8"
+        ],
+        "ignore": [
+          "deepinfra",
+          "baidu",
+          "digitalocean",
+          "mara",
+          "sambanova"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v3.2": {
+      "family": "deepseek-v3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 163840,
+      "max_tokens_default": 65536,
+      "max_tokens_cap": 147456,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "siliconflow",
+          "novita",
+          "gmicloud",
+          "atlas-cloud"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8"
+        ],
+        "ignore": [
+          "baidu",
+          "digitalocean",
+          "mara",
+          "sambanova",
+          "deepinfra"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-r1-0528": {
+      "family": "deepseek-v3",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 163840,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 147456,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "deepseek_v31_tokens",
+        "dsml",
+        "think_tags"
+      ],
+      "system_placement": "fold_into_first_user",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "siliconflow",
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8"
+        ],
+        "ignore": [
+          "deepinfra",
+          "baidu",
+          "digitalocean",
+          "mara",
+          "sambanova"
+        ],
+        "only": [
+          "siliconflow",
+          "novita"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v4-flash-0731": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "use_top_p": true,
+      "temperature": null,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1310720,
+      "max_tokens_default": 65536,
+      "max_tokens_cap": 943718,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "deepinfra",
+          "baseten",
+          "parasail",
+          "nebius",
+          "novita",
+          "together"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8"
+        ],
+        "ignore": [
+          "reka",
+          "coreweave",
+          "venice",
+          "baidu"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 65536,
+      "max_tokens_cap": 393216,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "deepseek",
+          "fireworks",
+          "together",
+          "parasail",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "unknown"
+        ],
+        "ignore": [
+          "deepinfra",
+          "venice",
+          "dekallm",
+          "phala",
+          "mara",
+          "sambanova"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "deepseek/deepseek-v4-pro-0813": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 65536,
+      "max_tokens_cap": 393216,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "deepseek"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "unknown"
+        ],
+        "ignore": [
+          "fireworks",
+          "deepinfra",
+          "venice"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.deepseek-v4-pro-0813.status"
+      ]
+    },
+    "moonshotai/kimi-k2": {
+      "family": "kimi-k2",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 98304,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens",
+        "json_text_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "only": [
+          "novita"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.kimi-k2.7-code.aliases.databricks"
+      ]
+    },
+    "moonshotai/kimi-k2-0905": {
+      "family": "kimi-k2",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 98304,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens",
+        "json_text_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "only": [
+          "novita"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "moonshotai/kimi-k2-thinking": {
+      "family": "kimi-k2",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens",
+        "json_text_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "google-vertex",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "moonshotai/kimi-k2.5": {
+      "family": "kimi-k2",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens",
+        "json_text_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "novita",
+          "siliconflow",
+          "atlas-cloud"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "ignore": [
+          "venice"
+        ],
+        "quantizations": [
+          "int4",
+          "unknown"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "moonshotai/kimi-k2.6": {
+      "family": "kimi-k26plus",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "temperature",
+        "top_p",
+        "n",
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "moonshotai"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "quantizations": [
+          "int4",
+          "mxfp4",
+          "fp8",
+          "bf16",
+          "unknown"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "moonshotai/kimi-k2.7-code": {
+      "family": "kimi-k26plus",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "temperature",
+        "top_p",
+        "n",
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "moonshotai"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "quantizations": [
+          "int4",
+          "mxfp4",
+          "fp8",
+          "bf16",
+          "unknown"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "aliases.databricks (models.dev only; not on the Databricks docs page)",
+        "models.kimi-k2.7-code.aliases.databricks"
+      ]
+    },
+    "moonshotai/kimi-k3": {
+      "family": "kimi-k26plus",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 131072,
+      "max_tokens_cap": 1048576,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "temperature",
+        "top_p",
+        "n",
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "moonshotai",
+          "fireworks",
+          "together",
+          "parasail",
+          "baseten"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "mxfp4",
+          "fp8",
+          "bf16",
+          "unknown"
+        ],
+        "ignore": [
+          "chutes",
+          "modal",
+          "phala",
+          "deepinfra",
+          "fireworks/fast",
+          "alibaba"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "z-ai/glm-4.5": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 98304,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "z-ai/glm-4.6": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 204800,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "novita",
+          "deepinfra"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "venice"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "z-ai/glm-4.7": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 204800,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "google-vertex",
+          "deepinfra",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "mancer",
+          "atlas-cloud",
+          "venice"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "z-ai/glm-5": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 204800,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "novita",
+          "baidu",
+          "streamlake",
+          "gmicloud"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "venice"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.glm-5.2.reasoning.off_strategy"
+      ]
+    },
+    "z-ai/glm-5.2": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "fireworks",
+          "together",
+          "baseten",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "digitalocean",
+          "parasail",
+          "cloudflare",
+          "decart"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.glm-5.2.reasoning.off_strategy",
+        "reasoning.off_strategy: Z.ai docs say thinking.type disabled is accepted; hermes-agent #96373 saw 400 code 1210 on 5.2"
+      ]
+    },
+    "z-ai/glm-5.3": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1310720,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "fireworks",
+          "together",
+          "baseten",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "reka",
+          "io-net"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "z-ai/glm-5.3-flash": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1310720,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details (4.7) | reasoning_content (5.x)",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "z-ai",
+          "fireworks",
+          "together",
+          "novita",
+          "deepinfra"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "quantizations": [
+          "fp8",
+          "bf16",
+          "fp4"
+        ],
+        "ignore": [
+          "io-net",
+          "reka",
+          "morph"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-235b-a22b-2507": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "gmicloud",
+          "parasail"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "ignore": [
+          "deepinfra",
+          "venice",
+          "nebius",
+          "google-vertex"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-235b-a22b-thinking-2507": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "top_k": 20,
+      "context_tokens": 131072,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 81920,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-coder": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "google-vertex",
+          "novita"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-coder-flash": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 1000000,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-coder-next": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "parasail",
+          "novita",
+          "streamlake"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3-next-80b-a3b-instruct": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "parasail",
+          "google-vertex"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "ignore": [
+          "deepinfra",
+          "novita"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "qwen/qwen3.5-122b-a10b": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "novita",
+          "atlas-cloud",
+          "deepinfra"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "ignore": [
+          "siliconflow"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "reasoning.replay"
+      ]
+    },
+    "qwen/qwen3.5-397b-a17b": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba",
+          "parasail",
+          "deepinfra",
+          "phala"
+        ],
+        "allow_fallbacks": true,
+        "require_parameters": true,
+        "ignore": [
+          "streamlake"
+        ]
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "reasoning.replay"
+      ]
+    },
+    "qwen/qwen3-max": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": null,
+      "top_p": null,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.qwen3-max.sampling",
+        "reasoning.replay",
+        "sampling"
+      ]
+    },
+    "qwen/qwen3-max-thinking": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": null,
+      "top_p": null,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.qwen3-max-thinking.sampling",
+        "reasoning.replay",
+        "sampling",
+        "cloned from qwen/qwen3-max -- H9 sampling-table audit found the row's key had a stray '(thinking sibling ...)' annotation baked in (never matched a real model id) and no separate row existed for the thinking variant at all; values are the base model's until someone confirms the thinking-mode ones directly"
+      ]
+    },
+    "minimax/minimax-m1": {
+      "family": "minimax",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "context_tokens": 1000000,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 40000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "<think> in content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "minimax_preserve",
+      "tool_leak_patterns": [
+        "minimax_m1_tool_calls",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "n"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "aliases.official (official API status)",
+        "models.minimax-m1.aliases.official"
+      ]
+    },
+    "minimax/minimax-m2": {
+      "family": "minimax",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "context_tokens": 204800,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details (with reasoning_split: true) | <think> in content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "minimax_preserve",
+      "tool_leak_patterns": [
+        "minimax_invoke_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "n"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "minimax",
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "minimax/minimax-m2.1": {
+      "family": "minimax",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "context_tokens": 204800,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_details (with reasoning_split: true) | <think> in content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "minimax_preserve",
+      "tool_leak_patterns": [
+        "minimax_invoke_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "n"
+      ],
+      "openrouter_pin": {
+        "order": [
+          "minimax",
+          "novita"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "note": "minimax/highspeed slug ~100 tps at 2x output price"
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "meta-llama/llama-4-maverick": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 16384,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "tools on 3 of 5 OpenRouter providers; Exacto routing available"
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)"
+      ]
+    },
+    "meta-llama/llama-4-scout": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1310720,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 16384,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "only 3 of 5 Maverick providers support tools; consider :exacto"
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)"
+      ]
+    },
+    "meta-llama/llama-3.3-70b-instruct": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 16384,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "only 3 of 5 Maverick providers support tools; consider :exacto"
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)"
+      ]
+    },
+    "meta-llama/llama-3.1-8b-instruct": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 8192,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "only 3 of 5 Maverick providers support tools; consider :exacto"
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)"
+      ]
+    },
+    "google/gemma-3-27b-it": {
+      "family": "gemma",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 131072,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 117964,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "gemma4_tool_call",
+        "gemma3_tool_code_fence",
+        "gemma4_thought_channel"
+      ],
+      "system_placement": "fold_into_first_user",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.gemma.sampling for Gemma 3 (generation_config gated; Gemma 4 verified)"
+      ]
+    },
+    "google/gemma-4-31b-it": {
+      "family": "gemma",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 262144,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 16384,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning (OpenRouter) | <|channel>thought raw",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "gemma4_tool_call",
+        "gemma3_tool_code_fence",
+        "gemma4_thought_channel"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.gemma.sampling for Gemma 3 (generation_config gated; Gemma 4 verified)"
+      ]
+    },
+    "google/gemma-4-26b-a4b-it": {
+      "family": "gemma",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 262144,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning (OpenRouter) | <|channel>thought raw",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "gemma4_tool_call",
+        "gemma3_tool_code_fence",
+        "gemma4_thought_channel"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "families.gemma.sampling for Gemma 3 (generation_config gated; Gemma 4 verified)"
+      ]
+    },
+    "mistralai/mistral-large-2512:batch": {
+      "family": "mistral",
+      "use_temperature": true,
+      "temperature": 0.1,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 262144,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "alnum9",
+      "tool_leak_patterns": [
+        "mistral_think_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "note": "devstral/magistral absent from OpenRouter on 2026-09-24; pin to Mistral API or self-host"
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "mistralai/mistral-medium-3-5": {
+      "family": "mistral",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 209715,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "thinking chunks (ThinkChunk type thinking) | reasoning_details on OpenRouter",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "alnum9",
+      "tool_leak_patterns": [
+        "mistral_think_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "note": "devstral/magistral absent from OpenRouter on 2026-09-24; pin to Mistral API or self-host"
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "mistralai/codestral-2508": {
+      "family": "mistral",
+      "use_temperature": true,
+      "temperature": 0.3,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 256000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 204800,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "alnum9",
+      "tool_leak_patterns": [
+        "mistral_think_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "note": "devstral/magistral absent from OpenRouter on 2026-09-24; pin to Mistral API or self-host"
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "openai/gpt-oss-120b": {
+      "family": "gpt-oss",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning (OpenRouter/Groq) | reasoning_content (vLLM) | harmony analysis channel",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "harmony_channels"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "consider :exacto for tool accuracy; Cerebras fastest"
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "limits_by_host.databricks.output_cap",
+        "models.gpt-oss-120b.limits_by_host.databricks"
+      ]
+    },
+    "openai/gpt-oss-20b": {
+      "family": "gpt-oss",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning (OpenRouter/Groq) | reasoning_content (vLLM) | harmony analysis channel",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "harmony_channels"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true,
+        "note": "consider :exacto for tool accuracy; Cerebras fastest"
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "x-ai/grok-4.7": {
+      "family": "grok",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 500000,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 450000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "x-ai/grok-4.6": {
+      "family": "grok",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 500000,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 450000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "x-ai/grok-4.5": {
+      "family": "grok",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 500000,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 450000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "x-ai/grok-4.3": {
+      "family": "grok",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1000000,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 900000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "low",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "x-ai/grok-4.20": {
+      "family": "grok",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 2000000,
+      "max_tokens_default": 30000,
+      "max_tokens_cap": 1800000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "limits.context",
+        "models.grok-4.20.limits.context"
+      ]
+    },
+    "nvidia/nemotron-3-nano-30b-a3b": {
+      "family": "nemotron3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "qwen3_coder_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "nvidia/nemotron-3-super-120b-a12b": {
+      "family": "nemotron3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "qwen3_coder_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "family": "nemotron3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 182520,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "qwen3_coder_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "family": "nemotron3",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 131072,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "qwen3_coder_xml",
+        "think_tags"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "google/gemini-3.1-pro-preview": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "google/gemini-3-flash-preview": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": false,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "google/gemini-3.1-flash-lite": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "google/gemini-3.5-flash": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    },
+    "google/gemini-3.8-flash": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": []
+    }
+  },
+  "databricks": {
+    "databricks-deepseek-v4-flash-0731": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "use_top_p": true,
+      "temperature": null,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 10000,
+      "max_tokens_cap": 10000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 200000,
+        "otpm": 10000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-deepseek-v4-1-flash": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 40000,
+      "max_tokens_cap": 40000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 2000000,
+        "otpm": 40000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-deepseek-v4-pro-0813": {
+      "family": "deepseek-v4",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 4000,
+      "max_tokens_cap": 4000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": true,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "dsml",
+        "deepseek_v31_tokens",
+        "name_json_text"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 200000,
+        "otpm": 4000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding",
+        "models.deepseek-v4-pro-0813.status"
+      ]
+    },
+    "databricks-kimi-k2-7-code": {
+      "family": "kimi-k26plus",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 262144,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 235929,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "temperature",
+        "top_p",
+        "n",
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "aliases.databricks (models.dev only; not on the Databricks docs page)",
+        "hosts.databricks.reasoning_replay_forwarding",
+        "models.kimi-k2.7-code.aliases.databricks"
+      ]
+    },
+    "databricks-kimi-k3": {
+      "family": "kimi-k26plus",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 40000,
+      "max_tokens_cap": 40000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "kimi_functions_idx",
+      "tool_leak_patterns": [
+        "kimi_section_tokens"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 2000000,
+        "otpm": 40000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [
+        "temperature",
+        "top_p",
+        "n",
+        "presence_penalty",
+        "frequency_penalty"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-glm-5-2": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 20000,
+      "max_tokens_cap": 20000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 200000,
+        "otpm": 20000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding",
+        "models.glm-5.2.reasoning.off_strategy",
+        "reasoning.off_strategy: Z.ai docs say thinking.type disabled is accepted; hermes-agent #96373 saw 400 code 1210 on 5.2"
+      ]
+    },
+    "databricks-glm-5-3": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 40000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 2000000,
+        "otpm": 40000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-glm-5-3-flash": {
+      "family": "glm",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 40000,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "max",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "glm_arg_key",
+        "python_repr_args",
+        "json_array_in_tool_call"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 2000000,
+        "otpm": 40000,
+        "qph": 7200
+      },
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-qwen3-next-80b-a3b-instruct": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-qwen35-122b-a10b": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 100000,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": {
+        "itpm": 1000000,
+        "otpm": 100000,
+        "qph": 360000
+      },
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding",
+        "reasoning.replay"
+      ]
+    },
+    "databricks-llama-4-maverick": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 128000,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)",
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-meta-llama-4-maverick": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 128000,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)",
+        "hosts.databricks.reasoning_replay_forwarding",
+        "H9 sampling-table audit: Databricks' own docs use two different endpoint names for this model across pages (supported-models lists databricks-llama-4-maverick, the function-calling page lists databricks-meta-llama-4-maverick) -- this row is a plain clone of that one so whichever name the real endpoint uses is covered; someone should confirm which is the actual live endpoint id and drop the other"
+      ]
+    },
+    "databricks-meta-llama-3-3-70b-instruct": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 16384,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)",
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-meta-llama-3-1-8b-instruct": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 8192,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)",
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemma-3-12b": {
+      "family": "gemma",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 32000,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "gemma4_tool_call",
+        "gemma3_tool_code_fence",
+        "gemma4_thought_channel"
+      ],
+      "system_placement": "fold_into_first_user",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.gemma.sampling for Gemma 3 (generation_config gated; Gemma 4 verified)",
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gpt-oss-120b": {
+      "family": "gpt-oss",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning (OpenRouter/Groq) | reasoning_content (vLLM) | harmony analysis channel",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "harmony_channels"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding",
+        "limits_by_host.databricks.output_cap",
+        "models.gpt-oss-120b.limits_by_host.databricks"
+      ]
+    },
+    "databricks-gpt-oss-20b": {
+      "family": "gpt-oss",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "context_tokens": 131072,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 32768,
+      "reasoning_replay": "text",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "medium",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning (OpenRouter/Groq) | reasoning_content (vLLM) | harmony analysis channel",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "harmony_channels"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-grok-4-6": {
+      "family": "grok",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 500000,
+      "max_tokens_default": 32768,
+      "max_tokens_cap": 450000,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "reasoning.encrypted_content (xAI) | reasoning_details reasoning.encrypted (OpenRouter)",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs"
+      ],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemini-3-1-pro": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemini-3-flash": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": false,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemini-3-1-flash-lite": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "minimal",
+      "reasoning_no_disable": false,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemini-3-5-flash": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-gemini-3-8-flash": {
+      "family": "gemini3",
+      "use_temperature": true,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "context_tokens": 1048576,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "details",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": true,
+      "reasoning_default_effort": "high",
+      "reasoning_no_disable": true,
+      "reasoning_field": "thought_signature on functionCall parts | tool_calls[].extra_content.google.thought_signature | reasoning_details reasoning.encrypted format google-gemini-v1",
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    }
+  }
+}

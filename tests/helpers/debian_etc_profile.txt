@@ -1,0 +1,45 @@
+# /etc/profile: system-wide .profile file for the Bourne shell (sh(1))
+# and Bourne compatible shells (bash(1), ksh(1), ash(1), ...).
+#
+# H9 whole-tree review finding 12 pinning test fixture: this is the REAL
+# `/etc/profile` from Debian's `base-files` package, as shipped by Kali
+# (fetched verbatim via `ssh user@linux-vm.lan "cat /etc/profile"` -- see
+# tests/test_h9b_findings.py's finding-12 test, which bind-mounts this
+# file over WSL Ubuntu's own /etc/profile inside `unshare -rm` so a plain
+# `bash -lc` on WSL sees EXACTLY what a `bash -lc` on real Kali/Debian
+# sees: PATH unconditionally reassigned, discarding anything the calling
+# process had. The brief's own words: "Debian profile means Debian's
+# base-files /etc/profile, which Kali ships, bind-mounted over Ubuntu's
+# inside unshare -rm. That needs no sudo, and the harness is unchanged."
+
+if [ "$(id -u)" -eq 0 ]; then
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+else
+  PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+fi
+export PATH
+
+if [ "${PS1-}" ]; then
+  if [ "${BASH-}" ] && [ "$BASH" != "/bin/sh" ]; then
+    # The file bash.bashrc already sets the default PS1.
+    # PS1='\h:\w\$ '
+    if [ -f /etc/bash.bashrc ]; then
+      . /etc/bash.bashrc
+    fi
+  else
+    if [ "$(id -u)" -eq 0 ]; then
+      PS1='# '
+    else
+      PS1='$ '
+    fi
+  fi
+fi
+
+if [ -d /etc/profile.d ]; then
+  for i in $(run-parts --list --regex '^[a-zA-Z0-9_][a-zA-Z0-9._-]*\.sh$' /etc/profile.d); do
+    if [ -r $i ]; then
+      . $i
+    fi
+  done
+  unset i
+fi

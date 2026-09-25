@@ -103,7 +103,7 @@ def test_case4_first_delta_arrives_before_upstream_finishes(ctx: Ctx):
         t0 = time.monotonic()
         first = next(gen)
         ctx.check("first event is message_start", first.get("type") == "message_start")
-        second = next(gen)  # the first real content_block_start/delta
+        next(gen)  # the first real content_block_start/delta
         dt = time.monotonic() - t0
         ctx.check(f"a real content event arrived well before the ~6s stream finishes, got dt={dt:.2f}s", dt < 3.0)
         gen.close()

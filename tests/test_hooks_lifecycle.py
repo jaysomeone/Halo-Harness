@@ -689,7 +689,6 @@ def test_hookrunner_once_only_fires_a_single_time_across_calls(ctx: Ctx):
 def test_stop_cap_9th_consecutive_block_overrides(ctx: Ctx):
     import os as _os
     tmp = tempfile.mkdtemp(prefix="hooks-stopcap-")
-    hook = H.HookDef(type="command", args=_SCRIPT_ARGS("exit1_stderr"))  # placeholder, replaced below via a real always-block script
     # a script that ALWAYS blocks (exit 2), so we can drive the cap deterministically
     always_block = H.HookDef(type="command", args=[sys.executable, "-c", "import sys; sys.exit(2)"])
     runner = _runner({"Stop": [always_block]}, tmp)

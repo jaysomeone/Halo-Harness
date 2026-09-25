@@ -248,6 +248,82 @@ def test_pre_4_5_notebook_without_cell_ids_gets_ids_assigned_on_touch(ctx: Ctx):
 
 
 @test
+def test_h9b_f15_pre_4_5_notebook_replace_and_delete_via_cell_dash_n_index(ctx: Ctx):
+    """H9 whole-tree review finding 15 (finding 34's own critique: the
+    existing pre-4.5 test above only ever INSERTS). [bin] Claude Code
+    2.1.282 renders an id-less cell's DISPLAY id as `e.id ?? cell-${n}`
+    (zero-indexed) and parses that exact `cell-N` shape back as a
+    positional index -- verified bug: on a 4.4 notebook with 2 cells and
+    NO ids at all, `cell-0`/`cell-1` (and bare `0`/`1`) ALL returned "No
+    cell with id" -- REPLACE and DELETE could never address a single cell,
+    only insert (which needs no cell_id at all when omitted)."""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "old.ipynb"
+        cell0 = {"cell_type": "code", "metadata": {}, "outputs": [{"output_type": "stream", "text": "2\n"}],
+                 "execution_count": 1, "source": ["print(1+1)"]}  # no "id" -- pre-4.5
+        cell1 = {"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
+                 "source": ["print(2+2)"]}
+        _write(path, {"cells": [cell0, cell1], "metadata": {}, "nbformat": 4, "nbformat_minor": 2})
+        tool = NotebookEditTool()
+
+        result = tool.run({"notebook_path": str(path), "cell_id": "cell-0", "new_source": "print(3+3)"},
+                           _ctx(Path(d)))
+        ctx.check(f"replace via cell-0 (a positional index) succeeds, got {result.content!r}",
+                  not result.is_error)
+        nb = _read(path)
+        ctx.check(f"cell 0's source is really updated, got {nb['cells'][0]['source']}",
+                  "".join(nb["cells"][0]["source"]) == "print(3+3)")
+        # finding 15's OTHER half: a code-cell replace clears the stale
+        # outputs/execution_count from the PREVIOUS source.
+        ctx.check(f"the stale stream output is gone, got {nb['cells'][0]['outputs']}",
+                  nb["cells"][0]["outputs"] == [])
+        ctx.check(f"the stale execution_count is cleared, got {nb['cells'][0]['execution_count']}",
+                  nb["cells"][0]["execution_count"] is None)
+        # ids were minted on THIS call and (since it succeeded) persisted.
+        ctx.check("cell 0 now has a real id (persisted, this call succeeded)", bool(nb["cells"][0].get("id")))
+
+        result2 = tool.run({"notebook_path": str(path), "cell_id": "cell-1", "edit_mode": "delete",
+                             "new_source": ""}, _ctx(Path(d)))
+        ctx.check(f"delete via cell-1 succeeds, got {result2.content!r}", not result2.is_error)
+        nb2 = _read(path)
+        ctx.check(f"only 1 cell remains, got {len(nb2['cells'])}", len(nb2["cells"]) == 1)
+        ctx.check("the surviving cell is the one that was cell-0 (now really print(3+3))",
+                  "".join(nb2["cells"][0]["source"]) == "print(3+3)")
+
+
+@test
+def test_h9b_f15_cell_dash_n_out_of_range_is_still_a_clear_error(ctx: Ctx):
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "old.ipynb"
+        cell0 = {"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None, "source": ["x = 1"]}
+        _write(path, {"cells": [cell0], "metadata": {}, "nbformat": 4, "nbformat_minor": 2})
+        tool = NotebookEditTool()
+        result = tool.run({"notebook_path": str(path), "cell_id": "cell-5", "new_source": "y = 2"}, _ctx(Path(d)))
+        ctx.check(f"out-of-range cell-N is a clear error, not a crash, got {result.content!r}",
+                  result.is_error and "No cell with id" in result.content)
+
+
+@test
+def test_h9b_f15_replace_on_an_already_code_cell_with_no_type_change_still_clears_outputs(ctx: Ctx):
+    """The bug specifically: outputs/execution_count were only ever reset
+    inside the `cell_type changed` branch -- an ordinary source-only
+    replace (the overwhelmingly common case) left them stale."""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "nb.ipynb"
+        cell = {"cell_type": "code", "id": "a", "metadata": {},
+                "outputs": [{"output_type": "execute_result", "data": {"text/plain": ["2"]}}],
+                "execution_count": 7, "source": ["1 + 1"]}
+        _write(path, _notebook([cell]))
+        tool = NotebookEditTool()
+        result = tool.run({"notebook_path": str(path), "cell_id": "a", "new_source": "3 + 3"}, _ctx(Path(d)))
+        ctx.check(f"no error, got {result.content!r}", not result.is_error)
+        nb = _read(path)
+        ctx.check(f"stale outputs cleared, got {nb['cells'][0]['outputs']}", nb["cells"][0]["outputs"] == [])
+        ctx.check(f"stale execution_count cleared, got {nb['cells'][0]['execution_count']}",
+                  nb["cells"][0]["execution_count"] is None)
+
+
+@test
 def test_source_as_a_single_string_is_read_fine_and_rewritten_as_a_list(ctx: Ctx):
     """Both `source` shapes (one string, or a list of line strings) are
     valid per the nbformat spec -- this tool must READ either, even though

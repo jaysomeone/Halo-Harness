@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -57,7 +56,6 @@ def test_memory_md_content_reaches_the_upstream_request(ctx: Ctx):
         ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-500:]!r})", result.returncode == 0)
         ctx.check("at least one request recorded", len(mock.requests) >= 1)
         last_body = mock.requests[-1]["body"] or {}
-        system_text = last_body.get("messages", [{}])[0].get("content", "") if last_body.get("messages") else ""
         # The system prompt travels as an OpenAI "system" role message (or
         # folded into the first message) once translated -- check the whole
         # serialized body for the memory text rather than assuming exactly

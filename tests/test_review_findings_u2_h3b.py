@@ -227,7 +227,6 @@ def test_finding_6_mode_change_applies_immediately_not_just_between_turns(ctx: C
 
     fh = build_fake_home()
     target1 = fh["proj"] / "finding6_a.txt"
-    target2 = fh["proj"] / "finding6_b.txt"
     mock = MockUpstream().start()
 
     def _scn(h, body):

@@ -3868,6 +3868,15 @@ DBX_MOCK_TOKEN = "test-dbx-token"
 
 
 def main() -> int:
+    # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring
+    # -- tracks every tempfile.mkdtemp() call for the rest of this process
+    # so it can be swept up once at the end, instead of leaking a directory
+    # per call forever (a real Linux run of the suites left thousands
+    # behind). Deferred import: this file runs standalone (`python
+    # test_bridge.py`, cwd = repo root), where the script's own directory
+    # is already on sys.path[0] -- no explicit path setup needed.
+    from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking
+    install_temp_dir_tracking()
     ctx = Ctx()
     if BRIDGE_EXISTS:
         try:
@@ -3931,6 +3940,9 @@ def main() -> int:
         print(f"NOTE: bridge.py not found at {BRIDGE_PY} -- all bridge-dependent tests were skipped, not failed.")
     elif ctx.bridge is None:
         print(f"NOTE: bridge.py exists but the shared server fixture could not start: {ctx.bridge_start_error}")
+
+    removed = cleanup_tracked_temp_dirs()
+    print(f"[cleanup] removed {removed} tracked temp dir(s)")
 
     exit_code = 1 if (failed > 0 or passed == 0) else 0
     print(f"exit={exit_code}")

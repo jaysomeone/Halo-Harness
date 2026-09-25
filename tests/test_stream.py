@@ -70,7 +70,7 @@ def test_abort_stops_generator_quickly(ctx: Ctx):
         next(gen)  # at least one real content event has arrived
         abort.set()
         t0 = time.monotonic()
-        remaining = list(gen)
+        list(gen)
         dt = time.monotonic() - t0
         ctx.check(f"generator finishes within 2s of abort.set(), took {dt:.2f}s", dt < 2.0)
     finally:

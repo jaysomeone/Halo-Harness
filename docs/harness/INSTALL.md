@@ -59,14 +59,33 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### No install at all (dev checkout)
 
-`bin/rolo-claude` (POSIX shell) works with zero install step -- it prefers
-`~/.local/bin/rolo-claude` when present (Option 1/2 above), otherwise falls
-back to `PYTHONPATH=<repo> python3 -m rolo_claude` from this checkout:
+`bin/rolo-claude` (POSIX shell) works with zero PACKAGING step -- it
+prefers `~/.local/bin/rolo-claude` when present (Option 1/2 above),
+otherwise falls back to `PYTHONPATH=<repo> python3 -m rolo_claude` from
+this checkout:
 
 ```sh
-cp bin/rolo-claude ~/bin/          # or symlink it; keep it executable
-chmod +x ~/bin/rolo-claude
+ln -s "$(pwd)/bin/rolo-claude" ~/bin/rolo-claude   # a symlink, not a copy -- see below
+chmod +x bin/rolo-claude
 ```
+
+Symlink it, don't copy it (H9 whole-tree review finding 24): a bare `cp`
+severs the connection back to this checkout entirely -- there is no
+`rolo_claude/` package sitting next to a lone copied file in `~/bin`, so
+it can never work no matter what. A symlink keeps pointing at the real
+checkout, and the script itself resolves that symlink (`readlink -f`)
+back to this directory before setting `PYTHONPATH`.
+
+This step alone does **not** install this harness's Python dependencies
+(textual, rich, mcp, ...) -- it only makes the `rolo-claude` COMMAND
+reachable on PATH. Something still has to have installed those
+dependencies somewhere `python3` can import them from: either run one of
+the `pip install -e .`/`uv tool install --editable .` recipes above at
+least once in this same checkout (their own console-script entry point is
+what line 1 of this section prefers -- once that exists, THIS symlink is
+redundant, though harmless to keep), or point `python3` at a venv that
+already has them (activate it before running `rolo-claude`, or hardcode
+its interpreter on this script's own shebang line).
 
 ## Windows
 
@@ -87,7 +106,8 @@ Some boxes only reach Databricks (over a VPN) and have no route to PyPI at
 all. `tools/vendor_wheels.py` pre-downloads every wheel `rolo-claude` needs
 (`requirements.lock`'s full pinned closure -- textual, rich, mcp,
 pydantic-core and everything under them -- plus the setuptools/wheel build
-backend) for Linux/cp311/cp312, so the work box never has to reach PyPI:
+backend) for Linux/cp311/cp312/cp313 (Debian 13 and Kali rolling both ship
+3.13 by default), so the work box never has to reach PyPI:
 
 ```sh
 # on a machine WITH internet access (the Windows build host is fine --
@@ -96,15 +116,33 @@ python tools/vendor_wheels.py                      # -> ./wheels (gitignored)
 python tools/vendor_wheels.py --platform manylinux2014_aarch64   # arm64 work box
 
 # copy wheels/ to the work box (shared drive, scp once the VPN is up, a USB
-# stick -- whatever side channel reaches it), then there:
-pip install --no-index --find-links=wheels -e . --no-build-isolation
+# stick -- whatever side channel reaches it), then there, INSIDE A VENV
+# (a fresh Python >=3.12 venv has no setuptools/pip preinstalled at all --
+# see the note below on why this must be a venv AND must NOT pass
+# --no-build-isolation):
+python3 -m venv ~/.venvs/rolo-claude && source ~/.venvs/rolo-claude/bin/activate
+pip install --no-index --find-links=wheels -e .
 ```
 
 `--no-index` refuses to reach PyPI even if a route momentarily exists;
-`--find-links=wheels` is the only source of packages; `--no-build-isolation`
-skips pip's normal "fetch the build backend into a throwaway env" step
-(which would itself need PyPI) since `wheels/` already has setuptools/wheel
-in it. `uv` works the same offline, pointed at the same directory:
+`--find-links=wheels` is the only source of packages -- pip passes BOTH of
+these through to the isolated build environment it creates for `-e .`
+itself (the standard, documented behaviour of pip's build isolation: the
+build env is populated using the SAME index options as the install
+command), so that isolated env finds `wheels/`'s own setuptools/wheel
+without ever reaching PyPI.
+H9 whole-tree review finding 23: do **not** add `--no-build-isolation`
+here, even though `wheels/` also has a setuptools/wheel pair sitting in
+it -- that flag skips creating the isolated build env ENTIRELY, so pip
+never looks in `--find-links` for the build backend at all; it instead
+requires setuptools to ALREADY be import-able in whatever environment
+`pip install` itself is running in. A fresh Python (>=3.12 stopped
+bundling setuptools into a new venv by default) or a bare `pip install
+--user` on Debian/Kali (PEP 668) has neither -- verified on WSL, a fresh
+3.12 venv: `ModuleNotFoundError: No module named 'setuptools'`, pip exit
+2. Dropping the flag (and installing inside a venv, never `--user`
+system-wide, to sidestep PEP 668 entirely) fixes both at once. `uv` works
+the same offline, pointed at the same directory:
 
 ```sh
 uv tool install --editable . --offline --find-links wheels
@@ -203,9 +241,13 @@ script -q -c "rolo-claude --demo" /dev/null
 
 ## Terminal notes (Linux acceptance)
 
-rolo-claude's TUI is built and tested against xterm, kitty, gnome-terminal
-and tmux (mouse on/off) over both a local Kali session and SSH; this is
-what to expect from each, and how to get the most out of it.
+rolo-claude's TUI is built on Textual, which targets any modern terminal
+(xterm, kitty, gnome-terminal, tmux, and others) -- this project's own
+acceptance record has directly exercised WSL Ubuntu's tmux over SSH (see
+`docs/harness/ACCEPTANCE-2026-09-25.md`); a mouse on/off matrix across the
+other terminals named above, and a local (non-SSH) Kali console session,
+have not yet been separately recorded. This is what to expect, and how to
+get the most out of it, on any of them.
 
 - **Mouse**: on by default (Textual captures it for click-to-focus, drag-
   scroll and drag-select-to-copy). **Hold Shift while dragging** to bypass

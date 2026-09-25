@@ -61,9 +61,10 @@ for OpenRouter models. Databricks credentials are discovered automatically,
 same chain the whole project has always used: explicit `BRIDGE_DBX_BASE_
 URL`+`BRIDGE_DBX_TOKEN` wins outright, then `ANTHROPIC_BASE_URL`+
 `ANTHROPIC_AUTH_TOKEN`/the settings `env` chain when the host is a real
-Databricks host, then `DATABRICKS_HOST`+`DATABRICKS_TOKEN`, then
-`~/.databrickscfg`'s `[DEFAULT]` section, then (H8) `~/.claude/ucode-
-settings.json` if Databricks' own `ug`/unity-gateway CLI already wrote one.
+Databricks host, then `DATABRICKS_HOST`+`DATABRICKS_TOKEN`, then (H8)
+`~/.claude/ucode-settings.json` if Databricks' own `ug`/unity-gateway CLI
+already wrote one, then `~/.databrickscfg`'s `[DEFAULT]` section last (a
+generic, possibly stale/unrelated-workspace fallback).
 Nothing to configure if any of those already work for the real `claude` CLI
 on the same box.
 
@@ -154,13 +155,18 @@ flight.
 
 ## Hooks, skills, commands, MCP, browser
 
-**Hooks**: every hook event Claude Code fires (`PreToolUse`, `PostToolUse`,
-`UserPromptSubmit`, `SessionStart`/`SessionEnd`, `Stop`/`SubagentStop`,
-`Notification`, `PreCompact`, plus the newer `TaskCreated`/`TaskCompleted`,
-`PreModelSwitch`/`PostModelSwitch`, worktree lifecycle events) and every
-handler type a hook definition can invoke -- `command` (shell),
+**Hooks**: the events this harness actually fires are `SessionStart`/
+`SessionEnd`, `UserPromptSubmit`, `PreToolUse`/`PostToolUse`(`Failure`),
+`PostToolBatch`, `PermissionRequest`/`PermissionDenied`, `Stop`/
+`SubagentStart`/`SubagentStop`, and `PreCompact`/`PostCompact` -- and every
+handler type a hook definition can invoke for them -- `command` (shell),
 `prompt` (inject text), `agent` (run a sub-agent), `http` (call a URL),
-`mcp_tool` (call a tool on a configured MCP server) -- are all wired.
+`mcp_tool` (call a tool on a configured MCP server) -- is wired. A settings.
+json/hooks.json entry for a name Claude Code also recognizes but this
+build doesn't fire yet (`Notification`, `TaskCreated`/`TaskCompleted`,
+`PreModelSwitch`/`PostModelSwitch`, the worktree lifecycle events, and a
+few others -- see `hooks.py`'s own `NOT_EMITTED_V1`) parses fine and is
+silently never triggered, rather than erroring.
 
 **Skills and custom commands**: discovered from both user and project
 directories exactly like `claude`; a skill's/command's body can reference
@@ -192,7 +198,9 @@ path string) for png/jpg/gif/webp when the active model's profile says it
 supports vision, resized/downscaled to at most 1568px and 5MB (omitted with
 a plain note instead when it can't be brought under that even after
 resizing, or when Pillow isn't installed at all -- the `vision` extra,
-`pip install 'rolo-claude[vision]'`, is optional, never required); an MCP
+`pip install --user -e '.[vision]'` (or `uv tool install --editable
+'.[vision]'`) from the checkout, same as every other install command in
+this doc, is optional, never required); an MCP
 tool's own image results get the same treatment. `@path` mentions to an
 image file (TUI or a skill/command body) and `--file PATH [PATH ...]`
 (a local path -- see `rolo-claude --help`; Claude Code's own `file_id:
@@ -213,8 +221,11 @@ killed when the session quits.
 directory; `-r`/`--resume [ID]` resumes a specific one (or shows a picker);
 `--fork-session` continues from one without overwriting it; `-n`/`--name`
 labels a session. `/rewind` (and the TUI's undo) restores both the
-conversation log and any file a Write/Edit touched, via the same shadow-
-copy mechanism regardless of which tool changed the file. Auto-compaction
+conversation log and any file a Write/Edit touched, via a shadow-copy
+mechanism scoped to those two tools by design -- a Bash- or NotebookEdit-
+made change is not shadow-copied and `/rewind` won't undo it (detecting
+which files a shell command touched would need a blocking `git status`
+call; see `tui/dispatch.py`'s `_maybe_record_shadow_step`). Auto-compaction
 triggers well before the model's real context ceiling (an 80%-of-usable
 default, floored so a small-context open-weight model still gets a
 sensible trigger point instead of ~0), summarizing older turns while
@@ -266,8 +277,10 @@ someone else, the latter aggregates turn/cost/token stats across sessions.
   `--remote-control`, `--teleport` and a handful of others are intentionally
   still in that state -- see `rolo_claude/cli.py`'s `_NOT_YET_FLAGS`.
 - **Where to look**: session logs under `~/.rolo-claude/sessions/`;
-  `rolo-claude doctor` / `doctor --work` for environment issues; `-d`/
-  `--debug` for verbose stderr.
+  `rolo-claude doctor` / `doctor --work` for environment issues;
+  `--verbose` for a running commentary of intermediate model
+  calls/tool calls on stderr in print mode (`-d`/`--debug` is one of the
+  not-yet flags above -- it parses but does nothing yet).
 
 ## Security posture
 

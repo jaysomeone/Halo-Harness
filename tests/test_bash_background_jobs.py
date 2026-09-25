@@ -96,7 +96,6 @@ def test_h9_completion_notice_truncates_long_output_with_a_bashoutput_hint(ctx: 
     to BashOutput for the rest. Constructs the JobRecord/collector directly
     (bypassing a real subprocess) for a fast, deterministic test of
     `_push_notice` itself."""
-    import dataclasses
     import time as time_mod
     from rolo_claude.agent.jobs import JobRecord
     from rolo_claude.tools._proc import _CappedCollector
@@ -307,6 +306,73 @@ def test_bash_timeout_moves_to_background_when_a_registry_is_present(ctx: Ctx):
     text, _ = reg.poll(job_id)
     ctx.check(f"its output is clean (no marker leakage), got {text!r}",
               "finally-done" in text and "__ROLO_CLAUDE_EXIT__" not in text and "__ROLO_CLAUDE_CWD__" not in text)
+
+
+@test
+def test_h9b_f30_first_bashoutput_poll_after_a_timeout_handoff_never_repeats_already_delivered_text(ctx: Ctx):
+    """Verified bug: a timeout-adopted job's `read_offset` defaulted to 0
+    (JobRecord's own dataclass default), so the FIRST BashOutput poll
+    after the handoff repeated everything the FOREGROUND Bash call's own
+    (already delivered to the model) timeout tool_result already showed."""
+    d = _tmpdir("bash-timeout-offset-")
+    reg = JobRegistry(_FakeParent())
+    ctx_obj = ToolContext(cwd=d, bash_state={"cwd": d}, job_registry=reg)
+    marker = "h9b-f30-already-delivered-marker"
+    result = BashTool().run({"command": f"echo {marker} && sleep 10 && echo later-output", "timeout": 800}, ctx_obj)
+    ctx.check(f"the foreground timeout result already shows the marker, got {result.content!r}", marker in result.content)
+    ctx.check("moved to background (not an error)", result.is_error is False)
+    job_id = next(iter(reg.jobs))
+    first_poll_text, err = reg.poll(job_id)
+    ctx.check(f"BashOutput's own poll call succeeded, got err={err!r}", err is None)
+    ctx.check(f"the FIRST poll does NOT repeat the marker the foreground result already delivered, "
+              f"got {first_poll_text!r}", marker not in first_poll_text)
+    ok = _wait_until(lambda: reg.jobs[job_id].status != "running", timeout=15.0)
+    ctx.check("the job eventually completes", ok)
+    later_text, _ = reg.poll(job_id)
+    ctx.check(f"but genuinely NEW output (produced after the handoff) still arrives, got {later_text!r}",
+              "later-output" in later_text)
+    ctx.check(f"and the marker is never repeated even across BOTH polls combined, got "
+              f"{first_poll_text!r} + {later_text!r}", marker not in (first_poll_text + later_text))
+
+
+@test
+def test_h9b_f30_capped_collector_append_and_result_are_thread_safe(ctx: Ctx):
+    """A direct stress test of the collector's own internal lock (finding
+    30's second half): `append()` from many threads concurrently with
+    `result()` being read repeatedly must never raise or corrupt
+    `total_len`'s own accounting, matching the real
+    run_streamed-hands-off-to-a-new-drain-thread race this fixes."""
+    from rolo_claude.tools._proc import _CappedCollector
+    collector = _CappedCollector()
+    chunk = "x" * 100
+    n_threads = 8
+    n_appends = 200
+    errors: list = []
+
+    def _writer():
+        try:
+            for _ in range(n_appends):
+                collector.append(chunk)
+        except Exception as e:
+            errors.append(e)
+
+    def _reader():
+        try:
+            for _ in range(n_appends):
+                collector.result()
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_writer) for _ in range(n_threads)] + [threading.Thread(target=_reader)
+                                                                                for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    ctx.check(f"no exceptions from concurrent append()/result(), got {errors}", errors == [])
+    ctx.check(f"total_len accounts for every append exactly once, expected "
+              f"{n_threads * n_appends * len(chunk)}, got {collector.total_len}",
+              collector.total_len == n_threads * n_appends * len(chunk))
 
 
 @test

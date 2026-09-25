@@ -291,7 +291,6 @@ def test_h9_sampling_unsupported_params_wired_from_model_table_json(ctx: Ctx):
     logprobs/top_logprobs) but had no matching `ProviderProfile` field at
     all, so it was silently dropped on load -- pure decoration, byte-
     identical whether the row listed anything or not. Now it round-trips."""
-    import json
     reset_model_table_cache()
     from rolo_claude.providers.profiles import load_model_table
     table = load_model_table()

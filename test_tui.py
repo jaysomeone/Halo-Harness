@@ -1525,7 +1525,123 @@ def test_bang_command_ask_mode_shows_a_permission_card_first(ctx: Ctx):
     asyncio.run(body())
 
 
+def _two_tool_calls_chunk(calls: list) -> list:
+    """`calls` = [(name, arguments, call_id), ...] -- H9 whole-tree review
+    finding 11's own pilot needs TWO parallel Task calls in ONE assistant
+    message (agent/loop.py's own ThreadPoolExecutor batch dispatch only
+    runs several Agent calls CONCURRENTLY when they arrive together like
+    this -- `_tool_call_chunk` above only ever emits one)."""
+    tool_calls = [
+        {"index": i, "id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for i, (name, args, cid) in enumerate(calls)
+    ]
+    return [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": tool_calls}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+
+@test
+def test_h9b_f11_two_parallel_children_get_separate_streams_and_never_touch_main_status_or_turn_done(ctx: Ctx):
+    """H9 whole-tree review finding 11: `_apply_event_inner` used to ignore
+    `agent_id` for everything except `permission_request` -- two parallel
+    children's text deltas merged into ONE widget ("childA-0 childB-0
+    childA-1 …"), a child's own status/message_end set the MAIN status bar
+    to the child's model/cost (and to idle while the parent was still
+    running), and a child's turn_done called `app.on_turn_done`, wrongly
+    showing "Interrupted." and firing the auto-title logic. A real pilot,
+    two REAL parallel foreground sub-agents (agent/loop.py's own
+    ThreadPoolExecutor batch dispatch, not background)."""
+    import argparse
+
+    async def body():
+        fh = build_fake_home()
+        SCENARIOS["h9b-f11-parent"] = ScriptedTurns([
+            _two_tool_calls_chunk([
+                ("Task", {"description": "a", "prompt": "go", "subagent_type": "general-purpose",
+                           "model": "or:mock/h9b-f11-child-a"}, "call_a"),
+                ("Task", {"description": "b", "prompt": "go", "subagent_type": "general-purpose",
+                           "model": "or:mock/h9b-f11-child-b"}, "call_b"),
+            ]),
+            _final_text_chunk("parent-final-answer"),
+        ])
+        SCENARIOS["h9b-f11-child-a"] = ScriptedTurns([_final_text_chunk("childA-answer")])
+        SCENARIOS["h9b-f11-child-b"] = ScriptedTurns([_final_text_chunk("childB-answer")])
+        mock = MockUpstream().start()
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_OPENROUTER_BASE_URL", "OPENROUTER_API_KEY")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        controller = None
+        try:
+            from rolo_claude.tui.bootstrap import build_controller
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=False,
+                tools=None, add_dir=None, model="or:mock/h9b-f11-parent", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "spawn two parallel sub-agents")
+                await pilot.press("enter")
+                for _ in range(120):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+                    if any("parent-final-answer" in t for t in texts):
+                        break
+                # The parent's own trailing message_end/turn_done events may
+                # still be queued right behind the text delta that just made
+                # "parent-final-answer" visible -- a few more drains let
+                # them actually apply before the status_bar/turn_done_count
+                # assertions below read a still-mid-flight state.
+                await _drain_a_few(app, pilot, n=10, pause=0.05)
+
+                texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+                child_a_widgets = [t for t in texts if "childA-answer" in t]
+                child_b_widgets = [t for t in texts if "childB-answer" in t]
+                ctx.check(f"child A's own answer is its own widget, got {texts}", len(child_a_widgets) == 1)
+                ctx.check(f"child B's own answer is its own widget, got {texts}", len(child_b_widgets) == 1)
+                ctx.check("child A's text never leaked into child B's widget or vice versa",
+                          "childB-answer" not in child_a_widgets[0] and "childA-answer" not in child_b_widgets[0])
+                parent_widgets = [t for t in texts if "parent-final-answer" in t]
+                ctx.check(f"the parent's own final answer is present and separate, got {texts}",
+                          len(parent_widgets) == 1 and "childA-answer" not in parent_widgets[0]
+                          and "childB-answer" not in parent_widgets[0])
+
+                ctx.check(f"the main status bar shows the PARENT's own model, never a child's, "
+                          f"got {app.status_bar.model!r}", app.status_bar.model == "or:mock/h9b-f11-parent")
+                ctx.check(f"the main status bar settled idle (the parent's own turn really ended), "
+                          f"got phase={app.status_bar.phase!r}", app.status_bar.phase == "idle")
+                ctx.check(f"on_turn_done fired exactly ONCE (the parent's own -- neither child's turn_done "
+                          f"incremented it), got {app._turn_done_count}", app._turn_done_count == 1)
+        finally:
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
+    # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
+    from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking
+    install_temp_dir_tracking()
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)
+    removed = cleanup_tracked_temp_dirs()
+    print(f"[cleanup] removed {removed} tracked temp dir(s)")
     sys.exit(print_results(results, passed, failed, skipped, label="TUI tests"))

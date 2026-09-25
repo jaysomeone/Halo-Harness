@@ -170,6 +170,63 @@ def test_image_offloaded_after_n_turns(ctx: Ctx):
 
 
 @test
+def test_h9b_f20_tool_result_messages_never_count_as_their_own_turn(ctx: Ctx):
+    """H9 whole-tree review finding 20: a tool_result is ALSO sent as a
+    `role: "user"` wire message -- verified bug: a screenshot in "fix the
+    bug in this screenshot" was offloaded after just 3 TOOL STEPS of the
+    SAME turn (each tool_result message wrongly counted as its own "user
+    turn"), not `image_offload_turns` real turns later. One real user
+    turn with a screenshot, 3 tool round-trips, all still the CURRENT
+    turn -- the image must survive."""
+    msgs = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "fix the bug in this screenshot"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "xxx"}},
+        ]},
+        _assistant_tool_use("t1"), _user_tool_result("t1", "result 1"),
+        _assistant_tool_use("t2"), _user_tool_result("t2", "result 2"),
+        _assistant_tool_use("t3"), _user_tool_result("t3", "result 3"),
+        {"role": "assistant", "content": [{"type": "text", "text": "fixed it"}]},
+    ]
+    out = prune_messages(msgs, image_offload_turns=3)
+    first_msg_content = out[0]["content"]
+    ctx.check("the screenshot from THIS turn survives 3 tool round-trips within the same turn",
+              any(b.get("type") == "image" for b in first_msg_content))
+
+
+@test
+def test_h9b_f20_image_nested_inside_a_tool_result_is_also_offloaded(ctx: Ctx):
+    """The other half of finding 20: an image returned BY A TOOL (nested
+    inside a tool_result block's own `content` list) was never reached by
+    the old top-level-only block loop -- never offloaded no matter how old."""
+    old_tool_result_with_image = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "t0", "content": [
+            {"type": "text", "text": "here is the screenshot"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "xxx"}},
+        ]}],
+    }
+    msgs = [
+        {"role": "user", "content": [{"type": "text", "text": "q0"}]},
+        _assistant_tool_use("t0"), old_tool_result_with_image,
+        {"role": "assistant", "content": [{"type": "text", "text": "a0"}]},
+    ]
+    # 6 more real turns, well past image_offload_turns=3, so the old nested
+    # image is now "old" by the same measure a top-level one would be.
+    for i in range(1, 7):
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"q{i}"}]})
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": f"a{i}"}]})
+    out = prune_messages(msgs, image_offload_turns=3)
+    nested_tool_result = out[2]["content"][0]
+    ctx.check(f"the nested content is still a tool_result block, got {nested_tool_result!r}",
+              nested_tool_result.get("type") == "tool_result")
+    inner = nested_tool_result.get("content")
+    ctx.check(f"the nested image was offloaded to a text placeholder, got {inner!r}",
+              isinstance(inner, list) and all(b.get("type") != "image" for b in inner)
+              and any(b.get("type") == "text" and "offloaded" in b.get("text", "") for b in inner))
+
+
+@test
 def test_estimate_text_tokens_chars_per_4(ctx: Ctx):
     ctx.check("estimate ~= chars/4", estimate_text_tokens("A" * 400) == 100)
     ctx.check("empty text is 0 tokens", estimate_text_tokens("") == 0)

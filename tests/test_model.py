@@ -2,7 +2,6 @@
 routes.json aliases), ModelProfile resolution from models.json/routes.json/
 defaults, CostMeter.
 """
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -89,7 +88,7 @@ def test_alias_chain_resolution(ctx: Ctx):
 def test_alias_self_cycle_does_not_hang(ctx: Ctx):
     routes = {"aliases": {"loop": "loop"}}
     try:
-        ref = parse_model_ref("loop", routes)
+        parse_model_ref("loop", routes)
         # Falls through to "bare databricks-*/vendor-model" checks and fails
         # those too -> InvalidModelError is the expected outcome, not a hang.
         ctx.check("a self-referencing alias must not hang (raised or resolved, either is fine)", True)
@@ -414,6 +413,94 @@ def test_unknown_model_with_no_vendored_entry_falls_back_to_defaults(ctx: Ctx):
     ref = parse_model_ref("or:some-vendor/totally-made-up-model-xyz")
     profile = resolve_model_profile(ref, state_dir, routes={})
     ctx.check("bare dataclass defaults, no crash", profile == ModelProfile())
+
+
+# ---- H9 whole-tree review finding 22: Databricks work-default rows -------
+
+@test
+def test_h9b_f22_work_default_databricks_models_get_real_context_from_model_table(ctx: Ctx):
+    """Verified bug: the vendored package fallback's 30 rows include NONE
+    of the plan's own work-default models (`databricks-deepseek-v4-1-
+    flash`, `-kimi-k3`, `-glm-5-3`) -- every one of them silently resolved
+    to the bare 128k/16k dataclass guess, so auto-compaction triggered at
+    ~89,600 tokens instead of the real ~773k (0.7 * 1,048,576) these
+    models actually support. `providers/model_table.json` (a DIFFERENT
+    file, for REQUEST shaping, not economics) already has a real,
+    hand-verified `context_tokens` for all three -- now consulted as a
+    fallback tier here too."""
+    from rolo_claude.providers.profiles import load_model_table
+    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    table = load_model_table().get("databricks") or {}
+    vendored = load_vendored_databricks_fallback()
+    for model_id in ("databricks-deepseek-v4-1-flash", "databricks-kimi-k3", "databricks-glm-5-3"):
+        ctx.check(f"fixture drift guard: model_table.json still has {model_id}", model_id in table)
+        ctx.check(f"fixture drift guard: the vendored fallback still LACKS {model_id} (else this "
+                  f"row would resolve via that tier instead, proving nothing)", model_id not in vendored)
+
+        state_dir = Path(tempfile.mkdtemp(prefix="model-h9b-f22-"))
+        ref = parse_model_ref(f"dbx:{model_id}")
+        profile = resolve_model_profile(ref, state_dir, routes={})
+        expected_context = table[model_id]["context_tokens"]
+        ctx.check(f"{model_id}: context_tokens came from model_table.json, expected "
+                  f"{expected_context}, got {profile.context_tokens}",
+                  profile.context_tokens == expected_context)
+        ctx.check(f"{model_id}: never the bare 128k dataclass guess",
+                  profile.context_tokens != ModelProfile().context_tokens)
+
+
+@test
+def test_h9b_f22_refreshed_models_dev_cache_is_actually_read(ctx: Ctx):
+    """Verified bug: `rolo-claude models --refresh` writes
+    <state_dir>/models-dev.json, but `load_models_dev_json` had NO caller
+    anywhere -- the refreshed data was written and then never looked at
+    again by anything. Now the FIRST fallback tier tried for `databricks`,
+    ahead of even the committed vendored file (a refresh the user
+    explicitly ran should win over a stale committed snapshot)."""
+    from rolo_claude.providers.models_dev import write_models_dev_json, load_vendored_databricks_fallback
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-h9b-f22-refresh-"))
+    fake_full_fetch = {
+        "databricks": {"id": "databricks", "models": {
+            "databricks-brand-new-refreshed-model": {
+                "limit": {"context": 999999, "output": 12345},
+                "modalities": {"input": ["text"]}, "reasoning": True,
+                "cost": {"input": 1.0, "output": 2.0},
+            },
+        }},
+        "openai": {"id": "openai", "models": {}},
+    }
+    write_models_dev_json(state_dir, fake_full_fetch)
+    ctx.check("fixture drift guard: this model id isn't ALSO in the vendored fallback (else this "
+              "proves nothing)", "databricks-brand-new-refreshed-model" not in load_vendored_databricks_fallback())
+
+    ref = parse_model_ref("dbx:databricks-brand-new-refreshed-model")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check(f"context_tokens came from the REFRESHED cache, got {profile.context_tokens}",
+              profile.context_tokens == 999999)
+    ctx.check(f"max_output_tokens too, got {profile.max_output_tokens}", profile.max_output_tokens == 12345)
+    ctx.check(f"pricing parsed the same way the vendored tier does, got {profile.price_in!r}",
+              profile.price_in is not None and abs(profile.price_in - 1.0 / 1_000_000) < 1e-15)
+
+
+@test
+def test_h9b_f22_refreshed_cache_wins_over_the_committed_vendored_fallback(ctx: Ctx):
+    """A model present in BOTH the refreshed cache and the committed
+    vendored file must resolve from the refreshed one -- it's what the
+    user explicitly just pulled."""
+    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback, write_models_dev_json
+
+    vendored = load_vendored_databricks_fallback()
+    known_id = next(iter(vendored))
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-h9b-f22-precedence-"))
+    write_models_dev_json(state_dir, {"databricks": {"id": "databricks", "models": {
+        known_id: {"limit": {"context": 424242, "output": 4242}, "modalities": {"input": ["text"]},
+                   "reasoning": False, "cost": {}},
+    }}})
+    ref = parse_model_ref(f"dbx:{known_id}")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check(f"the refreshed cache's value wins over the committed vendored file, got {profile.context_tokens}",
+              profile.context_tokens == 424242)
 
 
 if __name__ == "__main__":

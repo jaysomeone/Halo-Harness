@@ -733,6 +733,83 @@ def test_new_8_suggest_parse_decide_round_trips_to_allow(ctx: Ctx):
     ctx.check(f"suggest -> parse -> decide round-trips to allow for Bash, got {d_bash.action}", d_bash.action == "allow")
 
 
+# ---- H9 whole-tree review finding 21: Read is always allowed under this
+# session's own tool-results/ spill directory --------------------------------
+
+@test
+def test_h9b_f21_read_on_own_spill_dir_allowed_in_every_mode_with_no_rules(ctx: Ctx):
+    """Verified bug: the truncation hint's own "Use Read with offset/limit
+    on <spill>" pointer asked in TUI default mode and was denied outright
+    in -p default/acceptEdits/dontAsk -- there is no rule a user could even
+    write to fix this in advance, since the spill path is random per
+    session."""
+    tool_results_dir = Path(tempfile.mkdtemp(prefix="h9b-f21-spill-")) / "tool-results"
+    spill_file = tool_results_dir / "call_abc123.txt"
+    for mode in ("default", "acceptEdits", "dontAsk", "auto", "plan", "bypassPermissions"):
+        engine = P.PermissionEngine(mode=mode, cwd=CWD)
+        engine.tool_results_dir = tool_results_dir
+        d = engine.decide("Read", {"file_path": str(spill_file)})
+        ctx.check(f"mode={mode!r}: Read on the spill dir is allowed, got {d.action} ({d.reason})",
+                  d.action == "allow")
+
+
+@test
+def test_h9b_f21_read_outside_the_spill_dir_is_unaffected(ctx: Ctx):
+    """The built-in allow is scoped to the spill dir alone -- an ordinary
+    Read elsewhere still goes through the normal rule/mode-table path,
+    same as before this fix existed."""
+    tool_results_dir = Path(tempfile.mkdtemp(prefix="h9b-f21-spill2-")) / "tool-results"
+    other_dir = Path(tempfile.mkdtemp(prefix="h9b-f21-other-"))
+    other_file = other_dir / "not-a-spill.txt"
+    engine = P.PermissionEngine(mode="default", cwd=CWD)
+    engine.tool_results_dir = tool_results_dir
+    d = engine.decide("Read", {"file_path": str(other_file)})
+    ctx.check(f"an unrelated path is NOT covered by the built-in allow, got {d.action} ({d.reason})",
+              "tool-result" not in d.reason)
+
+
+@test
+def test_h9b_f21_explicit_user_deny_rule_still_wins_over_the_spill_dir_allow(ctx: Ctx):
+    """The built-in allow is a convenience, never an override of the ONE
+    real gate this harness keeps: the user's own explicit rules."""
+    tool_results_dir = Path(tempfile.mkdtemp(prefix="h9b-f21-spill3-")) / "tool-results"
+    spill_file = tool_results_dir / "call_xyz.txt"
+    engine = P.PermissionEngine(mode="auto", cwd=CWD)
+    # An ABSOLUTE-path deny rule targeting the spill dir specifically (the
+    # engine's own `_suggest_abs_path_value` -- the SAME helper a real
+    # suggested-rule flow uses -- so this is a platform-correct `//`-form
+    # on POSIX and a `C:/...`-form on Windows, never a guess at either).
+    abs_value = engine._suggest_abs_path_value(tool_results_dir)
+    deny_rule = P.parse_rule(f"Read({abs_value}/**)", source="session", base_dir=CWD, action="deny")
+    engine.deny_rules = [deny_rule]
+    engine.tool_results_dir = tool_results_dir
+    d = engine.decide("Read", {"file_path": str(spill_file)})
+    ctx.check(f"an explicit user deny rule still wins, got {d.action} ({d.reason})", d.action == "deny")
+
+
+@test
+def test_h9b_f21_real_session_wires_tool_results_dir_from_its_own_log(ctx: Ctx):
+    """End to end: a real Session sets this up automatically -- no caller
+    has to remember to."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+
+    cwd = Path(tempfile.mkdtemp(prefix="h9b-f21-session-"))
+    session_ctx = SessionContext(cwd=cwd, model_label="or:mock/x", bare=True)
+    model_ref = parse_model_ref("or:mock/x")
+    engine = P.PermissionEngine(mode="default", cwd=cwd)
+    session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
+                       state_dir=Path(tempfile.mkdtemp(prefix="h9b-f21-state-")), model_label="or:mock/x",
+                       session_context=session_ctx, permission_engine=engine)
+    ctx.check("tool_results_dir was wired automatically", engine.tool_results_dir is not None)
+    ctx.check(f"it matches THIS session's own log dir/session_id, got {engine.tool_results_dir}",
+              engine.tool_results_dir == session.log.dir / session.log.session_id / "tool-results")
+    spill_file = engine.tool_results_dir / "call_1.txt"
+    d = engine.decide("Read", {"file_path": str(spill_file)})
+    ctx.check(f"and Read on it is allowed, got {d.action}", d.action == "allow")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

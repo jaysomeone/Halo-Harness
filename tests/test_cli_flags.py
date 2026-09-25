@@ -304,7 +304,24 @@ def test_real_sigint_delivers_exit_130_posix(ctx: Ctx):
                 "--cwd", str(fh["proj"])]
         proc = subprocess.Popen(args, env=env, cwd=str(REPO_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True)
-        time.sleep(0.5)  # let it get into the (2s) slow scenario's request before interrupting
+        # NEW from H9b (verified flake): a fixed `time.sleep(0.5)` here
+        # raced a cold/loaded box -- if the child hadn't finished its own
+        # (heavy: textual, the mcp SDK, ...) imports and reached the mock
+        # server's slow scenario by then, SIGINT arrived before the
+        # harness's own signal.signal(SIGINT, ...) installed, so Python's
+        # default disposition killed it outright (returncode -2, not a
+        # deliberate exit(130)) -- confirmed empirically on a freshly
+        # tar-synced WSL tree. Poll `mock.requests` instead: the mock
+        # server records a request the INSTANT it's received, before the
+        # "slow" scenario's own artificial 2s delay even starts, so this
+        # is both faster and race-free.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not mock.requests:
+            if proc.poll() is not None:
+                raise AssertionError(f"process exited before ever reaching the mock server, "
+                                      f"returncode={proc.returncode}")
+            time.sleep(0.02)
+        ctx.check("the child process reached the mock server before SIGINT", bool(mock.requests))
         proc.send_signal(signal.SIGINT)
         try:
             _out, _err = proc.communicate(timeout=15)

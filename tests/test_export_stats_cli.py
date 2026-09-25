@@ -72,7 +72,7 @@ def test_export_no_sessions_is_a_clean_error(ctx: Ctx):
 def test_export_latest_session_round_trips_as_valid_jsonl(ctx: Ctx):
     home = _fresh_home()
     cwd = Path(tempfile.mkdtemp(prefix="exportstats-cwd-"))
-    session_id = _make_session_with_secret(home, cwd)
+    _make_session_with_secret(home, cwd)
     result = _run(["export"], home, cwd)
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     lines = [l for l in result.stdout.splitlines() if l.strip()]

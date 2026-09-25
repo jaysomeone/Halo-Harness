@@ -5,6 +5,7 @@ prompts), against the real fake MCP server (`fake://note` resource,
 `greet` prompt).
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -110,7 +111,19 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
         from rolo_claude.controller import Controller
         controller = Controller(session=session, cwd=cwd)
         controller.ingest_at_mentions("also see @fake:fake://note")
-        snapshot_nodes2 = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
+        # H9 whole-tree review finding 14: the `@server:resource` fetch now
+        # runs on a background thread (never blocking `ingest_at_mentions`
+        # itself, which is called synchronously on the UI thread on every
+        # real submit/steer) -- the snapshot lands whenever that thread
+        # finishes, which is soon but not necessarily by the time this
+        # call returns.
+        deadline = time.monotonic() + 10.0
+        snapshot_nodes2 = []
+        while time.monotonic() < deadline:
+            snapshot_nodes2 = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
+            if len(snapshot_nodes2) >= 2:
+                break
+            time.sleep(0.05)
         ctx.check(f"Controller.ingest_at_mentions ALSO appended one (now 2 total), got {len(snapshot_nodes2)}",
                   len(snapshot_nodes2) == 2)
 

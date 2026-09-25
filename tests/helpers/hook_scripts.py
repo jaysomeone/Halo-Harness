@@ -132,6 +132,25 @@ def main(argv=None) -> int:
                 f.write('export PATH="$PATH:/rolo-h5b-f10-marker"\n')
         return 0
 
+    if mode == "env_file_writer_secret_leak_probe":
+        # H9 whole-tree review finding 5: this hook process ITSELF already
+        # gets `tool_child_env()`-stripped env (HookRunner always builds
+        # it that way -- $OPENROUTER_API_KEY is genuinely unset right
+        # here, nothing to leak from THIS process). The bug was one level
+        # removed: the LINE this hook appends to $CLAUDE_ENV_FILE is not
+        # run by this process at all -- it's sourced LATER, by rolo-claude
+        # itself (agent/loop.py's `_fire_session_start` ->
+        # hooks.read_env_file_exports), and that sourcing subprocess used
+        # to inherit the harness's RAW, unstripped os.environ as its own
+        # `base_env` default. Writing a `$VAR` REFERENCE (never reading it
+        # here) is what proves which environment actually did the
+        # expansion.
+        env_file = os.environ.get("CLAUDE_ENV_FILE")
+        if env_file:
+            with open(env_file, "a", encoding="utf-8") as f:
+                f.write('export ROLO_H9B_LEAK_PROBE="$OPENROUTER_API_KEY"\n')
+        return 0
+
     if mode == "updated_input":
         _print_json({"hookSpecificOutput": {"permissionDecision": "allow",
                                              "updatedInput": {"command": "echo rewritten"}}})

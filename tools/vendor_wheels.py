@@ -1,5 +1,7 @@
-"""tools/vendor_wheels.py -- H8 scope F: pre-download manylinux cp311/cp312
-wheels for rolo-claude's full pinned dependency closure (`requirements.lock`,
+"""tools/vendor_wheels.py -- H8 scope F: pre-download manylinux cp311/cp312/
+cp313 (H9 whole-tree review finding 23: Debian 13 and Kali rolling both
+ship 3.13) wheels for rolo-claude's full pinned dependency closure
+(`requirements.lock`,
 `uv pip compile pyproject.toml --universal -o requirements.lock`) into a
 local directory, so a later `pip install --no-index --find-links=wheels -e .`
 on a machine with NO PyPI access at all -- only a VPN path to Databricks --
@@ -13,7 +15,7 @@ running pip), then copy the resulting `wheels/` directory to the work box
 over whatever side channel is available there (a shared drive, `scp` once
 the VPN is up, a USB stick -- this script doesn't care which).
 
-    python tools/vendor_wheels.py                       # -> ./wheels, cp311+cp312, manylinux2014_x86_64
+    python tools/vendor_wheels.py                       # -> ./wheels, cp311+cp312+cp313, manylinux2014_x86_64
     python tools/vendor_wheels.py --out /tmp/wheels --python-versions 311
     python tools/vendor_wheels.py --platform manylinux2014_aarch64
     python tools/vendor_wheels.py --dry-run             # print the pip commands, download nothing
@@ -182,8 +184,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Vendor manylinux wheels for rolo-claude's pinned dependencies.")
     ap.add_argument("--out", default=str(REPO_DIR / "wheels"),
                      help="destination directory (default: ./wheels, gitignored)")
-    ap.add_argument("--python-versions", default="311,312",
-                     help="comma-separated cpXYZ tags, no dots (default: 311,312)")
+    ap.add_argument("--python-versions", default="311,312,313",
+                     help="comma-separated cpXYZ tags, no dots (default: 311,312,313 -- H9 whole-tree "
+                          "review finding 23: Debian 13 ships Python 3.13, and so does Kali rolling, "
+                          "which tracks it, so cp313 wheels are needed by default too, not opt-in)")
     ap.add_argument("--platform", default="manylinux2014_x86_64",
                      help="pip --platform tag (default: manylinux2014_x86_64; "
                           "use manylinux2014_aarch64 for an arm64 work box)")

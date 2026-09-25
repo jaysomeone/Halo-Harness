@@ -117,13 +117,29 @@ def _pillow_available() -> bool:
 
 
 @test
-def test_oversized_dimension_is_resized_or_omitted(ctx: Ctx):
-    """A REAL, decodable over-MAX_IMAGE_DIM image is resized when Pillow is
-    installed (this build never REQUIRES it -- an optional extra, see
-    pyproject.toml), and omitted with OpenCode's own exact note text when
-    it isn't -- environment-adaptive so this test is correct either way,
-    never silently crashed on."""
+def test_h9b_f19_between_soft_and_hard_dim_passes_through_unresized_even_without_pillow(ctx: Ctx):
+    """H9 whole-tree review finding 19: a well-under-5MB image between
+    MAX_IMAGE_DIM (1568, the API's own auto-resize threshold -- crossing
+    it is server-side work, not a rejection) and MAX_IMAGE_HARD_DIM (8000,
+    the real hard cap) is sent through AS-IS regardless of whether Pillow
+    is installed -- verified bug: a plain 1920x1080 screenshot used to be
+    omitted outright on the default (no-Pillow) install for no real
+    reason, even though the real Anthropic API accepts and self-downsizes
+    anything up to 8000px."""
     data = _make_png(I.MAX_IMAGE_DIM + 500, 100)
+    block, note = I.image_block_or_note(data, "image/png")
+    ctx.check(f"sent through unresized (Pillow present={_pillow_available()}), never omitted", block is not None)
+    ctx.check("no omission note", note is None)
+
+
+@test
+def test_oversized_dimension_past_the_hard_cap_is_resized_or_omitted(ctx: Ctx):
+    """A REAL, decodable over-MAX_IMAGE_HARD_DIM (8000px) image is resized
+    when Pillow is installed (this build never REQUIRES it -- an optional
+    extra, see pyproject.toml), and omitted with OpenCode's own exact note
+    text when it isn't -- environment-adaptive so this test is correct
+    either way, never silently crashed on."""
+    data = _make_png(I.MAX_IMAGE_HARD_DIM + 500, 100)
     block, note = I.image_block_or_note(data, "image/png")
     if _pillow_available():
         ctx.check("Pillow installed: resized to a real, now-compliant block", block is not None and note is None)
@@ -148,6 +164,21 @@ def test_exactly_at_byte_limit_is_not_omitted(ctx: Ctx):
     exact = b"x" * I.MAX_IMAGE_BYTES
     block, note = I.image_block_or_note(exact, "image/octet-stream")
     ctx.check("at (not over) the byte cap is kept, not omitted", block is not None and note is None)
+
+
+# ---- sniff_media_type (H9 whole-tree review finding 19) --------------------
+
+@test
+def test_h9b_f19_sniff_media_type_identifies_all_four_real_formats(ctx: Ctx):
+    ctx.check("PNG", I.sniff_media_type(_make_png(10, 10)) == "image/png")
+    ctx.check("JPEG", I.sniff_media_type(_make_jpeg(10, 10)) == "image/jpeg")
+    ctx.check("GIF", I.sniff_media_type(_make_gif(10, 10)) == "image/gif")
+    ctx.check("WEBP (VP8X)", I.sniff_media_type(_make_webp_vp8x(10, 10)) == "image/webp")
+
+
+@test
+def test_h9b_f19_sniff_media_type_unrecognized_is_none(ctx: Ctx):
+    ctx.check("garbage bytes -> None, never raises", I.sniff_media_type(b"not an image at all") is None)
 
 
 if __name__ == "__main__":

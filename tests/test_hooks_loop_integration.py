@@ -532,7 +532,6 @@ def test_posttooluse_hook_additional_context_is_appended_to_the_result(ctx: Ctx)
         hooks_by_event = {"PostToolUse": [HookDef(type="command", matcher="Read",
                                                      args=_HOOK_SCRIPT_ARGV + ["json_allow"])]}
         # json_allow has no additionalContext, so also test the plain block-decision shape gets applied
-        from rolo_claude.hooks import HookDef as _HD
         hooks_by_event["PostToolUse"] = [HookDef(type="command", matcher="Read",
                                                     args=_HOOK_SCRIPT_ARGV + ["block_decision"])]
         session = _new_session(fh, mock, model="or:mock/hook-posttooluse",

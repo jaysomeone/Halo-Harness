@@ -261,7 +261,7 @@ def test_exit_plan_mode_print_mode_auto_approves_under_bypass_permissions(ctx: C
         ])
         session = _new_session(mock=mock, model="or:mock/h6-plan-bypass", interactive=False,
                                 permission_mode="bypassPermissions", plans_dir=Path(tempfile.mkdtemp(prefix="rc-plans-bp-")))
-        events = list(session.turn("go"))
+        list(session.turn("go"))
         ctx.check("continues past the plan under bypassPermissions too", len(mock.requests) == 2)
     finally:
         mock.stop()

@@ -352,7 +352,6 @@ class _FakeProfile:
 
 @test
 def test_resolve_agent_model_invocation_wins(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
     routes = {}
     ref, _profile = resolve_agent_model(
         invocation_model="or:vendor/explicit", frontmatter_model="or:vendor/frontmatter",

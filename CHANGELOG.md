@@ -100,11 +100,73 @@ Built up over milestones H0-H9 (plus U0/U2/U5 for the TUI):
   continue across the whole session instead of restarting per call;
   parallel sub-agents with colliding tool_use ids get distinct permission
   waiters; a missing `Path` import in `providers/http.py`.
+- **H9b -- whole-tree review fix pass**: closed the review's remaining 24
+  findings plus several "NEW from H9" cleanup items, all with real-Session
+  or real-CLI pinning tests. Background jobs/sub-agents as one contract: a
+  sub-agent's own `JobRegistry` is shared with (and killed by) its parent;
+  `-p` now handles SIGHUP the same as SIGTERM (an `atexit kill_all` safety
+  net too), verified with `pgrep` on WSL AND the Kali VM that both a
+  background Bash job and an MCP stdio server subprocess are gone after a
+  normal exit and after SIGHUP; a resume/`TaskOutput` on a task_id whose
+  background child is still writing its own log is refused instead of
+  racing it, and `AgentRuntime.tasks` is rebuilt from each child's own
+  `meta.json` on a `-c` resume instead of coming back "Unknown"; a child's
+  usage/cost rolls up into the parent's own CostMeter/log/`--max-budget-
+  usd`/`stats`; a child's error/max_turns/blocked outcome is carried onto
+  its ToolResult instead of handing back stale text as if it finished
+  normally. Secrets: ONE sanitizer (`sk-or-v1-`/`sk-ant-`/`dapi`/`ghp_`,
+  quoted `export KEY="…"`, JSON env blocks, Bearer headers) now backs both
+  `export --sanitize` and the TUI's `/export --sanitize`; the dead,
+  never-wired `session_cli.py` sanitizer is deleted; `CLAUDE_ENV_FILE` is
+  sourced against the already-stripped `tool_child_env`, not raw
+  `os.environ`. Linux PATH: a Debian/Kali `/etc/profile` login shell no
+  longer discards the session's own PATH (foreground and background Bash
+  alike), verified with the `unshare -rm` bind-mounted-profile trick on
+  WSL. TUI: parallel children stream into their own grouped blocks (keyed
+  by agent_id/turn/seq) and never touch the parent's status bar, cost or
+  `on_turn_done`; `@server:resource` mention resolution is regex-first,
+  runs off the UI thread with a cache and a content cap, so a hung/slow
+  MCP server can no longer freeze prompt submission. Also: pre-4.5
+  notebooks (no cell ids) accept positional `cell-N` addressing and clear
+  stale outputs on a code-cell replace; `turn()`'s own `finally` drains
+  queued `@mention`/`!cmd` writes before the next prompt, and manual
+  `/compact`/`/clear` count as busy for log-write queuing; a truncated
+  Read's continuation hint is computed from the actual last included line,
+  on a line boundary; image media type comes from sniffing the real bytes,
+  not the file extension, and only the two HARD limits (8000px/5MB) gate
+  omission without Pillow -- a plain screenshot under the old 1568px soft
+  threshold is no longer omitted for nothing; image offload counts real
+  prompts only, never a tool_result's own wire message; a spilled tool
+  result's continuation hint is Read-allowed under the session's own
+  `tool-results/` dir in every permission mode; Databricks default model
+  rows (DeepSeek V4.1 Flash, Kimi K3, GLM 5.3) resolve their real
+  1M-token context instead of a generic 128k/16k fallback; offline
+  packaging installs cleanly on a bare Python >=3.12 venv (setuptools no
+  longer assumed preinstalled) and vendors cp313 wheels too; `bin/rolo-
+  claude` resolves a symlink (`readlink -f`) instead of failing outside
+  the checkout; a `ucode-settings.json` shaped like a Claude Code
+  `--settings` file (an `env` block, or an `apiKeyHelper` command) now
+  resolves too, not just the gateway-config key spellings; `/stats`/
+  `stats` count real prompts only (never a notice/steer/Stop-continuation)
+  and report cache-read/cache-creation tokens; a background-job offset/
+  lock race that could duplicate or drop BashOutput text after a timeout
+  hand-off is fixed; `doctor` accepts the real minimum Python (3.10, not
+  3.9) and `--work` probes the actually-configured model with the
+  production header instead of the first DeepSeek/Kimi/GLM endpoint it
+  finds. Plus: every temp directory a test creates is tracked and cleaned
+  up at the end of a `run_all.py` invocation; `python -X dev -W
+  error::ResourceWarning tests/run_all.py` is clean (several unclosed
+  HTTP connections and subprocess pipes fixed, without reintroducing the
+  Windows orphaned-grandchild hang a naive synchronous `.close()` caused);
+  a `ruff check --select F,E9,B` pass across `rolo_claude/`/`tests/`
+  (dead imports/locals, unused loop variables, explicit `zip(strict=)`,
+  explicit exception chaining); confirmed `wip/` is already excluded from
+  the built wheel.
 
 `__version__` is `0.3.0` (`rolo_claude/__init__.py`); see
 `docs/harness/ACCEPTANCE-2026-09-25.md` for the full Linux/Windows
 acceptance record and `docs/harness/review-findings-*.md` for the detailed
-per-finding review history behind the H1-H5c entries above.
+per-finding review history behind the H1-H5c/H9b entries above.
 
 ## [0.2.1] - claude-bridge (pre-standalone-harness)
 

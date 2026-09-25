@@ -27,9 +27,71 @@ Usage in a test_*.py file:
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
+import threading
 import time
 import traceback
 from typing import Callable
+
+# NEW (post-H9 acceptance): a real Linux run of this suite left thousands
+# of /tmp/addrule-*, /tmp/rolo*, /tmp/tmp* directories behind -- the
+# overwhelmingly common `Path(tempfile.mkdtemp(prefix=...))` pattern used
+# throughout this test suite (and a few real rolo_claude/ code paths
+# exercised BY it) has no matching cleanup anywhere. Rather than hand-edit
+# cleanup into every one of the many call sites (error-prone, and every
+# FUTURE test would need to remember it too), `tempfile.mkdtemp` itself is
+# monkeypatched, process-wide, to record every directory it creates;
+# `cleanup_tracked_temp_dirs()` removes them all at once, best-effort, at
+# the very end of a suite run (tests/run_all.py, test_bridge.py,
+# test_tui.py's own `__main__` blocks) -- safe because nothing runs AFTER
+# that point that could still need one of them.
+_tracked_temp_dirs: "list[str]" = []
+_tracked_lock = threading.Lock()
+_real_mkdtemp = tempfile.mkdtemp
+_tracking_installed = False
+
+
+def _tracking_mkdtemp(*args, **kwargs) -> str:
+    path = _real_mkdtemp(*args, **kwargs)
+    with _tracked_lock:
+        _tracked_temp_dirs.append(path)
+    return path
+
+
+def install_temp_dir_tracking() -> None:
+    """Idempotent -- safe to call from more than one suite entry point in
+    the same process (it never has been, but costs nothing to guard)."""
+    global _tracking_installed
+    if _tracking_installed:
+        return
+    tempfile.mkdtemp = _tracking_mkdtemp
+    _tracking_installed = True
+
+
+def cleanup_tracked_temp_dirs() -> int:
+    """Removes every directory `tempfile.mkdtemp` created since
+    `install_temp_dir_tracking()` was installed -- best-effort (a
+    directory a test already removed itself, or one a background thread/
+    still-live subprocess has a handle open on, most commonly on Windows,
+    is silently skipped rather than raising). Returns how many were
+    actually removed. Safe to call more than once (the tracked list is
+    drained on each call, so a second call has nothing left to do)."""
+    with _tracked_lock:
+        paths = list(_tracked_temp_dirs)
+        _tracked_temp_dirs.clear()
+    removed = 0
+    for path in paths:
+        try:
+            if not os.path.isdir(path):
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.isdir(path):
+                removed += 1
+        except Exception:
+            pass
+    return removed
 
 
 class SkipTest(Exception):

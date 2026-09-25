@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-import time
 import traceback
 from pathlib import Path
 
@@ -20,7 +19,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
-from tests.helpers.runner import Ctx, run_all
+from tests.helpers.runner import Ctx, cleanup_tracked_temp_dirs, install_temp_dir_tracking, run_all
 
 
 def discover_test_modules() -> list:
@@ -31,6 +30,11 @@ def discover_test_modules() -> list:
 
 
 def main() -> int:
+    # NEW (post-H9 acceptance): see runner.py's own docstring on this pair
+    # -- every tempfile.mkdtemp() call for the rest of this process (every
+    # test module this run imports/executes) is tracked and swept up once,
+    # at the very end, instead of leaking a directory per call forever.
+    install_temp_dir_tracking()
     module_names = discover_test_modules()
     total_passed = total_failed = total_skipped = 0
     any_module_import_failed = False
@@ -66,6 +70,9 @@ def main() -> int:
     print("-" * 74)
     print(f"RESULT: {total} tests across {len(module_names)} modules -- "
           f"{total_passed} passed, {total_failed} failed, {total_skipped} skipped")
+
+    removed = cleanup_tracked_temp_dirs()
+    print(f"[cleanup] removed {removed} tracked temp dir(s)")
 
     return 0 if (total_failed == 0 and not any_module_import_failed) else 1
 
