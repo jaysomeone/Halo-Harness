@@ -721,6 +721,57 @@ def test_ensure_lazy_started_all_starts_only_pending_lazy_servers(ctx: Ctx):
         mgr.close_all()
 
 
+@test
+def test_h9_ensure_lazy_started_all_starts_targets_in_parallel(ctx: Ctx):
+    """H9 must-do: the lazy-start path used to be a plain SERIAL `for name
+    in self._lazy_names: h.start()` loop -- 3 lazy servers would take
+    roughly 3x one server's connect time. It now shares `start_all()`'s
+    concurrent-gather machinery, so 3 slow-starting lazy servers should
+    finish in roughly ONE slow-start's worth of wall clock, not three."""
+    cfgs = {name: M.McpServerConfig(name=name, type="stdio", command=sys.executable,
+                                     args=["-m", "tests.helpers.fake_mcp_server"],
+                                     cwd=str(REPO_DIR), lazy=True)
+            for name in ("lazyA", "lazyB", "lazyC")}
+    mgr = M.McpManager(cfgs, tool_env={**os.environ, "FAKE_MCP_MODE": "slow", "FAKE_MCP_SLEEP_S": "1.5"},
+                        cwd=REPO_DIR, lazy_names=set(cfgs))
+    try:
+        mgr.start_all()  # no-op: all 3 are lazy, none eager
+        t0 = time.monotonic()
+        started = mgr.ensure_lazy_started_all()
+        elapsed = time.monotonic() - t0
+        ctx.check(f"all 3 lazy servers started, got {sorted(started)}", sorted(started) == ["lazyA", "lazyB", "lazyC"])
+        states = [mgr.handles[n].state for n in cfgs]
+        ctx.check(f"all 3 connect, got {states}", states == ["connected"] * 3)
+        ctx.check(f"parallel (~1.5s), not serial (~4.5s) -- took {elapsed:.2f}s", elapsed < 3.0)
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_h9_ensure_lazy_started_all_honours_abort(ctx: Ctx):
+    """H9 must-do: `ensure_lazy_started_all` now accepts `abort` (threaded
+    from `ToolSearchTool` via `SessionCatalog.ensure_lazy_discovered`) and
+    waits the same ABORTABLE way `McpServerHandle.start()` already does --
+    an Esc/Ctrl+C fired mid-wait must return promptly instead of blocking
+    for the lazy servers' full (here, deliberately long) startup sleep."""
+    import threading
+    cfgs = {name: M.McpServerConfig(name=name, type="stdio", command=sys.executable,
+                                     args=["-m", "tests.helpers.fake_mcp_server"],
+                                     cwd=str(REPO_DIR), lazy=True)
+            for name in ("slowlazyA", "slowlazyB")}
+    mgr = M.McpManager(cfgs, tool_env={**os.environ, "FAKE_MCP_MODE": "slow", "FAKE_MCP_SLEEP_S": "6"},
+                        cwd=REPO_DIR, lazy_names=set(cfgs))
+    abort = threading.Event()
+    threading.Timer(0.3, abort.set).start()
+    try:
+        t0 = time.monotonic()
+        mgr.ensure_lazy_started_all(abort=abort)
+        elapsed = time.monotonic() - t0
+        ctx.check(f"returns promptly (~0.3s), not the full 6s slow-start sleep, got {elapsed:.2f}s", elapsed < 3.0)
+    finally:
+        mgr.close_all()
+
+
 # ---- finding 9: Controller.reconnect_mcp threads abort through --------------
 
 @test

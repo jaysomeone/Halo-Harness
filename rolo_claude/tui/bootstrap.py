@@ -66,8 +66,11 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         caller running this on its OWN abort-aware worker thread (the
         `/mcp` dialog's reconnect action, `tui/dialogs/mcp_status.py`)
         cut short a reconnect against a hung/slow server instead of
-        freezing for its full timeout; `Controller.reconnect_mcp` is
-        what actually threads a real Event through."""
+        freezing for its full timeout; `Controller.reconnect_mcp` (which
+        calls this) is what actually threads a real Event through, and
+        (H9 bug fix, item 11) is also where the config-file resync now
+        happens -- BEFORE this plain restart -- so this function itself
+        stays the simple "just restart this one handle" primitive."""
         if build.mcp_manager is None:
             return [f"MCP support is not enabled this session ({name} unchanged)."]
         ok = build.mcp_manager.reconnect(name, abort=abort)

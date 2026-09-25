@@ -245,9 +245,11 @@ def _write_dot_mcp_json(path: Path, data: dict) -> None:
 def _build_entry(*, transport: str, command_or_url: str, extra_args: list, env: dict, headers: dict,
                   oauth: Optional[dict]) -> dict:
     if transport == "stdio":
-        entry: dict = {"type": "stdio", "command": command_or_url, "args": list(extra_args)}
-        if env:
-            entry["env"] = env
+        # H9 MCP-compatibility matrix (item 7, byte-shape parity): the real
+        # `claude mcp add` 2.1.281 always writes `"env": {}` for a stdio
+        # entry, even with no --env given -- match it exactly so a server
+        # added here is byte-identical to one `claude` itself would write.
+        entry: dict = {"type": "stdio", "command": command_or_url, "args": list(extra_args), "env": dict(env or {})}
     else:
         entry = {"type": transport, "url": command_or_url}
         if headers:

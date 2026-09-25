@@ -11,7 +11,7 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from rolo_claude.agent.log import SessionLog
 from rolo_claude.agent.invariants import (
     ABORTED_BEFORE_DISPATCH, INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids,
-    repair_truncated_text, synthesize_missing_results, validate_tool_use,
+    highest_kimi_functions_idx, repair_truncated_text, synthesize_missing_results, validate_tool_use,
 )
 
 test, TESTS = new_registry()
@@ -20,6 +20,47 @@ test, TESTS = new_registry()
 def _fresh_log() -> SessionLog:
     d = Path(tempfile.mkdtemp(prefix="invariants-test-"))
     return SessionLog(d, session_id="test-session")
+
+
+@test
+def test_h9_highest_kimi_functions_idx_empty_log_is_minus_one(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("sys")
+    ctx.check("no functions.*:N ids anywhere -> -1 (caller starts fresh at 0)",
+              highest_kimi_functions_idx(log) == -1)
+
+
+@test
+def test_h9_highest_kimi_functions_idx_finds_the_max_across_every_assistant_node(ctx: Ctx):
+    """H9 critical review finding 1 repro: 6 Reads across 6 SEPARATE
+    assistant nodes (i.e. 6 separate model-call steps, exactly the
+    real-world shape) must all be seen, not just the last node -- an id
+    minted several steps ago is exactly the one a reset-to-0 counter would
+    collide with next."""
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "go"}])
+    for i in range(6):
+        log.append_assistant(content=[{"type": "tool_use", "id": f"functions.Read:{i}", "name": "Read", "input": {}}],
+                              stop_reason="tool_use")
+        log.append_tool_result(tool_use_id=f"functions.Read:{i}", content=f"file {i} contents")
+    ctx.check(f"highest idx across all 6 steps is 5, got {highest_kimi_functions_idx(log)}",
+              highest_kimi_functions_idx(log) == 5)
+
+
+@test
+def test_h9_highest_kimi_functions_idx_ignores_non_kimi_shaped_ids(ctx: Ctx):
+    log = _fresh_log()
+    log.append_system("sys")
+    log.append_user([{"type": "text", "text": "go"}])
+    log.append_assistant(content=[{"type": "tool_use", "id": "call_abc123", "name": "Read", "input": {}}],
+                          stop_reason="tool_use")
+    log.append_tool_result(tool_use_id="call_abc123", content="x")
+    log.append_assistant(content=[{"type": "tool_use", "id": "functions.Grep:2", "name": "Grep", "input": {}}],
+                          stop_reason="tool_use")
+    log.append_tool_result(tool_use_id="functions.Grep:2", content="y")
+    ctx.check(f"only the native-shaped id counts, got {highest_kimi_functions_idx(log)}",
+              highest_kimi_functions_idx(log) == 2)
 
 
 @test

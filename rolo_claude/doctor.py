@@ -171,6 +171,48 @@ def _check_playwright() -> str:
     return f"{WARN} missing on PATH for --playwright: {missing}"
 
 
+def _check_ripgrep() -> str:
+    """H9 OpenCode item 23: `rg` is optional (the Grep tool -- rolo_claude/
+    tools/grep_tool.py -- has a pure-Python fallback engine that's used
+    transparently whenever `rg` isn't found), so its absence is a WARN,
+    never a MISSING -- Grep still works either way, just slower on big
+    trees without it."""
+    rg = shutil.which("rg")
+    if rg:
+        return f"{OK} rg (ripgrep) on PATH: {rg}"
+    return (f"{WARN} rg (ripgrep) not on PATH -- the Grep tool falls back to a slower pure-Python "
+            f"search engine; install ripgrep for full speed (Claude Code itself ships rg embedded)")
+
+
+def _check_editor() -> str:
+    """H9 OpenCode item 23: `$VISUAL`/`$EDITOR` back Ctrl+E (edit the
+    current prompt draft in an external editor -- tui/app.py). Neither
+    being set is a WARN, not MISSING: the TUI still works fully, only that
+    one shortcut is unavailable."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor:
+        return f"{OK} $VISUAL/$EDITOR set: {editor}"
+    return f"{WARN} $VISUAL/$EDITOR not set -- Ctrl+E (edit the prompt draft in an external editor) won't work"
+
+
+def _check_shell() -> str:
+    """H9 OpenCode item 23 (carried-over must-do: "Git Bash (win32)"): the
+    Bash tool (rolo_claude/tools/bash.py) needs Git Bash on win32
+    (config.paths.git_bash()) or `/bin/bash` on POSIX -- without it, the
+    Bash tool, `!`-pre-execution and every `command`/`shell:"bash"` hook
+    handler are all unusable, so a genuinely missing shell IS a MISSING,
+    not a WARN (unlike rg/$EDITOR above, which degrade gracefully)."""
+    from rolo_claude.config.paths import git_bash
+    bash = git_bash()
+    if bash is not None and Path(bash).exists():
+        label = "Git Bash" if sys.platform == "win32" else "bash"
+        return f"{OK} {label} found: {bash}"
+    if sys.platform == "win32":
+        return (f"{MISSING} Git Bash not found -- the Bash tool requires it on Windows "
+                f"(install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH)")
+    return f"{MISSING} bash not found on PATH -- the Bash tool (and every shell hook) requires it"
+
+
 def _check_platform() -> str:
     system = platform.system()
     if system == "Linux":
@@ -416,6 +458,9 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     lines.append(_check_databricks())
     lines.append(_check_chrome())
     lines.append(_check_playwright())
+    lines.append(_check_ripgrep())
+    lines.append(_check_editor())
+    lines.append(_check_shell())
     lines.append(_check_plugins())
     lines.append(_check_platform())
     lines.extend(_check_catalog_ages())

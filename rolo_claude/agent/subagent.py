@@ -198,7 +198,25 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         # `self.abort.is_set()` check already threaded through the
         # child's own `_step`/retry waits/streaming now reacts to the
         # SAME signal, with no new logic needed on either side.
-        abort=parent.abort,
+        # H9 whole-tree review finding 10: a BACKGROUND child gets its OWN
+        # abort Event instead of sharing the parent's -- sharing meant Esc
+        # on a LATER, unrelated FOREGROUND turn (or Ctrl+C on an empty
+        # prompt while idle) cut a background child mid-stream with no
+        # relationship to what the user was actually looking at (verified:
+        # Esc on an unrelated turn interrupted a running background
+        # sub-agent). Only `quit()`/`TaskStop(task_id=...)` on THIS
+        # specific task may ever set it (see `run_agent_call` below, which
+        # stashes it on `runtime.tasks[task_id]["abort_event"]`).
+        abort=(parent.abort if not background else threading.Event()),
+        # H9: MUST be passed at construction time, not set afterward --
+        # `Session.__init__` reads `self.agent_id` synchronously (critical
+        # review finding 16: a child never fires the user's own
+        # SessionStart hooks, only SubagentStart) before this call even
+        # returns. Also namespaces `_permission_waiters` keys (finding 2,
+        # see `Session.__init__`'s own docstring on `agent_id`) so this
+        # child can never collide with a sibling's live waiter slot in the
+        # dict shared with the parent just below.
+        agent_id=agent_id,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
@@ -321,7 +339,17 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     new_task_id = uuid.uuid4().hex[:12]
     with runtime.lock:
         runtime.tasks[new_task_id] = {"child_session_id": child.log.session_id, "spec_name": spec.name,
-                                        "cwd": str(parent.cwd)}
+                                        "cwd": str(parent.cwd),
+                                        # H9 whole-tree review finding 10:
+                                        # only present (and only meaningful)
+                                        # for a background child -- a
+                                        # foreground one shares the
+                                        # parent's own Event, already
+                                        # reachable through the normal Esc
+                                        # path. tools/task_stop.py reads
+                                        # this to implement
+                                        # `TaskStop(task_id=<agent task>)`.
+                                        "abort_event": (child.abort if background else None)}
 
     start_ev = events.Event("subagent_start", {"agent_id": agent_id, "name": spec.name, "description": description,
                                                  "parent_tool_use_id": tool_id, "task_id": new_task_id})
@@ -346,7 +374,21 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
             # pending-notice append already uses.
             with parent._agent_notices_lock:
                 parent.permission_denials.extend(child.permission_denials)
-            notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id})]\n"
+            # H9 whole-tree review finding 10: `permission_denials` is a
+            # print-mode-only channel (the TUI never renders it) -- a
+            # background child's own denied tool calls used to be
+            # completely invisible in the TUI, which only ever sees this
+            # notice text. Same for an interrupted (quit/TaskStop) child:
+            # say so plainly instead of presenting whatever partial text
+            # it managed as if it were a normal, complete answer.
+            status_bits = []
+            if child.abort.is_set():
+                status_bits.append("interrupted")
+            if child.permission_denials:
+                names = ", ".join(sorted({d.get("tool_name", "?") for d in child.permission_denials}))
+                status_bits.append(f"{len(child.permission_denials)} tool call(s) denied ({names})")
+            status_suffix = f" [{'; '.join(status_bits)}]" if status_bits else ""
+            notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id}){status_suffix}]\n"
                       f"{_wrap_task_result(text, new_task_id)}")
             with parent._agent_notices_lock:
                 parent._pending_agent_notices.append(notice)

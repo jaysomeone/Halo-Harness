@@ -93,8 +93,20 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     try:
         stack.push_async_callback(http_client.aclose)
         async with task_timeout(connect_timeout):
-            read, write, _get_session_id = await stack.enter_async_context(
+            streams = await stack.enter_async_context(
                 streamable_http_client(url, http_client=http_client))
+        # H9 bug fix: the installed 2.2.0 SDK's `streamable_http_client`
+        # yields a 2-tuple `(read_stream, write_stream)` -- ITS OWN
+        # docstring says so ("Yields: Tuple containing: read_stream,
+        # write_stream"), no `get_session_id` callable at all -- but this
+        # function's comment claimed a 3-tuple "verified against the
+        # installed 2.2.0 API", which a real live connection attempt
+        # (H9 MCP-compatibility matrix) proved false: `ValueError: not
+        # enough values to unpack (expected 3, got 2)` on EVERY `type:
+        # "http"` server, 100% of the time. Take only what's actually
+        # there and tolerate either shape so a future SDK upgrade that
+        # reintroduces a third element doesn't break this again.
+        read, write = streams[0], streams[1]
         session = await stack.enter_async_context(ClientSession(read, write))
         return stack, session
     except BaseException:

@@ -635,17 +635,40 @@ def cmd_serve(args):
         log.info("Server stopped by keyboard interrupt")
     finally:
         server.server_close()
-def find_claude_exe() -> str:
-    """Return path to claude executable, raising ClaudeNotFoundError if not found."""
+def find_claude_exe(*, _which=None, _windows: "bool | None" = None) -> str:
+    """Return path to claude executable, raising ClaudeNotFoundError if not found.
+
+    H9 Linux acceptance (Part A, bug 1 -- CRITICAL): this only ever looked
+    for `claude.exe` / `claude.cmd` / `~/.local/bin/claude.exe`, i.e. the
+    Windows shims, so on Linux -- the primary platform -- `rolo-claude proxy
+    launch` never found a real `claude` on PATH or at `~/.local/bin/claude`
+    (the standard native install location) and raised ClaudeNotFoundError on
+    a clean Kali box, or, on WSL, picked up a Windows npm `claude.cmd` shim
+    through the inherited PATH and crashed trying to run its unresolved
+    `%dp0%\\...\\claude.exe`. POSIX now resolves the bare `claude` name first
+    (PATH, then `~/.local/bin/claude`) and never touches the Windows shim
+    logic; Windows keeps its existing order and gains the same bare-name
+    fallback last. `_which`/`_windows` are test seams only."""
+    which = _which or shutil.which
+    windows = (os.name == "nt") if _windows is None else _windows
     env_exe = os.environ.get("BRIDGE_CLAUDE_EXE")
     if env_exe:
         return env_exe
 
-    exe = shutil.which("claude.exe")
+    if not windows:
+        posix_exe = which("claude")
+        if posix_exe:
+            return posix_exe
+        local_posix = home() / ".local" / "bin" / "claude"
+        if local_posix.exists():
+            return str(local_posix)
+        raise ClaudeNotFoundError("claude executable not found (looked for `claude` on PATH and ~/.local/bin/claude)")
+
+    exe = which("claude.exe")
     if exe:
         return exe
 
-    cmd = shutil.which("claude.cmd")
+    cmd = which("claude.cmd")
     if cmd:
         try:
             with open(cmd, "r", encoding="utf-8") as f:
@@ -669,6 +692,10 @@ def find_claude_exe() -> str:
     local_exe = home() / ".local" / "bin" / "claude.exe"
     if local_exe.exists():
         return str(local_exe)
+
+    bare = which("claude")
+    if bare:
+        return bare
 
     raise ClaudeNotFoundError("claude executable not found")
 

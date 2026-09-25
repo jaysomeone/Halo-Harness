@@ -605,6 +605,120 @@ def test_h5c_f08_child_permission_ask_denied_live_still_tagged_and_merged(ctx: C
         mock.stop()
 
 
+@test
+def test_h9_two_parallel_children_with_colliding_tool_ids_get_distinct_live_asks(ctx: Ctx):
+    """H9 critical review finding 2: TWO PARALLEL children whose own
+    `tool_use` ids happen to be IDENTICAL (the concrete real-world trigger
+    is Kimi's per-call id counter restarting fresh in each child's own,
+    separately-empty log -- reproduced directly here with two children both
+    scripted to call Bash with the literal id "call_ask_0") must get TWO
+    DISTINCT, independently-answerable `permission_request`s, never one
+    shared waiter slot in `_permission_waiters` (the SAME dict object both
+    children share with the parent -- agent/subagent.py's
+    `_build_child_session`). Before the fix: the second child's insert
+    silently overwrote the first's live slot, so resolving one card could
+    wake the WRONG child's thread (running ITS command instead) while the
+    other waited forever with no way to ever be answered."""
+    from rolo_claude.permissions import Decision
+
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h9-parent-two-askchildren"] = ScriptedTurns([
+            _multi_tool_call_step([
+                ("Task", {"description": "run a", "prompt": "run a", "subagent_type": "writer",
+                           "model": "or:mock/h9-child-askchild-a"}, "call_agent_a"),
+                ("Task", {"description": "run b", "prompt": "run b", "subagent_type": "writer",
+                           "model": "or:mock/h9-child-askchild-b"}, "call_agent_b"),
+            ]),
+            # A required second (final) step -- without it, ScriptedTurns
+            # replays the SAME two-Task-call step once both children's
+            # results come back, spawning a fresh pair of children forever
+            # instead of ending the turn (same gotcha the "five agents"
+            # test's own comment calls out for a child's post-denial reply).
+            _text_step("both sub-agents finished"),
+        ])
+        cwd = Path(tempfile.mkdtemp(prefix="rc-agent-e2e-collide-"))
+        # Both children scripted with the SAME literal tool_use id -- this
+        # is the collision itself; which upstream mechanism would produce
+        # matching ids in real use (Kimi's per-call counter) doesn't matter
+        # to this fix, which is purely about the SHARED waiter dict. `printf`
+        # (unlike `echo`) is NOT on permissions.py's built-in read-only
+        # whitelist, so `default` mode genuinely asks for it instead of
+        # auto-allowing it outright.
+        SCENARIOS["h9-child-askchild-a"] = ScriptedTurns([
+            _tool_call_step("Bash", {"command": "printf FROM_A"}, "call_ask_0"),
+            _text_step("a done"),
+        ])
+        SCENARIOS["h9-child-askchild-b"] = ScriptedTurns([
+            _tool_call_step("Bash", {"command": "printf FROM_B"}, "call_ask_0"),
+            _text_step("b done"),
+        ])
+        spec = _general_purpose_spec(name="writer", permission_mode="default")
+        session = _new_session(mock=mock, model="or:mock/h9-parent-two-askchildren", agents={"writer": spec},
+                                permission_mode="auto", cwd=cwd, interactive=True)
+
+        events_seen: list = []
+        done = threading.Event()
+
+        def _drive():
+            try:
+                for ev in session.turn("run two sub-agents in parallel"):
+                    events_seen.append(ev)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t.start()
+        try:
+            deadline = time.monotonic() + 10
+            while len([e for e in events_seen if e.kind == "permission_request"]) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            cards = [e for e in events_seen if e.kind == "permission_request"]
+            ctx.check(f"both children's asks arrived live, got {len(cards)}", len(cards) == 2)
+            ctx.check(f"both cards name the same colliding tool_use id, got {[c.data.get('id') for c in cards]}",
+                      all(c.data.get("name") == "Bash" for c in cards))
+            ids = [c.data.get("id") for c in cards]
+            ctx.check(f"THE FIX: the two waiter/request ids are DISTINCT despite the identical tool_use id, got {ids}",
+                      len(set(ids)) == 2)
+            agent_ids = {c.agent_id for c in cards}
+            ctx.check(f"tagged with two distinct agent_ids, got {agent_ids}", len(agent_ids) == 2)
+            card_by_agent = {c.agent_id: c for c in cards}
+
+            # Resolve ONE card and confirm ONLY that child's own Bash call
+            # produced a result so far -- the other must still be waiting
+            # (proves no cross-wiring: answering A never touches B's slot).
+            first_agent_id = next(iter(agent_ids))
+            resolved = session.resolve_permission(card_by_agent[first_agent_id].data.get("id"),
+                                                    Decision("allow", "allow the first one"))
+            ctx.check("resolve_permission found the first child's own waiter", resolved is True)
+
+            deadline = time.monotonic() + 10
+            while not any(e.kind == "tool_result" and e.agent_id == first_agent_id for e in events_seen) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.05)
+            first_results = [e for e in events_seen if e.kind == "tool_result" and e.agent_id == first_agent_id]
+            ctx.check(f"the FIRST child's own Bash call got a result, got {first_results}", len(first_results) == 1)
+            ctx.check(f"it genuinely ran (not denied), got {first_results[0].data}", first_results[0].data.get("ok") is True)
+            other_agent_id = next(a for a in agent_ids if a != first_agent_id)
+            still_waiting = [e for e in events_seen if e.kind == "tool_result" and e.agent_id == other_agent_id]
+            ctx.check(f"the OTHER child's Bash call has NO result yet -- still genuinely waiting, "
+                      f"not silently resolved by the first answer, got {still_waiting}", still_waiting == [])
+
+            # Now resolve the second card too, so the turn can finish cleanly.
+            resolved2 = session.resolve_permission(card_by_agent[other_agent_id].data.get("id"),
+                                                     Decision("allow", "allow the second one"))
+            ctx.check("resolve_permission found the SECOND child's own waiter (not already consumed)", resolved2 is True)
+            done.wait(timeout=10)
+            ctx.check("the whole turn finished", done.is_set())
+            second_results = [e for e in events_seen if e.kind == "tool_result" and e.agent_id == other_agent_id]
+            ctx.check(f"the second child's own Bash call also got its OWN result, got {second_results}",
+                      len(second_results) == 1 and second_results[0].data.get("ok") is True)
+        finally:
+            done.wait(timeout=5)
+    finally:
+        mock.stop()
+
+
 # ---- subagent log files + meta.json --------------------------------------------
 
 @test
@@ -683,6 +797,86 @@ def test_task_id_resume_continues_the_same_child_session(ctx: Ctx):
         ctx.check("resume did not error", not result2.is_error)
         ctx.check("same task_id echoed back", f'task_id="{task_id}"' in result2.content)
         ctx.check("the RESUMED request still carried the original conversation", seen_original_context["ok"])
+    finally:
+        mock.stop()
+
+
+@test
+def test_h9_taskstop_targets_a_background_agents_own_abort_event(ctx: Ctx):
+    """H9 whole-tree review finding 32: the real Claude Code TaskStop
+    accepts a background sub-agent's own task_id, not just a Bash
+    shell_id (`tools/task_stop.py` used to answer "Unknown shell_id/
+    task_id" for every agent task, with no way to stop one at all).
+    `agent/subagent.py`'s `run_agent_call` now stashes a BACKGROUND
+    child's own (private, per finding 10) abort Event on `agent_runtime.
+    tasks[task_id]["abort_event"]`; TaskStop must find and set it."""
+    from rolo_claude.agent.subagent import run_agent_call
+    from rolo_claude.tools.base import ToolContext
+    from rolo_claude.tools.task_stop import TaskStopTool
+
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h9-child-taskstop-bg"] = ScriptedTurns([_text_step("background result")])
+        session = _new_session(mock=mock, model="or:mock/h9-parent-taskstop-unused",
+                                agents={"general-purpose": _general_purpose_spec()})
+        _events, result = run_agent_call(
+            runtime=session.agent_runtime, tool_id="toolu_bg1",
+            tool_input={"description": "bg", "prompt": "work in the background",
+                        "subagent_type": "general-purpose", "model": "or:mock/h9-child-taskstop-bg",
+                        "run_in_background": True},
+            tool_name="Task",
+        )
+        m = re.search(r'task_id="?([a-f0-9]+)"?', result.content)
+        ctx.check(f"a task_id was returned, got {result.content!r}", m is not None)
+        task_id = m.group(1)
+        task = session.agent_runtime.tasks.get(task_id)
+        ctx.check("the task record carries a real abort_event for this BACKGROUND child",
+                  task is not None and task.get("abort_event") is not None)
+
+        stop_ctx = ToolContext(cwd=session.cwd, agent_runtime=session.agent_runtime)
+        stop_result = TaskStopTool().run({"task_id": task_id}, stop_ctx)
+        ctx.check(f"TaskStop succeeds on an agent task_id, got {stop_result.content!r}", not stop_result.is_error)
+        ctx.check("the child's own abort Event is now set", task["abort_event"].is_set())
+
+        # A SECOND stop on the same (already-stopped) task_id is still a
+        # clean, non-error response (idempotent), never a crash/KeyError.
+        stop_result2 = TaskStopTool().run({"task_id": task_id}, stop_ctx)
+        ctx.check(f"stopping an already-stopped task is a clean no-op, got {stop_result2.content!r}",
+                  not stop_result2.is_error and "already" in stop_result2.content.lower())
+    finally:
+        mock.stop()
+
+
+@test
+def test_h9_taskstop_on_a_foreground_agent_task_is_a_clear_error_not_unknown(ctx: Ctx):
+    """A FOREGROUND sub-agent's task record deliberately carries NO abort_
+    event of its own (finding 10: it shares the parent's -- stopping it is
+    the user's own Esc/Ctrl+C, not TaskStop) -- must say so plainly, never
+    the generic "Unknown shell_id/task_id" (which would wrongly suggest
+    the task_id itself was wrong)."""
+    from rolo_claude.agent.subagent import run_agent_call
+    from rolo_claude.tools.base import ToolContext
+    from rolo_claude.tools.task_stop import TaskStopTool
+
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["h9-child-taskstop-fg"] = ScriptedTurns([_text_step("foreground result")])
+        session = _new_session(mock=mock, model="or:mock/h9-parent-taskstop-fg-unused",
+                                agents={"general-purpose": _general_purpose_spec()})
+        _events, result = run_agent_call(
+            runtime=session.agent_runtime, tool_id="toolu_fg1",
+            tool_input={"description": "fg", "prompt": "work in the foreground",
+                        "subagent_type": "general-purpose", "model": "or:mock/h9-child-taskstop-fg"},
+            tool_name="Task",
+        )
+        m = re.search(r'task_id="?([a-f0-9]+)"?', result.content)
+        ctx.check(f"a task_id was returned, got {result.content!r}", m is not None)
+        task_id = m.group(1)
+
+        stop_ctx = ToolContext(cwd=session.cwd, agent_runtime=session.agent_runtime)
+        stop_result = TaskStopTool().run({"task_id": task_id}, stop_ctx)
+        ctx.check(f"a clear FOREGROUND-specific error, not 'Unknown', got {stop_result.content!r}",
+                  stop_result.is_error and "FOREGROUND" in stop_result.content and "Unknown" not in stop_result.content)
     finally:
         mock.stop()
 

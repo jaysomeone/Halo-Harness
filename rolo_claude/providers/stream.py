@@ -102,6 +102,14 @@ class CompletionRequest:
     # keeps the proxy always minting fresh unique ids, exactly as before;
     # only agent/loop.py's Session ever passes anything else.
     tool_id_format: str = "mint"
+    # H9 critical review finding 1: the "kimi_functions_idx" rename counter
+    # must continue across the WHOLE session (Kimi's own idx is
+    # conversation-global on the wire), not restart at 0 on every fresh
+    # per-call stream -- agent/loop.py computes this from
+    # agent/invariants.highest_kimi_functions_idx(self.log) + 1 before each
+    # call; 0 (the default) is correct for the proxy, which never sets this
+    # and never uses "kimi_functions_idx" either.
+    kimi_tool_id_start: int = 0
     # H5 scope C: when set, `stream_anthropic_completion` (never
     # `stream_completion`, which stays openai-chat-dialect only) sends
     # this ALREADY-native-Anthropic-shaped body verbatim instead of
@@ -401,7 +409,8 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
     harness_mode = getattr(req, "harness_mode", False)
     sm = OpenAIStreamToAnthropic(req.model_label, estimate,
                                   capture_reasoning=harness_mode, strict_tool_json=harness_mode,
-                                  tool_id_format=getattr(req, "tool_id_format", "mint"))
+                                  tool_id_format=getattr(req, "tool_id_format", "mint"),
+                                  kimi_tool_id_start=getattr(req, "kimi_tool_id_start", 0))
 
     dumped_lines: list = []
     dumped_events: list = []
@@ -508,6 +517,21 @@ def stream_completion(req: CompletionRequest, abort: "threading.Event | None" = 
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
+                pass
+        # H9 static pass (`-X dev -W error::ResourceWarning`): the reader
+        # thread closes the HTTPResponse, but nothing ever closed the
+        # HTTPConnection itself, so its socket lived on until garbage
+        # collection -- one "unclosed <socket.socket ...>" ResourceWarning
+        # per model call (74 of them attributed to agent/loop.py's
+        # `for ev in gen`, 15 more to the summariser call, in one full
+        # suite run). Every call opens its own connection (no keep-alive
+        # reuse), so closing it here -- after the terminal event, or after
+        # the SHUT_RDWR above on an early exit -- is always correct.
+        conn = getattr(result, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
                 pass
         dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
         dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
@@ -669,6 +693,21 @@ def stream_anthropic_completion(req: CompletionRequest, abort: "threading.Event 
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
+                pass
+        # H9 static pass (`-X dev -W error::ResourceWarning`): the reader
+        # thread closes the HTTPResponse, but nothing ever closed the
+        # HTTPConnection itself, so its socket lived on until garbage
+        # collection -- one "unclosed <socket.socket ...>" ResourceWarning
+        # per model call (74 of them attributed to agent/loop.py's
+        # `for ev in gen`, 15 more to the summariser call, in one full
+        # suite run). Every call opens its own connection (no keep-alive
+        # reuse), so closing it here -- after the terminal event, or after
+        # the SHUT_RDWR above on an early exit -- is always correct.
+        conn = getattr(result, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
                 pass
         dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
         dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})

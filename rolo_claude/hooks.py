@@ -751,6 +751,29 @@ def _apply_json_fields(outcome: HookOutcome, parsed: dict, event: str) -> None:
         updated_input = hso.get("updatedInput")
         if isinstance(updated_input, dict):
             outcome.updated_input = updated_input
+        # H9 Linux acceptance (Part A, bug 2): a PreToolUse hook written in
+        # the PermissionRequest shape -- `hookSpecificOutput.decision.
+        # {behavior, updatedInput, message}` -- used to be a SILENT no-op:
+        # the documented PreToolUse contract is the flat `permissionDecision`
+        # / `updatedInput` pair above (binary-facts sec.7), so nothing read
+        # the nested object, and the ORIGINAL command ran unchanged with no
+        # warning. Honour the nested shape too when the flat fields are
+        # absent (never override an explicit flat decision): allow/deny and
+        # updatedInput are the same intent either way, and a hook author
+        # who copied the other event's schema should get what they asked
+        # for rather than nothing.
+        if event == "PreToolUse" and pd is None and not isinstance(updated_input, dict):
+            decision_obj = hso.get("decision")
+            if isinstance(decision_obj, dict):
+                behavior = decision_obj.get("behavior")
+                if behavior in ("allow", "deny", "ask"):
+                    outcome.permission_decision = behavior
+                message = decision_obj.get("message")
+                if isinstance(message, str) and message and not outcome.permission_decision_reason:
+                    outcome.permission_decision_reason = message[:REASON_CAP]
+                nested_input = decision_obj.get("updatedInput")
+                if isinstance(nested_input, dict):
+                    outcome.updated_input = nested_input
         extra_ctx = hso.get("additionalContext")
         if isinstance(extra_ctx, str) and extra_ctx:
             merged = f"{outcome.additional_context}\n{extra_ctx}" if outcome.additional_context else extra_ctx

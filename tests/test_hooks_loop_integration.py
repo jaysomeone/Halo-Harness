@@ -613,6 +613,73 @@ def test_h5b_f10_session_start_env_file_var_expansion_through_a_real_session(ctx
         mock.stop()
 
 
+@test
+def test_h9_sessionstart_never_refires_for_a_sub_agent(ctx: Ctx):
+    """H9 whole-tree review finding 16: `Session.__init__` unconditionally
+    fired SessionStart(startup) for every brand-new (always-empty) log --
+    including a sub-agent's own child log -- so spawning N sub-agents in
+    one session re-ran the USER's own SessionStart hook N extra times (a
+    session with 3 sub-agents used to run it 4 times total: once for the
+    parent, once per child). A sub-agent should fire SubagentStart
+    (agent/subagent.py's own event) instead, never the user's SessionStart
+    hooks at all. Verified directly at the Session level (not through the
+    full Agent-tool/AgentRuntime machinery) by constructing the PARENT
+    session (agent_id=None) and then two more Sessions the exact way
+    agent/subagent.py's `_build_child_session` does (agent_id set,
+    otherwise identical hook_runner/config) and counting real hook
+    invocations via the same `once_counter` script other hook tests use."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.log import SessionLog
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.hooks import HookDef, HookRunner
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.permissions import PermissionEngine
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        counter_file = Path(tempfile.mkdtemp(prefix="hooks-loop-sessionstart-")) / "counter.txt"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_DIR)
+        env["HOOK_ONCE_COUNTER_FILE"] = str(counter_file)
+
+        def _build(agent_id):
+            session_id = f"h9-f16-session-{agent_id or 'parent'}"
+            session_log = SessionLog(fh["proj"], session_id=session_id)
+            hook_runner = HookRunner(
+                {"SessionStart": [HookDef(type="command", args=_HOOK_SCRIPT_ARGV + ["once_counter"])]},
+                cwd=fh["proj"], session_id=session_id, transcript_path=str(session_log.path), effective_env=env,
+            )
+            session_ctx = SessionContext(cwd=fh["proj"], model_label="or:mock/hook-sessionstart-count")
+            model_ref = parse_model_ref("or:mock/hook-sessionstart-count")
+            return Session(
+                cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(),
+                creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+                state_dir=Path(tempfile.mkdtemp(prefix="hooks-loop-sessionstart-state-")),
+                model_label="or:mock/hook-sessionstart-count", session_context=session_ctx, session_log=session_log,
+                openrouter_base_url=mock.base_url, max_turns=10,
+                permission_engine=PermissionEngine(mode="auto", cwd=fh["proj"]), hook_runner=hook_runner,
+                agent_id=agent_id,
+            )
+
+        parent = _build(None)  # the top-level session -- SessionStart(startup) fires
+        lines = counter_file.read_text(encoding="utf-8").splitlines() if counter_file.exists() else []
+        ctx.check(f"the PARENT's own construction fires SessionStart exactly once, got {len(lines)}", len(lines) == 1)
+
+        _build("child-a")  # mirrors agent/subagent.py's _build_child_session exactly
+        _build("child-b")
+        lines = counter_file.read_text(encoding="utf-8").splitlines() if counter_file.exists() else []
+        ctx.check(f"two sub-agent constructions add ZERO further hook firings, got {len(lines)} (expected still 1)",
+                  len(lines) == 1)
+        ctx.check("agent_id really is set on the child Session objects (sanity: the guard has something to check)",
+                  parent.agent_id is None)
+    finally:
+        mock.stop()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

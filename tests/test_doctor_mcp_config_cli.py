@@ -122,6 +122,50 @@ def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
 
 
 @test
+def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
+    """H9 OpenCode item 23: doctor must ALSO check for `rg`, `$VISUAL`/
+    `$EDITOR` and a usable Bash shell (Git Bash on win32, `/bin/bash` on
+    POSIX) -- xclip/wl-copy (clipboard), `claude` (--chrome) and npx
+    (--playwright) were already covered before this milestone."""
+    from rolo_claude.doctor import run_checks, _check_ripgrep, _check_editor, _check_shell
+    lines, _ok = run_checks()
+    ctx.check(f"an rg/ripgrep line is present, got {lines}", any("rg" in l and "ripgrep" in l for l in lines))
+    ctx.check(f"a $VISUAL/$EDITOR line is present, got {lines}", any("$VISUAL/$EDITOR" in l for l in lines))
+    ctx.check(f"a shell (bash) line is present, got {lines}",
+              any(("Git Bash" in l or " bash " in l or l.strip().endswith("bash") or "bash not found" in l)
+                  for l in lines))
+
+    # Unit-level: rg/EDITOR degrade to WARN (never MISSING -- both are
+    # optional conveniences, not requirements), never crash either way.
+    old_path, old_editor, old_visual = os.environ.get("PATH"), os.environ.pop("EDITOR", None), os.environ.pop("VISUAL", None)
+    try:
+        os.environ["PATH"] = str(_fresh_home())  # a directory with nothing on it -- rg guaranteed absent
+        rg_line = _check_ripgrep()
+        ctx.check(f"rg absent -> WARN not MISSING, got {rg_line!r}", rg_line.startswith("[WARN]"))
+        editor_line = _check_editor()
+        ctx.check(f"$EDITOR unset -> WARN not MISSING, got {editor_line!r}", editor_line.startswith("[WARN]"))
+    finally:
+        if old_path is not None:
+            os.environ["PATH"] = old_path
+        if old_editor is not None:
+            os.environ["EDITOR"] = old_editor
+        if old_visual is not None:
+            os.environ["VISUAL"] = old_visual
+
+    # A real, findable shell IS present on every box this suite runs on
+    # (Windows has Git Bash per the plan's binary facts; Linux/WSL/Kali all
+    # have /bin/bash) -- this must be OK here, never MISSING/a crash.
+    shell_line = _check_shell()
+    ctx.check(f"a real shell is found on this test box, got {shell_line!r}", shell_line.startswith("[OK]"))
+
+    # The real doctor CLI (subprocess) also surfaces all three.
+    home = _fresh_home()
+    result = _run(["doctor"], home)
+    ctx.check("real doctor CLI mentions ripgrep", "ripgrep" in result.stdout.lower())
+    ctx.check("real doctor CLI mentions $VISUAL/$EDITOR", "$VISUAL/$EDITOR" in result.stdout)
+
+
+@test
 def test_mcp_list_no_servers(ctx: Ctx):
     home = _fresh_home()
     result = _run(["mcp", "list"], home)

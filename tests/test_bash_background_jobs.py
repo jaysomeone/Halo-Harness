@@ -85,6 +85,66 @@ def test_job_registry_start_background_and_poll(ctx: Ctx):
 
 
 @test
+def test_h9_completion_notice_truncates_long_output_with_a_bashoutput_hint(ctx: Ctx):
+    """H9 whole-tree review finding 7: a completion notice used to embed
+    the job's ENTIRE captured output verbatim (up to the collector's own
+    ~300k-char cap) as a plain user-role log entry -- unlike a real
+    tool_result, prune.py never stubs it, so it stayed at full size in the
+    log FOREVER, re-sent on every later request for the rest of the
+    session (the review's own repro: a 594k-char job produced a
+    300,292-char, ~75k-token notice). Now it's a short tail plus a pointer
+    to BashOutput for the rest. Constructs the JobRecord/collector directly
+    (bypassing a real subprocess) for a fast, deterministic test of
+    `_push_notice` itself."""
+    import dataclasses
+    import time as time_mod
+    from rolo_claude.agent.jobs import JobRecord
+    from rolo_claude.tools._proc import _CappedCollector
+
+    parent = _FakeParent()
+    reg = JobRegistry(parent)
+    collector = _CappedCollector()
+    long_output = "".join(f"line {i}\n" for i in range(2000))  # well over 2000 chars, well under the spill cap
+    collector.append(long_output)
+    record = JobRecord(job_id="bg_test123", command="a long-output command", description="long output",
+                        cwd=str(_tmpdir("job-notice-trunc-")), started_at=time_mod.monotonic(),
+                        collector=collector, status="completed", exit_code=0)
+    reg._push_notice(record)
+    ctx.check("exactly one notice pushed", len(parent._pending_job_notices) == 1)
+    notice = parent._pending_job_notices[0]
+    ctx.check(f"notice is FAR shorter than the full {len(long_output)}-char output, got {len(notice)} chars",
+              len(notice) < len(long_output) / 2)
+    ctx.check(f"notice points to BashOutput with the real job_id for the rest, got tail={notice[-200:]!r}",
+              "BashOutput('bg_test123')" in notice or 'BashOutput("bg_test123")' in notice)
+    ctx.check("notice ends with the TRUE tail of the real output (the last line), not truncated mid-content",
+              notice.rstrip("\n]").rstrip().endswith("line 1999") or "line 1999" in notice[-100:])
+    ctx.check("still names the job id and exit code up front, same as before this fix",
+              "bg_test123" in notice and "exit code 0" in notice)
+
+
+@test
+def test_h9_completion_notice_short_output_is_never_truncated(ctx: Ctx):
+    """The fix must be a no-op for the common case (a short job) -- never
+    add the BashOutput hint, never shorten output that was already under
+    the tail cap."""
+    import time as time_mod
+    from rolo_claude.agent.jobs import JobRecord
+    from rolo_claude.tools._proc import _CappedCollector
+
+    parent = _FakeParent()
+    reg = JobRegistry(parent)
+    collector = _CappedCollector()
+    collector.append("short output\n")
+    record = JobRecord(job_id="bg_short1", command="echo short output", description="short",
+                        cwd=str(_tmpdir("job-notice-short-")), started_at=time_mod.monotonic(),
+                        collector=collector, status="completed", exit_code=0)
+    reg._push_notice(record)
+    notice = parent._pending_job_notices[0]
+    ctx.check(f"short output preserved verbatim, no hint added, got {notice!r}",
+              "short output" in notice and "BashOutput" not in notice)
+
+
+@test
 def test_job_registry_poll_only_returns_new_output(ctx: Ctx):
     parent = _FakeParent()
     reg = JobRegistry(parent)

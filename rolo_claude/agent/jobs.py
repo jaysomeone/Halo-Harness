@@ -236,6 +236,18 @@ class JobRegistry:
             record.exit_code = record._parsed_exit if record._parsed_exit is not None else record.proc.returncode
         self._push_notice(record)
 
+    # H9 whole-tree review finding 7: a completion notice used to embed the
+    # job's ENTIRE captured output (up to the collector's own ~300k-char
+    # cap) verbatim, and unlike a real tool_result this text is a plain
+    # user-role log entry that prune.py never stubs -- it stays at full
+    # size in the log FOREVER, re-sent on every later request for the rest
+    # of the session (verified: a 594k-char job produced a 300,292-char
+    # notice, about 75k tokens, resent every step). BashOutput already
+    # exists specifically to fetch a job's output on demand, so the notice
+    # only needs a short tail to show what happened at a glance, not the
+    # whole thing.
+    _NOTICE_OUTPUT_TAIL_CHARS = 2000
+
     def _push_notice(self, record: JobRecord) -> None:
         """dsh: "background jobs ... report completion as a user-role
         notice in the next step" -- mirrors agent/subagent.py's own
@@ -246,6 +258,14 @@ class JobRegistry:
             status, exit_code = record.status, record.exit_code
             output = record.collector.result().strip() if record.collector else ""
         label = record.description or record.command[:60]
+        total_chars = len(output)
+        if total_chars > self._NOTICE_OUTPUT_TAIL_CHARS:
+            hint = (f"\n\n... [{total_chars - self._NOTICE_OUTPUT_TAIL_CHARS} earlier characters omitted -- "
+                    f"use BashOutput({record.job_id!r}) to fetch the rest, or the full capture is at "
+                    f"{record.collector.spill_path}]" if record.collector and record.collector.spill_path
+                    else f"\n\n... [{total_chars - self._NOTICE_OUTPUT_TAIL_CHARS} earlier characters omitted -- "
+                         f"use BashOutput({record.job_id!r}) to fetch the rest]")
+            output = output[-self._NOTICE_OUTPUT_TAIL_CHARS:] + hint
         if status == "killed":
             text = f"[Background job {record.job_id} ({label}) was stopped before it finished]"
             if output:
@@ -275,8 +295,36 @@ class JobRegistry:
             return None, f"Unknown shell_id {job_id!r}. Known background shells: {known}"
         with record.lock:
             full = record.collector.result() if record.collector else ""
-            new_text = full[record.read_offset:]
-            record.read_offset = len(full)
+            collector = record.collector
+            prev_offset = record.read_offset
+            total_len = collector.total_len if collector is not None else len(full)
+            if collector is not None and collector.spill_path is not None and prev_offset < collector.tail_start:
+                # H9 whole-tree review finding 6: `record.read_offset` used
+                # to be compared against `len(full)`, but once output
+                # exceeds the in-memory cap `result()` returns head+tail
+                # only (roughly constant length from here on) -- diffing
+                # against that silently DROPPED every char that had
+                # already rolled out of both windows before this poll ever
+                # ran. Verified: three 198k-char writes returned 198,136
+                # new chars, then 102,088, then "(no new output)" forever,
+                # even though the shell kept producing real output. Never
+                # silently lose it: deliver any HEAD bytes not yet
+                # delivered, account for the truly-unreachable middle with
+                # an explicit skipped-count and the spill file's path (a
+                # real Read call on it recovers everything), then the
+                # current tail in full.
+                head_len = collector.head_len
+                undelivered_head = full[prev_offset:head_len] if prev_offset < head_len else ""
+                skipped = collector.tail_start - max(prev_offset, head_len)
+                parts = [undelivered_head]
+                if skipped > 0:
+                    parts.append(f"\n\n... [{skipped} characters skipped -- already rolled out of the "
+                                 f"in-memory window; read {collector.spill_path} directly for the full output]\n\n")
+                parts.append(collector.tail_text)
+                new_text = "".join(parts)
+            else:
+                new_text = full[prev_offset:] if prev_offset <= len(full) else ""
+            record.read_offset = total_len
             status, exit_code = record.status, record.exit_code
         if filter_regex:
             try:

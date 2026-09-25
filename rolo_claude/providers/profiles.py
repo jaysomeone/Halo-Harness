@@ -150,6 +150,19 @@ class ProviderProfile:
     context_tokens: Optional[int] = None  # row-reported context window, informational
     databricks_rate_limits: Optional[dict] = None  # {itpm, otpm, qph} (hooks.max_tokens_budget)
     unverified: tuple = ()  # field names this row's data lacks a primary source for
+    # H9 sampling-table audit: every model_table.json row already carries
+    # this (DeepSeek V4/Grok/MiniMax: presence_penalty/frequency_penalty;
+    # Kimi K2.6+/K3: temperature/top_p/n/presence_penalty/frequency_penalty
+    # fixed server-side; Grok: +stop/logprobs/top_logprobs) but nothing
+    # read it back out of the row into a ProviderProfile field, so it was
+    # pure decoration -- request.build_request_body now pops any of these
+    # keys from the final body right before sending (see there). Currently
+    # a no-op in practice (nothing in this codebase sets presence_penalty/
+    # frequency_penalty/logit_bias/n/logprobs/stop today), but it's the
+    # documented safety net the table's own data implies, and it becomes
+    # load-bearing the moment any of those surfaces (a hook rewrite, a
+    # future settings knob) starts populating one.
+    sampling_unsupported_params: tuple = ()
 
 
 def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
@@ -207,6 +220,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
         context_tokens=row.get("context_tokens"),
         databricks_rate_limits=row.get("rate_limits"),
         unverified=tuple(row.get("unverified") or ()),
+        sampling_unsupported_params=tuple(row.get("sampling_unsupported_params") or ()),
     )
 
     if route.provider == "databricks":

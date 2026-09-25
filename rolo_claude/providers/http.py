@@ -25,6 +25,7 @@ import ssl
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from rolo_claude.providers.config import dump_debug, jdumps
 from rolo_claude.providers.errors import upstream_error_text

@@ -132,17 +132,113 @@ def _coerce_gemini_enums(node):
     return node
 
 
-def sanitize_tool_schema(schema: dict, *, family: Optional[str] = None) -> dict:
-    """`family` is `providers.profiles.model_family()`'s own string
-    ("kimi", "gemini", ...); `None`/an unrecognised family (in particular
-    "claude", which never reaches an OpenAI/Gemini/Moonshot-shaped
-    endpoint) is a no-op -- returns `schema` unchanged."""
+_REF_INLINE_MAX_DEPTH = 32
+
+
+def _resolve_local_ref(ref: str, root: dict):
+    """`#/$defs/Name` / `#/definitions/Name` (any JSON-pointer path under
+    the root) -> the referenced sub-schema, or None for a non-local or
+    unresolvable ref (left as-is by the caller, never invented)."""
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    node = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _inline_local_refs(node, root: dict, *, _stack: tuple = (), _depth: int = 0):
+    """H9 MCP-compatibility (bug (a) of the matrix): resolve every LOCAL
+    `$ref` (`#/$defs/...`, `#/definitions/...`) IN PLACE of the reference
+    -- semantically identical JSON Schema, but one that hosts which never
+    resolve refs at all (the vLLM/SGLang-style OpenAI-compatible servers
+    behind DeepSeek/GLM/Qwen on OpenRouter) can actually validate against.
+    A `$ref` node's SIBLING keywords (e.g. `description`) are kept and
+    override the target's (JSON Schema 2019-09+ semantics). Cycle-safe: a
+    self-/mutually-recursive ref, or nesting past `_REF_INLINE_MAX_DEPTH`,
+    falls back to a permissive `{"type": "object"}` -- the SAME fallback
+    `providers/request.simplify_schema_for_databricks` already uses -- so
+    a recursive schema can never expand forever."""
+    if isinstance(node, list):
+        return [_inline_local_refs(v, root, _stack=_stack, _depth=_depth + 1) for v in node]
+    if not isinstance(node, dict):
+        return node
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        target = _resolve_local_ref(ref, root)
+        if isinstance(target, dict):
+            if ref in _stack or _depth > _REF_INLINE_MAX_DEPTH:
+                return {"type": "object"}
+            merged = dict(target)
+            merged.update({k: v for k, v in node.items() if k != "$ref"})
+            return _inline_local_refs(merged, root, _stack=_stack + (ref,), _depth=_depth + 1)
+        # non-local / unresolvable: leave it exactly as it was
+    return {k: _inline_local_refs(v, root, _stack=_stack, _depth=_depth + 1) for k, v in node.items()}
+
+
+def _collapse_nullable_anyof(node):
+    """`anyOf: [T, {"type": "null"}]` (the common "optional nullable"
+    shape) -> T (keeping T's keywords), same collapse rule the Databricks
+    simplifier applies; any OTHER anyOf/oneOf is left untouched (OpenAI-
+    compatible validators generally accept them as-is)."""
+    if isinstance(node, list):
+        return [_collapse_nullable_anyof(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    any_of = node.get("anyOf")
+    if isinstance(any_of, list) and len(any_of) == 2:
+        non_null = [b for b in any_of if not (isinstance(b, dict) and b.get("type") == "null")]
+        if len(non_null) == 1 and len(any_of) - len(non_null) == 1 and isinstance(non_null[0], dict):
+            collapsed = dict(node)
+            collapsed.pop("anyOf", None)
+            collapsed.update(non_null[0])
+            node = collapsed
+    return {k: _collapse_nullable_anyof(v) for k, v in node.items()}
+
+
+def normalize_tool_schema(schema: dict) -> dict:
+    """Family-AGNOSTIC base normalisation (H9 MCP-compatibility matrix bug
+    (a): before this, only kimi/gemini got ANY massaging, and the harness's
+    own default family -- deepseek -- sent a real MCP tool's `$ref`/`$defs`
+    /tuple-`items` schema to OpenRouter completely unresolved). Local
+    `$ref`s are inlined (cycle-safe), the now-unreferenced `$defs`/
+    `definitions` containers dropped, tuple-style `items` arrays flattened
+    to `items[0]` (OpenCode's own rule), and the "optional nullable"
+    `anyOf` pair collapsed to its real type. A flat schema (Claude Code's
+    own built-in tools, most MCP tools) round-trips unchanged in value --
+    the output is always a NEW dict, never `schema` itself."""
     if not isinstance(schema, dict):
         return schema
-    out = schema
+    out = _inline_local_refs(schema, schema)
+    if isinstance(out, dict):
+        out = {k: v for k, v in out.items() if k not in ("$defs", "definitions")}
+    out = _flatten_tuple_items(out)
+    out = _collapse_nullable_anyof(out)
+    return out
+
+
+def sanitize_tool_schema(schema: dict, *, family: Optional[str] = None) -> dict:
+    """`family` is `providers.profiles.model_family()`'s own string
+    ("kimi", "gemini", "deepseek", ...). Every family that reaches an
+    OpenAI/Gemini/Moonshot-shaped endpoint -- i.e. everything except
+    "claude", whose Anthropic-shaped endpoints validate JSON Schema
+    natively and get `schema` back unchanged -- now gets
+    `normalize_tool_schema`'s base pass first (H9: previously only kimi/
+    gemini got anything at all), then its own family-specific extras on
+    top: kimi's bare-`$ref`-sibling rule (a no-op once refs are inlined,
+    kept for a NON-local ref the inliner leaves alone) and its
+    `required: []` for a no-property object; gemini's string-only enums."""
+    if not isinstance(schema, dict):
+        return schema
+    if family == "claude":
+        return schema
+    out = normalize_tool_schema(schema)
     if family == "kimi":
         out = _strip_ref_siblings(out)
-        out = _flatten_tuple_items(out)
         # Kimi K2.5 additionally rejects a `{}` (no properties) object
         # schema without an explicit "required": [] -- Claude Code itself
         # never sends a bare {} for a real parameter schema, but a no-arg

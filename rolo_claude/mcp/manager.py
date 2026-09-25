@@ -922,7 +922,22 @@ class McpServerHandle:
         # just whatever the SDK's internal `read_timeout_seconds` does on
         # its own.
         keepalive = ProgressKeepalive()
-        coro = self._session.call_tool(name, arguments or {}, read_timeout_seconds=timeout,
+        # H9 bug fix (MCP compatibility matrix, "progress keepalive" live
+        # check): this used to ALSO hand the SDK `read_timeout_seconds=
+        # timeout` -- a single `anyio.fail_after` armed once inside the
+        # SDK's own `send_raw_request` that NO progress notification ever
+        # resets -- while the outer, keepalive-extendable bound below was
+        # `timeout + 3`. The inner bound was therefore always 3s shorter
+        # and always fired first, so a progressing call was killed at
+        # exactly `timeout` every single time no matter how many progress
+        # pings had arrived (deterministic repro: timeout_ms=1000, a tool
+        # sending progress every 0.5s over 1.5s -> dead at 1.0s). The
+        # keepalive could never actually rescue anything. Leave the SDK's
+        # own bound OFF (None) and let `run_abortable`'s bound -- the one
+        # `keepalive` really extends, and the one `abort` really cuts --
+        # be the only wall-clock guard: a genuinely hung server still
+        # times out at the SAME `overall` moment as before.
+        coro = self._session.call_tool(name, arguments or {}, read_timeout_seconds=None,
                                         progress_callback=keepalive)
         overall = (timeout + 3) if timeout else mcp_timeout_s() + 3
         try:
@@ -1048,10 +1063,56 @@ class McpManager:
         self.configs = configs
         self._lazy_names = set(lazy_names or ())
         self._closed = False
+        # H9 bug fix (item 11, MCP compatibility matrix): kept around ONLY
+        # for `resync_from()` below, which needs to build a brand-new
+        # `McpServerHandle` the same way the constructor does for a name
+        # that shows up later (a server added to the config file mid-
+        # session) -- the constructor itself never stored these before.
+        self._tool_env = tool_env or {}
+        self._cwd = cwd
+        self._trusted = trusted
         self.handles: "dict[str, McpServerHandle]" = {
             name: McpServerHandle(cfg, self.loop, tool_env=tool_env or {}, cwd=cwd, trusted=trusted)
             for name, cfg in configs.items()
         }
+
+    def resync_from(self, new_configs: "dict[str, McpServerConfig]") -> "list[str]":
+        """H9 bug fix (item 11, MCP compatibility matrix): `reconnect()`
+        alone only ever restarts an ALREADY-KNOWN handle using its
+        ORIGINALLY-parsed `McpServerConfig` -- a real on-disk edit to an
+        existing server's command/args/env/url, or a brand-new server name
+        added to `~/.claude.json`/`.mcp.json` after this session started,
+        was previously invisible no matter how many times `/mcp` reconnect
+        ran, since neither `Controller.reconnect_mcp` nor this manager ever
+        re-resolved the config FILES at all. The caller re-runs
+        `resolve_server_configs(...)` against a freshly re-read
+        `~/.claude.json` (and re-passes it here) -- this method then
+        reconciles: a name with no existing handle gets a brand new one
+        (added server); a name whose config genuinely differs from what's
+        live now has its OLD handle closed and REPLACED with a fresh one
+        built from the new config (changed server); a name already present
+        with an UNCHANGED config is left alone (no needless reconnect,
+        and no interruption of an in-flight call). A name that no longer
+        appears in `new_configs` at all is left running untouched -- this
+        never tears a working connection down just because it dropped out
+        of the file; an explicit `reconnect()`/`close_all()` still can.
+        Returns the names actually added or updated; `start()` on the
+        result is the caller's job (eager vs. lazy is a caller decision,
+        same contract the constructor already has)."""
+        from dataclasses import asdict
+        touched = []
+        for name, cfg in new_configs.items():
+            existing_cfg = self.configs.get(name)
+            if existing_cfg is not None and asdict(existing_cfg) == asdict(cfg):
+                continue  # unchanged -- nothing to do, don't disturb a live connection
+            old_handle = self.handles.get(name)
+            if old_handle is not None:
+                old_handle.close(timeout=mcp_timeout_s() + 5.0)
+            self.configs[name] = cfg
+            self.handles[name] = McpServerHandle(cfg, self.loop, tool_env=self._tool_env,
+                                                  cwd=self._cwd, trusted=self._trusted)
+            touched.append(name)
+        return touched
 
     def start_all(self) -> None:
         """Start every eligible server (not lazy, not disabled, not
@@ -1060,8 +1121,6 @@ class McpManager:
         handle and never aborts the others, and this method itself never
         raises -- `status()` afterward is how a caller learns what
         happened. Safe to call with zero eligible servers (no-op)."""
-        from rolo_claude.mcp import http_sse as http_sse_mod
-
         # idempotent: a handle already connected/connecting/failed/
         # needs_auth/closed from an EARLIER start_all()/start() is never
         # re-targeted -- only genuinely still-"pending" handles are. A
@@ -1076,6 +1135,21 @@ class McpManager:
                    if name not in self._lazy_names and h.state == "pending"]
         if not targets:
             return
+        self._start_targets_parallel(targets)
+
+    def _start_targets_parallel(self, targets: "list[McpServerHandle]", *, abort=None) -> None:
+        """Shared by `start_all()` and `ensure_lazy_started_all()` (H9
+        must-do: the lazy-start path used to be a plain serial `for name in
+        self._lazy_names: h.start()` loop -- up to `len(lazy_names) *
+        MCP_TIMEOUT` of wall-clock time, worst case, and no `abort` at all,
+        so Esc/Ctrl+C could do nothing while ToolSearch's first call waited
+        on it. This starts every target CONCURRENTLY (same
+        one-lifecycle-task-per-handle mechanism `McpServerHandle.start()`
+        uses) and, when `abort` is given, waits on the combined future the
+        SAME abortable way `McpServerHandle.start()` already waits on a
+        single one -- an Esc during a lazy-discovery burst now returns
+        promptly instead of blocking for up to MCP_TIMEOUT per server."""
+        from rolo_claude.mcp import http_sse as http_sse_mod
 
         async def _start_one(h: McpServerHandle) -> None:
             # Same lifecycle-task mechanism `McpServerHandle.start()` uses
@@ -1110,12 +1184,24 @@ class McpManager:
 
         overall = mcp_timeout_s()
         try:
-            self.loop.run(_start_all_coro(), timeout=overall + 3)
+            if abort is None:
+                self.loop.run(_start_all_coro(), timeout=overall + 3)
+            else:
+                # abortable variant: spawn (don't block-run) the gather
+                # coroutine, then WAIT on it the same interruptible way
+                # McpServerHandle.start() waits on a single connect --
+                # abandoned-not-stopped on abort/timeout, same as
+                # everywhere else in this module (see wait_future_abortable's
+                # own docstring).
+                fut = self.loop.spawn(_start_all_coro())
+                self.loop.wait_future_abortable(fut, timeout=overall + 3, abort=abort)
         except Exception as e:
-            # the OUTER bound itself lapsed (belt-and-suspenders past each
-            # target's own inner wait_for) -- anything still mid-connect
-            # never got to record its own terminal state; do it here so a
-            # caller never observes a permanently-stuck "connecting".
+            # the OUTER bound itself lapsed/was aborted (belt-and-suspenders
+            # past each target's own inner wait_for) -- anything still
+            # mid-connect never got to record its own terminal state; do it
+            # here so a caller never observes a permanently-stuck
+            # "connecting" (an abort leaves it running in the background,
+            # same "abandoned, not stopped" caveat as everywhere else).
             for h in targets:
                 if h.state == "connecting":
                     h.state = "failed"
@@ -1129,7 +1215,7 @@ class McpManager:
         if h is not None and h.state == "pending":
             h.start(abort=abort)
 
-    def ensure_lazy_started_all(self) -> "list[str]":
+    def ensure_lazy_started_all(self, abort=None) -> "list[str]":
         """Linux/H4 must-do: start EVERY still-`pending` `mcpLazy` server
         now -- a lazy server otherwise never appears in `all_tools()`
         (that only ever looks at `connected` handles), so its tools can
@@ -1143,14 +1229,23 @@ class McpManager:
         discoverable. Returns the names actually (attempted to be)
         started, so the caller knows whose tools to (re)fetch via
         `all_tools()`; a no-op (returns []) once every lazy server has
-        already been started, or there are none."""
-        started = []
-        for name in self._lazy_names:
-            h = self.handles.get(name)
-            if h is not None and h.state == "pending":
-                h.start()
-                started.append(name)
-        return started
+        already been started, or there are none.
+
+        H9 must-do: this used to start each target with a plain SERIAL
+        `h.start()` loop -- worst case `len(lazy_names) * MCP_TIMEOUT` of
+        wall-clock time on ToolSearch's very first call, with no `abort`
+        parameter at all, so Esc could do nothing while it ran. Now shares
+        `start_all()`'s concurrent-gather machinery via
+        `_start_targets_parallel()`, bounded by ONE MCP_TIMEOUT window for
+        every lazy server together, and honours `abort` (pass
+        `ctx.abort` from a tool call) so an interrupt returns promptly
+        instead of blocking."""
+        targets_by_name = [(name, self.handles[name]) for name in self._lazy_names
+                            if self.handles.get(name) is not None and self.handles[name].state == "pending"]
+        if not targets_by_name:
+            return []
+        self._start_targets_parallel([h for _, h in targets_by_name], abort=abort)
+        return [name for name, _ in targets_by_name]
 
     def all_tools(self) -> "list[tuple[str, str, object]]":
         """`[(server_name, wire_tool_name, sdk_tool), ...]` across every

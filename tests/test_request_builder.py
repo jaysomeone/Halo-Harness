@@ -283,6 +283,56 @@ def test_deepseek_v4_flash_0731_sends_top_p_without_temperature(ctx: Ctx):
 
 
 @test
+def test_h9_sampling_unsupported_params_wired_from_model_table_json(ctx: Ctx):
+    """H9 sampling-table audit finding: `sampling_unsupported_params` was
+    present in EVERY model_table.json row (DeepSeek V4/Grok/MiniMax:
+    presence_penalty/frequency_penalty; Kimi K2.6+/K3: temperature/top_p/n/
+    presence_penalty/frequency_penalty fixed server-side; Grok: also stop/
+    logprobs/top_logprobs) but had no matching `ProviderProfile` field at
+    all, so it was silently dropped on load -- pure decoration, byte-
+    identical whether the row listed anything or not. Now it round-trips."""
+    import json
+    reset_model_table_cache()
+    from rolo_claude.providers.profiles import load_model_table
+    table = load_model_table()
+    for host, model_id in (("openrouter", "moonshotai/kimi-k3"), ("openrouter", "deepseek/deepseek-v4.1-flash"),
+                            ("databricks", "databricks-kimi-k3")):
+        row = table[host][model_id]
+        expected = tuple(row.get("sampling_unsupported_params") or ())
+        ctx.check(f"{model_id}: row actually lists some unsupported params", len(expected) > 0)
+        route = Route(provider=host, upstream_model=model_id, dialect="openai-chat")
+        profile = resolve_profile(route)
+        ctx.check(f"{model_id}: profile.sampling_unsupported_params matches the row exactly, "
+                  f"got {profile.sampling_unsupported_params!r} vs row {expected!r}",
+                  set(profile.sampling_unsupported_params) == set(expected))
+
+
+@test
+def test_h9_sampling_unsupported_params_stripped_from_the_wire_body(ctx: Ctx):
+    """The list isn't just carried on the dataclass -- build_request_body
+    actually pops every listed key from the FINAL body, even overriding
+    use_temperature/use_top_p (the Kimi K2.6+/K3 rows already have
+    use_temperature=False so this never fires for them in practice, but a
+    row with use_temperature=True is used here as the sharper test: the
+    strip must win even when the normal sampling logic WOULD have set the
+    key)."""
+    import dataclasses
+    reset_model_table_cache()
+    route = Route(provider="openrouter", upstream_model="z-ai/glm-5.3", dialect="openai-chat")
+    base_profile = resolve_profile(route)
+    ctx.check("baseline sanity: glm-5.3 normally sends temperature", base_profile.use_temperature is True)
+    profile = dataclasses.replace(base_profile, sampling_unsupported_params=("temperature", "top_p"))
+    body = build_request_body(system_text="S", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                               route=route, profile=profile)
+    ctx.check(f"temperature stripped despite use_temperature=True, got body keys {sorted(body)}",
+              "temperature" not in body)
+    ctx.check(f"top_p stripped too, got body keys {sorted(body)}", "top_p" not in body)
+    # A key NOT on the list is unaffected -- this isn't accidentally
+    # stripping everything sampling-related.
+    ctx.check("max_tokens (unrelated key) still present", "max_tokens" in body)
+
+
+@test
 def test_openrouter_claude_gets_cache_control_breakpoints(ctx: Ctx):
     """H5 scope C: or:anthropic/claude-* through the OPENAI dialect still
     needs explicit cache_control (OpenRouter has no automatic caching for

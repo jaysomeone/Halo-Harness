@@ -121,6 +121,24 @@ def simplify_schema_for_databricks(schema: dict, *, max_keys: int = 16) -> dict:
                 collapsed.pop("anyOf", None)
                 collapsed.update(non_null[0])
                 node = collapsed
+        # H9 MCP-compatibility matrix bug (b): a WIDER anyOf/oneOf (3+
+        # variants, or a 2-variant one that isn't the nullable pair above)
+        # used to be deleted outright by the keyword strip below, leaving
+        # the property with NO type at all -- unlike `$ref`, which falls
+        # back to a permissive object. Keep the FIRST non-null typed
+        # variant instead (the model at least learns the primary type), or
+        # the same permissive object when no variant is a plain typed dict.
+        for kw in ("anyOf", "oneOf"):
+            variants = node.get(kw)
+            if isinstance(variants, list) and kw in node:
+                typed = [b for b in variants if isinstance(b, dict) and b.get("type") not in (None, "null")]
+                fallback = dict(typed[0]) if typed else {"type": "object"}
+                replaced = dict(node)
+                replaced.pop(kw, None)
+                for fk, fv in fallback.items():
+                    replaced.setdefault(fk, fv)
+                log.debug("databricks schema: replaced %s with its first typed variant %r", kw, fallback)
+                node = replaced
         out = {}
         for k, v in node.items():
             if k in _DATABRICKS_STRIP_KEYWORDS:
@@ -314,6 +332,18 @@ def build_request_body(
     elif not profile.host_specific_fields:
         body.pop("provider", None)
         body.pop("usage", None)
+
+    # H9 sampling-table audit: model_table.json rows for DeepSeek V4/Grok/
+    # MiniMax/Kimi K2.6+ list fields their host 400s or silently ignores
+    # (presence_penalty/frequency_penalty/logit_bias/n/logprobs/stop,
+    # temperature/top_p/n themselves for Kimi K2.6+/K3, which are FIXED
+    # server-side) -- nothing in this build ever sets those keys today, so
+    # this is currently a no-op belt-and-suspenders, not a behavior change,
+    # but it makes the table's own data authoritative instead of decorative
+    # the moment anything upstream (a hook rewrite, a future settings knob)
+    # starts populating one.
+    for _unsupported_key in profile.sampling_unsupported_params:
+        body.pop(_unsupported_key, None)
 
     return body
 

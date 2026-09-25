@@ -31,7 +31,7 @@ class OpenAIStreamToAnthropic:
     `_malformed_json` instead of being silently dropped/swallowed to `{}`."""
     def __init__(self, requested_model: str, input_tokens_estimate: int, msg_id: str | None = None,
                  capture_reasoning: bool = False, strict_tool_json: bool = False,
-                 tool_id_format: str = "mint"):
+                 tool_id_format: str = "mint", kimi_tool_id_start: int = 0):
         self.msg_id = msg_id or f"msg_{uuid.uuid4().hex[:24]}"
         self.requested_model = requested_model
         self.input_tokens_estimate = input_tokens_estimate
@@ -54,7 +54,12 @@ class OpenAIStreamToAnthropic:
         self._id_to_key = {}
         self._last_key_box = [None]  # boxed: hooks.stream_aggregate_key mutates these in place
         self._next_auto_box = [0]
-        self._kimi_counter_box = [0]  # hooks.normalize_tool_id's per-stream rename counter
+        # H9 critical review finding 1: seeded from the HIGHEST
+        # `functions.{name}:{idx}` id already logged this session (agent/
+        # invariants.highest_kimi_functions_idx + 1), never a bare 0 -- a
+        # fresh per-stream counter that always restarted at 0 collided with
+        # ids minted several turns ago (see that function's own docstring).
+        self._kimi_counter_box = [kimi_tool_id_start]
         self.finish_reason = None
         self.usage = {}
         self.done = False

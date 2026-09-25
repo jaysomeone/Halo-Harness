@@ -543,7 +543,22 @@ class Session:
         hook_runner: Optional[HookRunner] = None,
         agents: Optional[dict] = None, routes: Optional[dict] = None, agent_depth: int = 0,
         agent_type_restriction: Optional[set] = None, abort: Optional[threading.Event] = None,
+        agent_id: Optional[str] = None,
     ):
+        # H9: identifies THIS session as a particular sub-agent (passed by
+        # `agent/subagent.py`'s `_build_child_session`; the parent/main
+        # session leaves this None). Two uses: (critical review finding 2)
+        # namespaces `_permission_waiters` keys (see `_resolve_tool_call`'s
+        # ask branch) so two PARALLEL children whose own tool_use ids
+        # happen to collide (e.g. Kimi's per-call id counter starting
+        # fresh at 0 in each child's own, separately-empty log) never
+        # overwrite each other's live waiter slot in the dict they share
+        # with the parent; and (finding 16) suppresses SessionStart(startup
+        # /resume) below for a child -- it fires SubagentStart instead
+        # (agent/subagent.py), never the user's own SessionStart hooks,
+        # which used to re-run once per sub-agent spawned (3 sub-agents in
+        # one session used to fire SessionStart(startup) 4 times).
+        self.agent_id: Optional[str] = agent_id
         self.cwd = cwd
         self.model_ref = model_ref
         self.small_model_ref = small_model_ref
@@ -565,6 +580,22 @@ class Session:
         self.openrouter_base_url = openrouter_base_url
         self.extra_headers = extra_headers or {}
         self._loop_breaker: dict = {}  # canonical (name,args) -> consecutive count, reset every turn
+        # H9 OpenCode item 20: a period-2 ("ping-pong") doom-loop detector
+        # layered ON TOP of the cumulative counter above -- catches a
+        # strict A,B,A,B,... alternation between two DIFFERENT calls at the
+        # SAME 3/5/8 remind/deny/end thresholds. Without this, a pure
+        # ping-pong (e.g. Read fileX, Grep for Y, Read fileX, Grep for Y,
+        # ...) only trips the plain per-key counter once EACH of A and B
+        # individually reaches the threshold on its own -- roughly twice as
+        # many total tool calls as a dedicated pair-counter needs.
+        # `_loop_breaker_history` holds the last 2 canonical keys called
+        # this turn, in order; `_loop_breaker_period2` counts, per ordered
+        # pair (older_key, newer_key), how many times "..., older_key,
+        # newer_key, older_key" has been observed. A plain immediate
+        # repeat (A,A,A) never enters this path (history[-1] == key is
+        # excluded below) -- that stays exclusively the counter above's job.
+        self._loop_breaker_history: list = []
+        self._loop_breaker_period2: dict = {}
         # must-do 5: an interrupt source (Bash kill/Esc -- none exists yet
         # in `-p`) sets this; `_step` passes it into `stream_completion`
         # (cuts phase 2 short) and observes it in every retry wait.
@@ -832,7 +863,17 @@ class Session:
         """H4 scope B: SessionStart(startup|resume|clear|compact) -- `resume`
         fires from `__init__`, `compact` from `_run_compaction`, `clear`
         from `/clear` (U5). Hook-added `additionalContext` becomes a
-        user-role SNAPSHOT in the log (never the system node -- brief B)."""
+        user-role SNAPSHOT in the log (never the system node -- brief B).
+
+        H9 review finding 16: a sub-agent (`self.agent_id is not None`)
+        NEVER fires the user's own SessionStart hooks at all -- it fires
+        SubagentStart instead (agent/subagent.py's own start event). Before
+        this guard, every child's brand-new (always-empty) log made its
+        `__init__` take the "startup" branch above, so spawning N sub-
+        agents in one session re-ran the user's SessionStart(startup) hook
+        N extra times (a session with 3 sub-agents ran it 4 times total)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("SessionStart"):
             return
         payload = self.hook_runner.payload("SessionStart", extra={"source": source})
@@ -1077,6 +1118,14 @@ class Session:
         return system_text, messages, tools, body
 
     def _build_request(self, body: dict) -> CompletionRequest:
+        kimi_tool_id_start = 0
+        if self.provider_profile.tool_id_format == "kimi_functions_idx":
+            # H9 critical review finding 1: seed the per-stream rename
+            # counter from the highest `functions.{name}:{idx}` already
+            # logged anywhere this session, never 0 -- see
+            # agent/invariants.highest_kimi_functions_idx's own docstring.
+            from rolo_claude.agent.invariants import highest_kimi_functions_idx
+            kimi_tool_id_start = highest_kimi_functions_idx(self.log) + 1
         kwargs = dict(
             body={"messages": []}, route=self.route,
             profile={"context_tokens": self.model_profile.context_tokens,
@@ -1085,6 +1134,7 @@ class Session:
             model_label=self.model_ref.raw, openrouter_base_url=self.openrouter_base_url,
             harness_mode=True, ping_interval=float(os.environ.get("BRIDGE_PING_INTERVAL", "15")),
             tool_id_format=self.provider_profile.tool_id_format,
+            kimi_tool_id_start=kimi_tool_id_start,
         )
         if self.route.dialect == "anthropic-passthrough":
             kwargs["prebuilt_anthropic_body"] = body
@@ -1953,6 +2003,8 @@ class Session:
         self.turn_count += 1
         turn_no = self.turn_count
         self._loop_breaker = {}
+        self._loop_breaker_history = []
+        self._loop_breaker_period2 = {}
         # H3/H4 must-do: a PREVIOUS turn's interrupt (Esc/Ctrl+C) leaves
         # `self.abort` set -- reused unchanged, a brand new turn would see
         # it already fired and abort immediately, before ever streaming a
@@ -2334,16 +2386,69 @@ class Session:
         repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
         item.update(name=name, input=tool_input, repaired=repaired)
 
+        # H9 whole-tree review finding 8: polling a background job with
+        # BashOutput(shell_id=...) -- Moonshot's OWN documented pattern for
+        # "start a server, wait until ready, run the tests" -- calls it
+        # with the SAME arguments every time by design (the shell_id never
+        # changes; only the LIVE job's state does). The identical-args loop
+        # breaker doesn't know that and denies at 5 polls, ends the turn at
+        # 8 -- verified: a `sleep 6` background job in `-p --output-format
+        # stream-json` got reminders at polls 3-4, denials at 5-7, and the
+        # turn ended at poll 8 with an empty result while the job was still
+        # running, well before the job could ever finish. Exempt it
+        # entirely (never counted, never denied/ended by this mechanism) --
+        # a genuinely runaway poll loop is bounded by --max-turns instead,
+        # the same higher-level guard that already bounds a paging loop
+        # that never repeats identical arguments (see
+        # test_max_turns_caps_model_calls_per_turn).
         key = (name, _canonical_args(tool_input))
-        count = self._loop_breaker.get(key, 0) + 1
-        self._loop_breaker[key] = count
+        if name == "BashOutput":
+            # exempt entirely -- never recorded in _loop_breaker, never
+            # added to _loop_breaker_history (so it can't back-door into a
+            # period-2 pattern with some other call either), count/
+            # period2_count stay 0 so the threshold checks below are
+            # always a no-op for it.
+            count = 0
+            period2_count = 0
+        else:
+            count = self._loop_breaker.get(key, 0) + 1
+            self._loop_breaker[key] = count
+
+            # H9 OpenCode item 20: period-2 ping-pong detection (see __init__'s
+            # docstring comment on _loop_breaker_history/_loop_breaker_period2).
+            history = self._loop_breaker_history
+            period2_count = 0
+            if len(history) >= 2 and history[-2] == key and history[-1] != key:
+                # ORDERLESS pair (frozenset, not a tuple) so "..., A, B, A" and
+                # the next step's "..., B, A, B" land in the SAME bucket --
+                # without this, a clean A,B,A,B,... alternation would only
+                # increment an (A-then-B) or (B-then-A) bucket every OTHER
+                # step, growing no faster than the plain per-key counter above
+                # and defeating the whole point of a dedicated pair detector.
+                pair_key = frozenset((history[-1], key))
+                period2_count = self._loop_breaker_period2.get(pair_key, 0) + 1
+                self._loop_breaker_period2[pair_key] = period2_count
+            history.append(key)
+            if len(history) > 8:
+                del history[:-8]  # bounded per turn; nothing downstream reads older entries
+
         item["count"] = count
-        if count >= _LOOP_BREAKER_END_AT:
-            item["text"] = f"Loop breaker: {name} called with the same arguments {count} times this turn -- ending the turn."
+        item["period2_count"] = period2_count
+        effective = max(count, period2_count)
+        if effective >= _LOOP_BREAKER_END_AT:
+            if period2_count >= count:
+                item["text"] = (f"Loop breaker: {name} is alternating with a previous call {period2_count} "
+                                 f"times this turn (A, B, A, B, ...) -- ending the turn.")
+            else:
+                item["text"] = f"Loop breaker: {name} called with the same arguments {count} times this turn -- ending the turn."
             item["end_turn"] = True
             return item
-        if count >= _LOOP_BREAKER_DENY_AT:
-            item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
+        if effective >= _LOOP_BREAKER_DENY_AT:
+            if period2_count >= count:
+                item["text"] = (f"Loop breaker: {name} is alternating with a previous call {period2_count} "
+                                 f"times -- denied. Try a different approach.")
+            else:
+                item["text"] = f"Loop breaker: {name} called with the same arguments {count} times -- denied. Try a different approach."
             return item
 
         if name in ("EnterPlanMode", "ExitPlanMode"):
@@ -2524,7 +2629,31 @@ class Session:
                 # waiter until the UI answers (U2).
                 item["pending_ask"] = True
                 item["suggested_rule"] = decision.suggested_rule
-                self._permission_waiters[tool_id] = {"event": threading.Event(), "decision": None}
+                # H9 critical review finding 2: namespace the waiter key
+                # (and the `permission_request` event's own "id", set from
+                # this same value below) by `agent_id` for a sub-agent --
+                # `_permission_waiters` is the SAME dict object shared with
+                # the parent (agent/subagent.py's `_build_child_session`),
+                # so without this, two PARALLEL children whose own
+                # tool_use ids happen to collide (Kimi's per-call counter
+                # restarting at 0 in each child's own, separately-empty
+                # log is the concrete repro) overwrite each other's live
+                # slot: the LOSING child's worker thread waits forever on
+                # an Event nobody will ever set, and answering the
+                # surviving card silently resolves the WRONG child.
+                request_id = f"{self.agent_id}:{tool_id}" if self.agent_id else tool_id
+                if request_id in self._permission_waiters:
+                    # Never overwrite a live slot outright (belt-and-
+                    # suspenders past the namespacing above, e.g. the same
+                    # child asking again with the same id before its first
+                    # ask was ever answered) -- disambiguate instead of
+                    # silently discarding whoever is still waiting on it.
+                    suffix = 2
+                    while f"{request_id}#{suffix}" in self._permission_waiters:
+                        suffix += 1
+                    request_id = f"{request_id}#{suffix}"
+                item["ask_request_id"] = request_id
+                self._permission_waiters[request_id] = {"event": threading.Event(), "decision": None}
                 return item
             # decision.action == "allow" (the PermissionRequest hook just
             # answered it) -- fall through to item["ready"]=True below.
@@ -2661,9 +2790,15 @@ class Session:
             summary_text = content_for_log
 
         count = item.get("count")
-        if count is not None and _LOOP_BREAKER_REMIND_AT <= count < _LOOP_BREAKER_DENY_AT:
-            reminder = (f"\n\n[reminder: {name} has now been called with these same arguments "
-                        f"{count} times this turn -- consider a different approach if unintentional]")
+        period2_count = item.get("period2_count", 0)
+        effective = max(count, period2_count) if count is not None else 0
+        if count is not None and _LOOP_BREAKER_REMIND_AT <= effective < _LOOP_BREAKER_DENY_AT:
+            if period2_count >= count:
+                reminder = (f"\n\n[reminder: {name} has now alternated with a previous call {period2_count} "
+                            f"times this turn (A, B, A, B, ...) -- consider a different approach if unintentional]")
+            else:
+                reminder = (f"\n\n[reminder: {name} has now been called with these same arguments "
+                            f"{count} times this turn -- consider a different approach if unintentional]")
             if isinstance(content_for_log, list):
                 content_for_log = content_for_log + [{"type": "text", "text": reminder.strip()}]
             else:
@@ -3105,15 +3240,25 @@ class Session:
             for msg in item.pop("hook_system_messages", None) or []:
                 yield events.notification(msg)
             if "ask_reason" in item:
-                yield events.Event("permission_request", {"id": tool_id, "name": name, "input": item["input"],
-                                                            "reason": item["ask_reason"],
+                # H9 critical review finding 2: the event's own "id" is
+                # what the UI echoes back verbatim through `resolve_
+                # permission` (tui/dispatch.py's `_show_permission_card`
+                # reads `data.get("id")` as `request_id`), so it must be
+                # the SAME (possibly agent_id-namespaced) key `_resolve_
+                # tool_call` actually inserted into `_permission_waiters`
+                # -- falls back to the bare `tool_id` for the immediate-
+                # deny (non-blocking) path, which never inserts a waiter
+                # at all, so there's nothing for it to collide with.
+                yield events.Event("permission_request", {"id": item.get("ask_request_id", tool_id), "name": name,
+                                                            "input": item["input"], "reason": item["ask_reason"],
                                                             "suggested_rule": item.get("suggested_rule")}, turn=turn_no)
 
             if item.get("pending_ask"):
                 # U2: this really BLOCKS the worker thread until the UI's
                 # PermissionCard answers (`answer_permission` ->
                 # `resolve_permission`) or the abort Event fires.
-                self._apply_permission_decision(item, self._await_permission_decision(tool_id))
+                self._apply_permission_decision(
+                    item, self._await_permission_decision(item.get("ask_request_id", tool_id)))
 
             if item.get("pending_question"):
                 # U2: the AskUserQuestion round trip -- never dispatched to

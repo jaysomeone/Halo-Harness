@@ -75,6 +75,32 @@ class _CappedCollector:
                 pass
             self._tail = (self._tail + text)[-half:]
 
+    # H9 whole-tree review finding 6: small public accessors so a caller
+    # (agent/jobs.py's JobRegistry.poll) can compute an INCREMENTAL
+    # "what's new since my last read" slice correctly even once spilling
+    # has started, instead of naively diffing against `len(result())`
+    # (which stays roughly constant once spilling begins, since `result()`
+    # is head+tail only -- see that finding's fix in jobs.py for why this
+    # matters).
+    @property
+    def tail_start(self) -> int:
+        """Absolute character position where the CURRENT tail begins (i.e.
+        `total_len` if nothing has ever spilled -- there IS no separate
+        tail concept then, `result()` already carries everything)."""
+        return self.total_len - len(self._tail)
+
+    @property
+    def spill_path(self) -> "Optional[Path]":
+        return self._spill_path
+
+    @property
+    def head_len(self) -> int:
+        return self._head_len
+
+    @property
+    def tail_text(self) -> str:
+        return self._tail
+
     def result(self) -> str:
         """Safe to call more than once (H8 scope A: a background job's
         collector is polled repeatedly) -- each call flushes/closes the

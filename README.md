@@ -69,7 +69,8 @@ on the same box.
 
 `rolo-claude doctor` is a read-only environment check (Python version,
 `~/.claude` layout, env file, OpenRouter/Databricks reachability, catalog
-cache ages, chrome/playwright/plugin detection); `rolo-claude doctor --work`
+cache ages, chrome/playwright/plugin detection, `rg`/`$VISUAL`/`$EDITOR`/
+Bash-shell presence, clipboard backend); `rolo-claude doctor --work`
 is the Databricks-specific preset for a VPN-gated work box (VPN
 reachability, token validity, the reasoning-replay/route-split probes) --
 see INSTALL.md's "Work box" section.

@@ -487,6 +487,33 @@ class Controller:
         just stops the CALLER from blocking on it."""
         if self._reconnect_fn is None:
             return [f"MCP support is not connected in this build ({name} unchanged)."]
+        # H9 bug fix (item 11, MCP compatibility matrix): `McpManager.
+        # reconnect()` (what `self._reconnect_fn` calls) only ever restarts
+        # an ALREADY-KNOWN handle using its config from when the session
+        # started -- neither it nor this method used to re-read
+        # ~/.claude.json/.mcp.json at all, so a real on-disk edit to an
+        # existing server's command/args/env/url, or a brand-new server
+        # name added since, was invisible no matter how many times /mcp
+        # reconnect ran. Re-resolve the config chain from a freshly re-read
+        # ~/.claude.json (project/local/user scopes -- the same tiers
+        # `resolve_server_configs` itself documents; launch-time-only
+        # concerns like --mcp-config/--chrome/--playwright are deliberately
+        # NOT re-applied here, since those are a NEW SESSION's decision,
+        # not something reconnecting one server should reconsider) and
+        # `resync_from` the live manager against it BEFORE the plain
+        # restart below -- covers both "config changed" and "brand new
+        # name" in one path. Best-effort: any failure here (no `mcp`
+        # package, a malformed file, an unresolvable path) must never
+        # block the plain reconnect that already worked before this fix.
+        if self.mcp_manager is not None:
+            try:
+                from rolo_claude.config.claude_json import load_claude_json
+                from rolo_claude.mcp.manager import resolve_server_configs
+                fresh_configs, _notices = resolve_server_configs(
+                    cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
+                self.mcp_manager.resync_from(fresh_configs)
+            except Exception:
+                pass
         try:
             result = self._reconnect_fn(name, abort=abort)
             # H3b must-do (unwired seam): a reconnected server's tool list

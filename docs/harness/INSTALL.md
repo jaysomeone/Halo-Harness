@@ -164,8 +164,9 @@ exactly, e.g. `uv pip sync requirements.lock` inside one.
 ```sh
 rolo-claude --version          # rolo-claude 0.3.0
 rolo-claude doctor             # read-only environment check: Python, ~/.claude,
-                                # env file, OpenRouter/Databricks, claude/node on
-                                # PATH, a WSL/Kali hint
+                                # env file, OpenRouter/Databricks, claude/node/rg
+                                # on PATH, $VISUAL/$EDITOR, a usable Bash shell,
+                                # clipboard backend, a WSL/Kali hint
 ```
 
 ## Configuration

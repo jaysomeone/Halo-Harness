@@ -72,7 +72,10 @@ class ToolSearchTool(Tool):
             # `SessionCatalog.ensure_lazy_discovered`'s own docstring).
             ensure_lazy = getattr(catalog, "ensure_lazy_discovered", None)
             if ensure_lazy is not None:
-                ensure_lazy()
+                # H9 must-do: thread ctx.abort through so Esc/Ctrl+C cuts
+                # the (now-parallel, still up-to-MCP_TIMEOUT) lazy-start
+                # wait short instead of blocking ToolSearch's first call.
+                ensure_lazy(abort=getattr(ctx, "abort", None))
             results, deferred_matched = catalog.search(query, max_results)
         else:
             results, deferred_matched = self._search_registry_only(registry, query, max_results)

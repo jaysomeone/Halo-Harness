@@ -317,7 +317,7 @@ class SessionCatalog:
                     continue
                 self.deferred[wire_name] = (server, sdk_tool)
 
-    def ensure_lazy_discovered(self) -> None:
+    def ensure_lazy_discovered(self, abort=None) -> None:
         """Linux/H4 must-do: "`mcpLazy` servers must connect on first
         ToolSearch hit so their tools are discoverable" -- a lazy server
         is never started at `start_all()` time, so it never appears in
@@ -329,8 +329,13 @@ class SessionCatalog:
         `McpManager.ensure_lazy_started_all()` is a no-op once every lazy
         server has already been started) so a lazy server's tools become
         searchable/loadable starting with the model's very next
-        ToolSearch call -- still never PRELOADED, only discoverable."""
-        started = self.manager.ensure_lazy_started_all()
+        ToolSearch call -- still never PRELOADED, only discoverable.
+        H9 must-do: `abort` (pass `ctx.abort` from the tool call) threads
+        through to `ensure_lazy_started_all`, which now starts every
+        pending lazy server IN PARALLEL (one shared MCP_TIMEOUT window,
+        not one per server) and honours the abort instead of blocking the
+        whole wait."""
+        started = self.manager.ensure_lazy_started_all(abort=abort)
         if not started:
             return
         with self._lock:

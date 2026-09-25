@@ -44,7 +44,30 @@ class TaskStopTool(Tool):
         if not job_id or not isinstance(job_id, str):
             return ToolResult("Either task_id or shell_id is required", is_error=True)
         registry = getattr(ctx, "job_registry", None)
-        if registry is None:
-            return ToolResult("No background shells are available in this session.", is_error=True)
-        ok, message = registry.kill(job_id)
-        return ToolResult(message, is_error=not ok)
+        if registry is not None and job_id in getattr(registry, "jobs", {}):
+            ok, message = registry.kill(job_id)
+            return ToolResult(message, is_error=not ok)
+        # H9 whole-tree review finding 32: the real Claude Code TaskStop
+        # also accepts a BACKGROUND SUB-AGENT's own task_id, not just a
+        # Bash shell_id -- `agent/subagent.py`'s `run_agent_call` stashes
+        # that child's own (background-only) abort Event on
+        # `agent_runtime.tasks[task_id]["abort_event"]` for exactly this.
+        # Setting it is the SAME interrupt signal the child's own turn loop
+        # already polls everywhere `self.abort.is_set()` is checked -- no
+        # new interrupt machinery needed, just reaching the right Event.
+        runtime = getattr(ctx, "agent_runtime", None)
+        if runtime is not None:
+            with runtime.lock:
+                task = runtime.tasks.get(job_id)
+            if task is not None:
+                abort_event = task.get("abort_event")
+                if abort_event is None:
+                    return ToolResult(
+                        f"Task {job_id!r} is a FOREGROUND sub-agent -- it shares the main session's own "
+                        f"abort and is stopped by the user's own Esc/Ctrl+C, not TaskStop.", is_error=True)
+                already_done = abort_event.is_set()
+                abort_event.set()
+                return ToolResult(f"Task {job_id!r} {'was already stopped' if already_done else 'stop requested'}.",
+                                   is_error=False)
+        known = ", ".join(sorted(getattr(registry, "jobs", {}) or {})) or "(none)"
+        return ToolResult(f"Unknown shell_id/task_id {job_id!r}. Known background shells: {known}", is_error=True)

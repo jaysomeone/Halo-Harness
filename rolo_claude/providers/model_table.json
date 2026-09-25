@@ -1354,7 +1354,7 @@
         "reasoning.replay"
       ]
     },
-    "qwen/qwen3-max (thinking sibling qwen/qwen3-max-thinking)": {
+    "qwen/qwen3-max": {
       "family": "qwen",
       "use_temperature": true,
       "temperature": null,
@@ -1392,6 +1392,47 @@
         "models.qwen3-max.sampling",
         "reasoning.replay",
         "sampling"
+      ]
+    },
+    "qwen/qwen3-max-thinking": {
+      "family": "qwen",
+      "use_temperature": true,
+      "temperature": null,
+      "top_p": null,
+      "top_k": 20,
+      "context_tokens": 262144,
+      "max_tokens_default": 16384,
+      "max_tokens_cap": 65536,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": "reasoning_content",
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "hermes_tool_call",
+        "qwen3_coder_xml",
+        "python_repr_args",
+        "missing_tool_call_opener"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": {
+        "order": [
+          "alibaba"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "edit_format": "diff",
+      "unverified": [
+        "models.qwen3-max-thinking.sampling",
+        "reasoning.replay",
+        "sampling",
+        "cloned from qwen/qwen3-max -- H9 sampling-table audit found the row's key had a stray '(thinking sibling ...)' annotation baked in (never matched a real model id) and no separate row existed for the thinking variant at all; values are the base model's until someone confirms the thinking-mode ones directly"
       ]
     },
     "minimax/minimax-m1": {
@@ -1748,7 +1789,7 @@
         "families.gemma.sampling for Gemma 3 (generation_config gated; Gemma 4 verified)"
       ]
     },
-    "mistralai/mistral-large-2512:batch (only the batch id listed)": {
+    "mistralai/mistral-large-2512:batch": {
       "family": "mistral",
       "use_temperature": true,
       "temperature": 0.1,
@@ -2691,7 +2732,7 @@
         "reasoning.replay"
       ]
     },
-    "databricks-llama-4-maverick (function-calling page names it databricks-meta-llama-4-maverick)": {
+    "databricks-llama-4-maverick": {
       "family": "llama",
       "use_temperature": false,
       "temperature": null,
@@ -2720,6 +2761,38 @@
       "unverified": [
         "families.llama.sampling (generation_config gated)",
         "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-meta-llama-4-maverick": {
+      "family": "llama",
+      "use_temperature": false,
+      "temperature": null,
+      "top_p": null,
+      "top_k": null,
+      "context_tokens": 128000,
+      "max_tokens_default": 8192,
+      "max_tokens_cap": 128000,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": true,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [
+        "llama_pythonic_list",
+        "llama_json_list"
+      ],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "families.llama.sampling (generation_config gated)",
+        "hosts.databricks.reasoning_replay_forwarding",
+        "H9 sampling-table audit: Databricks' own docs use two different endpoint names for this model across pages (supported-models lists databricks-llama-4-maverick, the function-calling page lists databricks-meta-llama-4-maverick) -- this row is a plain clone of that one so whichever name the real endpoint uses is covered; someone should confirm which is the actual live endpoint id and drop the other"
       ]
     },
     "databricks-meta-llama-3-3-70b-instruct": {
@@ -2784,7 +2857,7 @@
         "hosts.databricks.reasoning_replay_forwarding"
       ]
     },
-    "databricks-gemma-3-12b (12B only)": {
+    "databricks-gemma-3-12b": {
       "family": "gemma",
       "use_temperature": true,
       "temperature": 1.0,

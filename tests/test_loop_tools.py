@@ -296,6 +296,146 @@ def test_loop_breaker_unit_level_thresholds(ctx: Ctx):
 
 
 @test
+def test_h9_loop_breaker_exempts_bash_output_polling(ctx: Ctx):
+    """H9 whole-tree review finding 8: BashOutput(shell_id=...) polling a
+    long-running background job calls with the SAME arguments every time
+    by design (the shell_id never changes) -- Moonshot's own documented
+    "wait for a job to finish" pattern. The identical-args loop breaker
+    used to deny at 5 polls and end the turn at 8, well before a
+    legitimately slow job (a dev server starting up, a long test run)
+    could ever finish. 12 identical BashOutput calls (well past the old
+    5/8 thresholds) must never trip the breaker."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/model")
+    model_ref = parse_model_ref("or:mock/model")
+    session = Session(
+        cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(), creds=ProviderCreds(base_url="http://x", api_key="k"),
+        state_dir=Path(tempfile.mkdtemp(prefix="loop-breaker-bashoutput-")), model_label="mock/model", session_context=session_ctx,
+    )
+    tool_use = {"type": "tool_use", "id": "call_x", "name": "BashOutput", "input": {"shell_id": "bash_same_job"}}
+    outcomes = []
+    for i in range(12):
+        events_seen = list(session._dispatch_tools(1, [dict(tool_use, id=f"call_{i}")]))
+        result_events = [e for e in events_seen if e.kind == "tool_result"]
+        outcomes.append((result_events[0].data["summary"] if result_events else "") or "")
+    ctx.check(f"none of the 12 identical polls ever shows breaker text, got {outcomes}",
+              all("Loop breaker" not in o and "reminder" not in o for o in outcomes))
+
+    # A DIFFERENT tool called with identical args right alongside it must
+    # still be caught normally -- this exemption is BashOutput-specific,
+    # not a blanket "any tool repeated a lot is fine".
+    other = {"type": "tool_use", "id": "call_y", "name": "Read", "input": {"file_path": "/same/other.txt"}}
+    other_outcomes = []
+    for i in range(8):
+        events_seen = list(session._dispatch_tools(1, [dict(other, id=f"other_{i}")]))
+        result_events = [e for e in events_seen if e.kind == "tool_result"]
+        other_outcomes.append((result_events[0].data["summary"] if result_events else "") or "")
+    ctx.check(f"a DIFFERENT repeated tool (Read) still ends the turn at its 8th call, got {other_outcomes[-1]!r}",
+              "ending the turn" in other_outcomes[-1].lower())
+
+
+@test
+def test_h9_loop_breaker_period2_ping_pong_detected(ctx: Ctx):
+    """H9 OpenCode item 20: a strict A,B,A,B,... alternation between two
+    DIFFERENT calls (never identical back to back) must ALSO trip the
+    3/5/8 remind/deny/end breaker, via a dedicated pair counter layered on
+    top of the plain per-key one -- and must reach deny/end FASTER (in
+    total calls) than waiting for either A's or B's own count to get
+    there alone (which would need the 5th/8th occurrence of ONE of them,
+    i.e. absolute call 9/15 in a clean alternation, not call 7/10)."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/model")
+    model_ref = parse_model_ref("or:mock/model")
+    session = Session(
+        cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(), creds=ProviderCreds(base_url="http://x", api_key="k"),
+        state_dir=Path(tempfile.mkdtemp(prefix="loop-breaker-period2-")), model_label="mock/model", session_context=session_ctx,
+    )
+    tool_a = {"type": "tool_use", "id": "call_a", "name": "Read", "input": {"file_path": "/h9-period2-a.txt"}}
+    tool_b = {"type": "tool_use", "id": "call_b", "name": "Read", "input": {"file_path": "/h9-period2-b.txt"}}
+    outcomes = []
+    for i in range(10):
+        tu = dict(tool_a if i % 2 == 0 else tool_b, id=f"call_{i}")
+        events_seen = list(session._dispatch_tools(1, [tu]))
+        result_events = [e for e in events_seen if e.kind == "tool_result"]
+        outcomes.append((result_events[0].data["summary"] if result_events else "") or "")
+
+    ctx.check("calls 1-4: no breaker text yet (per-key counts only reach 2 each)",
+              all("Loop breaker" not in outcomes[i] for i in range(4)))
+    ctx.check("call 5: a reminder has appeared (pair count reaches 3 before either key alone would)",
+              "reminder" in outcomes[4])
+    ctx.check("call 7: DENIED via the alternating/pair path (pair=5, ahead of either key's own count=4)",
+              "denied" in outcomes[6].lower() and "alternat" in outcomes[6].lower())
+    ctx.check("call 9: not yet ended (pair=7, still under the end threshold of 8)",
+              "ending the turn" not in outcomes[8].lower())
+    ctx.check("call 10: turn ENDS via the alternating/pair path (pair=8) -- 5 calls sooner than the "
+              "15 a pure per-key count would need for a clean alternation",
+              "ending the turn" in outcomes[9].lower() and "alternat" in outcomes[9].lower())
+
+
+@test
+def test_h9_kimi_tool_id_counter_continues_across_the_session_not_reset_per_stream(ctx: Ctx):
+    """H9 critical review finding 1: `_build_request` must seed the
+    Kimi-rename counter from the highest `functions.{name}:{idx}` already
+    logged this session, so a fresh per-call stream never restarts at 0 and
+    collides with an id minted several steps ago (the exact repro: 6 Reads
+    of 6 different files, all with empty upstream ids, used to ALL become
+    `functions.Read:0`)."""
+    import dataclasses
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/model")
+    model_ref = parse_model_ref("or:mock/model")
+    session = Session(
+        cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(), creds=ProviderCreds(base_url="http://x", api_key="k"),
+        state_dir=Path(tempfile.mkdtemp(prefix="kimi-tool-id-")), model_label="mock/model", session_context=session_ctx,
+    )
+    session.provider_profile = dataclasses.replace(session.provider_profile, tool_id_format="kimi_functions_idx")
+
+    # No prior Kimi-shaped ids yet -> starts at 0, same as before this fix.
+    req0 = session._build_request({"messages": []})
+    ctx.check(f"first call of the session starts the counter at 0, got {req0.kimi_tool_id_start}",
+              req0.kimi_tool_id_start == 0)
+
+    # Simulate the review's own repro: 6 prior steps, each renaming an
+    # empty upstream id to functions.Read:0..5 (what the OLD, per-stream-
+    # reset counter actually produced -- every one of them "0" before this
+    # fix, but logged here as the CORRECT post-fix shape to test that the
+    # NEXT call continues from the true high-water mark of 5, not 0).
+    for i in range(6):
+        session.log.append_assistant(content=[{"type": "tool_use", "id": f"functions.Read:{i}", "name": "Read", "input": {}}],
+                                      stop_reason="tool_use")
+        session.log.append_tool_result(tool_use_id=f"functions.Read:{i}", content=f"file {i}")
+
+    req1 = session._build_request({"messages": []})
+    ctx.check(f"7th call continues from the highest logged idx (5) + 1, got {req1.kimi_tool_id_start}",
+              req1.kimi_tool_id_start == 6)
+
+    # A non-Kimi profile must never compute this at all (stays 0, the
+    # proxy's own permanent default, regardless of what's in the log).
+    session.provider_profile = dataclasses.replace(session.provider_profile, tool_id_format="preserve")
+    req2 = session._build_request({"messages": []})
+    ctx.check(f"non-kimi profile: always 0 regardless of log contents, got {req2.kimi_tool_id_start}",
+              req2.kimi_tool_id_start == 0)
+
+
+@test
 def test_interrupt_leaves_no_unanswered_tool_use(ctx: Ctx):
     """finding 16 (test #4 from the review's required list): an interrupt
     AFTER `tool_use_ready` (the assistant node WITH the tool_use is

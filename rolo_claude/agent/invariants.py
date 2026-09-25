@@ -15,10 +15,12 @@ hoped for.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 ABORTED_BEFORE_DISPATCH = "ABORTED_BEFORE_DISPATCH"
 INTERRUPTED_MESSAGE = "Tool call interrupted by user"
+_KIMI_FUNCTIONS_IDX_RE = re.compile(r"^functions\.[^:]+:(\d+)$")
 
 
 def tool_use_blocks(content: list) -> list:
@@ -85,6 +87,44 @@ def find_unpaired_tool_use_ids(log) -> list:
             if tid and tid not in answered:
                 missing.append(tid)
     return missing
+
+
+def highest_kimi_functions_idx(log) -> int:
+    """H9 critical review finding 1 (whole-tree review, 2026-09-25): Kimi's
+    native tool-id shape `functions.{name}:{idx}` uses a CONVERSATION-GLOBAL
+    counter on the wire, but `providers/oai_stream.py`'s
+    `OpenAIStreamToAnthropic._kimi_counter_box` used to start at `[0]` on
+    EVERY fresh stream (a new instance per model call) -- any non-native
+    upstream id (empty, or an OpenAI-style `call_...`, which Kimi's own
+    endpoints and Databricks both send at least sometimes) was renamed
+    starting from 0 again on every single step, so `functions.Read:0` (etc)
+    collides across the whole session: prune's stub set, spilled-result
+    filenames, `find_unpaired_tool_use_ids` and the TUI's own card grouping
+    are all keyed by the bare id, so a fresh `functions.Read:0` silently
+    reuses (and can be confused with) an OLDER one from several steps ago.
+
+    This scans EVERY assistant node in the log (not just the last one --
+    same reasoning as `find_unpaired_tool_use_ids`: an id minted several
+    turns ago is exactly the one a fresh per-stream counter would collide
+    with) for a `tool_use` id already in the native `functions.{name}:{idx}`
+    shape, and returns the highest `idx` found, or -1 if none is. The
+    caller (`agent/loop.py`'s `_build_request`) seeds the NEXT stream's
+    rename counter from `highest + 1` instead of 0, so a rename anywhere in
+    the session is guaranteed to mint an id that has never been used before
+    in this conversation -- "continue the counter across the session",
+    exactly like Kimi's own idx semantics already assume."""
+    highest = -1
+    for node in log.nodes():
+        if node.get("type") != "assistant":
+            continue
+        for b in tool_use_blocks(node.get("content")):
+            tid = b.get("id")
+            if not isinstance(tid, str):
+                continue
+            m = _KIMI_FUNCTIONS_IDX_RE.match(tid)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    return highest
 
 
 def synthesize_missing_results(log, *, reason: str = INTERRUPTED_MESSAGE) -> list:

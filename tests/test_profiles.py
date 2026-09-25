@@ -47,6 +47,52 @@ def test_every_seeded_model_table_row_resolves_without_raising(ctx: Ctx):
 
 
 @test
+def test_h9_model_table_keys_are_bare_model_ids_not_prose(ctx: Ctx):
+    """H9 sampling-table audit: four rows had an explanatory note baked
+    straight into the JSON KEY itself -- e.g. "qwen/qwen3-max (thinking
+    sibling qwen/qwen3-max-thinking)" instead of the bare id "qwen/qwen3-
+    max". `resolve_profile` looks a row up by EXACT `route.upstream_model`
+    match (providers/profiles.py's `model_table.get(host_key).get(route.
+    upstream_model)`), so a key like that can never match any real model
+    id -- the row, and all its carefully-tuned sampling/reasoning/pin
+    settings, was permanently dead. This pins both the absence of the bug
+    class (no key contains a space followed by '(' -- a real model id
+    never does) and the specific ids that were affected now resolving to
+    non-default values."""
+    reset_model_table_cache()
+    table = load_model_table()
+    for host, rows in table.items():
+        for model_id in rows:
+            ctx.check(f"{host}/{model_id}: key has no parenthetical annotation baked in",
+                      "(" not in model_id and ")" not in model_id)
+    # The four specific ids that were previously unreachable dead rows.
+    or_qwen_max = resolve_profile(_route("openrouter", "qwen/qwen3-max"))
+    ctx.check("qwen/qwen3-max now resolves its real (non-family-default) row",
+              or_qwen_max.top_k == 20 and or_qwen_max.edit_format == "diff")
+    or_qwen_max_thinking = resolve_profile(_route("openrouter", "qwen/qwen3-max-thinking"))
+    ctx.check("qwen/qwen3-max-thinking (previously nonexistent) now has its own row",
+              or_qwen_max_thinking.top_k == 20)
+    or_mistral_batch = resolve_profile(_route("openrouter", "mistralai/mistral-large-2512:batch"))
+    ctx.check("mistralai/mistral-large-2512:batch now resolves its real row",
+              or_mistral_batch.use_temperature is True and or_mistral_batch.temperature == 0.1)
+    # NOTE: ProviderProfile.family comes from the separate model_family()
+    # regex classifier (used only as a fallback when no exact row exists),
+    # not from the row's own "family" JSON key -- that classifier has no
+    # "llama" branch at all (pre-existing, unrelated to this bug: every
+    # llama id, fixed or not, classifies as "generic"), so this only
+    # checks fields resolve_profile DOES take from the row itself.
+    dbx_maverick = resolve_profile(_route("databricks", "databricks-llama-4-maverick"))
+    ctx.check("databricks-llama-4-maverick now resolves its real row",
+              dbx_maverick.max_tokens_cap == 128000 and dbx_maverick.tool_choice_required_supported is True)
+    dbx_maverick_alt = resolve_profile(_route("databricks", "databricks-meta-llama-4-maverick"))
+    ctx.check("databricks-meta-llama-4-maverick (the function-calling-page name) also has a row",
+              dbx_maverick_alt.max_tokens_cap == 128000 and dbx_maverick_alt.tool_choice_required_supported is True)
+    dbx_gemma = resolve_profile(_route("databricks", "databricks-gemma-3-12b"))
+    ctx.check("databricks-gemma-3-12b now resolves its real row",
+              dbx_gemma.use_temperature is True and dbx_gemma.top_k == 64)
+
+
+@test
 def test_no_temperature_on_thinking_endpoints(ctx: Ctx):
     reset_model_table_cache()
     for host, model in (("openrouter", "deepseek/deepseek-v4.1-flash"),

@@ -152,9 +152,17 @@ def playwright_server_config(*, cdp_endpoint: Optional[str] = None, headless: bo
     `--playwright-headless` -> `--headless` passthrough to the server."""
     from rolo_claude.mcp.manager import McpServerConfig
     npx = shutil.which("npx") or shutil.which("npx.cmd")
-    if not npx:
-        return None, ("--playwright: npx not found on PATH -- @playwright/mcp needs node/npx "
-                       "(see `doctor`).")
+    node = shutil.which("node") or shutil.which("node.exe")
+    if not npx or not node:
+        # H9 Linux acceptance (Part A, bug 4): fail FAST and honestly, the
+        # way --chrome does, whenever EITHER half is missing -- `doctor`
+        # already checks both node and npx, but this only checked npx, so
+        # a box with an `npx` shim and no runnable `node` (WSL's Windows-
+        # side npx through PE interop was the observed case) built a
+        # server config that then hung/misbehaved for the whole session.
+        missing = ", ".join(n for n, p in (("node", node), ("npx", npx)) if not p)
+        return None, (f"--playwright: {missing} not found on PATH -- @playwright/mcp needs node/npx "
+                       f"(see `doctor`).")
     args = ["-y", "@playwright/mcp@latest"]
     if cdp_endpoint:
         args += ["--cdp-endpoint", cdp_endpoint]
