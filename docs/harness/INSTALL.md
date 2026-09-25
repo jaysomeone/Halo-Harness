@@ -81,6 +81,67 @@ is a PATH wrapper that prefers that exe and falls back to
 copy/adapt it for another machine (a teammate substitutes their own repo
 path in the `else` branch).
 
+## Work box (offline install)
+
+Some boxes only reach Databricks (over a VPN) and have no route to PyPI at
+all. `tools/vendor_wheels.py` pre-downloads every wheel `rolo-claude` needs
+(`requirements.lock`'s full pinned closure -- textual, rich, mcp,
+pydantic-core and everything under them -- plus the setuptools/wheel build
+backend) for Linux/cp311/cp312, so the work box never has to reach PyPI:
+
+```sh
+# on a machine WITH internet access (the Windows build host is fine --
+# this cross-downloads Linux wheels regardless of what it's running on):
+python tools/vendor_wheels.py                      # -> ./wheels (gitignored)
+python tools/vendor_wheels.py --platform manylinux2014_aarch64   # arm64 work box
+
+# copy wheels/ to the work box (shared drive, scp once the VPN is up, a USB
+# stick -- whatever side channel reaches it), then there:
+pip install --no-index --find-links=wheels -e . --no-build-isolation
+```
+
+`--no-index` refuses to reach PyPI even if a route momentarily exists;
+`--find-links=wheels` is the only source of packages; `--no-build-isolation`
+skips pip's normal "fetch the build backend into a throwaway env" step
+(which would itself need PyPI) since `wheels/` already has setuptools/wheel
+in it. `uv` works the same offline, pointed at the same directory:
+
+```sh
+uv tool install --editable . --offline --find-links wheels
+```
+
+Re-run `vendor_wheels.py` after any dependency change (`pyproject.toml`'s
+`dependencies` plus a fresh `uv pip compile pyproject.toml --universal -o
+requirements.lock`) -- the wheels directory is a point-in-time snapshot of
+that lock file, not something that stays in sync on its own.
+
+### `ug`/unity-gateway compatibility
+
+Databricks' own `ug` CLI writes `~/.claude/ucode-settings.json` (gateway URL
+and token) when a user has already set up unity-gateway access for the
+stock Claude Code CLI on that box. `rolo-claude` reads it as one more source
+in the same Databricks-credential discovery chain the main README's Install
+section documents (env vars first, then this file) -- a work box already
+configured for `ug` needs no separate rolo-claude setup step at all.
+
+### `rolo-claude doctor --work`
+
+A preset for exactly this box: VPN reachability of the Databricks host, an
+actual token-validity probe (`GET /api/2.0/serving-endpoints`, or a 1-token
+completion), and the two open questions from the project plan --- does
+Databricks forward replayed `reasoning_content` back through a tool call,
+and does the invocations-vs-gateway route split hold for the configured
+model -- as runnable probes with a clear OK/WARN/MISSING line each, not just
+prose. Run it any time this box's Databricks setup is in doubt:
+
+```sh
+rolo-claude doctor --work
+```
+
+Off the VPN (including from the build host that produced `wheels/`), every
+line reports MISSING/WARN with a hint to get on the VPN or run `ug` first --
+that's the expected, correct offline result, not a bug.
+
 ## Reproducible installs (`requirements.lock`)
 
 `requirements.lock` is a cross-platform (`uv pip compile --universal`) pin of
@@ -196,6 +257,27 @@ python3 test_bridge.py; echo exit=$?        # the claude-bridge proxy's own blac
 (normalised, not byte-diffed against a golden copy -- box-drawing/font
 metrics legitimately differ between terminals); pass `UPDATE_SNAPSHOTS=1` if
 a future version of that suite adds a byte-comparison mode that needs it.
+
+### Cross-checking on WSL from the Windows build host
+
+Every milestone's suites must stay green on Linux, not just Windows. From a
+Windows checkout, with a one-time `python3 -m venv ~/rolo-claude-wt-venv &&
+~/rolo-claude-wt-venv/bin/pip install -e /mnt/c/path/to/rolo-claude` done
+once inside WSL to create the venv:
+
+```sh
+wsl -e bash -lc 'rsync -a --delete --exclude .git --exclude __pycache__ --exclude wheels \
+  /mnt/c/Users/user/Documents/vibes/appDev/rolo-claude/ ~/rolo-claude-wt/ \
+  && cd ~/rolo-claude-wt && source ~/rolo-claude-wt-venv/bin/activate \
+  && python3 tests/run_all.py | tail -5 \
+  && python3 test_bridge.py | tail -5 \
+  && python3 test_tui.py | tail -5'
+```
+
+`rsync` (not a symlink/bind-mount) because `/mnt/c/...` is a 9p/DrvFS mount
+-- editable installs and some file-watching code behave differently over
+it than on a native Linux filesystem, and the whole point of this check is
+to catch that class of bug before it reaches the Kali VM.
 
 ## Troubleshooting
 

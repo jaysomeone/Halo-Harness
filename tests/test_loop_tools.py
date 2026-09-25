@@ -443,6 +443,61 @@ def test_summary_text_for_blocks_prefers_real_text(ctx: Ctx):
               _summary_text_for_blocks([{"type": "image", "source": {}}]) == "[image]")
 
 
+# A real, tiny, valid 1x1 RGBA PNG (base64) -- same fixture shape a
+# Playwright/Chrome screenshot or a vision Read/MCP image result carries.
+_PNG_1X1_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+@test
+def test_summary_text_for_blocks_image_caption_names_media_type_dims_and_size(ctx: Ctx):
+    """H8 scope B: a real image block (the shape a Playwright/Chrome
+    screenshot or a vision Read/MCP result actually carries) gets a
+    concrete caption -- media type, sniffed dimensions, human byte size --
+    shown as the tool card's body, instead of the old bare "[image]"."""
+    from rolo_claude.agent.loop import _summary_text_for_blocks
+    block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG_1X1_B64}}
+    caption = _summary_text_for_blocks([block])
+    ctx.check(f"names the media type, got {caption!r}", "image/png" in caption)
+    ctx.check(f"names the real sniffed dimensions (1x1), got {caption!r}", "1x1" in caption)
+    ctx.check(f"names a human byte size, got {caption!r}",
+              any(unit in caption for unit in (" B]", " KB]", " MB]")))
+
+
+@test
+def test_summary_text_for_blocks_image_caption_degrades_gracefully_with_partial_info(ctx: Ctx):
+    from rolo_claude.agent.loop import _summary_text_for_blocks
+    # media_type but undecodable/missing data -- still names what it knows,
+    # never raises.
+    only_media_type = _summary_text_for_blocks([{"type": "image", "source": {"media_type": "image/png"}}])
+    ctx.check(f"names just the media type, got {only_media_type!r}", only_media_type == "[image: image/png]")
+    not_real_base64 = _summary_text_for_blocks([{"type": "image", "source": {"data": "not-valid-base64!!"}}])
+    ctx.check(f"bad base64 never raises, falls back to bare placeholder, got {not_real_base64!r}",
+              not_real_base64 == "[image]")
+
+
+@test
+def test_summary_text_for_blocks_multiple_images_get_one_caption_line_each(ctx: Ctx):
+    from rolo_claude.agent.loop import _summary_text_for_blocks
+    blocks = [{"type": "image", "source": {"media_type": "image/png"}},
+              {"type": "image", "source": {"media_type": "image/jpeg"}}]
+    caption = _summary_text_for_blocks(blocks)
+    lines = caption.splitlines()
+    ctx.check(f"one line per image, got {caption!r}",
+              len(lines) == 2 and "image/png" in lines[0] and "image/jpeg" in lines[1])
+
+
+@test
+def test_summary_text_for_blocks_mixed_image_and_other_non_text_falls_back_to_kind_list(ctx: Ctx):
+    """A MIX of an image with some other non-text kind is rarer/unusual
+    enough that the old, simple "[kind1, kind2]" placeholder is kept --
+    only an ALL-image result gets the richer per-image caption treatment."""
+    from rolo_claude.agent.loop import _summary_text_for_blocks
+    caption = _summary_text_for_blocks([{"type": "image", "source": {}}, {"type": "tool_reference"}])
+    ctx.check(f"falls back to the plain kind-list form, got {caption!r}", caption == "[image, tool_reference]")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

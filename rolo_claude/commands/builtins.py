@@ -363,6 +363,24 @@ def _cmd_stats(args: str, facade: HeadlessFacade) -> str:
     return "\n".join(lines)
 
 
+def _cmd_tasks(args: str, facade: HeadlessFacade) -> str:
+    """H8 scope A: lists every background Bash job this session has
+    started (via `run_in_background` or a timed-out foreground command
+    moved to the background), most-recently-started last."""
+    session = getattr(facade, "session", None)
+    registry = getattr(session, "job_registry", None)
+    jobs = registry.list_jobs() if registry is not None else []
+    if not jobs:
+        return "No background jobs in this session."
+    lines = ["Background jobs:"]
+    for job in jobs:
+        cmd = job["command"]
+        if len(cmd) > 60:
+            cmd = cmd[:60] + "..."
+        lines.append(f"  {job['id']}  [{job['status']}]  {job['description'] or cmd}")
+    return "\n".join(lines)
+
+
 def _cmd_rewind(args: str, facade: HeadlessFacade) -> str:
     return "rolo-claude: /rewind needs the interactive TUI (a file's history lives per-session)."
 
@@ -413,6 +431,7 @@ _BUILTIN_SPECS = {
     "rename": ("ui", "Rename this session", "<title>", _cmd_rename),
     "fork": ("ui", "Fork this session into a new one", None, _cmd_fork),
     "stats": ("core", "Show tokens/cost per model and tool-call counts", None, _cmd_stats),
+    "tasks": ("core", "List background Bash jobs started this session", None, _cmd_tasks),
     "rewind": ("ui", "Restore the working tree to a recorded step", "[step-id]", _cmd_rewind),
     "undo": ("ui", "Rewind one recorded step back", None, _cmd_undo),
     "redo": ("ui", "Rewind one recorded step forward", None, _cmd_redo),

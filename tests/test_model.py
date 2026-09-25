@@ -232,6 +232,69 @@ def test_cost_meter_databricks_still_na_even_with_pricing(ctx: Ctx):
     ctx.check("has_cost_data flips False", meter.has_cost_data is False)
 
 
+# ---- H8 scope C: the vendored fallback tier ------------------------------
+
+@test
+def test_vendored_openrouter_fallback_used_when_nothing_cached(ctx: Ctx):
+    """No models.json entry, no routes.json profile -- a model the package's
+    OWN vendored fallback (providers/catalog/openrouter_fallback.json)
+    covers still resolves real context/pricing instead of bare defaults."""
+    from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+    vendored = load_vendored_openrouter_fallback()
+    ctx.check("the vendored file has real entries to test against", len(vendored) > 0)
+    known_id = next(iter(vendored))
+    known_entry = vendored[known_id]
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-vendored-or-"))  # empty -- no models.json cache
+    ref = parse_model_ref(f"or:{known_id}")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check(f"context_tokens came from the vendored entry, got {profile.context_tokens}",
+              profile.context_tokens == (known_entry.get("context_length") or 128000))
+    ctx.check("not just the bare dataclass default (128000/16384 with no pricing)",
+              profile.price_in is not None or profile.context_tokens != 128000)
+
+
+@test
+def test_vendored_databricks_fallback_used_when_nothing_cached(ctx: Ctx):
+    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    vendored = load_vendored_databricks_fallback()
+    ctx.check("the vendored databricks file has real entries", len(vendored) > 0)
+    known_id = next(iter(vendored))
+    known_entry = vendored[known_id]
+    expected_context = (known_entry.get("limit") or {}).get("context")
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-vendored-dbx-"))
+    ref = parse_model_ref(f"dbx:{known_id}")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    if expected_context:
+        ctx.check(f"context_tokens came from models.dev's databricks entry, got {profile.context_tokens}",
+                  profile.context_tokens == expected_context)
+
+
+@test
+def test_models_json_cache_wins_over_vendored_fallback(ctx: Ctx):
+    """A real (even if minimal) models.json entry must always beat the
+    vendored package fallback -- the vendored tier is a LAST resort, never
+    a way to ignore a live/cached probe result."""
+    from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+    vendored = load_vendored_openrouter_fallback()
+    known_id = next(iter(vendored))
+
+    state_dir = Path(tempfile.mkdtemp(prefix="model-cache-wins-"))
+    write_models_json(state_dir, [{"id": known_id, "context_length": 999, "max_output_tokens": 111}])
+    ref = parse_model_ref(f"or:{known_id}")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check("the cached models.json value wins, not the vendored fallback", profile.context_tokens == 999)
+
+
+@test
+def test_unknown_model_with_no_vendored_entry_falls_back_to_defaults(ctx: Ctx):
+    state_dir = Path(tempfile.mkdtemp(prefix="model-truly-unknown-"))
+    ref = parse_model_ref("or:some-vendor/totally-made-up-model-xyz")
+    profile = resolve_model_profile(ref, state_dir, routes={})
+    ctx.check("bare dataclass defaults, no crash", profile == ModelProfile())
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

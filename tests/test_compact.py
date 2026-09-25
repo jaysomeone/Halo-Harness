@@ -8,9 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from rolo_claude.agent.compact import (
-    SUMMARY_HEADINGS, CompactionKnobs, build_summary_instruction, compaction_trigger_tokens,
-    dsh_trigger_tokens, find_prior_summary, opencode_usable, resolve_knobs, select_verbatim_tail,
-    should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
+    MIN_VIABLE_RESERVE_TOKENS, SUMMARY_HEADINGS, CompactionKnobs, build_summary_instruction,
+    compaction_trigger_tokens, dsh_trigger_tokens, find_prior_summary, opencode_usable, resolve_knobs,
+    select_verbatim_tail, should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
 )
 
 test, TESTS = new_registry()
@@ -131,6 +131,68 @@ def test_h5b_f01_real_models_json_zero_trigger_rows_now_get_a_sane_trigger(ctx: 
         ctx.check(f"{name}: trigger is a large share of context, got {trigger} of {context} "
                   f"(old buggy formula gave {old_trigger})", trigger >= int(context * 0.5))
         ctx.check(f"{name}: trigger stays below the context window, got {trigger}", trigger < context)
+
+
+@test
+def test_h5b_f03_small_window_profile_from_the_finding_itself(ctx: Ctx):
+    """H5b finding 3 (major): `min(usable, floored)` let `usable` override
+    the ~70% floor whenever `context - min(out,32k) - min(20k,out) <= 0` --
+    a SMALL window whose advertised max_output is itself a big fraction of
+    it. The finding's own worked example, quoted directly in its text:
+    "With a 32,768/29,491 profile ... each skipped step emits
+    compaction phase='failed'" -- the old formula gave EXACTLY 0 for this
+    pair (asserted below as documentation, not as today's behaviour)."""
+    context, max_out = 32_768, 29_491
+    old_dsh = max(0, int(0.8 * (context - min(32_000, max_out) - 65_536)))
+    old_usable = max(0, (context - min(32_000, max_out)) - min(20_000, min(32_000, max_out)))
+    old_trigger = min(old_dsh, old_usable)
+    ctx.check(f"sanity: this really is one of the verified zero-trigger shapes, old={old_trigger}",
+              old_trigger == 0)
+
+    trigger = compaction_trigger_tokens(context, max_out)
+    ctx.check(f"trigger is no longer 0, got {trigger}", trigger > 0)
+    ctx.check(f"trigger is a large share of the window (the ~70% floor), got {trigger} of {context}",
+              trigger >= int(context * 0.65))
+    ctx.check(f"trigger stays below the context window, got {trigger}", trigger < context)
+
+
+@test
+def test_h5b_f03_floor_and_reserve_both_hold(ctx: Ctx):
+    """"floor + reserve must both hold": the floor may raise the trigger
+    for a small window, but never so far that less than
+    MIN_VIABLE_RESERVE_TOKENS of headroom is left in the window -- the
+    floor must never crowd out room for a real reply entirely."""
+    for context, max_out in [(32_768, 29_491), (32_768, 32_768), (65_536, 65_536), (16_384, 16_384)]:
+        trigger = compaction_trigger_tokens(context, max_out)
+        ctx.check(f"({context},{max_out}): trigger + min reserve <= context, got trigger={trigger}",
+                  trigger + MIN_VIABLE_RESERVE_TOKENS <= context)
+        ctx.check(f"({context},{max_out}): trigger is still meaningfully positive, got {trigger}",
+                  trigger > 0)
+
+
+@test
+def test_h5b_f03_small_window_open_weight_shapes_no_longer_zero(ctx: Ctx):
+    """The class of real row this finding names (`z-ai/glm-5.2:free`,
+    `deepseek-r1-distill-llama-70b`, and three Qwen 2.5 rows: 32k-64k-class
+    context with an advertised max_output close to or equal to the whole
+    context, which is what OpenRouter reports for a model whose provider
+    listing gives no SEPARATE, smaller completion cap) -- exact current
+    published context/max_output pairs for those 5 specific ids were not
+    re-verified here (no network access to OpenRouter or the user's own
+    cached models.json in this sandbox); this covers the STRUCTURAL shape
+    the finding describes instead, which is what actually drives the bug."""
+    # (65_536, 65_536) reproduces the finding's OWN separately-quoted "nine
+    # more rows sit under 50%, for example 65,536-window rows at 13,536"
+    # number exactly (old_usable == 13_536 below) -- a DIFFERENT, less
+    # severe old-formula symptom than the ~0 rows, still fixed the same way.
+    shapes = [(32_768, 32_768), (32_768, 30_000), (65_536, 65_536), (16_384, 16_384)]
+    old_usables = {}
+    for context, max_out in shapes:
+        old_usables[(context, max_out)] = max(0, (context - min(32_000, max_out)) - min(20_000, min(32_000, max_out)))
+        trigger = compaction_trigger_tokens(context, max_out)
+        ctx.check(f"({context},{max_out}): fixed trigger is sane, got {trigger}", trigger >= int(context * 0.5))
+    ctx.check(f"the 65,536-window row's old `usable` was 13,536 (the finding's own quoted number), "
+              f"got {old_usables[(65_536, 65_536)]}", old_usables[(65_536, 65_536)] == 13_536)
 
 
 @test

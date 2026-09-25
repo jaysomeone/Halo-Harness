@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from rolo_claude.controller import Controller
-from rolo_claude.headless import build_session
+from rolo_claude.headless import attach_cli_files, build_session
 
 
 def build_controller(args) -> "tuple[Controller, object, object]":
@@ -52,6 +52,7 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         strict_mcp_config=bool(getattr(args, "strict_mcp_config", False)),
         print_mode=False,
     )
+    attach_cli_files(build.session, getattr(args, "file", None), cwd=cwd)
 
     def _mcp_status_fn() -> dict:
         if build.mcp_manager is None:

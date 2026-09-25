@@ -72,6 +72,20 @@ OPENCODE_OUTPUT_CAP = 32_000
 # "compact on almost every turn".
 TRIGGER_FLOOR_PCT = 0.70
 
+# H5b finding 3: the floor must survive being combined with `usable` --
+# OpenCode's own `reserved` (up to 20,000 tokens) is sized for a LARGE
+# window's generous headroom; subtracted from a SMALL window whose
+# advertised max_output is itself a big fraction of that window (verified:
+# `z-ai/glm-5.2:free`, `deepseek-r1-distill-llama-70b`, and three Qwen
+# 2.5 rows -- 5 of 458 real models.json rows -- plus the 32,768/29,491
+# profile this finding quotes directly), it collapses `usable` to 0,
+# and the OLD `min(usable, floored)` then threw the floor away entirely.
+# This is a much smaller, "just leave a real reply room" reserve used
+# ONLY to keep the FLOORED trigger from eating every last token of the
+# window -- never OpenCode's own `usable` ceiling, which is computed and
+# still respected separately (see `compaction_trigger_tokens`).
+MIN_VIABLE_RESERVE_TOKENS = 4_096
+
 # OpenCode Appendix D tail-retention formula (adopted per H5 scope F item 5,
 # REPLACING dsh's flat "retain 16%"): min(15k, max(2k, 25% of usable)).
 TAIL_MIN_TOKENS = 2_000
@@ -146,13 +160,25 @@ def compaction_trigger_tokens(context_tokens: int, max_output_tokens: int, *, pc
     floor_applies = pct >= DSH_TRIGGER_PCT
     dsh = dsh_trigger_tokens(context_tokens, max_output_tokens, pct=pct)
     usable = opencode_usable(context_tokens, max_output_tokens)
-    floored = max(dsh, int(TRIGGER_FLOOR_PCT * max(0, context_tokens))) if floor_applies else dsh
-    # The floor only ever RAISES the trigger -- `usable` (OpenCode's own
-    # ceiling: the point past which the NEXT reply's reserved output/buffer
-    # no longer fits) still wins if the floor would push the trigger past
-    # it, so auto-compaction never proactively fires later than the point
-    # a real ContextOverflow becomes possible.
-    return min(usable, floored)
+    # H5b finding 3: apply the floor AFTER OpenCode's own cap, never before
+    # it -- `capped` is exactly the pre-finding-3 `min(dsh, usable)` (still
+    # the tighter of the two ordinary ceilings for a normal-sized window),
+    # and only THEN does the floor get a chance to raise it back up when
+    # `usable` itself collapsed toward zero (the small-window bug above).
+    capped = min(dsh, usable)
+    if not floor_applies:
+        return capped
+    floor_value = int(TRIGGER_FLOOR_PCT * max(0, context_tokens))
+    capped_output = min(OPENCODE_OUTPUT_CAP, max(0, max_output_tokens)) or OPENCODE_OUTPUT_CAP
+    # "floor + reserve must both hold": the floor may raise the trigger,
+    # but never past the point of leaving less than MIN_VIABLE_RESERVE_
+    # TOKENS of headroom in the window -- a minimum viable reply budget,
+    # deliberately smaller than OpenCode's own up-to-20k `reserved` (that
+    # one is sized to protect a LARGE window's generous headroom, not to
+    # gate what a small window's floor is allowed to do).
+    min_reserve = min(MIN_VIABLE_RESERVE_TOKENS, capped_output)
+    hard_ceiling = max(0, context_tokens - min_reserve)
+    return min(hard_ceiling, max(capped, floor_value))
 
 
 def tail_retention_tokens(usable: int) -> int:

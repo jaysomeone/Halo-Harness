@@ -156,13 +156,18 @@ def compaction(*, phase: str, trigger: str = "auto", turn: int = 0, tokens_befor
                tokens_after: Optional[int] = None, headings_missing: Optional[list] = None,
                reason: Optional[str] = None) -> Event:
     """data: {phase, trigger, tokens_before, tokens_after, headings_missing,
-    reason} (H5 scope B) -- `phase` is "start"|"retry"|"done"|"failed";
-    `trigger` is "manual"|"auto"|"overflow" (mirrors the `compacted` log
-    node's own field and the PreCompact hook's `trigger`). Emitted by
-    `Session._run_compaction` so a UI can show a "Compacting..." indicator
-    and, on "done", how much room was freed. finding 4: `phase="failed"`
-    (with a human-readable `reason`) means compaction gave up WITHOUT
-    writing a `compacted` log node -- the history is unchanged."""
+    reason} (H5 scope B) -- `phase` is "start"|"retry"|"done"|"failed"|
+    "skipped"; `trigger` is "manual"|"auto"|"overflow" (mirrors the
+    `compacted` log node's own field and the PreCompact hook's `trigger`).
+    Emitted by `Session._run_compaction` so a UI can show a "Compacting..."
+    indicator and, on "done", how much room was freed. finding 4:
+    `phase="failed"` (with a human-readable `reason`) means compaction was
+    ATTEMPTED and gave up WITHOUT writing a `compacted` log node -- the
+    history is unchanged. H5b finding 3: `phase="skipped"` (also a human-
+    readable `reason`, also no log node written) means compaction was
+    deliberately NOT attempted at all (the back-to-back auto-compaction
+    guard) -- distinct from "failed" so a UI never renders a deliberate
+    skip as an error."""
     return Event("compaction", {
         "phase": phase, "trigger": trigger, "tokens_before": tokens_before,
         "tokens_after": tokens_after, "headings_missing": headings_missing or [], "reason": reason,

@@ -10,6 +10,7 @@ import stat
 from pathlib import Path
 
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from rolo_claude.tools.imageutil import image_block_or_note, is_image_path
 
 DESCRIPTION = (
     "Reads a file from the local filesystem. You can access any file directly by using this tool.\n"
@@ -21,6 +22,8 @@ DESCRIPTION = (
     "- When you already know which part of the file you need, only read that part. This can be important "
     "for larger files.\n"
     "- Results are returned using cat -n format, with line numbers starting at 1\n"
+    "- This tool can read png, jpg, jpeg, gif, and webp image files and show them to a model with vision "
+    "support; other models get a plain note instead\n"
     "- Try to maintain your current working directory throughout the session by using absolute paths and "
     "avoiding usage of `cd`."
 )
@@ -64,6 +67,34 @@ class ReadTool(Tool):
     def permission_content(self, input: dict) -> str:
         return input.get("file_path", "") if isinstance(input, dict) else ""
 
+    def _read_image(self, path: Path, media_type: str, ctx: ToolContext) -> ToolResult:
+        """H8 scope B: an image file becomes a real `image` content block
+        when the session's model advertises vision (`ctx.vision`, threaded
+        from `model.ModelProfile.vision`), else a plain text note -- same
+        gate `tools/mcp_tool.py`'s own `convert_content_blocks` applies to
+        an MCP server's image result, via the SAME shared
+        `tools/imageutil.py` (dimension sniffing, the 1568px/5MB size rule,
+        and an optional real Pillow resize when installed) so every source
+        of an image in this harness is capped/embedded identically."""
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            return ToolResult(f"Error reading file: {e}", is_error=True)
+        if isinstance(getattr(ctx, "read_cache", None), dict):
+            try:
+                ctx.read_cache[str(path)] = path.stat().st_mtime
+            except OSError:
+                pass
+        if not getattr(ctx, "vision", False):
+            return ToolResult(
+                f"{path} is an image ({len(data)} bytes, {media_type}) -- this model has no vision "
+                f"support configured in this session, so its contents cannot be shown."
+            )
+        block, note = image_block_or_note(data, media_type)
+        if block is not None:
+            return ToolResult([block])
+        return ToolResult(note)
+
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         file_path = input.get("file_path") if isinstance(input, dict) else None
         if not file_path or not isinstance(file_path, str):
@@ -86,6 +117,11 @@ class ReadTool(Tool):
             # process reading an infinite/blocking stream, or exhaust
             # memory well before any line-based cap below ever applies.
             return ToolResult(f"Not a regular file (refusing to read): {file_path}", is_error=True)
+
+        media_type = is_image_path(path)
+        if media_type is not None:
+            return self._read_image(path, media_type, ctx)
+
         if _looks_binary(path):
             return ToolResult(
                 f"{file_path} appears to be a binary file ({st.st_size} bytes) -- refusing to read it as text.",

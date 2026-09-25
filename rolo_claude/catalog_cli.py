@@ -19,6 +19,7 @@ from rolo_claude.providers.databricks import (
     load_dbx_endpoints_json, load_models_json, probe_databricks_endpoints_full,
     probe_openrouter_models, write_dbx_endpoints_json, write_models_json,
 )
+from rolo_claude.providers.models_dev import fetch_models_dev, models_dev_json_path, write_models_dev_json
 
 
 def _fmt_price(v) -> str:
@@ -82,4 +83,17 @@ def cmd_models(argv) -> int:
             for name in sorted(endpoints):
                 e = endpoints[name]
                 print(f"{name:<48} {str(e.get('task', '?')):<20} {str(e.get('ready', '?')):>6}")
+
+    # H8 scope C: models.dev's api.json is public/unauthenticated -- fetched
+    # regardless of whether OpenRouter/Databricks are configured, cached to
+    # models-dev.json for doctor's own freshness check and for future
+    # model_table.json cross-checking (see providers/models_dev.py).
+    models_dev_path = models_dev_json_path(state_dir)
+    if args.refresh or not models_dev_path.exists():
+        try:
+            fetched = fetch_models_dev()
+            write_models_dev_json(state_dir, fetched)
+            print(f"\nmodels.dev: cached {len(fetched)} provider(s) to {models_dev_path}")
+        except Exception as e:
+            print(f"rolo-claude models: could not refresh from models.dev: {e}", file=sys.stderr)
     return 0

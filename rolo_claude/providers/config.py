@@ -267,6 +267,50 @@ def load_databrickscfg(path: Path) -> DbxConfig | None:
     return None
 
 
+def load_ucode_settings(path: Path) -> DbxConfig | None:
+    """H8 scope F must-do (`ug`-compatibility note): Databricks' own
+    unity-gateway CLI (`ug`) writes its resolved gateway URL/token to
+    `~/.claude/ucode-settings.json` -- read-only here, same "None if
+    missing/unparseable/incomplete" contract as `load_databrickscfg`. The
+    exact key names aren't documented publicly, so every plausible spelling
+    a gateway-config JSON file would plausibly use is tried, first match
+    wins per field (never mixes a host from one key with a token from
+    another key of the SAME candidate list's LATER, lower-priority entry --
+    each list is tried in order, first hit stops that field's own search)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    # A gateway-shaped file may nest its own fields under "gateway"/
+    # "databricks"/"workspace" -- flatten one level so a top-level OR a
+    # nested shape both resolve the same way.
+    candidates = [data]
+    for nest_key in ("gateway", "databricks", "workspace", "default"):
+        nested = data.get(nest_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    host = token = None
+    for candidate in candidates:
+        if host is None:
+            for key in ("gateway_url", "host", "url", "base_url", "workspace_url", "workspace_host"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value:
+                    host = value
+                    break
+        if token is None:
+            for key in ("token", "api_token", "access_token", "gateway_token", "auth_token"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value:
+                    token = value
+                    break
+    if host and token:
+        return DbxConfig(host=host.rstrip("/"), token=token)
+    return None
+
+
 def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     """
     Resolve Databricks host+token: BRIDGE_DBX_* override, then filtered
@@ -318,7 +362,16 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     if dbx_host and dbx_token:
         return DbxConfig(host=dbx_host.rstrip("/"), token=dbx_token)
 
-    # 5. ~/.databrickscfg [DEFAULT].
+    # 5. H8 scope F must-do: ~/.claude/ucode-settings.json, written by
+    # Databricks' own `ug` (unity-gateway) CLI -- a purpose-built, harness-
+    # adjacent config file, so it's tried BEFORE the generic (and possibly
+    # stale/unrelated-workspace) ~/.databrickscfg below.
+    from rolo_claude.config.paths import claude_config_dir
+    ucode = load_ucode_settings(claude_config_dir() / "ucode-settings.json")
+    if ucode is not None:
+        return ucode
+
+    # 6. ~/.databrickscfg [DEFAULT].
     return load_databrickscfg(home() / ".databrickscfg")
 
 

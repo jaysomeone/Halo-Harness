@@ -25,6 +25,8 @@ its own `is_error` result instead of silently ending the turn
 
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
 import json
 import logging
@@ -38,6 +40,7 @@ from typing import Iterator, Optional
 
 from rolo_claude import events
 from rolo_claude.agent.planmode import PLAN_MODE_NOTE, ensure_plan_file, write_plan
+from rolo_claude.agent.jobs import JobRegistry
 from rolo_claude.agent.subagent import AgentRuntime
 from rolo_claude.agent.compact import (
     build_files_read_snapshot, build_summary_instruction, resolve_knobs, select_verbatim_tail,
@@ -47,7 +50,7 @@ from rolo_claude.agent.compact import opencode_usable as _opencode_usable
 from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
 from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
 from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.prune import prune_messages
+from rolo_claude.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
 from rolo_claude.agent.repair import repair_assistant_turn
 from rolo_claude.hooks import HookRunner, build_prompt_caller, load_plugin_hooks, merge_hook_maps, normalize_hooks
 from rolo_claude.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
@@ -68,6 +71,7 @@ from rolo_claude.providers.stream import (
     UpstreamError, stream_anthropic_completion, stream_completion,
 )
 from rolo_claude.tools.base import ToolContext, ToolResult
+from rolo_claude.tools.imageutil import sniff_dimensions
 from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
 from rolo_claude.tools.truncate import spill_and_truncate
 
@@ -160,15 +164,66 @@ def _mcp_blocks_for_log(blocks: list, *, meta, session_dir, tool_use_id) -> list
     return cap_and_spill(filtered, meta=meta, session_dir=session_dir, tool_use_id=tool_use_id)
 
 
+def _human_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024 or unit == "MB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} MB"
+
+
+def _image_caption(block: dict) -> str:
+    """H8 scope B ("screenshots ... shown as cards"): a real image block's
+    display caption -- media type, dimensions (sniffed from the raw bytes,
+    same pure-stdlib sniffer `tools/imageutil.py` uses elsewhere, never
+    requires Pillow) and a human byte size, e.g. "[image: image/png,
+    1280x800, 84.2 KB]" -- shown as the tool card's body via the SAME
+    plain-text card rendering every other tool result already uses (no new
+    widget/event field: `ToolCard`'s `Static(markup=False)` can't safely
+    interpret Rich markup from untrusted content, so real terminal pixel
+    rendering -- which would need a whole cross-terminal graphics-protocol
+    layer, Kitty/iTerm2/Sixel detection, entirely new widget plumbing -- is
+    deliberately out of scope here; this replaces the old bare "[image]"
+    placeholder with an honest, concrete description of what was captured
+    instead). Degrades all the way back to the plain "[image]" this
+    replaces when the block truly carries nothing describable (no
+    media_type, no decodable data -- e.g. a hand-built `{"type": "image",
+    "source": {}}` in a test)."""
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    media_type = source.get("media_type") if isinstance(source, dict) else None
+    data = source.get("data") if isinstance(source, dict) else None
+    raw = None
+    if isinstance(data, str):
+        try:
+            raw = base64.b64decode(data, validate=False)
+        except (binascii.Error, ValueError):
+            raw = None
+    dims = sniff_dimensions(raw) if raw else None
+    parts = []
+    if media_type:
+        parts.append(media_type)
+    if dims:
+        parts.append(f"{dims[0]}x{dims[1]}")
+    if raw is not None:
+        parts.append(_human_bytes(len(raw)))
+    return f"[image: {', '.join(parts)}]" if parts else "[image]"
+
+
 def _summary_text_for_blocks(blocks: list) -> str:
     """A short, human-readable stand-in for the `tool_result` EVENT's
     `summary` field (display/verbose-log only -- never what's logged to
     the session or sent to the model, which is the full block list) --
-    the first real text block, or an honest placeholder naming whatever
-    non-text content came back (e.g. "[image]")."""
+    the first real text block; an all-image result (a Playwright/Chrome
+    screenshot, a vision Read/MCP image result) gets one `_image_caption`
+    line per image; anything else (or a mix) gets an honest placeholder
+    naming whatever content kind(s) came back (e.g. "[document]")."""
     for b in blocks:
         if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
             return b["text"]
+    image_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "image"]
+    if image_blocks and len(image_blocks) == len(blocks):
+        return "\n".join(_image_caption(b) for b in image_blocks)
     kinds = sorted({b.get("type", "content") for b in blocks if isinstance(b, dict)}) or ["content"]
     return f"[{', '.join(kinds)}]"
 
@@ -259,6 +314,32 @@ def _rough_estimate(system_text: str, messages: list) -> int:
     except (TypeError, ValueError):
         blob = str(messages)
     return max(1, len(blob) // 4)
+
+
+def _total_prompt_tokens(usage: Optional[dict]) -> Optional[int]:
+    """H5b finding 4: `usage.input_tokens` ALONE understates a cached
+    native-Claude-route reply's real prompt size -- on `ant:`/Databricks
+    Claude passthrough, `message_start` reports only the UNCACHED portion,
+    excluding `cache_read_input_tokens`/`cache_creation_input_tokens`
+    (verified: a 150,000-token cached prompt reported `input_tokens=40`).
+    Every place a prompt's real size drives a decision or a display --
+    the compaction trigger (`_account_usage`), `context_pct` -- must use
+    input + cache_read + cache_creation, not `input_tokens` alone. Returns
+    None only when `usage` itself carries no usable `input_tokens` at all
+    (an OpenAI-dialect reply with no cache fields just adds two zeros)."""
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("input_tokens")
+    if not isinstance(input_tokens, int):
+        return None
+    total = input_tokens
+    cache_read = usage.get("cache_read_input_tokens")
+    if isinstance(cache_read, int):
+        total += cache_read
+    cache_creation = usage.get("cache_creation_input_tokens")
+    if isinstance(cache_creation, int):
+        total += cache_creation
+    return total
 
 
 # finding 4: OpenCode's own fallback shape (reports/OpenCode harness deep
@@ -543,6 +624,28 @@ class Session:
         # completion as a user-role notice in the next step").
         self._pending_agent_notices: list = []
         self._agent_notices_lock = threading.Lock()
+        # H8 scope A: background Bash jobs (`Bash(run_in_background:true)`
+        # and a foreground command moved to the background after its own
+        # timeout) -- one JobRegistry per session, threaded through every
+        # ToolContext as `job_registry=` (Bash/BashOutput/TaskStop all read
+        # it). `_pending_job_notices`/`_job_notices_lock` mirror
+        # `_pending_agent_notices`/`_agent_notices_lock` exactly (same dsh
+        # rule, kept in a SEPARATE list so a bash job's completion is never
+        # confused with a sub-agent's in the log) -- see
+        # `_apply_pending_job_notices`.
+        self.job_registry = JobRegistry(parent=self)
+        self._pending_job_notices: list = []
+        self._job_notices_lock = threading.Lock()
+        # H5b finding 2: tool_result pruning's "outside the 40k-token
+        # protection window -> stub it" decision is committed HERE, in
+        # batches of >= PRUNE_REBALANCE_CHUNK_TOKENS, rather than being
+        # recomputed (and therefore drifting by roughly one message) on
+        # every single request -- see `_pruned_messages_for_wire` and
+        # agent/prune.py's own module docstring. Reset on `/clear` and
+        # after a successful compaction (both already discard/rewrite the
+        # history these ids refer to).
+        self._prune_committed_stub_ids: set = set()
+        self._prune_pending_stub_tokens: dict = {}
         # H6 scope C: plan mode's pending ExitPlanMode wait -- mirrors
         # `_permission_waiters`/`_question_waiters` (a request_id-keyed
         # dict + threading.Event) but only ever has ONE live entry at a
@@ -664,6 +767,7 @@ class Session:
         session -- checks first; calling it mid-turn would race the
         worker thread's own log writes)."""
         self._fire_session_end("clear")
+        self._reset_prune_state()  # H5b finding 2: no old log left for these ids to refer to
         self.log = SessionLog(self.cwd)
         self.turn_count = 0
         self._last_prompt_tokens = None
@@ -740,6 +844,47 @@ class Session:
             gen.close()
         return "".join(text_parts)
 
+    def _pruned_messages_for_wire(self, raw_messages: list) -> list:
+        """H5b finding 2: the STABLE half of tool-result pruning. Computes
+        the raw candidate set fresh (cheap: pure token math, no mutation),
+        merges any NEWLY-qualifying tool_use_ids into the session's pending
+        batch, and only COMMITS the batch (making it part of
+        `self._prune_committed_stub_ids`, which every request from here on
+        stubs identically) once it is worth at least
+        `PRUNE_REBALANCE_CHUNK_TOKENS` -- so the wire prefix up to the
+        oldest still-growing content stays byte-identical across every
+        request in between two commits, instead of drifting by about one
+        message per step. `raw_messages` must be the UNPRUNED
+        `derive_request` output -- never a previously-pruned copy (an
+        already-stubbed result's short excerpt would under-count its own
+        real size on every later call)."""
+        candidates = compute_stub_candidates(raw_messages, protect_tokens=PRUNE_PROTECT_TOKENS)
+        for tool_use_id, tokens in candidates.items():
+            if tool_use_id not in self._prune_committed_stub_ids:
+                self._prune_pending_stub_tokens[tool_use_id] = tokens
+        # A committed id that no longer appears as a candidate (compaction
+        # rewrote the log out from under it) is harmless to keep around --
+        # `prune_messages` only ever stubs an id it actually finds a
+        # tool_result block for -- but drop it from PENDING so a stale
+        # entry can never inflate the chunk-size check below.
+        for tool_use_id in list(self._prune_pending_stub_tokens):
+            if tool_use_id not in candidates:
+                del self._prune_pending_stub_tokens[tool_use_id]
+        if sum(self._prune_pending_stub_tokens.values()) >= PRUNE_REBALANCE_CHUNK_TOKENS:
+            self._prune_committed_stub_ids |= set(self._prune_pending_stub_tokens)
+            self._prune_pending_stub_tokens = {}
+        return prune_messages(raw_messages, protect_tokens=PRUNE_PROTECT_TOKENS,
+                               force_stub_ids=frozenset(self._prune_committed_stub_ids))
+
+    def _reset_prune_state(self) -> None:
+        """Called after `/clear` and after a successful compaction (both
+        already discard/rewrite the history any committed/pending id refers
+        to) -- starting the batch fresh is correct and safe, never a
+        stability regression (there is no OLDER request sharing a prefix
+        with the post-clear/post-compaction log to begin with)."""
+        self._prune_committed_stub_ids = set()
+        self._prune_pending_stub_tokens = {}
+
     def _on_catalog_grow(self, names: list) -> None:
         """H3 scope C: `SessionCatalog.load()`'s own callback -- a
         ToolSearch call just appended one or more deferred MCP tools to
@@ -769,11 +914,14 @@ class Session:
         # (its "pruned ~N tokens" report never actually shrank anything a
         # real request sent) -- applied here, AFTER derive_request and
         # BEFORE the wire body is built, so every ordinary step benefits
-        # from dsh's head/tail + protection-window pruning, not just an
-        # auto/manual/overflow compaction pass. The LOGGED transcript is
+        # from OpenCode's protection-window pruning, not just an auto/
+        # manual/overflow compaction pass. The LOGGED transcript is
         # untouched (prune_messages never mutates its input and this
-        # session never writes the pruned copy back to the log).
-        messages = prune_messages(messages)
+        # session never writes the pruned copy back to the log). H5b
+        # finding 2: `_pruned_messages_for_wire` (not a bare `prune_messages`
+        # call) is what keeps the stub boundary STABLE across requests --
+        # see its own docstring.
+        messages = self._pruned_messages_for_wire(messages)
         requested_max_tokens = max_tokens_budget(
             self.provider_profile, model_key=self.model_ref.raw, requested=None, abort=self.abort,
         )
@@ -1167,10 +1315,19 @@ class Session:
             record_databricks_output_tokens(self.model_ref.raw, output_tokens)
         # H5 scope B: the provider's own reported prompt size drives the
         # compaction trigger (`_maybe_auto_compact`) -- "the provider's last
-        # prompt_tokens (else estimate)" per the brief.
-        input_tokens = result.usage.get("input_tokens") if isinstance(result.usage, dict) else None
-        if isinstance(input_tokens, int):
-            self._last_prompt_tokens = input_tokens
+        # prompt_tokens (else estimate)" per the brief. H5b finding 4: on a
+        # cached native Claude route (`ant:`, Databricks Claude passthrough)
+        # `message_start`'s own `input_tokens` reports ONLY the uncached
+        # portion -- verified: a 200k-context session with 150,000 tokens
+        # sitting in cache reported `input_tokens=40`, so the trigger
+        # (140,000) never fired and auto-compaction silently never ran
+        # until a hard overflow. The prompt's REAL size is
+        # input + cache_read + cache_creation, everywhere this number is
+        # used for anything size-related (the trigger here; context %/
+        # status-bar tokens and cost, both already usage-driven elsewhere).
+        total_prompt_tokens = _total_prompt_tokens(result.usage)
+        if total_prompt_tokens is not None:
+            self._last_prompt_tokens = total_prompt_tokens
 
     # ---- compaction (H5 scope B) -----------------------------------------
 
@@ -1207,16 +1364,56 @@ class Session:
             requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
         )
 
+    def _count_tokens_via_api(self) -> Optional[int]:
+        """H8 must-do: wire providers/http.py's `call_databricks_count_tokens`
+        relay (built, never called before this) into the compaction gate,
+        on any route that actually has a real count-tokens endpoint --
+        native Anthropic (`ant:`) or a Databricks Claude passthrough (the
+        same `/v1/messages/count_tokens` shape either host accepts). Never
+        raises and never the ONLY way to estimate prompt size: None on any
+        failure at all (wrong dialect, no creds, network error, a non-200,
+        an unparseable body) -- the caller always falls back to
+        `_rough_estimate`."""
+        if self.route.dialect != "anthropic-passthrough" or self.creds is None:
+            return None
+        try:
+            from rolo_claude.providers.http import call_databricks_count_tokens
+            system_text, messages, tools = derive_request(self.log, tools=None)
+            body = build_anthropic_request_body(
+                system_text=system_text, messages=messages, tools=tools, route=self.route,
+                profile=self.provider_profile, requested_max_tokens=1,
+            )
+            body.pop("stream", None)
+            body.pop("max_tokens", None)
+            result = call_databricks_count_tokens(
+                self.creds.base_url, self.creds.api_key, body, self.extra_headers or {}, self.state_dir,
+            )
+            if result.status != 200 or result.resp is None:
+                return None
+            raw = result.resp.read()
+            parsed = json.loads(raw.decode("utf-8", "replace"))
+            count = parsed.get("input_tokens")
+            return count if isinstance(count, int) else None
+        except Exception:
+            return None
+
     def _maybe_auto_compact(self, turn_no: int) -> Iterator[events.Event]:
         """Called right after `_account_usage` on every successful step:
         the 80%-of-headroom gate (agent/compact.py), using the provider's
-        OWN last-reported `input_tokens` (else a rough estimate of the log
-        as it stands right now)."""
+        OWN last-reported `input_tokens` when available (the common case --
+        every step after the first reply of the session, or after a
+        compaction, sets it); otherwise a REAL count from the route's own
+        count-tokens endpoint when it has one (H8 must-do), else a rough
+        len/4 estimate of the log as it stands right now."""
         if self._last_prompt_tokens is not None:
             prompt_tokens = self._last_prompt_tokens
         else:
-            system_text, messages, _ = derive_request(self.log, tools=None)
-            prompt_tokens = _rough_estimate(system_text, messages)
+            counted = self._count_tokens_via_api()
+            if counted is not None:
+                prompt_tokens = counted
+            else:
+                system_text, messages, _ = derive_request(self.log, tools=None)
+                prompt_tokens = _rough_estimate(system_text, messages)
         do_it, trigger_tokens = should_compact(
             prompt_tokens, self.model_profile.context_tokens, self.model_profile.max_output_tokens,
             self._compaction_knobs,
@@ -1233,8 +1430,12 @@ class Session:
                 "immediately after the previous auto-compaction -- it did not free enough room",
                 prompt_tokens, trigger_tokens,
             )
-            yield events.compaction(phase="failed", trigger="auto", turn=turn_no,
-                                     reason="skipped: still over the trigger right after the previous compaction")
+            # H5b finding 3: this is a deliberate SKIP (compaction was never
+            # attempted), not a failure -- `phase="failed"` here used to
+            # make the TUI show "✗ Compaction failed" for something that
+            # never actually ran and never touched the log.
+            yield events.compaction(phase="skipped", trigger="auto", turn=turn_no,
+                                     reason="still over the trigger right after the previous compaction")
             do_it = False
         self._just_compacted = False
         if do_it:
@@ -1385,13 +1586,17 @@ class Session:
         `phase="failed"` with a human-readable `reason` so a caller/UI can
         react. Returns True iff the marker + replacement content were
         actually written."""
-        system_text, messages, tools = derive_request(self.log, tools=None)
+        system_text, raw_messages, tools = derive_request(self.log, tools=None)
         # finding 4: prune_messages used to be wired ONLY into `/context` --
         # applied here too, so the summarisation call's own prefix benefits
-        # from the same head/tail + protection-window shrink an ordinary
-        # step now gets (`_derive_and_build`), making the exact-prefix
-        # attempt below less likely to need the flattened fallback at all.
-        messages = prune_messages(messages)
+        # from the same protection-window shrink an ordinary step now gets
+        # (`_derive_and_build`), making the exact-prefix attempt below less
+        # likely to need the flattened fallback at all. H5b finding 1:
+        # ONLY for the summarisation call's own request body -- `raw_
+        # messages` (unpruned) is what `select_verbatim_tail` below must
+        # select from, or a stubbed/truncated copy gets baked permanently
+        # into the freshly-compacted log.
+        messages = self._pruned_messages_for_wire(raw_messages)
         tokens_before = self._last_prompt_tokens or _rough_estimate(system_text, messages)
         yield events.compaction(phase="start", trigger=trigger, turn=turn_no, tokens_before=tokens_before)
 
@@ -1466,7 +1671,11 @@ class Session:
 
         wrapped = wrap_compacted_summary(summary_text)
         usable = _opencode_usable(self.model_profile.context_tokens, self.model_profile.max_output_tokens)
-        tail = select_verbatim_tail(messages, tail_retention_tokens(usable))
+        # H5b finding 1: select the tail from the UNPRUNED transcript, never
+        # the copy stubbed/head-tailed for the summarisation call's own
+        # request above -- otherwise a stubbed tool_result got written
+        # permanently into the freshly-compacted log.
+        tail = select_verbatim_tail(raw_messages, tail_retention_tokens(usable))
 
         self.log.append_compacted(trigger=trigger, custom_instructions=custom_instructions)
         self.log.append_user([{"type": "text", "text": wrapped}])
@@ -1525,6 +1734,11 @@ class Session:
         after_system, after_messages, _ = derive_request(self.log, tools=None)
         tokens_after = _rough_estimate(after_system, after_messages)
         self._last_prompt_tokens = None  # unknown until the next real reply's usage lands
+        # H5b finding 2: every committed/pending stub id refers to a
+        # tool_result that this compaction just replaced with the summary +
+        # a fresh verbatim tail -- start pruning's batch fresh rather than
+        # carrying stale ids (and a stale pending-token count) forward.
+        self._reset_prune_state()
         yield events.compaction(phase="done", trigger=trigger, turn=turn_no,
                                  tokens_before=tokens_before, tokens_after=tokens_after)
         return True
@@ -1617,6 +1831,7 @@ class Session:
         # breaker (a SEPARATE guard, kept as-is) did.
         model_calls = 0
         yield from self._apply_pending_agent_notices(turn_no)
+        yield from self._apply_pending_job_notices(turn_no)
         while True:
             if model_calls >= self.max_turns:
                 # H5 scope F item 9 (OpenCode Appendix H): inject
@@ -1641,9 +1856,9 @@ class Session:
                     # Mirrors the ordinary per-step message_end (see below)
                     # so a print-mode JSON result reflects the WRAP-UP
                     # call's own stop_reason/usage, not a stale earlier one.
-                    input_tokens = final_result.usage.get("input_tokens") if isinstance(final_result.usage, dict) else None
-                    context_pct = (round(100.0 * input_tokens / self.model_profile.context_tokens, 1)
-                                   if isinstance(input_tokens, int) and self.model_profile.context_tokens else None)
+                    prompt_tokens = _total_prompt_tokens(final_result.usage)
+                    context_pct = (round(100.0 * prompt_tokens / self.model_profile.context_tokens, 1)
+                                   if prompt_tokens is not None and self.model_profile.context_tokens else None)
                     yield events.message_end(
                         turn=turn_no, stop_reason=final_result.stop_reason, usage=final_result.usage,
                         cost_usd=(self.cost_meter.total_usd if self.cost_meter.has_cost_data else None),
@@ -1753,10 +1968,10 @@ class Session:
                 content=result.assistant_blocks, reasoning=result.reasoning,
                 stop_reason=result.stop_reason, request_hash=req_hash,
             )
-            input_tokens = result.usage.get("input_tokens") if isinstance(result.usage, dict) else None
+            prompt_tokens = _total_prompt_tokens(result.usage)
             context_pct = None
-            if isinstance(input_tokens, int) and self.model_profile.context_tokens:
-                context_pct = round(100.0 * input_tokens / self.model_profile.context_tokens, 1)
+            if prompt_tokens is not None and self.model_profile.context_tokens:
+                context_pct = round(100.0 * prompt_tokens / self.model_profile.context_tokens, 1)
             # finding 15: cost_usd is the SESSION's cumulative total (not
             # just this one call's own cost) -- output.py's JSON sink takes
             # message_end's cost_usd as-is (the latest value naturally IS
@@ -1794,7 +2009,7 @@ class Session:
                         self.log.append_user([{"type": "text", "text": continuation}])
                         yield events.user_message(continuation, turn=turn_no)
                         continue
-                yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no, context_tokens=input_tokens,
+                yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no, context_tokens=prompt_tokens,
                                      context_limit=self.model_profile.context_tokens,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
                 # finding 3: a message's OWN max_tokens cutoff is not the
@@ -2224,6 +2439,20 @@ class Session:
             yield events.user_message(text, turn=turn_no)
             yield events.notification(f"Sub-agent finished: {text.splitlines()[0]}")
 
+    def _apply_pending_job_notices(self, turn_no: int):
+        """H8 scope A: the background-Bash-job sibling of
+        `_apply_pending_agent_notices` (same dsh rule, same "called once at
+        the START of `_turn_body`" timing) -- a job that finished while this
+        session was between turns (or during a prior turn's own tool
+        dispatch) is applied as a user-role message before the model does
+        anything else this turn."""
+        with self._job_notices_lock:
+            notices, self._pending_job_notices = self._pending_job_notices, []
+        for text in notices:
+            self.log.append_user([{"type": "text", "text": text}])
+            yield events.user_message(text, turn=turn_no)
+            yield events.notification(f"Background job finished: {text.splitlines()[0]}")
+
     def _await_reply(self, waiters: dict, request_id: str, *, timeout: Optional[float] = None):
         """Block the WORKER thread until a UI-thread `resolve_*` call answers
         `request_id` or the session's abort Event is set (the escape hatch:
@@ -2391,6 +2620,7 @@ class Session:
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
                            mcp_manager=self.mcp_manager, agent_runtime=self.agent_runtime,
+                           job_registry=self.job_registry, vision=self.model_profile.vision,
                            session_allow_rule=lambda rule_text: self.permission_engine.add_session_allow_rule(
                                rule_text, temporary=True),
                            env_file=env_file_path(self.log.session_id),

@@ -117,7 +117,13 @@ def test_mcp_e2e_vision_image_reaches_the_request_body(ctx: Ctx):
         ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-1200:]!r}", result.returncode == 0)
         ctx.check(f"two upstream requests seen (before/after the tool call), got {len(seen_bodies)}",
                   len(seen_bodies) == 2)
-        second_body_text = json.dumps(seen_bodies[1])
+        # H8 scope B: scoped to `messages` only (not the whole body dump) --
+        # the request's `tools` array now also carries NotebookEditTool's
+        # own schema, whose param description text legitimately contains
+        # the plain English word "omitted" ("... if cell_id is omitted"),
+        # which is unrelated to an IMAGE being lossily omitted and must
+        # never fail this assertion.
+        second_body_text = json.dumps(seen_bodies[1].get("messages"))
         ctx.check("no lossy text placeholder for the image in the request body",
                   "[image content" not in second_body_text and "omitted" not in second_body_text)
         ctx.check(f"a real image part (image_url/base64 data) reached the request body, "

@@ -135,14 +135,37 @@ def _profile_from_models_json_entry(entry: dict) -> ModelProfile:
     )
 
 
+def _profile_from_vendored_databricks_entry(entry: dict) -> ModelProfile:
+    """H8 scope C: models.dev's own `databricks` provider entry (via
+    providers.models_dev.databricks_profile_fields_from_models_dev) into a
+    ModelProfile, defaults filling in anything that entry didn't have."""
+    from rolo_claude.providers.models_dev import databricks_profile_fields_from_models_dev
+    fields = databricks_profile_fields_from_models_dev(entry)
+    return ModelProfile(
+        context_tokens=fields.get("context_tokens", 128000),
+        max_output_tokens=fields.get("max_output_tokens", 16384),
+        vision=bool(fields.get("vision", False)),
+        reasoning=fields.get("reasoning", "none"),
+        price_in=fields.get("price_in"),
+        price_out=fields.get("price_out"),
+    )
+
+
 def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict] = None) -> ModelProfile:
     """models.json (extended probe_openrouter_models data) < routes.json
-    ["profiles"][ref.model or "default"] < the ModelProfile dataclass
-    defaults. A native Anthropic/Databricks-passthrough ref (dialect ==
-    "anthropic-passthrough") gets `reasoning="native"` unless models.json or
-    routes.json says otherwise -- a real Claude model always supports
-    extended thinking, unlike an openai-chat-dialect model, where reasoning
-    support depends on what the upstream actually advertises."""
+    ["profiles"][ref.model or "default"] < H8 scope C: a vendored fallback
+    catalog (providers/catalog/*.json -- OpenRouter's own model list for an
+    `openrouter` ref, models.dev's `databricks` provider entry for a
+    `databricks` ref) < the ModelProfile dataclass defaults. The vendored
+    tier exists so a fresh install with no network yet -- most notably the
+    work box, behind a VPN that may not be reachable -- still resolves real
+    context/output/pricing/vision for a model this harness ships pinned
+    defaults for, instead of the bare dataclass guess. A native Anthropic/
+    Databricks-passthrough ref (dialect == "anthropic-passthrough") gets
+    `reasoning="native"` unless a more specific source says otherwise -- a
+    real Claude model always supports extended thinking, unlike an
+    openai-chat-dialect model, where reasoning support depends on what the
+    upstream actually advertises."""
     routes = routes or {}
     models = load_models_json(state_dir)
     entry = models.get(ref.model)
@@ -165,6 +188,23 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             price_in=raw_entry.get("price_in"),
             price_out=raw_entry.get("price_out"),
         )
+
+    # H8 scope C: the vendored fallback tier -- consulted only once neither
+    # a live/cached probe NOR an explicit routes.json profile had anything,
+    # so it can never override a real probe or a user's own override.
+    if ref.provider == "databricks":
+        from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+        vendored = load_vendored_databricks_fallback().get(ref.model)
+        if vendored:
+            profile = _profile_from_vendored_databricks_entry(vendored)
+            if ref.dialect == "anthropic-passthrough" and profile.reasoning == "none":
+                profile = ModelProfile(**{**profile.__dict__, "reasoning": "native"})
+            return profile
+    elif ref.provider == "openrouter":
+        from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+        vendored_entry = load_vendored_openrouter_fallback().get(ref.model)
+        if vendored_entry:
+            return _profile_from_models_json_entry(vendored_entry)
 
     if ref.dialect == "anthropic-passthrough":
         return ModelProfile(context_tokens=200000, max_output_tokens=8192, reasoning="native")

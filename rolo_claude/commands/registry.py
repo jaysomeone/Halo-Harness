@@ -117,6 +117,70 @@ class Registry:
         return reg
 
 
+def _make_mcp_prompt_run(mcp_manager, server: str, prompt_name: str, arg_names: list) -> Callable:
+    """One `/mcp__<server>__<prompt>`'s `run` -- calls `prompts/get` and
+    joins every returned message's own text into the turn's actual prompt
+    (this command's `kind` is "prompt", same contract as a custom command
+    or a skill: the returned string becomes `final_prompt`, never printed
+    directly). Argument mapping is necessarily best-effort: a slash
+    command's own input is one freeform string, while an MCP prompt
+    declares its own named arguments -- a single-argument prompt gets the
+    WHOLE typed text verbatim (the common case, e.g. a "topic" or "query"
+    argument); more than one is mapped positionally by shell-style
+    splitting."""
+    def _run(args_text: str, facade) -> str:
+        arguments: dict = {}
+        if arg_names:
+            if len(arg_names) == 1:
+                if args_text:
+                    arguments[arg_names[0]] = args_text
+            else:
+                for name, value in zip(arg_names, split_args(args_text)):
+                    arguments[name] = value
+        try:
+            result = mcp_manager.get_prompt(server, prompt_name, arguments)
+        except Exception as e:
+            return f"[could not load MCP prompt {server}:{prompt_name}: {type(e).__name__}: {e}]"
+        texts = []
+        for message in getattr(result, "messages", None) or []:
+            content = getattr(message, "content", None)
+            text = getattr(content, "text", None)
+            if isinstance(text, str):
+                texts.append(text)
+            elif isinstance(content, list):
+                for block in content:
+                    block_text = getattr(block, "text", None)
+                    if isinstance(block_text, str):
+                        texts.append(block_text)
+        return "\n\n".join(texts) if texts else (args_text or "")
+    return _run
+
+
+def register_mcp_prompts(reg: "Registry", mcp_manager) -> None:
+    """H8 scope E (deferred by H3): every connected MCP server's own
+    prompts (`prompts/list`) become `/mcp__<server>__<prompt>` slash
+    commands -- Claude Code's own naming convention for MCP-provided
+    surfaces, mirroring `mcp__<server>__<tool>` tool names. `mcp_manager=
+    None` (no MCP client this session, or `--bare`) is a no-op. A prompt
+    name colliding with an existing command is skipped (`add()`'s own
+    "never overwrites" rule -- a builtin or a project's own custom command
+    always wins over a same-named MCP prompt)."""
+    if mcp_manager is None:
+        return
+    for server, prompt in mcp_manager.prompts():
+        prompt_name = getattr(prompt, "name", None)
+        if not prompt_name:
+            continue
+        description = getattr(prompt, "description", None) or f"MCP prompt {prompt_name!r} from server {server!r}"
+        arg_names = [a.name for a in (getattr(prompt, "arguments", None) or []) if getattr(a, "name", None)]
+        hint = " ".join(f"<{a}>" for a in arg_names) or None
+        cmd = SlashCommand(
+            name=f"mcp__{server}__{prompt_name}", description=description, kind="prompt", argument_hint=hint,
+            source="mcp", run=_make_mcp_prompt_run(mcp_manager, server, prompt_name, arg_names),
+        )
+        reg.add(cmd)
+
+
 # =============================================================================
 # Shared prompt-body substitution (custom.py + skills.py).
 # =============================================================================

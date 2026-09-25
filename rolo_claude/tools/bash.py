@@ -36,7 +36,12 @@ DESCRIPTION = (
     "the session by using absolute paths and avoiding usage of `cd`, unless the user explicitly "
     "requests it.\n"
     "- Always quote file paths that contain spaces (e.g. cd \"path with spaces/file.txt\").\n"
-    "- Chain related commands with `&&` or `;` rather than making several separate tool calls."
+    "- Chain related commands with `&&` or `;` rather than making several separate tool calls.\n"
+    "- Set `run_in_background=true` for a command expected to run for a while (a server, a watch/build "
+    "loop, a long download); you get back a shell_id immediately and the command keeps running. Use "
+    "the BashOutput tool to check on it (returns only the output produced since the last check) and "
+    "TaskStop to stop it early. A command that runs in the FOREGROUND and hits its own timeout is "
+    "moved to the background automatically instead of being killed -- check it the same way."
 )
 
 
@@ -87,7 +92,7 @@ class BashTool(Tool):
             "command": {"type": "string", "description": "The command to execute"},
             "description": {"type": "string", "description": "Clear, concise description of what this command does, 5-10 words, in active voice"},
             "timeout": {"type": "integer", "description": "Optional timeout in milliseconds (max 600000)"},
-            "run_in_background": {"type": "boolean", "description": "Run this command in the background (not yet implemented in this build)"},
+            "run_in_background": {"type": "boolean", "description": "Set to true to run this command in the background. Use BashOutput to read the output later."},
         },
         "required": ["command"],
     }
@@ -134,30 +139,48 @@ class BashTool(Tool):
         if shell_path is None:
             return ToolResult("No POSIX shell (bash) is available on this system to run Bash commands.", is_error=True)
 
+        env_file = getattr(ctx, "env_file", None)
+        source_prefix = ""
+        if env_file is not None:
+            source_prefix = f'[ -f "{to_posix(str(env_file))}" ] && . "{to_posix(str(env_file))}"\n'
+        env = dict(ctx.env) if isinstance(ctx.env, dict) else dict(os.environ)
+        env["CLAUDECODE"] = "1"
+        if env_file is not None:
+            env["CLAUDE_ENV_FILE"] = str(env_file)
+
+        job_registry = getattr(ctx, "job_registry", None)
+        if isinstance(input, dict) and input.get("run_in_background") and job_registry is not None:
+            # H8 scope A: spawn immediately, no foreground wait at all. No
+            # exit/cwd marker wrapping here (unlike the foreground path
+            # below) -- the user's own command stays the shell's LAST
+            # command, so `proc.returncode` is already its real exit
+            # status; a backgrounded job's own `cd` also never needs to
+            # feed back into this session's persistent bash_state.
+            plain_command = f"{source_prefix}{command}"
+            record, err = job_registry.start_background(
+                plain_command, description=input.get("description") or command,
+                cwd=cwd, env=env, shell_path=str(shell_path),
+            )
+            if err is not None:
+                return ToolResult(err, is_error=True)
+            body = (cwd_notice if cwd_notice else "") + (
+                f"Command running in the background (shell_id: {record.job_id}).\n"
+                f"Use BashOutput with shell_id={record.job_id!r} to check its progress, or TaskStop to stop it."
+            )
+            return ToolResult(body)
+
         # finding 9: a per-call random nonce, never reused across calls or
         # guessable from the command text -- the marker lines this wrapper
         # appends can only be recognized under THIS nonce (see
         # _strip_markers), so a command's own output can never forge one
         # (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\n'` used to
-        # hijack the session's cwd).
+        # hijack the session's cwd). finding 6: source_prefix/env were
+        # already computed above (needed by the run_in_background branch
+        # too) -- 2.1.281 sources CLAUDE_ENV_FILE as a real shell script
+        # ("Session environment script ready"), not a literal NAME=value
+        # parse, so `export PATH="$PATH:/x"` genuinely appends to the
+        # shell's OWN inherited PATH via `$VAR` expansion.
         nonce = uuid.uuid4().hex
-        # finding 6: SOURCE CLAUDE_ENV_FILE in THIS shell, before the
-        # model's own command, every call -- 2.1.281 sources it as a real
-        # shell script ("Session environment script ready"), not a
-        # literal NAME=value parse. `export PATH="$PATH:/x"` (Claude
-        # Code's own SessionStart docs example) then genuinely appends to
-        # the shell's OWN inherited PATH via `$VAR` expansion, instead of
-        # overwriting it with the literal string "$PATH:/x". The `[ -f ]`
-        # guard makes this a silent no-op before any hook has written one,
-        # and re-sourcing every call (not just once at session start)
-        # picks up a LATER hook's own additional exports with no restart.
-        # `to_posix` handles the win32/Git-Bash drive-letter form
-        # unconditionally (a no-op on real POSIX paths).
-        env_file = getattr(ctx, "env_file", None)
-        source_prefix = ""
-        if env_file is not None:
-            env_file_posix = to_posix(str(env_file))
-            source_prefix = f'[ -f "{env_file_posix}" ] && . "{env_file_posix}"\n'
         wrapped = (
             f"{source_prefix}"
             f"{command}\n"
@@ -171,14 +194,28 @@ class BashTool(Tool):
             f'__cwd=$(pwd -W 2>/dev/null || pwd)\n'
             f'printf "\\n{_EXIT_MARK}_{nonce}:%s\\n{_CWD_MARK}_{nonce}:%s\\n" "$__rc" "$__cwd"\n'
         )
-        env = dict(ctx.env) if isinstance(ctx.env, dict) else dict(os.environ)
-        env["CLAUDECODE"] = "1"
-        if env_file is not None:
-            env["CLAUDE_ENV_FILE"] = str(env_file)
+
+        # H8 scope A (dsh): "a foreground command that hits its timeout is
+        # moved to the background instead of killed" -- only wired when
+        # this session actually has a job registry; `_on_timeout` hands the
+        # still-live proc/queue/collector off to it (see agent/jobs.py's
+        # `adopt_from_timeout`) instead of `run_streamed` killing them, and
+        # records the resulting job here so the branch below can report
+        # "moved to the background" instead of "killed".
+        adopted = []
+
+        def _on_timeout(proc, q, collector) -> None:
+            record = job_registry.adopt_from_timeout(
+                proc=proc, q=q, collector=collector, command=command,
+                description=(input.get("description") if isinstance(input, dict) else None) or command,
+                cwd=cwd, nonce=nonce,
+            )
+            adopted.append(record)
 
         raw_output, exit_code, timed_out, aborted = run_streamed(
             [str(shell_path), "-lc", wrapped], cwd=cwd, env=env, timeout_s=timeout_ms / 1000.0,
             abort=getattr(ctx, "abort", None), progress_cb=getattr(ctx, "progress_cb", None),
+            on_timeout_handoff=(_on_timeout if job_registry is not None else None),
         )
 
         if exit_code is None and not timed_out and not aborted:
@@ -203,6 +240,16 @@ class BashTool(Tool):
             body = text.strip() + "\n[command aborted]" if text.strip() else "[command aborted]"
             return ToolResult(body, is_error=True)
         if timed_out:
+            if adopted:
+                # H8 scope A: handed off, not killed -- still running, so
+                # this is NOT an error result (the command didn't fail; it's
+                # just not done yet).
+                job_id = adopted[0].job_id
+                note = (f"[command timed out after {timeout_ms}ms and was moved to the background as "
+                        f"shell_id {job_id} -- use BashOutput with shell_id={job_id!r} to check on it, or "
+                        f"TaskStop to stop it]")
+                body = text.strip() + "\n" + note if text.strip() else note
+                return ToolResult(body)
             body = (text.strip() + f"\n[command timed out after {timeout_ms}ms and was killed]"
                      if text.strip() else f"[command timed out after {timeout_ms}ms and was killed]")
             return ToolResult(body, is_error=True)
@@ -210,6 +257,6 @@ class BashTool(Tool):
         body = text if text.strip() else "(no output)"
         if final_exit not in (0, None):
             body += f"\n[exit code {final_exit}]"
-        if isinstance(input, dict) and input.get("run_in_background"):
-            body += "\n[note: run_in_background isn't implemented yet in this build -- ran in the foreground instead]"
+        if isinstance(input, dict) and input.get("run_in_background") and job_registry is None:
+            body += "\n[note: background jobs aren't available in this session -- ran in the foreground instead]"
         return ToolResult(body)

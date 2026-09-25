@@ -78,6 +78,37 @@ def test_convert_resource_blob_image_with_vision(ctx: Ctx):
 
 
 @test
+def test_h8_convert_image_block_over_byte_limit_is_omitted(ctx: Ctx):
+    """H8 scope B: an MCP server's own image result (a screenshot tool, a
+    browser snapshot) gets the SAME OpenCode size gate a local file read
+    does -- previously convert_content_blocks embedded ANY size image
+    as-is with no cap at all."""
+    import base64 as _b64
+    big = _b64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode("ascii")
+    blocks = T.convert_content_blocks([_image(data=big, mime="image/png")], vision=True)
+    ctx.check("becomes a text note, not an image block", blocks[0]["type"] == "text")
+    ctx.check(f"OpenCode's own omitted wording, got {blocks[0]['text']!r}",
+              "could not be resized below the image size limit" in blocks[0]["text"])
+
+
+@test
+def test_h8_convert_resource_blob_image_over_byte_limit_is_omitted(ctx: Ctx):
+    import base64 as _b64
+    big = _b64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode("ascii")
+    blocks = T.convert_content_blocks([_resource_blob("file:///huge.png", blob=big)], vision=True)
+    ctx.check("becomes a text note, not an image block", blocks[0]["type"] == "text")
+
+
+@test
+def test_h8_convert_image_block_malformed_base64_falls_back_to_passthrough(ctx: Ctx):
+    """A server handing back non-base64 garbage must not crash conversion
+    -- falls back to embedding it unchanged (pre-existing behaviour for a
+    decode error, unrelated to the SIZE gate this milestone added)."""
+    blocks = T.convert_content_blocks([_image(data="not-valid-base64!!!", mime="image/png")], vision=True)
+    ctx.check("still becomes an image block (best-effort passthrough)", blocks[0]["type"] == "image")
+
+
+@test
 def test_convert_resource_blob_non_image_becomes_note(ctx: Ctx):
     blob_res = SimpleNamespace(uri="file:///x.bin", text=None, blob="QQ==", mime_type="application/octet-stream")
     blocks = T.convert_content_blocks([SimpleNamespace(type="resource", resource=blob_res)], vision=True)

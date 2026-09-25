@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -54,6 +55,20 @@ class _CappedCollector:
                 self._spill_file = os.fdopen(fd, "w", encoding="utf-8", errors="replace")
                 self._spill_path = Path(name)
                 self._spill_file.write("".join(self._head))
+            elif self._spill_file.closed:
+                # H8 scope A: a backgrounded job's collector keeps being
+                # appended to (agent.jobs.JobRegistry's drain thread) well
+                # after `result()` -- called once for run_streamed's own
+                # return value at the moment of a timeout handoff -- has
+                # already closed the file below. Re-open in append mode
+                # rather than silently losing every byte written after
+                # that first `result()` call (`except Exception: pass`
+                # below would otherwise swallow every write to a closed
+                # file with no error and no data).
+                try:
+                    self._spill_file = open(self._spill_path, "a", encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
             try:
                 self._spill_file.write(text)
             except Exception:
@@ -61,10 +76,15 @@ class _CappedCollector:
             self._tail = (self._tail + text)[-half:]
 
     def result(self) -> str:
+        """Safe to call more than once (H8 scope A: a background job's
+        collector is polled repeatedly) -- each call flushes/closes the
+        spill file as a consistent snapshot; `append` re-opens it (above)
+        if more text arrives afterward."""
         if self._spill_file is not None:
             try:
                 self._spill_file.flush()
-                self._spill_file.close()
+                if not self._spill_file.closed:
+                    self._spill_file.close()
             except Exception:
                 pass
             omitted = self.total_len - self._head_len - len(self._tail)
@@ -74,11 +94,45 @@ class _CappedCollector:
         return "".join(self._head)
 
 
+_TASKKILL_UNTERMINATED_RE = re.compile(r"process with PID (\d+).*?could not be terminated", re.IGNORECASE)
+
+
+def _kill_process_tree_windows(pid: int) -> None:
+    """H8 scope A finding: `taskkill /T /F /PID <pid>` can report "ERROR:
+    The process with PID <n> (child process of PID <pid>) could not be
+    terminated. Reason: The operation attempted is not supported." for a
+    GRANDCHILD spawned only milliseconds earlier (observed: a background
+    job killed essentially the instant it started -- e.g. TaskStop called
+    right after Bash's own run_in_background reply). The named process
+    (bash.exe itself, per `proc.poll()`) genuinely dies, but that orphaned
+    grandchild survives and keeps the child's stdout PIPE open for its own
+    full natural lifetime -- Windows only signals EOF once every write-end
+    handle, across every process, is closed, so a reader thread blocks
+    until the orphan exits on its own instead of seeing this as a kill.
+    Retried a few times, targeting whatever taskkill's own stderr still
+    names as un-terminated each round: it reliably succeeds once that PID
+    has finished registering with the OS, typically within tens of ms."""
+    targets = {pid}
+    for _attempt in range(5):
+        still_stuck = set()
+        for target in targets:
+            try:
+                result = subprocess.run(["taskkill", "/T", "/F", "/PID", str(target)],
+                                         capture_output=True, text=True, timeout=5)
+            except Exception:
+                continue
+            for m in _TASKKILL_UNTERMINATED_RE.finditer(result.stderr or ""):
+                still_stuck.add(int(m.group(1)))
+        if not still_stuck:
+            return
+        targets = still_stuck
+        time.sleep(0.2)
+
+
 def _kill_process_group(proc: "subprocess.Popen") -> None:
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                            capture_output=True, timeout=5)
+            _kill_process_tree_windows(proc.pid)
             return
         except Exception:
             pass
@@ -98,13 +152,15 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
 def run_streamed(
     argv: list, *, cwd, env: dict, timeout_s: float, abort=None,
     progress_cb: Optional[Callable[[str], None]] = None, poll_interval: float = POLL_INTERVAL_S,
+    on_timeout_handoff: Optional[Callable[["subprocess.Popen", "queue.Queue", "_CappedCollector"], None]] = None,
 ) -> "tuple[str, Optional[int], bool, bool]":
     """Run `argv`, return (merged_output, exit_code, timed_out, aborted).
     `exit_code` is None only when the process itself could never be
     launched (`merged_output` is then a plain error message, not real
-    subprocess output). `abort` is a threading.Event polled alongside the
-    timeout; either firing kills the whole process group, never just the
-    immediate child.
+    subprocess output), OR when a timeout was handed off (see below) --
+    the process is still running, ownership just moved elsewhere. `abort`
+    is a threading.Event polled alongside the timeout; either firing kills
+    the whole process group, never just the immediate child.
 
     finding 7: completion is keyed on the PROCESS exiting (`proc.poll()`),
     never on stdout EOF -- a backgrounded child (`sleep 100 &`) keeps the
@@ -114,7 +170,18 @@ def run_streamed(
     only a short bounded drain (`_DRAIN_AFTER_EXIT_S`) collects whatever
     was already flushed to the pipe before returning -- the process group
     is never killed just because it happened to leave a background job
-    running."""
+    running.
+
+    H8 scope A (dsh's agent-loop README, quoted in H8-brief.md): "a
+    foreground command that hits its timeout is moved to the background
+    rather than killed" -- when `on_timeout_handoff` is given AND a real
+    TIMEOUT (never an abort) is what ends the wait, it is called with the
+    still-live `(proc, q, collector)` instead of killing anything, and this
+    function returns immediately WITHOUT touching any of the three again
+    (a clean single-writer handoff: the caller, agent.jobs.JobRegistry,
+    takes over draining `q` into `collector` and owns `proc` from that
+    point on). `timed_out` is still True in the returned tuple so a caller
+    that passed no callback keeps seeing today's exact behaviour."""
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -187,6 +254,13 @@ def run_streamed(
             progress_cb("".join(pending))
         except Exception:
             pass
+
+    if timed_out and not aborted and on_timeout_handoff is not None:
+        try:
+            on_timeout_handoff(proc, q, collector)
+        except Exception:
+            pass
+        return collector.result(), None, timed_out, aborted
 
     if timed_out or aborted:
         _kill_process_group(proc)

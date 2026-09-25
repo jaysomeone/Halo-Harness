@@ -1,6 +1,8 @@
-"""tests.test_prune -- agent/prune.py: deterministic tool-result pruning
-(head/tail on any oversized result, a 2,000-char stub outside the 40k
-protection window), prefix stability across turns, and image offload."""
+"""tests.test_prune -- agent/prune.py: deterministic tool-result pruning (a
+2,000-char stub outside the 40k protection window; a result INSIDE it is
+never touched -- H5b finding 1), prefix stability across turns via
+`force_stub_ids`/`compute_stub_candidates` (H5b finding 2), and image
+offload."""
 import sys
 from pathlib import Path
 
@@ -8,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from rolo_claude.agent.prune import (
-    OLD_TOOL_RESULT_CLEARED, context_breakdown, estimate_text_tokens, prune_messages,
+    OLD_TOOL_RESULT_CLEARED, compute_stub_candidates, context_breakdown, estimate_text_tokens, prune_messages,
 )
 
 test, TESTS = new_registry()
@@ -34,15 +36,23 @@ def test_small_tool_result_untouched(ctx: Ctx):
 
 
 @test
-def test_oversized_tool_result_head_tail_truncated(ctx: Ctx):
-    big = "A" * 5000 + "MIDDLE" + "B" * 5000
+def test_h5b_f01_oversized_in_window_result_reaches_the_model_in_full(ctx: Ctx):
+    """H5b finding 1 (critical): a tool_result INSIDE the 40k-token
+    protection window is never pruned here, no matter how large -- its own
+    tool already capped it via tools/truncate.py's spill_and_truncate at
+    the moment it was logged, which is the ONE place its size is this
+    harness's business to bound. The old "any result over 8,192 chars gets
+    head/tail-truncated to ~5,120 chars, regardless of position" rule
+    silently cut a fresh 28,690-char Read down on the very next request,
+    with no spill pointer, while the TUI kept showing the untouched log
+    copy -- this is the regression test for exactly that bug, sized to the
+    review's own 44 KB repro."""
+    big = "A" * 22_000 + "MIDDLE" + "B" * 22_000  # ~44,006 chars, matches the review's own repro size
     msgs = [_plain_user("q"), _assistant_tool_use("t1"), _user_tool_result("t1", big)]
     out = prune_messages(msgs)
-    pruned_text = out[2]["content"][0]["content"]
-    ctx.check("truncated result is shorter than the original", len(pruned_text) < len(big))
-    ctx.check("starts with the original head", pruned_text.startswith("A" * 4096))
-    ctx.check("ends with the original tail", pruned_text.endswith("B" * 1024))
-    ctx.check("MIDDLE (the cut region) is gone", "MIDDLE" not in pruned_text)
+    result_text = out[2]["content"][0]["content"]
+    ctx.check("a 44KB in-window tool_result reaches the wire byte-for-byte", result_text == big)
+    ctx.check("MIDDLE (would have been the cut region under the old rule) is still present", "MIDDLE" in result_text)
 
 
 @test
@@ -167,15 +177,104 @@ def test_estimate_text_tokens_chars_per_4(ctx: Ctx):
 
 
 @test
-def test_context_breakdown_buckets(ctx: Ctx):
+def test_context_breakdown_buckets_with_nothing_pruned(ctx: Ctx):
+    """H5b finding 1: a single in-window tool_result, however large, is
+    never pruned any more -- the `pruned` bucket for THIS shape is
+    correctly 0, not a stale non-zero number from the old blanket rule."""
     msgs = [_plain_user("q"), _assistant_tool_use("t1"), _user_tool_result("t1", "A" * 20000)]
     pruned = prune_messages(msgs)
     bd = context_breakdown("SYSTEM PROMPT TEXT", msgs, [{"name": "Read"}], pruned)
     ctx.check("system bucket present", bd["system"] > 0)
     ctx.check("tools bucket present", bd["tools"] > 0)
-    ctx.check("messages bucket reflects the PRUNED size", bd["messages"] > 0)
-    ctx.check("pruned bucket is positive (rule 1 removed real content)", bd["pruned"] > 0)
+    ctx.check("messages bucket reflects the (unpruned) size", bd["messages"] > 0)
+    ctx.check("pruned bucket is 0 -- nothing outside the window to prune", bd["pruned"] == 0)
     ctx.check("total = system + tools + messages", bd["total"] == bd["system"] + bd["tools"] + bd["messages"])
+
+
+@test
+def test_context_breakdown_buckets_with_real_pruning(ctx: Ctx):
+    """Same buckets, but with enough content that rule 2 (the protection
+    window) genuinely stubs an old result -- `pruned` must reflect that."""
+    old_result = "old but important content " * 5
+    msgs = [_plain_user("q0"), _assistant_tool_use("t0"), _user_tool_result("t0", old_result)]
+    filler = "F" * 45000
+    for i in range(1, 6):
+        tid = f"t{i}"
+        msgs += [_plain_user(f"q{i}"), _assistant_tool_use(tid), _user_tool_result(tid, filler)]
+    pruned = prune_messages(msgs)
+    bd = context_breakdown("SYSTEM PROMPT TEXT", msgs, [{"name": "Read"}], pruned)
+    ctx.check("pruned bucket is positive (rule 2 stubbed the old result)", bd["pruned"] > 0)
+    ctx.check("total = system + tools + messages", bd["total"] == bd["system"] + bd["tools"] + bd["messages"])
+
+
+# ---- H5b finding 2: compute_stub_candidates / force_stub_ids --------------
+
+def _turn_with_filler(tid: str, i: int, filler: str) -> list:
+    return [_plain_user(f"q{i}"), _assistant_tool_use(tid), _user_tool_result(tid, filler)]
+
+
+@test
+def test_compute_stub_candidates_matches_what_prune_messages_would_pick(ctx: Ctx):
+    old_result = "old but important content " * 5
+    msgs = [_plain_user("q0"), _assistant_tool_use("t0"), _user_tool_result("t0", old_result)]
+    filler = "F" * 45000
+    for i in range(1, 6):
+        msgs += _turn_with_filler(f"t{i}", i, filler)
+    candidates = compute_stub_candidates(msgs)
+    ctx.check("t0 (well outside the window) is a candidate", "t0" in candidates)
+    ctx.check("t5 (the newest, inside the window) is never a candidate", "t5" not in candidates)
+    ctx.check("candidate token estimate is positive", candidates["t0"] > 0)
+
+
+@test
+def test_force_stub_ids_stubs_exactly_the_given_set_no_token_math(ctx: Ctx):
+    """`force_stub_ids` stubs precisely what it's given, even a tiny result
+    well inside the protection window that raw token math would never pick
+    on its own -- proving the caller's persisted decision, not a fresh
+    recomputation, is what actually governs the output."""
+    msgs = [_plain_user("q"), _assistant_tool_use("t1"), _user_tool_result("t1", "tiny result")]
+    out = prune_messages(msgs, force_stub_ids=frozenset({"t1"}))
+    ctx.check("the forced id is stubbed despite being tiny and recent",
+              OLD_TOOL_RESULT_CLEARED in out[2]["content"][0]["content"])
+
+
+@test
+def test_force_stub_ids_empty_set_prunes_nothing(ctx: Ctx):
+    old_result = "old content " * 5
+    msgs = [_plain_user("q0"), _assistant_tool_use("t0"), _user_tool_result("t0", old_result)]
+    filler = "F" * 45000
+    for i in range(1, 6):
+        msgs += _turn_with_filler(f"t{i}", i, filler)
+    out = prune_messages(msgs, force_stub_ids=frozenset())
+    ctx.check("nothing stubbed when the caller's own committed set is empty",
+              OLD_TOOL_RESULT_CLEARED not in out[0]["content"][0].get("content", "")
+              and old_result == out[2]["content"][0]["content"])
+
+
+@test
+def test_h5b_f02_stable_force_stub_ids_gives_byte_identical_prefix_across_steps(ctx: Ctx):
+    """H5b finding 2: this is the regression test for "the stub boundary
+    slides forward one result per step" -- with a STABLE, caller-committed
+    `force_stub_ids` (the whole point of `_pruned_messages_for_wire` on
+    Session), appending ONE more turn must reproduce the SAME bytes for
+    every earlier message; only the newly-appended turn differs."""
+    old_result = "old but important content " * 5
+    base = [_plain_user("q0"), _assistant_tool_use("t0"), _user_tool_result("t0", old_result)]
+    filler = "F" * 45000
+    for i in range(1, 6):
+        base += _turn_with_filler(f"t{i}", i, filler)
+
+    committed = frozenset(compute_stub_candidates(base))
+    ctx.check("something was committed", bool(committed))
+    out_a = prune_messages(base, force_stub_ids=committed)
+
+    extended = base + _turn_with_filler("t6", 6, filler)
+    out_b = prune_messages(extended, force_stub_ids=committed)  # SAME committed set -- not recomputed
+
+    shared = min(len(out_a), len(out_b))
+    ctx.check("every shared message is byte-identical (stable prefix)",
+              all(out_a[i] == out_b[i] for i in range(shared)))
+    ctx.check("only the newly-appended turn is new", len(out_b) == len(out_a) + 3)
 
 
 if __name__ == "__main__":

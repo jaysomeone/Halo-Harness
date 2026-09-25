@@ -73,6 +73,22 @@ class ToolContext:
     # ListMcpResourcesTool/ReadMcpResourceTool only (McpTool itself carries
     # its own manager reference directly, set at construction).
     mcp_manager: Optional[object] = None
+    # H8 scope A: the session's agent.jobs.JobRegistry (background Bash
+    # jobs) -- untyped for the same reverse-import reason as `registry`/
+    # `catalog`/`agent_runtime` (agent/jobs.py doesn't import this module,
+    # but agent/loop.py, which DOES, is what actually constructs one and
+    # threads it through). None means "no background-job support in this
+    # session" (every pre-H8 test, a bare ToolContext) -- Bash then simply
+    # cannot background a command (falls back to running in the
+    # foreground) and BashOutput/TaskStop report a plain error instead of
+    # crashing.
+    job_registry: Optional[object] = None
+    # H8 scope B: whether the configured model accepts image content
+    # blocks (model.ModelProfile.vision, threaded through by agent/loop.py)
+    # -- Read consults this to decide whether a png/jpg/gif/webp file
+    # becomes a real `image` block or a text note; False (the default, and
+    # every pre-H8 test's bare ToolContext) is the safe/old behaviour.
+    vision: bool = False
     # H4 scope C: the Skill tool's `allowed-tools` -> session rule (D-CFG:
     # "until the next user message") -- a callable(rule_text) -> bool, set
     # by agent/loop.py to `PermissionEngine.add_session_allow_rule(...,

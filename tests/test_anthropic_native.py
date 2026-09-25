@@ -486,6 +486,64 @@ def test_apply_cache_control_never_mutates_input(ctx: Ctx):
     ctx.check("input messages list untouched", messages == original)
 
 
+# ---- H8 must-do: the count_tokens relay --------------------------------
+
+@test
+def test_h8_call_databricks_count_tokens_returns_real_input_tokens(ctx: Ctx):
+    """The count_tokens relay (providers/http.py) built in an earlier
+    milestone but never called by anything -- proves the wire mechanics
+    work: a request with no stream/max_tokens fields gets back Anthropic's
+    real `{"input_tokens": N}` shape."""
+    from rolo_claude.providers.http import call_databricks_count_tokens
+    mock = MockAnthropic().start()
+    try:
+        body = build_anthropic_request_body(
+            system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=None, route=_route("claude-count-tokens-42", "databricks"), profile=_profile(),
+        )
+        body.pop("stream", None)
+        body.pop("max_tokens", None)
+        result = call_databricks_count_tokens(mock.base_url, "tok", body, {}, Path(tempfile.mkdtemp()))
+        ctx.check(f"200 ok, got {result.status}", result.status == 200)
+        parsed = __import__("json").loads(result.resp.read())
+        ctx.check(f"real input_tokens count, got {parsed}", parsed.get("input_tokens") == 42)
+    finally:
+        mock.stop()
+
+
+@test
+def test_h8_compaction_gate_uses_real_count_tokens_when_no_usage_yet(ctx: Ctx):
+    """The must-do's own acceptance: `_maybe_auto_compact` uses the route's
+    real count-tokens endpoint (never the crude len/4 estimator) whenever
+    `_last_prompt_tokens` is still unknown (before the session's first real
+    reply, or right after a compaction) on a route that has one."""
+    import os
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from tests.helpers.fake_home import build_fake_home
+
+    fh = build_fake_home()
+    mock = MockAnthropic().start()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    try:
+        session_ctx = SessionContext(cwd=fh["proj"], model_label="dbx:databricks-claude-count-tokens-42")
+        model_ref = parse_model_ref("dbx:databricks-claude-count-tokens-42")
+        session = Session(
+            cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(context_tokens=200_000, max_output_tokens=8192),
+            creds=ProviderCreds(base_url=mock.base_url, api_key="tok"),
+            state_dir=Path(tempfile.mkdtemp(prefix="count-tokens-gate-")), model_label=model_ref.raw,
+            session_context=session_ctx,
+        )
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        ctx.check("no usage recorded yet", session._last_prompt_tokens is None)
+        counted = session._count_tokens_via_api()
+        ctx.check(f"the real count_tokens relay was used, got {counted}", counted == 42)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

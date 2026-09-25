@@ -97,6 +97,12 @@ _REAL_FLAGS = [
     (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None)),
     (["--fork-session"], dict(dest="fork_session", action="store_true")),
     (["-n", "--name"], dict(dest="name", default=None)),
+    # H8 scope B: real now for a local path (attached as a log snapshot
+    # before the first turn; image when the model has vision, text
+    # otherwise). Claude Code's own file_id:relative_path cloud-resource
+    # form gets a clear "not available here" notice instead -- see
+    # headless.attach_cli_files.
+    (["--file"], dict(dest="file", nargs="+", default=None, metavar="SPEC")),
 ]
 
 _NOT_YET_FLAGS = [
@@ -114,7 +120,6 @@ _NOT_YET_FLAGS = [
     (["--exclude-dynamic-system-prompt-sections"], dict(dest="exclude_dynamic_system_prompt_sections", action="store_true"),
         "--exclude-dynamic-system-prompt-sections", "H5"),
     (["--fallback-model"], dict(dest="fallback_model", default=None, metavar="MODEL"), "--fallback-model", "H6"),
-    (["--file"], dict(dest="file", nargs="+", default=None, metavar="SPEC"), "--file", "H8"),
     (["--forward-subagent-text"], dict(dest="forward_subagent_text", action="store_true"), "--forward-subagent-text", "H6"),
     (["--from-pr"], dict(dest="from_pr", nargs="?", const="", default=None), "--from-pr", "H8"),
     (["--ide"], dict(dest="ide", action="store_true"), "--ide", "H8"),
@@ -151,7 +156,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rolo-claude", add_help=True,
         description="rolo-claude - starts an interactive session by default, use -p/--print for non-interactive output",
-        epilog="Commands: proxy, mcp, models, config, doctor (run `rolo-claude <command> --help`)",
+        epilog="Commands: proxy, mcp, models, config, doctor, stats, export (run `rolo-claude <command> --help`)",
     )
     try:
         parser._positionals.title = "Arguments"
@@ -235,6 +240,12 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "doctor":
         from rolo_claude.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
+    if argv and argv[0] == "stats":
+        from rolo_claude.stats_cli import cmd_stats
+        return cmd_stats(argv[1:])
+    if argv and argv[0] == "export":
+        from rolo_claude.export_cli import cmd_export
+        return cmd_export(argv[1:])
 
     parser = _build_parser()
     try:
@@ -355,7 +366,7 @@ def main(argv: Optional[list] = None) -> int:
             continue_=bool(getattr(args, "continue_", False)), resume=getattr(args, "resume", None),
             fork_session_flag=bool(getattr(args, "fork_session", False)),
             agent=getattr(args, "agent", None), agents_flag=getattr(args, "agents", None),
-            name=getattr(args, "name", None),
+            name=getattr(args, "name", None), file_specs=getattr(args, "file", None),
         )
     except InvalidModelError as e:
         # a bad --model/alias must be a clean config error (exit 2), not an

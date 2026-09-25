@@ -160,6 +160,13 @@ class Controller:
                 self.session._fire_session_end("quit")
             except Exception:
                 pass
+            # H8 scope A: "jobs killed on quit" -- a background Bash job
+            # (or one a timed-out foreground command was moved to) must
+            # never outlive the session that started it.
+            try:
+                self.session.job_registry.kill_all()
+            except Exception:
+                pass
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         return self.exit_code
@@ -350,6 +357,12 @@ class Controller:
             for path_str, content in read_at_mention_snapshots(result.text, cwd=self.cwd):
                 self.session.log.append_snapshot(
                     [{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
+            # H8 scope E: `@server:resource` mentions in the expanded body.
+            from rolo_claude.mcp.mentions import read_server_resource_snapshots
+            for label, content in read_server_resource_snapshots(
+                    result.text, mcp_manager=getattr(self.session, "mcp_manager", None)):
+                self.session.log.append_snapshot(
+                    [{"type": "text", "text": f"@{label}\n{content}"}], kind="at_mention")
             self.submit(result.text)
             return ""
         if cmd.run is None:
@@ -535,11 +548,32 @@ class Controller:
         from rolo_claude.tools.read import ReadTool
         from rolo_claude.tui.completion import parse_at_mentions
 
+        # H8 scope E (deferred by H3): `@server:resource` mentions -- BEFORE
+        # the `@path`-only early return below, so a prompt with ONLY a
+        # resource mention (no file mention at all) still gets it resolved.
+        from rolo_claude.mcp.mentions import read_server_resource_snapshots
+        for res_label, res_content in read_server_resource_snapshots(
+                text, mcp_manager=getattr(self.session, "mcp_manager", None)):
+            try:
+                self.session.log.append_snapshot(
+                    [{"type": "text", "text": f"@{res_label}\n{res_content}"}], kind="at_mention")
+            except Exception:
+                pass
+
         mentions = parse_at_mentions(text)
         if not mentions:
             return
         tool = ReadTool()
-        ctx = ToolContext(cwd=self.cwd)
+        # H8 scope B: `vision` threaded through so an `@path.png` mention
+        # attaches a REAL image block (same gate/size rule as a model-issued
+        # Read call), not just a "no vision" text note. `self.session` may
+        # be a lightweight test double with no `model_profile` at all (e.g.
+        # test_tui.py's `_real_controller`'s `_MinimalSession`) -- two
+        # levels of getattr, never a bare attribute access, so that's a
+        # quiet `vision=False` rather than an AttributeError that would
+        # abort every @mention in the turn.
+        model_profile = getattr(self.session, "model_profile", None)
+        ctx = ToolContext(cwd=self.cwd, vision=getattr(model_profile, "vision", False))
         for raw, start, end in mentions:
             path = Path(raw).expanduser()
             if not path.is_absolute():
@@ -560,10 +594,16 @@ class Controller:
                 result = tool.run(input_data, ctx)
             except Exception:
                 continue
-            content = result.content if isinstance(result.content, str) else str(result.content)
+            if isinstance(result.content, list):
+                # An image block (or list of blocks) from _read_image --
+                # keep it a REAL content block, never stringify it into
+                # unreadable dict-repr text.
+                blocks = [{"type": "text", "text": f"@{label}"}] + list(result.content)
+            else:
+                content = result.content if isinstance(result.content, str) else str(result.content)
+                blocks = [{"type": "text", "text": f"@{label}\n{content}"}]
             try:
-                self.session.log.append_snapshot([{"type": "text", "text": f"@{label}\n{content}"}],
-                                                  kind="at_mention")
+                self.session.log.append_snapshot(blocks, kind="at_mention")
             except Exception:
                 pass
 

@@ -303,3 +303,12 @@ async def _apply_event_inner(app, event) -> None:
             await app.transcript.add_note(f"✗ Compaction failed: {reason} (the conversation is unchanged)",
                                            kind="error")
             app.status_bar.apply_status({"phase": "idle"})
+        elif phase == "skipped":
+            # H5b finding 3: an auto-compaction the loop deliberately chose
+            # NOT to attempt (still over the trigger right after the
+            # previous one already ran) is not a failure -- nothing was
+            # tried and nothing went wrong; a plain note, not the error
+            # styling "failed" gets.
+            reason = data.get("reason") or "not enough new room since the last compaction"
+            await app.transcript.add_note(f"⧗ Compaction skipped: {reason}", kind="compaction")
+            app.status_bar.apply_status({"phase": "idle"})

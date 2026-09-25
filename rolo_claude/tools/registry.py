@@ -22,11 +22,14 @@ from rolo_claude.tools.agent import AgentTool, TaskTool
 from rolo_claude.tools.ask_user_question import AskUserQuestionTool
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
 from rolo_claude.tools.bash import BashTool
+from rolo_claude.tools.bash_output import BashOutputTool
 from rolo_claude.tools.edit import EditTool
 from rolo_claude.tools.glob_tool import GlobTool
 from rolo_claude.tools.grep_tool import GrepTool
+from rolo_claude.tools.notebook_edit import NotebookEditTool
 from rolo_claude.tools.read import ReadTool
 from rolo_claude.tools.skill import SkillTool
+from rolo_claude.tools.task_stop import TaskStopTool
 from rolo_claude.tools.todowrite import TodoWriteTool
 from rolo_claude.tools.tool_search import ToolSearchTool
 from rolo_claude.tools.webfetch import WebFetchTool
@@ -45,9 +48,9 @@ def default_tools() -> list:
     (imported lazily so a POSIX/Kali process never even imports a module
     that assumes `powershell.exe` might exist)."""
     tools = [
-        AgentTool(), AskUserQuestionTool(), BashTool(), EditTool(), EnterPlanModeTool(), ExitPlanModeTool(),
-        GlobTool(), GrepTool(), ReadTool(), SkillTool(), TaskTool(), TodoWriteTool(), ToolSearchTool(),
-        WebFetchTool(), WriteTool(),
+        AgentTool(), AskUserQuestionTool(), BashTool(), BashOutputTool(), EditTool(), EnterPlanModeTool(),
+        ExitPlanModeTool(), GlobTool(), GrepTool(), NotebookEditTool(), ReadTool(), SkillTool(), TaskStopTool(),
+        TaskTool(), TodoWriteTool(), ToolSearchTool(), WebFetchTool(), WriteTool(),
     ]
     if sys.platform == "win32":
         from rolo_claude.tools.powershell import PowerShellTool

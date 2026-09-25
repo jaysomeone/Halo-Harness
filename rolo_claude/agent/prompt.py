@@ -182,8 +182,19 @@ _FAMILY_NOTATION = {
     "deepseek": "Model notes: use native tool/function calling only. Prior reasoning from this "
                 "conversation is preserved and replayed back to you automatically on tool-call "
                 "turns -- you do not need to repeat it.",
+    # H8 scope D: adapted from OpenCode's own kimi.txt (deep review.md
+    # "Wire formats"/item 18) -- lines that measurably improve Kimi's own
+    # tool-calling behaviour, byte-stable per session like every other
+    # family block here (never per-model, never dynamic).
     "kimi": "Model notes: use native tool/function calling only. Tool-call ids in this "
-            "conversation are preserved exactly as issued; never expect them to be renumbered.",
+            "conversation are preserved exactly as issued; never expect them to be renumbered. "
+            "When calling tools, do not add explanations -- the tool calls themselves are "
+            "self-explanatory; follow each tool's own description and parameters exactly. When "
+            "you anticipate making multiple non-interfering tool calls, making them in parallel "
+            "is highly recommended. Always use a tool to make a change rather than describing it. "
+            "Make minimal changes to achieve the goal -- this matters. When a request could be read "
+            "as either a question to answer or a task to complete, treat it as a task. Do not run "
+            "`git commit` unless explicitly asked to.",
     "glm": "Model notes: use native tool/function calling only (never emit `<tool_call>` markup "
            "as text); make one tool call at a time.",
     "qwen": "Model notes: use native tool/function calling only (never emit XML-style tool-call "

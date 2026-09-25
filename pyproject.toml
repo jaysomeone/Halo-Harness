@@ -19,6 +19,12 @@ dependencies = [
 dev = [
     "textual-dev",
 ]
+# H8 scope B: rolo_claude/tools/imageutil.py works with NO imaging library
+# at all (an over-limit image is simply omitted with a note) -- installing
+# Pillow lets it actually resize/downscale one instead. Never required.
+vision = [
+    "Pillow>=10",
+]
 
 [project.scripts]
 rolo-claude = "rolo_claude.cli:main"
@@ -31,8 +37,13 @@ include = ["rolo_claude*"]
 
 [tool.setuptools.package-data]
 # U2: tui/styles.tcss must ship with a non-editable install too (App's
-# CSS_PATH resolves relative to tui/app.py at runtime).
-rolo_claude = ["tui/*.tcss"]
+# CSS_PATH resolves relative to tui/app.py at runtime). H8 scope C: the
+# per-model data table and the vendored catalog fallbacks are read from
+# disk at runtime (providers/profiles.py, model.py) -- without listing
+# them here a non-editable `pip install .`/wheel build would silently
+# drop every *.json under providers/, same class of bug package-data
+# already exists to prevent for styles.tcss.
+rolo_claude = ["tui/*.tcss", "providers/*.json", "providers/catalog/*.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "rolo_claude.__version__" }

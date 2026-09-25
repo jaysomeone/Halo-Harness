@@ -214,18 +214,15 @@ def env_file_path(session_id: str) -> Path:
     return bridge_home() / "session-env" / f"{session_id}.sh"
 
 
-def read_env_file_exports(path) -> dict:
-    """Parse simple `export NAME=value` lines (one per line; an optional
-    matching pair of quotes around `value` is stripped -- no general shell
-    parsing) out of a `CLAUDE_ENV_FILE` a hook wrote to. `{}` for a
-    missing/empty/unparseable file, never raises -- the caller (agent/
-    loop.py, after a SessionStart/Setup/CwdChanged/FileChanged `run()`)
-    folds the result into the session's own tool env."""
+def _read_env_file_exports_literal_fallback(path: Path) -> dict:
+    """Last-resort literal `export NAME=value` line parse (no `$VAR`
+    expansion at all) -- used ONLY when no POSIX shell is reachable at all
+    (`git_bash()`/`/bin/bash` both missing), which should not happen on any
+    of this harness's real target platforms; kept so a missing shell
+    degrades to the old (imperfect but non-crashing) behaviour instead of
+    silently discarding every export."""
     out: dict = {}
-    path = Path(path)
     try:
-        if not path.exists():
-            return out
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return out
@@ -243,6 +240,61 @@ def read_env_file_exports(path) -> dict:
         if name:
             out[name] = value
     return out
+
+
+def read_env_file_exports(path, *, base_env: Optional[dict] = None) -> dict:
+    """H5b finding 10: a `CLAUDE_ENV_FILE` a hook wrote to is a REAL shell
+    script (Claude Code's own SessionStart docs example is `export
+    PATH="$PATH:/some/dir"`), not a literal NAME=value list -- the OLD
+    parse here took `value` verbatim, so that exact documented example
+    produced the literal four-character string `$PATH:/some/dir` instead
+    of the real PATH with `/some/dir` appended, breaking every later Bash/
+    PowerShell/sub-agent/`!`-pre-exec call that needed anything from the
+    ORIGINAL PATH (verified on WSL Ubuntu: `grep: command not found`,
+    `ls: command not found`). Sources the file for real, in a POSIX shell
+    (`git_bash()` -- Git Bash on Windows, `/bin/bash` elsewhere), and
+    returns only the NAME=value pairs that are NEW or CHANGED relative to
+    `base_env` (default: this process's own `os.environ`) -- the hook's
+    actual exports/appends, never a full duplicate copy of the shell's
+    whole inherited environment. `{}` for a missing/empty file or when
+    sourcing fails for any reason; never raises -- the caller (agent/
+    loop.py, after a SessionStart/Setup/CwdChanged/FileChanged `run()`)
+    folds the result into the session's own tool env."""
+    path = Path(path)
+    try:
+        if not path.exists():
+            return {}
+    except OSError:
+        return {}
+    from rolo_claude.config.paths import git_bash, to_posix
+
+    shell_path = git_bash()
+    if shell_path is None:
+        return _read_env_file_exports_literal_fallback(path)
+
+    base_env = dict(base_env) if base_env is not None else dict(os.environ)
+    posix_path = to_posix(str(path))
+    # `env -0` (NUL-separated, GNU coreutils -- present in Git Bash/MSYS and
+    # every POSIX target) avoids the ambiguity a NEWLINE-separated `env`
+    # would have if some exported value legitimately contains one.
+    script = f'[ -f "{posix_path}" ] && . "{posix_path}"\nenv -0\n'
+    try:
+        result = subprocess.run(
+            [str(shell_path), "-lc", script], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=base_env, stdin=subprocess.DEVNULL, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    after: dict = {}
+    for entry in (result.stdout or "").split("\x00"):
+        if "=" not in entry:
+            continue
+        name, _, value = entry.partition("=")
+        if name:
+            after[name] = value
+
+    return {name: value for name, value in after.items() if base_env.get(name) != value}
 
 
 # =============================================================================

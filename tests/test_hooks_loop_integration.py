@@ -266,6 +266,69 @@ def test_posttooluse_hook_additional_context_is_appended_to_the_result(ctx: Ctx)
         mock.stop()
 
 
+@test
+def test_h5b_f10_session_start_env_file_var_expansion_through_a_real_session(ctx: Ctx):
+    """H5b finding 10 (major): `_fire_session_start` used to fold
+    `read_env_file_exports` in as a LITERAL NAME=value parse -- Claude
+    Code's own SessionStart docs example, `export PATH="$PATH:/some/dir"`,
+    became the literal four-character string "$PATH:/some/dir" in
+    `session.tool_env` (what Bash's OWN per-call sourcing does NOT depend
+    on -- finding 6 already fixed that separately -- but what PowerShell,
+    sub-agents and `!` pre-exec all start from). Goes through a REAL
+    `agent.loop.Session` end to end (not `read_env_file_exports`/the Bash
+    tool in isolation): a SessionStart hook writes exactly that documented
+    example to `CLAUDE_ENV_FILE`, and `session.tool_env['PATH']` must come
+    out with the marker genuinely APPENDED to the real inherited PATH, not
+    as a bare literal string standing alone."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.log import SessionLog
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.hooks import HookDef, HookRunner
+    from rolo_claude.model import ModelProfile, parse_model_ref
+    from rolo_claude.permissions import PermissionEngine
+    from rolo_claude.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        # `_hook_runner`'s own helper hardcodes session_id="test-session",
+        # which never matches a REAL Session's own randomly-generated
+        # `log.session_id` -- `_fire_session_start` reads
+        # `env_file_path(self.log.session_id)`, so a mismatched HookRunner
+        # session_id means it reads back an entirely different (empty)
+        # file than the one the hook actually wrote to. Build the log with
+        # an EXPLICIT, known session_id and a HookRunner that agrees with it.
+        session_id = "h5b-f10-envfile-session"
+        session_log = SessionLog(fh["proj"], session_id=session_id)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_DIR)
+        hook_runner = HookRunner(
+            {"SessionStart": [HookDef(type="command", args=_HOOK_SCRIPT_ARGV + ["env_file_writer_var_expansion"])]},
+            cwd=fh["proj"], session_id=session_id, transcript_path=str(session_log.path), effective_env=env,
+        )
+        session_ctx = SessionContext(cwd=fh["proj"], model_label="or:mock/hook-envfile-expand")
+        model_ref = parse_model_ref("or:mock/hook-envfile-expand")
+        session = Session(
+            cwd=fh["proj"], model_ref=model_ref, model_profile=ModelProfile(),
+            creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+            state_dir=Path(tempfile.mkdtemp(prefix="hooks-loop-envfile-")), model_label="or:mock/hook-envfile-expand",
+            session_context=session_ctx, session_log=session_log, openrouter_base_url=mock.base_url, max_turns=10,
+            permission_engine=PermissionEngine(mode="auto", cwd=fh["proj"]), hook_runner=hook_runner,
+        )
+        path_value = session.tool_env.get("PATH", "")
+        ctx.check(f"PATH was genuinely expanded (still a real, multi-entry PATH, not just the "
+                  f"literal marker), got {path_value!r}",
+                  "/rolo-h5b-f10-marker" in path_value and len(path_value) > len("/rolo-h5b-f10-marker") + 20)
+        ctx.check("the marker was truly APPENDED, at the end (never overwrote the real PATH)",
+                  path_value.rstrip().endswith("/rolo-h5b-f10-marker"))
+        ctx.check("no literal, un-expanded '$PATH' token leaked through",
+                  "$PATH" not in path_value)
+    finally:
+        mock.stop()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

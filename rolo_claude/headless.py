@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,6 +198,80 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
     from rolo_claude.commands.registry import read_at_mention_snapshots
     for path_str, content in read_at_mention_snapshots(text, cwd=cwd):
         session.log.append_snapshot([{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
+    # H8 scope E (deferred by H3): `@server:resource` mentions, the MCP
+    # sibling of the `@path` handling just above -- same "separate context
+    # block, never inlined" rule.
+    from rolo_claude.mcp.mentions import read_server_resource_snapshots
+    for label, content in read_server_resource_snapshots(text, mcp_manager=session.mcp_manager):
+        session.log.append_snapshot([{"type": "text", "text": f"@{label}\n{content}"}], kind="at_mention")
+
+
+def _resolve_local_file_spec(raw: str, *, cwd: Path) -> "Optional[Path]":
+    """A `--file` SPEC that is (or resolves to) a real local file, or
+    `None`. Tried BEFORE the `file_id:relative_path` cloud-resource form
+    (see `attach_cli_files`) specifically so a Windows absolute path like
+    `C:\\Users\\rolo\\shot.png` -- which also contains a `:` -- is never
+    misread as that form: an actual local file always wins."""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def attach_cli_files(session, file_specs: Optional[list], *, cwd: Path) -> None:
+    """`--file SPEC [SPEC ...]` (H8 scope B). Claude Code's own `--file`
+    downloads a claude.ai-hosted "file resource" at startup (SPEC format
+    `file_id:relative_path`, e.g. `file_abc:doc.txt`) -- a cloud-account
+    feature this standalone, bring-your-own-model harness has no backing
+    store for, so that form gets one clear stderr notice per spec rather
+    than either faking success or crashing. The practically useful case --
+    a local path -- IS fully supported and is what `@path` image mentions
+    in the TUI use too: read via the SAME Read tool a model-issued Read
+    call would use (an image becomes a real `image` content block when the
+    session's model advertises vision, same `tools/imageutil.py` gate
+    every other image source in this harness shares; anything else becomes
+    a text snapshot), appended as a log snapshot BEFORE the session's
+    first turn -- so the file is context the model already has, not
+    something it has to go looking for. Shared by both entry points
+    (`run_print_mode` below and `tui/bootstrap.py`'s `build_controller`),
+    called exactly once per process."""
+    if not file_specs:
+        return
+    from rolo_claude.tools.base import ToolContext
+    from rolo_claude.tools.read import ReadTool
+    tool = ReadTool()
+    model_profile = getattr(session, "model_profile", None)
+    ctx = ToolContext(cwd=cwd, vision=getattr(model_profile, "vision", False))
+    for raw in file_specs:
+        resolved = _resolve_local_file_spec(raw, cwd=cwd)
+        if resolved is None and ":" in raw:
+            file_id, _, rel_path = raw.partition(":")
+            print(f"rolo-claude: --file: {raw!r} looks like Claude Code's "
+                  f"file_id:relative_path cloud-resource form ({file_id!r} -> {rel_path!r}) -- "
+                  f"rolo-claude has no claude.ai-hosted file store to download it from, skipped. "
+                  f"A local path (relative to --cwd, or absolute) attaches directly.", file=sys.stderr)
+            continue
+        if resolved is None:
+            print(f"rolo-claude: --file: {raw}: not a file, skipped", file=sys.stderr)
+            continue
+        try:
+            result = tool.run({"file_path": str(resolved)}, ctx)
+        except Exception as e:
+            print(f"rolo-claude: --file: {raw}: {e}", file=sys.stderr)
+            continue
+        if isinstance(result.content, list):
+            blocks = [{"type": "text", "text": f"@{raw}"}] + list(result.content)
+        else:
+            content = result.content if isinstance(result.content, str) else str(result.content)
+            blocks = [{"type": "text", "text": f"@{raw}\n{content}"}]
+        try:
+            session.log.append_snapshot(blocks, kind="at_mention")
+        except Exception:
+            pass
 
 
 def _append_agent_mention_snapshot(session, text: Optional[str], agents: Optional[dict]) -> None:
@@ -225,6 +300,54 @@ def _events_for_direct_output(output: str, *, turn_no: int = 1):
     yield events.text_delta(output, turn=turn_no)
     yield events.message_end(turn=turn_no, stop_reason="end_turn", usage={})
     yield events.turn_done(turn=turn_no, reason="end_turn")
+
+
+def _events_for_background_notice(text: str, *, turn_no: int = 1):
+    """Same shape as `_events_for_direct_output` (no `user_message`, which
+    neither sink actually renders -- see its own docstring) minus the
+    misleading "(slash command)" label, for a background-job completion
+    notice printed by `_drain_background_jobs_for_print_mode` below."""
+    yield events.notification(text)
+    yield events.message_start(turn=turn_no)
+    yield events.text_delta(text, turn=turn_no)
+    yield events.message_end(turn=turn_no, stop_reason="end_turn", usage={})
+    yield events.turn_done(turn=turn_no, reason="end_turn")
+
+
+_BACKGROUND_JOB_WAIT_S = 120.0  # matches Bash's own default foreground timeout
+
+
+def _drain_background_jobs_for_print_mode(session, sink, exit_code: int) -> int:
+    """H8 scope A must-do (acceptance: "line count first, completion notice
+    later"): dsh's "background jobs ... report completion as a user-role
+    notice in the next step" has no NEXT step in a single `-p` text-input
+    call -- the process is about to exit right after this turn. Rather than
+    spend a whole extra model call just to announce it (token thrift -- see
+    MEMORY.md), wait (bounded) for any Bash job still running when the
+    visible turn ended, and print each completion notice directly as its
+    own small "turn" through the SAME sink the real one used, so it shows
+    up as real additional output rather than being silently dropped.
+    Genuinely long-running jobs outlive the bound and are simply killed on
+    the way out (`finally: session.job_registry.kill_all()`) like any
+    other background job the session never got back to -- this never turns
+    `-p` into an unbounded hang."""
+    registry = getattr(session, "job_registry", None)
+    if registry is None or not registry.jobs:
+        return exit_code
+
+    def _drain_once() -> None:
+        nonlocal exit_code
+        with session._job_notices_lock:
+            notices, session._pending_job_notices = session._pending_job_notices, []
+        for text in notices:
+            exit_code = sink.consume(_events_for_background_notice(text))
+
+    deadline = time.monotonic() + _BACKGROUND_JOB_WAIT_S
+    while any(rec.status == "running" for rec in registry.jobs.values()) and time.monotonic() < deadline:
+        time.sleep(0.2)
+        _drain_once()
+    _drain_once()  # a completion landed between the loop's last check and now
+    return exit_code
 
 
 @dataclass
@@ -529,6 +652,12 @@ def build_session(
         hook_runner.prompt_caller = session._call_model_for_hook
 
     command_registry = Registry.discover(cwd, home())
+    if not bare:
+        # H8 scope E (deferred by H3): every connected MCP server's own
+        # prompts become `/mcp__<server>__<prompt>` slash commands, in both
+        # -p and the TUI (bootstrap.py reuses this same builder).
+        from rolo_claude.commands.registry import register_mcp_prompts
+        register_mcp_prompts(command_registry, mcp_manager)
     facade = HeadlessFacade(
         cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
         permission_mode=resolved_mode, tool_registry=frozen_registry, registry=command_registry,
@@ -592,6 +721,7 @@ def run_print_mode(
     agent: Optional[str] = None,
     agents_flag: Optional[str] = None,
     name: Optional[str] = None,
+    file_specs: Optional[list] = None,
 ) -> int:
     """Run one turn (`input_format="text"`) or several (`"stream-json"`,
     one turn per entry of `stdin_lines`) in print mode; returns the
@@ -632,6 +762,7 @@ def run_print_mode(
         build.session, build.tool_registry, build.model_ref, build.model_profile)
     mcp_manager, resolved_mode, session_log = build.mcp_manager, build.resolved_mode, build.session_log
     family = model_family(model_ref.model)
+    attach_cli_files(session, file_specs, cwd=cwd)
 
     if mcp_manager is None and build.mcp_notices:
         print(f"rolo-claude: {build.mcp_notices[0]}", file=sys.stderr)
@@ -784,7 +915,13 @@ def run_print_mode(
         _append_at_mention_snapshots(session, final_prompt, cwd)
         _append_agent_mention_snapshot(session, final_prompt or prompt_text, build.agents)
         try:
-            return sink.consume(session.turn(final_prompt or prompt_text))
+            exit_code = sink.consume(session.turn(final_prompt or prompt_text))
+            # H8 scope A must-do: a single -p text-input call has no later
+            # turn to deliver a background job's completion notice through
+            # (see `_drain_background_jobs_for_print_mode`'s own docstring)
+            # -- print it here, before the process exits, instead of
+            # silently losing it.
+            return _drain_background_jobs_for_print_mode(session, sink, exit_code)
         finally:
             agent_sessions.record_session_turn(
                 cwd, session_log.session_id,
@@ -792,6 +929,13 @@ def run_print_mode(
     finally:
         try:
             session._fire_session_end("quit")
+        except Exception:
+            pass
+        # H8 scope A: "jobs killed on quit" -- never leave a background
+        # Bash job (or a timed-out foreground command moved to one)
+        # running past this process's own exit.
+        try:
+            session.job_registry.kill_all()
         except Exception:
             pass
         if mcp_manager is not None:

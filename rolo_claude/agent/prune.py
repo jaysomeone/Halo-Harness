@@ -5,31 +5,51 @@ the session LOG always keeps the full, unpruned text -- only what actually
 goes out over the wire shrinks (`agent/log.py` is never touched by this
 module).
 
-Two independent rules, both from dsh's own tool-result pruner (reports/
-DeepSeek and OpenRouter ori harnesses.md, "Compaction is the part of dsh
-most worth copying wholesale" paragraph) plus OpenCode's protection-window
-constants (reports/OpenCode harness deep review.md Appendix D):
+ONE rule, from dsh's own tool-result pruner (reports/DeepSeek and OpenRouter
+ori harnesses.md, "Compaction is the part of dsh most worth copying
+wholesale" paragraph) plus OpenCode's protection-window constants (reports/
+OpenCode harness deep review.md Appendix D):
 
-  1. ANY tool_result content longer than PRUNE_CHAR_THRESHOLD (8,192 chars)
-     is truncated to its own head PRUNE_HEAD_CHARS (4,096) / tail
-     PRUNE_TAIL_CHARS (1,024) chars, regardless of position -- a single huge
-     tool result never blows the budget even on the very next turn.
-  2. A tool_result whose distance from the END of the message list (summed,
-     in estimated tokens, over tool_result content strictly newer than it)
-     exceeds PRUNE_PROTECT_TOKENS (40,000, OpenCode's PRUNE_PROTECT) is
-     replaced entirely with a short excerpt (2,000 chars) plus OpenCode's
-     own marker string, "[Old tool result content cleared]" -- overriding
-     rule 1's head/tail result for anything that far back.
+  A tool_result whose distance from the END of the message list (summed, in
+  estimated tokens, over tool_result content strictly newer than it) exceeds
+  PRUNE_PROTECT_TOKENS (40,000, OpenCode's PRUNE_PROTECT) is replaced
+  entirely with a short excerpt (2,000 chars) plus OpenCode's own marker
+  string, "[Old tool result content cleared]". A result INSIDE the window is
+  never touched here at all: it already went through its own tool's
+  `result_cap` (tools/truncate.py's `spill_and_truncate`, or the MCP-specific
+  equivalent) at the moment it was logged, which is the ONE place its size is
+  this harness's business to bound.
 
-Determinism/cache-prefix stability: both rules are pure functions of the
-CURRENT message list's content (size + position), never of wall-clock time,
-a call counter, or RNG, so the same input always prunes the same way; once a
-tool result crosses PRUNE_PROTECT_TOKENS and gets stubbed, it stays stubbed
-identically on every later call (nothing about an already-stubbed result can
-un-stub or re-stub it differently) -- so appending new turns only ever
-invalidates the provider's cache prefix at the single boundary result that
-just crossed the line on THIS call, never retroactively across the whole
-prefix.
+H5b finding 1 (critical) removed a SECOND, blanket rule this module used to
+also apply -- "any tool_result over 8,192 chars gets head/tail-truncated to
+4,096+1,024 chars, regardless of position" -- because it fired on results
+INSIDE the protection window too: a 28,690-char Read (well under any tool's
+own cap, and the model's very last action) was silently cut to ~5,120 chars
+on the very next request, with no spill pointer, while the TUI kept showing
+the model's own untouched log copy -- "nothing looks wrong" is exactly how
+it shipped. A fresh Read/Bash/Grep/WebFetch/MCP result must always reach the
+model in full (bounded only by its own tool's cap) on the request immediately
+after the tool ran.
+
+H5b finding 2 (major) is why stub DECISIONS are no longer recomputed from
+scratch, from raw token math, on every single request: the exact boundary
+token count grows by a little on every step, so a NEW message crossing
+40,000 (and therefore changing shape) on almost every step invalidated the
+provider's cache prefix from that point on, at a real cost (finding 2:
+~42,000 uncached tokens resent per step in the verified repro). Callers that
+own persisted state across requests (`agent.loop.Session`) commit stub
+decisions in BATCHES of at least `PRUNE_REBALANCE_CHUNK_TOKENS` (20,000, via
+`compute_stub_candidates` below) and pass the resulting STABLE id set back in
+as `force_stub_ids` -- unchanged for potentially many requests in a row, so
+the wire prefix up to the oldest still-growing content stays byte-identical
+across them. A caller with no such state (a one-off `/context` preview, a
+unit test) may omit `force_stub_ids` and get the un-batched, freshly-computed
+set instead -- correct for a single call, just not prefix-stable across many.
+
+Determinism/cache-prefix stability: for a given `messages` and `force_stub_ids`,
+this is a pure function of both (never wall-clock time, a call counter, or
+RNG) -- the caller's OWN persisted id set is what makes repeated calls with
+growing `messages` prefix-stable, not anything hidden in this module.
 
 Images older than IMAGE_OFFLOAD_TURNS user turns are replaced with a text
 placeholder ("images offloaded after N turns" -- dsh's own phrase, exact
@@ -54,6 +74,13 @@ PRUNE_PROTECT_TOKENS = 40_000
 PRUNE_STUB_CHARS = 2000
 OLD_TOOL_RESULT_CLEARED = "[Old tool result content cleared]"
 INTERRUPTED_MARKER = "[Tool execution was interrupted]"
+
+# H5b finding 2: a caller with persisted state (agent.loop.Session) commits
+# newly-qualifying stub candidates in batches of at least this many
+# estimated tokens (dsh/OpenCode-shaped "chunked rebalance", per the
+# finding's own suggested fix) rather than the moment each one individually
+# crosses PRUNE_PROTECT_TOKENS -- see `compute_stub_candidates` below.
+PRUNE_REBALANCE_CHUNK_TOKENS = 20_000
 
 # OpenCode Appendix D: CHARS_PER_TOKEN = 4, "used only where no usage
 # exists" -- the same rough estimator this module uses for pruning
@@ -82,15 +109,6 @@ def _content_text(content) -> str:
                 parts.append(str(block.get("text") or ""))
         return "".join(parts)
     return ""
-
-
-def _truncate_head_tail(text: str) -> str:
-    if len(text) <= PRUNE_CHAR_THRESHOLD:
-        return text
-    head = text[:PRUNE_HEAD_CHARS]
-    tail = text[-PRUNE_TAIL_CHARS:] if PRUNE_TAIL_CHARS else ""
-    cut = len(text) - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS
-    return f"{head}\n... [{cut} chars pruned] ...\n{tail}"
 
 
 def _stub_excerpt(text: str) -> str:
@@ -136,45 +154,73 @@ def _each_tool_result_block(message: dict):
             yield i, block
 
 
-def prune_messages(
-    messages: list,
-    *,
-    char_threshold: int = PRUNE_CHAR_THRESHOLD,
-    head_chars: int = PRUNE_HEAD_CHARS,
-    tail_chars: int = PRUNE_TAIL_CHARS,
-    protect_tokens: int = PRUNE_PROTECT_TOKENS,
-    image_offload_turns: int = IMAGE_OFFLOAD_TURNS,
-) -> list:
-    """Return a NEW messages list (the input is never mutated) with tool
-    results pruned per the two rules above and old images offloaded. Purely
-    a function of `messages` -- no hidden state, no clock."""
+def compute_stub_candidates(
+    messages: list, *, protect_tokens: int = PRUNE_PROTECT_TOKENS,
+) -> "dict[str, int]":
+    """`{tool_use_id: estimated_tokens}` for every tool_result that
+    CURRENTLY sits outside the protection window, using raw (uncommitted)
+    token math over `messages` exactly as they stand right now. H5b finding
+    2: a caller with persisted state (agent.loop.Session) uses this to
+    decide whether enough NEW candidates have accumulated since the last
+    commit to justify rebalancing `force_stub_ids` by a full
+    PRUNE_REBALANCE_CHUNK_TOKENS-sized batch -- never call this to decide
+    what to actually prune on a given request; that is `prune_messages`'s
+    `force_stub_ids` param, which must stay STABLE across many requests in
+    a row for cache-prefix stability. A tool_result with no `tool_use_id`
+    (malformed input) is simply never a stub candidate."""
     n = len(messages)
-    out = [copy.deepcopy(m) if isinstance(m, dict) else m for m in messages]
-
-    # ---- rule 2 (protection window) needs the running token total of
-    # tool_result content STRICTLY NEWER than each block, so walk newest
-    # (end of list) to oldest first and accumulate.
+    out: "dict[str, int]" = {}
     running_newer_tokens = 0
     for idx in range(n - 1, -1, -1):
-        msg = out[idx]
+        msg = messages[idx]
         for _, block in _each_tool_result_block(msg):
             text = _content_text(block.get("content"))
             if not text:
                 continue
             this_tokens = estimate_text_tokens(text)
             if running_newer_tokens > protect_tokens:
-                block["content"] = _rewrite_tool_result_content(block.get("content"), _stub_excerpt(text))
-            elif len(text) > char_threshold:
-                # rule 1: still within the protection window, but this one
-                # result alone is huge -- head/tail it (uses the caller's
-                # own head_chars/tail_chars, not the module defaults, so a
-                # test can exercise non-default thresholds).
-                head = text[:head_chars]
-                tail = text[-tail_chars:] if tail_chars else ""
-                cut = len(text) - head_chars - tail_chars
-                truncated = f"{head}\n... [{cut} chars pruned] ...\n{tail}" if cut > 0 else text
-                block["content"] = _rewrite_tool_result_content(block.get("content"), truncated)
+                tool_use_id = block.get("tool_use_id")
+                if tool_use_id:
+                    out[tool_use_id] = this_tokens
             running_newer_tokens += this_tokens
+    return out
+
+
+def prune_messages(
+    messages: list,
+    *,
+    protect_tokens: int = PRUNE_PROTECT_TOKENS,
+    force_stub_ids: "Optional[frozenset]" = None,
+    image_offload_turns: int = IMAGE_OFFLOAD_TURNS,
+) -> list:
+    """Return a NEW messages list (the input is never mutated) with tool
+    results outside the protection window stubbed and old images offloaded.
+
+    `force_stub_ids` (H5b finding 2): when given, EXACTLY this set of
+    tool_use_ids is stubbed, full stop -- no token math is re-run to decide
+    it, so a caller that keeps this set stable across many requests (see
+    `compute_stub_candidates`) gets a byte-identical wire prefix across all
+    of them. `None` (a one-off caller with no persisted state -- `/context`'s
+    own preview, a unit test) falls back to computing the raw candidate set
+    fresh from `messages` via `compute_stub_candidates` -- correct for a
+    single call, just not prefix-stable across a series of growing ones.
+
+    H5b finding 1 (critical): a result INSIDE the window (not in the stub
+    set) is never touched here at all -- see this module's own docstring
+    for why the old blanket "any result over 8,192 chars" rule is gone."""
+    out = [copy.deepcopy(m) if isinstance(m, dict) else m for m in messages]
+    stub_ids = force_stub_ids if force_stub_ids is not None else set(
+        compute_stub_candidates(out, protect_tokens=protect_tokens))
+
+    if stub_ids:
+        for msg in out:
+            for _, block in _each_tool_result_block(msg):
+                if block.get("tool_use_id") not in stub_ids:
+                    continue
+                text = _content_text(block.get("content"))
+                if not text:
+                    continue
+                block["content"] = _rewrite_tool_result_content(block.get("content"), _stub_excerpt(text))
 
     # ---- image offload: walk oldest -> newest counting USER-turn
     # boundaries; once `image_offload_turns` boundaries have been crossed

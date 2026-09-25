@@ -2,6 +2,7 @@
 numbering, offset/limit, absolute-path requirement, registry dispatch and
 name-sorted definitions.
 """
+import base64
 import sys
 import tempfile
 from pathlib import Path
@@ -14,6 +15,12 @@ from rolo_claude.tools.read import ReadTool
 from rolo_claude.tools.registry import ToolRegistry
 
 test, TESTS = new_registry()
+
+# A real, minimal (1x1 pixel) PNG -- valid enough for imageutil's own
+# dimension sniffer and small enough to embed directly in a test.
+_TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 @test
@@ -147,6 +154,52 @@ def test_read_caps_total_result_size(ctx: Ctx):
 
 
 @test
+def test_read_image_without_vision_gets_a_text_note(ctx: Ctx):
+    """H8 scope B: `ctx.vision` defaults to False (every pre-H8 ToolContext)
+    -- an image file must become a plain text note, never a raw error and
+    never a real image block a non-vision model can't consume."""
+    d = Path(tempfile.mkdtemp(prefix="read-tool-img-novision-"))
+    f = d / "shot.png"
+    f.write_bytes(_TINY_PNG)
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d))
+    ctx.check("not an error", result.is_error is False)
+    ctx.check("content stays a plain string (no vision)", isinstance(result.content, str))
+    ctx.check("notes that vision isn't available", "vision" in result.content.lower())
+
+
+@test
+def test_read_image_with_vision_returns_an_image_block(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-tool-img-vision-"))
+    f = d / "shot.png"
+    f.write_bytes(_TINY_PNG)
+    tool = ReadTool()
+    cache: dict = {}
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d, vision=True, read_cache=cache))
+    ctx.check("not an error", result.is_error is False)
+    ctx.check(f"content is a list of blocks, got {type(result.content)}", isinstance(result.content, list))
+    block = result.content[0]
+    ctx.check("a real image block", block.get("type") == "image")
+    ctx.check("base64 source with the right media type", block.get("source", {}).get("media_type") == "image/png")
+    ctx.check("read_cache updated for this path (Write's must-Read-first check)", str(f) in cache)
+
+
+@test
+def test_read_image_case_insensitive_extension_and_jpeg(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-tool-img-jpg-"))
+    f = d / "photo.JPG"
+    # Not a real JPEG -- imageutil's dimension sniffer will fail to parse
+    # it and fall back to the byte-size gate only, which a few bytes easily
+    # passes; this test only cares that the .JPG (uppercase) EXTENSION is
+    # still recognised and routed as an image, not "appears to be binary".
+    f.write_bytes(b"\xff\xd8\xff\xe0not a real jpeg but has the magic bytes")
+    tool = ReadTool()
+    result = tool.run({"file_path": str(f)}, ToolContext(cwd=d, vision=True))
+    ctx.check("not flagged as a generic binary file", "binary file" not in (
+        result.content if isinstance(result.content, str) else ""))
+
+
+@test
 def test_registry_definitions_name_sorted(ctx: Ctx):
     reg = ToolRegistry()
     defs = reg.definitions()
@@ -184,6 +237,128 @@ def test_registry_dispatch_never_raises_on_tool_exception(ctx: Ctx):
     result = reg.dispatch("Boom", {}, ToolContext(cwd=Path(".")))
     ctx.check("a tool raising an exception becomes an error result, never propagates", result.is_error is True)
     ctx.check("mentions the exception", "boom" in result.content.lower())
+
+
+# ---- H8 scope B: image files -----------------------------------------------
+
+def _write_png(path: Path, width: int = 100, height: int = 80) -> None:
+    from tests.test_imageutil import _make_png
+    path.write_bytes(_make_png(width, height))
+
+
+@test
+def test_read_image_without_vision_is_a_plain_note(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-img-"))
+    png = d / "screenshot.png"
+    _write_png(png)
+    result = ReadTool().run({"file_path": str(png)}, ToolContext(cwd=d, vision=False))
+    ctx.check("not an error", result.is_error is False)
+    ctx.check("a plain text note, not an image block", isinstance(result.content, str))
+    ctx.check(f"names it as an image, got {result.content!r}", "image" in result.content.lower())
+    ctx.check("says why (no vision)", "vision" in result.content.lower())
+
+
+@test
+def test_read_image_with_vision_returns_a_real_image_block(ctx: Ctx):
+    """H8 scope B: this is the "image block reaches the TUI card path"
+    check -- Read's own ToolResult content becomes a list with a real
+    `image` block, which is exactly the shape agent/loop.py's
+    `_finalize_tool_result` -> `_summary_text_for_blocks`/`_image_caption`
+    turns into the `tool_result` event's "[image: image/png, WxH, N KB]"
+    caption (tui/dispatch.py's ToolCard then renders that as its body
+    text) -- see test_loop_tools_image_result_reaches_the_tool_result_event
+    below for the full event-level proof."""
+    d = Path(tempfile.mkdtemp(prefix="read-img-vision-"))
+    png = d / "screenshot.png"
+    _write_png(png)
+    result = ReadTool().run({"file_path": str(png)}, ToolContext(cwd=d, vision=True))
+    ctx.check("not an error", result.is_error is False)
+    ctx.check("content is a list of blocks", isinstance(result.content, list))
+    ctx.check("exactly one image block", len(result.content) == 1 and result.content[0]["type"] == "image")
+    ctx.check("base64 source with the right media type",
+              result.content[0]["source"]["type"] == "base64" and result.content[0]["source"]["media_type"] == "image/png")
+
+
+@test
+def test_read_image_updates_the_shared_read_cache(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-img-cache-"))
+    png = d / "screenshot.png"
+    _write_png(png)
+    cache: dict = {}
+    ReadTool().run({"file_path": str(png)}, ToolContext(cwd=d, vision=True, read_cache=cache))
+    ctx.check("the image Read is recorded in the shared read_cache", str(png) in cache)
+
+
+@test
+def test_read_oversized_image_is_resized_or_omitted(ctx: Ctx):
+    """Environment-adaptive (see test_imageutil.py's own note): a REAL,
+    decodable oversized PNG is resized when Pillow is installed, omitted
+    with OpenCode's exact note text when it isn't -- either way Read must
+    never error out or crash on it."""
+    from rolo_claude.tools.imageutil import MAX_IMAGE_DIM
+    from tests.test_imageutil import _pillow_available
+    d = Path(tempfile.mkdtemp(prefix="read-img-huge-"))
+    png = d / "huge.png"
+    _write_png(png, width=MAX_IMAGE_DIM + 400, height=10)
+    result = ReadTool().run({"file_path": str(png)}, ToolContext(cwd=d, vision=True))
+    ctx.check("not an error either way", result.is_error is False)
+    if _pillow_available():
+        ctx.check("Pillow installed: resized to a real image block", isinstance(result.content, list))
+        return
+    ctx.check("no Pillow: content is plain text (omitted), not an image block", isinstance(result.content, str))
+    ctx.check(f"OpenCode's own omitted wording, got {result.content!r}",
+              "could not be resized below the image size limit" in result.content)
+
+
+@test
+def test_read_image_missing_file_is_error(ctx: Ctx):
+    d = Path(tempfile.mkdtemp(prefix="read-img-missing-"))
+    result = ReadTool().run({"file_path": str(d / "nope.png")}, ToolContext(cwd=d, vision=True))
+    ctx.check("missing image file is an error", result.is_error is True)
+
+
+@test
+def test_loop_tools_image_result_reaches_the_tool_result_event(ctx: Ctx):
+    """H8 scope B acceptance ("a Playwright screenshot rendered as an image
+    card in the TUI"): verified headlessly (a live TUI screenshot pilot is
+    impractical to gate this suite on) by asserting the image block
+    actually reaches the `tool_result` EVENT's own data, carrying a real
+    "[image: image/png, 100x80, N KB]" caption (not just a bare "[image]")
+    -- the exact input tui/dispatch.py's handler uses to call
+    `ToolCard.set_result(content=...)`, which renders ANY multi-line
+    string as the card's body through its existing plain-text pipeline --
+    through a REAL Session dispatch, not just the Read tool in isolation."""
+    from rolo_claude.agent.assemble import SessionContext
+    from rolo_claude.agent.loop import Session
+    from rolo_claude.model import ModelProfile, parse_model_ref
+
+    d = Path(tempfile.mkdtemp(prefix="read-img-e2e-"))
+    png = d / "screenshot.png"
+    _write_png(png)
+    session_ctx = SessionContext(cwd=d, model_label="mock/vision-model")
+    model_ref = parse_model_ref("or:mock/vision-model")
+    session = Session(cwd=d, model_ref=model_ref, model_profile=ModelProfile(vision=True), creds=None,
+                       state_dir=Path(tempfile.mkdtemp(prefix="read-img-e2e-state-")), model_label="mock/vision-model",
+                       session_context=session_ctx)
+    tu = {"type": "tool_use", "id": "call_shot", "name": "Read", "input": {"file_path": str(png)}}
+    events_seen = list(session._dispatch_tools(1, [tu]))
+    results = [e for e in events_seen if e.kind == "tool_result"]
+    ctx.check("one tool_result event", len(results) == 1)
+    summary, content = results[0].data.get("summary"), results[0].data.get("content")
+    # H8 scope B: the ToolCard-ready caption -- media type, the real
+    # sniffed dimensions (100x80, this fixture's own size), a human byte
+    # size -- not just the bare "[image]" this replaced (see
+    # agent.loop._image_caption).
+    ctx.check(f"summary and content agree, got summary={summary!r} content={content!r}", summary == content)
+    ctx.check(f"names the media type, got {summary!r}", "image/png" in summary)
+    ctx.check(f"names the real sniffed dimensions, got {summary!r}", "100x80" in summary)
+    ctx.check("the call succeeded", results[0].data.get("ok") is True)
+    # And the LOG (what a resumed session or /export would see) keeps the
+    # real image block, not just the display placeholder.
+    tool_result_node = next(n for n in session.log.nodes() if n.get("type") == "tool_result")
+    logged = tool_result_node.get("content")
+    ctx.check("the log keeps the REAL image block, not the placeholder",
+              isinstance(logged, list) and any(b.get("type") == "image" for b in logged))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ actually USED once a real McpManager exists.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Optional
 
 from rolo_claude.mcp.manager import mcp_tool_name
 from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from rolo_claude.tools.imageutil import image_block_or_note
 
 IMAGE_TOKEN_COST = 1_600  # binary-facts sec.9: "images count 1 600 tokens"
 
@@ -152,6 +154,27 @@ def sanitize_tool_schema(schema: dict, *, family: Optional[str] = None) -> dict:
     return out
 
 
+def _image_block_from_b64(b64_data: str, media_type: str) -> dict:
+    """H8 scope B: an MCP server's own image result gets the SAME OpenCode
+    size/dimension gate `tools/read.py`'s Read tool applies to a local
+    image file -- an MCP server (a screenshot tool, a browser snapshot)
+    can hand back an arbitrarily large image with no cap of its own, and
+    embedding it as-is used to have no size check at all. Decodes,
+    checks/omits via `tools.imageutil.image_block_or_note`, and falls back
+    to embedding the ORIGINAL bytes unchanged if the base64 itself doesn't
+    even decode (malformed input from a misbehaving server) -- honoring
+    the pre-existing behaviour rather than silently dropping a result over
+    a decode error unrelated to size at all."""
+    try:
+        raw = base64.b64decode(b64_data, validate=False)
+    except (ValueError, TypeError):
+        return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64_data}}
+    block, note = image_block_or_note(raw, media_type)
+    if block is not None:
+        return block
+    return {"type": "text", "text": note}
+
+
 def convert_content_blocks(content, *, vision: bool) -> list:
     """One `CallToolResult.content` list -> Anthropic-shaped blocks (scope
     B): text passthrough; `image` -> a real `image` block when `vision`,
@@ -167,9 +190,7 @@ def convert_content_blocks(content, *, vision: bool) -> list:
         elif itype == "image":
             mime = getattr(item, "mime_type", None) or "image/png"
             if vision:
-                blocks.append({"type": "image", "source": {
-                    "type": "base64", "media_type": mime, "data": getattr(item, "data", "") or "",
-                }})
+                blocks.append(_image_block_from_b64(getattr(item, "data", "") or "", mime))
             else:
                 blocks.append({"type": "text",
                                 "text": f"[image content ({mime}) omitted -- this model has no vision support]"})
@@ -183,7 +204,7 @@ def convert_content_blocks(content, *, vision: bool) -> list:
             elif blob:
                 mime = getattr(resource, "mime_type", None) or "application/octet-stream"
                 if vision and mime.startswith("image/"):
-                    blocks.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": blob}})
+                    blocks.append(_image_block_from_b64(blob, mime))
                 else:
                     blocks.append({"type": "text", "text": f"[embedded resource {uri} ({mime}) omitted]"})
             else:

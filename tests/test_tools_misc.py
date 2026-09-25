@@ -233,10 +233,76 @@ def test_truncate_is_a_noop_under_the_cap(ctx: Ctx):
 
 @test
 def test_truncate_none_cap_means_no_truncation(ctx: Ctx):
+    """`cap=None` is the Agent/Task tool's own explicit opt-out ("this tool
+    manages its own truncation") -- it must ALWAYS skip the generic cap
+    entirely, including the H8 backstop below, or a second pass here would
+    silently overwrite that tool's own already-spilled full-text file with
+    a truncated copy."""
     from rolo_claude.tools.truncate import spill_and_truncate
     long_content = "x" * 1_000_000
     shown = spill_and_truncate(long_content, cap=None, session_dir=None, tool_use_id="call_3")
-    ctx.check("cap=None never truncates", shown == long_content)
+    ctx.check("cap=None never truncates, even far past the 50KB backstop", shown == long_content)
+
+
+# ---- H8 scope D: the 2000-line/50KB backstop -------------------------------
+
+@test
+def test_truncate_backstop_never_fires_under_2000_lines_and_50kb(ctx: Ctx):
+    from rolo_claude.tools.truncate import spill_and_truncate
+    content = "short line\n" * 500  # well under both 2000 lines and 50KB
+    shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_4")
+    ctx.check("under both backstop limits -> untouched even with a huge per-tool cap", shown == content)
+
+
+@test
+def test_truncate_backstop_line_count_binds_tighter_than_a_loose_char_cap(ctx: Ctx):
+    """Many short lines: under a tool's own (loose) char cap, but over the
+    2000-line backstop -- the backstop must still bind and use OpenCode's
+    own wording, not the per-tool "result truncated at N characters" one."""
+    from rolo_claude.tools.truncate import MAX_LINES, spill_and_truncate
+    content = "\n".join(f"line{i}" for i in range(MAX_LINES + 500))  # ~2500 short lines, well under 50KB
+    ctx.check(f"fixture really is under 50KB, got {len(content)}", len(content) < 50 * 1024)
+    shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_5")
+    ctx.check("the loose char cap alone would never have triggered", len(shown) < len(content))
+    ctx.check(f"OpenCode's own line/byte-cap wording, got tail={shown[-160:]!r}",
+              "2000-line" in shown and "50KB cap" in shown)
+    ctx.check("names the saved-file Read-with-offset/limit hint", "Read with offset/limit" in shown)
+
+
+@test
+def test_truncate_backstop_byte_size_binds_with_few_long_lines(ctx: Ctx):
+    """A handful of very long lines: under the 2000-line count, but over
+    the 50KB byte backstop."""
+    from rolo_claude.tools.truncate import MAX_BYTES, spill_and_truncate
+    content = "A" * (MAX_BYTES + 5000)  # one giant "line", well over 50KB
+    shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_6")
+    ctx.check("the byte backstop binds despite only one line", len(shown) < len(content))
+    ctx.check("OpenCode's own wording", "50KB cap" in shown)
+
+
+@test
+def test_truncate_backstop_never_looser_than_an_explicit_tighter_cap(ctx: Ctx):
+    """A tool's own (tighter) char cap still wins when it's SMALLER than
+    what the backstop alone would allow -- the backstop can only make the
+    effective cap smaller, never looser (old wording/behaviour preserved
+    for the common case, e.g. Bash's 30,000-char cap)."""
+    from rolo_claude.tools.truncate import spill_and_truncate
+    content = "y" * 40_000  # 1 line, under the 50KB byte backstop
+    shown = spill_and_truncate(content, cap=1_000, session_dir=None, tool_use_id="call_7")
+    ctx.check("the tighter per-tool cap (1000) wins, not the looser 50KB backstop", len(shown) < 5_000)
+    ctx.check("old per-tool wording used (backstop never bound here)", "result truncated at 1000 characters" in shown)
+
+
+@test
+def test_truncate_backstop_spills_full_content_and_names_the_file(ctx: Ctx):
+    from rolo_claude.tools.truncate import MAX_LINES, spill_and_truncate
+    d = Path(tempfile.mkdtemp(prefix="truncate-backstop-"))
+    content = "\n".join(f"line{i}" for i in range(MAX_LINES + 800))
+    shown = spill_and_truncate(content, cap=1_000_000, session_dir=d, tool_use_id="call_8")
+    spill_path = d / "tool-results" / "call_8.txt"
+    ctx.check("full content spilled to disk", spill_path.exists())
+    ctx.check("spilled file has the FULL, untruncated content", spill_path.read_text(encoding="utf-8") == content)
+    ctx.check("the shown text points at that exact saved file", str(spill_path) in shown)
 
 
 if __name__ == "__main__":

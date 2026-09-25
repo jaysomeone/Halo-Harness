@@ -366,25 +366,130 @@ def test_h5b_f04_retryable_429_reuses_the_step_retry_ladder(ctx: Ctx):
 @test
 def test_h5b_f04_prune_is_wired_into_every_ordinary_step(ctx: Ctx):
     """finding 4: agent/prune.py used to be wired ONLY into `/context` --
-    `_derive_and_build` (every real model call) must ALSO prune a huge
-    tool_result before it goes out over the wire."""
+    `_derive_and_build` (every real model call) must ALSO prune tool
+    results that fall OUTSIDE the 40k-token protection window before they
+    go out over the wire."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        from rolo_claude.agent.prune import PRUNE_CHAR_THRESHOLD
+        from rolo_claude.agent.prune import OLD_TOOL_RESULT_CLEARED
         session = _new_session(fh, mock, model="or:mock/model")
-        session.log.append_user([{"type": "text", "text": "run the huge command"}])
-        huge = "y" * (PRUNE_CHAR_THRESHOLD * 3)
+        session.log.append_user([{"type": "text", "text": "run the old command"}])
         session.log.append_assistant(
-            content=[{"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "huge"}}],
+            content=[{"type": "tool_use", "id": "call_old", "name": "Bash", "input": {"command": "old"}}],
             stop_reason="tool_use",
         )
-        session.log.append_tool_result(tool_use_id="call_1", content=huge, is_error=False)
+        session.log.append_tool_result(tool_use_id="call_old", content="the old result", is_error=False)
+        # Push "call_old" outside the 40k-token protection window with
+        # enough newer filler content.
+        for i in range(6):
+            tid = f"call_{i}"
+            session.log.append_user([{"type": "text", "text": f"q{i}"}])
+            session.log.append_assistant(
+                content=[{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "x"}}],
+                stop_reason="tool_use",
+            )
+            session.log.append_tool_result(tool_use_id=tid, content="F" * 45000, is_error=False)
 
         _system_text, messages, _tools, body = session._derive_and_build()
         wire_blob = json.dumps(body.get("messages") or [])
-        ctx.check(f"the huge tool_result was pruned before hitting the wire, got {len(wire_blob)} chars for the whole body",
-                  len(huge) not in (len(wire_blob),) and "[... " not in huge and "chars pruned" in wire_blob)
+        ctx.check("the old, now-outside-the-window tool_result was stubbed before hitting the wire",
+                  OLD_TOOL_RESULT_CLEARED in wire_blob)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f01_44kb_read_result_reaches_the_next_request_byte_for_byte(ctx: Ctx):
+    """H5b finding 1 (critical), exactly as specified: a 44 KB tool result
+    (a Read, in this repro) sitting INSIDE the protection window must
+    appear in the NEXT request's wire body byte-for-byte, never head/tail-
+    truncated by the old blanket "over 8,192 chars" rule."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "read the big file"}])
+        session.log.append_assistant(
+            content=[{"type": "tool_use", "id": "call_read", "name": "Read", "input": {"file_path": "/big.txt"}}],
+            stop_reason="tool_use",
+        )
+        big_read_result = "line content here\n" * 2500  # ~44,500 chars, matches the review's own repro size
+        ctx.check(f"fixture really is ~44KB, got {len(big_read_result)}", 40_000 < len(big_read_result) < 50_000)
+        session.log.append_tool_result(tool_use_id="call_read", content=big_read_result, is_error=False)
+
+        # `messages` (the 2nd return) is the Anthropic-shaped, ALREADY-
+        # PRUNED list `_derive_and_build` actually passes to the wire
+        # translation -- pruning's own concern is precisely THIS shape;
+        # `body["messages"]` would be OpenAI-chat-translated (a "tool"-role
+        # message keyed by `tool_call_id`, not `tool_use_id`) for this
+        # mock/openrouter session, which is a wire-format detail orthogonal
+        # to what this finding is about.
+        _system_text, messages, _tools, _body = session._derive_and_build()
+        found = None
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("tool_use_id") == "call_read":
+                        found = block.get("content")
+        ctx.check("the Read result is present in the very next request", found is not None)
+        ctx.check(f"...and byte-for-byte identical to what the tool actually returned, got {len(found or '')} chars",
+                  found == big_read_result)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h5b_f02_two_consecutive_requests_share_an_identical_prefix(ctx: Ctx):
+    """H5b finding 2: after a large step, two CONSECUTIVE `_derive_and_build`
+    calls must produce wire message lists that agree byte-for-byte on their
+    shared prefix -- the stub boundary must not slide forward between them
+    just because one more (small) turn was appended in between."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "q0"}])
+        session.log.append_assistant(
+            content=[{"type": "tool_use", "id": "call_old", "name": "Bash", "input": {"command": "old"}}],
+            stop_reason="tool_use",
+        )
+        session.log.append_tool_result(tool_use_id="call_old", content="old but important content " * 5,
+                                        is_error=False)
+        for i in range(6):
+            tid = f"call_{i}"
+            session.log.append_user([{"type": "text", "text": f"q{i}"}])
+            session.log.append_assistant(
+                content=[{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "x"}}],
+                stop_reason="tool_use",
+            )
+            session.log.append_tool_result(tool_use_id=tid, content="F" * 45000, is_error=False)
+
+        _s1, _m1, _t1, body1 = session._derive_and_build()
+        wire1 = body1.get("messages") or []
+
+        # One more (small) turn -- the STABLE case: this alone must not
+        # advance the committed stub boundary (it takes a full 20k-token
+        # batch to do that -- see agent/prune.py's own module docstring).
+        session.log.append_user([{"type": "text", "text": "q6"}])
+        session.log.append_assistant(
+            content=[{"type": "tool_use", "id": "call_6", "name": "Bash", "input": {"command": "y"}}],
+            stop_reason="tool_use",
+        )
+        session.log.append_tool_result(tool_use_id="call_6", content="small new result", is_error=False)
+        _s2, _m2, _t2, body2 = session._derive_and_build()
+        wire2 = body2.get("messages") or []
+
+        shared = min(len(wire1), len(wire2))
+        ctx.check(f"every shared message is byte-identical across the two requests, "
+                  f"got {shared} shared of {len(wire1)}/{len(wire2)}",
+                  all(wire1[i] == wire2[i] for i in range(shared)))
+        ctx.check("the second request has exactly the new turn appended", len(wire2) > len(wire1))
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)
@@ -451,8 +556,12 @@ def test_h5b_f01_no_back_to_back_auto_compaction(ctx: Ctx):
         events_seen = list(session._maybe_auto_compact(1))
         ctx.check("no compaction actually ran (skipped as back-to-back)", not any(
             e.kind == "compaction" and e.data["phase"] in ("start", "done") for e in events_seen))
-        ctx.check("a 'failed' event explains the skip", any(
-            e.kind == "compaction" and e.data["phase"] == "failed" for e in events_seen))
+        # H5b finding 3: a deliberate skip is NOT a failure -- nothing was
+        # attempted and nothing went wrong, so this is phase="skipped", not
+        # "failed" (which used to make the TUI show "Compaction failed"
+        # for something that never even ran).
+        ctx.check("a 'skipped' event explains the skip (not 'failed' -- nothing was attempted)", any(
+            e.kind == "compaction" and e.data["phase"] == "skipped" for e in events_seen))
         ctx.check("no compacted node was written", not any(n.get("type") == "compacted" for n in session.log.nodes()))
         ctx.check("_just_compacted is cleared so the NEXT call can compact again", session._just_compacted is False)
     finally:

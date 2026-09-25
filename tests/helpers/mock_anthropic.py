@@ -212,6 +212,13 @@ def _scn_overflow_400(h, body):
     }})
 
 
+def _scn_count_tokens_42(h, body):
+    """H8 must-do: a `/v1/messages/count_tokens`-shaped request (no
+    `stream`/`max_tokens` fields -- the real endpoint's own contract)
+    answered with Anthropic's real response shape, `{"input_tokens": N}`."""
+    _send_json(h, 200, {"input_tokens": 42})
+
+
 SCENARIOS = {
     "ok": _scn_ok,
     "thinking-and-signature": _scn_thinking_and_signature,
@@ -221,6 +228,7 @@ SCENARIOS = {
     "mid-stream-error": _scn_mid_stream_error,
     "rate-limit-429": _scn_rate_limit_429,
     "overflow-400": _scn_overflow_400,
+    "count-tokens-42": _scn_count_tokens_42,
 }
 
 

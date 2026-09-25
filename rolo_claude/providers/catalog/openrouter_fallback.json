@@ -1,0 +1,2003 @@
+{
+ "deepseek/deepseek-chat-v3.1": {
+  "context_length": 163840,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 32768,
+  "pricing": {
+   "completion": "0.00000095",
+   "input_cache_read": "0.00000013",
+   "prompt": "0.00000025"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-r1-0528": {
+  "context_length": 163840,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 32768,
+  "pricing": {
+   "completion": "0.00000215",
+   "input_cache_read": "0.00000035",
+   "prompt": "0.0000005"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v3.1-terminus": {
+  "context_length": 163840,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 32768,
+  "pricing": {
+   "completion": "0.000001",
+   "input_cache_read": "0.000000135",
+   "prompt": "0.00000027"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v3.2": {
+  "context_length": 163840,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.0000004",
+   "input_cache_read": "0.0000001345",
+   "prompt": "0.000000269"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v3.2-exp": {
+  "context_length": 163840,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.00000041",
+   "prompt": "0.00000027"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v4-flash-0731": {
+  "context_length": 1310720,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 943718,
+  "pricing": {
+   "completion": "0.00000032",
+   "input_cache_read": "0.000000016",
+   "prompt": "0.00000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_a",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v4-pro-0813": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 384000,
+  "pricing": {
+   "completion": "0.000001386",
+   "input_cache_read": "0.0000000154",
+   "prompt": "0.000000462"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "deepseek/deepseek-v4.1-flash": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 393216,
+  "pricing": {
+   "completion": "0.0000012",
+   "input_cache_read": "0.000000006",
+   "overrides": [
+    {
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "prompt": "0.00000015",
+     "utc_days": [
+      "saturday",
+      "sunday"
+     ]
+    },
+    {
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "prompt": "0.00000015",
+     "utc_days": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "utc_end": 100,
+     "utc_start": 0
+    },
+    {
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "prompt": "0.0000003",
+     "utc_days": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "utc_end": 400,
+     "utc_start": 100
+    },
+    {
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "prompt": "0.00000015",
+     "utc_days": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "utc_end": 600,
+     "utc_start": 400
+    },
+    {
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "prompt": "0.0000003",
+     "utc_days": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "utc_end": 1000,
+     "utc_start": 600
+    },
+    {
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "prompt": "0.00000015",
+     "utc_days": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "utc_end": 0,
+     "utc_start": 1000
+    }
+   ],
+   "prompt": "0.0000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "google/gemini-3-flash-preview": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image",
+   "file",
+   "audio",
+   "video"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "audio": "0.000001",
+   "completion": "0.000003",
+   "image": "0.0000005",
+   "input_audio_cache": "0.0000001",
+   "input_cache_read": "0.00000005",
+   "input_cache_write": "0.0000000833333333333333",
+   "internal_reasoning": "0.000003",
+   "prompt": "0.0000005",
+   "web_search": "0.014"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "google/gemini-3.1-flash-lite": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image",
+   "video",
+   "file",
+   "audio"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "audio": "0.0000005",
+   "completion": "0.0000015",
+   "image": "0.00000025",
+   "input_audio_cache": "0.00000005",
+   "input_cache_read": "0.000000025",
+   "input_cache_write": "0.0000000833333333333333",
+   "internal_reasoning": "0.0000015",
+   "prompt": "0.00000025",
+   "web_search": "0.014"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "google/gemini-3.1-pro-preview": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "audio",
+   "file",
+   "image",
+   "text",
+   "video"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "audio": "0.000002",
+   "completion": "0.000012",
+   "image": "0.000002",
+   "input_audio_cache": "0.0000002",
+   "input_cache_read": "0.0000002",
+   "input_cache_write": "0.000000375",
+   "internal_reasoning": "0.000012",
+   "overrides": [
+    {
+     "audio": "0.000004",
+     "completion": "0.000018",
+     "input_audio_cache": "0.0000004",
+     "input_cache_read": "0.0000004",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.000004"
+    }
+   ],
+   "prompt": "0.000002",
+   "web_search": "0.014"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "google/gemini-3.5-flash": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image",
+   "video",
+   "file",
+   "audio"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "audio": "0.000003",
+   "completion": "0.000009",
+   "image": "0.0000015",
+   "input_audio_cache": "0.0000003",
+   "input_cache_read": "0.00000015",
+   "input_cache_write": "0.0000000833333333333333",
+   "internal_reasoning": "0.000009",
+   "prompt": "0.0000015",
+   "web_search": "0.014"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "google/gemini-3.8-flash": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image",
+   "video",
+   "file",
+   "audio"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "audio": "0.00000075",
+   "completion": "0.00000375",
+   "image": "0.00000075",
+   "input_audio_cache": "0.000000075",
+   "input_cache_read": "0.000000075",
+   "input_cache_write": "0.0000000416666666666667",
+   "internal_reasoning": "0.00000375",
+   "prompt": "0.00000075",
+   "web_search": "0.014"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "google/gemma-3-27b-it": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 117964,
+  "pricing": {
+   "completion": "0.00000045",
+   "input_cache_read": "0.00000004",
+   "prompt": "0.00000008"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "google/gemma-4-26b-a4b-it": {
+  "context_length": 262144,
+  "input_modalities": [
+   "image",
+   "text",
+   "video"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000003",
+   "input_cache_read": "0.00000005",
+   "prompt": "0.00000009"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "google/gemma-4-31b-it": {
+  "context_length": 262144,
+  "input_modalities": [
+   "image",
+   "text",
+   "video"
+  ],
+  "max_output_tokens": 16384,
+  "pricing": {
+   "completion": "0.00000034",
+   "input_cache_read": "0.00000005",
+   "prompt": "0.00000009"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "meta-llama/llama-3.1-8b-instruct": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 117964,
+  "pricing": {
+   "completion": "0.00000008",
+   "input_cache_read": "0.000000025",
+   "prompt": "0.00000005"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "meta-llama/llama-3.3-70b-instruct": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 16384,
+  "pricing": {
+   "completion": "0.00000032",
+   "prompt": "0.0000001"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "meta-llama/llama-4-maverick": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 16384,
+  "pricing": {
+   "completion": "0.0000006525",
+   "prompt": "0.0000001875"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "meta-llama/llama-4-scout": {
+  "context_length": 1310720,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 16384,
+  "pricing": {
+   "completion": "0.0000003",
+   "prompt": "0.0000001"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "minimax/minimax-m1": {
+  "context_length": 1000000,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 40000,
+  "pricing": {
+   "completion": "0.0000022",
+   "prompt": "0.0000004"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "seed",
+   "stop",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "minimax/minimax-m2": {
+  "context_length": 204800,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 176947,
+  "pricing": {
+   "completion": "0.0000012",
+   "prompt": "0.0000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "minimax/minimax-m2.1": {
+  "context_length": 204800,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 131072,
+  "pricing": {
+   "completion": "0.0000012",
+   "input_cache_read": "0.00000003",
+   "prompt": "0.0000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "mistralai/codestral-2508": {
+  "context_length": 256000,
+  "input_modalities": [
+   "text",
+   "file"
+  ],
+  "max_output_tokens": 204800,
+  "pricing": {
+   "completion": "0.0000009",
+   "input_cache_read": "0.00000003",
+   "prompt": "0.0000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "max_tokens",
+   "prediction",
+   "presence_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "mistralai/mistral-medium-3-5": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 209715,
+  "pricing": {
+   "completion": "0.0000075",
+   "prompt": "0.0000015"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 98304,
+  "pricing": {
+   "completion": "0.0000023",
+   "prompt": "0.00000057"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "max_tokens",
+   "presence_penalty",
+   "repetition_penalty",
+   "seed",
+   "stop",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2-0905": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 98304,
+  "pricing": {
+   "completion": "0.0000025",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "max_tokens",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2-thinking": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 98304,
+  "pricing": {
+   "completion": "0.0000025",
+   "input_cache_read": "0.00000015",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2.5": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.00000225",
+   "input_cache_read": "0.00000007",
+   "prompt": "0.00000045"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2.6": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.000004",
+   "input_cache_read": "0.00000016",
+   "prompt": "0.00000095"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k2.7-code": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000033",
+   "input_cache_read": "0.00000018",
+   "prompt": "0.0000006562"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "moonshotai/kimi-k3": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text",
+   "image",
+   "video"
+  ],
+  "max_output_tokens": 943718,
+  "pricing": {
+   "completion": "0.0000105346",
+   "input_cache_read": "0.0000003",
+   "prompt": "0.0000008845"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "nvidia/nemotron-3-nano-30b-a3b": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000002",
+   "input_cache_read": "0.00000003",
+   "prompt": "0.00000005"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "nvidia/nemotron-3-super-120b-a12b": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.00000045",
+   "prompt": "0.00000008"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "nvidia/nemotron-3-ultra-550b-a55b": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 182520,
+  "pricing": {
+   "completion": "0.0000024",
+   "input_cache_read": "0.00000012",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "nvidia/nemotron-3.5-lightning": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 131072,
+  "pricing": {
+   "completion": "0.0000002",
+   "input_cache_read": "0.00000004",
+   "prompt": "0.00000008"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "openai/gpt-oss-120b": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.0000006",
+   "input_cache_read": "0.000000075",
+   "prompt": "0.00000015"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_a",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "openai/gpt-oss-20b": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 32768,
+  "pricing": {
+   "completion": "0.00000009",
+   "prompt": "0.000000018"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-235b-a22b-2507": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.00000035",
+   "input_cache_read": "0.0000000175",
+   "prompt": "0.0000000875"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-235b-a22b-thinking-2507": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 117964,
+  "pricing": {
+   "completion": "0.0000023",
+   "prompt": "0.00000023"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-coder": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.000001",
+   "input_cache_read": "0.0000001",
+   "prompt": "0.0000003"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-coder-flash": {
+  "context_length": 1000000,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.000000975",
+   "input_cache_read": "0.000000039",
+   "input_cache_write": "0.00000024375",
+   "overrides": [
+    {
+     "completion": "0.000001625",
+     "input_cache_read": "0.000000065",
+     "input_cache_write": "0.00000040625",
+     "min_prompt_tokens": 32000,
+     "prompt": "0.000000325"
+    },
+    {
+     "completion": "0.0000026",
+     "input_cache_read": "0.000000104",
+     "input_cache_write": "0.00000065",
+     "min_prompt_tokens": 128000,
+     "prompt": "0.00000052"
+    }
+   ],
+   "prompt": "0.000000195"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-coder-next": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000008",
+   "input_cache_read": "0.00000007",
+   "prompt": "0.00000012"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3-next-80b-a3b-instruct": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000011",
+   "input_cache_read": "0.00000007",
+   "prompt": "0.0000001"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3.5-122b-a10b": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image",
+   "video"
+  ],
+  "max_output_tokens": 65536,
+  "pricing": {
+   "completion": "0.00000208",
+   "prompt": "0.00000026"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "qwen/qwen3.5-397b-a17b": {
+  "context_length": 262144,
+  "input_modalities": [
+   "text",
+   "image",
+   "video"
+  ],
+  "max_output_tokens": 235929,
+  "pricing": {
+   "completion": "0.0000035",
+   "input_cache_read": "0.000000225",
+   "prompt": "0.00000055"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "x-ai/grok-4.20": {
+  "context_length": 2000000,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 1800000,
+  "pricing": {
+   "completion": "0.0000025",
+   "input_cache_read": "0.0000002",
+   "overrides": [
+    {
+     "completion": "0.000005",
+     "input_cache_read": "0.0000004",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.0000025"
+    }
+   ],
+   "prompt": "0.00000125",
+   "web_search": "0.005"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "reasoning",
+   "response_format",
+   "seed",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "x-ai/grok-4.3": {
+  "context_length": 1000000,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 900000,
+  "pricing": {
+   "completion": "0.0000025",
+   "input_cache_read": "0.0000002",
+   "overrides": [
+    {
+     "completion": "0.000005",
+     "input_cache_read": "0.0000004",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.0000025"
+    }
+   ],
+   "prompt": "0.00000125",
+   "web_search": "0.005"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "x-ai/grok-4.5": {
+  "context_length": 500000,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 450000,
+  "pricing": {
+   "completion": "0.000006",
+   "input_cache_read": "0.0000003",
+   "overrides": [
+    {
+     "completion": "0.000012",
+     "input_cache_read": "0.0000006",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.000004"
+    }
+   ],
+   "prompt": "0.000002",
+   "web_search": "0.005"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "x-ai/grok-4.6": {
+  "context_length": 500000,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 450000,
+  "pricing": {
+   "completion": "0.000006",
+   "input_cache_read": "0.0000005",
+   "overrides": [
+    {
+     "completion": "0.000012",
+     "input_cache_read": "0.000001",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.000004"
+    }
+   ],
+   "prompt": "0.000002",
+   "web_search": "0.005"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "x-ai/grok-4.7": {
+  "context_length": 500000,
+  "input_modalities": [
+   "text",
+   "image",
+   "file"
+  ],
+  "max_output_tokens": 450000,
+  "pricing": {
+   "completion": "0.0000048",
+   "input_cache_read": "0.0000004",
+   "overrides": [
+    {
+     "completion": "0.0000096",
+     "input_cache_read": "0.0000008",
+     "min_prompt_tokens": 200000,
+     "prompt": "0.0000032"
+    }
+   ],
+   "prompt": "0.0000016",
+   "web_search": "0.005"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "reasoning",
+   "reasoning_effort",
+   "response_format",
+   "seed",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-4.5": {
+  "context_length": 131072,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 98304,
+  "pricing": {
+   "completion": "0.0000022",
+   "input_cache_read": "0.00000011",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "include_reasoning",
+   "max_tokens",
+   "reasoning",
+   "response_format",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-4.6": {
+  "context_length": 204800,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 16384,
+  "pricing": {
+   "completion": "0.00000175",
+   "input_cache_read": "0.00000008",
+   "prompt": "0.00000043"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-4.7": {
+  "context_length": 204800,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 131072,
+  "pricing": {
+   "completion": "0.0000022",
+   "input_cache_read": "0.00000011",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "max_tokens",
+   "min_p",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_a",
+   "top_k",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-5": {
+  "context_length": 204800,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 128000,
+  "pricing": {
+   "completion": "0.00000192",
+   "input_cache_read": "0.00000012",
+   "prompt": "0.0000006"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logprobs",
+   "max_tokens",
+   "presence_penalty",
+   "reasoning",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-5.2": {
+  "context_length": 1048576,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 131072,
+  "pricing": {
+   "completion": "0.0000020416",
+   "input_cache_read": "0.00000012064",
+   "prompt": "0.0000006496"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-5.3": {
+  "context_length": 1310720,
+  "input_modalities": [
+   "text"
+  ],
+  "max_output_tokens": 943717,
+  "pricing": {
+   "completion": "0.0000044",
+   "input_cache_read": "0.00000026",
+   "prompt": "0.0000014"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ },
+ "z-ai/glm-5.3-flash": {
+  "context_length": 1310720,
+  "input_modalities": [
+   "text",
+   "image",
+   "video"
+  ],
+  "max_output_tokens": 131072,
+  "pricing": {
+   "completion": "0.0000006",
+   "input_cache_read": "0.0000000285",
+   "prompt": "0.000000045"
+  },
+  "supported_parameters": [
+   "frequency_penalty",
+   "include_reasoning",
+   "logit_bias",
+   "logprobs",
+   "max_tokens",
+   "min_p",
+   "parallel_tool_calls",
+   "presence_penalty",
+   "reasoning",
+   "reasoning_effort",
+   "repetition_penalty",
+   "response_format",
+   "seed",
+   "stop",
+   "structured_outputs",
+   "temperature",
+   "tool_choice",
+   "tools",
+   "top_k",
+   "top_logprobs",
+   "top_p"
+  ]
+ }
+}

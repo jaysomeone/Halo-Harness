@@ -114,6 +114,17 @@ def main(argv=None) -> int:
                 f.write("export HOOK_SCRIPT_VAR=from-env-file-writer\n")
         return 0
 
+    if mode == "env_file_writer_var_expansion":
+        # H5b finding 10: Claude Code's own SessionStart docs example,
+        # verbatim -- `export PATH="$PATH:/some/dir"` must APPEND to the
+        # shell's real inherited PATH via $VAR expansion, never overwrite
+        # it with the literal four-character string "$PATH:/some/dir".
+        env_file = os.environ.get("CLAUDE_ENV_FILE")
+        if env_file:
+            with open(env_file, "a", encoding="utf-8") as f:
+                f.write('export PATH="$PATH:/rolo-h5b-f10-marker"\n')
+        return 0
+
     if mode == "updated_input":
         _print_json({"hookSpecificOutput": {"permissionDecision": "allow",
                                              "updatedInput": {"command": "echo rewritten"}}})

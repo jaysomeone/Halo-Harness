@@ -47,6 +47,60 @@ def test_doctor_runs_and_exits_cleanly(ctx: Ctx):
 
 
 @test
+def test_h8_doctor_reports_catalog_ages(ctx: Ctx):
+    """H8 scope C: doctor shows the age of every cached catalog file -- a
+    fresh, never-refreshed BRIDGE_TEST_HOME reports each one as never
+    cached (never a crash, never silently omitted)."""
+    from rolo_claude.doctor import run_checks
+    home = _fresh_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        lines, _ok = run_checks()
+        catalog_lines = [l for l in lines if "models.json" in l or "dbx-endpoints.json" in l or "models-dev" in l
+                          or "models.dev" in l]
+        ctx.check(f"at least the 3 catalog files are mentioned, got {catalog_lines}", len(catalog_lines) >= 3)
+        ctx.check("a fresh home reports them as never cached (not a crash/omission)",
+                  all("never cached" in l or "never refreshed" in l for l in catalog_lines))
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_h8_doctor_work_offline_reports_unreachable_with_vpn_hint(ctx: Ctx):
+    """H8 scope F acceptance: `rolo-claude doctor --work` with no Databricks
+    configured (this build/test box) reports it plainly, never crashes, and
+    the VPN hint is present somewhere in the output for when it IS
+    configured but genuinely unreachable."""
+    home = _fresh_home()
+    result = _run(["doctor", "--work"], home)
+    ctx.check(f"exit 0 or 1 (never a crash), got {result.returncode}, stderr={result.stderr!r}",
+              result.returncode in (0, 1))
+    ctx.check("no traceback", "Traceback" not in result.stderr)
+    ctx.check(f"reports Databricks as not configured, got {result.stdout!r}",
+              "not configured" in result.stdout.lower())
+    ctx.check("mentions the open questions from the plan", "open question" in result.stdout.lower())
+
+    from rolo_claude.doctor import run_work_checks
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        lines, ok = run_work_checks()
+        ctx.check("run_work_checks() also never raises and reports not-configured", not ok)
+    finally:
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_h8_doctor_work_vpn_hint_when_configured_but_unreachable(ctx: Ctx):
+    """The VPN hint specifically: a Databricks host that's syntactically
+    configured but not actually reachable (a bogus hostname) must mention
+    the VPN in its own reachability line."""
+    from rolo_claude.doctor import _work_check_vpn_reachability
+    line = _work_check_vpn_reachability("https://this-host-does-not-exist.invalid.example")
+    ctx.check(f"reports unreachable, got {line!r}", "MISSING" in line or "[MISSING]" in line)
+    ctx.check("names the VPN as the likely reason", "VPN" in line)
+
+
+@test
 def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
     """U5's own leftover / H8 cheap must-do: tui/clipboard.py's
     `clipboard_doctor_line()` was written ready-to-call but never actually
