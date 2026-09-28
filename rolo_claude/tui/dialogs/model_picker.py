@@ -28,7 +28,15 @@ def _fmt_price(v) -> str:
 def _row_text(m: dict) -> str:
     ctx = m.get("context")
     ctx_str = f"{ctx // 1000}k" if isinstance(ctx, int) else "?"
-    return f"{m['ref']:<42} ctx={ctx_str:<6} out={m.get('output') or '?':<8} in={_fmt_price(m.get('price_in'))} out={_fmt_price(m.get('price_out'))}"
+    row = f"{m['ref']:<42} ctx={ctx_str:<6} out={m.get('output') or '?':<8} in={_fmt_price(m.get('price_in'))} out={_fmt_price(m.get('price_out'))}"
+    # H11 Part A: "the /model picker gets a 'Claude subscription (via
+    # Claude Code)' group" -- this dialog has no real section-header
+    # concept, so a cc: row (Controller.list_models()'s own `group` tag)
+    # is marked inline instead of restructuring the whole OptionList.
+    group = m.get("group")
+    if group:
+        row += f"  [{group}]"
+    return row
 
 
 class ModelPicker(ModalScreen):

@@ -24,6 +24,7 @@ from rolo_claude.providers.routing import InvalidModelError
 _ANT_PREFIX = "ant:"
 _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
+_CC_PREFIX = "cc:"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -60,6 +61,18 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     own main/small refs directly from CLI flags/settings, never via
     headers). Raises InvalidModelError (same exception the proxy's own
     route_model raises, for one consistent vocabulary) when nothing matches.
+
+    H11 Part A: `cc:<name>` (the installed `claude` binary, driven under
+    the user's own subscription login) and `ant:<name>` (the existing
+    native-Anthropic-passthrough provider, now with the SAME nine alias
+    names -- fable/opus/opus-5/opus-5.0/opus-4.8/opus-4.6/sonnet/sonnet-5/
+    haiku -- resolved to real API ids) both run their bare NAME through
+    `providers.cc_models` before falling back to pass-through (a full id,
+    or a name that table doesn't know, is untouched -- see
+    test_parse_ant_prefix's `ant:claude-opus-4` case). A BARE word with no
+    prefix at all naming one of those nine resolves to `cc:`/`ant:`
+    depending on what's available (subscription login vs.
+    ANTHROPIC_API_KEY) -- see providers.cc_models.default_bare_alias_route.
     """
     routes = routes or {}
     aliases = routes.get("aliases") or {}
@@ -77,17 +90,34 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     if resolved.startswith(_OR_PREFIX):
         bare = resolved[len(_OR_PREFIX):]
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
+    if resolved.startswith(_CC_PREFIX):
+        from rolo_claude.providers.cc_models import resolve_cc_alias
+        bare = resolved[len(_CC_PREFIX):]
+        return ModelRef(raw=raw, provider="cc", model=resolve_cc_alias(bare), dialect="cc-subprocess")
     if resolved.startswith(_ANT_PREFIX):
+        from rolo_claude.providers.cc_models import resolve_ant_alias
         bare = resolved[len(_ANT_PREFIX):]
-        return ModelRef(raw=raw, provider="anthropic", model=bare, dialect="anthropic-passthrough")
+        return ModelRef(raw=raw, provider="anthropic", model=resolve_ant_alias(bare), dialect="anthropic-passthrough")
     if "/" in resolved and resolved.count("/") == 1:
         return ModelRef(raw=raw, provider="openrouter", model=resolved, dialect="openai-chat")
     if resolved.startswith("databricks-") or resolved.startswith("system.ai."):
         return ModelRef(raw=raw, provider="databricks", model=resolved, dialect=_dialect_for(resolved))
 
+    from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES, default_bare_alias_route
+    if resolved in BARE_ALIAS_NAMES:
+        route = default_bare_alias_route()
+        if route == "cc":
+            return parse_model_ref(f"{_CC_PREFIX}{resolved}", routes)
+        if route == "ant":
+            return parse_model_ref(f"{_ANT_PREFIX}{resolved}", routes)
+        raise InvalidModelError(
+            f"{resolved!r} needs either a Claude subscription login (run `claude` once to log in, then "
+            f"use cc:{resolved}) or ANTHROPIC_API_KEY set (then use ant:{resolved}) -- neither is available"
+        )
+
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, vendor/model, "
-        f"a bare databricks-*/system.ai.* name, or a routes.json alias)"
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, vendor/model, "
+        f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)"
     )
 
 
@@ -193,6 +223,27 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
     openai-chat-dialect model, where reasoning support depends on what the
     upstream actually advertises."""
     routes = routes or {}
+    # H11 Part A: `cc:`/`ant:` model_table rows (context/output/pricing for
+    # the six subscription models) -- checked FIRST for `cc:` (it has no
+    # models.json/routes.json entry of its own at all -- Claude Code is the
+    # provider, never OpenRouter/Databricks) and for `ant:` only when the
+    # name is one of the nine known ones (anything else keeps falling
+    # through to the plain 200000/8192 native-passthrough default below,
+    # unchanged from before this milestone).
+    if ref.provider == "cc" or (ref.provider == "anthropic" and ref.dialect == "anthropic-passthrough"):
+        from rolo_claude.providers.cc_models import profile_fields_for_cc_model
+        fields = profile_fields_for_cc_model(ref.model)
+        if fields:
+            return ModelProfile(
+                context_tokens=fields.get("context_tokens", 1_000_000),
+                max_output_tokens=fields.get("max_output_tokens", 64_000),
+                reasoning="native",
+                price_in=fields.get("price_in"), price_out=fields.get("price_out"),
+                price_cache_read=fields.get("price_cache_read"), price_cache_write=fields.get("price_cache_write"),
+            )
+        if ref.provider == "cc":
+            return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, reasoning="native")
+
     models = load_models_json(state_dir)
     entry = models.get(ref.model)
     if entry:

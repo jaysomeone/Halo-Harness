@@ -165,6 +165,13 @@ class Controller:
                 self.session.job_registry.kill_all()
             except Exception:
                 pass
+            # H11 Part B: a cc: session's own claude subprocess must never
+            # outlive rolo-claude either -- a safe no-op when cc: was
+            # never used this session.
+            try:
+                self.session.close_cc()
+            except Exception:
+                pass
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         return self.exit_code
@@ -407,6 +414,22 @@ class Controller:
             if alias not in seen:
                 out.append({"ref": alias, "context": None, "output": None, "price_in": None,
                             "price_out": None, "provider": "alias", "target": target})
+        # H11 Part A: the "Claude subscription (via Claude Code)" group --
+        # the nine cc: aliases, with real profile data when known
+        # (providers.cc_models.CC_MODEL_TABLE / a --refresh cache), so
+        # they filter/sort/price alongside every OpenRouter row above
+        # instead of needing a separate picker.
+        from rolo_claude.providers.cc_models import CC_ALIASES, profile_fields_for_cc_model
+        for alias, cc_target in CC_ALIASES.items():
+            ref = f"cc:{alias}"
+            if ref in seen:
+                continue
+            fields = profile_fields_for_cc_model(cc_target) or {}
+            out.append({
+                "ref": ref, "context": fields.get("context_tokens"), "output": fields.get("max_output_tokens"),
+                "price_in": fields.get("price_in"), "price_out": fields.get("price_out"),
+                "provider": "cc", "group": "Claude subscription (via Claude Code)",
+            })
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context": self.session.model_profile.context_tokens,

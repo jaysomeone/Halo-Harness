@@ -37,15 +37,55 @@ def near_miss_slug(requested: str, known_ids) -> "list[str]":
     return difflib.get_close_matches(requested, list(known_ids), n=5, cutoff=0.5)
 
 
+def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
+    """H11 Part A: `rolo-claude models --cc` -- the nine subscription-model
+    alias names, their `cc:`/`ant:` targets, and (when a profile row is
+    known) context/output/pricing. Never touches the credentials file --
+    only `claude auth status` (login line) and, with --refresh, a handful
+    of cheap `-p --max-turns 1` pings (providers.cc_models.
+    refresh_cc_catalog)."""
+    from rolo_claude.providers.cc_models import (
+        ANT_ALIASES, CC_ALIASES, claude_auth_status, profile_fields_for_cc_model, refresh_cc_catalog,
+    )
+    status = claude_auth_status()
+    if status is None:
+        print("Claude subscription: claude not found -- cc: models unavailable (install Claude Code)")
+    elif not status.logged_in:
+        print("Claude subscription: claude found but not logged in -- run `claude` once to log in")
+    else:
+        print(f"Claude subscription: logged in ({status.auth_method or 'claude.ai'}) -- cc: models available")
+
+    if refresh:
+        refresh_cc_catalog(state_dir=state_dir)
+        print("(refreshed cc-models.json from live -p pings)\n")
+
+    print(f"{'alias':<12} {'cc: target':<24} {'ant: target':<28} {'context':>10} {'out cap':>9} {'in/M':>9} {'out/M':>9}")
+    for name in CC_ALIASES:
+        cc_target = CC_ALIASES[name]
+        ant_target = ANT_ALIASES.get(name, "")
+        fields = profile_fields_for_cc_model(cc_target) or {}
+        ctx = fields.get("context_tokens", "?")
+        out_cap = fields.get("max_output_tokens", "?")
+        print(f"{name:<12} {cc_target:<24} {ant_target:<28} {str(ctx):>10} {str(out_cap):>9} "
+              f"{_fmt_price(fields.get('price_in')):>9} {_fmt_price(fields.get('price_out')):>9}")
+    return 0
+
+
 def cmd_models(argv) -> int:
     parser = argparse.ArgumentParser(prog="rolo-claude models", add_help=True)
     parser.add_argument("--refresh", action="store_true", help="Re-probe OpenRouter/Databricks instead of using the cache")
+    parser.add_argument("--cc", action="store_true",
+                         help="List the Claude subscription models (cc:/ant: aliases) instead of the "
+                              "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
+                              "confirm its current canonical id")
     args = parser.parse_args(argv)
 
     import os
     load_env_file(Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env")))
 
     state_dir = bridge_home()
+    if args.cc:
+        return _cmd_models_cc(state_dir, refresh=args.refresh)
     models = load_models_json(state_dir)
     if args.refresh or not models:
         orc = resolve_openrouter()

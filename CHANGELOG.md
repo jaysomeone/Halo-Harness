@@ -5,6 +5,65 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.4.0] - 2026-09-28
+
+H11: Claude models through the user's own Claude subscription (`cc:` route)
+plus first-class `ant:` aliases for the same six models via
+`ANTHROPIC_API_KEY`. Binding constraint: rolo-claude never reads, copies or
+replays Claude Code's OAuth credentials (`~/.claude/.credentials.json`) and
+never calls `api.anthropic.com` with them -- the subscription is used the one
+legitimate way, by driving the installed `claude` binary headlessly under the
+user's own login, with rolo-claude's own tools exposed to it through a local
+MCP bridge. rolo-claude keeps its own tools, permissions, hooks, session log
+and telemetry for every `cc:` turn.
+
+- **Aliases (`rolo_claude/providers/cc_models.py`)**: `cc:fable`/`opus`/
+  `opus-5`/`opus-5.0`/`opus-4.8`/`opus-4.6`/`sonnet`/`sonnet-5`/`haiku` ->
+  `claude-fable-5-1`/`claude-opus-5-5`/`claude-opus-5`/`claude-opus-5`/
+  `claude-opus-4-8`/`claude-opus-4-6`/Claude Code's own `sonnet`/
+  `claude-sonnet-5`/Claude Code's own `haiku`; `ant:` gets the SAME nine
+  names resolved to real API ids; a bare alias with no prefix resolves to
+  `cc:` (a subscription login and no `ANTHROPIC_API_KEY`), `ant:` (the key
+  set), or an error naming both; any full id and a trailing `[1m]` suffix
+  pass through unchanged. Context/output/pricing for all nine come from a
+  vendored table (OpenRouter's own `anthropic/*` catalog rows), refreshable
+  live via `rolo-claude models --cc --refresh`. `doctor` and the `/model`
+  picker ("Claude subscription (via Claude Code)" group) both surface this.
+- **Transport (`rolo_claude/agent/cc_process.py`, `rolo_claude/ccbridge/`)**:
+  one `claude -p --output-format stream-json --input-format stream-json
+  --verbose --include-partial-messages --tools "" --strict-mcp-config
+  --mcp-config <inline> --settings '{"disableAllHooks":true}'
+  --permission-mode bypassPermissions --session-id/--resume <uuid5 of the
+  rolo session id>` subprocess per `cc:` session, lazily started, stdin held
+  open across turns -- every flag verified live against the installed
+  claude 2.1.281/2.1.284. The `--mcp-config` names one stdio server, "rolo"
+  (`python -m rolo_claude.ccbridge`), so Claude Code exposes every bridged
+  tool as `mcp__rolo__<Name>`; the child forwards `tools/list`/`tools/call`
+  to a `ToolBridgeServer` in the parent process (a Unix socket, mode 0600,
+  on POSIX; a TCP loopback socket + a random per-connection token on
+  Windows) which runs the real dispatch -- permission decide, PreToolUse/
+  PostToolUse hooks, the tool's own run, the session log, TUI events --
+  for every call, with Claude Code's own tool_use id kept verbatim. Esc
+  kills the subprocess (process group, no orphans) and synthesizes
+  interrupted results for anything still in flight; the next turn restarts
+  with `--resume`. A steer sends its line to the running subprocess
+  immediately (Claude Code queues it on its own). Switching models into
+  `cc:` mid-session primes the new subprocess with the prior log as one
+  `<conversation-so-far>` message; switching away needs nothing special
+  (every `cc:` turn already logged ordinary user/assistant/tool_result
+  nodes). `stats --models`/`/cost` show `cc:` rows with `total_cost_usd`
+  marked as Claude Code's own estimate, never real per-token billing.
+- **Tests**: `tests/helpers/fake_claude_cc.py` (a scripted `claude` stand-in
+  that also acts as a REAL MCP client against the real `ccbridge` child) plus
+  `tests/test_cc_models.py`, `tests/test_ccbridge_server.py`,
+  `tests/test_cc_session.py` -- 53 tests covering alias resolution, the
+  bridge's own wire protocol (both transports), lazy start/reuse/kill,
+  tools/list parity with the frozen catalog, deny rules, a live interactive
+  permission card, hooks firing exactly once, pairing invariants across an
+  Esc mid-call, the `estimate` usage flag, `--resume` after a restart and
+  after a fresh `--continue`-shaped process, steering, a cc:<->or: model
+  switch, and the credentials file never being opened.
+
 ## [0.3.1] - 2026-09-25
 
 H10: free L0 telemetry from the existing session logs, plus a human-gated

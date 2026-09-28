@@ -1026,6 +1026,15 @@ class Session:
         except Exception:
             pass  # a SessionEnd hook must never block process/session teardown
 
+    def close_cc(self) -> None:
+        """H11 Part B: kill this session's claude subprocess (process
+        group) and close its bridge server, if `cc:` was ever used this
+        session -- a safe no-op otherwise. Called from Controller.quit(),
+        headless.py's own atexit/finally cleanup, and SIGTERM/SIGHUP (via
+        the same paths that already call job_registry.kill_all())."""
+        from rolo_claude.agent import cc_runtime
+        cc_runtime.close_cc(self)
+
     def clear(self) -> None:
         """U5 must-do: `/clear` starts a genuinely NEW session log --
         `SessionEnd(clear)` fired on the OLD one, a fresh `SessionLog`
@@ -2332,7 +2341,18 @@ class Session:
             )
 
             try:
-                yield from self._turn_body(turn_no)
+                if self.model_ref.provider == "cc":
+                    # H11 Part B: the installed `claude` binary IS the
+                    # model here -- a completely separate turn-execution
+                    # path (agent/cc_runtime.py) that never touches
+                    # derive_request/stream_completion; it logs its own
+                    # user/assistant/tool_result/usage nodes so every OTHER
+                    # route's history reconstruction, /stats, /export and
+                    # resume all keep working unchanged.
+                    from rolo_claude.agent import cc_runtime
+                    yield from cc_runtime.turn_body_cc(self, turn_no, text)
+                else:
+                    yield from self._turn_body(turn_no)
             except GeneratorExit:
                 # rule 2/scope F: an interrupted turn must never leave a
                 # tool_use without a matching tool_result in the log.
@@ -3799,7 +3819,19 @@ class Session:
         cap) -- fixed by re-gating vision and LRU-evicting down to fit,
         and (c) no log record of the switch at all -- a `meta` node now
         carries the new model + the (possibly just-shrunk) tool list, the
-        same shape `_on_catalog_grow` already logs."""
+        same shape `_on_catalog_grow` already logs.
+
+        H11 Part B: switching INTO cc: mid-session (provider WASN'T "cc",
+        now is) stashes the prior log as one `<conversation-so-far>` user
+        message for the next fresh claude subprocess start to prime with
+        (documented v1 behaviour -- see agent/cc_runtime.py's
+        `prepare_conversation_so_far`). Switching AWAY from cc: needs no
+        special handling at all: every cc: turn already logged ordinary
+        user/assistant/tool_result nodes, so `derive_request` picks them
+        up as history exactly like any other route's own turns."""
+        if model_ref.provider == "cc" and self.model_ref.provider != "cc":
+            from rolo_claude.agent import cc_runtime
+            cc_runtime.prepare_conversation_so_far(self)
         self.model_ref = model_ref
         self.model_profile = model_profile
         if creds is not None:
@@ -3870,6 +3902,14 @@ class Session:
         turn instead" rather than silently dropping the text."""
         if not text:
             return False
+        if self.model_ref.provider == "cc":
+            # H11 Part B: a cc: steer is sent to the running claude
+            # subprocess IMMEDIATELY (Claude Code queues it internally --
+            # its own result JSON's queued_turn_count confirms this)
+            # rather than queued here for a `_step`/`_dispatch_tools`
+            # safe point a cc: turn never runs.
+            from rolo_claude.agent import cc_runtime
+            return cc_runtime.steer_cc(self, text)
         with self._steer_lock:
             if not self._busy.is_set():
                 return False

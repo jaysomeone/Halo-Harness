@@ -87,6 +87,29 @@ def _check_databricks() -> str:
     return f"{OK} Databricks: configured ({dbx.host})"
 
 
+def _check_claude_subscription() -> str:
+    """H11 Part B: `cc:` model availability -- reads ONLY `claude auth
+    status`'s own JSON (providers.cc_models.claude_auth_status), NEVER
+    `~/.claude/.credentials.json` (binding constraint, brief). Optional
+    (the harness's primary models are open-weight via Databricks/
+    OpenRouter): neither "not installed" nor "installed but not logged
+    in" ever fails doctor's overall `ok`. On the Kali VM `claude` lives
+    at `~/.local/bin` -- covered by `mcp_setup.find_claude_exe`'s own
+    PATH-then-~/.local/bin lookup, same as every other `claude` use here."""
+    from rolo_claude.providers.cc_models import claude_auth_status
+    try:
+        status = claude_auth_status()
+    except Exception as e:  # never let a doctor check crash the whole command
+        return f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})"
+    if status is None:
+        return f"{WARN} Claude subscription: claude not found (cc: models unavailable -- install Claude Code)"
+    if not status.logged_in:
+        return f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in for cc: models)"
+    via = status.auth_method or "claude.ai"
+    version_bit = f" via claude {status.version}" if status.version else ""
+    return f"{OK} Claude subscription: logged in ({via}){version_bit} -- cc: models available"
+
+
 _CHROME_NATIVE_HOST_ID = "com.anthropic.claude_code_browser_extension"
 # POSIX native-messaging manifest search dirs (Chrome/Chromium/Edge/Brave,
 # per-user) -- [verified doc]: Windows registers a registry key instead
@@ -538,6 +561,7 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     lines.append(_check_env_file())
     lines.append(_check_openrouter())
     lines.append(_check_databricks())
+    lines.append(_check_claude_subscription())
     lines.append(_check_chrome())
     lines.append(_check_playwright())
     lines.append(_check_ripgrep())

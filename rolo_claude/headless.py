@@ -701,6 +701,10 @@ def build_session(
     # already-killed/completed job is a no-op), so running it twice on a
     # normal clean exit is harmless.
     atexit.register(session.job_registry.kill_all)
+    # H11 Part B: same belt-and-suspenders atexit safety net for a cc:
+    # session's own claude subprocess -- a no-op session.close_cc() when
+    # cc: was never used.
+    atexit.register(session.close_cc)
 
     command_registry = Registry.discover(cwd, home())
     if not bare:
@@ -992,6 +996,13 @@ def run_print_mode(
     finally:
         try:
             session._fire_session_end("quit")
+        except Exception:
+            pass
+        # H11 Part B: never leave a cc: session's own claude subprocess
+        # running past this process's own exit either (a no-op when cc:
+        # was never used this session).
+        try:
+            session.close_cc()
         except Exception:
             pass
         # H8 scope A: "jobs killed on quit" -- never leave a background

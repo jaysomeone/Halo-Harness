@@ -118,6 +118,9 @@ Model reference forms:
 | `dbx:databricks-<name>` | `dbx:databricks-kimi-k3` | Databricks, OpenAI-chat dialect |
 | `dbx:system.ai.<name>` | `dbx:system.ai.my_model` | Databricks, OpenAI-chat dialect |
 | any of the above with `claude` in the name | `dbx:databricks-claude-sonnet` | Databricks, raw Anthropic passthrough |
+| `cc:<name>` | `cc:opus`, `cc:sonnet` | Your Claude subscription, via the installed `claude` binary |
+| `ant:<name>` | `ant:opus`, `ant:claude-3-5-haiku` | `api.anthropic.com`, pay-as-you-go (`ANTHROPIC_API_KEY`) |
+| a bare subscription-model name, no prefix | `opus`, `sonnet`, `fable` | `cc:` if logged in and no key is set, else `ant:` if a key is set, else an error |
 
 `--model`/`--small-model` pick the main/background-task model for the
 session; `rolo-claude models --refresh` pulls OpenRouter's `/api/v1/models`
@@ -128,6 +131,44 @@ catalog/`) still lets profile resolution work completely offline. Databricks'
 own endpoint list is cached by the same probe. Per-family prompt notation
 (including a Kimi-specific block adapted from OpenCode's own) adjusts tool-
 call/thinking conventions per model family automatically.
+
+### Claude models with your subscription (`cc:`)
+
+`cc:fable`, `cc:opus`, `cc:opus-5`, `cc:opus-5.0`, `cc:opus-4.8`,
+`cc:opus-4.6`, `cc:sonnet`, `cc:sonnet-5` and `cc:haiku` run on the Claude
+models included in your Claude subscription -- **not** the Anthropic API,
+and rolo-claude never touches your Claude Code login to get there.
+`ant:<same names>` reach the same models through `api.anthropic.com`
+pay-as-you-go instead (needs `ANTHROPIC_API_KEY`); a bare name with no
+prefix (`--model opus`) picks whichever of the two is actually available,
+preferring `cc:` when you're logged in and no key is set.
+
+**How it works**: rolo-claude never reads, copies or replays Claude Code's
+OAuth credentials (`~/.claude/.credentials.json` is never opened, not even
+to check it exists -- `claude auth status`'s own JSON answers that) and
+never sends them to `api.anthropic.com` itself. Instead it drives the
+`claude` binary you already have installed and logged in, headlessly, as
+the model: one `claude -p --input-format stream-json --output-format
+stream-json ...` subprocess per session, started the first time you use a
+`cc:` model and kept running across turns. rolo-claude's own tools (Read,
+Bash, MCP servers, everything) are handed to that subprocess through a
+small local bridge -- Claude Code sees them as one MCP server (`mcp__rolo__
+<Name>`) -- so every `cc:` tool call still goes through rolo-claude's OWN
+permissions, hooks, session log and telemetry, exactly like every other
+route. `doctor` shows "Claude subscription: logged in ... -- cc: models
+available" when this is usable; `rolo-claude models --cc` lists all nine
+names with their current targets and pricing.
+
+**Limitations of this v1**: a steer sent mid-turn is forwarded to Claude
+Code immediately, which queues it on its own terms rather than rolo-claude
+cutting the current reply the way it does for every other route. Claude
+Code applies its own auto-compaction to a `cc:` conversation; rolo-claude's
+own `/compact` is a no-op there (a note explains why). `stats --models`/
+`/cost` show a `cc:` row's cost as Claude Code's own estimate (a
+subscription isn't billed per token, so this is never exact spend the way
+every other route's real per-token pricing is). Switching models into
+`cc:` mid-session hands the new subprocess the prior conversation as one
+plain-text summary message rather than true native history.
 
 ## Permissions and auto mode
 
@@ -309,10 +350,19 @@ improve.model or:deepseek/deepseek-v4-flash`.
 
 ## Security posture
 
-- No local server/open port in the harness itself -- it's a direct
-  in-process HTTP client to OpenRouter/Databricks, not a proxy something
-  else connects to. (`rolo-claude proxy` is the one exception; see below,
-  and its own security posture is unchanged from `claude-bridge`'s.)
+- No local server/open port in the harness itself for the OpenRouter/
+  Databricks/`ant:` routes -- a direct in-process HTTP client, not a proxy
+  something else connects to. (`rolo-claude proxy` is one exception, see
+  below, security posture unchanged from `claude-bridge`'s; a `cc:` session
+  is the other -- see just below.)
+- **`cc:` never touches Claude Code's login.** `~/.claude/.credentials.json`
+  is never opened, not even to check it exists (`claude auth status`'s own
+  JSON is the only thing read, and its OAuth token itself is never
+  extracted or forwarded anywhere). The local tool bridge a `cc:` session
+  opens (a Unix socket, mode 0600, on POSIX; a TCP loopback socket + a
+  random per-connection token on Windows) only ever talks to the ONE
+  `claude` subprocess THIS session started, on this machine, for this
+  process's lifetime.
 - Credentials come from the environment, the settings chain, or
   `~/.databrickscfg`/`ucode-settings.json`; they're never written to the
   repo, a command line, or committed config. `rolo-claude --config`-style

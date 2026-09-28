@@ -152,7 +152,8 @@ class SessionLog:
                       model: Optional[str] = None, route: Optional[str] = None,
                       provider: Optional[str] = None, finish_reason: Optional[str] = None,
                       latency_ms: Optional[float] = None, ttft_ms: Optional[float] = None,
-                      retries: Optional[int] = None, status: Optional[str] = None) -> dict:
+                      retries: Optional[int] = None, status: Optional[str] = None,
+                      estimate: Optional[bool] = None) -> dict:
         """H9 whole-tree review finding 13: `agent_id`, when given, tags
         this usage node as a SUB-AGENT's rolled-up total (agent/subagent.py
         calls this on the PARENT's own log once a child finishes) rather
@@ -169,8 +170,17 @@ class SessionLog:
         for per-model/per-provider aggregation -- never read by
         `derive_request` (a `usage` node contributes no message at all), so
         adding them is automatically wire-safe. `status` is one of
-        "ok"|"429"|"5xx"|"overflow"|"aborted"|"connect_error"."""
+        "ok"|"429"|"5xx"|"overflow"|"aborted"|"connect_error".
+
+        H11 Part B: `estimate=True` marks a `cc:`-route usage node whose
+        `cost_usd` came from Claude Code's own `total_cost_usd` -- a
+        subscription is not billed per token, so that figure is Claude
+        Code's own estimate, not a real charge; `stats --models`/`/cost`
+        surface this instead of presenting it as exact spend like every
+        other route's real per-token pricing."""
         node = {"type": "usage", "usage": usage, "cost_usd": cost_usd}
+        if estimate is not None:
+            node["estimate"] = estimate
         if agent_id is not None:
             node["agent_id"] = agent_id
         if model is not None:
