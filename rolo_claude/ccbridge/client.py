@@ -71,6 +71,14 @@ class ParentLink:
     def call_tool(self, name: str, arguments: dict) -> dict:
         return self._call("tools/call", {"name": name, "arguments": arguments or {}})
 
+    def await_tools_change(self, known_generation: int) -> dict:
+        """H11b finding 6: a bounded long-poll -- the parent's own
+        `_await_tools_change` always answers within `_TOOLS_AWAIT_
+        TIMEOUT_S`, generation unchanged if nothing grew the catalog in
+        that window. Callers loop this on their OWN dedicated connection
+        (see `ccbridge/__main__.py`'s `_watch_tool_changes`)."""
+        return self._call("tools/await_change", {"known_generation": known_generation})
+
     def close(self) -> None:
         for f in (self._rf, self._wf):
             try:

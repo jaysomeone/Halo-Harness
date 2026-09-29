@@ -799,7 +799,19 @@ class Controller:
         `SessionLog` is append-only, so forking is a copy, never a
         symlink/shared-tail scheme) and switch this Controller onto it.
         Returns the new session id; the conversation continues unchanged,
-        now diverging independently of the original."""
+        now diverging independently of the original.
+
+        H11b finding 8: a live `cc:` claude subprocess (still tied to the
+        OLD conversation id, now copied verbatim into the new log's own
+        `cc_session_id` meta node) is closed here -- otherwise this
+        Session would just keep talking to that SAME old process/
+        conversation, never actually diverging on the claude side at all,
+        and the NEXT restart (Esc/crash) would `--resume` an id that was
+        never independently created. `_cc_fork_session` tells `ensure_cc_
+        state`'s next start to use `--resume <that id> --fork-session`
+        (claude's own "branch into a new conversation" flag) instead of a
+        plain resume, which would just continue the SAME shared
+        conversation the original session might still be using."""
         from rolo_claude.agent.log import SessionLog
 
         new_id = uuid.uuid4().hex
@@ -807,6 +819,10 @@ class Controller:
         for node in self.session.log.nodes():
             new_log._append({k: v for k, v in node.items() if k != "seq"})
         self.session.log = new_log
+        if getattr(self.session, "_cc_state", None) is not None:
+            self.session.close_cc()
+            self.session._cc_state = None
+            self.session._cc_fork_session = True
         return new_id
 
     def export_session(self, *, sanitize: bool = False, path: Optional[str] = None) -> str:

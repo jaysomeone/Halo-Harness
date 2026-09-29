@@ -237,12 +237,20 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             return ModelProfile(
                 context_tokens=fields.get("context_tokens", 1_000_000),
                 max_output_tokens=fields.get("max_output_tokens", 64_000),
+                # H11b finding 7: this call site never read `fields["vision"]`
+                # at all (the dataclass default, False, always won) -- every
+                # real Claude model accepts image input, so this defaults
+                # True even for a future table row that forgets the key.
+                vision=bool(fields.get("vision", True)),
                 reasoning="native",
                 price_in=fields.get("price_in"), price_out=fields.get("price_out"),
                 price_cache_read=fields.get("price_cache_read"), price_cache_write=fields.get("price_cache_write"),
             )
         if ref.provider == "cc":
-            return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, reasoning="native")
+            # An unrecognized cc: model id is still a REAL Claude model
+            # (Claude Code resolved it, whatever it is) -- vision=True for
+            # the same reason reasoning="native" already is here.
+            return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, vision=True, reasoning="native")
 
     models = load_models_json(state_dir)
     entry = models.get(ref.model)

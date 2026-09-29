@@ -306,7 +306,7 @@ def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_m
     unchanged [D-CFG chain]. `haiku` resolves to the parent's SMALL model
     (brief: "haiku -> small model"); `inherit`, or nothing resolving at
     all, reuses the parent's ref/profile OBJECTS directly (never re-parsed)."""
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
+    from rolo_claude.model import ModelRef, parse_model_ref, resolve_model_profile
 
     env = env or {}
     raw = (invocation_model or frontmatter_model or env.get("CLAUDE_CODE_SUBAGENT_MODEL")
@@ -318,6 +318,33 @@ def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_m
             profile = parent_small_profile or resolve_model_profile(parent_small_ref, state_dir, routes)
             return parent_small_ref, profile
         return parent_ref, parent_profile
+    # H11b finding 25: `parse_model_ref`'s bare-alias auto-routing (a bare
+    # "sonnet"/"opus"/... resolves to cc: or ant: depending on what's
+    # available) is scoped to a HUMAN's own `--model`/`/model` request
+    # (model.py's own docstring) -- a sub-agent's frontmatter `model:` or
+    # an `Agent(model=...)` override must never silently jump to a
+    # DIFFERENT provider than the parent's own just because one of these
+    # nine words happens to match and `claude` happens to be logged in on
+    # this machine (verified live: a DeepSeek/Kimi session's plugin agents
+    # with `model: sonnet` started spawning nested claude subprocesses on
+    # the subscription once H11 shipped; before it they correctly failed
+    # with InvalidModelError, the same way a made-up model name would). A
+    # Claude-family PARENT (cc:/ant:) resolves the alias on its OWN
+    # already-chosen route (never re-deciding cc: vs ant: independently);
+    # any other parent keeps the bare word as a literal model id on the
+    # parent's own provider/dialect -- the same explicit failure a
+    # not-really-a-model-id string always produced pre-H11.
+    from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES
+    base_raw = raw[:-len("[1m]")] if raw.endswith("[1m]") else raw
+    if base_raw in BARE_ALIAS_NAMES:
+        if parent_ref.provider == "cc":
+            ref = parse_model_ref(f"cc:{raw}", routes)
+            return ref, resolve_model_profile(ref, state_dir, routes)
+        if parent_ref.provider == "anthropic" and parent_ref.dialect == "anthropic-passthrough":
+            ref = parse_model_ref(f"ant:{raw}", routes)
+            return ref, resolve_model_profile(ref, state_dir, routes)
+        ref = ModelRef(raw=raw, provider=parent_ref.provider, model=raw, dialect=parent_ref.dialect)
+        return ref, resolve_model_profile(ref, state_dir, routes)
     ref = parse_model_ref(raw, routes)
     profile = resolve_model_profile(ref, state_dir, routes)
     return ref, profile

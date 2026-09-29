@@ -16,6 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 
+# H11b finding 27: this module's own scratch home -- every ToolBridgeServer
+# here writes its POSIX run/<sid>.sock under `bridge_home()`, never the
+# real ~/.rolo-claude/run. See test_cc_session.py's own comment on this
+# same line for why it's set once, at import time, per module.
+os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="ccbridge-server-scratchhome-")
+
 test, TESTS = new_registry()
 
 REPO_DIR = Path(__file__).resolve().parent.parent

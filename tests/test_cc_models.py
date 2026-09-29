@@ -14,6 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 
+# H11b finding 27: this module's own scratch home -- `profile_fields_for_
+# cc_model`/`refresh_cc_catalog` read/write `<bridge_home()>/cc-models.
+# json`, which defaulted to the REAL ~/.rolo-claude/cc-models.json here
+# (verified: this module read the real file). See test_cc_session.py's
+# own comment on this same line for why it's set once, at import time.
+os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="cc-models-scratchhome-")
+
 test, TESTS = new_registry()
 
 

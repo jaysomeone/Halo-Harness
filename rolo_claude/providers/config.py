@@ -109,6 +109,32 @@ def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
     return {k: v for k, v in env.items() if k not in strip_keys}
 
 
+# H11b critical finding 2: the `cc:` route's own child env -- everything
+# `tool_child_env` already strips PLUS every ANTHROPIC_*/CLAUDE_CODE_*
+# variable and the bare CLAUDECODE marker, so the installed `claude`
+# binary's own subscription login (never ours to read or replay) is
+# ALWAYS what a `cc:` turn uses -- never an ambient ANTHROPIC_API_KEY/
+# AUTH_TOKEN/BASE_URL this process happened to have (from the env file, a
+# real shell var, or a Databricks passthrough setup for `ant:`), and never
+# an OUTER Claude Code session's own identity (CLAUDE_CODE_SESSION_ID,
+# CLAUDE_CODE_MESSAGING_SOCKET/_TOKEN, CLAUDE_EFFORT, ...) this rolo-claude
+# process itself happens to have inherited from running nested inside one.
+# Used for BOTH the `claude` subprocess's own env AND (transitively, since
+# an MCP stdio child inherits its spawning process's env -- verified live,
+# H11 report) the `ccbridge` child's env.
+def cc_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
+    stripped = tool_child_env(env, env_file_path=env_file_path)
+    # `CLAUDE*` (not just `CLAUDE_CODE_*`) also catches CLAUDECODE and
+    # rolo's OWN hook/skill template vars (CLAUDE_EFFORT, CLAUDE_PROJECT_
+    # DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_ENV_FILE, ...) -- verified live from
+    # INSIDE an actual nested launch: CLAUDE_EFFORT alone survived a
+    # narrower `CLAUDE_CODE_`-only prefix check because it has no "_CODE_"
+    # in it, yet is explicitly named in finding 2's own repro. None of
+    # rolo's own `CLAUDE*` namespace means anything to the real `claude`
+    # binary, so the broader prefix costs nothing.
+    return {k: v for k, v in stripped.items() if not k.startswith("CLAUDE") and not k.startswith("ANTHROPIC_")}
+
+
 def load_settings_env_chain(cwd: Path) -> dict:
     """
     Merge env blocks from settings files in precedence order.

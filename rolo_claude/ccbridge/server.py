@@ -24,17 +24,50 @@ connection is closed without a response.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from rolo_claude.config.paths import bridge_home
 
 _ACCEPT_POLL_S = 0.5
+_HANDSHAKE_TIMEOUT_S = 5.0    # finding 16: an unauthenticated connection that never sends a line must not pin a thread forever
+_TOOLS_AWAIT_TIMEOUT_S = 25.0  # finding 6: long-poll bound for tools/await_change -- always returns eventually
+_STALE_SOCKET_PROBE_S = 0.2
+
+
+def _sweep_stale_sockets(run_dir: Path) -> None:
+    """H11b finding 15: a SIGKILL'd (or crashed) rolo-claude leaves its
+    old `<sid>.sock` file behind forever otherwise -- self-healing rather
+    than accumulating: a socket whose listener is gone refuses a connect
+    almost instantly (`ConnectionRefusedError`), so this never meaningfully
+    delays a real server's own `start()`."""
+    try:
+        entries = list(run_dir.glob("*.sock"))
+    except OSError:
+        return
+    for path in entries:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(_STALE_SOCKET_PROBE_S)
+            sock.connect(str(path))
+            sock.close()  # a real listener answered -- leave it alone, some other session owns it
+        except OSError:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 class ToolBridgeServer:
@@ -51,6 +84,11 @@ class ToolBridgeServer:
         self.socket_path: Optional[Path] = None
         self.host: Optional[str] = None
         self.port: Optional[int] = None
+        # finding 6: bumped by `notify_tools_changed()`; `tools/await_change`
+        # long-polls this condition so the ccbridge child learns when to
+        # send Claude Code a real `notifications/tools/list_changed`.
+        self._tools_generation = 0
+        self._tools_cond = threading.Condition()
 
     def start(self) -> None:
         if self._sock is not None:
@@ -66,6 +104,14 @@ class ToolBridgeServer:
     def _start_unix(self) -> None:
         run_dir = bridge_home() / "run"
         run_dir.mkdir(parents=True, exist_ok=True)
+        # finding 15: 0700, not whatever a permissive umask left `mkdir`
+        # with (0755 verified) -- explicit chmod so this holds even when
+        # the directory already existed from before this fix.
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+        _sweep_stale_sockets(run_dir)
         self.socket_path = run_dir / f"{self.session_id}.sock"
         try:
             self.socket_path.unlink()
@@ -113,14 +159,26 @@ class ToolBridgeServer:
         wf = conn.makefile("wb", buffering=0)
         try:
             if os.name == "nt":
-                first = rf.readline()
+                # finding 16: a handshake timeout -- a local connection
+                # that never sends its token line used to pin this thread
+                # (an unbounded `readline()`) forever.
+                conn.settimeout(_HANDSHAKE_TIMEOUT_S)
+                try:
+                    first = rf.readline()
+                except OSError:
+                    return
+                conn.settimeout(None)
                 if not first:
                     return
                 try:
                     hello = json.loads(first.decode("utf-8", "replace"))
                 except ValueError:
                     hello = None
-                if not isinstance(hello, dict) or hello.get("token") != self.token:
+                token = hello.get("token") if isinstance(hello, dict) else None
+                # finding 16: constant-time compare -- the plain `==` this
+                # replaces leaks timing information about how much of the
+                # real token a guess matched.
+                if not isinstance(token, str) or not hmac.compare_digest(token, self.token or ""):
                     self._write(wf, {"id": None, "error": {"message": "bad or missing token"}})
                     return
             while not self._closed.is_set():
@@ -165,12 +223,40 @@ class ToolBridgeServer:
             if method == "tools/call":
                 result = self._call_tool_fn(params.get("name"), params.get("arguments") or {})
                 return {"id": rid, "result": result}
+            if method == "tools/await_change":
+                # finding 6: a bounded long-poll -- ties up ONLY this one
+                # connection's thread (the ccbridge child uses a SEPARATE
+                # connection for this, never the one tools/list/tools/call
+                # share, so a pending poll never delays a real tool call).
+                known = params.get("known_generation")
+                return {"id": rid, "result": self._await_tools_change(known if isinstance(known, int) else 0)}
             return {"id": rid, "error": {"message": f"unknown ccbridge method {method!r}"}}
         except Exception as e:  # a bridge RPC handler must never take the accept loop down with it
             return {"id": rid, "error": {"message": f"{type(e).__name__}: {e}"}}
 
+    def notify_tools_changed(self) -> None:
+        """H11b finding 6: called from `agent/cc_runtime.py`'s
+        `notify_catalog_changed` whenever a ToolSearch load actually grows
+        the session's wire catalog -- bumps the generation a pending (or
+        future) `tools/await_change` long-poll is waiting on."""
+        with self._tools_cond:
+            self._tools_generation += 1
+            self._tools_cond.notify_all()
+
+    def _await_tools_change(self, known_generation: int) -> dict:
+        with self._tools_cond:
+            deadline = time.monotonic() + _TOOLS_AWAIT_TIMEOUT_S
+            while self._tools_generation == known_generation and not self._closed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._tools_cond.wait(timeout=remaining)
+            return {"generation": self._tools_generation}
+
     def close(self) -> None:
         self._closed.set()
+        with self._tools_cond:
+            self._tools_cond.notify_all()
         if self._sock is not None:
             try:
                 self._sock.close()

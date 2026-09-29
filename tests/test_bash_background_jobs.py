@@ -469,8 +469,23 @@ def test_task_stop_tool_requires_an_id(ctx: Ctx):
 
 @test
 def test_background_bash_job_notice_applied_on_next_turn(ctx: Ctx):
+    # H11b finding 27: save/restore BRIDGE_TEST_HOME -- this used to set it
+    # and never restore it, so it leaked into every test that ran later in
+    # the SAME `run_all.py` process, silently shielding other suites'
+    # "never touches the real ~/.rolo-claude" guards for the wrong reason.
     fh = build_fake_home()
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    try:
+        _run_background_bash_job_notice_test(ctx, fh)
+    finally:
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+def _run_background_bash_job_notice_test(ctx: Ctx, fh: dict) -> None:
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
@@ -501,8 +516,20 @@ def test_background_bash_job_notice_applied_on_next_turn(ctx: Ctx):
 
 @test
 def test_controller_quit_kills_background_jobs(ctx: Ctx):
+    # finding 27: same save/restore as the test above.
     fh = build_fake_home()
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    try:
+        _run_controller_quit_kills_background_jobs(ctx, fh)
+    finally:
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+def _run_controller_quit_kills_background_jobs(ctx: Ctx, fh: dict) -> None:
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.controller import Controller

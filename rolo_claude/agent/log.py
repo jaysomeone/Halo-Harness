@@ -60,7 +60,16 @@ class SessionLog:
             node.setdefault("ts", time.time())
             node["seq"] = len(self._nodes)
             try:
-                with open(self.path, "a", encoding="utf-8") as f:
+                # H11b finding 21: `errors="surrogateescape"` -- a tool
+                # result built from `os.fsdecode`d bytes (e.g. Glob over a
+                # directory with a non-UTF-8 filename) can carry a lone
+                # surrogate codepoint; the default `errors="strict"` raised
+                # UnicodeEncodeError HERE (verified on WSL), which reached
+                # a cc: bridged call as an unhandled dispatch exception.
+                # surrogateescape round-trips it back to the exact original
+                # bytes instead, the same error handler `os.fsdecode`
+                # itself used to produce it in the first place.
+                with open(self.path, "a", encoding="utf-8", errors="surrogateescape") as f:
                     f.write(json.dumps(node, ensure_ascii=False) + "\n")
             except OSError:
                 pass

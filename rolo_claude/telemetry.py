@@ -206,6 +206,29 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
         if ntype == "meta":
             if node.get("model"):
                 current_model = node["model"]
+                # H11b finding 18: a cc: turn logs its tool_use/tool_result
+                # nodes BEFORE its own (single, end-of-turn) usage node, so
+                # `current_key` -- otherwise only ever touched by a "usage"
+                # node -- was still whatever the PREVIOUS turn (or route,
+                # after an or:->cc: switch) left it at; every tool call
+                # this turn was mis-attributed (or, on a session's first
+                # turn ever, silently dropped: model_bucket() returned
+                # None). `Session.__init__`/`clear()`/`set_model()` all log
+                # a `model=` meta node before any tool call can happen, so
+                # this alone fixes both cases -- a bare `tools=`-only
+                # catalog-growth meta write (agent/loop.py's `_on_catalog_
+                # grow`) never has a `model` key, so it never reaches here.
+                # The FALLBACK provider guess matters too: `cc:` is always
+                # deterministically provider "cc" (no per-call responding-
+                # provider/failover concept applies to it at all), so a
+                # session's very first cc: turn's tool calls land in the
+                # SAME bucket its usage node will use a moment later,
+                # rather than splitting into a same-model/no-provider row
+                # of their own (`_route_from_model` covers or:/dbx:/ant:
+                # reasonably, though those CAN legitimately fail over to a
+                # different responding provider than their own prefix).
+                guessed_provider = "cc" if current_model.startswith("cc:") else (_route_from_model(current_model) or "")
+                current_key = last_key_for_model.get(current_model, f"{current_model}\x1f{guessed_provider}")
         elif ntype == "user":
             kind = node.get("kind")
             if kind not in _NON_PROMPT_USER_KINDS:

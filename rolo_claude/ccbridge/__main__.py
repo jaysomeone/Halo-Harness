@@ -7,6 +7,14 @@ local socket (`ccbridge.client.ParentLink`, wired from the environment --
 see server.py's `child_env()`). Every actual dispatch (permission decide,
 hooks, the tool's own run, the session log) happens on the PARENT side
 (`agent/cc_runtime.py`); this process is a thin, stateless relay.
+
+H11b finding 6: also runs a background watcher (a SECOND `ParentLink`
+connection, never sharing the one `tools/list`/`tools/call` use, so a
+long-poll never delays a real tool call) that long-polls the parent's
+`tools/await_change` and calls the MCP session's own `send_tool_list_
+changed()` the moment a ToolSearch load actually grows the catalog --
+without this, Claude Code only ever lists tools once, at startup, and can
+never learn a newly-loaded deferred tool exists.
 """
 
 from __future__ import annotations
@@ -32,19 +40,69 @@ def _content_blocks(raw_blocks, types_mod):
     return out
 
 
+def _tool_from_dict(t: dict, types_mod):
+    """finding 7: forwards `annotations.readOnlyHint`/`destructiveHint`
+    and `_meta` when `bridge_list_tools` (agent/cc_runtime.py) included
+    them -- lets Claude Code apply its own per-tool result-size override
+    (`_meta["anthropic/maxResultSizeChars"]`) instead of its generic 25k-
+    token cap, and tell a read-only bridged tool apart from a mutating
+    one the same way it would for a native MCP server."""
+    annotations = None
+    raw_ann = t.get("annotations")
+    if isinstance(raw_ann, dict):
+        annotations = types_mod.ToolAnnotations(
+            read_only_hint=raw_ann.get("readOnlyHint"), destructive_hint=raw_ann.get("destructiveHint"),
+        )
+    kwargs = dict(name=t.get("name", ""), description=t.get("description", ""),
+                   input_schema=t.get("input_schema") or {"type": "object", "properties": {}})
+    if annotations is not None:
+        kwargs["annotations"] = annotations
+    meta = t.get("_meta")
+    if isinstance(meta, dict) and meta:
+        kwargs["meta"] = meta
+    return types_mod.Tool(**kwargs)
+
+
+async def _watch_tool_changes(session) -> None:
+    """Runs for the lifetime of this child process (cancelled, best-
+    effort, when `_run` returns). A fresh `ParentLink` of its own --
+    never the one `on_list_tools`/`on_call_tool` share."""
+    try:
+        link = ParentLink()
+    except ParentLinkError:
+        return
+    known_generation = 0
+    try:
+        while True:
+            try:
+                resp = await asyncio.to_thread(link.await_tools_change, known_generation)
+            except ParentLinkError:
+                return
+            new_generation = resp.get("generation")
+            if isinstance(new_generation, int) and new_generation != known_generation:
+                known_generation = new_generation
+                try:
+                    await session.send_tool_list_changed()
+                except Exception:
+                    pass
+    finally:
+        link.close()
+
+
 async def _run(link: ParentLink) -> None:
     import mcp.server.stdio
     import mcp.types as types
-    from mcp.server.lowlevel import Server
+    from mcp.server.lowlevel import NotificationOptions, Server
+
+    watch_task: "asyncio.Task | None" = None
 
     async def on_list_tools(ctx, params):
+        nonlocal watch_task
         tools = await asyncio.to_thread(link.list_tools)
+        if watch_task is None:
+            watch_task = asyncio.create_task(_watch_tool_changes(ctx.session))
         return types.ListToolsResult(tools=[
-            types.Tool(
-                name=t.get("name", ""), description=t.get("description", ""),
-                input_schema=t.get("input_schema") or {"type": "object", "properties": {}},
-            )
-            for t in tools if isinstance(t, dict) and t.get("name")
+            _tool_from_dict(t, types) for t in tools if isinstance(t, dict) and t.get("name")
         ])
 
     async def on_call_tool(ctx, params):
@@ -61,8 +119,14 @@ async def _run(link: ParentLink) -> None:
         )
 
     server = Server("rolo", version="1.0", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            init_options = server.create_initialization_options(notification_options=NotificationOptions(
+                tools_changed=True))
+            await server.run(read_stream, write_stream, init_options)
+    finally:
+        if watch_task is not None:
+            watch_task.cancel()
 
 
 def main(argv=None) -> int:

@@ -72,7 +72,17 @@ def build_mcp_config(server_env: dict) -> dict:
     sec.9's `mcp__${wn(server)}__${wn(tool)}` naming) running the child
     side of the bridge, `python -m rolo_claude.ccbridge`. `PYTHONPATH` is
     always set so the child can `import rolo_claude` whether this process
-    is an editable/repo checkout or an installed package."""
+    is an editable/repo checkout or an installed package.
+
+    H11b finding 16: `server_env` is normally `{}` in production --
+    `ensure_cc_state` folds the bridge's own `child_env()` (the socket
+    path, or the Windows host/port/TOKEN) into the `claude` SUBPROCESS's
+    own env instead (`cc_process.ClaudeCodeProcess`'s `env=`), which the
+    stdio MCP child then simply inherits (verified live) -- never spelled
+    out here, where it would ride along in plaintext on claude's own
+    command line (Windows: readable via `Win32_Process.CommandLine` by
+    any same-user process or an admin). `server_env` still accepts one
+    for a direct/test caller that wants the OLD inline-env shape."""
     env = dict(server_env)
     existing_pp = os.environ.get("PYTHONPATH", "")
     repo_root = _repo_root_for_pythonpath()
@@ -88,18 +98,42 @@ def build_mcp_config(server_env: dict) -> dict:
 def build_cc_argv(*, model: str, session_id: str, resume: bool, mcp_config: dict,
                    append_system_prompt: Optional[str] = CC_APPEND_SYSTEM_PROMPT,
                    permission_mode: str = "bypassPermissions",
-                   tools_flag: str = "") -> list:
+                   tools_flag: str = "", fork_session: bool = False,
+                   max_turns: Optional[int] = None, effort: Optional[str] = None) -> list:
+    """`fork_session=True` (H11b finding 8, `/fork` on a session that
+    already used cc:) adds `--fork-session` -- only meaningful alongside
+    `resume=True` (claude's own contract: "When resuming, create a new
+    session ID instead of reusing the original"); `session_id` is still
+    the id to `--resume` in that case, since claude picks the NEW forked
+    id itself (never told to us in advance) -- the real id in use is
+    read back from the first stream-json line's own `session_id` field
+    (see `agent/cc_runtime.py`'s `_events_for_stdout_obj`) and logged as
+    the session's new `cc_session_id`. `max_turns` (H11b finding 5):
+    live-verified this is a PER-TURN cap in `-p --input-format stream-
+    json` mode, not a process-lifetime total (two prompts sent 6s apart
+    to one `--max-turns 1` process both got their own full "success"
+    result) -- safe to forward `session.max_turns` unconditionally.
+    `effort` forwards rolo-claude's own `--effort`/`/effort` the same
+    way. `--json-schema` is NOT forwarded: `output.py`'s sinks already
+    apply `_try_structured_output` to whatever final text ANY route
+    (cc: included) produces, so there is nothing cc:-specific to wire."""
     argv = resolve_claude_launch_argv() + [
         "-p", "--model", model,
         "--output-format", "stream-json", "--input-format", "stream-json",
-        "--verbose", "--include-partial-messages",
+        "--verbose", "--include-partial-messages", "--replay-user-messages",
         "--tools", tools_flag, "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
         "--settings", json.dumps({"disableAllHooks": True}),
         "--permission-mode", permission_mode,
     ]
     argv += (["--resume", session_id] if resume else ["--session-id", session_id])
+    if fork_session:
+        argv.append("--fork-session")
     if append_system_prompt:
         argv += ["--append-system-prompt", append_system_prompt]
+    if max_turns:
+        argv += ["--max-turns", str(max_turns)]
+    if effort:
+        argv += ["--effort", effort]
     return argv
 
 
@@ -169,8 +203,17 @@ class ClaudeCodeProcess:
         return self._proc.poll() is None
 
     def send_user_line(self, text: str) -> None:
-        line = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}},
-                           ensure_ascii=False)
+        self.send_user_blocks([{"type": "text", "text": text}])
+
+    def send_user_blocks(self, blocks: list) -> None:
+        """H11b finding 4: the multi-block form -- `send_user_line` is a
+        thin one-block wrapper over this. `blocks` are Anthropic Messages
+        API content blocks verbatim (text and/or image, e.g. `tools.
+        imageutil.image_block_or_note`'s own `{"type":"image","source":
+        {"type":"base64","media_type":...,"data":...}}` shape) -- claude's
+        own `--input-format stream-json` user-message content accepts the
+        same shapes the Messages API does, so no translation is needed."""
+        line = json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}, ensure_ascii=False)
         with self._stdin_lock:
             stdin = self._proc.stdin
             if stdin is None or stdin.closed:

@@ -91,34 +91,43 @@ _1M_SUFFIX = "[1m]"
 # passthrough path unchanged. True for every opus>=4.6, every 5.x, and
 # fable (all adaptive-thinking-capable per Anthropic's own model notes);
 # False for haiku.
+# H11b finding 7: every current Claude model (subscription or API) accepts
+# image input -- `vision=True` on every row here is what makes
+# `model.resolve_model_profile`'s cc:/ant: branch actually set
+# `ModelProfile.vision=True` (before this fix the fields dict had no
+# "vision" key at all, so `fields.get("vision", False)` -- and, until that
+# call site was also fixed, the ModelProfile constructor call itself, which
+# never even READ this key -- silently defaulted every cc:/ant: model to
+# vision=False, the exact bug verified live: "Read of a PNG on cc:fable
+# returns ... this model has no vision support configured").
 CC_MODEL_TABLE: "dict[str, dict]" = {
     "claude-fable-5-1": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.00001, "price_out": 0.00005,
         "price_cache_read": 0.00000025, "price_cache_write": 0.0000125,
     },
     "claude-opus-5-5": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000004, "price_out": 0.00002,
         "price_cache_read": 0.0000002, "price_cache_write": 0.000005,
     },
     "claude-opus-5": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000005, "price_out": 0.000025,
         "price_cache_read": 0.0000005, "price_cache_write": 0.00000625,
     },
     "claude-opus-4-8": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000005, "price_out": 0.000025,
         "price_cache_read": 0.0000005, "price_cache_write": 0.00000625,
     },
     "claude-opus-4-6": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000005, "price_out": 0.000025,
         "price_cache_read": 0.0000005, "price_cache_write": 0.00000625,
     },
     "claude-sonnet-5": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000002, "price_out": 0.00001,
         "price_cache_read": 0.0000002, "price_cache_write": 0.0000025,
     },
@@ -126,12 +135,12 @@ CC_MODEL_TABLE: "dict[str, dict]" = {
     # 2026-09-28 -- proxied from claude-sonnet-5's own pricing (same tier,
     # one point release apart) until a refresh observes the real row.
     "claude-sonnet-5-5": {
-        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True,
+        "context_tokens": 1_000_000, "max_output_tokens": 128_000, "adaptive_thinking": True, "vision": True,
         "price_in": 0.000002, "price_out": 0.00001,
         "price_cache_read": 0.0000002, "price_cache_write": 0.0000025,
     },
     "claude-haiku-4-5-20251001": {
-        "context_tokens": 200_000, "max_output_tokens": 64_000, "adaptive_thinking": False,
+        "context_tokens": 200_000, "max_output_tokens": 64_000, "adaptive_thinking": False, "vision": True,
         "price_in": 0.000001, "price_out": 0.000005,
         "price_cache_read": 0.0000001, "price_cache_write": 0.00000125,
     },
@@ -225,9 +234,25 @@ class ClaudeAuthStatus:
     subscription_type: Optional[str] = None
     version: Optional[str] = None
     raw: dict = field(default_factory=dict)
+    # H11b finding 23: a real `claude auth status` timeout must not read as
+    # "not installed" (doctor's misleading "install Claude Code" message,
+    # verified live) -- set True ONLY on a `subprocess.TimeoutExpired`,
+    # never merged with the "binary not found at all" (`None` return) or
+    # "ran fine, reported not logged in" (`logged_in=False, timed_out=
+    # False`) cases.
+    timed_out: bool = False
 
 
-def claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
+# H11b critical finding 2: `authMethod` values `claude_auth_status` treats
+# as "this really is the user's own claude.ai subscription" -- everything
+# else (today just `"api_key"`, seen live when ANTHROPIC_API_KEY is set in
+# the checked environment) means "logged in, but not to a subscription
+# cc: may spend against" (doctor WARNs, `_preflight_cc` refuses and points
+# at `ant:`).
+SUBSCRIPTION_AUTH_METHODS = frozenset({"claude.ai"})
+
+
+def claude_auth_status(*, timeout: float = 10.0, env: Optional[dict] = None) -> Optional[ClaudeAuthStatus]:
     """Runs `claude auth status` and parses its JSON -- NEVER opens
     `~/.claude/.credentials.json` (binding constraint, brief). Returns
     None ONLY when the binary itself can't be found/run at all (doctor's
@@ -236,7 +261,16 @@ def claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
     a real `claude auth status` always prints JSON, per this milestone's
     live verification) `loggedIn: false` -- or omits the key -- still
     returns a `ClaudeAuthStatus(logged_in=False, ...)` (doctor's "run
-    `claude` once and log in" case), so callers can tell the two apart.
+    `claude` once and log in" case), so callers can tell the two apart. A
+    genuine timeout returns `ClaudeAuthStatus(logged_in=False,
+    timed_out=True)` instead of None -- see that field's own docstring.
+
+    `env` (H11b critical finding 2): the environment THIS subprocess runs
+    in -- defaults to `providers.config.cc_child_env(os.environ)`, the
+    SAME stripped env the real `cc:` subprocess gets, so an ambient
+    ANTHROPIC_API_KEY/BASE_URL never makes this call (and therefore
+    doctor/`_preflight_cc`) report an `authMethod` the actual `cc:` turn
+    would never see or use.
 
     Test seam: `BRIDGE_TEST_CC_AUTH_STATUS` (a JSON object string, same
     shape `claude auth status` itself prints) short-circuits this without
@@ -249,9 +283,14 @@ def claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
         argv = resolve_claude_launch_argv()
     except ClaudeCodeNotFoundError:
         return None
+    if env is None:
+        from rolo_claude.providers.config import cc_child_env
+        env = cc_child_env(dict(os.environ))
     try:
-        proc = subprocess.run(argv + ["auth", "status"], capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
+        proc = subprocess.run(argv + ["auth", "status"], capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return ClaudeAuthStatus(logged_in=False, timed_out=True)
+    except OSError:
         return None
     return _parse_auth_status_json(proc.stdout)
 
@@ -343,29 +382,38 @@ def refresh_cc_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.
     CLI action (token-thrift: a normal session never pays this). Returns
     the freshly written dict; best-effort per-alias (a ping that errors
     just keeps that name's existing/static mapping, never aborts the
-    whole refresh)."""
+    whole refresh).
+
+    H11b finding 24: `--no-session-persistence` (never `--session-id
+    <uuid4>`) so this never adds nine throwaway "pong" entries to Claude
+    Code's own `/resume` picker; the stripped `cc_child_env` (never this
+    process's raw env) so an ambient ANTHROPIC_API_KEY can't bill the
+    ping instead of the subscription; and the modelUsage entry with the
+    most output tokens (never just `next(iter(...))`, which is dict-
+    iteration-order, not "the model that actually answered") is what gets
+    cached as the canonical id."""
     try:
         argv = resolve_claude_launch_argv()
     except ClaudeCodeNotFoundError:
         return _load_cc_models_cache(state_dir)
+    from rolo_claude.providers.config import cc_child_env
+    env = cc_child_env(dict(os.environ))
     ant_aliases = dict(_load_cc_models_cache(state_dir).get("ant_aliases", {}))
     for name, cc_value in CC_ALIASES.items():
         try:
-            import uuid
-            sid = str(uuid.uuid4())
             proc = subprocess.run(
                 argv + ["-p", "--model", cc_value, "--output-format", "json", "--max-turns", "1",
                         "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                        "--session-id", sid, "--permission-mode", "bypassPermissions",
+                        "--no-session-persistence", "--permission-mode", "bypassPermissions",
                         "reply with the single word pong"],
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True, text=True, timeout=timeout, env=env,
             )
             data = json.loads(proc.stdout)
             model_usage = data.get("modelUsage") or {}
             if model_usage:
-                canonical = next(iter(model_usage))
+                canonical = max(model_usage, key=lambda k: (model_usage[k] or {}).get("outputTokens", 0) or 0)
                 ant_aliases[name] = canonical
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, StopIteration):
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
             continue
     result = {"ant_aliases": ant_aliases, "profiles": {}}
     path = _cc_models_cache_path(state_dir)

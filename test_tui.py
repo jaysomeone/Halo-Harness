@@ -1075,6 +1075,23 @@ def _real_controller(cwd: Path, *, mode: str = "bypassPermissions"):
     from rolo_claude.controller import Controller
     from rolo_claude.permissions import PermissionEngine
 
+    # H11b finding 27 (same spirit): `SessionLog(cwd)` below honours
+    # BRIDGE_TEST_HOME/BRIDGE_STATE_DIR if set, else the REAL
+    # ~/.rolo-claude -- this helper never scoped either one itself, only
+    # ever safe because SOME other test happened to leave one set first.
+    # Never overrides a value a caller deliberately set. `BRIDGE_STATE_DIR`
+    # (skips the extra "/.rolo-claude" segment) with a SHORT prefix --
+    # `rolo_claude/shadow.py` re-embeds a tracked file's own full absolute
+    # path (drive letter included) under `<state_dir>/sessions/<slug>/
+    # <session_id>/shadow/_drive_C/...`; a long prefix here pushed a
+    # `cwd` already deep under AppData\Local\Temp past Windows' 260-char
+    # MAX_PATH, so `git add` silently added zero files (verified: `git
+    # ls-tree` on the resulting commit was empty) and rewind/undo restored
+    # nothing -- never a rolo-claude bug, just this helper's own scratch
+    # path being needlessly long.
+    if "BRIDGE_TEST_HOME" not in os.environ and "BRIDGE_STATE_DIR" not in os.environ:
+        os.environ["BRIDGE_STATE_DIR"] = tempfile.mkdtemp(prefix="th-")
+
     class _MinimalSession:
         def __init__(self) -> None:
             self.permission_engine = PermissionEngine(mode=mode, print_mode=False, cwd=cwd)
@@ -1240,7 +1257,16 @@ def test_write_then_rewind_undo_restores_the_file_via_real_shadow_hook(ctx: Ctx)
                 ctx.check(f"a RewindCard is pending, got {type(app.pending_card).__name__}",
                           type(app.pending_card).__name__ == "RewindCard")
                 await pilot.press("1")  # confirm restore
-                await pilot.pause(0.2)
+                # the actual restore runs on a background worker thread
+                # (tui/slash.py's `_apply_rewind_worker`, `thread=True`) --
+                # poll (bounded) instead of one fixed pause, which flaked
+                # under a loaded box (verified: the confirm's own
+                # `on_decide` clears `pending_card` immediately, well
+                # before the worker thread actually gets scheduled).
+                for _ in range(40):
+                    if target.read_text(encoding="utf-8") == "version 1\n":
+                        break
+                    await pilot.pause(0.1)
                 ctx.check(f"the file was restored to the PREVIOUS step's content, got {target.read_text()!r}",
                           target.read_text(encoding="utf-8") == "version 1\n")
                 ctx.check("pending card cleared", app.pending_card is None)
@@ -1522,6 +1548,77 @@ def test_bang_command_ask_mode_shows_a_permission_card_first(ctx: Ctx):
                 ctx.check(f"it actually ran, got status={cards_after[0].status!r}", cards_after[0].status == "ok")
                 ctx.check("the file it touched really exists on disk",
                           (cwd / "should-ask-first.txt").exists())
+    asyncio.run(body())
+
+
+@test
+def test_cc_route_permission_card_in_default_mode_runs_after_allow(ctx: Ctx):
+    """H11 brief C / H11b finding 28: a REAL TUI pilot on a `cc:` session
+    (real Controller + real Session via `build_controller`, the `claude`
+    binary replaced by tests/helpers/fake_claude_cc.py, which is a real
+    MCP client against the real ccbridge child). In `default` mode a
+    bridged Write shows the SAME PermissionCard a native call would, runs
+    only after "1" (allow once), and the file really lands on disk."""
+    import argparse
+
+    async def body():
+        fh = build_fake_home()
+        fake = Path(__file__).resolve().parent / "tests" / "helpers" / "fake_claude_cc.py"
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_CLAUDE_EXE"] = '"' + sys.executable + '" "' + str(fake) + '"'
+        os.environ["FAKE_CLAUDE_CC_LOGGED_IN"] = "1"
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        controller = None
+        try:
+            from rolo_claude.tui.bootstrap import build_controller
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="default", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="cc:fable", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            target = Path(fh["proj"]) / "cc-tui-card.txt"
+            prompt = "TOOL:Write:" + json.dumps({"file_path": str(target).replace("\\", "/"), "content": "hi\n"})
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, prompt)
+                await pilot.press("enter")
+                for _ in range(400):  # the fake claude's first start (mcp SDK import) can take a few seconds
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.pending_card, PermissionCard):
+                        break
+                ctx.check(f"status bar shows the cc: model, got {app.status_bar.model!r}",
+                          app.status_bar.model == "cc:fable")
+                ctx.check(f"a PermissionCard is pending for the bridged Write, got {type(app.pending_card).__name__}",
+                          isinstance(app.pending_card, PermissionCard))
+                ctx.check("nothing was written before the card was answered", not target.exists())
+                await pilot.press("1")  # allow once
+                for _ in range(400):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if target.exists():
+                        break
+                ctx.check("the bridged Write ran after allow", target.exists() and target.read_text(encoding="utf-8") == "hi\n")
+        finally:
+            if controller is not None:
+                try:
+                    controller.quit()
+                except Exception:
+                    pass
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     asyncio.run(body())
 
 

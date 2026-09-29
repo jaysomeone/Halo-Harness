@@ -161,14 +161,29 @@ names with their current targets and pricing.
 
 **Limitations of this v1**: a steer sent mid-turn is forwarded to Claude
 Code immediately, which queues it on its own terms rather than rolo-claude
-cutting the current reply the way it does for every other route. Claude
-Code applies its own auto-compaction to a `cc:` conversation; rolo-claude's
-own `/compact` is a no-op there (a note explains why). `stats --models`/
-`/cost` show a `cc:` row's cost as Claude Code's own estimate (a
+cutting the current reply the way it does for every other route -- Claude
+Code may fold it into the reply already in progress, or answer it as its
+own follow-up turn once that one finishes; either way rolo-claude waits
+for however many turns it actually takes and shows "queued for Claude
+Code" the moment it's sent. Claude Code applies its own auto-compaction to
+a `cc:` conversation; rolo-claude's own `/compact` is a real no-op there (a
+note explains why, rather than the confusing failure earlier builds gave).
+`stats --models`/`/cost` show a `cc:` row's cost as Claude Code's own
+estimate, logged as the delta since that same `claude` process's previous
+turn (its own `total_cost_usd` is cumulative for the whole process) -- a
 subscription isn't billed per token, so this is never exact spend the way
-every other route's real per-token pricing is). Switching models into
-`cc:` mid-session hands the new subprocess the prior conversation as one
-plain-text summary message rather than true native history.
+every other route's real per-token pricing is, and it never counts toward
+`--max-budget-usd`. Switching models into `cc:` mid-session (or resuming a
+process that idled on another route for a while) hands the live/new
+subprocess the prior conversation as one capped plain-text summary message
+rather than true native history; `/clear`, `/fork` and a `cc:` model
+change each start (or branch, for `/fork`) a genuinely new Claude Code
+conversation instead. Claude Code's own tool-call loop drives `cc:`, so a
+sub-agent's ask now gets a real, answerable card (live-forwarded from the
+child) the same way a native tool call's does -- but a bridged call
+inherits the harness's own loop-breaker the same way, so an unusually
+repetitive bridged tool-call pattern can be denied/end the call the same
+way it would on any other route.
 
 ## Permissions and auto mode
 
@@ -358,11 +373,20 @@ improve.model or:deepseek/deepseek-v4-flash`.
 - **`cc:` never touches Claude Code's login.** `~/.claude/.credentials.json`
   is never opened, not even to check it exists (`claude auth status`'s own
   JSON is the only thing read, and its OAuth token itself is never
-  extracted or forwarded anywhere). The local tool bridge a `cc:` session
-  opens (a Unix socket, mode 0600, on POSIX; a TCP loopback socket + a
-  random per-connection token on Windows) only ever talks to the ONE
-  `claude` subprocess THIS session started, on this machine, for this
-  process's lifetime.
+  extracted or forwarded anywhere); that check runs with every
+  `ANTHROPIC_*`/`CLAUDE_CODE_*` variable stripped from its own environment,
+  so an API key or an outer Claude Code session's identity can never make
+  it misreport which login is active. The `claude` subprocess itself (and
+  the MCP child it spawns) gets the same stripped environment, so the
+  subscription login is always what a `cc:` turn actually uses -- doctor
+  and `cc:` refuse to say "available" unless that check's own `authMethod`
+  is `claude.ai`. The local tool bridge a `cc:` session opens (a Unix
+  socket, mode 0600, on POSIX; a TCP loopback socket + a random per-session
+  token on Windows, passed to the `claude` subprocess through its
+  environment, never its command line) only ever talks to the ONE `claude`
+  subprocess THIS session started, on this machine, for this session's
+  lifetime -- closed, along with any of its own sub-agent children's, when
+  the session restarts (`/clear`, `/fork`, a model switch) or ends.
 - Credentials come from the environment, the settings chain, or
   `~/.databrickscfg`/`ucode-settings.json`; they're never written to the
   repo, a command line, or committed config. `rolo-claude --config`-style

@@ -40,7 +40,7 @@ and telemetry for every `cc:` turn.
   (`python -m rolo_claude.ccbridge`), so Claude Code exposes every bridged
   tool as `mcp__rolo__<Name>`; the child forwards `tools/list`/`tools/call`
   to a `ToolBridgeServer` in the parent process (a Unix socket, mode 0600,
-  on POSIX; a TCP loopback socket + a random per-connection token on
+  on POSIX; a TCP loopback socket + a random per-session token on
   Windows) which runs the real dispatch -- permission decide, PreToolUse/
   PostToolUse hooks, the tool's own run, the session log, TUI events --
   for every call, with Claude Code's own tool_use id kept verbatim. Esc
@@ -63,6 +63,82 @@ and telemetry for every `cc:` turn.
   Esc mid-call, the `estimate` usage flag, `--resume` after a restart and
   after a fresh `--continue`-shaped process, steering, a cc:<->or: model
   switch, and the credentials file never being opened.
+
+### H11b fix pass (same 0.4.0 milestone, no version bump)
+
+A 28-finding review of the H11 work above (2 critical, 12 major, 14 minor --
+`docs/harness/review-findings-h11.md`) found the `cc:` route's steering
+accounting could hang a turn forever, and the `claude` subprocess inherited
+this process's whole environment (provider keys, an outer Claude Code
+session's own identity) instead of a stripped one. Both are fixed, along
+with the rest of the findings:
+
+- **Steering (critical)**: `claude` now runs with `--replay-user-messages`;
+  every stdin line is tracked in a FIFO until its own `isReplay` echo
+  confirms claude actually consumed it, and a turn ends at a `result` only
+  once that FIFO is empty -- correct whether a steer is absorbed into the
+  turn already running (one result covers both) or answered as its own
+  follow-up turn (queued lines get a combined reply). A steer is logged
+  only once consumed, never at send time.
+- **Child environment (critical)**: the `claude` subprocess and its MCP
+  child now get `tool_child_env()` minus every `ANTHROPIC_*`/`CLAUDE_CODE_*`
+  variable and `CLAUDECODE` -- an ambient API key, base URL or an outer
+  session's own identity never reaches it. Doctor and `cc:` now refuse to
+  report "available" unless `claude auth status`, checked in that same
+  stripped environment, reports `authMethod: claude.ai`.
+- **The bridge's dispatch is now the loop's own dispatch**: EnterPlanMode/
+  ExitPlanMode, AskUserQuestion, and Agent/Task (streamed live, a child's
+  own permission ask reaching the same card the parent's calls use) all
+  reuse `Session._resolve_tool_call`/`_finalize_tool_result` directly
+  instead of a separate, partial re-implementation -- always-allow rules,
+  PreToolUse/PermissionRequest/PermissionDenied hooks and the loop breaker
+  now all apply to bridged calls too. Images now flow both ways (a pasted
+  image reaches claude in the stream-json message; a bridged tool's image
+  result reaches claude as a real MCP `ImageContent`, never "[image
+  block]"). `--append-system-prompt` now carries a real addendum (skills
+  index, subagent_type list, MCP server instructions, deferred-tool names,
+  the plan-mode note, and a sub-agent's own body). Background-job/sub-agent
+  notices and a `UserPromptSubmit` hook's context are sent to claude, not
+  just logged; Stop hooks fire on `result`.
+- **MCP catalog growth**: the bridge sends a real
+  `notifications/tools/list_changed` (a long-poll on a dedicated
+  connection) when ToolSearch grows the session's catalog, so Claude Code
+  can discover and call a tool that loaded mid-session.
+- **Session identity**: the cc conversation id is logged in a `meta` node;
+  `/clear` drops it (a fresh conversation); `/fork` and a `cc:` model
+  change close the live process and restart with `--resume`/
+  `--fork-session`; a `--resume` claude rejects ("No conversation found"/
+  "already in use") falls back to a fresh `--session-id` primed with the
+  prior log instead of surfacing the error.
+- **Accounting and errors**: `total_cost_usd` (cumulative per claude
+  process) is now logged as the per-turn delta, never double-counted. An
+  error-shaped result (no stream deltas) now becomes a real error event,
+  a non-zero `-p` exit and an `is_error` result; an unconnected bridge MCP
+  server gets a warning instead of silently leaving claude with no tools.
+- **Lifecycle**: a sub-agent's own claude subprocess/bridge/socket closes
+  when its call ends (not just at process quit); an old bridge is closed
+  before a restart replaces it; a tool call's result is paired with its
+  tool_use even if the bridge's own dispatch raises.
+- **Command-line budget (found by this pass's own live acceptance, not in
+  the review)**: the `--append-system-prompt` addendum rides on claude's
+  own command line, which on Windows goes through `claude.CMD` -> cmd.exe;
+  a real dev box with a dozen verbosely-described skills hit "The command
+  line is too long" and the subprocess never started. Every discovered
+  skill/agent/MCP description is clipped and the whole addendum is capped
+  (~3.5K chars) -- a short hint beats a session that cannot start.
+- **Tests**: `tests/test_cc_session.py` grew from 21 to 46 (steer absorbed
+  between tool calls / two steers queued behind a turn, the stripped child
+  env, plan tools, AskUserQuestion, streamed Agent + a child's live ask,
+  images both ways, notices/hook context, `list_changed`, the logged cc
+  session id, `/clear`, `/fork`, resume fallback, a cc:->cc: model switch,
+  per-turn cost delta, error results, Stop hooks, child close, and --
+  POSIX only -- pgrep/SIGHUP orphan checks); `test_tui.py` gained a real
+  Textual pilot of a `cc:` session's PermissionCard (46 -> 47); each cc:
+  test module now sets its own scratch home, and
+  `tests/test_bash_background_jobs.py` restores `BRIDGE_TEST_HOME`.
+- Corrected this changelog's own "per-connection token" (it's per-session)
+  and "`/compact` no-op" (now a real one, not a failure) claims from
+  earlier in this same entry.
 
 ## [0.3.1] - 2026-09-25
 

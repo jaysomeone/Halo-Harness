@@ -1049,6 +1049,19 @@ class Session:
         Never called while `self.busy` (the caller -- Controller.clear_
         session -- checks first; calling it mid-turn would race the
         worker thread's own log writes)."""
+        # H11b finding 8: a live `cc:` claude subprocess holds the WHOLE
+        # old conversation -- closing it (and dropping `_cc_state`) here,
+        # BEFORE the fresh log below is even built, is what makes the next
+        # `cc:` turn's own `ensure_cc_state` correctly see "no cc_session_id
+        # meta node in this (brand new) log" and start a genuinely fresh
+        # `--session-id`, instead of either reusing the old process (still
+        # talking about the pre-/clear conversation) or restarting with
+        # `--resume uuid5(<new session id>)` -- an id claude never created,
+        # which fails outright ("No conversation found").
+        if getattr(self, "_cc_state", None) is not None:
+            from rolo_claude.agent import cc_runtime
+            cc_runtime.close_cc(self)
+            self._cc_state = None
         self._fire_session_end("clear")
         self._reset_prune_state()  # H5b finding 2: no old log left for these ids to refer to
         self.log = SessionLog(self.cwd)
@@ -1128,8 +1141,21 @@ class Session:
         `rolo_claude.improve.draft`'s own drafting call. `model_ref`
         defaults to `self.small_model_ref or self.model_ref` (unchanged
         behavior for every existing caller); a caller that resolved its
-        OWN model (e.g. `improve.model` from config) passes it explicitly."""
+        OWN model (e.g. `improve.model` from config) passes it explicitly.
+
+        H11b finding 22: `ref.provider == "cc"` (no distinct non-cc small-
+        model configured) can't go through `build_request_body`/
+        `stream_completion` at all -- there is no HTTP endpoint for "cc",
+        the installed `claude` binary is the provider -- so title
+        generation, prompt/agent hooks and `/improve`'s drafting call used
+        to fail outright on a `cc:` session ("the summarisation call
+        failed"). Routed to a quick, stateless one-shot `claude -p`
+        instead (never touches this session's own live `_cc_state`/
+        conversation)."""
         ref = model_ref or self.small_model_ref or self.model_ref
+        if ref.provider == "cc":
+            from rolo_claude.agent.cc_runtime import one_shot_cc_call
+            return one_shot_cc_call(ref.model, system_text, user_text, timeout_s=timeout_s)
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
@@ -1217,8 +1243,18 @@ class Session:
         NEW `meta` node carrying the full, still name-order-frozen-then-
         append-only tool list (`derive_request` always takes the LAST
         meta node's `tools`, so this is the only write needed for the
-        NEXT request to carry it -- see agent/derive.py)."""
+        NEXT request to carry it -- see agent/derive.py).
+
+        H11b finding 6: also tells a live `cc:` bridge (a no-op for every
+        other route -- `notify_catalog_changed` itself no-ops with no
+        `_cc_state`) so its child sends Claude Code a real
+        `notifications/tools/list_changed` -- without this, a tool
+        ToolSearch loads mid-session enters rolo's own catalog but
+        Claude Code, which only ever listed tools once at startup, never
+        learns it exists and can never call it."""
         self.log.append_meta(tools=self.tool_registry.definitions_for(names))
+        from rolo_claude.agent import cc_runtime
+        cc_runtime.notify_catalog_changed(self)
 
     # ---- request construction ------------------------------------------
 
@@ -2088,7 +2124,22 @@ class Session:
         leaving the session log byte-for-byte unchanged, and yields
         `phase="failed"` with a human-readable `reason` so a caller/UI can
         react. Returns True iff the marker + replacement content were
-        actually written."""
+        actually written.
+
+        H11b finding 22: a `cc:` session's model-visible context lives in
+        Claude Code itself (module docstring, agent/cc_runtime.py) --
+        `derive_request` is never what a `cc:` turn actually sends, so
+        summarising ITS output and splicing a `compacted` marker into
+        THIS log would compact something the model never even sees.
+        Claude Code auto-compacts its own context; this is the documented
+        no-op (README: "`/compact` prints a note")."""
+        if self.model_ref.provider == "cc":
+            yield events.compaction(
+                phase="failed", trigger=trigger, turn=turn_no,
+                reason="rolo-claude's own compaction is a no-op for cc: sessions -- Claude Code "
+                       "manages its own context/compaction internally.",
+            )
+            return False
         system_text, raw_messages, tools = derive_request(self.log, tools=None)
         # finding 4: prune_messages used to be wired ONLY into `/context` --
         # applied here too, so the summarisation call's own prefix benefits
@@ -2306,6 +2357,13 @@ class Session:
         # routes new input to a fresh turn or to `steer`) is True for the
         # WHOLE method body below, cleared no matter how it ends.
         self._busy.set()
+        # H11b finding 4: captured here (this hook block's own scope ends
+        # before the cc: dispatch below) so a UserPromptSubmit hook's
+        # additionalContext -- already logged as a snapshot two lines down
+        # from where it's set -- also reaches a `cc:` turn's own stdin
+        # line; every other route already sees it via `derive_request`
+        # picking the snapshot up like any other logged node.
+        hook_context_text: Optional[str] = None
         try:
             if self.hook_runner is not None and self.hook_runner.has_hooks("UserPromptSubmit"):
                 payload = self.hook_runner.payload("UserPromptSubmit", prompt_id=f"prompt_{turn_no}",
@@ -2328,6 +2386,7 @@ class Session:
                     return
                 if outcome.additional_context:
                     self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
+                    hook_context_text = outcome.additional_context
 
             blocks = [{"type": "text", "text": text}]
             for img in (images or []):
@@ -2350,7 +2409,8 @@ class Session:
                     # route's history reconstruction, /stats, /export and
                     # resume all keep working unchanged.
                     from rolo_claude.agent import cc_runtime
-                    yield from cc_runtime.turn_body_cc(self, turn_no, text)
+                    yield from cc_runtime.turn_body_cc(self, turn_no, text, images=images,
+                                                        hook_context=hook_context_text)
                 else:
                     yield from self._turn_body(turn_no)
             except GeneratorExit:
@@ -3107,7 +3167,15 @@ class Session:
         """Log + yield the `tool_result` for one `_resolve_tool_call` item,
         whether it was rejected before ever reaching a tool or actually
         ran (solo or inside a read-only batch, `item["result"]` either way
-        by the time this is called)."""
+        by the time this is called). H11b finding 3/7: also RETURNS
+        `(content, is_error)` (via the generator's own return value,
+        `yield from`-visible) -- `content` is `text` for a rejected item,
+        else whatever got logged (a block list when the tool's own result
+        was blocks, e.g. a vision image, else the capped text) -- so
+        `agent/cc_runtime.py`'s bridge can reuse this ONE method for every
+        bridged tool call (plan tools included) and build the wire MCP
+        reply from its return value instead of duplicating any of the
+        hook/spill/logging logic here."""
         tool_id, name = item["tool_id"], item["name"]
         if not item["ready"]:
             text = item["text"]
@@ -3131,7 +3199,7 @@ class Session:
             yield events.Event("tool_result", {"id": tool_id, "ok": False, "summary": text}, turn=turn_no)
             if item.get("permission_denial") is not None:
                 self.permission_denials.append(item["permission_denial"])
-            return
+            return text, True
         tr = item["result"]
         tr, hook_system_messages = self._apply_post_tool_use_hooks(name, tool_id, item["input"], tr)
         for msg in hook_system_messages:
@@ -3189,6 +3257,7 @@ class Session:
         # the pager has something real to show.
         yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200],
                                             "content": summary_text}, turn=turn_no)
+        return content_for_log, tr.is_error
 
     # ---- interactive permission handshake (U2) ---------------------------
 
@@ -3828,10 +3897,29 @@ class Session:
         `prepare_conversation_so_far`). Switching AWAY from cc: needs no
         special handling at all: every cc: turn already logged ordinary
         user/assistant/tool_result nodes, so `derive_request` picks them
-        up as history exactly like any other route's own turns."""
+        up as history exactly like any other route's own turns.
+
+        H11b finding 10: a cc:->cc: MODEL change (e.g. `/model cc:opus`
+        then `/model cc:sonnet`) and a cc:->other switch both close the
+        live claude subprocess (it can't hot-swap `--model` mid-stream) --
+        `_cc_state` is dropped but the log's own `cc_session_id` meta node
+        is left alone, so the NEXT `cc:` turn's `ensure_cc_state`
+        naturally restarts with `--resume <same id> --model <new model>`,
+        continuing the SAME claude conversation under the new model. A
+        cc:->or:->cc: round trip (the live process was never closed, just
+        idle) reuses that same still-alive process, so `prepare_
+        conversation_so_far` alone would leave its own `<conversation-so-
+        far>` stashed but unsent forever -- `ensure_cc_state`'s reuse path
+        now drains it (capped) before returning, see that function."""
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
             from rolo_claude.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
+        elif self.model_ref.provider == "cc" and (
+            model_ref.provider != "cc" or model_ref.model != self.model_ref.model
+        ):
+            from rolo_claude.agent import cc_runtime
+            cc_runtime.close_cc(self)
+            self._cc_state = None
         self.model_ref = model_ref
         self.model_profile = model_profile
         if creds is not None:

@@ -13,6 +13,7 @@ import argparse
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -95,19 +96,49 @@ def _check_claude_subscription() -> str:
     OpenRouter): neither "not installed" nor "installed but not logged
     in" ever fails doctor's overall `ok`. On the Kali VM `claude` lives
     at `~/.local/bin` -- covered by `mcp_setup.find_claude_exe`'s own
-    PATH-then-~/.local/bin lookup, same as every other `claude` use here."""
-    from rolo_claude.providers.cc_models import claude_auth_status
+    PATH-then-~/.local/bin lookup, same as every other `claude` use here.
+
+    H11b finding 23: the version comes from `claude --version` (real
+    `claude auth status` JSON has no version key at all -- verified live:
+    analyticsDisabled, apiProvider, authMethod, configDirectory, email,
+    loggedIn, orgId, orgName, projectsDirectory, subscriptionType -- so
+    the old `status.version` bit never actually printed anything). A
+    timeout gets its own message instead of reading as "not installed".
+    Finding 2: WARNs (never OK) unless `authMethod == "claude.ai"` -- an
+    `api_key` authMethod (an ANTHROPIC_API_KEY visible to `claude auth
+    status`'s own -- now stripped -- environment) means cc: would NOT use
+    the subscription even though `loggedIn` is true."""
+    from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
     try:
         status = claude_auth_status()
     except Exception as e:  # never let a doctor check crash the whole command
         return f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})"
     if status is None:
         return f"{WARN} Claude subscription: claude not found (cc: models unavailable -- install Claude Code)"
+    if getattr(status, "timed_out", False):
+        return f"{WARN} Claude subscription: `claude auth status` timed out (try again -- cc: models unavailable for now)"
     if not status.logged_in:
         return f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in for cc: models)"
-    via = status.auth_method or "claude.ai"
-    version_bit = f" via claude {status.version}" if status.version else ""
-    return f"{OK} Claude subscription: logged in ({via}){version_bit} -- cc: models available"
+    version = _claude_version()
+    version_bit = f" via claude {version}" if version else ""
+    if status.auth_method not in SUBSCRIPTION_AUTH_METHODS:
+        via = status.auth_method or "an unrecognized method"
+        return (f"{WARN} Claude subscription: logged in via {via}, not claude.ai{version_bit} -- cc: will not use "
+                 f"this (that's the ant: route); log in with `claude` and no ANTHROPIC_API_KEY set for cc:")
+    return f"{OK} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available"
+
+
+def _claude_version() -> Optional[str]:
+    from rolo_claude.providers.cc_models import ClaudeCodeNotFoundError, resolve_claude_launch_argv
+    try:
+        argv = resolve_claude_launch_argv()
+    except ClaudeCodeNotFoundError:
+        return None
+    try:
+        proc = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=10.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return (proc.stdout or "").strip().split(" ")[0] or None
 
 
 _CHROME_NATIVE_HOST_ID = "com.anthropic.claude_code_browser_extension"
