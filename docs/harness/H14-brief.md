@@ -64,3 +64,44 @@ G. CHANGELOG, README "Databricks at work" section (what is read from Claude Code
 
 Report ≤ 50 lines. Rules as in the other briefs; no hostnames, no tokens, ≤ 250 lines per write,
 suites green on Windows, WSL and the Kali VM, no commits.
+
+## Verified catalog api_types (from the workspace listing, 2026-09-29) — the source of truth for D
+Per endpoint the gateway model id is `foundation_model.name` (NOT derivable by prefixing the
+endpoint name); the anthropic gateway takes the ENDPOINT name as `model`. Families:
+- Claude foundation (`databricks-claude-opus-4-1|4-5|4-6|4-7|4-8|5|5-5`, `databricks-claude-sonnet-4|
+  4-5|4-6|5|5-5`, `databricks-claude-haiku-4-5`): `mlflow/v1/chat/completions`, `anthropic/v1/messages`
+  (model = endpoint name), `cursor/v1/chat/completions`, `mlflow/v1/responses`. Default: anthropic.
+- GLM (`databricks-glm-5-3`, `-5-3-flash`, `-5-2`) and Kimi (`databricks-kimi-k3`): `mlflow/v1/chat/
+  completions`, `mlflow/v1/responses`, `anthropic/v1/messages`, `codex/v1/responses`. Default: mlflow
+  chat (the tested path); `anthropic` selectable per model (`databricks.gateway.<endpoint>: anthropic`
+  or a `dbx:<endpoint>@anthropic` suffix) — the work matrix compares both.
+- DeepSeek (`databricks-deepseek-v4-1-flash`, `-v4-pro-0813`, `-v4-flash-0731`), Qwen
+  (`databricks-qwen35-122b-a10b` → `system.ai.qwen35-122b-a10b`, `databricks-qwen3-next-80b-a3b-instruct`
+  → `system.ai.qwen3-next-80b-a3b-instruct`), Llama (`databricks-llama-4-maverick` → `system.ai.llama-4-
+  maverick`, `databricks-meta-llama-3-1-8b-instruct` → `system.ai.meta_llama_v3_1_8b_instruct`,
+  `databricks-meta-llama-3-3-70b-instruct` → `system.ai.llama_v3_3_70b_instruct`), Gemma
+  (`databricks-gemma-3-12b` → `system.ai.gemma-3-12b-it`), gpt-oss (`databricks-gpt-oss-120b` →
+  `system.ai.gpt-oss-120b`, `-20b` → `system.ai.gpt-oss-20b`), Inkling: `mlflow/v1/chat/completions` +
+  `mlflow/v1/responses` only. Default: mlflow chat.
+- GPT (`databricks-gpt-5`, `-5-1`, `-5-2`, `-5-4`, `-5-4-mini`, `-5-4-nano`, `-5-5`, `-5-6-sol|luna|terra`,
+  `-6-sol|luna|astra`, `-5-mini`, `-5-nano`): `mlflow/v1/chat/completions`, `openai/v1/responses`,
+  `cursor/v1/chat/completions`, `mlflow/v1/responses`, `codex/v1/responses`. EXCEPTION
+  `databricks-gpt-5-5-pro`: NO mlflow chat — `openai/v1/responses`, `cursor/v1/chat/completions`,
+  `mlflow/v1/responses`, `codex/v1/responses` → use `cursor/v1/chat/completions` (chat-shaped), then
+  invocations. Grok (`-4-6`, `-4-7`): `mlflow/v1/chat/completions`, `openai/v1/responses`.
+- Gemini (`databricks-gemini-2-5-flash|pro`, `-3-1-flash-lite`, `-3-5|3-7|3-8-flash`): `mlflow/v1/chat/
+  completions`, `gemini/v1/generateContent`, `gemini/v1/streamGenerateContent`, `cursor/v1/chat/
+  completions`, `mlflow/v1/responses`. Default: mlflow chat.
+- Bedrock EXTERNAL Claude (`claude-3-5-sonnet-20240620-v1-0`, `us-anthropic-claude-*`): invocations
+  ONLY (chat format, no model field).
+- Non-chat (hide): `databricks-gte-large-en`, `databricks-bge-large-en` (`mlflow/v1/embeddings`),
+  `databricks-qwen3-embedding-0-6b`, `titan-embed-text-v1|v2-0`, `sandbox_whisper_large_v3`.
+Candidate order per endpoint = [family default] → other chat-shaped types it lists (`mlflow` chat,
+`cursor` chat) → `/serving-endpoints/<name>/invocations`; never a type the endpoint does not list.
+
+## H. `doctor --work --probe-all` (the work matrix)
+Sends one short pong through EVERY chat endpoint on its chosen path (and, for GLM/Kimi/Claude, on
+the anthropic gateway too when `--both`), prints a table: endpoint, path, HTTP status, first tokens,
+latency, DBUs, tool-call support (one Read tool call when `--tools`), and writes
+`~/.rolo-claude/work-matrix-<date>.json` (no token, no host in the report — endpoint names only) so
+the owner can paste it back. Costs are shown up front; `--only <glob>` narrows the set.
