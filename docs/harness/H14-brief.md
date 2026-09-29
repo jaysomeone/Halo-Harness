@@ -123,3 +123,16 @@ token and they're off")
 ## Later (H15, after the work matrix): roles
 Role table in the preset (`orchestrator`, `coder`, `reviewer`, `researcher`, `small`), built-in
 agents wired to roles, cost-aware defaults, `/roles` view, `--role` overrides; decided by the matrix.
+
+## J. `/models refresh` (alias `/dbx`) and `models --refresh --urls` (rolo, 2026-09-29)
+- TUI `/models refresh`: re-list the workspace with the user's token, print the table (endpoint,
+  family, chosen path type, gateway model id, DBU in/out, capabilities flags), update the cached
+  catalog (`~/.rolo-claude/dbx-endpoints.json`) so `/model` reflects it immediately, and print a
+  diff against the previous cache (added / removed / changed types or ids). Runs off the UI thread.
+- CLI `rolo-claude models --refresh --urls`: same table plus the exact URL per endpoint and path
+  type (what the listing script printed), `--json` for tooling.
+- Auto-refresh: catalog older than 24 h (configurable `databricks.catalog_max_age_hours`) refreshes
+  in the background when `/model` opens or a session starts, with a one-line notification of the
+  diff; failures (offline, 403 IP list) keep the cache and say so. Never touches Claude Code's files.
+- Tests: refresh diff on fixture listings (added/removed/changed), stale-cache trigger, offline
+  keeps cache, `--urls` output shape, TUI pilot for `/models refresh`.
