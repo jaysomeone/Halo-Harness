@@ -136,3 +136,10 @@ agents wired to roles, cost-aware defaults, `/roles` view, `--role` overrides; d
   diff; failures (offline, 403 IP list) keep the cache and say so. Never touches Claude Code's files.
 - Tests: refresh diff on fixture listings (added/removed/changed), stale-cache trigger, offline
   keeps cache, `--urls` output shape, TUI pilot for `/models refresh`.
+
+## Correction (rolo, 2026-09-29): discovery only — no workspace endpoint list in the repo
+Host + token are the only inputs. `init --preset work` / `models --refresh` discover the endpoints
+and cache them per user (`~/.rolo-claude/dbx-endpoints.json`); that cache is the offline fallback.
+The repo ships only the generic family/api_type RULES table (H13 correction) and synthetic test
+fixtures. Wherever this brief says "vendored snapshot" read "per-user cache". `team.json` (§I) holds
+host, defaults and preferences only — never endpoint lists, never tokens.
