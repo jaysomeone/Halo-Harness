@@ -105,3 +105,21 @@ the anthropic gateway too when `--both`), prints a table: endpoint, path, HTTP s
 latency, DBUs, tool-call support (one Read tool call when `--tools`), and writes
 `~/.rolo-claude/work-matrix-<date>.json` (no token, no host in the report — endpoint names only) so
 the owner can paste it back. Costs are shown up front; `--only <glob>` narrows the set.
+
+## I. Team preset + token-only onboarding (rolo, 2026-09-29: "the team just inserts their databricks
+token and they're off")
+- The workspace listing is the model list: `init --preset work` and `models --refresh` discover and
+  cache it (`~/.rolo-claude/dbx-endpoints.json` with api_types, ids, capabilities, DBU prices); the
+  H13 vendored snapshot is only the offline fallback and picker seed. Never a hand-maintained list.
+- A shared `team.json` preset (host, default model, per-family gateway preference, DBU price,
+  optional role table for H15) found at `.rolo-claude/team.json` in the project, `~/.rolo-claude/
+  team.json`, or `--team <path|url>`; it never holds tokens. `init --preset work` reads it (or the
+  Claude Code work settings env), asks ONLY for the user's token (hidden input, 0600 env file),
+  refreshes the catalog, and prints the count of models available and the default. Re-running
+  reports state. `/model` groups by family, shows DBUs and the path type, hides non-chat endpoints.
+- Docs: a "Databricks at work — team setup" README section and a sample `team.example.json`
+  (placeholder host).
+
+## Later (H15, after the work matrix): roles
+Role table in the preset (`orchestrator`, `coder`, `reviewer`, `researcher`, `small`), built-in
+agents wired to roles, cost-aware defaults, `/roles` view, `--role` overrides; decided by the matrix.
