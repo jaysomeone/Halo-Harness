@@ -489,11 +489,35 @@ def _check_mcp_servers(cwd: Optional[Path]) -> str:
     if not resolved:
         return f"{OK} MCP servers: none configured"
     eager = sorted(name for name, cfg in resolved.items() if not cfg.lazy)
-    lazy_n = len(resolved) - len(eager)
+    lazy_names = sorted(name for name, cfg in resolved.items() if cfg.lazy)
     hint = ("" if not eager else
             " -- no connect-time history recorded yet; if startup feels slow, add "
             "\"mcpLazy\": true to a slow one in .mcp.json/settings.json")
-    return f"{OK} MCP servers: {len(resolved)} configured ({len(eager)} eager, {lazy_n} lazy){hint}"
+    # H13 Part A: lazy is now the default, so most servers here are lazy --
+    # `mcp.tools_cache`'s own age (best-effort, pure file stat, never
+    # connects anything -- matches this whole function's "never connects"
+    # contract) tells the user whether a lazy server's catalog entry is
+    # fresh or has been stale for a while.
+    ages = []
+    try:
+        from rolo_claude.mcp import tools_cache
+        for name in lazy_names:
+            age_s = tools_cache.cache_age_s(name)
+            if age_s is not None:
+                ages.append(f"{name} {_format_age(age_s)}")
+    except Exception:
+        pass
+    cache_hint = f"; cache ages: {', '.join(ages)}" if ages else ""
+    return (f"{OK} MCP servers: {len(resolved)} configured "
+            f"({len(eager)} eager, {len(lazy_names)} lazy){hint}{cache_hint}")
+
+
+def _format_age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
 
 
 def _provider_configured(ref) -> "tuple[bool, str]":

@@ -25,6 +25,15 @@ dev = [
 vision = [
     "Pillow>=10",
 ]
+# H13 Part B: rolo_claude/tui/images.py's kitty encoder needs no imaging
+# library at all (kitty decodes the PNG/JPEG bytes itself, f=100); Pillow
+# is what lets the sixel encoder do real pixel/palette work and lets both
+# protocols downscale to a bounded on-screen size. `textual-image` (PyPI)
+# was evaluated and rejected: its own repo declares LGPL-3.0 (not
+# permissive) and it requires Python >=3.12 (this project supports >=3.10).
+images = [
+    "Pillow>=10",
+]
 
 [project.scripts]
 rolo-claude = "rolo_claude.cli:main"

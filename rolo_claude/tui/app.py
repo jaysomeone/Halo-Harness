@@ -13,9 +13,11 @@ widget, so nothing here is ever called from another thread.
 from __future__ import annotations
 
 import inspect
+import os
 import queue
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -117,7 +119,8 @@ class BridgeApp(App):
 
     def __init__(self, controller, *, registry=None, facade=None, tool_registry=None,
                  cwd: Optional[Path] = None, theme_name: Optional[str] = None,
-                 tui_setting: Optional[str] = None, initial_prompt: Optional[str] = None) -> None:
+                 tui_setting: Optional[str] = None, initial_prompt: Optional[str] = None,
+                 initial_resume_filter: Optional[str] = None, no_inline_images: bool = False) -> None:
         # `App.__init__` itself calls `get_css_variables()` (to build its
         # initial stylesheet) before returning -- `theme_name` must exist
         # on `self` BEFORE `super().__init__()` runs, not after.
@@ -130,6 +133,28 @@ class BridgeApp(App):
         self.cwd = Path(cwd) if cwd else Path.cwd()
         self.tui_setting = tui_setting
         self._initial_prompt = initial_prompt
+        # H13 Part C: an ambiguous (or no-match) `--resume <text>` at launch
+        # -- opened, pre-filtered, from `on_mount` below instead of silently
+        # starting a plain new session with no feedback at all.
+        self._initial_resume_filter = initial_resume_filter
+        # H13 Part B ("inline images in the terminal"): resolved ONCE at
+        # startup, never per-image -- `images_render_mode` folds the config
+        # ("~/.rolo-claude/config.json"'s "images" key) and `--no-inline-
+        # images` together into "inline"|"caption"; `image_protocol` is the
+        # one live detection pass (env + tmux passthrough + a real DA1
+        # terminal query, all best-effort/never-raising) a real interactive
+        # run needs -- `sys.stdout.isatty()` is naturally False under
+        # `app.run_test()`'s headless pilot driver and in any piped/
+        # captured context, so this is "none" (never touches a real
+        # terminal) throughout the whole test suite with zero special-
+        # casing needed there.
+        from rolo_claude.theme import get_config_value
+        from rolo_claude.tui.images import detect_image_protocol, effective_render_mode
+        self.images_render_mode = effective_render_mode(
+            get_config_value("images", None), no_inline_flag=no_inline_images)
+        self.image_protocol = (
+            detect_image_protocol(dict(os.environ), isatty=sys.stdout.isatty())
+            if self.images_render_mode == "inline" else "none")
 
         self._local_events: "queue.Queue" = queue.Queue()
         self.verbose = False
@@ -200,6 +225,14 @@ class BridgeApp(App):
             self.set_interval(5.0, self._refresh_statusline)
         if self._initial_prompt:
             await self._submit_prompt(self._initial_prompt, {})
+        elif self._initial_resume_filter is not None:
+            # H13 Part C: reuses the exact same off-UI-thread listing +
+            # picker-opening path `/resume` itself uses (tui/slash.py) --
+            # just pre-filtered by the text that made the startup
+            # `--resume <text>` ambiguous (or match nothing) in the first place.
+            from rolo_claude.tui.slash import _resume_list_worker
+            self.run_worker(lambda: _resume_list_worker(self, self._initial_resume_filter),
+                             thread=True, name="list-sessions-startup")
 
     def _git_branch(self) -> str:
         try:

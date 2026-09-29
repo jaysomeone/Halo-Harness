@@ -5,6 +5,57 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.5.0] - 2026-09-29
+
+H13 (RECOMMENDATIONS.md P1): lazy MCP start by default, inline images in the
+terminal, `/resume` search, and the first live family-baseline pass for
+GLM-5.3/Qwen/MiniMax/Kimi K2.7-code/Kimi K3.
+
+- **Lazy MCP by default**: every configured server is now lazy unless it's
+  `alwaysLoad` or explicitly `"mcpLazy": false` (per-server, or globally via
+  a new top-level `"mcpLazy": false` in `settings.json`) -- reversing the
+  pre-0.5.0 "eager unless `mcpLazy: true`" default. A per-server tool cache
+  under `~/.rolo-claude/mcp/tools-cache/<server>.json` (keyed by a hash of
+  the server's own command/args/env/url/headers) means a lazy server's tool
+  names/descriptions are still known -- and findable/preloadable -- before
+  it's ever connected: no cache yet (first run, or the config changed)
+  connects it once to learn its tools and writes the cache; a valid cache
+  seeds a new `"cached"` handle state with zero connections. A tool call, or
+  `/mcp`'s own reconnect, connects a cached/lazy server for real on demand;
+  a live tool list that turns out to differ from what the cache promised
+  refreshes the catalog and surfaces a short note on that same call. Status
+  bar/`/mcp`/`mcp list`/`doctor` all show the new `"cached"` state (`doctor`
+  additionally reports each lazy server's cache age). Every uncached server
+  needing a real connect (a first run against N configured servers) does so
+  CONCURRENTLY (`McpManager.start_many`), not one at a time -- a real bug
+  from live dogfooding this milestone's own acceptance line surfaced before
+  any fix landed (up to N times MCP_TIMEOUT, worse than the pre-0.5.0 eager
+  path, which was already concurrent).
+- **Inline images in the terminal**: a screenshot/image tool result renders
+  inline via the kitty graphics protocol (kitty, WezTerm, Ghostty, foot) or
+  sixel (other terminals, detected live), with the existing type/size/
+  dimensions caption as the fallback everywhere else (no real tty, tmux
+  without `allow-passthrough on`, detection finds nothing, or `images:
+  "caption"`/`"off"` in `~/.rolo-claude/config.json` / `--no-inline-images`).
+  `textual-image` (PyPI) was evaluated per the brief and rejected on both
+  grounds it named: its own repo declares LGPL-3.0 (not permissive) and it
+  requires Python >=3.12 (this project supports >=3.10) -- the kitty/sixel
+  encoders are implemented directly instead (`rolo_claude/tui/images.py`);
+  Pillow (the existing `vision` extra, now also `pip install rolo-claude
+  [images]`) enables the sixel encoder and bounded downscaling for both
+  protocols, but nothing here requires it (kitty decodes PNG/JPEG itself).
+- **`/resume` search**: the session picker (TUI `/resume`, and an ambiguous/
+  no-match `--resume <text>` at TUI startup -- previously silently ignored
+  outside print mode, now genuinely wired through `build_session`) gets a
+  live text filter, fuzzy-ranked over title/first prompt/cwd/model;
+  `--resume <text>` in print mode picks the unique match or lists the
+  ambiguous candidates instead of silently guessing the most recent one.
+- **Family baselines**: `docs/harness/FAMILY-BASELINE-2026-09-29.md` --
+  live acceptance rows for GLM-5.3, Qwen3.8 Flash, MiniMax M3, Kimi
+  K2.7-code and Kimi K3 on OpenRouter (pong, a 200-line Read, a Write ->
+  Edit -> Bash chain, one steer; Kimi K3 kept to the cheap pong+Read subset
+  per the brief).
+
 ## [0.4.1] - 2026-09-28
 
 H12 (RECOMMENDATIONS.md P0): the whole first run in one command, a

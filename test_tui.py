@@ -411,6 +411,222 @@ def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
     asyncio.run(body())
 
 
+# H13 Part C: /resume search (SessionPicker's own live text filter).
+_H13_SESSIONS = [
+    {"id": "sid-auth-0001", "cwd": "/proj", "mtime": 3000.0, "summary": "fix the auth bug",
+     "title": "", "model": "or:deepseek/deepseek-v4.1-flash", "cost_usd": 0.01, "turns": 2},
+    {"id": "sid-billing002", "cwd": "/proj", "mtime": 2000.0, "summary": "refactor billing",
+     "title": "Billing cleanup", "model": "or:z-ai/glm-5.3", "cost_usd": 0.02, "turns": 4},
+    {"id": "sid-gardenxyz3", "cwd": "/proj", "mtime": 1000.0, "summary": "notes about gardening",
+     "title": "", "model": "or:deepseek/deepseek-v4.1-flash", "cost_usd": 0.00, "turns": 1},
+]
+
+
+@test
+def test_resume_picker_shows_a_live_text_filter_that_narrows_as_you_type(ctx: Ctx):
+    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from textual.widgets import Input, OptionList
+
+    async def body():
+        fake = FakeController()
+        fake.list_sessions = lambda: list(_H13_SESSIONS)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/resume")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            ctx.check(f"SessionPicker is the active screen, got {type(app.screen).__name__}",
+                      isinstance(app.screen, SessionPicker))
+            option_list = app.screen.query_one(OptionList)
+            ctx.check(f"all 3 sessions listed before any filter, got {option_list.option_count}",
+                      option_list.option_count == 3)
+
+            await _type(pilot, "auth")
+            await pilot.pause(0.2)
+            ctx.check(f"typing 'auth' narrows to the one matching session, got {option_list.option_count}",
+                      option_list.option_count == 1)
+
+            filter_box = app.screen.query_one(Input)
+            for _ in range(len(filter_box.value)):
+                await pilot.press("backspace")
+            await _type(pilot, "glm-5.3")
+            await pilot.pause(0.2)
+            ctx.check(f"filtering by MODEL id narrows to that session too, got {option_list.option_count}",
+                      option_list.option_count == 1)
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check("Esc dismisses the picker", not isinstance(app.screen, SessionPicker))
+    asyncio.run(body())
+
+
+@test
+def test_slash_resume_with_args_opens_the_picker_prefiltered(ctx: Ctx):
+    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from textual.widgets import Input, OptionList
+
+    async def body():
+        fake = FakeController()
+        fake.list_sessions = lambda: list(_H13_SESSIONS)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/resume gardening")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            ctx.check(f"SessionPicker opened, got {type(app.screen).__name__}", isinstance(app.screen, SessionPicker))
+            filter_box = app.screen.query_one(Input)
+            ctx.check(f"the filter box is pre-filled with the /resume argument, got {filter_box.value!r}",
+                      filter_box.value == "gardening")
+            option_list = app.screen.query_one(OptionList)
+            ctx.check(f"already narrowed to the one matching session, got {option_list.option_count}",
+                      option_list.option_count == 1)
+    asyncio.run(body())
+
+
+@test
+def test_ambiguous_startup_resume_opens_the_picker_prefiltered(ctx: Ctx):
+    """H13 Part C acceptance shape at the OTHER entry point: an ambiguous
+    (or no-match) `--resume <text>` at launch defers to the SAME picker,
+    pre-filtered, instead of silently guessing or starting a blank session
+    with no feedback (`tui/app.py`'s own `_initial_resume_filter`)."""
+    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from textual.widgets import Input
+
+    async def body():
+        fake = FakeController()
+        fake.list_sessions = lambda: list(_H13_SESSIONS)
+        app = BridgeApp(fake, cwd=_cwd(), initial_resume_filter="billing")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.2)
+            ctx.check(f"the picker opens automatically on mount, got {type(app.screen).__name__}",
+                      isinstance(app.screen, SessionPicker))
+            filter_box = app.screen.query_one(Input)
+            ctx.check(f"pre-filled with the startup --resume text, got {filter_box.value!r}",
+                      filter_box.value == "billing")
+    asyncio.run(body())
+
+
+# H13 Part B: inline images in the terminal (a fake image tool result
+# reaching a real ToolCard -- the encoders/detection matrix themselves are
+# pure-function tests in tests/test_tui_images.py).
+_H13_PNG_1X1_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _image_result_turn():
+    return [
+        ev.user_message("take a screenshot", turn=1),
+        ev.Event("tool_use_start", {"id": "toolu_img1", "name": "mcp__chrome__screenshot"}, turn=1),
+        ev.Event("tool_use_ready", {"id": "toolu_img1", "name": "mcp__chrome__screenshot", "input": {},
+                                     "repaired": False}, turn=1),
+        ev.Event("tool_result", {"id": "toolu_img1", "ok": True, "summary": "[image: image/png, 1x1, 68 B]",
+                                  "content": "[image: image/png, 1x1, 68 B]",
+                                  "images": [{"media_type": "image/png", "data": _H13_PNG_1X1_B64}]}, turn=1),
+        ev.turn_done(turn=1, reason="end_turn"),
+    ]
+
+
+@test
+def test_image_tool_result_reaches_the_tool_card_and_attempts_an_inline_render(ctx: Ctx):
+    from rolo_claude.tui.widgets.cards import ToolCard
+
+    captured = []
+
+    def _fake_writer(self, seq):
+        captured.append(seq)
+
+    async def body():
+        fake = FakeController(turns=[_image_result_turn()])
+        app = await _mounted(fake)
+        # Bypass real env/tty detection (always "none" under the pilot's
+        # headless driver) -- proves the render PATH, per the brief's own
+        # "or a pilot proves the encoder path" acceptance line.
+        app.images_render_mode = "inline"
+        app.image_protocol = "kitty"
+        orig_writer = ToolCard._default_inline_writer
+        ToolCard._default_inline_writer = _fake_writer
+        try:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "take a screenshot")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot)
+                cards = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check(f"exactly one ToolCard mounted, got {len(cards)}", len(cards) == 1)
+                card = cards[0]
+                ctx.check(f"the caption text is STILL the card's own body (never replaced), got {card.body_text!r}",
+                          "image/png" in card.body_text)
+                ctx.check(f"an inline render was attempted with a real kitty escape sequence, got {captured}",
+                          len(captured) == 1 and captured[0].startswith("\x1b_Ga=T,f=100"))
+        finally:
+            ToolCard._default_inline_writer = orig_writer
+    asyncio.run(body())
+
+
+@test
+def test_image_result_falls_back_to_caption_only_when_render_mode_is_caption(ctx: Ctx):
+    from rolo_claude.tui.widgets.cards import ToolCard
+
+    captured = []
+
+    def _fake_writer(self, seq):
+        captured.append(seq)
+
+    async def body():
+        fake = FakeController(turns=[_image_result_turn()])
+        app = await _mounted(fake)
+        app.images_render_mode = "caption"  # --no-inline-images / config off|caption
+        app.image_protocol = "kitty"        # even though a protocol WAS detected
+        orig_writer = ToolCard._default_inline_writer
+        ToolCard._default_inline_writer = _fake_writer
+        try:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "take a screenshot")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot)
+                cards = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check(f"exactly one ToolCard mounted, got {len(cards)}", len(cards) == 1)
+                ctx.check(f"the caption is still shown, got {cards[0].body_text!r}",
+                          "image/png" in cards[0].body_text)
+                ctx.check(f"caption mode NEVER attempts an inline render, got {captured}", captured == [])
+        finally:
+            ToolCard._default_inline_writer = orig_writer
+    asyncio.run(body())
+
+
+@test
+def test_image_result_falls_back_to_caption_when_no_protocol_detected(ctx: Ctx):
+    from rolo_claude.tui.widgets.cards import ToolCard
+
+    captured = []
+
+    def _fake_writer(self, seq):
+        captured.append(seq)
+
+    async def body():
+        fake = FakeController(turns=[_image_result_turn()])
+        app = await _mounted(fake)
+        ctx.check(f"a headless pilot's own driver is never a real tty, got {app.image_protocol!r}",
+                  app.image_protocol == "none")
+        orig_writer = ToolCard._default_inline_writer
+        ToolCard._default_inline_writer = _fake_writer
+        try:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "take a screenshot")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot)
+                cards = [w for w in app.transcript.children if isinstance(w, ToolCard)]
+                ctx.check(f"the caption is shown even though images_render_mode defaults to inline, "
+                          f"got {cards[0].body_text!r}", "image/png" in cards[0].body_text)
+                ctx.check(f"no protocol detected -> never attempts an inline render, got {captured}", captured == [])
+        finally:
+            ToolCard._default_inline_writer = orig_writer
+    asyncio.run(body())
+
+
 @test
 def test_shift_tab_cycles_the_status_text_through_all_four_modes(ctx: Ctx):
     async def body():

@@ -447,6 +447,16 @@ class McpTool(Tool):
         blocks = content_with_structured_fallback(blocks, getattr(result, "structured_content", None))
         if not blocks:
             blocks = [{"type": "text", "text": "(no content returned)"}]
+        # H13 Part A: this call may have just connected a previously-`cached`
+        # server for real -- if its live tool list turned out to differ from
+        # what the cache promised, `refresh_if_stale` already refreshed
+        # `ctx.catalog`'s deferred pool and hands back a short note to
+        # surface alongside this call's own result.
+        catalog = getattr(ctx, "catalog", None)
+        if catalog is not None:
+            stale_note = catalog.refresh_if_stale(self.server_name)
+            if stale_note:
+                blocks = [{"type": "text", "text": stale_note}] + blocks
         return ToolResult(content=blocks, is_error=bool(getattr(result, "is_error", False)))
 
 

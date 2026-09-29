@@ -35,6 +35,11 @@ def run_tui(args) -> int:
         controller, registry=registry, facade=facade, tool_registry=getattr(facade, "tool_registry", None),
         cwd=cwd, theme_name=theme_name, tui_setting=tui_setting,
         initial_prompt=(args.prompt if not args.demo else None),
+        # H13 Part C: set only when `--resume <text>` didn't resolve to
+        # exactly one session (`tui/bootstrap.py::build_controller`) -- opens
+        # the resume picker, pre-filtered by that text, right after mount.
+        initial_resume_filter=getattr(controller, "pending_resume_filter", None),
+        no_inline_images=bool(getattr(args, "no_inline_images", False)),
     )
     try:
         app.run()

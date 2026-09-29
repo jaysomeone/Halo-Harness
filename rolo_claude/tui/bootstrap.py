@@ -31,6 +31,26 @@ def build_controller(args) -> "tuple[Controller, object, object]":
     receive events)."""
     cwd = Path(args.cwd).resolve() if getattr(args, "cwd", None) else Path.cwd()
 
+    # H13 Part C ("--resume <text> picks the unique match or opens the
+    # picker filtered"): resolved BEFORE build_session (which would
+    # otherwise silently pick `resolve_resume`'s own "most recent match"
+    # guess, or silently start a brand-new session on zero matches, with no
+    # feedback either way -- the TUI had no picker wired to `--resume`'s own
+    # text at all before this). A real *text* argument (not a bare `-r`/
+    # `--resume` flag, and not paired with `--continue`) that resolves to
+    # anything OTHER than exactly one session is deferred to the picker,
+    # opened already filtered by that same text once the app mounts
+    # (`tui/app.py::on_mount`) -- `build_session` then runs with NO resume
+    # at all, so it starts an ordinary new session in the meantime.
+    pending_resume_filter = None
+    resume_arg = getattr(args, "resume", None)
+    effective_resume = resume_arg
+    if resume_arg and not getattr(args, "continue_", False):
+        from rolo_claude.agent.sessions import find_resume_matches
+        if len(find_resume_matches(cwd, resume_arg)) != 1:
+            pending_resume_filter = resume_arg
+            effective_resume = None
+
     build = build_session(
         cwd=cwd, model_ref_raw=getattr(args, "model", None),
         small_model_ref_raw=getattr(args, "small_model", None),
@@ -50,6 +70,18 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         playwright_headless=bool(getattr(args, "playwright_headless", False)),
         mcp_config=getattr(args, "mcp_config", None),
         strict_mcp_config=bool(getattr(args, "strict_mcp_config", False)),
+        # H13 Part C bug fix: `--continue`/`--resume`/`--fork-session` were
+        # never passed through here at all -- headless.py's own print-mode
+        # call site (below, in run_print_mode) always has, but the TUI's
+        # `build_session` call silently dropped every one of these three
+        # flags, so `rolo-claude --resume`/`--continue`/`--fork-session`
+        # (without `-p`) always just started a brand-new session with zero
+        # feedback. `resume` uses `effective_resume` (None instead of an
+        # AMBIGUOUS text -- see `pending_resume_filter` above), never the
+        # raw flag value, so an ambiguous/no-match text never lets
+        # `resolve_resume`'s own "most recent match" guess silently win.
+        continue_=bool(getattr(args, "continue_", False)), resume=effective_resume,
+        fork_session_flag=bool(getattr(args, "fork_session", False)),
         print_mode=False,
     )
     attach_cli_files(build.session, getattr(args, "file", None), cwd=cwd)
@@ -84,6 +116,12 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         mcp_status_fn=_mcp_status_fn, reconnect_fn=_reconnect_fn, settings=build.settings,
     )
     controller.mcp_manager = build.mcp_manager  # tui/app.py's clean shutdown hook
+    # H13 Part C: `tui/launch.py` reads this straight off the controller
+    # (same pattern as `mcp_manager` just above) to tell `BridgeApp` to open
+    # the resume picker, pre-filtered, right after mount -- None (the
+    # overwhelming majority of launches: no --resume at all, or one that
+    # already resolved to exactly one session) means "nothing to do".
+    controller.pending_resume_filter = pending_resume_filter
     for n in build.mcp_notices:
         print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
     return controller, build.command_registry, build.facade

@@ -182,7 +182,13 @@ class McpServerConfig:
     headers_helper: Optional[str] = None
     timeout_ms: Optional[int] = None
     always_load: bool = False
-    lazy: bool = False  # finding 13 must-do: server-level "mcpLazy" -- connect on first use, not at start_all()
+    # H13 Part A: tri-state -- `None` means "mcpLazy wasn't set on this
+    # entry", resolved to a concrete bool by `_apply_lazy_defaults` (below)
+    # before a caller ever sees it: an explicit per-server True/False always
+    # wins; otherwise the GLOBAL `settings.json` "mcpLazy" default applies
+    # (True -- lazy-by-default -- when that's absent too). `always_load`
+    # servers are forced eager regardless (see `_apply_lazy_defaults`).
+    lazy: Optional[bool] = None
     oauth: Optional[dict] = None
     scope: str = "user"  # local | project | user | flag | managed | dynamic
     source_path: Optional[str] = None
@@ -224,7 +230,11 @@ def parse_server(name: str, raw, *, scope: str, source_path: Optional[str] = Non
         env=dict(raw.get("env") or {}), cwd=raw.get("cwd"), url=url,
         headers=dict(raw.get("headers") or {}), headers_helper=raw.get("headersHelper"),
         timeout_ms=raw.get("timeout"), always_load=bool(raw.get("alwaysLoad", False)),
-        lazy=bool(raw.get("mcpLazy", False)),
+        # H13 Part A: preserve tri-state here -- an entry with no "mcpLazy"
+        # key at all must resolve against the GLOBAL default later
+        # (`_apply_lazy_defaults`), not silently collapse to False the way
+        # `bool(raw.get("mcpLazy", False))` used to.
+        lazy=(bool(raw["mcpLazy"]) if raw.get("mcpLazy") is not None else None),
         oauth=raw.get("oauth"), scope=scope, source_path=source_path,
     )
 
@@ -368,6 +378,7 @@ def resolve_server_configs(
         _notice_dropped_dynamic(extra_dynamic, resolved, notices, "managed-mcp.json is exclusive")
         resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
         notices.extend(policy_notices)
+        resolved = _apply_lazy_defaults(resolved, settings_raw)
         return _expand_all(resolved, env_for_expansion, notices)
 
     def _add_missing(entries: dict, scope: str, source_path=None):
@@ -399,6 +410,7 @@ def resolve_server_configs(
                                  "--strict-mcp-config restricts MCP servers to --mcp-config entries only")
         resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
         notices.extend(policy_notices)
+        resolved = _apply_lazy_defaults(resolved, settings_raw)
         return _expand_all(resolved, env_for_expansion, notices)
 
     _add_missing_configs(extra_dynamic)
@@ -448,6 +460,7 @@ def resolve_server_configs(
 
     resolved, policy_notices = _apply_mcp_server_policy(resolved, settings_raw)
     notices.extend(policy_notices)
+    resolved = _apply_lazy_defaults(resolved, settings_raw)
     return _expand_all(resolved, env_for_expansion, notices)
 
 
@@ -538,6 +551,34 @@ def _apply_mcp_server_policy(resolved: dict, settings_raw: dict) -> "tuple[dict,
     return resolved, notices
 
 
+def _apply_lazy_defaults(resolved: dict, settings_raw: dict) -> dict:
+    """H13 Part A ("make lazy the default"): resolves every surviving
+    server's tri-state `McpServerConfig.lazy` to a concrete bool, IN PLACE
+    of the tri-state -- every downstream reader (`doctor._check_mcp_servers`,
+    `mcp_setup.build_manager`'s own `{name for name, cfg in configs.items()
+    if cfg.lazy}`) keeps reading a plain bool and needs no changes.
+
+    Precedence: an `alwaysLoad` server is always eager (preloading its
+    tools needs a live connection at session start regardless of any
+    `mcpLazy` value someone also set on it) -> else an explicit per-server
+    `mcpLazy` (True or False) always wins -> else the GLOBAL default from
+    `settings.json`'s own top-level `"mcpLazy"` key (same key name, top
+    level instead of per-entry) -> else True (lazy is now the DEFAULT,
+    reversing the pre-H13 "eager unless mcpLazy: true" behaviour)."""
+    global_raw = settings_raw.get("mcpLazy")
+    global_default = True if global_raw is None else bool(global_raw)
+    out = {}
+    for name, cfg in resolved.items():
+        if cfg.always_load:
+            effective = False
+        elif cfg.lazy is not None:
+            effective = cfg.lazy
+        else:
+            effective = global_default
+        out[name] = cfg if cfg.lazy is effective else dataclass_replace_config(cfg, lazy=effective)
+    return out
+
+
 def _expand_all(resolved: dict, env_for_expansion, notices: list) -> "tuple[dict, list]":
     if not env_for_expansion:
         return resolved, notices
@@ -568,8 +609,10 @@ def _looks_like_dead_transport(exc: BaseException) -> bool:
 
 # ---- McpServerHandle ---------------------------------------------------------
 
-# state vocabulary: pending | pending_approval | connecting | connected |
-# failed | disabled | needs_auth | closed [D-CFG].
+# state vocabulary: pending | pending_approval | cached | connecting |
+# connected | failed | disabled | needs_auth | closed [D-CFG]. H13 Part A
+# adds "cached": a lazy server whose tools were seeded from
+# `mcp.tools_cache` without ever connecting -- see `McpManager.mark_cached`.
 class McpServerHandle:
     """One server's whole connection lifecycle, transport-agnostic past
     `_connect_once` (stdio vs http vs sse only matters for how the
@@ -1068,6 +1111,12 @@ class McpManager:
         self.configs = configs
         self._lazy_names = set(lazy_names or ())
         self._closed = False
+        # H13 Part A: names whose real, post-connect `tools/list` turned out
+        # to differ from what a stale-but-hash-matching cache had promised
+        # (`ensure_started`/`reconnect` populate this) -- drained by
+        # `SessionCatalog.refresh_if_stale` so the model's own catalog gets
+        # refreshed and told about it exactly once per drift.
+        self._stale_after_connect: set = set()
         # H9 bug fix (item 11, MCP compatibility matrix): kept around ONLY
         # for `resync_from()` below, which needs to build a brand-new
         # `McpServerHandle` the same way the constructor does for a name
@@ -1118,6 +1167,55 @@ class McpManager:
                                                   cwd=self._cwd, trusted=self._trusted)
             touched.append(name)
         return touched
+
+    # ---- H13 Part A: tool cache (lazy-by-default) --------------------------
+
+    def mark_cached(self, name: str, tools: list, instructions: Optional[str]) -> None:
+        """Seed a still-`pending` handle's tools from `mcp.tools_cache`
+        WITHOUT connecting anything -- `tools` is a list of cache-shaped
+        objects (`tools_cache.CachedTool`, or any object with `.name`/
+        `.description`/`.input_schema`/`.meta`). A no-op on a handle that
+        isn't `pending` (already cached/connecting/connected/failed/etc --
+        never clobber a real, live state with stale cache data)."""
+        h = self.handles.get(name)
+        if h is None or h.state != "pending":
+            return
+        h.tools = list(tools or [])
+        h.instructions = instructions
+        h.state = "cached"
+
+    def was_cache_stale(self, name: str) -> bool:
+        return name in self._stale_after_connect
+
+    def clear_cache_stale(self, name: str) -> None:
+        self._stale_after_connect.discard(name)
+
+    def _refresh_tools_cache(self, name: str, h: "McpServerHandle",
+                              cached_tools_before: Optional[list] = None) -> None:
+        """Writes a fresh `mcp.tools_cache` entry for `h` (only meaningful
+        for a `_lazy_names` member -- an eager server's tools are never read
+        back from the cache, so caching them would be pure unused disk IO)
+        and, when `cached_tools_before` is given (a handle that just moved
+        from `cached` to `connected` for real), records whether the live
+        `tools/list` actually matches what the cache had promised -- H13
+        Part A: "stale cache + changed tools on connect -> refresh the
+        catalog entries and emit a notification" (the notification itself
+        is `SessionCatalog.refresh_if_stale`'s job, driven by
+        `was_cache_stale` above). Best-effort: a cache-module import/write
+        failure never breaks the connection that already succeeded."""
+        if name not in self._lazy_names:
+            return
+        try:
+            from rolo_claude.mcp import tools_cache
+            if cached_tools_before is not None:
+                before = tools_cache.tool_signature_set(cached_tools_before)
+                after = tools_cache.tool_signature_set(h.tools)
+                if before != after:
+                    self._stale_after_connect.add(name)
+            key = tools_cache.config_cache_key(h.config)
+            tools_cache.write_cache(name, key=key, tools=h.tools, instructions=h.instructions)
+        except Exception:
+            pass
 
     def start_all(self) -> None:
         """Start every eligible server (not lazy, not disabled, not
@@ -1215,10 +1313,22 @@ class McpManager:
     def ensure_started(self, name: str, abort=None) -> None:
         """`mcpLazy` servers (and a not-yet-approved `.mcp.json` server
         that just became approved) connect on FIRST USE instead of at
-        `start_all()` time."""
+        `start_all()` time. H13 Part A: a `cached` handle (tools known from
+        `mcp.tools_cache`, never actually connected) is started here the
+        exact same way a `pending` one is -- this is the ONE place a real
+        connection actually happens for a tool call against either state
+        (`McpManager.call` always runs this first). On a successful
+        cached->connected transition, the fresh `tools/list` is compared
+        against what the cache had promised and a new cache entry is
+        written either way (see `_refresh_tools_cache`)."""
         h = self.handles.get(name)
-        if h is not None and h.state == "pending":
-            h.start(abort=abort)
+        if h is None or h.state not in ("pending", "cached"):
+            return
+        was_cached = h.state == "cached"
+        cached_tools_before = list(h.tools) if was_cached else None
+        h.start(abort=abort)
+        if was_cached and h.state == "connected":
+            self._refresh_tools_cache(name, h, cached_tools_before)
 
     def ensure_lazy_started_all(self, abort=None) -> "list[str]":
         """Linux/H4 must-do: start EVERY still-`pending` `mcpLazy` server
@@ -1252,14 +1362,37 @@ class McpManager:
         self._start_targets_parallel([h for _, h in targets_by_name], abort=abort)
         return [name for name, _ in targets_by_name]
 
+    def start_many(self, names, abort=None) -> None:
+        """H13 Part A: start every still-`pending` name in `names` IN
+        PARALLEL, one shared MCP_TIMEOUT window for the whole batch --
+        `mcp_setup.bootstrap_lazy_from_cache`'s own public entry point for
+        this, so a box with N lazy servers that have no cache yet (a first
+        run, or a box whose config just changed) bootstraps in roughly ONE
+        slow server's connect time, not N of them back to back. A name not
+        in `self.handles`, or not currently `pending`, is silently skipped
+        (already connected/cached/disabled -- nothing to do)."""
+        targets = [self.handles[n] for n in names
+                   if self.handles.get(n) is not None and self.handles[n].state == "pending"]
+        if not targets:
+            return
+        self._start_targets_parallel(targets, abort=abort)
+
     def all_tools(self) -> "list[tuple[str, str, object]]":
         """`[(server_name, wire_tool_name, sdk_tool), ...]` across every
-        CONNECTED server, name-sorted by WIRE name -- the candidate pool
-        `agent/catalog.py` selects preload/deferred from, and what
-        ToolSearch searches over for a not-yet-loaded name."""
+        CONNECTED or CACHED server, name-sorted by WIRE name -- the
+        candidate pool `agent/catalog.py` selects preload/deferred from, and
+        what ToolSearch searches over for a not-yet-loaded name. H13 Part A:
+        a `cached` handle's tools (seeded from `mcp.tools_cache`, never
+        actually connected) are included here on purpose -- that's the
+        whole point of the cache: the frozen catalog/ToolSearch can find and
+        preload/defer a lazy server's tools before it is ever connected. A
+        `McpTool` built from one of these calls `McpManager.call()` on
+        invocation exactly like any other, which connects it for real on
+        first use via `ensure_started` -- nothing downstream needs to know
+        which state a tool's own server was in when this list was built."""
         out = []
         for server_name, h in self.handles.items():
-            if h.state != "connected":
+            if h.state not in ("connected", "cached"):
                 continue
             for t in h.tools:
                 out.append((server_name, mcp_tool_name(server_name, t.name), t))
@@ -1297,7 +1430,10 @@ class McpManager:
                 "name": name, "type": h.config.type, "command": h.config.command, "args": h.config.args,
                 "url": h.config.url, "state": h.state, "error": h.error,
                 "tools_fetch_failed": h.tools_fetch_failed,
-                "tool_count": len(h.tools) if h.state == "connected" else 0,
+                # H13 Part A: a "cached" server's tool count is known (from
+                # mcp.tools_cache) even though it was never actually
+                # connected -- reported the same as a real "connected" one.
+                "tool_count": len(h.tools) if h.state in ("connected", "cached") else 0,
                 "instructions": h.instructions, "scope": h.config.scope,
             })
         return out
@@ -1323,13 +1459,23 @@ class McpManager:
         h = self.handles.get(name)
         if h is None:
             return False
+        # H13 Part A: a manual `/mcp` reconnect of a `cached` (never
+        # actually connected) handle is how "or when /mcp asks for it"
+        # connects a lazy server on demand -- captured BEFORE close()/
+        # start() below so a real tools/list that turns out to differ from
+        # what the cache promised is still detected (see
+        # `_refresh_tools_cache`).
+        cached_tools_before = list(h.tools) if h.state == "cached" else None
         h.close(timeout=mcp_timeout_s() + 5.0, abort=abort)
         h.error = None
         h.tools_fetch_failed = False
         h._reconnect_on_next_call = False
         h.state = "pending_approval" if h.config.pending_approval else "pending"
         h.start(abort=abort)
-        return h.state == "connected"
+        ok = h.state == "connected"
+        if ok:
+            self._refresh_tools_cache(name, h, cached_tools_before)
+        return ok
 
     def close_all(self, timeout: float = 5.0) -> None:
         """Close every handle, then hard-stop the shared loop -- the WHOLE

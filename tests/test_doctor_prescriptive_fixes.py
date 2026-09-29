@@ -234,12 +234,14 @@ def test_mcp_servers_check_none_configured_and_enumeration_failure(ctx: Ctx):
 
 @test
 def test_mcp_servers_check_reports_eager_vs_lazy(ctx: Ctx):
+    # H13 Part A: lazy is now the DEFAULT -- a server needs an EXPLICIT
+    # "mcpLazy": false to count as eager; one with no key at all is lazy.
     from rolo_claude import doctor
     home = _fresh_home()
     (home / ".claude.json").write_text(json.dumps({
         "mcpServers": {
-            "eager-one": {"type": "stdio", "command": "true"},
-            "lazy-one": {"type": "stdio", "command": "true", "mcpLazy": True},
+            "eager-one": {"type": "stdio", "command": "true", "mcpLazy": False},
+            "lazy-one": {"type": "stdio", "command": "true"},
         },
     }), encoding="utf-8")
     old_home = os.environ.get("BRIDGE_TEST_HOME")
@@ -251,6 +253,28 @@ def test_mcp_servers_check_reports_eager_vs_lazy(ctx: Ctx):
         ctx.check("names the mcpLazy lever since something is eager", "mcpLazy" in line)
         ctx.check("never a WARN just for having eager servers (no timing data to justify one)",
                   line.startswith(doctor.OK))
+    finally:
+        if old_home is not None:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+        else:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_mcp_servers_check_lazy_is_now_the_default_with_no_mcplazy_key(ctx: Ctx):
+    """H13 Part A acceptance: a plain server entry with NO "mcpLazy" key at
+    all is now lazy by default (the pre-H13 default was eager)."""
+    from rolo_claude import doctor
+    home = _fresh_home()
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"plain-one": {"type": "stdio", "command": "true"}},
+    }), encoding="utf-8")
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        line = doctor._check_mcp_servers(home)
+        ctx.check(f"the one server with no mcpLazy key is lazy by default, got {line!r}",
+                  "1 configured" in line and "0 eager" in line and "1 lazy" in line)
     finally:
         if old_home is not None:
             os.environ["BRIDGE_TEST_HOME"] = old_home

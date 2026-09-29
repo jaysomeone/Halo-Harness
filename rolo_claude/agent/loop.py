@@ -3243,6 +3243,22 @@ class Session:
         # need the PRE-cap text this function no longer has by this point.
         spilled = _SPILL_MARKER in summary_text if isinstance(summary_text, str) else False
         error_class = (_classify_tool_error_text(name, summary_text) if tr.is_error else None)
+        # H13 Part B ("inline images in the terminal"): the real (already
+        # capped/spilled by _mcp_blocks_for_log above -- never the raw
+        # uncapped tool output) base64 image data, extracted from
+        # content_for_log so the TUI can attempt an inline render instead of
+        # just the plain _image_caption text every event already carries
+        # via summary/content. None when this result has no real image
+        # block at all (the overwhelming majority of tool calls) -- kept
+        # OUT of the event entirely rather than an empty list, so a caller
+        # that only checks truthiness never has to special-case "present
+        # but empty".
+        images_for_event = [
+            {"media_type": b["source"].get("media_type"), "data": b["source"].get("data")}
+            for b in (content_for_log if isinstance(content_for_log, list) else [])
+            if isinstance(b, dict) and b.get("type") == "image" and isinstance(b.get("source"), dict)
+            and b["source"].get("type") == "base64" and b["source"].get("data")
+        ] or None
         self.log.append_tool_result(
             tool_use_id=tool_id, content=content_for_log, is_error=tr.is_error, tool=name,
             error_class=error_class, ms=tr.duration_ms,
@@ -3256,7 +3272,7 @@ class Session:
         # e.g. tens of KB, never the raw uncapped tool output) text so
         # the pager has something real to show.
         yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200],
-                                            "content": summary_text}, turn=turn_no)
+                                            "content": summary_text, "images": images_for_event}, turn=turn_no)
         return content_for_log, tr.is_error
 
     # ---- interactive permission handshake (U2) ---------------------------

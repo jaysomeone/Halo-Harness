@@ -83,24 +83,28 @@ async def _handle_clear(app, _args: str) -> None:
     await app.transcript.add_note("Conversation cleared -- starting a new session context.", kind="note")
 
 
-async def _handle_resume(app, _args: str) -> None:
+async def _handle_resume(app, args: str) -> None:
     # U5/review must-do: `list_sessions()` is file I/O -- off the UI thread.
-    app.run_worker(lambda: _resume_list_worker(app), thread=True, name="list-sessions")
+    # H13 Part C: `/resume <text>` opens the picker ALREADY filtered by
+    # `<text>` (the SAME fuzzy filter -- title/first prompt/cwd/model -- the
+    # picker's own live Input box uses) instead of ignoring it.
+    query = (args or "").strip()
+    app.run_worker(lambda: _resume_list_worker(app, query), thread=True, name="list-sessions")
 
 
-def _resume_list_worker(app) -> None:
+def _resume_list_worker(app, query: str) -> None:
     sessions = app.controller.list_sessions()
-    app.call_from_thread(_open_resume_picker, app, sessions)
+    app.call_from_thread(_open_resume_picker, app, sessions, query)
 
 
-def _open_resume_picker(app, sessions) -> None:
+def _open_resume_picker(app, sessions, query: str = "") -> None:
     from rolo_claude.tui.dialogs.session_picker import SessionPicker
 
     def _on_pick(session_id) -> None:
         if session_id:
             app.controller.resume(session_id)
 
-    app.push_screen(SessionPicker(sessions), _on_pick)
+    app.push_screen(SessionPicker(sessions, initial_query=query), _on_pick)
 
 
 async def _handle_permissions(app, _args: str) -> None:

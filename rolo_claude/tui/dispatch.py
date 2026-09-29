@@ -228,7 +228,14 @@ async def _apply_event_inner(app, event) -> None:
     elif kind == "tool_result":
         card = app.transcript.tool_cards.get(data.get("id"))
         if card is not None:
-            card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"))
+            # H13 Part B: `images` (present only for a real image tool
+            # result -- Read of an image, a Playwright/Chrome screenshot,
+            # an MCP image block) lets the card attempt an inline render
+            # instead of just the plain caption text; a card that never
+            # gets this kwarg (every non-image result) behaves exactly as
+            # before.
+            card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"),
+                             images=data.get("images"))
         _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")))
     elif kind == "permission_request":
         # H5c finding 8: a FOREGROUND sub-agent's own "ask" (when its

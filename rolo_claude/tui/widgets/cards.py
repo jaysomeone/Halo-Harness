@@ -74,7 +74,9 @@ class ToolCard(Static, can_focus=True):
         self.body_text += chunk
         self._refresh()
 
-    def set_result(self, *, ok: bool, summary: str, content: Optional[str] = None) -> None:
+    def set_result(self, *, ok: bool, summary: str, content: Optional[str] = None,
+                    images: Optional[list] = None, render_mode: Optional[str] = None,
+                    protocol: Optional[str] = None, write_fn: Optional[Callable] = None) -> None:
         # review finding 15: prefer the fuller `content` (still capped
         # upstream, never the raw uncapped tool output) over the 200-char
         # `summary` for the card's OWN body/pager text -- the old
@@ -85,6 +87,64 @@ class ToolCard(Static, can_focus=True):
         self.remove_class("tool-running")
         self.add_class("tool-ok" if ok else "tool-error")
         self._refresh()
+        # H13 Part B ("inline images in the terminal"): the caption text
+        # above is ALWAYS set first and is never replaced by this -- an
+        # inline render is a best-effort ADDITION on top of it (kitty/sixel
+        # draw into the terminal's own graphics layer; the text cells this
+        # widget owns are untouched), so a detection miss, an unsupported
+        # terminal, or any failure here still leaves the exact same caption
+        # a caller that never passes `images` at all would see.
+        if images and render_mode is None:
+            render_mode = getattr(getattr(self, "app", None), "images_render_mode", "caption")
+        if images and protocol is None:
+            protocol = getattr(getattr(self, "app", None), "image_protocol", "none")
+        if images and render_mode == "inline" and protocol in ("kitty", "sixel"):
+            self._try_render_inline(images[0], protocol, write_fn=write_fn)
+
+    def _try_render_inline(self, image: dict, protocol: str, *, write_fn: Optional[Callable] = None) -> None:
+        import base64
+        from rolo_claude.tui import images as image_mod
+
+        data_b64, media_type = image.get("data"), image.get("media_type") or "image/png"
+        if not data_b64:
+            return
+        try:
+            raw = base64.b64decode(data_b64, validate=False)
+        except Exception:
+            return
+        raw = image_mod.downscale_for_terminal(raw, media_type)
+        seq = image_mod.encode_kitty_apc(raw, cell_cols=48) if protocol == "kitty" else image_mod.encode_sixel(raw)
+        if not seq:
+            return
+        # test hook: a pilot asserts on this without needing a real
+        # terminal or a stable Rich/Textual internal write API.
+        self._last_inline_sequence = seq
+        (write_fn or self._default_inline_writer)(seq)
+
+    def _default_inline_writer(self, seq: str) -> None:
+        app = getattr(self, "app", None)
+        console = getattr(app, "console", None)
+        if console is None or not getattr(console, "is_terminal", False):
+            return  # a pilot/print-mode-adjacent run, or output piped -- never write raw escapes there
+        self.call_after_refresh(lambda: self._write_positioned(seq))
+
+    def _write_positioned(self, seq: str) -> None:
+        # Written to the SAME underlying stream Textual's own driver
+        # ultimately writes to (`Console.file`, a stable public Rich API),
+        # bracketed in cursor save/move/restore so it lands at this card's
+        # own on-screen region without disturbing wherever Textual's next
+        # redraw expects the cursor to be. The image lives in the
+        # terminal's own graphics layer from here on -- a later scroll/
+        # resize can visually strand it (kitty/sixel have no "reflow"
+        # concept), an accepted limitation the brief's own caption fallback
+        # covers for every terminal that can't do this at all.
+        try:
+            region = self.region
+            out = f"\x1b[s\x1b[{region.y + 1};{region.x + 1}H{seq}\x1b[u"
+            self.app.console.file.write(out)
+            self.app.console.file.flush()
+        except Exception:
+            pass
 
     def set_skipped(self, reason: str) -> None:
         self.status = "skipped"

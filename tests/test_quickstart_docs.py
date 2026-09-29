@@ -64,12 +64,27 @@ def test_rest_of_readme_unchanged_below_quick_start(ctx: Ctx):
 
 @test
 def test_version_bumped_to_0_4_1_and_changelog_has_an_entry(ctx: Ctx):
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 0.4.1, got {__version__!r}", __version__ == "0.4.1")
+    """H12's own pinning -- kept exact (checked against the CHANGELOG's own
+    still-present [0.4.1] entry, not the CURRENT version) now that H13 has
+    bumped past it; see `test_version_bumped_to_0_5_0_and_changelog_has_an_
+    entry` below for H13's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
-    ctx.check("CHANGELOG.md has a [0.4.1] entry", "[0.4.1]" in changelog)
+    ctx.check("CHANGELOG.md still has a [0.4.1] entry", "[0.4.1]" in changelog)
     ctx.check("the [0.4.1] entry mentions rolo-claude init",
               "rolo-claude init" in changelog.split("[0.4.1]", 1)[1].split("[0.4.0]", 1)[0])
+
+
+@test
+def test_version_bumped_to_0_5_0_and_changelog_has_an_entry(ctx: Ctx):
+    """H13 brief Part E: lazy MCP by default, inline images, /resume search,
+    the family-baseline pass, version bump."""
+    from rolo_claude import __version__
+    ctx.check(f"__version__ is 0.5.0, got {__version__!r}", __version__ == "0.5.0")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [0.5.0] entry", "[0.5.0]" in changelog)
+    entry = changelog.split("[0.5.0]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("lazy", "inline", "/resume"):
+        ctx.check(f"the [0.5.0] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 if __name__ == "__main__":

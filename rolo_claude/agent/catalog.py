@@ -317,6 +317,30 @@ class SessionCatalog:
                     continue
                 self.deferred[wire_name] = (server, sdk_tool)
 
+    def refresh_if_stale(self, server_name: str) -> Optional[str]:
+        """H13 Part A ("stale cache + changed tools on connect -> refresh
+        the catalog entries and emit a notification"): called right after a
+        tool call against `server_name` completes (`tools/mcp_tool.py`'s
+        `McpTool.run()`) -- a no-op returning `None` unless `self.manager`
+        just detected (via `McpManager.ensure_started`/`reconnect`) that a
+        `cached` handle's real, post-connect `tools/list` differs from what
+        the cache had promised when this session's catalog was frozen. When
+        it did: reuses the EXISTING reconnect-time refresh mechanism
+        (`refresh_deferred_for_server`) so any tool this server added/
+        removed/changed enters/leaves `self.deferred` correctly, clears the
+        manager's own one-shot stale flag (so the same drift is never
+        reported twice), and returns a short human-readable note for the
+        caller to surface to the model -- never raises."""
+        was_stale = getattr(self.manager, "was_cache_stale", lambda _n: False)(server_name)
+        if not was_stale:
+            return None
+        self.refresh_deferred_for_server(server_name)
+        clear = getattr(self.manager, "clear_cache_stale", None)
+        if callable(clear):
+            clear(server_name)
+        return (f"(mcp: {server_name!r}'s tool list changed since it was last cached -- "
+                f"the catalog has been refreshed.)")
+
     def ensure_lazy_discovered(self, abort=None) -> None:
         """Linux/H4 must-do: "`mcpLazy` servers must connect on first
         ToolSearch hit so their tools are discoverable" -- a lazy server

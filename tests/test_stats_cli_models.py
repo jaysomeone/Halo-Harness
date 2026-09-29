@@ -48,6 +48,32 @@ def test_stats_models_json_stable_schema(ctx: Ctx):
         ctx.check(f"top-level key {key!r} present", key in obj)
     ctx.check(f"3 sessions counted, got {obj['sessions']}", obj["sessions"] == 3)
     ctx.check("models is a list", isinstance(obj["models"], list))
+
+
+@test
+def test_stats_since_1d_is_accepted_not_rejected_by_argparse(ctx: Ctx):
+    """H13 Part D bug fix: `--since` used to be `choices=("7d","30d","all")`
+    -- "1d" (the brief's own "use `stats --models --since 1d` for the
+    family-baseline numbers" acceptance line) failed with argparse's
+    "invalid choice" before any fix landed. Any positive "<N>d" now parses;
+    a genuinely bad value is still a clean, honest usage error (exit 2),
+    never silently reinterpreted."""
+    home = _home_with_fixtures()
+    cwd = Path(tempfile.mkdtemp(prefix="stats-models-cwd-"))
+    result = _run(["stats", "--models", "--since", "1d", "--all-projects", "--json"], home, cwd)
+    ctx.check(f"--since 1d is accepted, exit 0, got {result.returncode} stderr={result.stderr!r}",
+              result.returncode == 0)
+    obj = json.loads(result.stdout)
+    ctx.check(f"since echoed back exactly, got {obj.get('since')!r}", obj.get("since") == "1d")
+    ctx.check(f"the 3 fixture sessions (mtimes bumped to now) are still within a 1-day window, got {obj['sessions']}",
+              obj["sessions"] == 3)
+
+    result2 = _run(["stats", "--models", "--since", "2d", "--all-projects", "--json"], home, cwd)
+    ctx.check(f"any positive <N>d works, not just 1d, got {result2.returncode}", result2.returncode == 0)
+
+    bad = _run(["stats", "--models", "--since", "not-a-window", "--all-projects", "--json"], home, cwd)
+    ctx.check(f"a genuinely invalid --since is still a clean usage error, got exit {bad.returncode}",
+              bad.returncode == 2)
     ctx.check("tools is a list", isinstance(obj["tools"], list))
     if obj["models"]:
         row = obj["models"][0]

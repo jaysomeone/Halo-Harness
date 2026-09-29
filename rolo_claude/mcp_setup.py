@@ -231,10 +231,74 @@ def build_manager(
 
     # finding 13 must-do: server-level "mcpLazy" -- connect on first tool
     # use instead of at start_all() time (parsed into McpServerConfig.lazy
-    # but never consulted anywhere until now).
+    # but never consulted anywhere until now). H13 Part A: `cfg.lazy` is now
+    # ALREADY the fully-resolved effective value (per-server override, else
+    # the global `settings.json` "mcpLazy" default, else True) --
+    # `resolve_server_configs`/`_apply_lazy_defaults` did that resolution;
+    # this stays the same one-line set comprehension it always was.
     lazy_names = {name for name, cfg in configs.items() if cfg.lazy}
     manager = McpManager(configs, tool_env=tool_child_env(base_env), cwd=cwd,
                           lazy_names=lazy_names, trusted=trusted)
     if start:
         manager.start_all()
+        if lazy_names:
+            notices.extend(bootstrap_lazy_from_cache(manager, configs, lazy_names))
     return manager, notices
+
+
+def bootstrap_lazy_from_cache(manager, configs: "dict[str, object]", lazy_names: set) -> list:
+    """H13 Part A: every lazy server needs its tool NAMES/DESCRIPTIONS known
+    before the frozen catalog is built, even though it must not actually
+    connect yet. For each lazy server: a cache file whose hash matches this
+    server's CURRENT config (`mcp.tools_cache.config_cache_key`) seeds the
+    handle straight from disk (`McpManager.mark_cached` -- zero connections);
+    no cache, or a hash mismatch (first session ever, or the command/args/
+    env/url/headers changed since it was last cached) means it needs a real
+    connect to learn its tools for the first time.
+
+    Bug found live (H13 Part D dogfooding, before any real acceptance line
+    was recorded): this used to `h.start()` -- a BLOCKING call -- ONE
+    uncached server at a time in a plain `for` loop. A box with N lazy
+    servers and no cache yet (every real box's very FIRST run, or right
+    after any of their configs change) paid up to N * MCP_TIMEOUT (30s
+    default) SEQUENTIALLY -- observed hanging past 400s against a real
+    15-server `~/.claude.json` with a few unreachable/hardware-dependent
+    entries, worse than the pre-H13 eager `start_all()` (which at least
+    already ran every eager server concurrently via `_start_targets_
+    parallel`). Every uncached server now connects together via
+    `McpManager.start_many` (the SAME concurrent-gather machinery
+    `start_all()`/`ensure_lazy_started_all()` already use), one shared
+    MCP_TIMEOUT window for the whole batch, not one per server -- pinned by
+    `tests/test_mcp_lazy_cache.py::
+    test_bootstrap_connects_multiple_uncached_lazy_servers_in_parallel_not_serially`.
+
+    A connect failure is left exactly as `McpManager.status()` already
+    reports it (`failed`/`needs_auth`) -- no different from an eager server
+    failing at `start_all()` time; nothing here fabricates or swallows
+    that. Returns any notices worth surfacing (currently none on the happy
+    path -- kept as a list return, matching every other notices-returning
+    function in this module, for whichever future case needs one)."""
+    from rolo_claude.mcp import tools_cache
+    notices: list = []
+    needs_connect: list = []
+    for name in lazy_names:
+        h = manager.handles.get(name)
+        cfg = configs.get(name)
+        if h is None or cfg is None or h.state != "pending":
+            continue  # disabled/pending_approval -- nothing this bootstrap can do
+        key = tools_cache.config_cache_key(cfg)
+        entry = tools_cache.read_cache(name)
+        if entry is not None and entry.get("hash") == key:
+            manager.mark_cached(name, [tools_cache.tool_from_dict(d) for d in (entry.get("tools") or [])],
+                                 entry.get("instructions"))
+        else:
+            needs_connect.append(name)
+
+    if needs_connect:
+        manager.start_many(needs_connect)
+        for name in needs_connect:
+            h = manager.handles[name]
+            if h.state == "connected":
+                tools_cache.write_cache(name, key=tools_cache.config_cache_key(configs[name]),
+                                         tools=h.tools, instructions=h.instructions)
+    return notices

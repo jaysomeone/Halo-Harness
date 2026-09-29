@@ -35,6 +35,11 @@ _STATUS_LABELS = {
     "pending": "- Not configured",
     "connecting": "✗ Connection error",
     "closed": "- Not configured",
+    # H13 Part A: a lazy server whose tools came from `mcp.tools_cache`
+    # without ever connecting -- rolo-claude's own addition to the status
+    # vocabulary (Claude Code has no lazy-start concept, so there is no
+    # binary-facts wording to match here).
+    "cached": "◐ Cached (connects on first use)",
 }
 
 

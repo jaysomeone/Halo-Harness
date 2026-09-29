@@ -438,14 +438,17 @@ class Controller:
         return out
 
     def list_sessions(self) -> list:
-        """`[{id, cwd, mtime, summary, title, cost_usd, turns}, ...]`,
+        """`[{id, cwd, mtime, summary, title, model, cost_usd, turns}, ...]`,
         newest first, for the `--resume`/`/resume` picker (U5 sessions UX:
         "title/age/cost/turns" -- `title` is whatever `/rename` or the
         after-first-turn auto-title last wrote as a `meta` node's own
         `title` field, `""` if never set; `cost_usd`/`turns` are summed/
         counted straight from that session's own `usage`/`user` nodes, the
-        same source `/cost` and `/stats` read). Reads OUR session logs only
-        (~/.rolo-claude). Synchronous file I/O -- U5 must-do: callers on
+        same source `/cost` and `/stats` read). `model` (H13 Part C: "/resume
+        search... fuzzy over title, first prompt, cwd and model") is the
+        LAST `meta` node's own `model` field seen, `""` if the session
+        predates any `meta` node ever recording one. Reads OUR session logs
+        only (~/.rolo-claude). Synchronous file I/O -- U5 must-do: callers on
         the UI thread (the `/resume` slash handler) run this on a worker,
         never inline (matches `_git_branch`'s own fix)."""
         slug = project_slug(self.cwd)
@@ -454,7 +457,7 @@ class Controller:
         if not directory.is_dir():
             return out
         for path in sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
-            summary, title, cost_usd, turns = "", "", 0.0, 0
+            summary, title, model, cost_usd, turns = "", "", "", 0.0, 0
             try:
                 for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     try:
@@ -469,8 +472,11 @@ class Controller:
                                 if isinstance(block, dict) and block.get("type") == "text":
                                     summary = block.get("text", "")[:80]
                                     break
-                    elif ntype == "meta" and isinstance(node.get("title"), str) and node["title"]:
-                        title = node["title"]
+                    elif ntype == "meta":
+                        if isinstance(node.get("title"), str) and node["title"]:
+                            title = node["title"]
+                        if isinstance(node.get("model"), str) and node["model"]:
+                            model = node["model"]
                     elif ntype == "usage":
                         c = node.get("cost_usd")
                         if isinstance(c, (int, float)):
@@ -478,7 +484,8 @@ class Controller:
             except OSError:
                 pass
             out.append({"id": path.stem, "cwd": str(self.cwd), "mtime": path.stat().st_mtime,
-                        "summary": summary, "title": title, "cost_usd": cost_usd, "turns": turns})
+                        "summary": summary, "title": title, "model": model,
+                        "cost_usd": cost_usd, "turns": turns})
         return out
 
     def resume(self, session_id: str) -> None:

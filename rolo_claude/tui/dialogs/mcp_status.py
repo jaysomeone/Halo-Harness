@@ -30,6 +30,7 @@ from textual.widgets.option_list import Option
 _STATE_GLYPH = {
     "connected": "✓", "connecting": "⋯", "pending": "○",
     "pending_approval": "⚠", "needs_auth": "⚠", "failed": "✗", "closed": "⊘",
+    "cached": "◐",  # H13 Part A: tools known from mcp.tools_cache, not yet connected
 }
 
 

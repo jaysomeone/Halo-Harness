@@ -266,21 +266,34 @@ submitted text. An MCP server's own prompts show up as `/mcp__<server>__
 <prompt>` slash commands automatically.
 
 **MCP**: stdio/http/sse transports, user/project/local/managed/plugin
-scopes, the `.mcp.json` first-time-approval flow, lazy servers, always-load
-servers, `ToolSearch` for a large/deferred tool set, resources and prompts
+scopes, the `.mcp.json` first-time-approval flow, always-load servers,
+`ToolSearch` for a large/deferred tool set, resources and prompts
 (`ListMcpResourcesTool`/`ReadMcpResourceTool`, `@server:resource` mentions,
-`/mcp__server__prompt`), `/mcp` to inspect/reconnect mid-session.
+`/mcp__server__prompt`), `/mcp` to inspect/reconnect mid-session. **Lazy by
+default**: a server connects the first time one of its tools is actually
+called, or when `/mcp` reconnects it -- `alwaysLoad` servers and one marked
+`"mcpLazy": false` (per-server, or globally via a top-level `"mcpLazy":
+false` in `settings.json`) connect eagerly at session start instead. A
+per-server cache (`~/.rolo-claude/mcp/tools-cache/`) keeps a lazy server's
+tool names/descriptions searchable/preloadable even with zero live
+connections -- the status bar's "MCP n/m" only counts real connections, so
+a fresh session typically starts "MCP 0/m" and climbs as tools are used;
+`doctor`/`mcp list`/`/mcp` show a `cached` (not yet connected, but known)
+state alongside the usual connected/failed/pending ones.
 
 **Browser**: `--chrome` (the claude-in-chrome extension's native-messaging
 bridge) and `--playwright`/`--playwright-cdp`/`--playwright-headless`
 (a real Chromium/Chrome/Brave via Playwright); a screenshot from either one
-shows up as its own tool card in the TUI transcript, captioned with its
-media type, real dimensions and size (e.g. "image/png, 1280x800, 84.2 KB")
--- not literal pixels: rendering actual terminal graphics would need a
-cross-terminal protocol (Kitty/iTerm2/Sixel) this harness doesn't attempt.
-The real image block is still what the model itself sees (subject to the
-same vision/size gate as any other image); only the human-facing card is a
-caption.
+shows up as its own tool card in the TUI transcript. In a terminal that
+speaks the kitty graphics protocol (kitty, WezTerm, Ghostty, foot) or sixel
+(detected live; tmux needs `allow-passthrough on` first) it renders inline,
+downscaled to a bounded size; everywhere else it's captioned with its media
+type, real dimensions and size (e.g. "image/png, 1280x800, 84.2 KB"), same
+as before -- `images: "inline"|"caption"|"off"` in `~/.rolo-claude/
+config.json` (default `"inline"`) or `--no-inline-images` forces the plain
+caption. The real image block is still what the model itself sees (subject
+to the same vision/size gate as any other image) regardless of how it's
+displayed to you.
 
 **Images/vision**: Read returns a real `image` content block (not just a
 path string) for png/jpg/gif/webp when the active model's profile says it
@@ -307,9 +320,14 @@ killed when the session quits.
 ## Sessions
 
 `-c`/`--continue` resumes the most recent session for the current
-directory; `-r`/`--resume [ID]` resumes a specific one (or shows a picker);
-`--fork-session` continues from one without overwriting it; `-n`/`--name`
-labels a session. `/rewind` (and the TUI's undo) restores both the
+directory; `-r`/`--resume [ID]` resumes a specific one, or opens a picker
+with a live fuzzy text filter (title, first prompt, cwd, model -- `/resume
+<text>` in the TUI opens it pre-filtered) when given no id at all; `-r
+<text>` on the command line resumes the one session that text uniquely
+matches, or (print mode) lists the ambiguous candidates instead of
+silently guessing, or (interactive) opens that same picker pre-filtered by
+`<text>`; `--fork-session` continues from one without overwriting it;
+`-n`/`--name` labels a session. `/rewind` (and the TUI's undo) restores both the
 conversation log and any file a Write/Edit touched, via a shadow-copy
 mechanism scoped to those two tools by design -- a Bash- or NotebookEdit-
 made change is not shadow-copied and `/rewind` won't undo it (detecting

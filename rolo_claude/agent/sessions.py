@@ -104,6 +104,103 @@ def resolve_resume(cwd, value: Optional[str]) -> "tuple[Optional[str], Optional[
     return None, f"no session matches {value!r}"
 
 
+def _model_for(nodes: list) -> str:
+    for node in reversed(nodes):
+        if node.get("type") == "meta" and isinstance(node.get("model"), str) and node["model"]:
+            return node["model"]
+    return ""
+
+
+def _match_score(query: str, *fields: str) -> "Optional[tuple]":
+    """Lowest sorts first: `(0, field_index, position)` for a PREFIX match
+    on any field, `(1, field_index, position)` for a substring match
+    anywhere, `None` when `query` appears in none of `fields` at all. The
+    field a match was found in (its position in `fields`, given caller-side
+    by priority) breaks a tie between two same-tier matches, same shape as
+    `tui/dialogs/palette.py`'s own `_score` but generalised over several
+    fields per item instead of just one label/detail pair."""
+    best = None
+    for idx, f in enumerate(fields):
+        f = (f or "").lower()
+        if not f:
+            continue
+        if f.startswith(query):
+            cand = (0, idx, 0)
+        else:
+            pos = f.find(query)
+            if pos < 0:
+                continue
+            cand = (1, idx, pos)
+        if best is None or cand < best:
+            best = cand
+    return best
+
+
+def filter_sessions(sessions: list, query: str) -> list:
+    """H13 Part C ("/resume search"): fuzzy-ish filter+rank over
+    title/first-prompt/cwd/model/id (in that priority order) -- a prefix
+    match beats a substring match anywhere, and within one tier, a hit in
+    an earlier-priority field (title first) beats a later one; ties keep
+    the input's own relative order (`list.sort` is stable, so a
+    newest-first `sessions` list stays newest-first among equal scores).
+    Empty/whitespace-only `query` returns every session unchanged -- the
+    TUI picker's own "nothing typed yet" state, and `--resume` with no
+    text at all falling back to "every session" at the LISTING level (the
+    actual "which one" choice for that case stays `resolve_resume`'s own
+    "most recent" contract, unrelated to this function). Shared by BOTH
+    the TUI `SessionPicker`'s live Input filter and `find_resume_matches`
+    below, so typing a word in the picker and passing the same word to
+    `--resume` agree on what counts as a match."""
+    query = (query or "").strip().lower()
+    if not query:
+        return list(sessions)
+    scored = []
+    for s in sessions:
+        score = _match_score(query, s.get("title") or "", s.get("summary") or "",
+                              s.get("cwd") or "", s.get("model") or "", s.get("id") or "")
+        if score is not None:
+            scored.append((score, s))
+    scored.sort(key=lambda pair: pair[0])
+    return [s for _, s in scored]
+
+
+def _session_rows_for_filter(cwd) -> list:
+    """Every session under `cwd`, newest first, as `{id, mtime, title,
+    summary, cwd, model}` -- unlike `list_sessions` below (which trusts
+    `index.json`'s own `title`/`first_prompt` and never looks further), this
+    ALWAYS falls back to scanning the transcript directly for whichever of
+    those `index.json` doesn't have, so a session written before `index.
+    json` existed (or by something that never called `record_session_
+    start`) still fuzzy-matches on its real title/first message/model."""
+    directory = sessions_dir(cwd)
+    if not directory.is_dir():
+        return []
+    index = load_index(cwd)
+    out = []
+    for path in sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+        sid = path.stem
+        entry = index.get(sid, {})
+        nodes = _read_nodes(path)
+        title = entry.get("title") or _title_for(nodes)
+        summary = entry.get("first_prompt") or _first_user_text(nodes)
+        out.append({"id": sid, "mtime": path.stat().st_mtime, "title": title,
+                     "summary": summary, "cwd": str(cwd), "model": _model_for(nodes)})
+    return out
+
+
+def find_resume_matches(cwd, text: Optional[str]) -> list:
+    """H13 Part C: every session under `cwd` that `filter_sessions` ranks as
+    matching `text` (best match first) -- the CLI's own "is `--resume
+    <text>` a unique match or an ambiguous one" signal (`headless.py`'s
+    pre-check; the TUI's `tui/bootstrap.py` uses it the same way before
+    deciding whether to resume directly or open a picker instead), and the
+    row shape a picker can be pre-filtered from. Never raises; an empty/
+    missing `text` matches every session (the caller decides what "every
+    session" means for its own use case -- this function only ever answers
+    "what matches", never "so which one do I pick")."""
+    return filter_sessions(_session_rows_for_filter(cwd), text or "")
+
+
 def list_sessions(cwd) -> list:
     """`[{id, mtime, title, summary}, ...]`, newest first -- a headless
     (`/resume` with no argument, in `-p`) equivalent of `Controller.

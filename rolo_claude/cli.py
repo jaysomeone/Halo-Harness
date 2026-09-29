@@ -89,6 +89,11 @@ _REAL_FLAGS = [
     (["--playwright-headless"], dict(dest="playwright_headless", action="store_true")),
     (["--mcp-config"], dict(dest="mcp_config", nargs="+", default=None, metavar="CONFIG")),
     (["--strict-mcp-config"], dict(dest="strict_mcp_config", action="store_true")),
+    # H13 Part B: forces the plain type/size/dimensions caption for every
+    # image tool result this run, same as `images: "caption"`/`"off"` in
+    # ~/.rolo-claude/config.json but for just this one invocation -- the
+    # TUI only (print mode has no inline-image concept to disable).
+    (["--no-inline-images"], dict(dest="no_inline_images", action="store_true")),
     # H6: real now (agent definitions + the Agent tool + plan mode +
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),

@@ -807,6 +807,23 @@ def run_print_mode(
         print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
         return 2
     if resume is not None and resume != "" and not continue_:
+        # H13 Part C ("--resume <text> picks the unique match or opens the
+        # picker filtered"): print mode has no picker to open, so a genuine
+        # AMBIGUOUS match (2+ sessions fuzzy-match the given text) is its
+        # own honest error -- listing the candidates so the user can be more
+        # specific or pass an exact id -- rather than silently guessing the
+        # most-recently-modified one the way a bare `resolve_resume` call
+        # would. A UNIQUE match, or the classic zero-match error, are both
+        # unchanged (still `resolve_resume`'s own contract below).
+        matches = agent_sessions.find_resume_matches(cwd, resume)
+        if len(matches) > 1:
+            print(f"rolo-claude: --resume {resume!r} matches {len(matches)} sessions -- "
+                  f"be more specific, or pass an exact session id (run without -p to pick interactively):",
+                  file=sys.stderr)
+            for m in matches[:8]:
+                label = m.get("title") or m.get("summary") or "(no summary)"
+                print(f"  {m['id']}  {label}", file=sys.stderr)
+            return 2
         _resolved_probe, resume_err = agent_sessions.resolve_resume(cwd, resume)
         if _resolved_probe is None and resume_err:
             print(f"rolo-claude: --resume: {resume_err}", file=sys.stderr)

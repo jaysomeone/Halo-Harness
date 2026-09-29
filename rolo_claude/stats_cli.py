@@ -21,6 +21,31 @@ import shutil
 from pathlib import Path
 
 
+def _since_arg(value: str) -> str:
+    """H13 Part D bug fix: `--since` was `choices=("7d", "30d", "all")`,
+    rejecting anything else at the ARGPARSE level -- even though `rolo_
+    claude.telemetry._since_cutoff` already parses any `"<N>d"` string
+    generically (`rolo_claude.improve.config.since_str` has produced one
+    from a custom `improve.since_days` since before this milestone). Found
+    live: the brief's own "use `stats --models --since 1d` for the family-
+    baseline numbers" acceptance line failed outright with argparse's
+    "invalid choice: '1d'" before any fix landed. Accepts "all" or "<N>d"
+    for a positive integer N; anything else raises `argparse.
+    ArgumentTypeError` (argparse's own way of reporting a bad value) rather
+    than silently falling back the way `_since_cutoff`'s OWN "garbage ->
+    7 days" leniency does -- a typo on the command line should be an
+    honest usage error here, not a silently-wrong window."""
+    if value == "all":
+        return value
+    if value.endswith("d"):
+        try:
+            if int(value[:-1]) > 0:
+                return value
+        except ValueError:
+            pass
+    raise argparse.ArgumentTypeError(f"{value!r} is not \"all\" or \"<N>d\" (e.g. \"1d\", \"7d\", \"30d\")")
+
+
 def _merge_stats(total: dict, part: dict) -> None:
     total["turns"] += part["turns"]
     total["total_cost_usd"] += part["total_cost_usd"]
@@ -315,8 +340,9 @@ def cmd_stats(argv: list) -> int:
     parser.add_argument("--tools", action="store_true", help="Show the per-tool telemetry table")
     parser.add_argument("--wide", action="store_true",
                          help="Show every --models column instead of the terminal-fit compact default")
-    parser.add_argument("--since", default="7d", choices=("7d", "30d", "all"),
-                         help="Time window for --models/--tools (default 7d; ignored by the plain report below)")
+    parser.add_argument("--since", default="7d", type=_since_arg,
+                         help="Time window for --models/--tools: \"all\", or \"<N>d\" (e.g. \"1d\", \"7d\", \"30d\"; "
+                              "default 7d). Ignored by the plain report below.")
     parser.add_argument("--session", default=None, metavar="ID", help="Scope to one session id")
     args = parser.parse_args(argv)
 
