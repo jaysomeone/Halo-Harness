@@ -14,6 +14,7 @@ capabilities.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,28 @@ _MAX_ALIAS_HOPS = 4
 # when V4.1 Flash isn't reachable.
 DEFAULT_MODEL_REF = "or:deepseek/deepseek-v4.1-flash"
 FALLBACK_MODEL_REF = "or:deepseek/deepseek-v3.2"
+
+
+def resolve_default_model_raw(routes: Optional[dict] = None) -> str:
+    """H12 Part A step 3: the ONE place both `-p` and the TUI (`headless.
+    build_session` is the single shared session builder both go through)
+    and `doctor --work`'s own probe resolve "the configured default model
+    when nothing more specific was passed on the command line". Precedence:
+    `BRIDGE_MODEL` env var > `routes.json`'s own "default" alias (both
+    pre-existing) > `~/.rolo-claude/config.json`'s `"model"` key (written
+    by `rolo-claude init`'s step 3 or a plain `rolo-claude config set
+    model ...`) > the hardcoded `DEFAULT_MODEL_REF`. A `--model` flag/arg
+    always wins over ALL of this -- callers check that FIRST, same as
+    before this function existed (see `build_session`'s own call site)."""
+    routes = routes or {}
+    env_or_routes = os.environ.get("BRIDGE_MODEL") or routes.get("default")
+    if env_or_routes:
+        return env_or_routes
+    from rolo_claude.theme import get_config_value
+    configured = get_config_value("model", default=None)
+    if isinstance(configured, str) and configured:
+        return configured
+    return DEFAULT_MODEL_REF
 
 
 def _dialect_for(bare_model: str) -> str:

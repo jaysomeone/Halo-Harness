@@ -1,0 +1,424 @@
+"""tests.test_init_cli -- `rolo-claude init` (H12 brief Part A): the whole
+first run in one command. Every test runs against an isolated BRIDGE_TEST_
+HOME (never the real machine's ~/.config/vibes-hacker/env or ~/.rolo-claude)
+and a default `BRIDGE_TEST_CC_AUTH_STATUS` of "not logged in" so a doctor
+check inside `init` never spawns a real `claude auth status` subprocess
+(fast, deterministic, independent of whatever's actually installed on the
+box running this suite) -- a test that specifically wants a faked claude.ai
+login overrides it explicitly, the same test seam `tests/test_cc_models.py`
+documents. A live pong is exercised against `tests.helpers.mock_openai.
+MockUpstream` (a loopback-only HTTP server), never a real network call.
+"""
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.helpers.mock_openai import MockUpstream
+from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+test, TESTS = new_registry()
+
+_NOT_LOGGED_IN = json.dumps({"loggedIn": False})
+_LOGGED_IN_CLAUDE_AI = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+
+
+def _fresh_home() -> Path:
+    return Path(tempfile.mkdtemp(prefix="rolo-claude-init-"))
+
+
+def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, timeout: int = 40):
+    env = dict(os.environ)
+    env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
+                "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
+    env.update(extra_env or {})
+    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           input=stdin, timeout=timeout)
+
+
+def _env_file(home: Path) -> Path:
+    return home / ".config" / "vibes-hacker" / "env"
+
+
+# ---------------------------------------------------------------------------
+# Part A step 2/7: credentials, env-file mode bits, idempotency
+# ---------------------------------------------------------------------------
+
+@test
+def test_home_preset_stdin_key_writes_env_file_and_config(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="sk-or-fake-key-123\n")
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("the key is never printed to stdout", "sk-or-fake-key-123" not in result.stdout)
+    ctx.check("the key is never printed to stderr", "sk-or-fake-key-123" not in result.stderr)
+
+    env_path = _env_file(home)
+    ctx.check(f"the env file was written at {env_path}", env_path.exists())
+    content = env_path.read_text(encoding="utf-8")
+    ctx.check(f"it carries the key, got {content!r}", "OPENROUTER_API_KEY=sk-or-fake-key-123" in content)
+
+    cfg_path = home / ".rolo-claude" / "config.json"
+    ctx.check(f"config.json was written at {cfg_path}", cfg_path.exists())
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    ctx.check(f"model set to the home default, got {cfg}", cfg.get("model") == "or:deepseek/deepseek-v4.1-flash")
+
+    ctx.check("never writes ~/.claude.json", not (home / ".claude.json").exists())
+    ctx.check("never writes ~/.claude/settings.json", not (home / ".claude" / "settings.json").exists())
+
+    if os.name != "nt":
+        ctx.check(f"env file mode 0600, got {oct(stat.S_IMODE(env_path.stat().st_mode))}",
+                   stat.S_IMODE(env_path.stat().st_mode) == 0o600)
+        dir_mode = stat.S_IMODE(env_path.parent.stat().st_mode)
+        ctx.check(f"env dir mode 0700, got {oct(dir_mode)}", dir_mode == 0o700)
+
+
+@test
+def test_home_preset_key_already_in_env_var_not_rewritten(ctx: Ctx):
+    """Already-discoverable (ambient env, not yet a stdin/getpass entry) --
+    reported as configured, the env file is never created at all (nothing
+    to write -- the credential already resolves without it)."""
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live"], home,
+                   extra_env={"OPENROUTER_API_KEY": "sk-or-ambient-key"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("reports already configured", "already configured" in result.stdout)
+    ctx.check("the key is never printed", "sk-or-ambient-key" not in result.stdout)
+    ctx.check("no env file needed to be created", not _env_file(home).exists())
+
+
+@test
+def test_home_preset_rerun_is_idempotent(ctx: Ctx):
+    home = _fresh_home()
+    first = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="sk-or-fake-key-abc\n")
+    ctx.check(f"first run exit 0, got {first.returncode}", first.returncode == 0)
+    env_path = _env_file(home)
+    before = env_path.read_text(encoding="utf-8")
+
+    second = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="")
+    ctx.check(f"second run exit 0, got {second.returncode}, stderr={second.stderr!r}", second.returncode == 0)
+    ctx.check("second run reports the CURRENT state (already configured)", "already configured" in second.stdout)
+    after = env_path.read_text(encoding="utf-8")
+    ctx.check("the env file is byte-identical after a no-op re-run", before == after)
+    ctx.check("only one OPENROUTER_API_KEY= line exists (never duplicated)",
+              after.count("OPENROUTER_API_KEY=") == 1)
+
+
+@test
+def test_no_key_entered_warns_but_does_not_crash(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="")
+    ctx.check(f"exit 0 (no live pong attempted, so nothing to fail on), got {result.returncode}",
+              result.returncode == 0)
+    ctx.check("warns that no key was entered", "no key entered" in result.stdout.lower()
+              or "not found" in result.stdout.lower())
+    ctx.check("no traceback", "Traceback" not in result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Part A step 1: preset detection / gating
+# ---------------------------------------------------------------------------
+
+@test
+def test_preset_claude_rejected_without_a_login(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "claude", "--yes", "--no-live"], home)
+    ctx.check(f"exit 2 (usage/config error), got {result.returncode}", result.returncode == 2)
+    ctx.check("explains why", "claude.ai login" in result.stdout or "claude.ai login" in result.stderr)
+
+
+@test
+def test_preset_claude_accepted_with_a_faked_login(ctx: Ctx):
+    """`fake_claude_cc`-style login fake: BRIDGE_TEST_CC_AUTH_STATUS short-
+    circuits `claude auth status` (the same test seam tests/test_cc_models.py
+    documents) to report a real claude.ai login with no subprocess at all."""
+    home = _fresh_home()
+    result = _run(["init", "--preset", "claude", "--yes", "--no-live"], home,
+                   extra_env={"BRIDGE_TEST_CC_AUTH_STATUS": _LOGGED_IN_CLAUDE_AI})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("preset accepted", "Preset: claude" in result.stdout)
+    ctx.check("credentials step stores nothing", "nothing stored" in result.stdout)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"default model is cc:sonnet, got {cfg}", cfg.get("model") == "cc:sonnet")
+
+
+@test
+def test_preset_home_and_work_never_probe_claude_login(ctx: Ctx):
+    """An explicit --preset home/work never needs to know whether a claude.ai
+    login exists at all -- BRIDGE_TEST_CC_AUTH_STATUS is deliberately left
+    UNPARSEABLE here; if `_step_preset` ever called claude_auth_status() for
+    an explicit non-claude preset, doctor's own subscription check (step 4,
+    which always runs) would still tolerate it, but this test's OWN point is
+    the preset step itself never needs to for these two presets -- proven by
+    it never crashing even with a broken override in place, same as always."""
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="sk-or-x\n",
+                   extra_env={"BRIDGE_TEST_CC_AUTH_STATUS": "not json at all"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("no traceback", "Traceback" not in result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Part A step 2 (Databricks) / step 3 (model) / never touching claude files
+# ---------------------------------------------------------------------------
+
+@test
+def test_work_preset_host_and_token_via_stdin(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "work", "--yes", "--no-live"], home,
+                   stdin="https://fake-ws.cloud.databricks.com\nfake-token-999\n")
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("token never printed", "fake-token-999" not in result.stdout)
+    content = _env_file(home).read_text(encoding="utf-8")
+    ctx.check(f"host written, got {content!r}", "DATABRICKS_HOST=https://fake-ws.cloud.databricks.com" in content)
+    ctx.check(f"token written, got {content!r}", "DATABRICKS_TOKEN=fake-token-999" in content)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"model set to the work default, got {cfg}",
+              cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
+
+
+@test
+def test_work_preset_already_configured_not_rewritten(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "work", "--yes", "--no-live"], home,
+                   extra_env={"DATABRICKS_HOST": "https://ambient.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "ambient-token"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("reports already configured", "already configured" in result.stdout)
+    ctx.check("token never printed", "ambient-token" not in result.stdout)
+    ctx.check("no env file needed to be created", not _env_file(home).exists())
+
+
+@test
+def test_model_flag_overrides_preset_default(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live", "--model", "or:deepseek/deepseek-v3.2"],
+                   home, stdin="sk-or-x\n")
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"--model wins over the preset default, got {cfg}", cfg.get("model") == "or:deepseek/deepseek-v3.2")
+
+
+# ---------------------------------------------------------------------------
+# Part A step 3: model precedence in the real resolver both -p and the TUI use
+# ---------------------------------------------------------------------------
+
+@test
+def test_model_precedence_flag_then_config_then_builtin_default(ctx: Ctx):
+    from rolo_claude.model import DEFAULT_MODEL_REF, resolve_default_model_raw
+    from rolo_claude.theme import set_config_value
+    home = _fresh_home()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    old_bridge_model = os.environ.pop("BRIDGE_MODEL", None)
+    try:
+        ctx.check(f"nothing configured -> the built-in default, got {resolve_default_model_raw({})!r}",
+                  resolve_default_model_raw({}) == DEFAULT_MODEL_REF)
+
+        set_config_value("model", "or:deepseek/deepseek-v3.2")
+        ctx.check("config.json's model wins over the built-in default",
+                  resolve_default_model_raw({}) == "or:deepseek/deepseek-v3.2")
+
+        ctx.check("routes.json's own 'default' still wins over config.json (pre-existing precedence)",
+                  resolve_default_model_raw({"default": "or:from-routes/model"}) == "or:from-routes/model")
+
+        os.environ["BRIDGE_MODEL"] = "or:from-env/model"
+        ctx.check("BRIDGE_MODEL still wins over everything below it (pre-existing precedence)",
+                  resolve_default_model_raw({"default": "or:from-routes/model"}) == "or:from-env/model")
+    finally:
+        os.environ.pop("BRIDGE_MODEL", None)
+        if old_bridge_model is not None:
+            os.environ["BRIDGE_MODEL"] = old_bridge_model
+        if old_home is not None:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+        else:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_headless_build_session_honours_config_json_model(ctx: Ctx):
+    """The one shared session builder both `-p` and the TUI call -- proof
+    that a `--model` flag beats config.json's own model, which in turn beats
+    the hardcoded default, at the ACTUAL session-construction call site."""
+    from rolo_claude import headless
+    from rolo_claude.theme import set_config_value
+    home = _fresh_home()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    try:
+        set_config_value("model", "or:deepseek/deepseek-v3.2")
+        build = headless.build_session(cwd=home, bare=True, print_mode=True)
+        ctx.check(f"no --model given -> config.json's model wins, got {build.model_ref.raw!r}",
+                  build.model_ref.raw == "or:deepseek/deepseek-v3.2")
+
+        build2 = headless.build_session(cwd=home, model_ref_raw="or:deepseek/deepseek-chat-v3.1",
+                                         bare=True, print_mode=True)
+        ctx.check(f"--model still wins over config.json, got {build2.model_ref.raw!r}",
+                  build2.model_ref.raw == "or:deepseek/deepseek-chat-v3.1")
+    finally:
+        if old_home is not None:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+        else:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+# ---------------------------------------------------------------------------
+# Part A step 6: Linux fixes (rc-file marker, rg fake download, --no-fixes)
+# ---------------------------------------------------------------------------
+
+@test
+def test_no_fixes_flag_skips_the_whole_step(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live", "--no-fixes"], home, stdin="sk-or-x\n")
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("step 6 reports skipped", "skipped (--no-fixes)" in result.stdout)
+
+
+@test
+def test_rc_file_line_written_once_with_marker(ctx: Ctx):
+    """`ensure_local_bin_on_rc`/`rc_file_for_shell` (shared by doctor.py's
+    own check and this init step): zsh -> ~/.zshenv, else ~/.profile;
+    idempotent -- a second call is a pure no-op, never a duplicate line."""
+    from rolo_claude.linux_fixes import PATH_LINE, PATH_MARKER, ensure_local_bin_on_rc, rc_file_for_shell
+    home = _fresh_home()
+    ctx.check("zsh -> ~/.zshenv", rc_file_for_shell("/usr/bin/zsh", home=home) == home / ".zshenv")
+    ctx.check("bash -> ~/.profile", rc_file_for_shell("/bin/bash", home=home) == home / ".profile")
+    ctx.check("unknown/empty $SHELL -> ~/.profile", rc_file_for_shell("", home=home) == home / ".profile")
+
+    written1, path1 = ensure_local_bin_on_rc(shell="/bin/bash", home=home)
+    ctx.check("first call writes it", written1 and path1 == home / ".profile")
+    written2, path2 = ensure_local_bin_on_rc(shell="/bin/bash", home=home)
+    ctx.check("second call is a no-op", not written2 and path2 == path1)
+
+    content = path1.read_text(encoding="utf-8")
+    ctx.check("marker present exactly once", content.count(PATH_MARKER) == 1)
+    ctx.check("PATH line present exactly once", content.count(PATH_LINE) == 1)
+
+
+@test
+def test_ripgrep_install_exercised_with_a_fake_download(ctx: Ctx):
+    """No real network: `fetch_json`/`fetch_bytes` are swapped for fakes
+    returning a genuine in-memory tar.gz built with the stdlib `tarfile`
+    module, so real extraction/chmod/verify logic still runs end to end."""
+    import io
+    import tarfile
+
+    from rolo_claude.linux_fixes import install_static_ripgrep, pick_ripgrep_asset, ripgrep_asset_suffix
+
+    ctx.check("linux x86_64 -> the musl asset suffix",
+              ripgrep_asset_suffix(system="Linux", machine="x86_64") == "x86_64-unknown-linux-musl.tar.gz")
+    ctx.check("windows -> no asset (this fix is Linux-only)",
+              ripgrep_asset_suffix(system="Windows", machine="AMD64") is None)
+
+    release = {"assets": [
+        {"name": "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+         "browser_download_url": "https://example.invalid/rg.tar.gz"},
+        {"name": "ripgrep-14.1.0-x86_64-pc-windows-msvc.zip",
+         "browser_download_url": "https://example.invalid/rg.zip"},
+    ]}
+    asset = pick_ripgrep_asset(release, system="Linux", machine="x86_64")
+    ctx.check(f"picks the musl tarball, got {asset}", asset is not None and asset["name"].endswith("musl.tar.gz"))
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        payload = b"#!/bin/sh\necho fake-rg\n"
+        info = tarfile.TarInfo(name="ripgrep-14.1.0-x86_64-unknown-linux-musl/rg")
+        info.size = len(payload)
+        info.mode = 0o755
+        tf.addfile(info, io.BytesIO(payload))
+    archive_bytes = buf.getvalue()
+
+    dest = _fresh_home() / "rg-dest"
+    ok, msg = install_static_ripgrep(
+        dest, system="Linux", machine="x86_64",
+        fetch_json=lambda url: release, fetch_bytes=lambda url: archive_bytes,
+        verify=lambda p: p.exists(),
+    )
+    ctx.check(f"reports success, got ({ok}, {msg!r})", ok and msg == str(dest / "rg"))
+    ctx.check("the fake rg binary actually landed on disk", (dest / "rg").exists())
+
+    ok2, msg2 = install_static_ripgrep(dest, system="Darwin", machine="x86_64",
+                                        fetch_json=lambda url: release, fetch_bytes=lambda url: b"")
+    ctx.check(f"an unsupported OS falls back to a package-manager hint, got ({ok2}, {msg2!r})",
+              ok2 is False and isinstance(msg2, str) and msg2)
+
+
+# ---------------------------------------------------------------------------
+# Part A step 5: live pong (against a local mock, never a real network call)
+# ---------------------------------------------------------------------------
+
+@test
+def test_live_pong_success_against_mock_upstream(ctx: Ctx):
+    home = _fresh_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run(["init", "--preset", "home", "--yes", "--model", "or:mock/model"], home,
+                       stdin="sk-or-x\n",
+                       extra_env={"BRIDGE_OPENROUTER_BASE_URL": mock.base_url})
+        ctx.check(f"exit 0, got {result.returncode}, stdout={result.stdout!r} stderr={result.stderr!r}",
+                  result.returncode == 0)
+        ctx.check("step 5 header printed", "5. Live pong" in result.stdout)
+        ctx.check("reports the reply/model/provider/cost line",
+                  "reply='pong'" in result.stdout and "provider=openrouter" in result.stdout)
+        ctx.check("no key ever printed", "sk-or-x" not in result.stdout)
+        ctx.check("summary points at starting the real thing", "Run `rolo-claude`" in result.stdout)
+    finally:
+        mock.stop()
+
+
+@test
+def test_live_pong_failure_is_a_nonzero_exit_with_a_hint(ctx: Ctx):
+    home = _fresh_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run(["init", "--preset", "home", "--yes", "--model", "or:mock/error-401"], home,
+                       stdin="sk-or-x\n",
+                       extra_env={"BRIDGE_OPENROUTER_BASE_URL": mock.base_url})
+        ctx.check(f"nonzero exit when the pong fails, got {result.returncode}", result.returncode != 0)
+        ctx.check("step 5 reports a WARN", "[WARN]" in result.stdout)
+        ctx.check("summary names a next step", "Next:" in result.stdout)
+    finally:
+        mock.stop()
+
+
+@test
+def test_no_live_skips_pong_and_catalog_refresh(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "home", "--yes", "--no-live"], home, stdin="sk-or-x\n")
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("live pong explicitly skipped", "Live pong: skipped (--no-live)" in result.stdout)
+    ctx.check("catalog refresh explicitly skipped", "catalog refresh skipped" in result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Part A: wired into cli.py's help
+# ---------------------------------------------------------------------------
+
+@test
+def test_top_level_help_epilog_mentions_init(ctx: Ctx):
+    from rolo_claude.cli import _build_parser
+    help_text = _build_parser().format_help()
+    ctx.check("epilog lists the init command", "init" in help_text.split("Commands:")[-1])
+
+
+@test
+def test_init_help_runs_standalone(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--help"], home)
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("mentions every flag", all(f in result.stdout for f in
+              ("--preset", "--model", "--yes", "--no-live", "--no-fixes")))
+
+
+if __name__ == "__main__":
+    ctx = Ctx()
+    results, passed, failed, skipped = run_all(TESTS, ctx)
+    sys.exit(print_results(results, passed, failed, skipped))

@@ -95,6 +95,28 @@ def model_family(model_id: str) -> str:
     return "generic"
 
 
+def edit_hint_for(provider: str, model_id: str, model_table: Optional[dict] = None) -> Optional[str]:
+    """H12 Part C (RECOMMENDATIONS.md P0 #3 / §4 telemetry: DeepSeek V4.1
+    Flash's 8% Edit "Found multiple matches" failure rate is almost
+    entirely too-little old_string context): the Edit tool's optional
+    per-family context-line hint from `model_table.json`'s own top-level
+    `"edit_hints"` map, keyed by the SAME coarse family `model_family()`
+    returns -- a specific (provider, model_id) row's own `"edit_hint"` key
+    (including an explicit `""` to silence the family default for just
+    that one model) wins over the family default when present. Claude/GPT
+    rows carry no family default at all (no `"claude"`/`"gpt"` key in the
+    table) -- a native tool-calling loop doesn't need the extra nudge the
+    DeepSeek/Kimi/GLM/Qwen/MiniMax families do. Returns None (never `""`)
+    when there is nothing to append, so a caller can `if hint:` directly."""
+    model_table = model_table if model_table is not None else load_model_table()
+    family = model_family(model_id)
+    host_key = provider if provider in ("databricks", "openrouter") else None
+    row = ((model_table.get(host_key) or {}).get(model_id) or {}) if host_key else {}
+    if "edit_hint" in row:
+        return row.get("edit_hint") or None
+    return (model_table.get("edit_hints") or {}).get(family) or None
+
+
 @dataclass(frozen=True)
 class ProviderProfile:
     system_vs_developer: str = "system"           # "system" | "developer" | "none"

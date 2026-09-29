@@ -9,6 +9,13 @@ Prerequisites everywhere: Python 3.10+ (`python3 --version`). `uv` is optional
 but recommended (both launchers below fall back to plain `pip`/`python3` when
 it's absent).
 
+**Short version**: install with one of the two options below, then run
+`rolo-claude init` -- it picks a preset, sets up credentials, sets a default
+model, runs `doctor`, sends a live pong, and (on Linux) offers the `rg`/PATH
+fixes, all in one command, and is always safe to re-run. Everything else in
+this file is the manual/reference version of what `init` automates, plus the
+offline/work-box and reproducible-install recipes it doesn't cover.
+
 ## Kali / Linux
 
 ### Option 1 -- `uv tool install` (recommended)
@@ -200,14 +207,20 @@ exactly, e.g. `uv pip sync requirements.lock` inside one.
 ## Verify
 
 ```sh
-rolo-claude --version          # rolo-claude 0.3.0
+rolo-claude --version          # rolo-claude 0.4.1
 rolo-claude doctor             # read-only environment check: Python, ~/.claude,
                                 # env file, OpenRouter/Databricks, claude/node/rg
-                                # on PATH, $VISUAL/$EDITOR, a usable Bash shell,
-                                # clipboard backend, a WSL/Kali hint
+                                # on PATH, $VISUAL/$EDITOR, tmux mouse mode, a
+                                # usable Bash shell, clipboard backend, MCP
+                                # servers, the default model, a WSL/Kali hint --
+                                # every WARN/MISSING line names its own fix;
+                                # `doctor --json` for the machine-readable form
 ```
 
 ## Configuration
+
+`rolo-claude init` does everything below for you in one command (see the top
+of this file) -- read on for the manual/reference version of the same steps.
 
 Put `OPENROUTER_API_KEY` in `~/.config/vibes-hacker/env` (`KEY=value`, `#`
 comments, optional leading `export`; override the path with `BRIDGE_ENV_FILE`)

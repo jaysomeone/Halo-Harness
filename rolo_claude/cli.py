@@ -156,8 +156,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rolo-claude", add_help=True,
         description="rolo-claude - starts an interactive session by default, use -p/--print for non-interactive output",
-        epilog="Commands: proxy, mcp, models, config, doctor, stats, improve, export "
-               "(run `rolo-claude <command> --help`)",
+        epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export "
+               "(run `rolo-claude <command> --help`; `rolo-claude init` sets up a fresh box in one go)",
     )
     try:
         parser._positionals.title = "Arguments"
@@ -256,6 +256,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "doctor":
         from rolo_claude.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
+    if argv and argv[0] == "init":
+        from rolo_claude.init_cli import cmd_init
+        return cmd_init(argv[1:])
     if argv and argv[0] == "stats":
         from rolo_claude.stats_cli import cmd_stats
         return cmd_stats(argv[1:])

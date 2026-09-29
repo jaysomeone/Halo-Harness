@@ -5,6 +5,45 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.4.1] - 2026-09-28
+
+H12 (RECOMMENDATIONS.md P0): the whole first run in one command, a
+prescriptive `doctor`, and the cheapest fix for DeepSeek V4.1 Flash's own
+telemetry-observed 8% Edit "Found multiple matches" rate.
+
+- **`rolo-claude init`** (`rolo_claude/init_cli.py`): picks a preset
+  (`home`/OpenRouter, `work`/Databricks, `claude`/your subscription --
+  auto-detected, or `--preset`/`--yes` for non-interactive), asks for a
+  missing OpenRouter key or Databricks host/token with hidden input and
+  writes it into the same env file the harness already reads (POSIX mode
+  0600, dir 0700, existing lines preserved, never echoed), sets
+  `~/.rolo-claude/config.json`'s `model` key, runs `doctor` and `models
+  --refresh`, sends a live pong, and (Linux only) offers a static `rg`
+  install into `~/.local/bin` and the `~/.local/bin`-on-PATH rc-file line
+  (`~/.zshenv` for zsh, `~/.profile` otherwise, behind a marker comment) --
+  every step is idempotent, so re-running only ever reports the current
+  state. Never touches `~/.claude.json`/`~/.claude/settings.json`, never
+  prints a key/token. `~/.rolo-claude/config.json`'s `model` now sits in the
+  default-model precedence chain (`--model` > `BRIDGE_MODEL`/`routes.json`
+  > config.json > the built-in default) that both `-p` and the TUI resolve
+  through (`model.resolve_default_model_raw`, `headless.build_session`).
+- **Prescriptive `doctor`**: every `[WARN]`/`[MISSING]` line now ends with
+  `-> fix: <exact command>` or `-> see: <reference>`; `doctor --json` prints
+  the same checks as `{id, status, message, fix, see}` records (what `init`
+  consumes for its own summary). New checks: `~/.local/bin` on PATH for a
+  non-interactive shell, `tmux` mouse mode when `$TMUX` is set, configured
+  MCP servers (eager vs. `mcpLazy`), and the default model in
+  `config.json` plus whether its provider actually resolves.
+- **Edit tool context hint** (`rolo_claude/providers/model_table.json`'s new
+  `edit_hints` map, `providers/profiles.edit_hint_for`): a DeepSeek/Kimi/
+  GLM/Qwen/MiniMax-family session's Edit tool description gets one extra
+  line asking for at least three lines of `old_string` context, computed
+  once when the frozen tool catalog is built so the wire request stays
+  cache-prefix-stable; Claude/GPT sessions are unaffected, byte for byte.
+- **README/INSTALL.md**: a "Quick start (Kali / Linux)" section leads the
+  README now (install, `rolo-claude init`, `rolo-claude`, then Windows in
+  five lines); INSTALL.md points to `init` up front.
+
 ## [0.4.0] - 2026-09-28
 
 H11: Claude models through the user's own Claude subscription (`cc:` route)

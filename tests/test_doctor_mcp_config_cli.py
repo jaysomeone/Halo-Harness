@@ -354,6 +354,14 @@ def test_config_get_missing_key(ctx: Ctx):
     home = _fresh_home()
     result = _run(["config", "get", "does-not-exist"], home)
     ctx.check(f"exit 1, got {result.returncode}", result.returncode == 1)
+    # A missing key (or a missing dotted segment such as `improve.nope`) is a
+    # one-line "is not set" message, never a KeyError traceback (found live
+    # after H12: `config get model` on a box where init had not run).
+    ctx.check("stderr says 'is not set'", "is not set" in (result.stderr or ""))
+    ctx.check("no traceback on stderr", "Traceback" not in (result.stderr or ""))
+    dotted = _run(["config", "get", "improve.nope"], home)
+    ctx.check(f"dotted missing key exits 1, got {dotted.returncode}", dotted.returncode == 1)
+    ctx.check("dotted missing key: no traceback", "Traceback" not in (dotted.stderr or ""))
 
 
 @test

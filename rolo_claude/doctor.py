@@ -5,13 +5,23 @@ slash command's shared implementation (U0 scope A). Checks: Python version,
 (needed for `--playwright`), and a WSL/Kali hint. Read-only: never writes
 anything, never raises on a missing/misconfigured piece -- each check
 degrades to a "not configured" line instead.
+
+H12 Part B (RECOMMENDATIONS.md P0 #2, "prescriptive doctor"): every `[WARN]`/
+`[MISSING]` line ends with `-> fix: <exact command>` (via `_fix` below), or
+`-> see: <URL/section>` when there's no single command -- an `[OK]`/info line
+never gets one (nothing to fix). `run_checks_structured`/`doctor --json`
+exposes the SAME lines as `{id, status, message, fix}` records for
+`rolo-claude init` (and any other machine caller) to consume without
+re-parsing rendered text.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +31,50 @@ from typing import Optional
 OK, WARN, MISSING = "[OK]", "[WARN]", "[MISSING]"
 
 
+def _fix(line: str, *, cmd: Optional[str] = None, see: Optional[str] = None) -> str:
+    """Appends ` -> fix: <cmd>` or ` -> see: <ref>` to a WARN/MISSING line
+    -- a no-op on an OK/info line (nothing to fix) or when neither is given.
+    `cmd` wins when both are passed (a real command is always more useful
+    than a reference)."""
+    if not (line.startswith(WARN) or line.startswith(MISSING)):
+        return line
+    if cmd:
+        return f"{line} -> fix: {cmd}"
+    if see:
+        return f"{line} -> see: {see}"
+    return line
+
+
+_FIX_SUFFIX_RE = re.compile(r"\s*-> (fix|see): (.+)$")
+
+
+def _parse_check_line(line: str) -> dict:
+    """One rendered `[OK]`/`[WARN]`/`[MISSING]` line -> `{status, message,
+    fix, see}` (status lowercased; `fix`/`see` are `None` when the line
+    carries neither, which is always true for a non-WARN/MISSING line).
+    Leading whitespace is stripped first -- `--work`'s own reasoning-replay
+    probe indents its sub-lines two spaces, unlike every other line in this
+    module."""
+    stripped = line.strip()
+    if stripped.startswith(OK):
+        status, rest = "ok", stripped[len(OK):].strip()
+    elif stripped.startswith(WARN):
+        status, rest = "warn", stripped[len(WARN):].strip()
+    elif stripped.startswith(MISSING):
+        status, rest = "missing", stripped[len(MISSING):].strip()
+    else:
+        status, rest = "info", stripped
+    fix = see = None
+    m = _FIX_SUFFIX_RE.search(rest)
+    if m:
+        rest = rest[:m.start()].rstrip()
+        if m.group(1) == "fix":
+            fix = m.group(2).strip()
+        else:
+            see = m.group(2).strip()
+    return {"status": status, "message": rest, "fix": fix, "see": see}
+
+
 def _check_python() -> str:
     # H9 whole-tree review finding 33: this hardcoded (3, 9), one full
     # minor version below pyproject.toml's real `requires-python = ">=
@@ -28,26 +82,40 @@ def _check_python() -> str:
     # actually meeting the package's own declared minimum.
     info = sys.version_info
     version = f"{info.major}.{info.minor}.{info.micro}"
-    status = OK if (info.major, info.minor) >= (3, 10) else WARN
-    return f"{status} Python {version}"
+    if (info.major, info.minor) >= (3, 10):
+        return f"{OK} Python {version}"
+    return _fix(f"{WARN} Python {version}", see="docs/harness/INSTALL.md (Prerequisites: Python 3.10+)")
 
 
 def _check_claude_layout() -> list:
     from rolo_claude.config.paths import claude_config_dir, claude_json_path
     lines = []
     cfg_dir = claude_config_dir()
-    lines.append(f"{OK if cfg_dir.is_dir() else MISSING} ~/.claude directory: {cfg_dir}")
+    if cfg_dir.is_dir():
+        lines.append(f"{OK} ~/.claude directory: {cfg_dir}")
+    else:
+        lines.append(_fix(f"{MISSING} ~/.claude directory: {cfg_dir}", cmd="claude"))
     settings_path = cfg_dir / "settings.json"
-    lines.append(f"{OK if settings_path.exists() else WARN} settings.json: {settings_path}")
+    if settings_path.exists():
+        lines.append(f"{OK} settings.json: {settings_path}")
+    else:
+        lines.append(_fix(f"{WARN} settings.json: {settings_path}",
+                           see="README.md (Config reuse from Claude Code) -- optional, defaults apply"))
     cj_path = claude_json_path()
-    lines.append(f"{OK if cj_path.exists() else WARN} .claude.json: {cj_path}")
+    if cj_path.exists():
+        lines.append(f"{OK} .claude.json: {cj_path}")
+    else:
+        lines.append(_fix(f"{WARN} .claude.json: {cj_path}",
+                           see="README.md (Config reuse from Claude Code) -- optional, defaults apply"))
     return lines
 
 
 def _check_env_file() -> str:
     from rolo_claude.config.paths import home
     env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    return f"{OK if env_path.exists() else WARN} env file: {env_path}"
+    if env_path.exists():
+        return f"{OK} env file: {env_path}"
+    return _fix(f"{WARN} env file: {env_path}", cmd="rolo-claude init")
 
 
 def _load_env_file_best_effort() -> None:
@@ -70,9 +138,10 @@ def _check_openrouter() -> str:
         from rolo_claude.providers.config import resolve_openrouter
         orc = resolve_openrouter()
     except Exception as e:  # never let a doctor check crash the whole command
-        return f"{WARN} OpenRouter: could not check ({type(e).__name__}: {e})"
+        return _fix(f"{WARN} OpenRouter: could not check ({type(e).__name__}: {e})", cmd="rolo-claude init")
     if orc is None:
-        return f"{WARN} OpenRouter: not configured (no OPENROUTER_API_KEY found)"
+        return _fix(f"{WARN} OpenRouter: not configured (no OPENROUTER_API_KEY found)",
+                     cmd="rolo-claude init --preset home")
     return f"{OK} OpenRouter: key found ({orc.base_url})"
 
 
@@ -82,9 +151,10 @@ def _check_databricks() -> str:
         from rolo_claude.providers.config import resolve_databricks
         dbx = resolve_databricks()
     except Exception as e:
-        return f"{WARN} Databricks: could not check ({type(e).__name__}: {e})"
+        return _fix(f"{WARN} Databricks: could not check ({type(e).__name__}: {e})", cmd="rolo-claude init")
     if dbx is None:
-        return f"{WARN} Databricks: not configured (no host/token found)"
+        return _fix(f"{WARN} Databricks: not configured (no host/token found)",
+                     cmd="rolo-claude init --preset work")
     return f"{OK} Databricks: configured ({dbx.host})"
 
 
@@ -112,19 +182,24 @@ def _check_claude_subscription() -> str:
     try:
         status = claude_auth_status()
     except Exception as e:  # never let a doctor check crash the whole command
-        return f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})"
+        return _fix(f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})",
+                     cmd="rolo-claude doctor")
     if status is None:
-        return f"{WARN} Claude subscription: claude not found (cc: models unavailable -- install Claude Code)"
+        return _fix(f"{WARN} Claude subscription: claude not found (cc: models unavailable -- install Claude Code)",
+                     see="https://claude.com/claude-code")
     if getattr(status, "timed_out", False):
-        return f"{WARN} Claude subscription: `claude auth status` timed out (try again -- cc: models unavailable for now)"
+        return _fix(f"{WARN} Claude subscription: `claude auth status` timed out (try again -- cc: models "
+                     f"unavailable for now)", cmd="rolo-claude doctor")
     if not status.logged_in:
-        return f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in for cc: models)"
+        return _fix(f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in "
+                     f"for cc: models)", cmd="claude")
     version = _claude_version()
     version_bit = f" via claude {version}" if version else ""
     if status.auth_method not in SUBSCRIPTION_AUTH_METHODS:
         via = status.auth_method or "an unrecognized method"
-        return (f"{WARN} Claude subscription: logged in via {via}, not claude.ai{version_bit} -- cc: will not use "
-                 f"this (that's the ant: route); log in with `claude` and no ANTHROPIC_API_KEY set for cc:")
+        return _fix(f"{WARN} Claude subscription: logged in via {via}, not claude.ai{version_bit} -- cc: will "
+                     f"not use this (that's the ant: route); log in with `claude` and no ANTHROPIC_API_KEY set "
+                     f"for cc:", cmd="unset ANTHROPIC_API_KEY && claude")
     return f"{OK} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available"
 
 
@@ -195,12 +270,14 @@ def _check_chrome() -> str:
     from rolo_claude.mcp_setup import find_claude_exe
     claude_exe = find_claude_exe()
     if not claude_exe:
-        return f"{WARN} claude executable not found on PATH -- --chrome cannot spawn the claude-in-chrome MCP server"
+        return _fix(f"{WARN} claude executable not found on PATH -- --chrome cannot spawn the claude-in-chrome "
+                     f"MCP server", see="https://claude.com/claude-code")
     registered, detail = _chrome_native_host_registered()
     pipe = " (bridge pipe currently open)" if _chrome_bridge_pipe_present() else ""
     if registered:
         return f"{OK} claude={claude_exe}; native host registered ({detail}){pipe}"
-    return f"{WARN} claude={claude_exe}; Chrome extension native host NOT registered ({detail}) -- install/enable Claude in Chrome first"
+    return _fix(f"{WARN} claude={claude_exe}; Chrome extension native host NOT registered ({detail}) -- "
+                 f"install/enable Claude in Chrome first", see="README.md (Browser)")
 
 
 def _check_plugins() -> str:
@@ -212,7 +289,8 @@ def _check_plugins() -> str:
         from rolo_claude.config.plugins import discover_plugin_mcp_servers
         servers, notices = discover_plugin_mcp_servers(env=dict(os.environ))
     except Exception as e:  # never let a doctor check crash the whole command
-        return f"{WARN} Plugins: could not check ({type(e).__name__}: {e})"
+        return _fix(f"{WARN} Plugins: could not check ({type(e).__name__}: {e})",
+                     see="~/.claude/plugins/installed_plugins.json (check for a syntax error)")
     if not servers:
         return f"{OK} Plugins: no plugin-provided MCP servers discovered"
     names = ", ".join(sorted(servers))
@@ -226,7 +304,8 @@ def _check_playwright() -> str:
     if node and npx:
         return f"{OK} node/npx on PATH (needed for --playwright): {node}"
     missing = ", ".join(n for n, p in (("node", node), ("npx", npx)) if not p)
-    return f"{WARN} missing on PATH for --playwright: {missing}"
+    return _fix(f"{WARN} missing on PATH for --playwright: {missing}",
+                 see="https://nodejs.org/ (install Node.js, then re-run doctor)")
 
 
 def _check_ripgrep() -> str:
@@ -238,8 +317,9 @@ def _check_ripgrep() -> str:
     rg = shutil.which("rg")
     if rg:
         return f"{OK} rg (ripgrep) on PATH: {rg}"
-    return (f"{WARN} rg (ripgrep) not on PATH -- the Grep tool falls back to a slower pure-Python "
-            f"search engine; install ripgrep for full speed (Claude Code itself ships rg embedded)")
+    return _fix(f"{WARN} rg (ripgrep) not on PATH -- the Grep tool falls back to a slower pure-Python "
+                f"search engine; install ripgrep for full speed (Claude Code itself ships rg embedded)",
+                cmd="rolo-claude init")
 
 
 def _check_editor() -> str:
@@ -250,7 +330,8 @@ def _check_editor() -> str:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if editor:
         return f"{OK} $VISUAL/$EDITOR set: {editor}"
-    return f"{WARN} $VISUAL/$EDITOR not set -- Ctrl+E (edit the prompt draft in an external editor) won't work"
+    return _fix(f"{WARN} $VISUAL/$EDITOR not set -- Ctrl+E (edit the prompt draft in an external editor) "
+                f"won't work", cmd="export EDITOR=nano")
 
 
 def _check_shell() -> str:
@@ -266,9 +347,11 @@ def _check_shell() -> str:
         label = "Git Bash" if sys.platform == "win32" else "bash"
         return f"{OK} {label} found: {bash}"
     if sys.platform == "win32":
-        return (f"{MISSING} Git Bash not found -- the Bash tool requires it on Windows "
-                f"(install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH)")
-    return f"{MISSING} bash not found on PATH -- the Bash tool (and every shell hook) requires it"
+        return _fix(f"{MISSING} Git Bash not found -- the Bash tool requires it on Windows "
+                    f"(install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH)",
+                    see="https://git-scm.com/download/win")
+    return _fix(f"{MISSING} bash not found on PATH -- the Bash tool (and every shell hook) requires it",
+                cmd="sudo apt install bash")
 
 
 def _check_platform() -> str:
@@ -313,12 +396,15 @@ def _check_catalog_ages() -> list:
                             ("models-dev.json (models.dev)", models_dev_json_path)):
         path = path_fn(state_dir)
         if not path.exists():
-            lines.append(f"{WARN} {label}: never cached (vendored package fallback still applies) -- "
-                         f"run `rolo-claude models --refresh`")
+            lines.append(_fix(f"{WARN} {label}: never cached (vendored package fallback still applies)",
+                               cmd="rolo-claude models --refresh"))
             continue
         age_days = (time.time() - path.stat().st_mtime) / 86400
-        status = WARN if age_days > 30 else OK
-        lines.append(f"{status} {label}: cached {age_days:.1f} day(s) ago ({path})")
+        if age_days > 30:
+            lines.append(_fix(f"{WARN} {label}: cached {age_days:.1f} day(s) ago ({path})",
+                               cmd="rolo-claude models --refresh"))
+        else:
+            lines.append(f"{OK} {label}: cached {age_days:.1f} day(s) ago ({path})")
     return lines
 
 
@@ -341,6 +427,131 @@ def _check_telemetry_and_improve() -> "list[str]":
         f"since_days={cfg.since_days} max_candidates={cfg.max_candidates}"
     )
     return lines
+
+
+def _check_local_bin_on_path() -> Optional[str]:
+    """New (RECOMMENDATIONS.md P0 #2 / H12 brief Part B): `~/.local/bin`
+    (pipx/`uv tool install`/`pip install --user`'s own console-script
+    location) missing from PATH for a NON-interactive shell is the single
+    most common "rolo-claude: command not found" right after install --
+    checked with `rolo_claude.linux_fixes.local_bin_on_noninteractive_path`
+    (re-invokes `$SHELL -c 'echo $PATH'`, never this process's own already-
+    widened inherited PATH). Linux/macOS only -- Windows has no equivalent
+    PATH-for-a-non-interactive-shell concept; `rolo-claude init`'s own
+    Windows-launcher check covers the Windows side of this instead."""
+    if sys.platform == "win32":
+        return None
+    from rolo_claude.linux_fixes import PATH_LINE, local_bin_on_noninteractive_path, rc_file_for_shell
+    if local_bin_on_noninteractive_path():
+        return f"{OK} ~/.local/bin on PATH for a non-interactive shell"
+    rc_path = rc_file_for_shell()
+    return _fix(f"{WARN} ~/.local/bin not on PATH for a non-interactive shell",
+                cmd=f"echo '{PATH_LINE}' >> {rc_path}")
+
+
+def _check_tmux_mouse() -> Optional[str]:
+    """New (RECOMMENDATIONS.md P0 #2): only relevant -- and only checked --
+    when `$TMUX` says we're actually inside a tmux session; `tmux show -g
+    mouse` reflects whether tmux itself is forwarding mouse events to
+    rolo-claude at all (Textual's own mouse capture needs tmux's
+    cooperation first, see INSTALL.md's own "Mouse" terminal note)."""
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        proc = subprocess.run(["tmux", "show", "-g", "mouse"], capture_output=True, text=True, timeout=5)
+        output = (proc.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return _fix(f"{WARN} tmux mouse mode: could not check ({type(e).__name__}: {e})", cmd="tmux set -g mouse on")
+    if "on" in output.split():
+        return f"{OK} tmux mouse mode: on ({output})"
+    return _fix(f"{WARN} tmux mouse mode: not on ({output or 'no output'}) -- click-to-focus/drag-scroll/"
+                f"drag-select-to-copy won't work until it is (Shift+drag still uses the terminal's native "
+                f"selection either way)", cmd="tmux set -g mouse on")
+
+
+def _check_mcp_servers(cwd: Optional[Path]) -> str:
+    """New (RECOMMENDATIONS.md P0 #2 / section 3, "MCP startup cost is the
+    biggest perceived-speed item"): configured MCP servers -- a pure config
+    MERGE enumeration (`mcp.manager.resolve_server_configs`, never connects
+    to anything, unlike `rolo-claude mcp list`'s own live health check) plus
+    the eager-vs-`mcpLazy` breakdown. No connect-time history is recorded
+    anywhere yet (a future telemetry pass, RECOMMENDATIONS.md P1), so this
+    never fabricates a total-time WARN from an unmeasured guess -- it names
+    the real, actionable lever (mcpLazy) as plain information instead."""
+    cwd = cwd or Path.cwd()
+    try:
+        from rolo_claude.config.claude_json import load_claude_json
+        from rolo_claude.mcp.manager import resolve_server_configs
+        resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json())
+    except Exception as e:
+        return _fix(f"{WARN} MCP servers: could not enumerate ({type(e).__name__}: {e})",
+                     cmd="rolo-claude doctor")
+    if not resolved:
+        return f"{OK} MCP servers: none configured"
+    eager = sorted(name for name, cfg in resolved.items() if not cfg.lazy)
+    lazy_n = len(resolved) - len(eager)
+    hint = ("" if not eager else
+            " -- no connect-time history recorded yet; if startup feels slow, add "
+            "\"mcpLazy\": true to a slow one in .mcp.json/settings.json")
+    return f"{OK} MCP servers: {len(resolved)} configured ({len(eager)} eager, {lazy_n} lazy){hint}"
+
+
+def _provider_configured(ref) -> "tuple[bool, str]":
+    """`(is_configured, human_label)` for a `model.ModelRef`'s own
+    provider -- shared by `_check_default_model` below; the SAME resolvers
+    every other provider-specific check in this module already uses, so
+    this never disagrees with the `OpenRouter:`/`Databricks:`/`Claude
+    subscription:` lines just above it. Never raises -- same "degrade to a
+    clear line" contract as every other check (`_check_openrouter`/
+    `_check_databricks`/`_check_claude_subscription` each guard their own
+    resolver call the same way; this one guards all of them at once since
+    it calls whichever ONE actually applies to `ref.provider`)."""
+    _load_env_file_best_effort()
+    try:
+        if ref.provider == "openrouter":
+            from rolo_claude.providers.config import resolve_openrouter
+            return resolve_openrouter() is not None, "OpenRouter"
+        if ref.provider == "databricks":
+            from rolo_claude.providers.config import resolve_databricks
+            return resolve_databricks() is not None, "Databricks"
+        if ref.provider == "anthropic":
+            from rolo_claude.providers.config import resolve_anthropic
+            return resolve_anthropic() is not None, "ANTHROPIC_API_KEY"
+        if ref.provider == "cc":
+            from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
+            status = claude_auth_status()
+            ok = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
+            return ok, "Claude subscription"
+    except Exception as e:
+        return False, f"could not check ({type(e).__name__}: {e})"
+    return True, ref.provider
+
+
+def _check_default_model() -> str:
+    """New (RECOMMENDATIONS.md P0 #2): `~/.rolo-claude/config.json`'s own
+    `"model"` key (written by `rolo-claude init` step 3, or a plain
+    `rolo-claude config set model ...`) and whether ITS provider actually
+    resolves -- via `model.parse_model_ref`, the SAME parser `headless.
+    build_session` uses, so this line never disagrees with what a real
+    session would actually pick. Not set at all is perfectly normal (the
+    built-in default applies) and reported OK, never WARN."""
+    from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref
+    from rolo_claude.theme import get_config_value
+    configured = get_config_value("model", default=None)
+    if not isinstance(configured, str) or not configured:
+        return (f"{OK} Default model: not set in config.json -- built-in default {DEFAULT_MODEL_REF!r} "
+                f"applies (BRIDGE_MODEL/routes.json still win when set)")
+    try:
+        ref = parse_model_ref(configured)
+    except Exception as e:
+        return _fix(f"{WARN} Default model: config.json's model={configured!r} does not resolve ({e})",
+                     cmd=f"rolo-claude config set model {DEFAULT_MODEL_REF}")
+    provider_ok, provider_label = _provider_configured(ref)
+    if provider_ok:
+        return f"{OK} Default model: {configured} ({provider_label} configured)"
+    preset = "work" if ref.provider == "databricks" else ("claude" if ref.provider in ("cc", "anthropic") else "home")
+    return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
+                 cmd=f"rolo-claude init --preset {preset}")
 
 
 def _dbx_probe_target():
@@ -369,10 +580,12 @@ def _check_ucode_settings() -> str:
     from rolo_claude.providers.config import load_ucode_settings
     path = claude_config_dir() / "ucode-settings.json"
     if not path.exists():
-        return f"{WARN} ucode-settings.json: not found at {path} (ug/unity-gateway CLI not run on this box, or not installed)"
+        return _fix(f"{WARN} ucode-settings.json: not found at {path} (ug/unity-gateway CLI not run on this "
+                     f"box, or not installed)", cmd="rolo-claude init --preset work")
     parsed = load_ucode_settings(path)
     if parsed is None:
-        return f"{WARN} ucode-settings.json: found at {path} but no recognizable gateway URL/token in it"
+        return _fix(f"{WARN} ucode-settings.json: found at {path} but no recognizable gateway URL/token in it",
+                     see="docs/harness/INSTALL.md (ug/unity-gateway compatibility)")
     return f"{OK} ucode-settings.json: found and parsed ({path}) -> host {parsed.host}"
 
 
@@ -381,7 +594,8 @@ def _work_check_vpn_reachability(host: Optional[str]) -> str:
     Databricks host -- the same connect path `providers.http.open_upstream`
     uses, so a WARN here means a live request would fail the identical way."""
     if not host:
-        return f"{MISSING} Databricks host: not configured (see the Databricks line above) -- nothing to reach"
+        return _fix(f"{MISSING} Databricks host: not configured (see the Databricks line above) -- nothing "
+                     f"to reach", cmd="rolo-claude init --preset work")
     import socket
     import ssl
     import urllib.parse
@@ -394,8 +608,8 @@ def _work_check_vpn_reachability(host: Optional[str]) -> str:
                 pass
         return f"{OK} VPN/reachability: connected to {hostname}:{port}"
     except Exception as e:
-        return (f"{MISSING} VPN/reachability: could not reach {hostname}:{port} ({type(e).__name__}: {e}) "
-                f"-- are you on the VPN? Databricks is whitelisted")
+        return _fix(f"{MISSING} VPN/reachability: could not reach {hostname}:{port} ({type(e).__name__}: {e})",
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
 
 
 def _work_check_token_validity(host: Optional[str], token: Optional[str]) -> str:
@@ -404,18 +618,22 @@ def _work_check_token_validity(host: Optional[str], token: Optional[str]) -> str
     list them (same wording the proxy's own --probe has always used);
     anything else (incl. a connect failure) is reported honestly."""
     if not host or not token:
-        return f"{MISSING} Token validity: not configured -- nothing to check"
+        return _fix(f"{MISSING} Token validity: not configured -- nothing to check",
+                     cmd="rolo-claude init --preset work")
     try:
         from rolo_claude.providers.databricks import probe_databricks_endpoints
         from rolo_claude.providers.config import derive_workspace_root
         status, names = probe_databricks_endpoints(derive_workspace_root(host), token)
     except Exception as e:
-        return f"{MISSING} Token validity: connection failed ({type(e).__name__}: {e}) -- are you on the VPN?"
+        return _fix(f"{MISSING} Token validity: connection failed ({type(e).__name__}: {e})",
+                     cmd="connect to the VPN, then re-run `rolo-claude doctor --work`")
     if status == 200:
         return f"{OK} Token validity: valid, can list endpoints ({len(names)} found)"
     if status in (401, 403):
-        return f"{WARN} Token validity: got HTTP {status} listing endpoints -- token may only be able to run inference, not list it"
-    return f"{WARN} Token validity: got HTTP {status} from /api/2.0/serving-endpoints"
+        return _fix(f"{WARN} Token validity: got HTTP {status} listing endpoints -- token may only be able "
+                     f"to run inference, not list it", see="your Databricks workspace admin (token scope)")
+    return _fix(f"{WARN} Token validity: got HTTP {status} from /api/2.0/serving-endpoints",
+                 cmd="rolo-claude doctor --work")
 
 
 _THINKING_FAMILY_HINTS = ("deepseek", "kimi", "moonshot", "glm", "zhipu", "z-ai")
@@ -442,10 +660,10 @@ def _configured_databricks_thinking_model(state_dir) -> Optional[str]:
     test at all), else None (the caller falls back to the catalog's first
     match, same as before, but now honestly labelled as a fallback)."""
     try:
-        from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref
+        from rolo_claude.model import parse_model_ref, resolve_default_model_raw
         from rolo_claude.providers.config import load_routes
         routes = load_routes(Path(state_dir) / "routes.json")
-        model_raw = os.environ.get("BRIDGE_MODEL") or routes.get("default") or DEFAULT_MODEL_REF
+        model_raw = resolve_default_model_raw(routes)
         ref = parse_model_ref(model_raw, routes)
     except Exception:
         return None
@@ -479,17 +697,20 @@ def _work_check_reasoning_replay_after_tool_call(host: Optional[str], token: Opt
              "DeepSeek/Kimi/GLM after a tool call? (2) does the invocations-vs-mlflow route "
              "split hold for the CONFIGURED model?"]
     if not host or not token:
-        lines.append(f"  {MISSING} cannot probe -- Databricks not configured")
+        lines.append("  " + _fix(f"{MISSING} cannot probe -- Databricks not configured",
+                                  cmd="rolo-claude init --preset work"))
         return lines
     try:
         from rolo_claude.providers.databricks import probe_databricks_endpoints_full
         from rolo_claude.providers.config import derive_workspace_root
         status, entries = probe_databricks_endpoints_full(derive_workspace_root(host), token)
     except Exception as e:
-        lines.append(f"  {MISSING} cannot probe -- connection failed ({type(e).__name__}: {e}); are you on the VPN?")
+        lines.append("  " + _fix(f"{MISSING} cannot probe -- connection failed ({type(e).__name__}: {e})",
+                                  cmd="connect to the VPN, then re-run `rolo-claude doctor --work`"))
         return lines
     if status != 200:
-        lines.append(f"  {MISSING} cannot probe -- HTTP {status} listing endpoints")
+        lines.append("  " + _fix(f"{MISSING} cannot probe -- HTTP {status} listing endpoints",
+                                  cmd="rolo-claude doctor --work"))
         return lines
     configured = _configured_databricks_thinking_model(state_dir)
     if configured:
@@ -563,6 +784,26 @@ def _work_check_reasoning_replay_after_tool_call(host: Optional[str], token: Opt
     return lines
 
 
+def _work_check_entries() -> "list[tuple[str, str]]":
+    """The `--work` counterpart of `_check_entries` -- one id-tagged table
+    shared by `run_work_checks` and `run_work_checks_structured`/`doctor
+    --work --json`."""
+    from rolo_claude.config.paths import bridge_home
+    host, token = _dbx_probe_target()
+    databricks_config_line = (f"{OK} Databricks config: host {host}" if host else
+                               _fix(f"{MISSING} Databricks config: not configured",
+                                    cmd="rolo-claude init --preset work"))
+    entries = [
+        ("databricks_config", databricks_config_line),
+        ("ucode_settings", _check_ucode_settings()),
+        ("vpn_reachability", _work_check_vpn_reachability(host)),
+        ("token_validity", _work_check_token_validity(host, token)),
+    ]
+    probe_lines = _work_check_reasoning_replay_after_tool_call(host, token, bridge_home())
+    entries.extend((f"reasoning_replay_probe_{i}", line) for i, line in enumerate(probe_lines))
+    return entries
+
+
 def run_work_checks() -> "tuple[list, bool]":
     """H8 scope F: `rolo-claude doctor --work` -- VPN reachability, token
     validity, ucode-settings.json, and the plan's own two open questions as
@@ -570,45 +811,89 @@ def run_work_checks() -> "tuple[list, bool]":
     MISSING line with the VPN hint instead of crashing when the work box
     genuinely isn't reachable from here (expected when run outside the VPN,
     e.g. this exact build/test box)."""
-    from rolo_claude.config.paths import bridge_home
-    host, token = _dbx_probe_target()
-    lines = [
-        f"{OK if host else MISSING} Databricks config: " + (f"host {host}" if host else "not configured"),
-        _check_ucode_settings(),
-        _work_check_vpn_reachability(host),
-        _work_check_token_validity(host, token),
-    ]
-    lines.extend(_work_check_reasoning_replay_after_tool_call(host, token, bridge_home()))
+    lines = [line for _cid, line in _work_check_entries()]
     ok = not any(line.strip().startswith(MISSING) for line in lines)
     return lines, ok
+
+
+def run_work_checks_structured() -> "tuple[list, bool]":
+    """H12 Part B: `doctor --work --json`'s own payload -- see
+    `run_checks_structured`'s docstring for the shape; `ok` matches
+    `run_work_checks`' own definition exactly."""
+    checks = []
+    for cid, line in _work_check_entries():
+        parsed = _parse_check_line(line)
+        parsed["id"] = cid
+        checks.append(parsed)
+    ok = not any(c["status"] == "missing" for c in checks)
+    return checks, ok
+
+
+def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
+    """`[(id, rendered_line), ...]` -- the ONE table both `run_checks`
+    (the plain `lines`/`ok` pair every existing caller/test already uses)
+    and `run_checks_structured`/`doctor --json` (H12 Part B: "for init to
+    reuse") build from, so the two can never drift apart. A check that
+    returns `None` (the new PART B checks that only apply sometimes --
+    tmux mouse mode off-tmux, `~/.local/bin` on win32) is skipped entirely
+    rather than appearing as an empty/placeholder entry."""
+    entries: "list[tuple[str, Optional[str]]]" = [("python", _check_python())]
+    claude_ids = ("claude_dir", "claude_settings_json", "claude_dot_json")
+    entries.extend(zip(claude_ids, _check_claude_layout()))
+    entries.append(("env_file", _check_env_file()))
+    entries.append(("openrouter", _check_openrouter()))
+    entries.append(("databricks", _check_databricks()))
+    entries.append(("claude_subscription", _check_claude_subscription()))
+    entries.append(("chrome", _check_chrome()))
+    entries.append(("playwright", _check_playwright()))
+    entries.append(("ripgrep", _check_ripgrep()))
+    entries.append(("editor", _check_editor()))
+    entries.append(("shell", _check_shell()))
+    entries.append(("plugins", _check_plugins()))
+    entries.append(("platform", _check_platform()))
+    entries.append(("local_bin_on_path", _check_local_bin_on_path()))
+    entries.append(("tmux_mouse", _check_tmux_mouse()))
+    catalog_ids = ("catalog_models_json", "catalog_dbx_endpoints", "catalog_models_dev")
+    entries.extend(zip(catalog_ids, _check_catalog_ages()))
+    telemetry_ids = ("sessions", "improve")
+    entries.extend(zip(telemetry_ids, _check_telemetry_and_improve()))
+    # U5 leftover / H8 cheap must-do: tui/clipboard.py's own
+    # clipboard_doctor_line() was written ready-to-call but never actually
+    # wired into a real doctor run. H12 Part B: that function's own WARN
+    # (no xclip/wl-copy/xsel on PATH -- a bare Linux box with neither, e.g.
+    # a fresh WSL install) gets the fix suffix HERE rather than inside
+    # tui/clipboard.py itself, since `_fix`/the WARN/MISSING vocabulary is
+    # this module's own convention, not that one's.
+    from rolo_claude.tui.clipboard import clipboard_doctor_line
+    entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
+    entries.append(("mcp_servers", _check_mcp_servers(cwd)))
+    entries.append(("default_model", _check_default_model()))
+    return [(cid, line) for cid, line in entries if line is not None]
 
 
 def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     """Returns (lines, ok) -- `ok` is True iff nothing came back MISSING
     (a WARN is informational, e.g. "no Databricks configured", and never
     fails doctor as a whole)."""
-    lines = [_check_python()]
-    lines.extend(_check_claude_layout())
-    lines.append(_check_env_file())
-    lines.append(_check_openrouter())
-    lines.append(_check_databricks())
-    lines.append(_check_claude_subscription())
-    lines.append(_check_chrome())
-    lines.append(_check_playwright())
-    lines.append(_check_ripgrep())
-    lines.append(_check_editor())
-    lines.append(_check_shell())
-    lines.append(_check_plugins())
-    lines.append(_check_platform())
-    lines.extend(_check_catalog_ages())
-    lines.extend(_check_telemetry_and_improve())
-    # U5 leftover / H8 cheap must-do: tui/clipboard.py's own
-    # clipboard_doctor_line() was written ready-to-call but never actually
-    # wired into a real doctor run.
-    from rolo_claude.tui.clipboard import clipboard_doctor_line
-    lines.append(clipboard_doctor_line())
+    lines = [line for _cid, line in _check_entries(cwd)]
     ok = not any(line.startswith(MISSING) for line in lines)
     return lines, ok
+
+
+def run_checks_structured(cwd: Optional[Path] = None) -> "tuple[list, bool]":
+    """H12 Part B: `doctor --json`'s own payload, and what `rolo-claude
+    init` consumes to build its own Summary step -- `[{"id", "status",
+    "message", "fix", "see"}, ...]`, the SAME checks/order/wording
+    `run_checks` renders as plain text, just structured instead of
+    re-parsed from it. `ok` matches `run_checks`' own definition exactly
+    (True iff nothing is "missing")."""
+    checks = []
+    for cid, line in _check_entries(cwd):
+        parsed = _parse_check_line(line)
+        parsed["id"] = cid
+        checks.append(parsed)
+    ok = not any(c["status"] == "missing" for c in checks)
+    return checks, ok
 
 
 def cmd_doctor(argv: list) -> int:
@@ -617,12 +902,22 @@ def cmd_doctor(argv: list) -> int:
     parser.add_argument("--work", action="store_true",
                          help="Run the Databricks work-box preset (VPN reachability, token validity, "
                               "route-split/reasoning-replay probes) instead of the general checks")
+    parser.add_argument("--json", action="store_true",
+                         help="Machine-readable output: a JSON list of {id, status, message, fix, see}")
     args = parser.parse_args(argv)
     if args.work:
+        if args.json:
+            checks, ok = run_work_checks_structured()
+            print(json.dumps(checks, indent=2))
+            return 0 if ok else 1
         lines, ok = run_work_checks()
         print("rolo-claude doctor --work")
         for line in lines:
             print(f"  {line}")
+        return 0 if ok else 1
+    if args.json:
+        checks, ok = run_checks_structured()
+        print(json.dumps(checks, indent=2))
         return 0 if ok else 1
     lines, ok = run_checks()
     print("rolo-claude doctor")

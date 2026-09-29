@@ -34,7 +34,12 @@ def _cmd_get(rest: list) -> int:
     args = parser.parse_args(rest)
     # H10 Part B: a dotted key ("improve.model") reads a nested value;
     # a plain key is unchanged from before.
-    value = theme_mod.get_config_value(args.key, default=theme_mod._MISSING)
+    try:
+        value = theme_mod.get_config_value(args.key, default=theme_mod._MISSING)
+    except KeyError:
+        # get_config_value raises when the sentinel default is passed and the
+        # key (or a dotted path segment) is absent -- report it, never traceback.
+        value = theme_mod._MISSING
     if value is theme_mod._MISSING:
         print(f"rolo-claude config: {args.key!r} is not set", file=sys.stderr)
         return 1

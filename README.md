@@ -9,6 +9,32 @@ also ships the older `claude-bridge` proxy (drives the REAL `claude` binary
 against those same providers) as the `rolo-claude proxy` subcommand -- see
 **Proxy mode** near the end.
 
+## Quick start (Kali / Linux)
+
+```sh
+cd /path/to/rolo-claude
+uv tool install --editable .        # or: pipx install --editable .
+rolo-claude init                    # one command: preset, credentials, default model, doctor, live pong
+rolo-claude                         # full-screen TUI
+```
+
+`rolo-claude init` picks a sensible preset automatically (an existing OpenRouter key -> `home`;
+Databricks host/`ucode-settings.json` -> `work`; a claude.ai login and nothing else -> `claude`) and
+asks before changing anything; `rolo-claude init --preset home --yes` runs it fully non-interactively.
+Re-running is always safe -- it shows the current state and changes nothing already configured. See
+`docs/harness/INSTALL.md` for the full walkthrough (offline/work-box install, PEP 668 workarounds,
+terminal notes) and `rolo-claude doctor` for a read-only environment check with a fix for every WARN.
+
+### Windows (five lines)
+
+```powershell
+cd C:\path\to\rolo-claude
+uv tool install --editable .
+rolo-claude init
+rolo-claude --version
+rolo-claude
+```
+
 ## What it is
 
 `rolo-claude` is its own agent loop, not a wrapper around `claude`: it reads
@@ -54,6 +80,9 @@ Both produce a `rolo-claude` console script. Prerequisite: Python 3.10+;
 
 ## Configuration
 
+`rolo-claude init` (see Quick start above) does everything below in one
+command; this section is the manual/reference version of the same steps.
+
 Put `OPENROUTER_API_KEY` in `~/.config/vibes-hacker/env` (`KEY=value`, `#`
 comments, optional leading `export`; override the path with
 `BRIDGE_ENV_FILE`) or export it yourself -- that's the only required setup
@@ -71,7 +100,11 @@ on the same box.
 `rolo-claude doctor` is a read-only environment check (Python version,
 `~/.claude` layout, env file, OpenRouter/Databricks reachability, catalog
 cache ages, chrome/playwright/plugin detection, `rg`/`$VISUAL`/`$EDITOR`/
-Bash-shell presence, clipboard backend); `rolo-claude doctor --work`
+tmux mouse mode/Bash-shell presence, clipboard backend, configured MCP
+servers, the default model in `~/.rolo-claude/config.json`); every `WARN`/
+`MISSING` line ends with the exact fix command (or a doc reference when
+there's no single command), and `doctor --json` prints the same checks as
+`{id, status, message, fix}` records. `rolo-claude doctor --work`
 is the Databricks-specific preset for a VPN-gated work box (VPN
 reachability, token validity, the reasoning-replay/route-split probes) --
 see INSTALL.md's "Work box" section.

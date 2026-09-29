@@ -39,7 +39,7 @@ from rolo_claude.config.agents_md import discover_agents
 from rolo_claude.config.claude_json import is_trusted, load_claude_json
 from rolo_claude.config.paths import bridge_home, home, lookup_project
 from rolo_claude.config.settings import resolve_settings
-from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref, resolve_model_profile
+from rolo_claude.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
 from rolo_claude.output import PrintModeSink, StreamJsonSink
 from rolo_claude.permissions import (
     PermissionEngine, bare_deny_tool_names, build_rules_from_settings, freeze_tool_registry,
@@ -497,12 +497,26 @@ def build_session(
     state_dir = bridge_home()
     routes = load_routes(state_dir / "routes.json")
 
-    model_raw = model_ref_raw or os.environ.get("BRIDGE_MODEL") or routes.get("default") or DEFAULT_MODEL_REF
+    model_raw = model_ref_raw or resolve_default_model_raw(routes)
     model_ref = parse_model_ref(model_raw, routes)
     small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL") or routes.get("small") or model_raw
     small_ref = parse_model_ref(small_raw, routes) if small_raw else None
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
+
+    # H12 Part C (RECOMMENDATIONS.md P0 #3): a per-family Edit context-line
+    # hint, appended to the frozen registry's OWN Edit tool INSTANCE
+    # (default_tools() built a fresh one for this call, never shared with
+    # any other session) exactly once, here -- before session_catalog/the
+    # first request ever reads tool_registry.definitions(), so the wire
+    # tool definitions stay stable turn to turn (never recomputed mid-
+    # session, which would bust the provider's own prompt cache prefix).
+    edit_tool = frozen_registry.get("Edit")
+    if edit_tool is not None:
+        from rolo_claude.providers.profiles import edit_hint_for
+        edit_hint = edit_hint_for(model_ref.provider, model_ref.model)
+        if edit_hint:
+            edit_tool.description = f"{edit_tool.description}\n\n{edit_hint}"
 
     # finding 7 (major, h4-h5-h3c review): WebSearch must be registered
     # BEFORE `session_catalog = SessionCatalog(..., names=frozen_registry.

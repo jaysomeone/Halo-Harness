@@ -1,4 +1,11 @@
 {
+  "edit_hints": {
+    "deepseek": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
+    "kimi": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
+    "glm": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
+    "qwen": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
+    "minimax": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing."
+  },
   "openrouter": {
     "deepseek/deepseek-chat-v3.1": {
       "family": "deepseek-v3",
