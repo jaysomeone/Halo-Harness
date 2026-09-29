@@ -190,6 +190,34 @@ class Settings:
         return self._raw.get("modelSettings", {}).get(model, {}).get("effortLevel")
 
     @property
+    def effort_level_default(self) -> Optional[str]:
+        """H14 scope C: the top-level `effortLevel` key (Claude Code's
+        work-box settings.json carries this alongside `model`/
+        `modelSettings`) -- the settings-wide default effort when no
+        per-model `modelSettings.<id>.effortLevel` overrides it."""
+        value = self._raw.get("effortLevel")
+        return value if isinstance(value, str) and value else None
+
+    def resolved_effort_level(self) -> Optional[str]:
+        """H14 scope C: the effort a session should default to from
+        settings alone (`--effort` on the command line always wins over
+        this -- callers only consult it when nothing more specific was
+        given). `modelSettings.<id>.effortLevel`, keyed by the top-level
+        `model` setting's own value (a trailing `[1m]`-style context-window
+        suffix stripped first, matching Claude Code's own convention -- see
+        tests/helpers/fake_home.py's `"claude-fable-5-1[1m]"` /
+        `modelSettings["claude-fable-5-1"]` pair), wins over the plain
+        top-level `effortLevel` fallback; None when neither is set (the
+        provider's own default effort applies, unchanged)."""
+        model_setting = self._raw.get("model")
+        if isinstance(model_setting, str) and model_setting:
+            bare = model_setting.split("[", 1)[0]
+            per_model = self.effort_level(bare)
+            if per_model:
+                return per_model
+        return self.effort_level_default
+
+    @property
     def plans_directory(self) -> Optional[str]:
         """H6 scope C: `plansDirectory` -- an override for where plan-mode
         plan files are written (default `~/.claude/plans`,

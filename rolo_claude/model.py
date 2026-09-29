@@ -38,7 +38,7 @@ DEFAULT_MODEL_REF = "or:deepseek/deepseek-v4.1-flash"
 FALLBACK_MODEL_REF = "or:deepseek/deepseek-v3.2"
 
 
-def resolve_default_model_raw(routes: Optional[dict] = None) -> str:
+def resolve_default_model_raw(routes: Optional[dict] = None, env: Optional[dict] = None) -> str:
     """H12 Part A step 3: the ONE place both `-p` and the TUI (`headless.
     build_session` is the single shared session builder both go through)
     and `doctor --work`'s own probe resolve "the configured default model
@@ -46,9 +46,17 @@ def resolve_default_model_raw(routes: Optional[dict] = None) -> str:
     `BRIDGE_MODEL` env var > `routes.json`'s own "default" alias (both
     pre-existing) > `~/.rolo-claude/config.json`'s `"model"` key (written
     by `rolo-claude init`'s step 3 or a plain `rolo-claude config set
-    model ...`) > the hardcoded `DEFAULT_MODEL_REF`. A `--model` flag/arg
-    always wins over ALL of this -- callers check that FIRST, same as
-    before this function existed (see `build_session`'s own call site)."""
+    model ...`) > H14 scope C: `dbx:<ANTHROPIC_MODEL>` when the environment
+    carries Claude Code's own Databricks work-box shape (`ANTHROPIC_MODEL`/
+    `ANTHROPIC_DEFAULT_*_MODEL` resolving a real Databricks config) > the
+    hardcoded `DEFAULT_MODEL_REF`. A `--model` flag/arg always wins over ALL
+    of this -- callers check that FIRST, same as before this function
+    existed (see `build_session`'s own call site).
+
+    `env` (same must-do-6 shape every other resolver here takes) defaults to
+    `os.environ`; only the new work-env step reads it (the two pre-existing
+    steps keep using `os.environ`/routes.json unchanged, so every existing
+    caller that passes no `env` is completely unaffected)."""
     routes = routes or {}
     env_or_routes = os.environ.get("BRIDGE_MODEL") or routes.get("default")
     if env_or_routes:
@@ -57,13 +65,29 @@ def resolve_default_model_raw(routes: Optional[dict] = None) -> str:
     configured = get_config_value("model", default=None)
     if isinstance(configured, str) and configured:
         return configured
+    env = env if env is not None else os.environ
+    from rolo_claude.providers.config import databricks_work_env_active
+    if databricks_work_env_active(env):
+        anthropic_model = env.get("ANTHROPIC_MODEL")
+        if anthropic_model:
+            return f"{_DBX_PREFIX}{anthropic_model}"
     return DEFAULT_MODEL_REF
 
 
-def _dialect_for(bare_model: str) -> str:
-    """Same rule as providers.routing._dbx_dialect: passthrough iff 'claude'
-    appears in the (already prefix-stripped) name."""
-    return "anthropic-passthrough" if "claude" in bare_model.lower() else "openai-chat"
+def _databricks_model_ref(raw: str, bare: str) -> "ModelRef":
+    """H14 scope D: the ONE place both `parse_model_ref`'s `dbx:`-prefixed
+    and bare `databricks-*`/`system.ai.*` branches build a databricks
+    `ModelRef` -- strips a `@anthropic` suffix / applies a `databricks.
+    gateway.<endpoint>` override / picks the family's default dialect
+    (`providers.dbx_routing.resolve_databricks_dialect`), and refuses a
+    known non-chat endpoint (embeddings/whisper) with a clear message
+    instead of quietly building a ModelRef nothing can actually drive."""
+    from rolo_claude.providers.dbx_routing import refuse_if_non_chat, resolve_databricks_dialect
+    clean, dialect = resolve_databricks_dialect(bare)
+    err = refuse_if_non_chat(clean)
+    if err:
+        raise InvalidModelError(err)
+    return ModelRef(raw=raw, provider="databricks", model=clean, dialect=dialect)
 
 
 @dataclass(frozen=True)
@@ -109,7 +133,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
 
     if resolved.startswith(_DBX_PREFIX):
         bare = resolved[len(_DBX_PREFIX):]
-        return ModelRef(raw=raw, provider="databricks", model=bare, dialect=_dialect_for(bare))
+        return _databricks_model_ref(raw, bare)
     if resolved.startswith(_OR_PREFIX):
         bare = resolved[len(_OR_PREFIX):]
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
@@ -124,10 +148,20 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     if "/" in resolved and resolved.count("/") == 1:
         return ModelRef(raw=raw, provider="openrouter", model=resolved, dialect="openai-chat")
     if resolved.startswith("databricks-") or resolved.startswith("system.ai."):
-        return ModelRef(raw=raw, provider="databricks", model=resolved, dialect=_dialect_for(resolved))
+        return _databricks_model_ref(raw, resolved)
 
     from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES, default_bare_alias_route
     if resolved in BARE_ALIAS_NAMES:
+        # H14 scope C: at work (Claude Code's own settings env resolves a
+        # real Databricks config via ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_
+        # MODEL), a bare opus/sonnet/haiku maps through THAT env instead of
+        # the cc:/ant: subscription route -- checked FIRST, so cc:/ant: only
+        # ever apply "when no Databricks env is active" (brief wording).
+        from rolo_claude.providers.config import databricks_default_model_for_tier, databricks_work_env_active
+        if resolved in ("opus", "sonnet", "haiku") and databricks_work_env_active():
+            dbx_model = databricks_default_model_for_tier(resolved)
+            if dbx_model:
+                return parse_model_ref(f"{_DBX_PREFIX}{dbx_model}", routes)
         route = default_bare_alias_route()
         if route == "cc":
             return parse_model_ref(f"{_CC_PREFIX}{resolved}", routes)

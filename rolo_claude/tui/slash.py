@@ -14,6 +14,9 @@ async def handle_slash(app, name: str, args: str) -> None:
     name = name.lower()
     handler = {
         "model": _handle_model, "mcp": _handle_mcp, "clear": _handle_clear,
+        # H14 scope J: /models refresh (alias /dbx) -- always off the UI
+        # thread (a live Databricks probe is a real network call).
+        "models": _handle_models, "dbx": _handle_dbx,
         "resume": _handle_resume, "permissions": _handle_permissions,
         "exit": _handle_exit, "quit": _handle_exit, "theme": _handle_theme,
         # U5 scope C: sessions UX.
@@ -41,8 +44,29 @@ async def _handle_model(app, args: str) -> None:
     if args:
         _apply_model(app, args)
         return
+    # H14 scope J: auto-refresh the Databricks catalog when stale
+    # (databricks.catalog_max_age_hours, default 24), off the UI thread --
+    # the picker opens immediately with whatever's cached; a background
+    # refresh just notifies once it lands, it never blocks /model itself.
+    app.run_worker(lambda: _dbx_auto_refresh_worker(app), thread=True, name="dbx-auto-refresh")
     models = app.controller.list_models()
     app.push_screen(ModelPicker(models, current=app.status_bar.model), lambda ref: _apply_model(app, ref))
+
+
+def _dbx_auto_refresh_worker(app) -> None:
+    from rolo_claude.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
+    state_dir = getattr(app.controller, "state_dir", None)
+    if state_dir is None:
+        return
+    result = refresh_dbx_catalog_if_stale(state_dir)
+    if result is None:
+        return  # not stale, or Databricks isn't configured -- nothing to do
+    ok, diff, _note = result
+    if not ok:
+        return  # scope J: offline/403 keeps the cache silently here -- doctor/--refresh explain why
+    summary = format_dbx_diff(diff)
+    if summary != "no changes":
+        app.call_from_thread(app.notify, f"Databricks catalog updated: {summary}", title="/model")
 
 
 def _apply_model(app, ref) -> None:
@@ -53,6 +77,47 @@ def _apply_model(app, ref) -> None:
         app.notify(err, severity="error", title="/model")
     else:
         app.notify(f"Model set to {ref}", title="/model")
+
+
+# ============================================================================
+# H14 scope J: /models refresh (alias /dbx), off the UI thread.
+# ============================================================================
+
+async def _handle_models(app, args: str) -> None:
+    do_refresh = (args or "").strip().lower() in ("refresh", "--refresh", "")
+    app.run_worker(lambda: _models_refresh_worker(app, do_refresh), thread=True, name="models-refresh")
+
+
+async def _handle_dbx(app, _args: str) -> None:
+    app.run_worker(lambda: _models_refresh_worker(app, True), thread=True, name="models-refresh")
+
+
+def _models_refresh_worker(app, do_refresh: bool) -> None:
+    from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
+    from rolo_claude.providers.databricks import (
+        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, refresh_dbx_catalog,
+    )
+    state_dir = getattr(app.controller, "state_dir", None)
+    dbx = resolve_databricks()
+    if dbx is None:
+        app.call_from_thread(app.notify, "Databricks is not configured.", severity="warning", title="/models")
+        return
+    if not do_refresh:
+        endpoints = load_dbx_endpoints_json(state_dir)
+        age = dbx_endpoints_age_seconds(state_dir)
+        age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+        app.call_from_thread(app.transcript.add_note,
+                              f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}).",
+                              kind="command")
+        return
+    ok, diff, note = refresh_dbx_catalog(state_dir, derive_workspace_root(dbx.host), dbx.token)
+    endpoints = load_dbx_endpoints_json(state_dir)
+    if not ok:
+        app.call_from_thread(app.notify, f"Databricks refresh failed: {note}", severity="warning", title="/models")
+        return
+    text = f"Refreshed {len(endpoints)} Databricks endpoint(s). {format_dbx_diff(diff)}"
+    app.call_from_thread(app.transcript.add_note, text, kind="command")
+    app.call_from_thread(app.notify, format_dbx_diff(diff), title="/models refresh")
 
 
 async def _handle_mcp(app, _args: str) -> None:

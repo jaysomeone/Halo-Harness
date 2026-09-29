@@ -1,0 +1,403 @@
+"""tests.test_dbx_work_routing -- H14 scopes A-D: host/gateway split from
+Claude Code's own work-box settings.json (tests/fixtures/dbx_work_settings.json,
+synthetic token + placeholder host, exactly the shape docs/harness/H14-brief.md
+transcribes), ANTHROPIC_CUSTOM_HEADERS parsing/merge, model default/alias
+resolution in both environments, and the generic family x api_type RULES
+table (providers/dbx_routing.py) -- never a vendored per-model list.
+"""
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+
+test, TESTS = new_registry()
+
+_FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "dbx_work_settings.json").read_text(encoding="utf-8"))
+
+
+class _EnvSandbox:
+    """Isolates BRIDGE_TEST_HOME/BRIDGE_ENV_FILE and writes the fixture
+    settings.json as `~/.claude/settings.json` under a fresh fake home --
+    same manual save/restore convention test_work_box.py already uses."""
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in
+                       ("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE", "BRIDGE_STATE_DIR")}
+        self.home = Path(tempfile.mkdtemp(prefix="dbx-work-fixture-"))
+        (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        (self.home / ".claude" / "settings.json").write_text(json.dumps(_FIXTURE), encoding="utf-8")
+        os.environ["BRIDGE_TEST_HOME"] = str(self.home)
+        os.environ["BRIDGE_ENV_FILE"] = str(self.home / "no-such-env-file")
+        os.environ["BRIDGE_STATE_DIR"] = str(self.home / ".rolo-claude")
+        for key in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+                    "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
+                    "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+            os.environ.pop(key, None)
+        return self
+
+    def settings(self):
+        from rolo_claude.config.settings import resolve_settings
+        return resolve_settings(self.home, trusted=True)
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+# ---------------------------------------------------------------------------
+# Scope A: host/gateway split.
+# ---------------------------------------------------------------------------
+
+@test
+def test_resolve_databricks_splits_root_from_gateway_path_via_settings_env(ctx: Ctx):
+    with _EnvSandbox() as sb:
+        from rolo_claude.providers.config import resolve_databricks
+        # No `env` arg -> defaults to the real os.environ, which triggers
+        # step 3's settings-chain re-derivation (the `env is os.environ`
+        # gate) and picks up the fixture's ~/.claude/settings.json.
+        dbx = resolve_databricks()
+        ctx.check("resolved", dbx is not None)
+        ctx.check(f"host is the bare root, got {dbx.host!r}",
+                  dbx.host == "https://your-workspace.cloud.databricks.com")
+        ctx.check(f"anthropic_gateway remembered, got {dbx.anthropic_gateway!r}",
+                  dbx.anthropic_gateway == "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic")
+
+
+@test
+def test_resolve_databricks_databricks_host_with_a_path_also_splits(ctx: Ctx):
+    from rolo_claude.providers.config import resolve_databricks
+    dbx = resolve_databricks(env={
+        "DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic/v1/messages",
+        "DATABRICKS_TOKEN": "tok",
+    })
+    ctx.check(f"root stripped, got {dbx.host!r}", dbx.host == "https://your-workspace.cloud.databricks.com")
+    ctx.check(f"gateway remembered, got {dbx.anthropic_gateway!r}",
+              dbx.anthropic_gateway == "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic")
+
+
+@test
+def test_resolve_databricks_bare_host_has_no_gateway(ctx: Ctx):
+    from rolo_claude.providers.config import resolve_databricks
+    dbx = resolve_databricks(env={"DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com",
+                                   "DATABRICKS_TOKEN": "tok"})
+    ctx.check("no path to strip -> anthropic_gateway is None", dbx.anthropic_gateway is None)
+    ctx.check("host unchanged", dbx.host == "https://your-workspace.cloud.databricks.com")
+
+
+# ---------------------------------------------------------------------------
+# Scope B: ANTHROPIC_CUSTOM_HEADERS parsing + merge precedence.
+# ---------------------------------------------------------------------------
+
+@test
+def test_parse_custom_headers_single_and_multi_line(ctx: Ctx):
+    from rolo_claude.providers.config import parse_custom_headers
+    ctx.check("single line", parse_custom_headers("x-databricks-use-coding-agent-mode: true") ==
+              {"x-databricks-use-coding-agent-mode": "true"})
+    multi = parse_custom_headers("x-a: 1\nx-b: 2\n\n# comment-shaped line has no colon so is skipped-ish\nx-c:3")
+    ctx.check(f"multi-line parsed, got {multi!r}", multi == {"x-a": "1", "x-b": "2", "x-c": "3"})
+    ctx.check("empty/None -> {}", parse_custom_headers("") == {} and parse_custom_headers(None) == {})
+    ctx.check("later line wins on a case-insensitive name collision",
+              parse_custom_headers("X-Name: old\nx-name: new") == {"x-name": "new"})
+
+
+@test
+def test_resolve_databricks_carries_custom_headers_from_settings_env(ctx: Ctx):
+    with _EnvSandbox():
+        from rolo_claude.providers.config import resolve_databricks
+        dbx = resolve_databricks()
+        ctx.check(f"custom_headers parsed, got {dbx.custom_headers!r}",
+                  dbx.custom_headers == {"x-databricks-use-coding-agent-mode": "true"})
+
+
+@test
+def test_merge_databricks_headers_precedence(ctx: Ctx):
+    from rolo_claude.providers.config import merge_databricks_headers
+    # Default only.
+    ctx.check("default alone", merge_databricks_headers(None) == {"x-databricks-use-coding-agent-mode": "true"})
+    # Custom header overrides the default's own name.
+    merged = merge_databricks_headers({"x-databricks-use-coding-agent-mode": "custom", "x-extra": "1"})
+    ctx.check(f"custom overrides default + adds new, got {merged!r}",
+              merged == {"x-databricks-use-coding-agent-mode": "custom", "x-extra": "1"})
+    # Explicit wins over custom.
+    merged2 = merge_databricks_headers({"x-extra": "from-custom"}, {"x-extra": "from-explicit"})
+    ctx.check(f"explicit wins over custom, got {merged2!r}", merged2["x-extra"] == "from-explicit")
+
+
+# ---------------------------------------------------------------------------
+# Scope C: model defaults/aliases at work.
+# ---------------------------------------------------------------------------
+
+@test
+def test_resolve_default_model_raw_uses_anthropic_model_at_work(ctx: Ctx):
+    with _EnvSandbox() as sb:
+        from rolo_claude.model import resolve_default_model_raw
+        env = sb.settings().effective_env
+        got = resolve_default_model_raw(routes={}, env=env)
+        ctx.check(f"dbx:<ANTHROPIC_MODEL>, got {got!r}", got == "dbx:databricks-claude-opus-4-6")
+
+
+@test
+def test_resolve_default_model_raw_bridge_model_still_wins(ctx: Ctx):
+    # BRIDGE_MODEL (rolo-claude's own escape hatch, not a Claude Code
+    # settings concept) is read straight off the real process environment,
+    # unaffected by `env=` -- same as every other BRIDGE_MODEL call site.
+    with _EnvSandbox() as sb:
+        from rolo_claude.model import resolve_default_model_raw
+        os.environ["BRIDGE_MODEL"] = "or:some/other-model"
+        try:
+            got = resolve_default_model_raw(routes={}, env=sb.settings().effective_env)
+        finally:
+            os.environ.pop("BRIDGE_MODEL", None)
+        ctx.check(f"BRIDGE_MODEL beats the work default, got {got!r}", got == "or:some/other-model")
+
+
+@test
+def test_resolve_default_model_raw_no_work_env_falls_back_to_hardcoded_default(ctx: Ctx):
+    from rolo_claude.model import resolve_default_model_raw, DEFAULT_MODEL_REF
+    got = resolve_default_model_raw(routes={}, env={})
+    ctx.check(f"no work env -> hardcoded default, got {got!r}", got == DEFAULT_MODEL_REF)
+
+
+@test
+def test_bare_opus_sonnet_haiku_resolve_through_work_env(ctx: Ctx):
+    with _EnvSandbox():
+        from rolo_claude.model import parse_model_ref
+        for bare, expect in (("opus", "databricks-claude-opus-4-6"),
+                             ("sonnet", "databricks-claude-opus-5"),
+                             ("haiku", "databricks-claude-opus-4-8")):
+            ref = parse_model_ref(bare)
+            ctx.check(f"{bare} -> databricks provider, got {ref.provider!r}", ref.provider == "databricks")
+            ctx.check(f"{bare} -> {expect}, got {ref.model!r}", ref.model == expect)
+            ctx.check(f"{bare} -> anthropic-passthrough dialect, got {ref.dialect!r}",
+                      ref.dialect == "anthropic-passthrough")
+
+
+@test
+def test_bare_tier_falls_back_to_pinned_claude_endpoint_when_default_unset(ctx: Ctx):
+    from rolo_claude.providers.config import databricks_default_model_for_tier
+    env = {"ANTHROPIC_MODEL": "databricks-claude-opus-4-6",
+           "ANTHROPIC_BASE_URL": "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic",
+           "ANTHROPIC_AUTH_TOKEN": "dapiFAKE"}
+    ctx.check("opus pinned fallback", databricks_default_model_for_tier("opus", env) == "databricks-claude-opus-5-5")
+    ctx.check("sonnet pinned fallback",
+              databricks_default_model_for_tier("sonnet", env) == "databricks-claude-sonnet-5-5")
+    ctx.check("haiku pinned fallback", databricks_default_model_for_tier("haiku", env) == "databricks-claude-haiku-4-5")
+    ctx.check("non-tier name -> None", databricks_default_model_for_tier("fable", env) is None)
+
+
+@test
+def test_bare_alias_uses_cc_ant_when_no_databricks_work_env_active(ctx: Ctx):
+    """No ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_MODEL at all -- the
+    cc:/ant: subscription route applies exactly as before this milestone."""
+    from rolo_claude.providers.config import databricks_work_env_active
+    ctx.check("no work env -> False", databricks_work_env_active(env={}) is False)
+    ctx.check("no work env (os.environ, nothing set here) -> resolve doesn't crash",
+              databricks_work_env_active(env={"SOME_OTHER_VAR": "1"}) is False)
+
+
+@test
+def test_resolved_effort_level_from_modelsettings_and_top_level(ctx: Ctx):
+    with _EnvSandbox() as sb:
+        settings = sb.settings()
+        ctx.check(f"modelSettings.opus.effortLevel used, got {settings.resolved_effort_level()!r}",
+                  settings.resolved_effort_level() == "xhigh")
+        ctx.check("effort_level_default reads the top-level key too", settings.effort_level_default == "xhigh")
+
+
+# ---------------------------------------------------------------------------
+# Scope D: the generic family x api_type RULES table.
+# ---------------------------------------------------------------------------
+
+_CATALOG = [
+    {"name": "databricks-claude-opus-4-6", "foundation_model_name": "claude-opus-4-6", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "anthropic/v1/messages", "cursor/v1/chat/completions",
+                   "mlflow/v1/responses"]},
+    {"name": "databricks-glm-5-3", "foundation_model_name": "glm-5-3", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses", "anthropic/v1/messages",
+                   "codex/v1/responses"]},
+    {"name": "databricks-kimi-k3", "foundation_model_name": "kimi-k3", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses", "anthropic/v1/messages",
+                   "codex/v1/responses"]},
+    {"name": "databricks-deepseek-v4-1-flash", "foundation_model_name": "deepseek-v4-1-flash",
+     "task": "llm/v1/chat", "api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses"]},
+    {"name": "databricks-qwen35-122b-a10b", "foundation_model_name": "system.ai.qwen35-122b-a10b",
+     "task": "llm/v1/chat", "api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses"]},
+    {"name": "databricks-llama-4-maverick", "foundation_model_name": "system.ai.llama-4-maverick",
+     "task": "llm/v1/chat", "api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses"]},
+    {"name": "databricks-gpt-5", "foundation_model_name": "gpt-5", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "openai/v1/responses", "cursor/v1/chat/completions",
+                   "mlflow/v1/responses", "codex/v1/responses"]},
+    {"name": "databricks-gpt-5-5-pro", "foundation_model_name": "gpt-5-5-pro", "task": "llm/v1/chat",
+     "api_types": ["openai/v1/responses", "cursor/v1/chat/completions", "mlflow/v1/responses",
+                   "codex/v1/responses"]},
+    {"name": "databricks-grok-4-6", "foundation_model_name": "grok-4-6", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "openai/v1/responses"]},
+    {"name": "databricks-gemini-3-1-pro", "foundation_model_name": "gemini-3-1-pro", "task": "llm/v1/chat",
+     "api_types": ["mlflow/v1/chat/completions", "gemini/v1/generateContent",
+                   "gemini/v1/streamGenerateContent", "cursor/v1/chat/completions", "mlflow/v1/responses"]},
+    {"name": "us-anthropic-claude-3-5-sonnet-v2", "task": "llm/v1/external/chat", "api_types": []},
+    {"name": "databricks-gte-large-en", "task": "llm/v1/embeddings", "api_types": ["mlflow/v1/embeddings"]},
+]
+
+
+def _state_dir_with_catalog():
+    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-state-"))
+    write_dbx_endpoints_json(state_dir, _CATALOG)
+    return state_dir
+
+
+@test
+def test_chat_route_candidates_claude_foundation_excludes_anthropic(ctx: Ctx):
+    """anthropic-passthrough is a SEPARATE dialect decision -- the openai-
+    chat candidate list never includes it even for a family that lists it."""
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    cands = chat_route_candidates("databricks-claude-opus-4-6", state_dir)
+    keys = [c.key for c in cands]
+    ctx.check(f"mlflow, cursor, invocations (no anthropic), got {keys}",
+              keys == ["mlflow", "cursor", "invocations"])
+    ctx.check("mlflow uses the foundation_model_name", cands[0].model_value == "claude-opus-4-6")
+
+
+@test
+def test_chat_route_candidates_glm_kimi_default_mlflow(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    for name, fm in (("databricks-glm-5-3", "glm-5-3"), ("databricks-kimi-k3", "kimi-k3")):
+        cands = chat_route_candidates(name, state_dir)
+        ctx.check(f"{name} default is mlflow, got {[c.key for c in cands]}", cands[0].key == "mlflow")
+        ctx.check(f"{name} mlflow model value is foundation_model_name", cands[0].model_value == fm)
+        ctx.check(f"{name} ends with invocations", cands[-1].key == "invocations")
+
+
+@test
+def test_chat_route_candidates_deepseek_qwen_llama_mlflow_only(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    for name, fm in (("databricks-deepseek-v4-1-flash", "deepseek-v4-1-flash"),
+                     ("databricks-qwen35-122b-a10b", "system.ai.qwen35-122b-a10b"),
+                     ("databricks-llama-4-maverick", "system.ai.llama-4-maverick")):
+        cands = chat_route_candidates(name, state_dir)
+        ctx.check(f"{name} -> [mlflow, invocations], got {[c.key for c in cands]}",
+                  [c.key for c in cands] == ["mlflow", "invocations"])
+        ctx.check(f"{name} wire model is the discovered foundation_model_name (not the endpoint name)",
+                  cands[0].model_value == fm)
+
+
+@test
+def test_chat_route_candidates_gpt_and_gpt_5_5_pro_exception(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    gpt = chat_route_candidates("databricks-gpt-5", state_dir)
+    ctx.check(f"gpt: mlflow then cursor, got {[c.key for c in gpt]}",
+              [c.key for c in gpt] == ["mlflow", "cursor", "invocations"])
+    pro = chat_route_candidates("databricks-gpt-5-5-pro", state_dir)
+    ctx.check(f"gpt-5-5-pro: NO mlflow, cursor only, got {[c.key for c in pro]}",
+              [c.key for c in pro] == ["cursor", "invocations"])
+
+
+@test
+def test_chat_route_candidates_grok_and_gemini(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    grok = chat_route_candidates("databricks-grok-4-6", state_dir)
+    ctx.check(f"grok: mlflow only, got {[c.key for c in grok]}", [c.key for c in grok] == ["mlflow", "invocations"])
+    gem = chat_route_candidates("databricks-gemini-3-1-pro", state_dir)
+    ctx.check(f"gemini: mlflow then cursor, got {[c.key for c in gem]}",
+              [c.key for c in gem] == ["mlflow", "cursor", "invocations"])
+
+
+@test
+def test_chat_route_candidates_bedrock_external_is_invocations_only(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    state_dir = _state_dir_with_catalog()
+    cands = chat_route_candidates("us-anthropic-claude-3-5-sonnet-v2", state_dir)
+    ctx.check(f"invocations only, got {[c.key for c in cands]}", [c.key for c in cands] == ["invocations"])
+    ctx.check("dialect stays openai-chat despite 'claude' in the name",
+              resolve_databricks_dialect("us-anthropic-claude-3-5-sonnet-v2", state_dir)[1] == "openai-chat")
+
+
+@test
+def test_unknown_endpoint_falls_back_to_todays_order(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    state_dir = _state_dir_with_catalog()
+    cands = chat_route_candidates("databricks-brand-new-family-not-in-cache", state_dir)
+    ctx.check(f"today's static order (invocations first for a non-system.ai. name), got {[c.key for c in cands]}",
+              [c.key for c in cands] == ["invocations", "mlflow"])
+    sysai = chat_route_candidates("system.ai.brand-new-thing", state_dir)
+    ctx.check(f"today's static order (mlflow first for system.ai.), got {[c.key for c in sysai]}",
+              [c.key for c in sysai] == ["mlflow", "invocations"])
+
+
+@test
+def test_non_chat_endpoint_refused_and_no_candidates(ctx: Ctx):
+    from rolo_claude.providers.dbx_routing import chat_route_candidates, refuse_if_non_chat
+    state_dir = _state_dir_with_catalog()
+    err = refuse_if_non_chat("databricks-gte-large-en", state_dir)
+    ctx.check(f"refused with a clear message, got {err!r}", err is not None and "non-chat" in err)
+    ctx.check("no candidates for a refused endpoint", chat_route_candidates("databricks-gte-large-en", state_dir) == [])
+    ctx.check("a chat endpoint is never refused",
+              refuse_if_non_chat("databricks-glm-5-3", state_dir) is None)
+
+
+@test
+def test_parse_model_ref_refuses_non_chat_databricks_endpoint(ctx: Ctx):
+    from rolo_claude.model import parse_model_ref
+    from rolo_claude.providers.routing import InvalidModelError
+    state_dir = _state_dir_with_catalog()
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        try:
+            parse_model_ref("dbx:databricks-gte-large-en")
+            ctx.check("must raise InvalidModelError for a non-chat endpoint", False)
+        except InvalidModelError as e:
+            ctx.check(f"clear non-chat message, got {e}", "non-chat" in str(e))
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
+@test
+def test_at_anthropic_suffix_and_gateway_config_override_glm(ctx: Ctx):
+    from rolo_claude.model import parse_model_ref
+    from rolo_claude.theme import set_config_value
+    state_dir = _state_dir_with_catalog()
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    os.environ["BRIDGE_TEST_HOME"] = str(state_dir)  # config.json lives under home/.rolo-claude too
+    try:
+        ref = parse_model_ref("dbx:databricks-glm-5-3@anthropic")
+        ctx.check(f"suffix strips + switches dialect, got model={ref.model!r} dialect={ref.dialect!r}",
+                  ref.model == "databricks-glm-5-3" and ref.dialect == "anthropic-passthrough")
+
+        set_config_value("databricks.gateway.databricks-kimi-k3", "anthropic")
+        ref2 = parse_model_ref("dbx:databricks-kimi-k3")
+        ctx.check(f"config override switches dialect too, got {ref2.dialect!r}",
+                  ref2.dialect == "anthropic-passthrough")
+    finally:
+        for k, v in (("BRIDGE_STATE_DIR", old), ("BRIDGE_TEST_HOME", old_home)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+if __name__ == "__main__":
+    ctx = Ctx()
+    results, passed, failed, skipped = run_all(TESTS, ctx)
+    sys.exit(print_results(results, passed, failed, skipped))

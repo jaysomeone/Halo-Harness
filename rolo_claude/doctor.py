@@ -579,20 +579,30 @@ def _check_default_model() -> str:
 
 
 def _dbx_probe_target():
-    """`(host, token)` from the real discovery chain, or `(None, None)` --
-    shared by every `--work` check below so they never disagree about
-    which config they're evaluating (the same chain `_check_databricks`
-    uses for the plain `doctor` line, just returning the raw values
-    instead of a formatted string)."""
+    """`(host, token)` from the real discovery chain, or `(host, None)`
+    when a step has a host but no matching token ("host-only" -- scope E),
+    or `(None, None)` when nothing at all resolves -- shared by every
+    `--work` check below so they never disagree about which config they're
+    evaluating (the same chain `_check_databricks` uses for the plain
+    `doctor` line, just returning the raw values instead of a formatted
+    string). Without the host-only fallback, `resolve_databricks()`'s own
+    all-or-nothing contract (host+token together, or neither) means a real
+    "token missing" state can never actually reach `_work_check_token_
+    validity`/`_work_check_vpn_reachability` at all -- it always looked
+    identical to "nothing configured"."""
     _load_env_file_best_effort()
     try:
-        from rolo_claude.providers.config import resolve_databricks
+        from rolo_claude.providers.config import resolve_databricks, resolve_databricks_host_only
         dbx = resolve_databricks()
     except Exception:
         return None, None
-    if dbx is None:
-        return None, None
-    return dbx.host, dbx.token
+    if dbx is not None:
+        return dbx.host, dbx.token
+    try:
+        host_only = resolve_databricks_host_only()
+    except Exception:
+        host_only = None
+    return host_only, None
 
 
 def _check_ucode_settings() -> str:
@@ -636,28 +646,118 @@ def _work_check_vpn_reachability(host: Optional[str]) -> str:
                      cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
 
 
+_IP_ACCESS_LIST_HINTS = (
+    "ip access", "ip_access", "not permitted to access", "access is not allowed",
+    "ip is not allowed", "blocked by ip", "ip allowlist", "ip acl", "ip-based",
+)
+
+
+def _classify_databricks_probe(status: int, raw: bytes) -> "tuple[str, str]":
+    """H14 scope E: `(kind, detail)` for a GET /api/2.0/serving-endpoints
+    response -- `kind` is "ok"/"warn"/"missing" (this module's own
+    vocabulary). 401 = bad token; 403 carrying Databricks' own IP-access-
+    list wording = "connect to the VPN" (`missing`, since nothing further
+    can be checked from off the VPN); 403 without that wording = the token
+    itself lacks list permission, but inference may still work (`warn`,
+    not fatal); 404 = wrong path (the derived workspace root is probably
+    incorrect)."""
+    if status == 200:
+        return "ok", "200"
+    text = raw.decode("utf-8", "replace").lower() if raw else ""
+    if status == 401:
+        return "warn", "401 (bad token)"
+    if status == 403:
+        if any(h in text for h in _IP_ACCESS_LIST_HINTS):
+            return "missing", "403 (IP access list -- connect to the VPN, Databricks is whitelisted there)"
+        return "warn", "403 (token lacks permission to list endpoints -- inference may still work)"
+    if status == 404:
+        return "missing", "404 (wrong path -- the derived workspace root may be incorrect)"
+    return "warn", f"HTTP {status}"
+
+
 def _work_check_token_validity(host: Optional[str], token: Optional[str]) -> str:
     """GET /api/2.0/serving-endpoints -- 200 means the token can list
-    endpoints; 401/403 means it can likely still run inference but not
-    list them (same wording the proxy's own --probe has always used);
-    anything else (incl. a connect failure) is reported honestly."""
-    if not host or not token:
+    endpoints; H14 scope E distinguishes 401 (bad token) / 403 with the IP
+    access-list wording (connect to the VPN) / 403 without it (token lacks
+    list permission, inference may still work) / a wrong-path 404, instead
+    of lumping every non-200 into one generic "may only run inference"
+    line. A host with no token yet still probes (scope E: "the
+    reachability probe still runs without a token, a 401 proves
+    reachability") rather than skipping the network call outright."""
+    if not host:
         return _fix(f"{MISSING} Token validity: not configured -- nothing to check",
                      cmd="rolo-claude init --preset work")
+    from rolo_claude.providers.config import derive_workspace_root
+    from rolo_claude.providers.databricks import probe_databricks_status
+    root = derive_workspace_root(host)
+    if not token:
+        try:
+            status, raw = probe_databricks_status(root, "")
+        except Exception as e:
+            return _fix(f"{MISSING} Token validity: host configured, token missing, and the reachability "
+                         f"probe failed ({type(e).__name__}: {e})", cmd="rolo-claude init --preset work")
+        _kind, detail = _classify_databricks_probe(status, raw)
+        return _fix(f"{MISSING} Token validity: host configured, token missing (probe reached the host: "
+                     f"{detail})", cmd="rolo-claude init --preset work")
     try:
-        from rolo_claude.providers.databricks import probe_databricks_endpoints
-        from rolo_claude.providers.config import derive_workspace_root
-        status, names = probe_databricks_endpoints(derive_workspace_root(host), token)
+        status, raw = probe_databricks_status(root, token)
     except Exception as e:
         return _fix(f"{MISSING} Token validity: connection failed ({type(e).__name__}: {e})",
                      cmd="connect to the VPN, then re-run `rolo-claude doctor --work`")
-    if status == 200:
-        return f"{OK} Token validity: valid, can list endpoints ({len(names)} found)"
-    if status in (401, 403):
-        return _fix(f"{WARN} Token validity: got HTTP {status} listing endpoints -- token may only be able "
-                     f"to run inference, not list it", see="your Databricks workspace admin (token scope)")
-    return _fix(f"{WARN} Token validity: got HTTP {status} from /api/2.0/serving-endpoints",
-                 cmd="rolo-claude doctor --work")
+    kind, detail = _classify_databricks_probe(status, raw)
+    if kind == "ok":
+        try:
+            n = len(json.loads(raw.decode("utf-8", "replace")).get("endpoints", []))
+        except (ValueError, AttributeError):
+            n = "?"
+        return f"{OK} Token validity: valid, can list endpoints ({n} found)"
+    if kind == "missing":
+        return _fix(f"{MISSING} Token validity: {detail}",
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
+    return _fix(f"{WARN} Token validity: {detail}", see="your Databricks workspace admin (token scope)")
+
+
+def _work_check_config_summary() -> "list[str]":
+    """H14 scope E: "prints the derived root, the gateway path, the header
+    NAMES (never values), the default model and effort, the token
+    source" -- the exact config a real session on this box would build,
+    so a mismatch between "what's configured" and "what rolo-claude
+    resolved" is visible before ever making a live call. `[]` when
+    Databricks doesn't resolve at all (the plain "Databricks config" line
+    already covers that case)."""
+    _load_env_file_best_effort()
+    from rolo_claude.providers.config import resolve_databricks, resolve_databricks_source
+    try:
+        dbx = resolve_databricks()
+    except Exception as e:
+        return [_fix(f"{WARN} Work config: could not resolve ({type(e).__name__}: {e})",
+                      cmd="rolo-claude doctor --work")]
+    if dbx is None:
+        return []
+    gateway = dbx.anthropic_gateway or f"{dbx.host}/ai-gateway/anthropic"
+    header_names = sorted({"x-databricks-use-coding-agent-mode"} | set(dbx.custom_headers))
+    lines = [
+        f"{OK} Workspace root: {dbx.host}",
+        f"{OK} Anthropic gateway: {gateway}/v1/messages",
+        f"{OK} Headers sent (names only): {', '.join(header_names)}",
+    ]
+    try:
+        from rolo_claude.config.paths import bridge_home
+        from rolo_claude.model import resolve_default_model_raw
+        from rolo_claude.providers.config import load_routes
+        routes = load_routes(bridge_home() / "routes.json")
+        lines.append(f"{OK} Default model: {resolve_default_model_raw(routes)}")
+    except Exception as e:
+        lines.append(_fix(f"{WARN} Default model: could not resolve ({type(e).__name__}: {e})",
+                           cmd="rolo-claude doctor --work"))
+    try:
+        from rolo_claude.config.settings import resolve_settings
+        effort = resolve_settings(Path.cwd()).resolved_effort_level()
+    except Exception:
+        effort = None
+    lines.append(f"{OK} Default effort: {effort or 'not set (provider default)'}")
+    lines.append(f"{OK} Token source: {resolve_databricks_source() or '?'}")
+    return lines
 
 
 _THINKING_FAMILY_HINTS = ("deepseek", "kimi", "moonshot", "glm", "zhipu", "z-ai")
@@ -814,15 +914,22 @@ def _work_check_entries() -> "list[tuple[str, str]]":
     --work --json`."""
     from rolo_claude.config.paths import bridge_home
     host, token = _dbx_probe_target()
-    databricks_config_line = (f"{OK} Databricks config: host {host}" if host else
-                               _fix(f"{MISSING} Databricks config: not configured",
-                                    cmd="rolo-claude init --preset work"))
+    if host and token:
+        databricks_config_line = f"{OK} Databricks config: host {host}"
+    elif host:
+        databricks_config_line = _fix(f"{MISSING} Databricks config: host configured, token missing ({host})",
+                                       cmd="rolo-claude init --preset work")
+    else:
+        databricks_config_line = _fix(f"{MISSING} Databricks config: not configured",
+                                       cmd="rolo-claude init --preset work")
     entries = [
         ("databricks_config", databricks_config_line),
         ("ucode_settings", _check_ucode_settings()),
         ("vpn_reachability", _work_check_vpn_reachability(host)),
         ("token_validity", _work_check_token_validity(host, token)),
     ]
+    config_ids = ("work_root", "work_gateway", "work_headers", "work_default_model", "work_effort", "work_token_source")
+    entries.extend(zip(config_ids, _work_check_config_summary()))
     probe_lines = _work_check_reasoning_replay_after_tool_call(host, token, bridge_home())
     entries.extend((f"reasoning_replay_probe_{i}", line) for i, line in enumerate(probe_lines))
     return entries
@@ -928,7 +1035,29 @@ def cmd_doctor(argv: list) -> int:
                               "route-split/reasoning-replay probes) instead of the general checks")
     parser.add_argument("--json", action="store_true",
                          help="Machine-readable output: a JSON list of {id, status, message, fix, see}")
+    parser.add_argument("--probe-all", action="store_true",
+                         help="With --work: the full work matrix -- one short pong per chat-shaped "
+                              "Databricks endpoint on its chosen path")
+    parser.add_argument("--both", action="store_true",
+                         help="With --probe-all: also probe Claude/GLM/Kimi endpoints via the anthropic gateway")
+    parser.add_argument("--tools", action="store_true",
+                         help="With --probe-all: also check one Read tool-call per endpoint")
+    parser.add_argument("--only", default=None, metavar="GLOB",
+                         help="With --probe-all: only endpoints matching this glob")
     args = parser.parse_args(argv)
+    if args.work and args.probe_all:
+        from rolo_claude.work_matrix import format_table, run_work_matrix
+        print("rolo-claude doctor --work --probe-all")
+        print("  Sends one short pong (and a tool call with --tools) to each endpoint below -- "
+              "this spends real tokens/DBUs against your Databricks workspace.")
+        rows, report_path = run_work_matrix(only=args.only, both=args.both, tools=args.tools)
+        if not rows:
+            print("  No chat-shaped endpoints to probe (Databricks not configured, or the catalog is empty -- "
+                  "run `rolo-claude models --refresh` first).")
+            return 1
+        print(format_table(rows, tools=args.tools))
+        print(f"\n  Report written to {report_path} (endpoint names only -- no host, no token).")
+        return 0 if all(r.status == "200" for r in rows) else 1
     if args.work:
         if args.json:
             checks, ok = run_work_checks_structured()

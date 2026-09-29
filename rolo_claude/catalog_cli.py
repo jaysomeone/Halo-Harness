@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import sys
 
 from pathlib import Path
@@ -16,8 +17,7 @@ from pathlib import Path
 from rolo_claude.config.paths import bridge_home, home
 from rolo_claude.providers.config import load_env_file, resolve_databricks, resolve_openrouter, derive_workspace_root
 from rolo_claude.providers.databricks import (
-    load_dbx_endpoints_json, load_models_json, probe_databricks_endpoints_full,
-    probe_openrouter_models, write_dbx_endpoints_json, write_models_json,
+    load_dbx_endpoints_json, load_models_json, probe_openrouter_models, write_models_json,
 )
 from rolo_claude.providers.models_dev import fetch_models_dev, models_dev_json_path, write_models_dev_json
 
@@ -71,6 +71,34 @@ def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
     return 0
 
 
+def _endpoint_url_and_path_type(root: str, name: str, state_dir) -> "tuple[str, str]":
+    """H14 scope J ("--urls"): the exact URL + path-type label
+    `chat_route_candidates`/`resolve_databricks_dialect` would actually pick
+    FIRST for `name` -- what a real request from this box would hit."""
+    from rolo_claude.providers.dbx_routing import chat_route_candidates, resolve_databricks_dialect
+    _clean, dialect = resolve_databricks_dialect(name, state_dir)
+    if dialect == "anthropic-passthrough":
+        return f"{root}/ai-gateway/anthropic/v1/messages", "anthropic"
+    cands = chat_route_candidates(name, state_dir)
+    if not cands:
+        return "(refused -- non-chat endpoint)", "none"
+    return f"{root}{cands[0].path}", cands[0].key
+
+
+def _dbx_rows(endpoints: dict, root: str, state_dir, *, urls: bool) -> dict:
+    from rolo_claude.providers.dbx_routing import classify_family
+    rows = {}
+    for name, e in endpoints.items():
+        family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
+                                  model_class=e.get("model_class") or "")
+        row = {"family": family, "task": e.get("task"), "chat": family != "non_chat",
+               "api_types": e.get("api_types") or []}
+        if urls and root:
+            row["url"], row["path_type"] = _endpoint_url_and_path_type(root, name, state_dir)
+        rows[name] = row
+    return rows
+
+
 def cmd_models(argv) -> int:
     parser = argparse.ArgumentParser(prog="rolo-claude models", add_help=True)
     parser.add_argument("--refresh", action="store_true", help="Re-probe OpenRouter/Databricks instead of using the cache")
@@ -78,6 +106,9 @@ def cmd_models(argv) -> int:
                          help="List the Claude subscription models (cc:/ant: aliases) instead of the "
                               "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
                               "confirm its current canonical id")
+    parser.add_argument("--urls", action="store_true",
+                         help="Databricks endpoints: also print the exact URL and path type each one resolves to")
+    parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     args = parser.parse_args(argv)
 
     import os
@@ -97,6 +128,29 @@ def cmd_models(argv) -> int:
             except Exception as e:
                 print(f"rolo-claude models: could not refresh from OpenRouter: {e}", file=sys.stderr)
 
+    dbx = resolve_databricks()
+    endpoints = load_dbx_endpoints_json(state_dir)
+    dbx_diff = None
+    if dbx is not None and (args.refresh or not endpoints):
+        from rolo_claude.providers.databricks import refresh_dbx_catalog
+        root = derive_workspace_root(dbx.host)
+        ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
+        if ok:
+            endpoints = load_dbx_endpoints_json(state_dir)
+            if args.refresh:
+                dbx_diff = diff
+        else:
+            print(f"rolo-claude models: could not refresh from Databricks: {note}", file=sys.stderr)
+
+    if args.json:
+        payload = {"openrouter": models}
+        if dbx is not None:
+            payload["databricks"] = _dbx_rows(endpoints, derive_workspace_root(dbx.host), state_dir, urls=args.urls)
+            if dbx_diff is not None:
+                payload["databricks_diff"] = dbx_diff
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
     print("OpenRouter models (models.json):")
     print(f"{'id':<48} {'context':>10} {'max_out':>10} {'in/M':>10} {'out/M':>10}")
     for mid in sorted(models):
@@ -105,24 +159,21 @@ def cmd_models(argv) -> int:
         print(f"{mid:<48} {str(entry.get('context_length', '?')):>10} {str(entry.get('max_output_tokens', '?')):>10} "
               f"{_fmt_price(pricing.get('prompt')):>10} {_fmt_price(pricing.get('completion')):>10}")
 
-    dbx = resolve_databricks()
-    if dbx is not None:
-        endpoints = load_dbx_endpoints_json(state_dir)
-        if args.refresh or not endpoints:
-            try:
-                root = derive_workspace_root(dbx.host)
-                status, fetched = probe_databricks_endpoints_full(root, dbx.token)
-                if status == 200:
-                    write_dbx_endpoints_json(state_dir, fetched)
-                    endpoints = load_dbx_endpoints_json(state_dir)
-            except Exception as e:
-                print(f"rolo-claude models: could not refresh from Databricks: {e}", file=sys.stderr)
-        if endpoints:
-            print("\nDatabricks endpoints (dbx-endpoints.json):")
-            print(f"{'name':<48} {'task':<20} {'ready':>6}")
-            for name in sorted(endpoints):
-                e = endpoints[name]
-                print(f"{name:<48} {str(e.get('task', '?')):<20} {str(e.get('ready', '?')):>6}")
+    if dbx is not None and endpoints:
+        root = derive_workspace_root(dbx.host)
+        rows = _dbx_rows(endpoints, root, state_dir, urls=args.urls)
+        print("\nDatabricks endpoints (dbx-endpoints.json):")
+        header = f"{'name':<42} {'family':<16} {'path':<12} {'chat':>5}"
+        print(header + ("  url" if args.urls else ""))
+        for name in sorted(rows):
+            r = rows[name]
+            line = f"{name:<42} {r['family']:<16} {r.get('path_type', '?'):<12} {('yes' if r['chat'] else 'no'):>5}"
+            if args.urls:
+                line += f"  {r.get('url', '?')}"
+            print(line)
+        if dbx_diff is not None:
+            from rolo_claude.providers.databricks import format_dbx_diff
+            print(f"\nDatabricks catalog diff (this refresh): {format_dbx_diff(dbx_diff)}")
 
     # H8 scope C: models.dev's api.json is public/unauthenticated -- fetched
     # regardless of whether OpenRouter/Databricks are configured, cached to

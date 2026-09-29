@@ -202,18 +202,87 @@ def _ensure_openrouter_key(args, console: Console) -> Optional[Path]:
     return path
 
 
+def _known_databricks_host() -> Optional[str]:
+    """H14 scope E/I: host-only discovery -- Claude Code's own settings env
+    may set ANTHROPIC_BASE_URL/DATABRICKS_HOST without a usable token yet
+    (a fresh box, or the work settings.json template before the token line
+    is filled in); `resolve_databricks()` itself returns None in that case
+    (it requires both), so this mirrors just the host half of its chain.
+
+    Gated on `databricks_work_signal_present` (ANTHROPIC_MODEL/ANTHROPIC_
+    DEFAULT_*_MODEL, the SAME signal scope C uses) -- a bare, incidental
+    DATABRICKS_HOST/ANTHROPIC_BASE_URL with none of those set is NOT treated
+    as "already known" here. Without this gate, a box that happens to have
+    an unrelated DATABRICKS_HOST exported (a different Databricks tool,
+    nothing to do with Claude Code) would silently skip the host prompt on
+    a fresh `init --preset work` -- verified live: this exact box's own
+    ambient DATABRICKS_HOST, with no ANTHROPIC_MODEL alongside it, is NOT
+    Claude Code's work settings and must never be adopted as one."""
+    from rolo_claude.providers.config import (
+        databricks_work_signal_present, derive_workspace_root, load_settings_env_chain, looks_like_databricks_host,
+    )
+    settings_env = load_settings_env_chain(Path.cwd())
+    for source in (os.environ, settings_env):
+        if not databricks_work_signal_present(source):
+            continue
+        anth_host = source.get("ANTHROPIC_BASE_URL")
+        if anth_host and looks_like_databricks_host(anth_host):
+            return derive_workspace_root(anth_host)
+        dbx_host = source.get("DATABRICKS_HOST")
+        if dbx_host:
+            return derive_workspace_root(dbx_host)
+    return None
+
+
+def _load_team_config(args, console: Console) -> Optional[dict]:
+    from rolo_claude.team_config import load_team_config
+    cfg, warnings = load_team_config(Path.cwd(), team_flag=getattr(args, "team", None))
+    for w in warnings:
+        console.print(f"   [WARN] {w}")
+    return cfg
+
+
 def _ensure_databricks_creds(args, console: Console) -> Optional[Path]:
-    from rolo_claude.providers.config import redact, resolve_databricks
+    from rolo_claude.providers.config import databricks_work_env_active, redact, resolve_databricks
     existing = resolve_databricks()
     if existing is not None:
-        console.print(f"   [OK] Databricks: already configured (host={existing.host}, "
+        source = "Claude Code's settings" if databricks_work_env_active() else "existing config"
+        console.print(f"   [OK] Databricks: already configured via {source} (host={existing.host}, "
                        f"token={redact(existing.token)}) -- not changed.")
         return None
+
+    # H14 scope I: "the team just inserts their databricks token and
+    # they're off" -- a host already known (Claude Code's own settings env,
+    # or a shared team.json) means ONLY the token is asked for.
+    team_cfg = _load_team_config(args, console)
+    host = _known_databricks_host() or (team_cfg or {}).get("host")
+    if host:
+        console.print(f"   [OK] Databricks host configured: {host} -- only the token is needed.")
+        if args.yes and sys.stdin.isatty():
+            console.print("   [WARN] token not found, and --yes skips the prompt -- "
+                           "set DATABRICKS_TOKEN, or re-run without --yes.")
+            return None
+        token = _prompt_secret("   DATABRICKS_TOKEN (hidden)")
+        if not token:
+            console.print("   [WARN] no token entered -- Databricks will not be configured yet.")
+            return None
+        path = _env_file_path()
+        _write_env_var(path, "DATABRICKS_HOST", host)
+        _write_env_var(path, "DATABRICKS_TOKEN", token)
+        os.environ["DATABRICKS_HOST"] = host
+        os.environ["DATABRICKS_TOKEN"] = token
+        console.print(f"   [OK] wrote DATABRICKS_HOST/DATABRICKS_TOKEN to {path}")
+        if team_cfg and team_cfg.get("gateway_preference"):
+            from rolo_claude.team_config import apply_gateway_preference
+            apply_gateway_preference(team_cfg["gateway_preference"])
+        return path
+
     if args.yes and sys.stdin.isatty():
         console.print("   [WARN] Databricks host/token not found, and --yes skips the prompt -- "
                        "set DATABRICKS_HOST/DATABRICKS_TOKEN (or ~/.databrickscfg), or re-run without --yes.")
         return None
-    console.print("   Databricks host/token not found (checked env, ~/.databrickscfg, ucode-settings.json).")
+    console.print("   Databricks host/token not found (checked env, team.json, ~/.databrickscfg, "
+                   "ucode-settings.json).")
     host = _prompt_plain("   DATABRICKS_HOST (e.g. https://your-workspace.cloud.databricks.com)")
     if not host:
         console.print("   [WARN] no host entered -- Databricks will not be configured yet.")
@@ -250,7 +319,12 @@ def _step_credentials(preset: str, args, console: Console) -> list:
 def _step_default_model(preset: str, args, console: Console) -> "tuple[str, Optional[Path]]":
     from rolo_claude.config.paths import bridge_home
     from rolo_claude.theme import get_config_value, set_config_value
-    chosen = args.model or _PRESET_DEFAULT_MODEL[preset]
+    team_default = None
+    if preset == "work" and not args.model:
+        from rolo_claude.team_config import load_team_config
+        team_cfg, _warnings = load_team_config(Path.cwd(), team_flag=getattr(args, "team", None))
+        team_default = (team_cfg or {}).get("default_model")
+    chosen = args.model or team_default or _PRESET_DEFAULT_MODEL[preset]
     current = get_config_value("model", default=None)
     if current == chosen:
         console.print(f"3. Default model: {chosen} (unchanged)")
@@ -265,7 +339,19 @@ def _step_default_model(preset: str, args, console: Console) -> "tuple[str, Opti
 # Step 4: checks (doctor + models --refresh)
 # ---------------------------------------------------------------------------
 
-def _step_checks(args, console: Console, cwd: Path) -> "tuple[list, bool]":
+def _print_work_catalog_summary(console: Console, model_raw: str) -> None:
+    """H14 scope I: "prints the count of models available and the default"
+    -- read straight back from the JUST-refreshed dbx-endpoints.json, so
+    the number always matches what `/model`/`models --refresh` would show,
+    never a separately-maintained count."""
+    from rolo_claude.config.paths import bridge_home
+    from rolo_claude.providers.databricks import load_dbx_endpoints_json
+    endpoints = load_dbx_endpoints_json(bridge_home())
+    chat = sum(1 for e in endpoints.values() if isinstance(e, dict) and e.get("api_types"))
+    console.print(f"   {len(endpoints)} Databricks endpoint(s) cached ({chat} chat-capable) -- default: {model_raw}")
+
+
+def _step_checks(args, console: Console, cwd: Path, *, preset: str = "", model_raw: str = "") -> "tuple[list, bool]":
     console.print("4. Checks:")
     from rolo_claude.doctor import run_checks
     lines, ok = run_checks(cwd=cwd)
@@ -278,6 +364,8 @@ def _step_checks(args, console: Console, cwd: Path) -> "tuple[list, bool]":
         from rolo_claude.catalog_cli import cmd_models
         try:
             cmd_models(["--refresh"])
+            if preset == "work":
+                _print_work_catalog_summary(console, model_raw)
         except Exception as e:
             console.print(f"   [WARN] catalog refresh failed: {type(e).__name__}: {e}")
     return lines, ok
@@ -465,6 +553,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="accept every default without prompting")
     parser.add_argument("--no-live", action="store_true", help="skip the catalog refresh and the live pong")
     parser.add_argument("--no-fixes", action="store_true", help="skip the Linux rg/PATH fixes step")
+    parser.add_argument("--team", default=None, metavar="PATH|URL",
+                         help="a team.json preset (host/default model/gateway preference/DBU price -- "
+                              "never a token); overrides .rolo-claude/team.json / ~/.rolo-claude/team.json")
     return parser
 
 
@@ -489,7 +580,7 @@ def cmd_init(argv: list) -> int:
     if model_path:
         written.append(str(model_path))
 
-    doctor_lines, _doctor_ok = _step_checks(args, console, cwd)
+    doctor_lines, _doctor_ok = _step_checks(args, console, cwd, preset=preset, model_raw=model_ref_raw)
 
     pong_ok = True
     if args.no_live:

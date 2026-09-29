@@ -212,38 +212,53 @@ def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_head
 
 def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, model: str,
                           on_connect=None) -> UpstreamResult:
-    """POST an OpenAI-chat body to a Databricks route, trying the cached/candidate paths with 404 fallback and a max_tokens-limit clamp-retry."""
+    """POST an OpenAI-chat body to a Databricks route, trying the cached/
+    candidate paths with 404 fallback and a max_tokens-limit clamp-retry.
+    H14 scope D: candidates (path, whether the body needs "model", and
+    WHICH string to put there) come from `providers.dbx_routing.
+    chat_route_candidates` -- the discovered `~/.rolo-claude/dbx-endpoints.
+    json` cache's family/api_types RULES-table order when `model` (the
+    endpoint/model name) is in it, else today's static order unchanged."""
     # Deferred import: breaks the http.py <-> databricks.py module cycle
     # (see this module's docstring). By the time this function is actually
     # CALLED, both modules have finished initializing, so a plain `from`
     # import here behaves exactly like a top-level one.
     from rolo_claude.providers.databricks import (
-        databricks_route_candidates,
         build_databricks_body,
         parse_databricks_max_tokens_limit,
         dbx_cache_get_route,
         dbx_cache_set_route,
         dbx_cache_set_max_tokens_limit,
     )
-    candidates = databricks_route_candidates(model)
+    from rolo_claude.providers.dbx_routing import RouteCandidate, chat_route_candidates
+    candidates = chat_route_candidates(model, state_dir)
+    if not candidates:
+        # Defensive only -- callers (model.py's own ModelRef construction,
+        # work_matrix.py's own probe loop) already refuse/skip a known
+        # non-chat endpoint before ever reaching here, so this is normally
+        # unreachable; never crash on an unpack of an empty `chosen` if it
+        # somehow is (a direct/future call site that skips that check).
+        candidates = [RouteCandidate(key="invocations", path=f"/serving-endpoints/{model}/invocations",
+                                      include_model=False, model_value=None)]
     cached_idx = dbx_cache_get_route(model, state_dir)
     if cached_idx is not None and 0 <= cached_idx < len(candidates):
-        order = [(cached_idx, *candidates[cached_idx])]
-        order += [(i, *cand) for i, cand in enumerate(candidates) if i != cached_idx]
+        order = [(cached_idx, candidates[cached_idx])]
+        order += [(i, cand) for i, cand in enumerate(candidates) if i != cached_idx]
     else:
-        order = [(i, *cand) for i, cand in enumerate(candidates)]
+        order = list(enumerate(candidates))
 
-    chosen = None  # (orig_idx, path, include_model, resp, conn)
-    for pos, (orig_idx, path, include_model) in enumerate(order):
-        req_body = build_databricks_body(body, include_model, model)
-        resp, conn = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir, on_connect=on_connect)
+    chosen = None  # (orig_idx, candidate, resp, conn)
+    for pos, (orig_idx, candidate) in enumerate(order):
+        req_body = build_databricks_body(body, candidate.include_model, candidate.model_value)
+        resp, conn = _dbx_post(base_url, candidate.path, api_key, req_body, extra_headers, state_dir,
+                                on_connect=on_connect)
         if resp.status == 404 and pos != len(order) - 1:
             resp.read()
             continue
-        chosen = (orig_idx, path, include_model, resp, conn)
+        chosen = (orig_idx, candidate, resp, conn)
         break
 
-    orig_idx, path, include_model, resp, conn = chosen
+    orig_idx, candidate, resp, conn = chosen
     dbx_cache_set_route(model, orig_idx, state_dir)
     headers = {k.lower(): v for k, v in resp.getheaders()}
 
@@ -268,8 +283,9 @@ def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers:
                 pass
             retry_body = dict(body)
             retry_body["max_tokens"] = limit
-            req_body = build_databricks_body(retry_body, include_model, model)
-            resp2, conn2 = _dbx_post(base_url, path, api_key, req_body, extra_headers, state_dir, on_connect=on_connect)
+            req_body = build_databricks_body(retry_body, candidate.include_model, candidate.model_value)
+            resp2, conn2 = _dbx_post(base_url, candidate.path, api_key, req_body, extra_headers, state_dir,
+                                      on_connect=on_connect)
             dbx_cache_set_max_tokens_limit(model, limit, state_dir)
             headers2 = {k.lower(): v for k, v in resp2.getheaders()}
             return UpstreamResult(status=resp2.status, headers=headers2, resp=resp2, conn=conn2, body_bytes=None)

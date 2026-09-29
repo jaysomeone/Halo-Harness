@@ -26,8 +26,26 @@ class Route:
 
 
 def _dbx_dialect(stripped_model: str) -> str:
-    """Databricks dialect for an already dbx:-stripped model name: passthrough iff 'claude' appears in it."""
-    return "anthropic-passthrough" if "claude" in stripped_model.lower() else "openai-chat"
+    """Databricks dialect for an already dbx:-stripped model name. H14
+    scope D: delegates to the shared family-aware
+    `providers.dbx_routing.resolve_databricks_dialect` instead of a bare
+    "claude" substring check -- that check alone wrongly sent Bedrock
+    EXTERNAL Claude endpoints (`us-anthropic-claude-*`,
+    `claude-3-5-sonnet-...`, no `databricks-claude-` prefix) down the
+    native Anthropic passthrough dialect too; those are invocations-only,
+    openai-chat-shaped endpoints despite "claude" being in the name."""
+    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    return resolve_databricks_dialect(stripped_model)[1]
+
+
+def _dbx_route(stripped_model: str) -> Route:
+    """`Route("databricks", <clean name>, <dialect>)` -- the clean name
+    strips a `@anthropic` suffix (scope D's per-call gateway override) so
+    the proxy never sends that suffix upstream as if it were part of the
+    real endpoint/model name."""
+    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    clean, dialect = resolve_databricks_dialect(stripped_model)
+    return Route("databricks", clean, dialect)
 
 
 def route_model(name: str, headers: dict[str, str], cfg) -> Route:
@@ -35,14 +53,13 @@ def route_model(name: str, headers: dict[str, str], cfg) -> Route:
     # Helper to strip a dbx:/or: prefix and return the matching Route, else
     # None. NOTE: dbx:'s dialect must be decided the SAME way as the
     # unprefixed databricks-*/system.ai. fallback further down (via
-    # _dbx_dialect) -- a bug in an earlier draft hardcoded
+    # _dbx_route/_dbx_dialect) -- a bug in an earlier draft hardcoded
     # "anthropic-passthrough" for every dbx: name regardless of whether it
     # was actually a Claude model, silently sending non-Claude Databricks
     # models down the raw-relay path instead of the openai-chat translation.
     def prefixed(name_to_check):
         if name_to_check.startswith("dbx:"):
-            stripped = name_to_check[len("dbx:"):]
-            return Route("databricks", stripped, _dbx_dialect(stripped))
+            return _dbx_route(name_to_check[len("dbx:"):])
         if name_to_check.startswith("or:"):
             return Route("openrouter", name_to_check[len("or:"):], "openai-chat")
         return None
@@ -72,7 +89,7 @@ def route_model(name: str, headers: dict[str, str], cfg) -> Route:
 
     # Databricks patterns
     if resolved.startswith("databricks-") or resolved.startswith("system.ai."):
-        return Route("databricks", resolved, _dbx_dialect(resolved))
+        return _dbx_route(resolved)
 
     raise InvalidModelError(
         f"no route: {name!r} (accepted forms are dbx:, or:, vendor/model, or a configured tier alias)"

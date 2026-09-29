@@ -430,6 +430,44 @@ class Controller:
                 "price_in": fields.get("price_in"), "price_out": fields.get("price_out"),
                 "provider": "cc", "group": "Claude subscription (via Claude Code)",
             })
+        # H14 scope I: the discovered Databricks endpoint catalog
+        # (~/.rolo-claude/dbx-endpoints.json, from `init --preset work`/
+        # `models --refresh` -- never a vendored list), grouped by family,
+        # each row showing its chosen path type and DBU rate when known;
+        # a known non-chat endpoint (embeddings/whisper) is hidden here
+        # (`rolo-claude models` itself still lists it, for diagnostics).
+        try:
+            from rolo_claude.providers.databricks import load_dbx_endpoints_json
+            from rolo_claude.providers.dbx_routing import (
+                chat_route_candidates, classify_family, format_dbu_cost, resolve_databricks_dialect,
+            )
+            endpoints = load_dbx_endpoints_json(self.state_dir)
+        except Exception:
+            endpoints = {}
+        for name in sorted(endpoints):
+            ref = f"dbx:{name}"
+            if ref in seen:
+                continue
+            e = endpoints[name] if isinstance(endpoints[name], dict) else {}
+            family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
+                                      model_class=e.get("model_class") or "")
+            if family == "non_chat":
+                continue
+            try:
+                _clean, dialect = resolve_databricks_dialect(name, self.state_dir)
+                if dialect == "anthropic-passthrough":
+                    path_type = "anthropic"
+                else:
+                    cands = chat_route_candidates(name, self.state_dir)
+                    path_type = cands[0].key if cands else "?"
+            except Exception:
+                path_type = "?"
+            usage_policy = e.get("usage_policy") if isinstance(e.get("usage_policy"), dict) else {}
+            dbu = format_dbu_cost(usage_policy.get("output_dbu_per_1k_tokens"))
+            out.append({
+                "ref": ref, "context": None, "output": None, "price_in": None, "price_out": None,
+                "provider": "databricks", "group": f"Databricks ({family})", "path_type": path_type, "dbu": dbu,
+            })
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context": self.session.model_profile.context_tokens,

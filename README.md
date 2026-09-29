@@ -218,6 +218,76 @@ inherits the harness's own loop-breaker the same way, so an unusually
 repetitive bridged tool-call pattern can be denied/end the call the same
 way it would on any other route.
 
+### Databricks at work
+
+If the box already runs Claude Code against a Databricks workspace, rolo-claude
+needs zero setup: it reads the SAME `~/.claude/settings.json` `env` block
+Claude Code itself uses (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`/`_SONNET_MODEL`/
+`_HAIKU_MODEL`, `ANTHROPIC_CUSTOM_HEADERS`), the same host/gateway-path
+convention (`https://<workspace>/ai-gateway/anthropic` splits into the bare
+workspace root plus the gateway path), and maps the default model and bare
+`opus`/`sonnet`/`haiku` through it -- `run rolo-claude` and it drives the
+same models Claude Code would. **Nothing about the real workspace ever
+leaves the box**: the hostname and token live only in the local env file
+(or wherever Claude Code's own settings already put them) and are never
+written into a session log, a cache file, or printed by `doctor`.
+
+**Discovery, not a vendored list.** `rolo-claude models --refresh` (or
+`init --preset work`) lists the workspace's own serving endpoints and caches
+them, per user, to `~/.rolo-claude/dbx-endpoints.json` (name, `api_types`,
+`foundation_model.name`, task) -- the ONLY source of truth for what a
+workspace serves. A generic family x api_type table (detected from the
+endpoint's own name) then decides each endpoint's route: Claude foundation
+endpoints default to the native `anthropic/v1/messages` gateway; GLM/Kimi
+default to `mlflow/v1/chat/completions` chat (the anthropic gateway is
+selectable per model with `databricks.gateway.<endpoint>: anthropic` in
+`~/.rolo-claude/config.json`, or a one-off `dbx:<endpoint>@anthropic` suffix);
+DeepSeek/Qwen/Llama/Gemma/gpt-oss/GPT/Grok/Gemini default to mlflow chat
+(the wire "model" value is the endpoint's own discovered
+`foundation_model.name`, e.g. `system.ai.qwen35-122b-a10b`, never guessed by
+prefixing); `databricks-gpt-5-5-pro` has no mlflow chat and uses `cursor/v1/
+chat/completions` instead; Bedrock EXTERNAL Claude endpoints
+(`us-anthropic-claude-*`) are invocations-only, never the native passthrough,
+despite "claude" being in the name; an embeddings/whisper endpoint is
+refused with a clear message and hidden from `/model`. An endpoint the cache
+doesn't know about yet still works (the pre-discovery candidate order).
+
+**Team setup.** A shared, checked-in `team.json` (see `team.example.json`)
+holds the workspace host, a default model, a per-family gateway preference,
+and a DBU price -- **never a token, never an endpoint list** -- discovered
+at `.rolo-claude/team.json` in the project, `~/.rolo-claude/team.json`, or
+`--team <path|url>`. With a host already known (from `team.json` or Claude
+Code's own settings), `rolo-claude init --preset work` asks ONLY for the
+personal Databricks token (hidden input, written to the env file at 0600),
+refreshes the catalog, and prints how many endpoints are available and the
+default model.
+
+**Keeping the catalog fresh.** `/models refresh` (alias `/dbx`) re-lists the
+workspace off the UI thread and reports what changed since last time;
+`rolo-claude models --refresh --urls [--json]` prints the exact URL and path
+type (mlflow/cursor/anthropic/invocations) each endpoint resolves to, for
+scripting. The cache auto-refreshes off the UI thread, with a one-line diff
+notification, whenever it's older than `databricks.catalog_max_age_hours`
+(default 24) and `/model` is opened; an already-cached catalog also
+refreshes silently (never a first-time discovery call) when a Databricks
+session starts. A refresh that fails (offline, or 403 from the IP access
+list) just keeps the existing cache and says so.
+
+**Diagnostics.** `rolo-claude doctor --work` prints the derived workspace
+root, the gateway path, the header NAMES it sends (never values), the
+resolved default model and effort, and which config source supplied the
+token; it distinguishes a bad token (401) from the IP access list (403 with
+Databricks' own wording -- "connect to the VPN") from a token that can run
+inference but not list endpoints (403 without that wording) from a wrong
+path (404). `rolo-claude doctor --work --probe-all [--both] [--tools]
+[--only <glob>]` is the full work matrix: one short pong through every
+chat-shaped endpoint on its chosen path (plus the anthropic gateway too for
+Claude/GLM/Kimi with `--both`; a tool-call check with `--tools`), a table of
+status/latency/output tokens, and a JSON report at `~/.rolo-claude/
+work-matrix-<date>.json` naming endpoints only -- no host, no token -- so it
+can be pasted back for review.
+
 ## Permissions and auto mode
 
 Seven modes, same names and mode-table semantics as Claude Code:

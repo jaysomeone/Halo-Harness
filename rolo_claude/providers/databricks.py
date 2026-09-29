@@ -19,7 +19,9 @@ import json
 import re
 import socket
 import ssl
+import time
 from pathlib import Path
+from typing import Optional
 
 def databricks_route_candidates(model: str) -> list[tuple[str, bool]]:
     """Ordered (path, body_has_model) candidates for a resolved Databricks
@@ -37,7 +39,7 @@ def databricks_route_candidates(model: str) -> list[tuple[str, bool]]:
     return [invocations, mlflow]
 
 
-def build_databricks_body(oai_body: dict, include_model: bool, model: str) -> dict:
+def build_databricks_body(oai_body: dict, include_model: bool, model) -> dict:
     """Filter an OpenAI-chat body down to the Databricks-accepted key
     allowlist, adding/omitting 'model'. `reasoning_effort`/`stream_options`
     (scope B/D) are additive: the proxy's own `anthropic_to_openai` never
@@ -134,14 +136,37 @@ def dbx_cache_set_max_tokens_limit(model: str, limit: int, state_dir) -> None:
     _dbx_cache_save(state_dir)
 
 
+def clear_dbx_route_cache(state_dir) -> None:
+    """H14 scope D/J: a refreshed `dbx-endpoints.json` can change which
+    candidate index is correct for a model (a family's api_types changed,
+    or an endpoint that used to be uncached now has a real RULES-table
+    order) -- called after every `models --refresh`/`init --preset work`
+    catalog write so a stale route index never outlives the catalog it was
+    learned against. Self-healing either way (a wrong cached index just
+    costs one extra 404 before the real path is found and re-cached), so
+    this is a cheap, safe reset, never a correctness requirement on its own."""
+    _DBX_ROUTE_CACHE.clear()
+    try:
+        path = _dbx_cache_path(state_dir)
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
 
 
-def _probe_databricks_endpoints_raw(root: str, token: str) -> "tuple[int, list[dict]]":
-    """GET <root>/api/2.0/serving-endpoints; returns (status, raw endpoint
-    dicts). Raises UpstreamConnectError on connect/DNS failure. Shared by
-    `probe_databricks_endpoints` (bare names, unchanged proxy contract) and
-    `probe_databricks_endpoints_full` (scope I catalog refresh, extended
-    fields) so the HTTP call exists exactly once."""
+
+
+def probe_databricks_status(root: str, token: str) -> "tuple[int, bytes]":
+    """GET <root>/api/2.0/serving-endpoints; returns (status, raw response
+    bytes) for ANY status -- the low-level primitive `_probe_databricks_
+    endpoints_raw` (200-only, parsed endpoint list) builds on, and what
+    `doctor.py`'s own `--work` token-validity check (H14 scope E: 401 vs
+    403-IP-access-list vs 403-other vs 404 wording) uses directly for a
+    non-200 response's body. `token` may be empty/None -- scope E: "the
+    reachability probe still runs without a token, a 401 proves
+    reachability" -- in which case no Authorization header is sent at all
+    (an empty Bearer value would just be a different kind of bad token,
+    not "no token"). Raises UpstreamConnectError on connect/DNS failure."""
     import urllib.parse
     from rolo_claude.providers.http import open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(root)
@@ -149,7 +174,9 @@ def _probe_databricks_endpoints_raw(root: str, token: str) -> "tuple[int, list[d
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     tls = parsed.scheme == "https"
     path = parsed.path.rstrip("/") + "/api/2.0/serving-endpoints"
-    headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
+    headers = {"Accept-Encoding": "identity"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     conn = None
     try:
         conn = open_upstream(host, port, tls)
@@ -169,13 +196,23 @@ def _probe_databricks_endpoints_raw(root: str, token: str) -> "tuple[int, list[d
                 conn.close()
             except Exception:
                 pass
-    if resp.status == 200:
+    return resp.status, raw
+
+
+def _probe_databricks_endpoints_raw(root: str, token: str) -> "tuple[int, list[dict]]":
+    """GET <root>/api/2.0/serving-endpoints; returns (status, raw endpoint
+    dicts). Raises UpstreamConnectError on connect/DNS failure. Shared by
+    `probe_databricks_endpoints` (bare names, unchanged proxy contract) and
+    `probe_databricks_endpoints_full` (scope I catalog refresh, extended
+    fields) so the HTTP call exists exactly once."""
+    status, raw = probe_databricks_status(root, token)
+    if status == 200:
         try:
             data = json.loads(raw.decode("utf-8", "replace"))
             return 200, list(data.get("endpoints", []))
         except (json.JSONDecodeError, ValueError):
             pass
-    return resp.status, []
+    return status, []
 
 
 def probe_databricks_endpoints(root: str, token: str) -> tuple[int, list[str]]:
@@ -186,18 +223,36 @@ def probe_databricks_endpoints(root: str, token: str) -> tuple[int, list[str]]:
 
 def probe_databricks_endpoints_full(root: str, token: str) -> "tuple[int, list[dict]]":
     """Like `probe_databricks_endpoints` but keeps each endpoint's `name`,
-    `task`, `state.ready` and caller `permission_level` (scope I: "Databricks
-    endpoints list") instead of collapsing to bare names."""
+    `task`, `state.ready`, caller `permission_level` (scope I: "Databricks
+    endpoints list"), and (H14 scope D) the fields the generic family/
+    api_type RULES table (providers/dbx_routing.py) needs to route it
+    without a vendored per-model list: `foundation_model.api_types`,
+    `foundation_model.name` (the gateway model id for mlflow/cursor --
+    NOT derivable by prefixing the endpoint name, per the brief),
+    `foundation_model.model_class` (a family hint, when the listing
+    supplies one), `endpoint_type`, `ai_gateway_v2_supported`, and any
+    `usage_policy` DBU-rate hint (best-effort -- most workspaces won't
+    have one; `dbx_routing.format_dbu_cost` degrades to "?" either way)."""
     status, entries = _probe_databricks_endpoints_raw(root, token)
     out = []
     for e in entries:
         if not isinstance(e, dict) or not e.get("name"):
             continue
         state = e.get("state") if isinstance(e.get("state"), dict) else {}
-        out.append({
+        fm = e.get("foundation_model") if isinstance(e.get("foundation_model"), dict) else {}
+        entry = {
             "name": e["name"], "task": e.get("task"),
             "ready": state.get("ready"), "permission_level": e.get("permission_level"),
-        })
+            "endpoint_type": e.get("endpoint_type"),
+            "ai_gateway_v2_supported": e.get("ai_gateway_v2_supported"),
+            "api_types": fm.get("api_types") or [],
+            "foundation_model_name": fm.get("name"),
+            "model_class": fm.get("model_class"),
+        }
+        usage_policy = e.get("usage_policy")
+        if isinstance(usage_policy, dict):
+            entry["usage_policy"] = usage_policy
+        out.append(entry)
     return status, out
 
 
@@ -227,6 +282,109 @@ def load_dbx_endpoints_json(state_dir) -> dict:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+# ---------------------------------------------------------------------------
+# H14 scope J: catalog diff, staleness, and the shared "refresh if stale"
+# helper used by `/models refresh` (TUI, off the UI thread), `rolo-claude
+# models --refresh`, and the auto-refresh-on-session-start/on-`/model`-open
+# path (`databricks.catalog_max_age_hours`, default 24).
+# ---------------------------------------------------------------------------
+
+_TRACKED_DIFF_FIELDS = ("api_types", "task", "endpoint_type", "foundation_model_name", "ready")
+
+
+def diff_dbx_catalog(old: dict, new: dict) -> dict:
+    """`{"added": [names], "removed": [names], "changed": [{"name", "fields": [...]}]}`
+    between two dbx-endpoints.json-shaped dicts -- compares only the fields
+    a route/picker decision actually depends on (`_TRACKED_DIFF_FIELDS`), so
+    an unrelated field (`permission_level`, ...) changing doesn't show up as
+    noise."""
+    old = old or {}
+    new = new or {}
+    added = sorted(set(new) - set(old))
+    removed = sorted(set(old) - set(new))
+    changed = []
+    for name in sorted(set(old) & set(new)):
+        old_e, new_e = old.get(name) or {}, new.get(name) or {}
+        fields = [f for f in _TRACKED_DIFF_FIELDS if old_e.get(f) != new_e.get(f)]
+        if fields:
+            changed.append({"name": name, "fields": fields})
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def format_dbx_diff(diff: dict) -> str:
+    """One-line diff summary for a TUI notification / CLI print -- "no
+    changes" when the diff is empty."""
+    parts = []
+    if diff.get("added"):
+        parts.append(f"+{len(diff['added'])} added ({', '.join(diff['added'][:3])}{'...' if len(diff['added']) > 3 else ''})")
+    if diff.get("removed"):
+        parts.append(f"-{len(diff['removed'])} removed ({', '.join(diff['removed'][:3])}{'...' if len(diff['removed']) > 3 else ''})")
+    if diff.get("changed"):
+        parts.append(f"~{len(diff['changed'])} changed")
+    return "; ".join(parts) if parts else "no changes"
+
+
+def dbx_endpoints_age_seconds(state_dir) -> Optional[float]:
+    """Age of dbx-endpoints.json in seconds, or None if never cached."""
+    path = dbx_endpoints_path(state_dir)
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def refresh_dbx_catalog(state_dir, host: str, token: str) -> "tuple[bool, dict, str]":
+    """One refresh cycle: probe, write the new catalog, clear the now
+    possibly-stale route cache (scope D), and diff against whatever was
+    cached before. Returns `(ok, diff, note)` -- `ok=False` (offline/403/...)
+    leaves the existing cache completely untouched and `note` says why,
+    matching scope J: "failures (offline, 403 IP list) keep the cache and
+    say so"."""
+    old = load_dbx_endpoints_json(state_dir)
+    try:
+        status, fetched = probe_databricks_endpoints_full(host, token)
+    except Exception as e:
+        return False, {}, f"refresh failed ({type(e).__name__}: {e}) -- keeping the cached catalog"
+    if status != 200:
+        return False, {}, f"refresh failed (HTTP {status}) -- keeping the cached catalog"
+    write_dbx_endpoints_json(state_dir, fetched)
+    clear_dbx_route_cache(state_dir)
+    new = load_dbx_endpoints_json(state_dir)
+    diff = diff_dbx_catalog(old, new)
+    return True, diff, format_dbx_diff(diff)
+
+
+def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = None,
+                                  force: bool = False) -> Optional["tuple[bool, dict, str]"]:
+    """Scope J auto-refresh: `None` when nothing needed doing (not stale,
+    or Databricks isn't configured) -- else the same `(ok, diff, note)`
+    triple `refresh_dbx_catalog` returns. `max_age_hours` defaults to
+    `databricks.catalog_max_age_hours` (~/.rolo-claude/config.json, itself
+    defaulting to 24). Never raises -- an auto-refresh must not be able to
+    break session start or opening `/model`."""
+    try:
+        if max_age_hours is None:
+            from rolo_claude.theme import get_config_value
+            max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
+        age = dbx_endpoints_age_seconds(state_dir)
+        # A max age of 0 (or less) means "always refresh". Clamp the measured
+        # age at 0: on Windows a just-written file's mtime can land a few
+        # milliseconds AFTER time.time(), making `age` slightly negative and
+        # `age < 0` wrongly true.
+        always = float(max_age_hours) <= 0
+        if age is not None:
+            age = max(0.0, float(age))
+        if not force and not always and age is not None and age < float(max_age_hours) * 3600:
+            return None
+        from rolo_claude.providers.config import resolve_databricks
+        dbx = resolve_databricks()
+        if dbx is None:
+            return None
+        return refresh_dbx_catalog(state_dir, dbx.host, dbx.token)
+    except Exception as e:
+        return False, {}, f"auto-refresh errored ({type(e).__name__}: {e}) -- keeping the cached catalog"
 
 
 def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:

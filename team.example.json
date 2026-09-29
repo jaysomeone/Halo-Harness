@@ -1,0 +1,8 @@
+{
+  "host": "https://your-workspace.cloud.databricks.com",
+  "default_model": "dbx:databricks-claude-opus-4-6",
+  "gateway_preference": {
+    "databricks-kimi-k3": "anthropic"
+  },
+  "dbu_price_usd": 0.07
+}

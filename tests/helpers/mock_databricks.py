@@ -115,10 +115,60 @@ def _scn_ok(handler, body):
     ])
 
 
+def _sse_anthropic_event(handler, event: dict) -> None:
+    frame = f"event: {event['type']}\r\ndata: {json.dumps(event, ensure_ascii=False)}\r\n\r\n".encode("utf-8")
+    _write(handler, b"%x\r\n" % len(frame) + frame + b"\r\n")
+
+
+def _finish_anthropic(handler, body: dict) -> None:
+    """H14 scope H: a minimal, real native-Anthropic-Messages SSE reply
+    (message_start/content_block_start/_delta/_stop/message_delta/
+    message_stop) -- just enough for `stream_anthropic_completion` to
+    decode a real "pong"-shaped turn through the SAME mock server the
+    openai-chat scenarios above use, so one mock covers both dialects."""
+    _start_sse(handler)
+    for ev in (
+        {"type": "message_start", "message": {"id": "msg_mock", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"),
+         "usage": {"input_tokens": 5, "output_tokens": 0}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "pong"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ):
+        _sse_anthropic_event(handler, ev)
+    _end_sse(handler)
+
+
+def _scn_tool_call_ok(handler, body):
+    """H14 scope H: a streamed OpenAI-shaped tool call (Read) -- the work
+    matrix's own `--tools` probe scenario."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_wm_1", "type": "function", "function": {"name": "Read", "arguments": ""}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"file_path": "pong.txt"}'}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
+def _scn_echo(handler, body):
+    """H14 scope F: a non-streaming, plain-JSON scenario that echoes which
+    PATH/body this request actually hit -- used to prove end to end which
+    of invocations/mlflow/cursor a given model+family combination really
+    picked (`chat_route_candidates`), not just that SOME 200 came back."""
+    _send_json(handler, 200, {"echo_path": handler.path, "echo_body": body})
+
+
 SCENARIOS = {
     "reasoning-content-shape": _scn_reasoning_content_shape,
     "reasoning-blocks-shape": _scn_reasoning_blocks_shape,
     "rate-limit-429": _scn_rate_limit_429,
+    "echo": _scn_echo,
+    "tool-call-ok": _scn_tool_call_ok,
     "ok": _scn_ok,
 }
 
@@ -142,7 +192,18 @@ class _Handler(BaseHTTPRequestHandler):
 
         mock: MockDatabricks = self.server.mock  # type: ignore[attr-defined]
         with mock._lock:
-            mock.requests.append({"path": self.path, "body": body})
+            mock.requests.append({"path": self.path, "body": body,
+                                   "headers": {k: v for k, v in self.headers.items()}})
+
+        # H14 scope H: the native Anthropic-Messages path (Claude/GLM/Kimi
+        # probed on the anthropic gateway too, `--both`) is a DIFFERENT wire
+        # shape entirely (no OpenAI-chat allowlist applies) -- served here,
+        # never falling into the openai-chat scenario dispatch below, so ONE
+        # mock server can answer both dialects for the work-matrix probe.
+        if self.path.startswith("/ai-gateway/anthropic/v1/messages") or \
+                self.path.startswith("/serving-endpoints/anthropic/v1/messages"):
+            _finish_anthropic(self, body)
+            return
 
         # Strict allowlist guard (scope B/D): ANY key outside the allowlist -> 400,
         # matching Databricks' real "json: unknown field \"X\"" wording.
@@ -175,6 +236,18 @@ class _Handler(BaseHTTPRequestHandler):
         fn(self, body)
 
     def do_GET(self):
+        mock: MockDatabricks = self.server.mock  # type: ignore[attr-defined]
+        if self.path.startswith("/api/2.0/serving-endpoints"):
+            with mock._lock:
+                mock.requests.append({"path": self.path, "body": None,
+                                       "headers": {k: v for k, v in self.headers.items()}})
+            status = mock.endpoints_status
+            body = mock.endpoints_body
+            if body is None:
+                body = {"endpoints": mock.endpoints_catalog} if status == 200 else {
+                    "error_code": "MOCK_ERROR", "message": "mock endpoints error"}
+            _send_json(self, status, body)
+            return
         _send_json(self, 404, {"error": "mock databricks only serves POST"})
 
 
@@ -184,6 +257,36 @@ class MockDatabricks:
         self._thread = None
         self.requests: list = []
         self._lock = threading.Lock()
+        # H14 scope E/F/H: GET /api/2.0/serving-endpoints -- 200 with
+        # `endpoints_catalog` (a list of endpoint dicts, the shape
+        # `probe_databricks_endpoints_full` parses) by default; a test sets
+        # `endpoints_status`/`endpoints_body` to simulate 401/403-IP/
+        # 403-other/404 (see `set_endpoints_error` below for the common
+        # cases' exact wording).
+        self.endpoints_status = 200
+        self.endpoints_body = None
+        self.endpoints_catalog: list = []
+
+    def set_endpoints_catalog(self, endpoints: list) -> None:
+        self.endpoints_status = 200
+        self.endpoints_body = None
+        self.endpoints_catalog = endpoints
+
+    def set_endpoints_error(self, kind: str) -> None:
+        """`kind` in "401"/"403-ip"/"403-other"/"404" -- the four cases
+        `doctor --work`'s token-validity check (H14 scope E) distinguishes."""
+        table = {
+            "401": (401, {"error_code": "PERMISSION_DENIED", "message": "Invalid access token."}),
+            "403-ip": (403, {"error_code": "PERMISSION_DENIED",
+                              "message": "Public internet access is not allowed for this workspace; "
+                                         "your IP address is not on the IP access list."}),
+            "403-other": (403, {"error_code": "PERMISSION_DENIED",
+                                 "message": "User does not have permission to list serving endpoints."}),
+            "404": (404, {"error_code": "NOT_FOUND", "message": "not found"}),
+        }
+        status, body = table[kind]
+        self.endpoints_status = status
+        self.endpoints_body = body
 
     @property
     def port(self) -> int:

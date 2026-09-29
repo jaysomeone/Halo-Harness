@@ -239,9 +239,22 @@ def resolve_anthropic(env: dict | None = None) -> AntConfig | None:
 
 @dataclass
 class DbxConfig:
-    """Databricks configuration."""
+    """Databricks configuration. H14 scope A: `host` is ALWAYS the bare
+    workspace root (never a gateway path) -- every API call (`/api/2.0/
+    serving-endpoints`, `/serving-endpoints/<name>/invocations`,
+    `/ai-gateway/...`) builds from it. `anthropic_gateway` is the full
+    `<root>/ai-gateway/anthropic` URL, remembered when the ORIGINAL value
+    this config was resolved from actually carried that suffix (e.g.
+    Claude Code's own `ANTHROPIC_BASE_URL`) -- None when the source was a
+    bare root to begin with (DATABRICKS_HOST, ~/.databrickscfg, ...);
+    scope D can still always build the gateway URL from `host` regardless.
+    H14 scope B: `custom_headers` is `ANTHROPIC_CUSTOM_HEADERS` (one or
+    more "Name: value" lines from the settings env) parsed into a plain
+    dict, sent on every Databricks request."""
     host: str
     token: str
+    anthropic_gateway: Optional[str] = None
+    custom_headers: dict = field(default_factory=dict)
 
 
 _DBX_HOST_SUFFIXES = (".databricks.com", ".azuredatabricks.net", ".gcp.databricks.com")
@@ -388,6 +401,56 @@ def _run_api_key_helper(command: str) -> Optional[str]:
     return output or None
 
 
+def parse_custom_headers(raw: Optional[str]) -> dict[str, str]:
+    """H14 scope B: `ANTHROPIC_CUSTOM_HEADERS`-shaped value (Claude Code's
+    own settings.json `env` block convention) -- one or more "Name: value"
+    lines -- parsed into a plain header-name -> value dict. Blank lines and
+    any line without a ':' are skipped; a later line reusing the same name
+    (case-insensitively) replaces the earlier one, keeping that later
+    occurrence's own name spelling."""
+    result: dict[str, str] = {}
+    if not raw:
+        return result
+    lower_seen: dict[str, str] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        prior = lower_seen.get(name.lower())
+        if prior is not None and prior != name:
+            result.pop(prior, None)
+        result[name] = value
+        lower_seen[name.lower()] = name
+    return result
+
+
+_DBX_DEFAULT_HEADERS = {"x-databricks-use-coding-agent-mode": "true"}
+
+
+def merge_databricks_headers(custom_headers: Optional[dict], explicit_headers: Optional[dict] = None) -> dict:
+    """H14 scope B: the final header dict for a Databricks request --
+    `x-databricks-use-coding-agent-mode: true` by default, overridden
+    (case-insensitive name match) by `ANTHROPIC_CUSTOM_HEADERS`
+    (`custom_headers`, already parsed by `parse_custom_headers`), overridden
+    in turn by any explicit `--header`/config-supplied headers. Sent on
+    every Databricks request, native passthrough and chat alike."""
+    result: dict[str, str] = dict(_DBX_DEFAULT_HEADERS)
+    lower_to_key = {k.lower(): k for k in result}
+    for source in (custom_headers, explicit_headers):
+        for name, value in (source or {}).items():
+            existing_key = lower_to_key.get(name.lower())
+            if existing_key is not None and existing_key != name:
+                del result[existing_key]
+            result[name] = value
+            lower_to_key[name.lower()] = name
+    return result
+
+
 def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     """
     Resolve Databricks host+token: BRIDGE_DBX_* override, then filtered
@@ -404,29 +467,52 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     `load_settings_env_chain`) is skipped, since `env` already IS that
     merged chain, correctly ordered and trust-filtered. The proxy's own
     callers pass nothing and get the exact pre-H2 behavior.
+
+    H14 scope A/B: every branch below returns through `_finalize`, which
+    (a) splits the resolved host into its bare workspace root (`.host`)
+    plus, when the ORIGINAL value carried it, the full `/ai-gateway/
+    anthropic` gateway URL (`.anthropic_gateway`), and (b) parses
+    `ANTHROPIC_CUSTOM_HEADERS` (from `env`, falling back to the settings
+    chain re-derivation the same way step 3 does) onto `.custom_headers`.
     """
     env = env if env is not None else os.environ
+    _settings_env_box: list = []
+
+    def _settings_env() -> dict:
+        if not _settings_env_box:
+            _settings_env_box.append(load_settings_env_chain(Path.cwd()) if env is os.environ else {})
+        return _settings_env_box[0]
+
+    def _custom_headers() -> dict[str, str]:
+        raw = env.get("ANTHROPIC_CUSTOM_HEADERS") or _settings_env().get("ANTHROPIC_CUSTOM_HEADERS") or ""
+        return parse_custom_headers(raw)
+
+    def _finalize(host_raw: str, token: str) -> DbxConfig:
+        stripped = host_raw.rstrip("/")
+        root = derive_workspace_root(stripped)
+        gateway = f"{root}/ai-gateway/anthropic" if root != stripped else None
+        return DbxConfig(host=root, token=token, anthropic_gateway=gateway, custom_headers=_custom_headers())
 
     # 1. Explicit override -- always wins, unfiltered.
     bridge_host = env.get("BRIDGE_DBX_BASE_URL")
     bridge_token = env.get("BRIDGE_DBX_TOKEN")
     if bridge_host and bridge_token:
-        return DbxConfig(host=bridge_host.rstrip("/"), token=bridge_token)
+        return _finalize(bridge_host, bridge_token)
 
     # 2. ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Databricks hosts only).
     anth_host = env.get("ANTHROPIC_BASE_URL")
     anth_token = env.get("ANTHROPIC_AUTH_TOKEN")
     if anth_host and anth_token and looks_like_databricks_host(anth_host):
-        return DbxConfig(host=anth_host.rstrip("/"), token=anth_token)
+        return _finalize(anth_host, anth_token)
 
     # 3. The proxy's OWN settings-chain re-derivation -- only when the
     # caller did NOT already hand us a merged env (see docstring above).
-    settings_env = {} if env is not os.environ else load_settings_env_chain(Path.cwd())
+    settings_env = _settings_env()
     if settings_env:
         anth_host = settings_env.get("ANTHROPIC_BASE_URL")
         anth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN")
         if anth_host and anth_token and looks_like_databricks_host(anth_host):
-            return DbxConfig(host=anth_host.rstrip("/"), token=anth_token)
+            return _finalize(anth_host, anth_token)
 
     # 4. DATABRICKS_HOST + DATABRICKS_TOKEN (falling back to the proxy's
     # own settings chain per-field when using bare os.environ) --
@@ -437,7 +523,7 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
         dbx_host = settings_env.get("DATABRICKS_HOST") or dbx_host
         dbx_token = settings_env.get("DATABRICKS_TOKEN") or dbx_token
     if dbx_host and dbx_token:
-        return DbxConfig(host=dbx_host.rstrip("/"), token=dbx_token)
+        return _finalize(dbx_host, dbx_token)
 
     # 5. H8 scope F must-do: ~/.claude/ucode-settings.json, written by
     # Databricks' own `ug` (unity-gateway) CLI -- a purpose-built, harness-
@@ -446,10 +532,153 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     from rolo_claude.config.paths import claude_config_dir
     ucode = load_ucode_settings(claude_config_dir() / "ucode-settings.json")
     if ucode is not None:
-        return ucode
+        return _finalize(ucode.host, ucode.token)
 
     # 6. ~/.databrickscfg [DEFAULT].
-    return load_databrickscfg(home() / ".databrickscfg")
+    cfg_file = load_databrickscfg(home() / ".databrickscfg")
+    if cfg_file is not None:
+        return _finalize(cfg_file.host, cfg_file.token)
+    return None
+
+
+def resolve_databricks_source(env: dict | None = None) -> Optional[str]:
+    """H14 scope E: WHICH step of `resolve_databricks`'s own precedence
+    chain would supply the config -- a short human label `doctor --work`
+    prints as its "token source" line. Mirrors `resolve_databricks` exactly
+    (same order, same settings-chain re-derivation gate) as a read-only,
+    side-effect-free lookup; None when nothing resolves there either."""
+    env = env if env is not None else os.environ
+    if env.get("BRIDGE_DBX_BASE_URL") and env.get("BRIDGE_DBX_TOKEN"):
+        return "BRIDGE_DBX_BASE_URL/BRIDGE_DBX_TOKEN (explicit override)"
+    anth_host, anth_token = env.get("ANTHROPIC_BASE_URL"), env.get("ANTHROPIC_AUTH_TOKEN")
+    if anth_host and anth_token and looks_like_databricks_host(anth_host):
+        return "ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (environment)"
+    settings_env = load_settings_env_chain(Path.cwd()) if env is os.environ else {}
+    if settings_env:
+        anth_host = settings_env.get("ANTHROPIC_BASE_URL")
+        anth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN")
+        if anth_host and anth_token and looks_like_databricks_host(anth_host):
+            return "ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (Claude Code settings.json env)"
+    dbx_host, dbx_token = env.get("DATABRICKS_HOST"), env.get("DATABRICKS_TOKEN")
+    if not dbx_host or not dbx_token:
+        dbx_host = settings_env.get("DATABRICKS_HOST") or dbx_host
+        dbx_token = settings_env.get("DATABRICKS_TOKEN") or dbx_token
+    if dbx_host and dbx_token:
+        return "DATABRICKS_HOST/DATABRICKS_TOKEN"
+    from rolo_claude.config.paths import claude_config_dir
+    if load_ucode_settings(claude_config_dir() / "ucode-settings.json") is not None:
+        return "~/.claude/ucode-settings.json"
+    if load_databrickscfg(home() / ".databrickscfg") is not None:
+        return "~/.databrickscfg"
+    return None
+
+
+def resolve_databricks_host_only(env: dict | None = None) -> Optional[str]:
+    """H14 scope E: the bare workspace root when SOME step of `resolve_
+    databricks`'s own chain has a host but not (that step's own) token --
+    "host configured, token missing" doctor's own line needs this to ever
+    actually fire in a real run, since `resolve_databricks()` only ever
+    returns a host+token PAIR together (any lone host is otherwise
+    invisible to a caller). None when a full config already resolves (not
+    "host-only" -- just configured) or no step has a host at all."""
+    env = env if env is not None else os.environ
+    if resolve_databricks(env) is not None:
+        return None
+    bridge_host = env.get("BRIDGE_DBX_BASE_URL")
+    if bridge_host:
+        return derive_workspace_root(bridge_host)
+    anth_host = env.get("ANTHROPIC_BASE_URL")
+    if anth_host and looks_like_databricks_host(anth_host):
+        return derive_workspace_root(anth_host)
+    settings_env = load_settings_env_chain(Path.cwd()) if env is os.environ else {}
+    anth_host = settings_env.get("ANTHROPIC_BASE_URL")
+    if anth_host and looks_like_databricks_host(anth_host):
+        return derive_workspace_root(anth_host)
+    dbx_host = env.get("DATABRICKS_HOST") or settings_env.get("DATABRICKS_HOST")
+    if dbx_host:
+        return derive_workspace_root(dbx_host)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# H14 scope C: model defaults/aliases "at work" -- Claude Code's own settings
+# env (ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_MODEL) sets the harness's default
+# model and what bare opus/sonnet/haiku resolve to, instead of the cc:/ant:
+# subscription route or the hardcoded OpenRouter default.
+# ---------------------------------------------------------------------------
+
+_WORK_ENV_SIGNAL_KEYS = (
+    "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
+
+
+def _work_env_signal(env: dict) -> dict:
+    """The `_WORK_ENV_SIGNAL_KEYS` values from `env`, falling back to the
+    settings-chain re-derivation (same `env is os.environ` gate
+    `resolve_databricks` itself uses -- must-do 6) so a caller with no
+    merged `Settings.effective_env` to pass (most bare `parse_model_ref`
+    call sites) still sees a work env that lives ONLY in Claude Code's
+    settings.json `env` block, never just the raw process environment."""
+    settings_env = load_settings_env_chain(Path.cwd()) if env is os.environ else {}
+    return {k: env.get(k) or settings_env.get(k) for k in _WORK_ENV_SIGNAL_KEYS}
+
+
+def databricks_work_signal_present(env: dict | None = None) -> bool:
+    """True when `env` (or the settings-chain re-derivation, same gate as
+    `_work_env_signal`) carries Claude Code's own Databricks work-box
+    signal (`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`) -- WITHOUT also
+    requiring a full host+token to already resolve (unlike
+    `databricks_work_env_active`). Used wherever a caller needs to tell
+    "this host came from Claude Code's own work settings" apart from an
+    UNRELATED ambient `DATABRICKS_HOST`/`ANTHROPIC_BASE_URL` a box might
+    have set for some other Databricks tool -- e.g. `init --preset work`'s
+    own "host already known, ask only for the token" shortcut (scope I)
+    must never fire off a bare, incidental `DATABRICKS_HOST` alone."""
+    env = env if env is not None else os.environ
+    return any(_work_env_signal(env).values())
+
+
+def databricks_work_env_active(env: dict | None = None) -> bool:
+    """True when `env` carries Claude Code's own Databricks work-box env
+    shape (`ANTHROPIC_MODEL` and/or `ANTHROPIC_DEFAULT_*_MODEL`) AND a
+    Databricks config actually resolves from it -- the signal that tells
+    "Claude Code's settings env, pointed at Databricks" (base URL or
+    DATABRICKS_HOST) apart from an unrelated ~/.databrickscfg/ucode-
+    settings.json a box may also have for other purposes (those never set
+    these Claude-Code-specific names, so this is always False for them)."""
+    env = env if env is not None else os.environ
+    if not databricks_work_signal_present(env):
+        return False
+    return resolve_databricks(env) is not None
+
+
+_BARE_TIER_ENV_VAR = {
+    "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+}
+# Pinned Databricks Claude endpoint fallback when the matching
+# ANTHROPIC_DEFAULT_*_MODEL var is unset (brief scope C).
+_BARE_TIER_DBX_FALLBACK = {
+    "opus": "databricks-claude-opus-5-5",
+    "sonnet": "databricks-claude-sonnet-5-5",
+    "haiku": "databricks-claude-haiku-4-5",
+}
+
+
+def databricks_default_model_for_tier(tier: str, env: dict | None = None) -> Optional[str]:
+    """bare `opus`/`sonnet`/`haiku` -> the bare (unprefixed) Databricks
+    endpoint name Claude Code's own `ANTHROPIC_DEFAULT_*_MODEL` picks at
+    work, or the pinned Databricks Claude endpoint fallback when that var
+    is unset; None for any other tier name. Falls back to the settings-
+    chain re-derivation the same way `_work_env_signal` does, so a value
+    living only in Claude Code's settings.json is found too."""
+    env = env if env is not None else os.environ
+    var = _BARE_TIER_ENV_VAR.get(tier)
+    if var is None:
+        return None
+    return _work_env_signal(env).get(var) or _BARE_TIER_DBX_FALLBACK[tier]
 
 
 def derive_workspace_root(base_url: str) -> str:
@@ -528,11 +757,13 @@ def resolve_config() -> BridgeConfig:
     dbx_config = resolve_databricks()
     dbx_dict = None
     if dbx_config:
-        dbx_root = derive_workspace_root(dbx_config.host)
+        dbx_root = dbx_config.host  # already the bare root (H14 scope A)
         dbx_dict = {
             "host": dbx_config.host,
             "token": redact(dbx_config.token),
             "workspace_root": dbx_root,
+            "anthropic_gateway": dbx_config.anthropic_gateway,
+            "custom_header_names": sorted(dbx_config.custom_headers),
             "routes": {
                 "invocations": f"{dbx_root}/serving-endpoints/<name>/invocations",
                 "mlflow_chat": f"{dbx_root}/ai-gateway/mlflow/v1/chat/completions",

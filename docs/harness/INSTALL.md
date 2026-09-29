@@ -185,7 +185,21 @@ rolo-claude doctor --work
 
 Off the VPN (including from the build host that produced `wheels/`), every
 line reports MISSING/WARN with a hint to get on the VPN or run `ug` first --
-that's the expected, correct offline result, not a bug.
+that's the expected, correct offline result, not a bug. It also prints the
+derived workspace root, the gateway path, the header NAMES it will send
+(never values), the resolved default model/effort, and which config source
+supplied the token, and distinguishes a bad token (401) from the IP access
+list (403 with Databricks' own wording) from a token that can run inference
+but not list endpoints (403 without it) from a wrong path (404).
+
+`rolo-claude doctor --work --probe-all [--both] [--tools] [--only <glob>]`
+goes further: one short pong through every chat-shaped endpoint the catalog
+knows about, on its own chosen path (`--both` also probes the anthropic
+gateway for Claude/GLM/Kimi; `--tools` adds a one-tool-call check), and a
+JSON report at `~/.rolo-claude/work-matrix-<date>.json` naming endpoints
+only -- no host, no token -- to paste back for review. See the README's
+"Databricks at work" section for `team.json` (shared host/default-model/
+gateway-preference setup) and `/models refresh`.
 
 ## Reproducible installs (`requirements.lock`)
 

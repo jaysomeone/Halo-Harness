@@ -149,6 +149,39 @@ def _cmd_model(args: str, facade: HeadlessFacade) -> str:
     return f"Current model: {facade.model_ref or '?'}\nEffort: {facade.effort or 'default'}"
 
 
+def _cmd_models(args: str, facade: HeadlessFacade) -> str:
+    """H14 scope J: `/models [refresh]` (`/dbx` is a plain alias that always
+    refreshes) -- headless surface for the same catalog refresh `rolo-claude
+    models --refresh`/the TUI's own off-UI-thread `/models refresh` use.
+    Bare `/models` reports the cached catalog's size/age without touching
+    the network."""
+    from rolo_claude.config.paths import bridge_home
+    from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
+    from rolo_claude.providers.databricks import (
+        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, refresh_dbx_catalog,
+    )
+    state_dir = bridge_home()
+    dbx = resolve_databricks()
+    if dbx is None:
+        return "Databricks is not configured -- nothing to refresh (see `rolo-claude doctor --work`)."
+    if args.strip().lower() in ("refresh", "--refresh"):
+        ok, diff, note = refresh_dbx_catalog(state_dir, derive_workspace_root(dbx.host), dbx.token)
+        endpoints = load_dbx_endpoints_json(state_dir)
+        if not ok:
+            return f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached)."
+        return f"Refreshed: {len(endpoints)} endpoint(s) cached. Diff: {format_dbx_diff(diff)}"
+    endpoints = load_dbx_endpoints_json(state_dir)
+    age = dbx_endpoints_age_seconds(state_dir)
+    age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+    return (f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}). "
+            f"Use `/models refresh` (or `/dbx`) to update.")
+
+
+def _cmd_dbx(args: str, facade: HeadlessFacade) -> str:
+    """`/dbx` -- always behaves like `/models refresh`, regardless of args."""
+    return _cmd_models("refresh", facade)
+
+
 def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
     if facade.mcp_status is not None:
         # H3 scope D: real per-server health, same line format `mcp list` uses.
@@ -422,6 +455,8 @@ _BUILTIN_SPECS = {
     "cost": ("core", "Show the total cost and duration of the session", None, _cmd_cost),
     "context": ("core", "Show current context window usage", None, _cmd_context),
     "model": ("core", "Show or change the active model", "[model]", _cmd_model),
+    "models": ("core", "List/refresh the Databricks endpoint catalog", "[refresh]", _cmd_models),
+    "dbx": ("core", "Alias for /models refresh", None, _cmd_dbx),
     "mcp": ("core", "List configured MCP servers", None, _cmd_mcp),
     "memory": ("core", "Show the auto-memory directory and index", None, _cmd_memory),
     "permissions": ("core", "Show the active permission mode and rule counts", None, _cmd_permissions),

@@ -1,0 +1,17 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "dapiSYNTHETICTOKEN00000000000000",
+    "ANTHROPIC_MODEL": "databricks-claude-opus-4-6",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-6",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-opus-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-opus-4-8",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-databricks-use-coding-agent-mode: true"
+  },
+  "model": "opus",
+  "effortLevel": "xhigh",
+  "modelSettings": {
+    "opus": { "effortLevel": "xhigh" }
+  },
+  "permissions": { "defaultMode": "default" }
+}

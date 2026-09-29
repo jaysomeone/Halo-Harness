@@ -85,6 +85,18 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
     return None
 
 
+def _resolve_dbx_config_for_headers(settings=None):
+    """H14 scope B: a second, cheap (no network) `resolve_databricks` call
+    purely to get at `DbxConfig.custom_headers` -- `_resolve_creds` above
+    only ever keeps `(base_url, api_key)`, and threading a header dict
+    through `ProviderCreds` (shared by OpenRouter/Databricks/Anthropic
+    alike) would widen that dataclass for one provider's own concern.
+    `None` when Databricks isn't configured at all (extra_headers then
+    falls back to just the default coding-agent-mode header)."""
+    env = settings.effective_env if settings is not None else None
+    return resolve_databricks(env)
+
+
 def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: str,
                        effort: Optional[str], permission_mode: str, mcp_manager, bare: bool):
     """Shared by `run_print_mode` and `tui/bootstrap.py` (imported from
@@ -458,6 +470,13 @@ def build_session(
     settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
     claude_json_allowed_tools = lookup_project(claude_json, cwd).get("allowedTools")
 
+    # H14 scope C: `effortLevel`/`modelSettings.<id>.effortLevel` from
+    # settings.json become the session's default effort -- only when
+    # nothing more specific (`--effort`) was already given; a settings
+    # value can never override an explicit flag.
+    if effort is None:
+        effort = settings.resolved_effort_level()
+
     cli_allow = split_tool_rule_list(allowed_tools) if allowed_tools else []
     cli_disallow = split_tool_rule_list(disallowed_tools) if disallowed_tools else []
     deny_rules, ask_rules, allow_rules = build_rules_from_settings(
@@ -497,7 +516,11 @@ def build_session(
     state_dir = bridge_home()
     routes = load_routes(state_dir / "routes.json")
 
-    model_raw = model_ref_raw or resolve_default_model_raw(routes)
+    # H14 scope C: `settings.effective_env` (trust-filtered, shell < settings
+    # chain) rather than bare os.environ, so "at work" default-model
+    # resolution honors the SAME trust rules every other provider lookup
+    # here already does.
+    model_raw = model_ref_raw or resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
     small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL") or routes.get("small") or model_raw
     small_ref = parse_model_ref(small_raw, routes) if small_raw else None
@@ -546,6 +569,28 @@ def build_session(
         websearch_allowed = False
 
     creds = _resolve_creds(model_ref, settings)
+
+    # H14 scope J: auto-refresh the Databricks catalog on session start when
+    # stale, silently, on a daemon thread -- never blocks/delays this turn;
+    # the visible one-line diff notification is `/model` open and `/models
+    # refresh`/`/dbx`'s own job (headless.py has no UI to post one to). Only
+    # ever refreshes an ALREADY-cached catalog (never first-time discovery
+    # from a plain session start, which every -p/TUI/test session goes
+    # through) -- a session against a host with no cache yet is left to
+    # `init --preset work`/`/models refresh`, so an unreachable/fake `dbx:`
+    # host (common in this harness's own test suite) never spawns a live
+    # background probe just from building a session.
+    if not bare and model_ref.provider == "databricks" and creds is not None:
+        import threading as _threading
+        def _bg_dbx_refresh() -> None:
+            try:
+                from rolo_claude.providers.databricks import dbx_endpoints_age_seconds, refresh_dbx_catalog_if_stale
+                if dbx_endpoints_age_seconds(state_dir) is not None:
+                    refresh_dbx_catalog_if_stale(state_dir)
+            except Exception:
+                pass
+        _threading.Thread(target=_bg_dbx_refresh, daemon=True, name="rolo-claude-dbx-auto-refresh").start()
+
     if (not bare and websearch_allowed and model_ref.provider == "openrouter" and creds is not None
             and frozen_registry.get("WebSearch") is None):
         from rolo_claude.tools.websearch import build_websearch_tool
@@ -661,7 +706,16 @@ def build_session(
         ctx.system_prompt = system_prompt
 
     openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
-    extra_headers = {"x-databricks-use-coding-agent-mode": "true"} if model_ref.provider == "databricks" else None
+    extra_headers = None
+    if model_ref.provider == "databricks":
+        # H14 scope B: ANTHROPIC_CUSTOM_HEADERS (one or more "Name: value"
+        # lines from the settings env) is sent on every Databricks request,
+        # native passthrough and chat alike -- merged under the default
+        # x-databricks-use-coding-agent-mode (overridden by the custom
+        # header of the same name when the env sets one).
+        from rolo_claude.providers.config import merge_databricks_headers
+        dbx_cfg = _resolve_dbx_config_for_headers(settings)
+        extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
 
     # H6 scope D: --continue/--resume/--fork-session all resolve to a
     # concrete session_id BEFORE the log is opened -- an explicit

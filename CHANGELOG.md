@@ -5,6 +5,80 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.6.0] - 2026-09-29
+
+H14: Databricks work-config parity -- zero-setup at work from Claude Code's
+own settings, a generic family x api_type routing table (no vendored
+endpoint list), doctor accuracy, team onboarding, and the work matrix.
+
+- **Host/gateway split (scope A)**: `resolve_databricks()` now always
+  returns the bare workspace root as `.host` -- a gateway path riding along
+  in `ANTHROPIC_BASE_URL`/`DATABRICKS_HOST` (`.../ai-gateway/anthropic`) is
+  split off into `.anthropic_gateway` instead of leaking into every derived
+  URL. Fixes `doctor --work` building `/api/2.0/serving-endpoints` under the
+  gateway path.
+- **Custom headers (scope B)**: `ANTHROPIC_CUSTOM_HEADERS` (one or more
+  "Name: value" lines, Claude Code's own settings.json convention) is parsed
+  onto `DbxConfig.custom_headers` and merged onto every Databricks request
+  (native passthrough and chat), under the default
+  `x-databricks-use-coding-agent-mode: true` and any explicit override.
+- **Model defaults/aliases at work (scope C)**: when Claude Code's own
+  settings env resolves a Databricks config, the default model is
+  `dbx:<ANTHROPIC_MODEL>` and bare `opus`/`sonnet`/`haiku` resolve through
+  `ANTHROPIC_DEFAULT_*_MODEL` (falling back to pinned `databricks-claude-*`
+  endpoints when unset) instead of the `cc:`/`ant:` subscription route or the
+  OpenRouter default; `effortLevel`/`modelSettings.<id>.effortLevel` now
+  actually set the session's default effort (previously unwired).
+- **Generic family x api_type RULES table (scope D,
+  `providers/dbx_routing.py`)**: family detected from the endpoint name (and,
+  when cached, `foundation_model.name`/`model_class`) drives an ordered,
+  endpoint-specific route built from the endpoint's OWN discovered
+  `api_types` -- never a hand-maintained per-model list. Claude foundation
+  defaults to the native anthropic gateway; GLM/Kimi default to mlflow chat
+  with the anthropic gateway selectable per model (`databricks.gateway.
+  <endpoint>` config or a `dbx:<endpoint>@anthropic` suffix); DeepSeek/Qwen/
+  Llama/Gemma/gpt-oss default to mlflow chat, using the endpoint's real
+  `foundation_model.name` as the wire model id (not a `system.ai.` prefix
+  guess); GPT/Grok/Gemini default to mlflow chat, with `databricks-gpt-5-5-
+  pro`'s own exception (no mlflow chat, cursor chat instead); Bedrock
+  EXTERNAL Claude endpoints (`us-anthropic-claude-*`) are invocations-only
+  and no longer misclassified as native Claude passthrough just because
+  "claude" is in the name; a known non-chat endpoint (embeddings/whisper) is
+  refused with a clear message and hidden from pickers. An unknown endpoint
+  (not yet in the discovery cache) falls back to the pre-H14 static order.
+- **doctor --work accuracy (scope E)**: prints the derived workspace root,
+  gateway path, header NAMES (never values), default model, default effort,
+  and which resolution step supplied the token; token-validity now
+  distinguishes 401 (bad token), 403 with Databricks' own IP-access-list
+  wording ("connect to the VPN"), 403 without it (token lacks list
+  permission, inference may still work), and a wrong-path 404 -- previously
+  every non-200 read as one generic "may only run inference" line. A host
+  configured with no token yet still probes (a 401 without a token proves
+  reachability) instead of skipping the network call.
+- **Work matrix (scope H, `rolo-claude doctor --work --probe-all [--both]
+  [--tools] [--only <glob>]`)**: one short pong per chat-shaped endpoint on
+  its chosen path (plus the anthropic gateway too for Claude/GLM/Kimi with
+  `--both`), a table of status/latency/output tokens/tool-call support, and
+  a JSON report at `~/.rolo-claude/work-matrix-<date>.json` with endpoint
+  names only -- no host, no token. Mock-verified (the real workspace is
+  behind an IP access list from this box).
+- **Team onboarding (scope I)**: a shared `team.json` (host, default model,
+  per-family gateway preference, DBU price -- never a token, never an
+  endpoint list) discovered at `.rolo-claude/team.json` (project),
+  `~/.rolo-claude/team.json`, or `--team <path|url>`; `init --preset work`
+  reads it (or Claude Code's own settings env) and asks ONLY for the token
+  when a host is already known, hidden input, 0600 env file. `/model`
+  groups Databricks endpoints by family, shows the chosen path type, and
+  hides non-chat endpoints. `team.example.json` added.
+- **`/models refresh` (alias `/dbx`) (scope J)**: re-lists the workspace
+  catalog off the UI thread, updates `~/.rolo-claude/dbx-endpoints.json`, and
+  reports a one-line added/removed/changed diff; `rolo-claude models
+  --refresh --urls [--json]` prints the exact URL and path type per
+  endpoint. Auto-refresh (`databricks.catalog_max_age_hours`, default 24h)
+  on `/model` open and (silently, for an already-cached catalog only) on
+  session start; an offline/403 refresh keeps the existing cache.
+- `__version__` -> 0.6.0.
+
 ## [0.5.0] - 2026-09-29
 
 H13 (RECOMMENDATIONS.md P1): lazy MCP start by default, inline images in the
