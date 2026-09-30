@@ -1,13 +1,17 @@
 # rolo-claude
 
 A standalone, Claude-Code-compatible agent harness: full-screen TUI, `-p`
-print mode, the same config/session/tool conventions as the real `claude`
-CLI, driving OpenRouter and Databricks-hosted models (including Databricks'
-own Claude endpoints) instead of an Anthropic subscription. **Kali Linux is
-the primary target platform** -- Windows is the secondary/build host. It
-also ships the older `claude-bridge` proxy (drives the REAL `claude` binary
-against those same providers) as the `rolo-claude proxy` subcommand -- see
-**Proxy mode** near the end.
+print mode, and the same config, session and tool conventions as the real
+`claude` CLI, driving models over four routes -- OpenRouter (DeepSeek, Kimi,
+GLM, Qwen and more), Databricks (every endpoint a workspace serves, including
+its Claude endpoints), the Anthropic API, and your own Claude subscription
+through the installed `claude` binary. It reads your existing Claude Code
+configuration (settings, permissions, hooks, CLAUDE.md, memory, skills,
+commands, agents, MCP servers) so nothing has to be set up twice. **Kali
+Linux is the primary target platform** -- Windows is the secondary/build
+host. It also ships the older `claude-bridge` proxy (drives the REAL `claude`
+binary against OpenRouter or Databricks) as the `rolo-claude proxy`
+subcommand -- see **Proxy mode** near the end.
 
 ## Quick start (Kali / Linux)
 
