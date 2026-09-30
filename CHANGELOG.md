@@ -5,6 +5,67 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.7.0] - 2026-09-29
+
+V2a: per-family Databricks correctness across every gateway type the harness
+routes to (`anthropic/v1/messages`, `mlflow/v1/chat/completions`,
+`cursor/v1/chat/completions`, `/serving-endpoints/<name>/invocations`), a
+fixture test matrix driven by an extended `tests/helpers/mock_databricks.py`
+speaking every dialect, and the two work-matrix open-question probes. See
+`docs/harness/V2-brief.md`.
+
+- **`tests/helpers/mock_databricks.py` speaks every dialect now**: the
+  native `anthropic/v1/messages` gateway path is scenario-dispatched (it was
+  hardcoded to one fixed "pong" reply) -- thinking blocks + signatures,
+  tool_use (including Kimi's own verbatim `functions.<name>:<idx>` id), and
+  the dialect's own 401/403-IP/404/overflow-400/429/5xx shapes; the
+  openai-chat side gained 401/403-IP/404/500/context-overflow-400/413/
+  finish_reason=length-minimal-output/Kimi-native-tool-id/cached-and-
+  reasoning-token-usage/two-turn-reasoning-replay scenarios, plus path-aware
+  404-then-fallback scenarios (mlflow-then-cursor, cursor-then-mlflow).
+- **Per-family/per-type pinning tests** (`test_v2a_<family>_<type>_...`,
+  five new files under `tests/`): Claude foundation/GLM/Kimi
+  thinking+signature+cache_control+coding-agent-mode-header on the
+  anthropic gateway (tested with and without thinking); DeepSeek/GPT/Grok/
+  Gemini/gpt-oss reasoning decode+replay rules on mlflow; GLM's fixed
+  sampling pair vs. Kimi/DeepSeek's server-fixed omission; the catalog's own
+  `foundation_model.name` on the wire, `stream: true` explicit, the 32-tool
+  cap + schema simplifier, and OTPM pre-admission against Kimi's real
+  published rate limits; `gpt-5-5-pro`'s cursor-only route and the GPT
+  family's mlflow-then-cursor fallback; Bedrock EXTERNAL Claude's
+  invocations-only, model-less chat body with tool support; every error
+  shape (400 unknown-field, 401, 403-IP, 404-to-exhaustion, 413,
+  context-overflow-400, 429 with limit_type/retry_after, 5xx) and usage/cost
+  accounting (cached + reasoning tokens, Databricks cost always "n/a", the
+  catalog's DBU-rate-to-dollars conversion) per type.
+- **Fix: a literal HTTP 413 is now non-retryable and classified
+  `CONTEXT_WINDOW_EXCEEDED`** (`providers/errors.py`) -- `map_upstream_error`
+  had no row for 413 and fell through to its own `should_retry=True`
+  default, which won the `e.retryable or is_retryable_message(...)`
+  short-circuit in `agent/loop.py` before `is_context_overflow_message`'s
+  own (already-correct) unconditional 413-is-overflow rule ever got a
+  chance to run -- a real 413 was silently retried up to `MAX_RETRIES`
+  times against the identical, still-too-large body instead of surfacing as
+  an overflow.
+- **The two work-matrix open questions are now runnable probes**
+  (`rolo_claude/work_matrix.py`, `doctor --work --probe-all --tools`): (1)
+  reasoning replay after a tool call -- a real second turn, built through
+  the exact same `providers.request` builders a live session uses (a
+  genuinely signed `thinking` block on the anthropic dialect; the family's
+  own `reasoning_echo` rule on the openai-chat dialect), is sent and its
+  acceptance recorded per endpoint as `reasoning_replay_ok`; (2) route split
+  from the cache -- `cached_path_type` (what `routes-cache.json` said
+  before this run) alongside `path_type` (what this run actually used/
+  re-cached) makes a stale-cache mismatch visible in the JSON report
+  without a second run. Both fields are `None` when not applicable (no
+  `--tools`, or nothing was cached yet) rather than a misleading default.
+- `docs/DATABRICKS.md`/`docs/MODELS.md` updated: the work matrix's two new
+  report fields, and a wording correction -- `databricks.dbu_price_usd`
+  converts the catalog's own advertised DBU rate for the `/model` picker's
+  informational display only; Databricks never reports a per-turn spend, so
+  `/cost`/`stats` stay "n/a" regardless of whether that price is configured.
+- `__version__` -> 0.7.0.
+
 ## [0.6.0] - 2026-09-29
 
 H14: Databricks work-config parity -- zero-setup at work from Claude Code's

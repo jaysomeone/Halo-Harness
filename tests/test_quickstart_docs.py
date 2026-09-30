@@ -89,17 +89,29 @@ def test_version_bumped_to_0_5_0_and_changelog_has_an_entry(ctx: Ctx):
 
 @test
 def test_version_bumped_to_0_6_0_and_changelog_has_an_entry(ctx: Ctx):
-    """H14 brief: Databricks work-config parity -- host/gateway split,
-    custom headers, model defaults/aliases at work, the generic family x
-    api_type RULES table, doctor --work accuracy, team.json onboarding,
-    /models refresh, the work matrix, version bump."""
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 0.6.0, got {__version__!r}", __version__ == "0.6.0")
+    """H14's own pinning -- kept exact (checked against the CHANGELOG's own
+    still-present [0.6.0] entry, not the CURRENT version) now that V2a has
+    bumped past it; see `test_version_bumped_to_0_7_0_and_changelog_has_an_
+    entry` below for V2a's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
-    ctx.check("CHANGELOG.md has a [0.6.0] entry", "[0.6.0]" in changelog)
+    ctx.check("CHANGELOG.md still has a [0.6.0] entry", "[0.6.0]" in changelog)
     entry = changelog.split("[0.6.0]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("databricks", "work", "team.json"):
         ctx.check(f"the [0.6.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_0_7_0_and_changelog_has_an_entry(ctx: Ctx):
+    """V2a brief (docs/harness/V2-brief.md): per-family Databricks request/
+    stream/error/usage correctness across every gateway type, the fixture
+    matrix, the two work-matrix open-question probes, version bump."""
+    from rolo_claude import __version__
+    ctx.check(f"__version__ is 0.7.0, got {__version__!r}", __version__ == "0.7.0")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [0.7.0] entry", "[0.7.0]" in changelog)
+    entry = changelog.split("[0.7.0]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("v2a", "reasoning replay", "route split"):
+        ctx.check(f"the [0.7.0] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 if __name__ == "__main__":

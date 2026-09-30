@@ -138,9 +138,16 @@ response itself doesn't carry a `usage.cost` field, `CostMeter` derives one
 from those rates (input × price_in + (output + reasoning) × price_out +
 cache_read/cache_write at their own rates, falling back to `price_in` for
 cache tokens when no specific rate is known). **Databricks never reports
-cost** -- `stats`/`/cost` show `n/a` unless `databricks.dbu_price_usd` is
-configured (`~/.rolo-claude/config.json`, or a team.json's `dbu_price_usd`),
-in which case a DBU-priced route's spend is shown converted to dollars. A
+cost** -- `stats`/`/cost` always show `n/a` for a Databricks turn; there is
+no per-turn billing field on the wire to read, by design (`CostMeter.
+add_usage` treats `provider == "databricks"` as unknown-cost
+unconditionally, whatever pricing config exists). Where
+`databricks.dbu_price_usd` (`~/.rolo-claude/config.json`, or a team.json's
+`dbu_price_usd`) actually applies is narrower: it converts an endpoint's own
+**catalog-advertised** DBU rate (`usage_policy.output_dbu_per_1k_tokens`,
+when the workspace publishes one) into a dollar figure for the `/model`
+picker's informational per-endpoint display (`Controller.list_models()`'s
+`dbu` column) -- a reference price, never a real per-turn spend. A
 `cc:` row's "cost" is Claude Code's own cumulative `total_cost_usd`,
 delta'd since that subprocess's previous turn -- an estimate, never real
 per-token billing, and never counted toward `--max-budget-usd`.

@@ -191,6 +191,24 @@ status/latency/output tokens/tool-call support and writes
 host or a token** -- safe to paste back for review. This spends real
 tokens/DBUs against the real workspace; the command says so before running.
 
+V2a closes the plan's own two open questions as two extra fields in that
+same JSON report, per endpoint:
+
+- **`cached_path_type`** vs. **`path_type`**: `cached_path_type` is whatever
+  `~/.rolo-claude/routes-cache.json` already named for this endpoint
+  *before* this run; `path_type` is what this run actually used (and just
+  re-cached). The two differing is a real **route split** -- a stale cached
+  candidate that no longer answers, most often right after a family's own
+  `api_types` change without a catalog refresh in between.
+- **`reasoning_replay_ok`** (only when `--tools` produced a tool call to
+  replay; `None`/absent otherwise): a **second** turn, built through the
+  exact same `providers.request.build_request_body`/
+  `build_anthropic_request_body` a live session uses -- replaying whatever
+  reasoning/thinking the first turn produced, plus the tool result -- is
+  sent for real, and whether the endpoint accepted it is recorded here.
+  This is what answers "does reasoning replay after a tool call actually
+  work for this family" from live data instead of a guess.
+
 ## How Claude Code's own work settings are reused
 
 At a Databricks work box already running Claude Code, `rolo-claude` needs

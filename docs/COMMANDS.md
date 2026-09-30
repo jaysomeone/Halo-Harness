@@ -27,7 +27,7 @@ export PYTHONPATH=/path/to/rolo-claude   # a dev checkout; skip if installed
 rolo-claude --version
 ```
 ```
-rolo-claude 0.6.0
+rolo-claude 0.7.0
 ```
 
 There is no `sessions` subcommand in this build -- session resume/fork/

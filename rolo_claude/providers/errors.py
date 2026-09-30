@@ -177,6 +177,17 @@ def map_upstream_error(status: int, body: dict | bytes | str, provider: str,
         (403, "permission_error", 403, False),
         (404, "not_found_error", 404, False),
         (400, "invalid_request_error", 400, False),
+        # V2a fix: 413 had no row here, so it fell through to this
+        # function's own "anything else" default of should_retry=True --
+        # that default WINS at the caller (agent/loop.py's `e.retryable or
+        # is_retryable_message(...)` short-circuits on a True left side),
+        # so `is_context_overflow_message`'s own unconditional
+        # `status == 413` -> overflow rule (never retryable) was never
+        # actually reachable: a real 413 (a request too large to ever
+        # succeed unmodified) was retried up to MAX_RETRIES times against
+        # the identical failing body instead. 413 is never retryable in
+        # place, matching every other 4xx client-error row above.
+        (413, "invalid_request_error", 413, False),
         (429, "rate_limit_error", 429, True),
         (500, "api_error", 500, True),
         (502, "overloaded_error", 529, True),
@@ -294,7 +305,11 @@ def classify_error_category(status: int, message: str) -> str:
         return AUTH
     if status == 429:
         return RATE_LIMIT
-    if status == 400 and _OVERFLOW_TAXONOMY_RE.search(message):
+    # V2a: a literal 413 is unconditionally an overflow (matching
+    # `is_context_overflow_message`'s own `status == 413` rule) -- it never
+    # needs a wording match the way a 400 does, since "the payload itself
+    # was too large" is the whole meaning of that status code.
+    if status == 413 or (status == 400 and _OVERFLOW_TAXONOMY_RE.search(message)):
         return CONTEXT_WINDOW_EXCEEDED
     if status >= 500:
         return PROVIDER_FAILURE

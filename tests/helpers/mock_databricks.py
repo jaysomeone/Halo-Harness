@@ -125,7 +125,10 @@ def _finish_anthropic(handler, body: dict) -> None:
     (message_start/content_block_start/_delta/_stop/message_delta/
     message_stop) -- just enough for `stream_anthropic_completion` to
     decode a real "pong"-shaped turn through the SAME mock server the
-    openai-chat scenarios above use, so one mock covers both dialects."""
+    openai-chat scenarios above use, so one mock covers both dialects. This
+    is the DEFAULT/"ok" scenario on the anthropic gateway -- unchanged since
+    H14, so every existing caller with no matching suffix below keeps
+    getting byte-identical output."""
     _start_sse(handler)
     for ev in (
         {"type": "message_start", "message": {"id": "msg_mock", "type": "message", "role": "assistant",
@@ -139,6 +142,183 @@ def _finish_anthropic(handler, body: dict) -> None:
     ):
         _sse_anthropic_event(handler, ev)
     _end_sse(handler)
+
+
+# ---------------------------------------------------------------------------
+# V2a: scenario dispatch for the native anthropic/v1/messages gateway (Claude
+# foundation default; GLM/Kimi opt-in via `@anthropic`/`databricks.gateway.
+# <endpoint>`) -- thinking blocks + signatures, tool_use (including Kimi's
+# own verbatim `functions.<name>:<idx>` id), and the same error shapes as the
+# openai-chat dialect above, keyed the SAME way (longest suffix of `model`).
+# ---------------------------------------------------------------------------
+
+def _usage_a(input_tokens=5, output_tokens=0, cache_read=0, cache_write=0) -> dict:
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_write}
+
+
+def _ascn_thinking_and_signature(handler, body):
+    """Thinking block + signature, then a plain text reply -- the "with
+    thinking" half of "GLM/Kimi thinking shapes through the gateway (test
+    both with and without thinking)"; family-agnostic (Claude/GLM/Kimi all
+    decode identically -- AnthropicSSEDecoder never inspects `model`)."""
+    _start_sse(handler)
+    for ev in (
+        {"type": "message_start", "message": {"id": "msg_think", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"), "usage": _usage_a()}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "let me consider this"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_abc123"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "pong"}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": _usage_a(input_tokens=500, output_tokens=30, cache_read=200, cache_write=50)},
+        {"type": "message_stop"},
+    ):
+        _sse_anthropic_event(handler, ev)
+    _end_sse(handler)
+
+
+def _ascn_tool_use(handler, body):
+    _start_sse(handler)
+    for ev in (
+        {"type": "message_start", "message": {"id": "msg_tool", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"), "usage": _usage_a()}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"file_path"'}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": ':"pong.txt"}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": _usage_a()},
+        {"type": "message_stop"},
+    ):
+        _sse_anthropic_event(handler, ev)
+    _end_sse(handler)
+
+
+def _ascn_kimi_tool_id(handler, body):
+    """Kimi's own verbatim `functions.<name>:<idx>` id on the ANTHROPIC
+    dialect -- the decoder never touches an id, so this must pass through
+    completely unchanged end to end."""
+    _start_sse(handler)
+    for ev in (
+        {"type": "message_start", "message": {"id": "msg_kimi", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"), "usage": _usage_a()}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "functions.Read:0", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"file_path":"pong.txt"}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": _usage_a()},
+        {"type": "message_stop"},
+    ):
+        _sse_anthropic_event(handler, ev)
+    _end_sse(handler)
+
+
+def _ascn_thinking_then_tool_then_reply(handler, body):
+    """V2a open question 1, anthropic dialect: turn 1 (no `tool_result` in
+    the incoming messages yet) answers with thinking+signature and a Read
+    tool_use; turn 2 (the replayed request already carries the tool_result,
+    and -- if the harness replayed it correctly -- the signed thinking
+    block back too) answers plainly. Dispatches on content, never call
+    count, so it is retry-ladder-safe exactly like mock_anthropic.py's own
+    twin of this scenario."""
+    has_tool_result = any(
+        isinstance(m.get("content"), list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+        for m in (body.get("messages") or []) if isinstance(m, dict)
+    )
+    if has_tool_result:
+        _start_sse(handler)
+        for ev in (
+            {"type": "message_start", "message": {"id": "msg_replay_final", "type": "message", "role": "assistant",
+             "content": [], "model": body.get("model", "claude"), "usage": _usage_a(input_tokens=900)}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
+            {"type": "message_stop"},
+        ):
+            _sse_anthropic_event(handler, ev)
+        _end_sse(handler)
+        return
+    _start_sse(handler)
+    for ev in (
+        {"type": "message_start", "message": {"id": "msg_replay_think_tool", "type": "message", "role": "assistant",
+         "content": [], "model": body.get("model", "claude"), "usage": _usage_a(input_tokens=321)}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "need to read the file first"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_replay_1"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_replay", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"file_path"'}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ':"pong.txt"}'}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 18}},
+        {"type": "message_stop"},
+    ):
+        _sse_anthropic_event(handler, ev)
+    _end_sse(handler)
+
+
+def _ascn_401(handler, body):
+    _send_json(handler, 401, {"error_code": "PERMISSION_DENIED", "message": "Invalid access token."})
+
+
+def _ascn_403_ip(handler, body):
+    _send_json(handler, 403, {"error_code": "PERMISSION_DENIED",
+                               "message": "Public internet access is not allowed for this workspace; "
+                                          "your IP address is not on the IP access list."})
+
+
+def _ascn_404(handler, body):
+    _send_json(handler, 404, {"type": "error", "error": {"type": "not_found_error", "message": "not found"}})
+
+
+def _ascn_overflow_400(handler, body):
+    _send_json(handler, 400, {"type": "error", "error": {
+        "type": "invalid_request_error", "message": "prompt is too long: 210000 tokens > 200000 maximum"}})
+
+
+def _ascn_rate_limit_429(handler, body):
+    _send_json(handler, 429, {"type": "error", "error": {
+        "type": "rate_limit_error", "message": "Number of request tokens has exceeded your rate limit"}},
+        {"retry-after": "3"})
+
+
+def _ascn_500(handler, body):
+    _send_json(handler, 500, {"type": "error", "error": {"type": "api_error", "message": "internal error"}})
+
+
+ANTHROPIC_SCENARIOS = {
+    "thinking-and-signature": _ascn_thinking_and_signature,
+    "tool-use": _ascn_tool_use,
+    "kimi-tool-id": _ascn_kimi_tool_id,
+    "thinking-then-tool-then-reply": _ascn_thinking_then_tool_then_reply,
+    "401-error": _ascn_401,
+    "403-ip-error": _ascn_403_ip,
+    "404-error": _ascn_404,
+    "overflow-400": _ascn_overflow_400,
+    "rate-limit-429": _ascn_rate_limit_429,
+    "500-error": _ascn_500,
+    "ok": _finish_anthropic,
+}
+
+
+def _dispatch_anthropic(handler, body: dict) -> None:
+    """Longest-suffix match of `body["model"]` against ANTHROPIC_SCENARIOS,
+    same convention as the openai-chat SCENARIOS dispatch below -- default
+    (no match) is `_finish_anthropic`'s plain pong, byte-identical to the
+    pre-V2a behavior every existing test already relies on."""
+    model = body.get("model", "") or ""
+    for name in sorted(ANTHROPIC_SCENARIOS, key=len, reverse=True):
+        if model.endswith(name):
+            ANTHROPIC_SCENARIOS[name](handler, body)
+            return
+    _finish_anthropic(handler, body)
 
 
 def _scn_tool_call_ok(handler, body):
@@ -163,12 +343,176 @@ def _scn_echo(handler, body):
     _send_json(handler, 200, {"echo_path": handler.path, "echo_body": body})
 
 
+# ---------------------------------------------------------------------------
+# V2a: error shapes per the brief's own list -- 401/403-IP/404/413/429-with-
+# limit_type (already covered by _scn_rate_limit_429 above)/5xx/context
+# overflow, plus finish_reason=length-with-minimal-output and Kimi's own
+# verbatim `functions.<name>:<idx>` tool-call id shape on the openai-chat
+# dialect (mlflow/cursor/invocations all share this same handler).
+# ---------------------------------------------------------------------------
+
+def _scn_401(handler, body):
+    _send_json(handler, 401, {"error_code": "PERMISSION_DENIED", "message": "Invalid access token."})
+
+
+def _scn_403_ip(handler, body):
+    _send_json(handler, 403, {"error_code": "PERMISSION_DENIED",
+                               "message": "Public internet access is not allowed for this workspace; "
+                                          "your IP address is not on the IP access list."})
+
+
+def _scn_404_not_found(handler, body):
+    _send_json(handler, 404, {"error_code": "NOT_FOUND", "message": "not found"})
+
+
+def _scn_500_error(handler, body):
+    _send_json(handler, 500, {"error_code": "INTERNAL_ERROR", "message": "internal error, please retry"})
+
+
+def _scn_context_overflow_400(handler, body):
+    """Databricks' own real overflow wording (providers.errors.
+    parse_context_overflow's `dbx_full` pattern): "... exceed context
+    limit: A + B > L"."""
+    _send_json(handler, 400, {"error_code": "BAD_REQUEST",
+                               "message": "Input validation error: `inputs` tokens + `max_new_tokens` tokens "
+                                          "exceed context limit: 120000 + 16384 > 131072"})
+
+
+def _scn_413_overflow(handler, body):
+    _send_json(handler, 413, {"error_code": "BAD_REQUEST", "message": "request_too_large: payload exceeds limit"})
+
+
+def _scn_finish_length_minimal(handler, body):
+    """finish_reason: length with <=1 output token -- oai_stream.py's own
+    `length_with_minimal_output` flag (a provider failure to re-route/
+    re-pin, never retried in place; scope C)."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "x"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
+    ])
+
+
+def _scn_tool_call_kimi_native_id(handler, body):
+    """A tool call whose streamed id is ALREADY Kimi's own native
+    `functions.<name>:<idx>` shape -- `hooks.normalize_tool_id`'s
+    "kimi_functions_idx" branch must preserve it verbatim, never re-mint."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "functions.Read:0", "type": "function", "function": {"name": "Read", "arguments": ""}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"file_path": "pong.txt"}'}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
+def _scn_usage_cached_tokens(handler, body):
+    """Cached + reasoning token accounting (scope: "cached tokens where
+    reported") -- OpenAI-chat-shaped `usage.prompt_tokens_details.
+    cached_tokens`/`completion_tokens_details.reasoning_tokens`."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 500, "completion_tokens": 20,
+                   "prompt_tokens_details": {"cached_tokens": 300},
+                   "completion_tokens_details": {"reasoning_tokens": 8}}},
+    ])
+
+
+def _scn_mlflow_404_then_ok(handler, body):
+    """404s ONLY the mlflow sub-path -- proves a `gpt` family endpoint's
+    SECOND candidate (cursor) is genuinely reached and answers, rather than
+    falling all the way through to invocations."""
+    if "/mlflow/" in handler.path:
+        _send_json(handler, 404, {"error_code": "NOT_FOUND", "message": "not found"})
+        return
+    _scn_ok(handler, body)
+
+
+def _scn_cursor_404_then_ok(handler, body):
+    """404s ONLY the cursor sub-path -- the mirror of
+    `_scn_mlflow_404_then_ok`, used to simulate a STALE cached route (one
+    that used to answer on cursor but no longer does) falling over to
+    mlflow, a real "route split" the work matrix's own cache-vs-actual
+    fields exist to surface."""
+    if "/cursor/" in handler.path:
+        _send_json(handler, 404, {"error_code": "NOT_FOUND", "message": "not found"})
+        return
+    _scn_ok(handler, body)
+
+
+def _scn_mlflow_or_cursor_404_then_invocations_ok(handler, body):
+    """404s ONLY the mlflow/cursor gateway sub-paths, so the FIRST candidate
+    a family like glm/gpt tries fails over to the next one -- proves
+    `call_databricks_chat`'s own 404-fallback-and-cache dance end to end
+    without needing a second, differently-named scenario per candidate
+    position."""
+    if "/mlflow/" in handler.path or "/cursor/" in handler.path:
+        _send_json(handler, 404, {"error_code": "NOT_FOUND", "message": "not found"})
+        return
+    _scn_ok(handler, body)
+
+
+def _scn_reasoning_replay_rejected(handler, body):
+    """Turn 1: a normal Read tool call (like tool-call-ok); turn 2 (a
+    `role: tool` message already present) -- the upstream REJECTS the
+    replay with DeepSeek's own reasoning_content-must-be-passed-back
+    wording, so a work-matrix probe correctly reports
+    `reasoning_replay_ok=False` instead of a false positive."""
+    has_tool_msg = any(isinstance(m, dict) and m.get("role") == "tool" for m in (body.get("messages") or []))
+    if has_tool_msg:
+        _send_json(handler, 400, {"error_code": "BAD_REQUEST",
+                                   "message": "The reasoning_content in the thinking mode must be passed back "
+                                              "to the API."})
+        return
+    _scn_tool_call_ok(handler, body)
+
+
+def _scn_reasoning_replay_loop(handler, body):
+    """Two-turn openai-chat "reasoning replay after a tool call" shape (V2a
+    open question 1): turn 1 (no `role: tool` message yet) replies with
+    reasoning_content + a Read tool call; turn 2 (the replayed request
+    already carries the tool result) replies plainly -- lets a caller drive
+    a REAL two-turn round trip through the exact request-building code a
+    live session would use and observe whether the upstream accepts
+    whatever this harness replayed back as reasoning."""
+    has_tool_msg = any(isinstance(m, dict) and m.get("role") == "tool" for m in (body.get("messages") or []))
+    if has_tool_msg:
+        _scn_ok(handler, body)
+        return
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": "need to read the file"}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "call_replay_1", "type": "function", "function": {"name": "Read", "arguments": ""}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"file_path": "pong.txt"}'}},
+        ]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ])
+
+
 SCENARIOS = {
     "reasoning-content-shape": _scn_reasoning_content_shape,
     "reasoning-blocks-shape": _scn_reasoning_blocks_shape,
     "rate-limit-429": _scn_rate_limit_429,
     "echo": _scn_echo,
     "tool-call-ok": _scn_tool_call_ok,
+    "401-error": _scn_401,
+    "403-ip-error": _scn_403_ip,
+    "404-not-found": _scn_404_not_found,
+    "500-error": _scn_500_error,
+    "context-overflow-400": _scn_context_overflow_400,
+    "413-overflow": _scn_413_overflow,
+    "finish-length-minimal": _scn_finish_length_minimal,
+    "tool-call-kimi-native-id": _scn_tool_call_kimi_native_id,
+    "usage-cached-tokens": _scn_usage_cached_tokens,
+    "mlflow-or-cursor-404-then-ok": _scn_mlflow_or_cursor_404_then_invocations_ok,
+    "mlflow-404-then-ok": _scn_mlflow_404_then_ok,
+    "cursor-404-then-ok": _scn_cursor_404_then_ok,
+    "reasoning-replay-loop": _scn_reasoning_replay_loop,
+    "reasoning-replay-rejected": _scn_reasoning_replay_rejected,
     "ok": _scn_ok,
 }
 
@@ -202,7 +546,7 @@ class _Handler(BaseHTTPRequestHandler):
         # mock server can answer both dialects for the work-matrix probe.
         if self.path.startswith("/ai-gateway/anthropic/v1/messages") or \
                 self.path.startswith("/serving-endpoints/anthropic/v1/messages"):
-            _finish_anthropic(self, body)
+            _dispatch_anthropic(self, body)
             return
 
         # Strict allowlist guard (scope B/D): ANY key outside the allowlist -> 400,
