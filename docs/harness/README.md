@@ -41,6 +41,7 @@ release (this project didn't use strict per-milestone semver until H10).
 | [H13-brief.md](H13-brief.md) | 0.5.0 | lazy MCP by default; inline terminal images; `/resume` search; the first live family-baseline pass |
 | [H14-brief.md](H14-brief.md) | 0.6.0 | Databricks work-config parity: the family x api_type routing table, `doctor --work` accuracy, team onboarding, the work matrix |
 | [H14b-brief.md](H14b-brief.md) | -- | this documentation pass, immediately before the repo goes public |
+| [V2-brief.md](V2-brief.md) | 0.7.0, 0.8.0 | Databricks-first per-family correctness (V2a); matrix-driven fixes (V2b); roles (V2c). The brief's own V2d/V2e (renaming this project to `databricks-claude`) was superseded: the owner spun off a separate `databricks-claude` repository instead, and rolo-claude stayed the general four-route harness, released as `1.0.0` -- see CHANGELOG.md's own `[1.0.0]` entry |
 
 ## Reviews
 

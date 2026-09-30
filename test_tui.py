@@ -117,6 +117,45 @@ def test_submit_streams_text_and_mounts_tool_card(ctx: Ctx):
 
 
 @test
+def test_prompt_input_is_visible_above_the_status_bar(ctx: Ctx):
+    """Found live on a Kali box: `#prompt-row` and `.status-bar` were BOTH
+    docked to the bottom edge, and Textual overlaps same-edge docks instead
+    of stacking them, so the status bar painted over the input line -- the
+    TUI showed a separator and a status bar and nothing to type into at
+    every terminal height and theme. The fix puts both in one docked
+    `#bottom-dock` container. This pins the geometry the pilots never
+    checked: the input row sits strictly above the status bar, the glyph is
+    on screen, and typed text is on screen."""
+    async def body():
+        for size in ((110, 30), (100, 40), (80, 24)):
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause(0.3)
+                inp = app.prompt_input.region
+                bar = app.status_bar.region
+                ctx.check(f"{size}: input row is above the status bar (input {inp}, bar {bar})",
+                          inp.height >= 1 and inp.y + inp.height <= bar.y)
+                ctx.check(f"{size}: status bar is the last row", bar.y + bar.height == size[1])
+                ctx.check(f"{size}: input does not overlap the transcript",
+                          app.transcript.region.y + app.transcript.region.height <= inp.y)
+                await pilot.click("#prompt-input")
+                await _type(pilot, "hello there")
+                snap = ""
+                for _ in range(10):  # the TextArea repaints a frame or two after the last key
+                    await pilot.pause(0.1)
+                    snap = app.export_screenshot()
+                    if "hello" in snap and "there" in snap:
+                        break
+                ctx.check(f"{size}: the input holds the typed text", app.prompt_input.text == "hello there")
+                ctx.check(f"{size}: prompt glyph is on screen", "❯" in snap)
+                # The SVG export may split a text run at the space (a non-breaking
+                # entity), so check the two words rather than the exact phrase.
+                ctx.check(f"{size}: typed text is on screen", "hello" in snap and "there" in snap)
+    asyncio.run(body())
+
+
+@test
 def test_tool_card_same_widget_start_to_result_plus_ctrl_o(ctx: Ctx):
     """A `FakeController` script hands its whole turn to `_local_events` in
     one shot (no real per-event timing to catch "mid-flight" through the 30

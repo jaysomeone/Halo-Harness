@@ -27,7 +27,7 @@ export PYTHONPATH=/path/to/rolo-claude   # a dev checkout; skip if installed
 rolo-claude --version
 ```
 ```
-rolo-claude 0.7.0
+rolo-claude 1.0.0
 ```
 
 There is no `sessions` subcommand in this build -- session resume/fork/
@@ -219,6 +219,26 @@ never deadlocks.
 What: with `--output-format stream-json`, also emits a `stream_event` line
 per text/thinking delta (not just the final assembled message).
 
+#### `-d`, `--debug [FILTER]`
+What: turns on DEBUG file logging for the whole run, TUI or print mode. The
+log goes to `~/.rolo-claude/bridge.log` (rotating, secrets redacted) and the
+path is printed once on stderr as `rolo-claude: debug log -> <path>`. The
+optional FILTER value is accepted for Claude Code parity and ignored:
+everything is logged. Use it when the TUI misbehaves or a route fails, then
+send the last lines of the log.
+Reads: nothing new. Writes: `~/.rolo-claude/bridge.log`.
+```sh
+rolo-claude --debug
+tail -60 ~/.rolo-claude/bridge.log
+```
+
+#### `--debug-file PATH`
+What: same as `--debug`, but the log is written to `PATH` (parent
+directories are created) instead of the state directory.
+```sh
+rolo-claude --debug-file /tmp/rolo-claude-debug.log -p "reply with the single word pong"
+```
+
 #### `--verbose`
 What: in text mode, also prints every intermediate assistant message this
 turn produced (dimmed) on the way to the final reply, plus reasoning; a
@@ -391,8 +411,6 @@ rolo-claude: --ide is not supported yet (planned: H8)
 | `--betas BETA [BETA ...]` | H8 |
 | `--brief` | H4 |
 | `--cloud [CLOUD]` | H8 |
-| `-d`, `--debug [DEBUG]` | H8 |
-| `--debug-file PATH` | H8 |
 | `--environment ENVIRONMENT_ID` | H8 |
 | `--exclude-dynamic-system-prompt-sections` | H5 |
 | `--fallback-model MODEL` | H6 |

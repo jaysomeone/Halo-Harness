@@ -123,10 +123,15 @@ AssistantText {
     background: $bridge-panel;
 }
 
+#bottom-dock {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+}
+
 #prompt-row {
     height: auto;
     max-height: 10;
-    dock: bottom;
     background: $bridge-surface;
     border-top: solid $bridge-border;
 }
@@ -148,7 +153,6 @@ AssistantText {
 }
 
 .status-bar {
-    dock: bottom;
     height: 1;
     width: 100%;
     background: $bridge-panel;

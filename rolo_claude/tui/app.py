@@ -24,7 +24,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from rolo_claude import events as ev
@@ -186,10 +186,17 @@ class BridgeApp(App):
         yield Transcript()
         yield CompletionPopup()
         yield WhichKeyOverlay()
-        with Horizontal(id="prompt-row"):
-            yield Static("❯", id="prompt-glyph")
-            yield PromptInput(placeholder=DEFAULT_PLACEHOLDER)
-        yield StatusBar(cwd=str(self.cwd))
+        # One bottom-docked container holds the prompt row ABOVE the status
+        # bar. Docking both widgets to the bottom edge separately made
+        # Textual overlap them: the status bar (composed last, height 1)
+        # painted over the prompt row's input line, so the TUI showed a
+        # separator and a status bar and nothing to type into (found live
+        # on a Kali box; the pilots never checked geometry).
+        with Vertical(id="bottom-dock"):
+            with Horizontal(id="prompt-row"):
+                yield Static("❯", id="prompt-glyph")
+                yield PromptInput(placeholder=DEFAULT_PLACEHOLDER)
+            yield StatusBar(cwd=str(self.cwd))
 
     def get_css_variables(self) -> dict:
         variables = dict(super().get_css_variables())

@@ -6,8 +6,11 @@ different models (cheap for exploration, strong for planning/review) without
 editing every agent file by hand. Verified against `rolo_claude/roles.py`,
 `config/agents_md.py`, `agent/subagent.py`, `tools/agent.py`, `cli.py`,
 `commands/builtins.py`, and `telemetry.py`. See [MODELS.md](MODELS.md) for
-how a model reference itself resolves, and [DATABRICKS.md](DATABRICKS.md)'s
-work-matrix section for endpoint health, which is a separate concern.
+how a model reference itself resolves, [DATABRICKS.md](DATABRICKS.md)'s
+work-matrix section for endpoint health (a separate concern), and that same
+doc's **End-to-end team workflow** section for how a shared `team.json`'s
+own `roles` table actually gets onto everyone's box via `rolo-claude init
+--preset work`.
 
 ## The five roles
 

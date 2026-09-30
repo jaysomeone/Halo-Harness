@@ -248,6 +248,40 @@ those bare names would otherwise resolve to everywhere else. `settings.json`'s
 top-level `effortLevel`/`modelSettings.<id>.effortLevel` set the session's
 default effort the same way.
 
+## End-to-end team workflow
+
+How a team actually rolls this out, tying together every piece documented
+above into one ordered walkthrough:
+
+1. **One person writes `team.json`** (see **The team preset** above) --
+   workspace host, a default model, a per-family gateway preference, a DBU
+   price, and optionally a shared `roles` table (see
+   [ROLES.md](ROLES.md)) -- and commits it to the project as
+   `.rolo-claude/team.json`, or shares it as a URL for `--team`.
+2. **Each teammate runs `rolo-claude init --preset work`.** With the host
+   already known from `team.json` (or from Claude Code's own settings,
+   zero-setup), it asks ONLY for a personal Databricks token, seeds
+   `gateway_preference`/`roles` into `~/.rolo-claude/config.json` (never
+   overwriting a value the teammate already set locally), refreshes the
+   endpoint catalog, and ends with a live pong.
+3. **`rolo-claude doctor --work --probe-all --tools`** runs the full work
+   matrix against the real workspace -- one short pong (plus a tool-call
+   check) per chat-shaped endpoint, on its own chosen path -- and writes
+   `~/.rolo-claude/work-matrix-<date>.json` (endpoint names only, safe to
+   hand to someone else for review).
+4. **`rolo-claude work-matrix show <that report>`** turns any failing row
+   into a suggested action; **`work-matrix apply <report> --yes`** writes
+   the one failure class that maps onto a real
+   `databricks.gateway.<endpoint>` config override, after listing exactly
+   what it's about to write and asking for confirmation.
+5. **`/roles` (in-session) or `rolo-claude stats --roles`** confirm the
+   team's model-per-role choices actually took effect and show what
+   sub-agent work is costing per role (see [ROLES.md](ROLES.md)).
+
+Steps 3-5 are also exactly what to re-run after the workspace's own catalog
+changes (a new endpoint, a renamed one, a model deprecated) -- none of this
+is a one-time setup step.
+
 ## Troubleshooting by HTTP status
 
 | Symptom | Cause | Fix |

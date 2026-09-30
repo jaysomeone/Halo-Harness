@@ -149,6 +149,33 @@ def test_print_mode_never_imports_textual(ctx: Ctx):
 
 
 @test
+def test_debug_flag_writes_a_debug_log_and_is_not_a_not_yet_notice(ctx: Ctx):
+    """Found live: a blank TUI on a Linux box had no log to look at because
+    `--debug` still printed the "not supported yet (planned: H8)" notice.
+    `--debug` now enables DEBUG file logging at <state dir>/bridge.log and
+    says where the log is; `--debug-file PATH` picks the file. Print mode
+    must keep working exactly as before."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--debug"])
+        ctx.check(f"exit 0 with --debug, got {result.returncode} stderr={result.stderr[-300:]!r}", result.returncode == 0)
+        ctx.check("pong still answered", "pong" in result.stdout)
+        ctx.check("no not-yet notice for --debug", "not supported yet" not in result.stderr)
+        ctx.check("stderr names the debug log", "debug log ->" in result.stderr)
+        log = Path(fh["home"]) / ".rolo-claude" / "bridge.log"
+        ctx.check(f"debug log written under the state dir ({log})", log.exists() and log.stat().st_size > 0)
+        ctx.check("log records the debug-enabled line", "debug logging enabled" in log.read_text(encoding="utf-8", errors="replace"))
+        with tempfile.TemporaryDirectory() as d:
+            custom = Path(d) / "sub" / "my.log"
+            result2 = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--debug-file", str(custom)])
+            ctx.check(f"--debug-file: exit 0, got {result2.returncode}", result2.returncode == 0)
+            ctx.check("--debug-file: the chosen file exists", custom.exists() and custom.stat().st_size > 0)
+    finally:
+        mock.stop()
+
+
+@test
 def test_chrome_flag_real_and_prompt_still_runs(ctx: Ctx):
     """H3: `--chrome` is real now (was not-yet) -- it tries to spawn the
     claude-in-chrome MCP server; a short MCP_TIMEOUT keeps this test fast

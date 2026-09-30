@@ -5,6 +5,51 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [1.0.0] - 2026-09-30
+
+rolo-claude 1.0.0: the stable general harness release. Summarises the
+Databricks-first correctness/tooling work from the `V2-brief.md` line
+(`docs/harness/V2-brief.md`) -- per-family request/stream/error correctness
+across every gateway type a workspace can serve (the `0.7.0` line below),
+and matrix-driven fixes plus roles (the `0.8.0` line below) -- and a
+documentation pass on top of them. rolo-claude itself is unchanged in
+scope: still the one general harness driving all four routes (OpenRouter,
+Databricks, the Anthropic API, and a Claude subscription via `cc:`), not
+renamed, with no new console-script alias.
+
+- **0.7.0 (V2a) recap**: per-family correctness for every Databricks gateway
+  dialect the harness routes to (native `anthropic/v1/messages`, `mlflow/
+  v1/chat/completions`, `cursor/v1/chat/completions`, and the universal
+  `/serving-endpoints/<name>/invocations` fallback) -- thinking/reasoning
+  replay per family, usage/cost accounting per type, every error shape
+  (400/401/403/404/413/429/5xx) classified correctly, and the two
+  work-matrix open questions (reasoning replay after a tool call, route
+  split from a stale cache) turned into runnable probes.
+- **0.8.0 (V2b+V2c) recap**: `rolo-claude work-matrix show`/`apply` turns a
+  `doctor --work --probe-all` report into a suggested fix per failing
+  endpoint (and writes the one class of fix that maps onto a real
+  `databricks.gateway.<endpoint>` config key); roles
+  (`orchestrator`/`coder`/`reviewer`/`researcher`/`small`) let a team point
+  different kinds of work at different models via `~/.rolo-claude/
+  config.json`/`team.json`'s own `roles` table, `--role NAME=MODEL`,
+  `Agent(role=...)`, `/roles`, and `stats --roles`.
+- **Docs**: README now documents roles and the work-matrix show/apply
+  workflow (real 0.8.0 features that had shipped without a README mention
+  until now) and points to a separate sibling project,
+  [databricks-claude](https://github.com/roloVibes/databricks-claude), for
+  teams that want a Databricks-only edition; `docs/DATABRICKS.md` gained an
+  end-to-end team-workflow section tying `team.json` -> `init` -> the work
+  matrix -> roles together in one walkthrough; `docs/ROLES.md` cross-links
+  it; `docs/harness/README.md`'s milestone index gained a `V2-brief.md` row.
+- **Naming, for the record**: `docs/harness/V2-brief.md` (kept as originally
+  written -- this project's own build-history convention, see
+  `docs/harness/README.md`'s opening note) describes a planned V2d/V2e phase
+  renaming this project to `databricks-claude`. That did not happen here --
+  the owner instead spun off a **separate** `databricks-claude` repository
+  as its own Databricks-only edition for teams, and rolo-claude stayed the
+  general four-route harness, released as `1.0.0` rather than `2.0.0`.
+- `__version__` -> 1.0.0.
+
 ## [0.8.0] - 2026-09-29
 
 V2b+V2c: matrix-driven fixes tooling and roles. See `docs/harness/V2-brief.md`.

@@ -113,6 +113,14 @@ _REAL_FLAGS = [
     # form gets a clear "not available here" notice instead -- see
     # headless.attach_cli_files.
     (["--file"], dict(dest="file", nargs="+", default=None, metavar="SPEC")),
+    # Real now: `-d/--debug [FILTER]` turns on DEBUG file logging for the
+    # whole run (TUI or print mode) at <state dir>/bridge.log, `--debug-file
+    # PATH` picks the file. Found missing live: a blank TUI on a Linux box
+    # had no log to look at because --debug still printed the "planned"
+    # notice. The optional FILTER value is accepted for Claude Code parity
+    # and ignored (everything is logged).
+    (["-d", "--debug"], dict(dest="debug", nargs="?", const="", default=None)),
+    (["--debug-file"], dict(dest="debug_file", default=None, metavar="PATH")),
 ]
 
 _NOT_YET_FLAGS = [
@@ -124,8 +132,6 @@ _NOT_YET_FLAGS = [
     (["--betas"], dict(dest="betas", nargs="+", default=None, metavar="BETA"), "--betas", "H8"),
     (["--brief"], dict(dest="brief", action="store_true"), "--brief", "H4"),
     (["--cloud"], dict(dest="cloud", nargs="?", const="", default=None), "--cloud", "H8"),
-    (["-d", "--debug"], dict(dest="debug", nargs="?", const="", default=None), "--debug", "H8"),
-    (["--debug-file"], dict(dest="debug_file", default=None, metavar="PATH"), "--debug-file", "H8"),
     (["--environment"], dict(dest="environment_id", default=None, metavar="ENVIRONMENT_ID"), "--environment", "H8"),
     (["--exclude-dynamic-system-prompt-sections"], dict(dest="exclude_dynamic_system_prompt_sections", action="store_true"),
         "--exclude-dynamic-system-prompt-sections", "H5"),
@@ -152,6 +158,41 @@ _NOT_YET_FLAGS = [
     (["--tmux"], dict(dest="tmux", nargs="?", const="default", default=None), "--tmux", "H8"),
     (["-w", "--worktree"], dict(dest="worktree", nargs="?", const="", default=None), "--worktree", "H8"),
 ]
+
+
+def _enable_debug_logging(debug_file: Optional[str]) -> None:
+    """`--debug` / `--debug-file PATH`: DEBUG file logging for the whole run,
+    TUI or print mode. Default file = <state dir>/bridge.log (rotating,
+    secrets redacted by RedactingFormatter); `--debug-file` picks the path.
+    Never raises -- a logging problem must not stop the harness."""
+    import logging
+    try:
+        from rolo_claude.config.paths import bridge_home
+        from rolo_claude.providers.config import RedactingFormatter, setup_logging
+        if debug_file:
+            log_path = Path(debug_file).expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            logger = logging.getLogger("bridge")
+            for hdlr in logger.handlers[:]:
+                logger.removeHandler(hdlr)
+            handler = logging.FileHandler(str(log_path), encoding="utf-8")
+            handler.setFormatter(RedactingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+            logger.addHandler(handler)
+            logger.propagate = False
+        else:
+            logger = setup_logging(bridge_home())
+            log_path = bridge_home() / "bridge.log"
+        logger.setLevel(logging.DEBUG)
+        for name in ("rolo_claude", "rolo_claude.tui", "rolo_claude.agent", "rolo_claude.mcp"):
+            child = logging.getLogger(name)
+            child.setLevel(logging.DEBUG)
+            if not child.handlers:
+                for hdlr in logger.handlers:
+                    child.addHandler(hdlr)
+        logger.debug("debug logging enabled (rolo-claude %s, argv=%s)", __version__, sys.argv[1:])
+        print(f"rolo-claude: debug log -> {log_path}", file=sys.stderr)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"rolo-claude: could not enable debug logging: {e}", file=sys.stderr)
 
 
 def _flag_was_set(value) -> bool:
@@ -300,6 +341,9 @@ def main(argv: Optional[list] = None) -> int:
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
         if _flag_was_set(getattr(args, kwargs["dest"])):
             print_not_yet(label, milestone)
+
+    if _flag_was_set(getattr(args, "debug", None)) or getattr(args, "debug_file", None):
+        _enable_debug_logging(getattr(args, "debug_file", None))
 
     if getattr(args, "role", None):
         # V2c (H15): validated ONCE, here, before either run_print_mode or

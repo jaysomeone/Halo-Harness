@@ -115,16 +115,33 @@ def test_version_bumped_to_0_7_0_and_changelog_has_an_entry(ctx: Ctx):
 
 @test
 def test_version_bumped_to_0_8_0_and_changelog_has_an_entry(ctx: Ctx):
-    """V2 brief (docs/harness/V2-brief.md) V2b+V2c: work-matrix show/apply,
-    the `call_anthropic_native` by-name-invocations fallback fix, roles
-    (orchestrator/coder/reviewer/researcher/small), version bump."""
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 0.8.0, got {__version__!r}", __version__ == "0.8.0")
+    """V2 brief (docs/harness/V2-brief.md) V2b+V2c's own pinning shape, kept
+    exact (checked against the CHANGELOG's own still-present [0.8.0] entry,
+    not the CURRENT version) now that the 1.0.0 docs pass has bumped past
+    it; see `test_version_bumped_to_1_0_0_and_changelog_has_an_entry` below
+    for THIS release's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
-    ctx.check("CHANGELOG.md has a [0.8.0] entry", "[0.8.0]" in changelog)
+    ctx.check("CHANGELOG.md still has a [0.8.0] entry", "[0.8.0]" in changelog)
     entry = changelog.split("[0.8.0]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("work-matrix", "roles", "researcher"):
         ctx.check(f"the [0.8.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_1_0_0_and_changelog_has_an_entry(ctx: Ctx):
+    """rolo-claude 1.0.0: the stable general harness release -- a docs pass
+    summarising the 0.7.0/0.8.0 Databricks-correctness-and-tooling line,
+    NOT a rename and NOT a new console-script alias (a separate
+    `databricks-claude` repository was spun off instead; see the
+    CHANGELOG's own [1.0.0] entry for why the version jumped straight past
+    `2.0.0`)."""
+    from rolo_claude import __version__
+    ctx.check(f"__version__ is 1.0.0, got {__version__!r}", __version__ == "1.0.0")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [1.0.0] entry", "[1.0.0]" in changelog)
+    entry = changelog.split("[1.0.0]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("stable", "databricks-claude", "roles"):
+        ctx.check(f"the [1.0.0] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 if __name__ == "__main__":

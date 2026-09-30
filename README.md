@@ -5,8 +5,13 @@ print mode, and the same config, session and tool conventions as the real
 `claude` CLI, driving models over four routes -- OpenRouter (DeepSeek, Kimi,
 GLM, Qwen and more), Databricks (every endpoint a workspace serves, including
 its Claude endpoints), the Anthropic API, and your own Claude subscription
-through the installed `claude` binary. It reads your existing Claude Code
-configuration (settings, permissions, hooks, CLAUDE.md, memory, skills,
+through the installed `claude` binary. Roles (`orchestrator`/`coder`/
+`reviewer`/`researcher`/`small`, [docs/ROLES.md](docs/ROLES.md)) let a team
+point different kinds of work at different models without hand-editing every
+agent file, and the work-matrix workflow (`doctor --work --probe-all` ->
+`work-matrix show`/`apply`) turns a live probe of your own Databricks
+workspace into a suggested per-endpoint fix. It reads your existing Claude
+Code configuration (settings, permissions, hooks, CLAUDE.md, memory, skills,
 commands, agents, MCP servers) so nothing has to be set up twice. **Kali
 Linux is the primary target platform** -- Windows is the secondary/build
 host. It also ships the older `claude-bridge` proxy (drives the REAL `claude`
@@ -364,6 +369,38 @@ Claude/GLM/Kimi with `--both`; a tool-call check with `--tools`), a table of
 status/latency/output tokens, and a JSON report at `~/.rolo-claude/
 work-matrix-<date>.json` naming endpoints only -- no host, no token -- so it
 can be pasted back for review.
+
+**Turning probes into fixes.** `rolo-claude work-matrix show <report.json>`
+reads that same JSON report and prints one line per failing endpoint with a
+suggested action (a 403 -> get on the VPN; a wrong default gateway path ->
+set `databricks.gateway.<endpoint>`; a family-wide tool-call/reasoning-replay
+issue -> report only, no per-endpoint fix exists); `rolo-claude work-matrix
+apply <report.json> [--yes]` writes the one class of fix that maps onto a
+real `~/.rolo-claude/config.json` key, after listing exactly what it's about
+to write and asking for confirmation. See
+[docs/DATABRICKS.md](docs/DATABRICKS.md)'s own **End-to-end team workflow**
+section for how this fits together with `team.json` and `init`.
+
+**A Databricks-only edition.** If your whole team only ever talks to a
+Databricks workspace, a separate repository,
+[databricks-claude](https://github.com/roloVibes/databricks-claude), is a
+dedicated Databricks-only edition built for that case. rolo-claude itself
+stays the general harness across all four routes above.
+
+### Roles
+
+`orchestrator`/`coder`/`reviewer`/`researcher`/`small` (V2c) let a team
+point different kinds of work at different models -- cheap for exploration,
+strong for planning/review -- without hand-editing every agent file.
+`~/.rolo-claude/config.json`'s (or a shared `team.json`'s) `roles` table
+sets a model per role; built-in agents (`general-purpose`, `Explore`,
+`Researcher`, `Plan`, `Reviewer`, `Coder`) each carry a fixed default role, a
+custom `.claude/agents/*.md` sets one with a `role:` frontmatter key, and
+`--role NAME=MODEL`/`Agent(role=...)` override one for a single run/call.
+`/roles` shows the resolved table (model, endpoint/path type, price) per
+role; `rolo-claude stats --roles` sums sub-agent spend per role. See
+[docs/ROLES.md](docs/ROLES.md) for the full resolution precedence and the
+(documented, never automatic beyond one specific case) cost-aware defaults.
 
 ## Permissions and auto mode
 
