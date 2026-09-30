@@ -45,10 +45,10 @@ def test_project_slug_truncates_long_paths(ctx: Ctx):
 
 @test
 def test_normalize_cwd_forward_slashes_and_drive_upper(ctx: Ctx):
-    n = p.normalize_cwd("C:/Users/user")
-    ctx.check(f"forward slashes, upper drive, got {n!r}", n == "C:/Users/user")
-    n2 = p.normalize_cwd(r"C:/Users/user")
-    ctx.check(f"backslash input also normalized, got {n2!r}", n2 == "C:/Users/user")
+    n = p.normalize_cwd("c:/Users/someone")
+    ctx.check(f"forward slashes, upper drive, got {n!r}", n == "C:/Users/someone")
+    n2 = p.normalize_cwd(r"c:\Users\someone")
+    ctx.check(f"backslash input also normalized, got {n2!r}", n2 == "C:/Users/someone")
 
 
 @test

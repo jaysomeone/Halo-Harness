@@ -395,7 +395,9 @@ def cache_age_seconds() -> Optional[float]:
     written."""
     p = cache_path()
     try:
-        return time.time() - p.stat().st_mtime
+        # Clamp at 0: on Windows a just-written file's mtime can land a few
+        # milliseconds after time.time(), which would read as a negative age.
+        return max(0.0, time.time() - p.stat().st_mtime)
     except OSError:
         return None
 
