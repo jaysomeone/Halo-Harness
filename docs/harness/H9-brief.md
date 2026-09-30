@@ -1,6 +1,6 @@
 # H9 brief — bug hunt, Linux-first acceptance, MCP compatibility matrix, release v0.3.0 (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H8 commit on master with all suites green on Windows and WSL and
 every earlier review's findings closed. Do not commit (Fable commits and tags).
 
@@ -14,14 +14,14 @@ every earlier review's findings closed. Do not commit (Fable commits and tags).
    Bash rule matching with the trailing-` *` wildcard, doctor checks for `rg`/`xclip`/`wl-copy`/
    `$EDITOR`, sampling-table audit, tmux/kitty acceptance).
 
-## Part A — Linux-first acceptance (WSL Ubuntu now; the Kali VM `linux-vm.lan` user `kali` if
-`ssh -i ~/.ssh/linux_vm user@linux-vm.lan` answers — try it; zsh, single-line commands)
+## Part A — Linux-first acceptance (WSL Ubuntu now; the Kali VM `192.0.2.50` user `kali` if
+`ssh -i ~/.ssh/linux_vm user@192.0.2.50` answers — try it; zsh, single-line commands)
 - Fresh clone from GitHub (`git clone https://github.com/roloVibes/rolo-claude`), install via
   `uv tool install --editable .` AND `pip install --user -e .` (PEP 668 note), `rolo-claude --version`,
   `rolo-claude doctor`, `rolo-claude models`, `rolo-claude mcp list` with that box's real `~/.claude`
   (if the VM has none, create a realistic one from `tests/helpers/fake_home.py` under a temp HOME and
   ALSO run against the WSL user's real `~/.claude` copy of rolo's Windows config: rsync
-  `/mnt/c/Users/user/.claude` and `.claude.json` into a temp HOME with paths rewritten — the MCP
+  `~/.claude` and `.claude.json` into a temp HOME with paths rewritten — the MCP
   commands will fail to start because they point at Windows venvs; that is expected, statuses must be
   honest, nothing may crash).
 - All three suites; then every brief's acceptance lines end-to-end on Linux with the real default

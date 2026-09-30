@@ -1,6 +1,6 @@
 # H5 brief — compaction + pruning, native Anthropic routes, reasoning display, cost (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
 — OS-neutral). Baseline = the H4 commit on master, both suites (+ `test_tui.py`) green on Windows
 and WSL. Do not commit.
 

@@ -7,7 +7,7 @@ Verified read-only on rolo's box: Claude Code 2.1.281, Claude in Chrome extensio
 ```
 agent ⇄ MCP/JSON-RPC over stdio ⇄ [claude.exe --claude-in-chrome-mcp]
       ⇄ named pipe \\.\pipe\claude-mcp-browser-bridge-<username>  (POSIX: /tmp/claude-mcp-browser-bridge-<user>/<pid>.sock)
-      ⇄ [claude.exe --chrome-native-host]   (launched by Chrome via C:\Users\user\.claude\chrome\chrome-native-host.bat)
+      ⇄ [claude.exe --chrome-native-host]   (launched by Chrome via ~\.claude\chrome\chrome-native-host.bat)
       ⇄ Chrome native messaging (4-byte little-endian length + UTF-8 JSON, max 1 MiB) ⇄ extension service worker ⇄ pages
 ```
 - Claude Code registers an in-process MCP server definition
@@ -24,7 +24,7 @@ agent ⇄ MCP/JSON-RPC over stdio ⇄ [claude.exe --claude-in-chrome-mcp]
   uid check) plus the extension's own per-site permission prompts.
 - Registry (HKCU, Chrome + Edge + Brave + Chromium + Vivaldi):
   `com.anthropic.claude_code_browser_extension` → manifest
-  `C:\Users\user\AppData\Roaming\Claude Code\ChromeNativeHost\com.anthropic.claude_code_browser_extension.json`
+  `~\AppData\Roaming\Claude Code\ChromeNativeHost\com.anthropic.claude_code_browser_extension.json`
   (`type: stdio`, `path: …\.claude\chrome\chrome-native-host.bat`, `allowed_origins:
   ["chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/"]`). The Claude Desktop app has a separate
   host (`com.anthropic.claude_browser_extension`, standalone exe, Chrome only) using a sealed/paired

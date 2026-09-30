@@ -1,6 +1,6 @@
 # H3 brief — MCP client, frozen catalog + lazy load, `mcp` CLI, Claude in Chrome + Playwright (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
 — OS-neutral, `/bin/bash` on Linux). Baseline = the H2b commit on master with both suites green on
 Windows and WSL. Do not commit.
 

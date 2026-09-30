@@ -1,6 +1,6 @@
 # H5b brief — fix pass for the H4/H5/H3c review + H6/U5 must-dos (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
 primary platform**, so every fix must be OS-neutral and tested for the Linux code paths). Baseline =
 commit `c5a62fe` ("H6 + U5") on master: `python test_bridge.py` 97/97, `python tests/run_all.py`
 1111 (1107 passed, 4 skipped), `python test_tui.py` 37/37, green on Windows and WSL Ubuntu.

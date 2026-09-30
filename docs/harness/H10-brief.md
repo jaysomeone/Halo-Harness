@@ -5,7 +5,7 @@ Approved by rolo 2026-09-24 after `reports/Self improving agent harnesses.md` ("
 (L1 memory/rules + L3 skills). NOT approved, do not build: settings proposals (L2), prompt
 optimisation (L4), code self-edits (L5), any automatic promotion.
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H9 commit (`v0.3.0`) on master, all suites green on Windows and
 WSL. You are the only worker on the tree. Do not commit (Fable verifies and commits).
 

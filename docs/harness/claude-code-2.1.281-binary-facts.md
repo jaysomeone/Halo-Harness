@@ -137,7 +137,7 @@ safety heuristics are NOT reproduced).
 - `mcp list`: "Checking MCP server health…" then per server `${name}: ${url} (SSE|HTTP) - ${status}`
   or `${name}: ${command} ${args} - ${status}`; statuses `✔ Connected`, `! Needs authentication`,
   `! Connected · tools fetch failed`, `- Not configured`, `✗ Failed to connect`, `✗ Connection error`,
-  `⏸ Pending approval`. Example: `codriver: node C:\Users\user\codriver-mcp\dist\index.js - ✔ Connected`.
+  `⏸ Pending approval`. Example: `codriver: node ~\codriver-mcp\dist\index.js - ✔ Connected`.
 
 ## 10. Hook payloads and decisions
 - Base fields on every event: `session_id, transcript_path, cwd, scratchpad_dir?, prompt_id?,

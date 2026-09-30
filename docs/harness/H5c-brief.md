@@ -1,6 +1,6 @@
 # H5c brief — fix pass for the H5b review (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H8 commit on master, all three suites green on Windows and WSL.
 You are the ONLY worker on the tree. Do not commit (Fable verifies and commits).
 

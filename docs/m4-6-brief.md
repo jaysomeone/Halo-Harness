@@ -1,6 +1,6 @@
 # Milestones 4–6 brief (Databricks live route, Claude passthrough, overflow/compaction, reasoning log, probe)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\claude-bridge\` — `bridge.py` (foundation M0–3 done by Worker A2),
+Repo: `~\Documents\vibes\appDev\claude-bridge\` — `bridge.py` (foundation M0–3 done by Worker A2),
 `test_bridge.py` (46 black-box tests, keep green), `docs/design-review-2026-09-23.md` (items 6, 7, 12, 13 are yours).
 Home box has NO Databricks access; everything Databricks is verified hermetically here (mock upstream) and live
 at work on the VPN (Linux) via `--probe`.
@@ -58,7 +58,7 @@ at work on the VPN (Linux) via `--probe`.
   mocks (`BRIDGE_OPENROUTER_BASE_URL` + `BRIDGE_DBX_BASE_URL`), models.json → launcher env values.
 
 ## Acceptance at home (hermetic) — `python test_bridge.py; echo exit=$?` → 0; `python bridge.py --config` with
-`BRIDGE_DBX_BASE_URL=https://example.cloud.databricks.com/ai-gateway/anthropic BRIDGE_DBX_TOKEN=x` shows the
+`BRIDGE_DBX_BASE_URL=https://your-workspace.cloud.databricks.com/ai-gateway/anthropic BRIDGE_DBX_TOKEN=x` shows the
 derived root + both routes; `python bridge.py --probe` reports Databricks unreachable with the VPN hint and lists
 OpenRouter models into `<state>/models.json`.
 ## Acceptance at work (VPN, Linux) — `bridge.py --probe` lists endpoints; `bin/claude-bridge --model

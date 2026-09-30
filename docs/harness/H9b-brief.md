@@ -1,6 +1,6 @@
 # H9b brief — fix pass for the whole-tree review, then v0.3.0 (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H9 commit on master, all three suites green on Windows and WSL.
 You are the ONLY worker on the tree. Do not commit, push or tag (Fable verifies, commits and tags).
 
@@ -59,7 +59,7 @@ finding involves the loop)
   updated with the re-run lines your fixes touch.
 
 ## Tests
-Suites exit 0 on Windows AND WSL (`export PYTHONPATH="C:/Users/user/Documents/vibes/appDev/rolo-claude"`;
+Suites exit 0 on Windows AND WSL (`export PYTHONPATH="~/Documents/vibes/appDev/rolo-claude"`;
 WSL recipe in `docs/harness/INSTALL.md`, venv `~/rolo-claude-wt-venv`). Linux failures fixed for
 real, never skipped. `python -X dev -W error::ResourceWarning tests/run_all.py` stays clean.
 

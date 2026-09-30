@@ -19,7 +19,7 @@ sections, because the H9 brief asks for one explicitly).
 - **Base commit**: `d653a78` ("H5c: close the remaining 19 findings of the
   H5b review") -- working tree only, nothing committed by this pass
 - **Environment**: Windows 11 (build/test host) + WSL Ubuntu (`~/rolo-
-  claude-wt`, `~/rolo-claude-wt-venv`); the Kali VM (`linux-vm.lan`) was
+  claude-wt`, `~/rolo-claude-wt-venv`); the Kali VM (`192.0.2.50`) was
   unreachable on the first retry at the start of this pass (connection
   timed out) -- see "Kali VM" below for the end-of-pass retry; OpenRouter
   key configured (real DeepSeek V4.1 Flash used for every "live" row
@@ -88,7 +88,7 @@ transferred with tar-over-ssh and the install paths exercised from it); the
 native-Linux `--playwright` path (WSL has no native Node -- exercised on the
 Kali VM instead, see below); `ant:`/Databricks routes (no key/VPN).
 
-### Kali VM (`linux-vm.lan`, the primary platform -- reached on the second retry)
+### Kali VM (`192.0.2.50`, the primary platform -- reached on the second retry)
 
 | Milestone | Command | Expected | Observed | Pass/Fail | Platform |
 |---|---|---|---|---|---|
@@ -100,7 +100,7 @@ Kali VM instead, see below); `ant:`/Databricks routes (no key/VPN).
 | H9 doctor | `rolo-claude doctor` against the VM's REAL `~/.claude` | honest, no crash | exit 0: real `~/.claude`/`.claude.json` found, `claude=~/.local/bin/claude` + Chrome native host under `~/.config/google-chrome/NativeMessagingHosts`, node/npx OK, rg WARN, `$EDITOR` WARN, bash OK, **a real `claude plugin install`ed MCP server discovered (`plugin_claude-mem_mcp-search`)**, Linux (Kali) recognised, xclip found | PASS | Kali |
 | H9 models | `rolo-claude models` | lists or an honest empty table | empty OpenRouter table (no key in the login env), models.dev cached (223 providers) | PASS (see deferred: empty-table wording) | Kali |
 | H9 mcp list | `rolo-claude mcp list` against the VM's real 4 user servers + 1 plugin server | honest per-server health, no crash | exit 0: `caido-mcp-extended` (npx tsx), `mcp-kali-server`, `plugin_claude-mem_mcp-search` Connected; `caido` (binary absent) and `vibe-hacking` (a real `type: http` server, nothing listening on :3333) honestly Failed | PASS | Kali |
-| H9 vault | grep `/home/user/Documents/vibes/` for claude-bridge/claude_bridge/rolo-claude | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
+| H9 vault | grep `~/Documents/vibes/` for claude-bridge/claude_bridge/rolo-claude | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
 | Suites + live lines | `~/vm_suites.sh`, `~/vm_live.sh` (venv; key handed over stdin, never on a command line) | green; pong / line count / Write-Edit-Bash / proxy pong / MCP call / --chrome / --playwright / stream-json / config untouched | see "Kali VM" at the end of this file | -- | Kali |
 
 ## Part B -- MCP compatibility matrix
@@ -326,7 +326,7 @@ fixed in this pass is listed under "Deferred / not fixed" below.)_
 
 ## Kali VM
 
-First retry (start of this pass): `ssh -i ~/.ssh/linux_vm user@linux-vm.lan` -- connection timed
+First retry (start of this pass): `ssh -i ~/.ssh/linux_vm user@192.0.2.50` -- connection timed
 out. Fable's own retry shortly after **succeeded** (`Linux kali 7.1.5+kali-amd64`, kernel 7.1.5,
 Python 3.13.15, Kali GNU/Linux Rolling 2026.3), with `uv`/`claude` found at `~/.local/bin/` once
 PATH was seeded manually (non-interactive ssh doesn't load `.zshrc`). Both worker sessions then
@@ -360,7 +360,7 @@ used it as the primary Linux target for the rest of the pass:
   behaviour, not something either harness's code does) -- rolo-claude's own write path to those
   files is unchanged (`permissions.add_allow_rule`, only on an explicit "always allow" answer,
   never triggered by a `-p` run).
-- **Vault README pointer**: searched `/home/user/Documents/vibes/` (content grep for
+- **Vault README pointer**: searched `~/Documents/vibes/` (content grep for
   "claude-bridge"/"claude_bridge"/"rolo-claude", case-insensitive, plus a filename search),
   confirmed independently by both worker sessions -- **no file describing claude-bridge exists
   anywhere in that vault**. Nothing to replace, nothing written.
@@ -408,7 +408,7 @@ except by this pass's own edits (no commit was made by either worker; still no t
 live `/mnt/c/...` mount of the SAME working tree via `PYTHONPATH`, NOT the separate, stale
 `~/rolo-claude-wt` checkout that predates this pass -- that checkout's own editable pip install
 was silently shadowing the live tree and had to be `pip uninstall`-ed first, see "gotchas" below);
-the Kali VM (`linux-vm.lan`, reachable this time), synced via a `tar` pipe over `ssh` into a
+the Kali VM (`192.0.2.50`, reachable this time), synced via a `tar` pipe over `ssh` into a
 fresh `~/rolo-claude-h9b/rolo-claude` (the repo is private with no stored credentials on the VM,
 same limitation the original H9 pass hit), with the SAME stale-editable-install gotcha fixed the
 same way.

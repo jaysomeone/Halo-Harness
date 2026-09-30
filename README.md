@@ -54,6 +54,78 @@ permission decisions are pure grammar (deny/ask/allow rules + mode), the
 same as Claude Code's own, never an extra layer of "is this dangerous"
 judgment.
 
+**What it is not**: a fork of Claude Code's own source (none of it is
+reused -- the compatibility is behavioral, built by reading its documented
+config/permission/hook conventions); a hosted service (everything runs on
+your own machine, talking straight to whichever provider you configured);
+or dependent on an Anthropic account for its open-weight routes (`or:`/
+`dbx:` need no Anthropic relationship at all -- only `ant:`/`cc:` do, and
+`cc:` reuses a subscription login you already have rather than creating a
+new dependency).
+
+## A 10-minute walkthrough
+
+```sh
+rolo-claude init                    # pick a preset, set credentials, doctor, live pong
+rolo-claude                         # full-screen TUI
+```
+
+1. **`rolo-claude init`** picks `home` (OpenRouter), `work` (Databricks), or
+   `claude` (your subscription) automatically from what it finds already
+   configured, asks for the one credential it's missing, sets a default
+   model, and ends with a real "pong" from that model -- see
+   `docs/COMMANDS.md`'s `init` section for exactly what each step reads and
+   writes.
+2. **The first session** opens with an empty prompt line and a status bar
+   showing the model, permission mode, and MCP server count. Type a prompt
+   and press `Enter`.
+3. **`/model`** opens a picker of every model this box can currently reach
+   (OpenRouter's cache, Databricks' own discovered endpoints grouped by
+   family, and your subscription's nine names if logged in); pick one, or
+   type `/model or:deepseek/deepseek-v3.2` directly.
+4. **A tool call with a permission card**: ask for something that edits a
+   file (`"add a .gitignore entry for *.log"`). In the default permission
+   mode, an `Edit`/`Write` inside your working directory shows a
+   `PermissionCard` -- `1` allow once, `2` allow for the rest of this
+   session, `3` allow always (writes a rule to
+   `.claude/settings.local.json`), `4`/`Esc` deny (optionally typing one
+   line telling the model what to do differently first). `Shift+Tab`
+   cycles into `auto` mode any time you'd rather not be asked at all --
+   auto mode allows everything except a rule *you* wrote yourself, never a
+   built-in judgment call.
+5. **Steering**: type another line and hit `Enter` while a turn is still
+   running -- it queues and is woven in at the next safe point (a chunk
+   boundary, or right after the tool call in progress finishes), shown as
+   "steering..." until then. It never needs you to wait for the turn to
+   finish first, and it never answers a permission/question card that
+   happens to be pending at the same moment.
+6. **`/resume`** (or `-r` on the command line next time) opens a picker of
+   recent sessions for this directory, live-filtered as you type by title,
+   first prompt, cwd, or model.
+7. **`/stats --models`** aggregates tokens/cost/tool-error-rate/repair-hit-
+   rate across every session logged for this project -- the same data
+   `rolo-claude stats --models` prints headlessly (`docs/COMMANDS.md`).
+8. **`/improve`** scans recent sessions for repeated friction (tool errors,
+   repair-layer hits, corrections you typed), drafts up to eight candidate
+   memory/rule/skill files with one model call, and reviews them one card
+   at a time -- `a` apply, `e` edit first, `s` skip, `d` dismiss forever,
+   `q` stop. Nothing is written to disk until you say so.
+
+## Documentation
+
+| Doc | Covers |
+|---|---|
+| [docs/COMMANDS.md](docs/COMMANDS.md) | every CLI subcommand and flag, with worked examples |
+| [docs/SLASH-COMMANDS.md](docs/SLASH-COMMANDS.md) | every `/command`, key binding, chord, and `@file`/`!cmd` prefix |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the session log, request derivation, providers, permissions, hooks, MCP, compaction, sub-agents, the `cc:` bridge, telemetry, the TUI event model |
+| [docs/CONFIG.md](docs/CONFIG.md) | exactly which Claude Code files are read (and how), rolo-claude's own files, every environment variable |
+| [docs/MODELS.md](docs/MODELS.md) | model reference forms, per-family request-shaping rules, catalogs, pricing |
+| [docs/DATABRICKS.md](docs/DATABRICKS.md) | the work-box setup, discovery, routing, team onboarding, troubleshooting by HTTP status |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | symptom -> `doctor` line -> fix |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | repo layout, the three test suites, how to extend the harness |
+| [docs/harness/README.md](docs/harness/README.md) | the build history (milestone briefs, reviews, acceptance records) |
+| [docs/harness/INSTALL.md](docs/harness/INSTALL.md) | the full install walkthrough (PEP 668, offline work-box, terminal notes) |
+
 ## Install
 
 See `docs/harness/INSTALL.md` for the full walkthrough (PEP 668/externally-
@@ -295,10 +367,14 @@ Seven modes, same names and mode-table semantics as Claude Code:
 `plan`, `dontAsk`, `auto`, `bypassPermissions`. Grammar and modes ONLY --
 **no classifier, no destructive-command list, no protected-path list, no
 security-tool flagging, anywhere**: `auto` allows everything not matched by
-an explicit deny/ask rule; `bypassPermissions` allows everything not
-matched by a deny rule; the manual modes keep Claude Code's own semantics
-because the user chose them deliberately, with no extra heuristics bolted
-on. Rules are the same grammar Claude Code accepts (`Bash(git status:*)`,
+an explicit deny/ask rule or blocked by the user's own hook;
+`bypassPermissions` allows everything not matched by a deny rule (hooks
+still apply to both -- a `PreToolUse`/`PermissionRequest` hook the user
+configured runs after every decision, in every mode, and can still block
+or rewrite a call `auto` already allowed); the manual modes keep Claude
+Code's own semantics because the user chose them deliberately, with no
+extra heuristics bolted on. Rules are the same grammar Claude Code accepts
+(`Bash(git status:*)`,
 path globs, `mcp__server`/`mcp__server__tool`, WebFetch domains, etc.),
 read from `permissions.allow`/`.ask`/`.deny` in the same settings chain,
 plus `--allowedTools`/`--disallowedTools`/`--dangerously-skip-permissions`.

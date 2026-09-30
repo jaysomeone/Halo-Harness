@@ -1,6 +1,6 @@
 # U5 brief — TUI polish + OpenCode UX adoptions (rolo-claude)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
 — the TUI must be excellent in xterm/kitty/tmux over SSH). Baseline = the H6 commit on master, all
 suites green on Windows and WSL. Do not commit.
 

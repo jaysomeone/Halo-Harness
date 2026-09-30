@@ -101,7 +101,7 @@ cd C:\path\to\rolo-claude
 uv tool install --editable .
 ```
 
-Produces `%USERPROFILE%\.local\bin\rolo-claude.exe`. `C:\Users\user\bin\rolo-claude.cmd`
+Produces `%USERPROFILE%\.local\bin\rolo-claude.exe`. `~\bin\rolo-claude.cmd`
 is a PATH wrapper that prefers that exe and falls back to
 `python -m rolo_claude` from this checkout when the exe isn't installed yet --
 copy/adapt it for another machine (a teammate substitutes their own repo
@@ -337,7 +337,7 @@ once inside WSL to create the venv:
 
 ```sh
 wsl -e bash -lc 'rsync -a --delete --exclude .git --exclude __pycache__ --exclude wheels \
-  /mnt/c/Users/user/Documents/vibes/appDev/rolo-claude/ ~/rolo-claude-wt/ \
+  ~/Documents/vibes/appDev/rolo-claude/ ~/rolo-claude-wt/ \
   && cd ~/rolo-claude-wt && source ~/rolo-claude-wt-venv/bin/activate \
   && python3 tests/run_all.py | tail -5 \
   && python3 test_bridge.py | tail -5 \

@@ -1,6 +1,6 @@
 # H1 brief — provider layer, session log, invariants, dsh-shaped loop (rolo-claude 0.3.x)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows 11, `python` 3.11, Git Bash).
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows 11, `python` 3.11, Git Bash).
 Baseline (commit `4a4ca04`): `python test_bridge.py` → 97 green (proxy), `python tests/run_all.py`
 → 102 green (harness). Keep both green. Do not commit.
 
@@ -109,7 +109,7 @@ number of lines"`); profile resolution for every seeded model_table row; models.
 ## Acceptance (paste verbatim, trimmed)
 1. `python test_bridge.py 2>&1 | tail -2; echo exit=$?` → 97 green. `python tests/run_all.py 2>&1 |
    tail -2; echo exit=$?` → ≥ 162 green.
-2. Live (home): `rolo-claude -p "read C:\Users\user\Documents\vibes\appDev\rolo-claude\README.md and
+2. Live (home): `rolo-claude -p "read ~\Documents\vibes\appDev\rolo-claude\README.md and
    reply with only the number of lines" --model <default V4 id>` → the correct count (compare
    `wc -l`); the same with `--model or:deepseek/deepseek-v3.2` (pinned providers) → same count; the
    memory question from H0 still answers; `--output-format json` shape unchanged; `rolo-claude

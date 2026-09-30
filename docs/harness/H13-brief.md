@@ -1,7 +1,7 @@
 # H13 brief — RECOMMENDATIONS P1: lazy MCP by default, inline images, /resume search, family baselines
 
 rolo (2026-09-29): "go ahead with the lazy MCP and the P1 items". Source: `docs/harness/
-RECOMMENDATIONS.md` §3, §4, §7 (P1). Repo `C:\Users\user\Documents\vibes\appDev\rolo-claude\`
+RECOMMENDATIONS.md` §3, §4, §7 (P1). Repo `~\Documents\vibes\appDev\rolo-claude\`
 (Windows build host; **Kali Linux is primary**). Baseline = tag `v0.4.1` (`9d1ed9d`): run_all 1629,
 test_bridge 97, test_tui 47, green on Windows, WSL and the Kali VM. Only worker on the tree; no
 commits; no sub-agents that edit files. The repo is about to become PUBLIC: no home paths, LAN

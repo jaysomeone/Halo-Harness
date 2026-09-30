@@ -1,6 +1,6 @@
 # U2 brief — the Textual TUI (rolo-claude launches like `claude`)
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
 — the TUI must run in a Linux terminal first; Windows Terminal second). Baseline = the H3 commit on
 master, both suites green on Windows and WSL. Do not commit.
 
@@ -22,7 +22,7 @@ master, both suites green on Windows and WSL. Do not commit.
 A. **Packaging**: add `textual==8.2.8` + `rich>=14,<16` to `pyproject.toml` dependencies (mcp is
    already there from H3), `requirements.lock` via `uv pip compile`, `uv tool install --editable .`
    on the Windows host producing `%USERPROFILE%\.local\bin\rolo-claude.exe`; update
-   `C:\Users\user\bin\rolo-claude.cmd` to prefer that exe and fall back to `python -m rolo_claude`;
+   `~\bin\rolo-claude.cmd` to prefer that exe and fall back to `python -m rolo_claude`;
    `bin/rolo-claude` (POSIX) mirrors it (`~/.local/bin/rolo-claude` else `python3 -m rolo_claude`);
    for the Kali box document `pip install --user -e .` / `uv tool install`; textual imported only
    inside the TUI entry point.

@@ -9,7 +9,8 @@ release, not a separate published version.
 
 H14: Databricks work-config parity -- zero-setup at work from Claude Code's
 own settings, a generic family x api_type routing table (no vendored
-endpoint list), doctor accuracy, team onboarding, and the work matrix.
+endpoint list), doctor accuracy, team onboarding, and the work matrix. See
+`docs/harness/H14-brief.md`.
 
 - **Host/gateway split (scope A)**: `resolve_databricks()` now always
   returns the bare workspace root as `.host` -- a gateway path riding along
@@ -83,7 +84,7 @@ endpoint list), doctor accuracy, team onboarding, and the work matrix.
 
 H13 (RECOMMENDATIONS.md P1): lazy MCP start by default, inline images in the
 terminal, `/resume` search, and the first live family-baseline pass for
-GLM-5.3/Qwen/MiniMax/Kimi K2.7-code/Kimi K3.
+GLM-5.3/Qwen/MiniMax/Kimi K2.7-code/Kimi K3. See `docs/harness/H13-brief.md`.
 
 - **Lazy MCP by default**: every configured server is now lazy unless it's
   `alwaysLoad` or explicitly `"mcpLazy": false` (per-server, or globally via
@@ -134,7 +135,8 @@ GLM-5.3/Qwen/MiniMax/Kimi K2.7-code/Kimi K3.
 
 H12 (RECOMMENDATIONS.md P0): the whole first run in one command, a
 prescriptive `doctor`, and the cheapest fix for DeepSeek V4.1 Flash's own
-telemetry-observed 8% Edit "Found multiple matches" rate.
+telemetry-observed 8% Edit "Found multiple matches" rate. See
+`docs/harness/H12-brief.md`.
 
 - **`rolo-claude init`** (`rolo_claude/init_cli.py`): picks a preset
   (`home`/OpenRouter, `work`/Databricks, `claude`/your subscription --
@@ -173,7 +175,8 @@ telemetry-observed 8% Edit "Found multiple matches" rate.
 
 H11: Claude models through the user's own Claude subscription (`cc:` route)
 plus first-class `ant:` aliases for the same six models via
-`ANTHROPIC_API_KEY`. Binding constraint: rolo-claude never reads, copies or
+`ANTHROPIC_API_KEY`. See `docs/harness/H11-brief.md` (and the H11b fix-pass
+review below, `docs/harness/review-findings-h11.md`). Binding constraint: rolo-claude never reads, copies or
 replays Claude Code's OAuth credentials (`~/.claude/.credentials.json`) and
 never calls `api.anthropic.com` with them -- the subscription is used the one
 legitimate way, by driving the installed `claude` binary headlessly under the
@@ -307,7 +310,7 @@ with the rest of the findings:
 ## [0.3.1] - 2026-09-25
 
 H10: free L0 telemetry from the existing session logs, plus a human-gated
-`/improve` (L1 memory/rules + L3 skills). Nothing here lets a model edit its
+`/improve` (L1 memory/rules + L3 skills). See `docs/harness/H10-brief.md`. Nothing here lets a model edit its
 own instructions silently -- every written artifact is approved on a card
 or an explicit headless `--apply`; provenance is information shown on the
 card, never a block or a classifier; nothing drafts or writes in `-p`;
@@ -365,7 +368,8 @@ primary target platform; Windows is the build/test host. The original
 `claude-bridge` proxy (drives the real `claude` binary against the same
 providers) is kept unchanged as the `rolo-claude proxy` subcommand.
 
-Built up over milestones H0-H9 (plus U0/U2/U5 for the TUI):
+Built up over milestones H0-H9 (plus U0/U2/U5 for the TUI) -- see
+`docs/harness/README.md` for the full per-milestone brief/review index:
 
 - **H0-H1 -- foundation and provider layer**: package split from the
   `bridge.py` proxy; per-provider compat profiles (OpenAI-chat dialect +

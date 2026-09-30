@@ -12,7 +12,7 @@ binary is the provider.** rolo-claude drives it headlessly under the user's own 
 keeps its tools, permissions, hooks, cards, session log and telemetry. Pay-as-you-go access to the
 same models via `ANTHROPIC_API_KEY` is the existing `ant:` route, which gets first-class aliases.
 
-Repo: `C:\Users\user\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is
+Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is
 primary**). Baseline = tag `v0.3.1` (+ the RECOMMENDATIONS docs commit): run_all 1507, test_bridge
 97, test_tui 46, green on Windows, WSL and the Kali VM. Only worker on the tree; no commits.
 

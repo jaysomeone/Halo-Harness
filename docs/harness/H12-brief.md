@@ -1,7 +1,7 @@
 # H12 brief — RECOMMENDATIONS P0: `rolo-claude init`, prescriptive doctor, Edit context line per family, README quick start
 
 rolo (2026-09-28): "go ahead with the P0 items, start with rolo-claude init". Source: `docs/harness/
-RECOMMENDATIONS.md` §2, §3, §4 and §7 (P0). Repo `C:\Users\user\Documents\vibes\appDev\rolo-claude\`
+RECOMMENDATIONS.md` §2, §3, §4 and §7 (P0). Repo `~\Documents\vibes\appDev\rolo-claude\`
 (Windows build host; **Kali Linux is primary**). Baseline = tag `v0.4.0` (`57eb133`): run_all 1585,
 test_bridge 97, test_tui 47, green on Windows, WSL and the Kali VM. Only worker on the tree; no
 commits; no sub-agents that edit files.
