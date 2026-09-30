@@ -54,6 +54,17 @@ def _new_model_counters() -> dict:
     }
 
 
+def _new_role_counters() -> dict:
+    """V2c (H15) `stats --roles`: a rolled-up sub-agent usage node
+    (`agent/log.py::append_usage(role=...)`) carries no per-turn tool/
+    repair/latency breakdown of its own (that detail lives in the CHILD's
+    own, separately-globbed `subagents/*.jsonl`, deliberately never
+    double-counted here -- see `stats_cli.py`'s own docstring) -- just the
+    spend `_rollup_child_cost_into_parent` already summed for that one
+    Agent-tool call."""
+    return {"calls": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0, "cost_usd": 0.0}
+
+
 def _new_tool_counters() -> dict:
     return {"calls": 0, "errors": 0, "ms_sum": 0.0, "ms_n": 0, "bytes_sum": 0, "spilled": 0,
             "error_classes": {c: 0 for c in ERROR_CLASSES}}
@@ -132,6 +143,11 @@ class SessionSummary:
     corrupt_lines: int = 0
     turns: int = 0
     models: dict = field(default_factory=dict)
+    # V2c (H15): role name -> `_new_role_counters()` -- `stats --roles`'s
+    # own per-role spend aggregation. Absent from a pre-V2c cached entry
+    # (`from_dict`'s "known fields" filter tolerates that already); a
+    # session with no role-bearing sub-agent call simply leaves this `{}`.
+    roles: dict = field(default_factory=dict)
     tools: dict = field(default_factory=dict)
     error_examples: dict = field(default_factory=dict)  # error_class -> "sid#seq"
 
@@ -276,6 +292,19 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                 status = node.get("status") or "ok"
                 if status in b["status_counts"]:
                     b["status_counts"][status] += 1
+                # V2c (H15): a sub-agent rollup's own `role` tag (absent on
+                # every ordinary direct-model-call usage node, and on any
+                # pre-V2c log) -- `stats --roles`'s own per-role spend.
+                role = node.get("role")
+                if role:
+                    rb = s.roles.setdefault(role, _new_role_counters())
+                    rb["calls"] += 1
+                    rb["tokens_in"] += int(usage.get("input_tokens") or 0)
+                    rb["tokens_out"] += int(usage.get("output_tokens") or 0)
+                    rb["tokens_cached"] += (int(usage.get("cache_read_input_tokens") or 0)
+                                             + int(usage.get("cache_creation_input_tokens") or 0))
+                    if isinstance(cost, (int, float)):
+                        rb["cost_usd"] += cost
         elif ntype == "assistant":
             if node.get("stop_reason") == "interrupted":
                 b = model_bucket()
@@ -562,6 +591,30 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
     # already covers the useful cross-session signal, so `turns` above is
     # intentionally left as a per-model placeholder (None) rather than
     # double-counting a session's turns once per model it happened to use.
+    return rows
+
+
+def aggregate_by_role(summaries: "list[SessionSummary]") -> "list[dict]":
+    """V2c (H15) `stats --roles`: rows per role name, sorted, sessions/
+    calls/tokens/cost -- summed straight from each session's own `s.roles`
+    (populated only from a rolled-up sub-agent usage node's `role` tag;
+    see `_summarize_nodes`)."""
+    merged: dict = {}
+    sessions_per_role: dict = {}
+    for s in summaries:
+        for role, b in s.roles.items():
+            dest = merged.setdefault(role, _new_role_counters())
+            sessions_per_role.setdefault(role, set()).add(s.session_id)
+            for field_name in ("calls", "tokens_in", "tokens_out", "tokens_cached", "cost_usd"):
+                dest[field_name] += b.get(field_name, 0)
+    rows = []
+    for role in sorted(merged):
+        c = merged[role]
+        rows.append({
+            "role": role, "sessions": len(sessions_per_role.get(role, ())), "calls": c["calls"],
+            "tokens_in": c["tokens_in"], "tokens_out": c["tokens_out"], "tokens_cached": c["tokens_cached"],
+            "cost_usd": round(c["cost_usd"], 4),
+        })
     return rows
 
 

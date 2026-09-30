@@ -61,6 +61,7 @@ def _gather_real_flags() -> "dict[str, set]":
     built yet, so they show up in `--help` exactly like a real one)."""
     from rolo_claude import cli as cli_mod
     from rolo_claude import mcp_cli, catalog_cli, doctor as doctor_mod, stats_cli, export_cli, improve_cli, init_cli
+    from rolo_claude import work_matrix as work_matrix_mod
     from rolo_claude.config_cli import cmd_config
     import bridge
 
@@ -80,13 +81,17 @@ def _gather_real_flags() -> "dict[str, set]":
     out["rolo-claude improve"] = _flags_in(_capture(improve_cli.cmd_improve, ["--help"]))
     out["rolo-claude init"] = _flags_in(_capture(init_cli.cmd_init, ["--help"]))
     out["rolo-claude proxy"] = _flags_in(_capture(bridge.main, ["--help"]))
+    out["rolo-claude work-matrix"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["--help"]))
+    out["rolo-claude work-matrix show"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["show", "--help"]))
+    out["rolo-claude work-matrix apply"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["apply", "--help"]))
     return out
 
 
 @test
 def test_every_subcommand_is_documented(ctx: Ctx):
     text = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8")
-    for name in ("init", "doctor", "models", "mcp", "config", "stats", "export", "improve", "proxy"):
+    for name in ("init", "doctor", "models", "mcp", "config", "stats", "export", "improve", "proxy",
+                 "work-matrix"):
         label = f"rolo-claude {name}"
         ctx.check(f"COMMANDS.md documents {label!r} (as a heading)",
                   re.search(rf"^#{{1,3}}\s+.*`?{re.escape(label)}`?", text, re.MULTILINE) is not None)

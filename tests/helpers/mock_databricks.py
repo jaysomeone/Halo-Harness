@@ -544,8 +544,17 @@ class _Handler(BaseHTTPRequestHandler):
         # shape entirely (no OpenAI-chat allowlist applies) -- served here,
         # never falling into the openai-chat scenario dispatch below, so ONE
         # mock server can answer both dialects for the work-matrix probe.
-        if self.path.startswith("/ai-gateway/anthropic/v1/messages") or \
-                self.path.startswith("/serving-endpoints/anthropic/v1/messages"):
+        # V2b fix: the by-name invocations fallback (`/serving-endpoints/
+        # <real-endpoint-name>/invocations`, http.py's own
+        # `call_anthropic_native`) can land on the SAME url shape an
+        # openai-chat invocations call uses -- dispatched here by BODY
+        # shape instead of a hardcoded literal endpoint name ("anthropic"
+        # is never a real one): a top-level `system` field (string or a
+        # list of blocks) is Anthropic-Messages-only -- the openai-chat
+        # dialect always folds system into `messages[0]` instead, and
+        # `system` is not on `DATABRICKS_BODY_ALLOWLIST`.
+        if self.path.startswith("/ai-gateway/anthropic/v1/messages") or (
+                "/invocations" in self.path and isinstance(body.get("system"), (list, str))):
             _dispatch_anthropic(self, body)
             return
 

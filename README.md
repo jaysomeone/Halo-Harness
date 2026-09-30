@@ -124,7 +124,8 @@ rolo-claude                         # full-screen TUI
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the session log, request derivation, providers, permissions, hooks, MCP, compaction, sub-agents, the `cc:` bridge, telemetry, the TUI event model |
 | [docs/CONFIG.md](docs/CONFIG.md) | exactly which Claude Code files are read (and how), rolo-claude's own files, every environment variable |
 | [docs/MODELS.md](docs/MODELS.md) | model reference forms, per-family request-shaping rules, catalogs, pricing |
-| [docs/DATABRICKS.md](docs/DATABRICKS.md) | the work-box setup, discovery, routing, team onboarding, troubleshooting by HTTP status |
+| [docs/DATABRICKS.md](docs/DATABRICKS.md) | the work-box setup, discovery, routing, team onboarding, troubleshooting by HTTP status, the work-matrix fixes tooling |
+| [docs/ROLES.md](docs/ROLES.md) | orchestrator/coder/reviewer/researcher/small, resolution precedence, `--role`, `/roles`, `stats --roles` |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | symptom -> `doctor` line -> fix |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | repo layout, the three test suites, how to extend the harness |
 | [docs/harness/README.md](docs/harness/README.md) | the build history (milestone briefs, reviews, acceptance records) |

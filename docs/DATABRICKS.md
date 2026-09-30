@@ -209,6 +209,30 @@ same JSON report, per endpoint:
   This is what answers "does reasoning replay after a tool call actually
   work for this family" from live data instead of a guess.
 
+## `rolo-claude work-matrix show` / `apply`
+
+V2b: matrix-driven fixes tooling over a `doctor --work --probe-all` report
+(the owner's own real work-VM run, or one of the two synthetic samples under
+`tests/fixtures/work-matrix/`) -- endpoint names only, still never a host or
+a token. `work_matrix.py::classify_row` turns each row into one of:
+
+| Row shape | Suggested action | `apply` writes? |
+|---|---|---|
+| `status == "403"` | "run this on the VPN, then re-probe" | no -- nothing to write |
+| non-200, and a `"<name> (anthropic gateway)"` companion row (only present when `--both` probed it) answered 200 | the endpoint's default dialect is the wrong path -- set `databricks.gateway.<endpoint> = anthropic` | **yes** -- the only failure class `apply` ever writes anything for |
+| non-200, no working companion to point at | genuinely unknown from this data alone | no -- report it |
+| 200, but `tool_call_ok is False` (only meaningful with `--tools`) | a FAMILY-wide rule (`model_table.json`'s `tool_choice_required_supported`/schema simplifier), never a per-endpoint config key | no |
+| 200, but `reasoning_replay_ok is False` (only meaningful when `--tools` produced a tool_use to replay) | disable thinking for tool loops on that endpoint -- no existing per-endpoint knob to write | no |
+| 200, neither flag False | clean -- not a failure at all | n/a |
+
+`rolo-claude work-matrix show <report.json>` prints one line per failing row
+(status, issue, suggested action); a report with nothing failing says so
+plainly. `rolo-claude work-matrix apply <report.json> [--yes]` lists every
+`databricks.gateway.<endpoint>` override the report's wrong-path rows imply,
+asks for confirmation (`--yes` skips it), then writes them to `~/.rolo-claude/
+config.json` -- never `~/.claude.json`/`~/.claude/settings.json`. See
+`docs/COMMANDS.md`'s own `work-matrix` section for the exact `--help` output.
+
 ## How Claude Code's own work settings are reused
 
 At a Databricks work box already running Claude Code, `rolo-claude` needs

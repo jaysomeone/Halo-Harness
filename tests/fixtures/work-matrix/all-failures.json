@@ -1,0 +1,41 @@
+{
+  "generated_at": "2026-09-29T12:05:00+00:00",
+  "rows": [
+    {
+      "endpoint": "databricks-gemma-3-27b", "family": "gemma", "path_type": "mlflow",
+      "status": "403", "first_tokens": "", "latency_ms": 15.0, "tokens_out": null,
+      "tool_call_ok": null, "error": "Public access is not allowed", "cached_path_type": null,
+      "reasoning_replay_ok": null
+    },
+    {
+      "endpoint": "databricks-glm-5-3", "family": "glm", "path_type": "mlflow",
+      "status": "404", "first_tokens": "", "latency_ms": 30.0, "tokens_out": null,
+      "tool_call_ok": null, "error": "not found", "cached_path_type": "mlflow", "reasoning_replay_ok": null
+    },
+    {
+      "endpoint": "databricks-glm-5-3 (anthropic gateway)", "family": "glm", "path_type": "anthropic",
+      "status": "200", "first_tokens": "pong", "latency_ms": 280.0, "tokens_out": 1,
+      "tool_call_ok": null, "error": null, "cached_path_type": null, "reasoning_replay_ok": null
+    },
+    {
+      "endpoint": "databricks-qwen-3-max", "family": "qwen", "path_type": "mlflow",
+      "status": "500", "first_tokens": "", "latency_ms": 500.0, "tokens_out": null,
+      "tool_call_ok": null, "error": "internal error", "cached_path_type": "mlflow", "reasoning_replay_ok": null
+    },
+    {
+      "endpoint": "databricks-deepseek-v4-1-flash", "family": "deepseek", "path_type": "mlflow",
+      "status": "200", "first_tokens": "", "latency_ms": 210.0, "tokens_out": 4,
+      "tool_call_ok": false, "error": null, "cached_path_type": "mlflow", "reasoning_replay_ok": null
+    },
+    {
+      "endpoint": "databricks-gpt-oss-120b", "family": "gpt_oss", "path_type": "mlflow",
+      "status": "200", "first_tokens": "pong", "latency_ms": 190.0, "tokens_out": 8,
+      "tool_call_ok": true, "error": null, "cached_path_type": "mlflow", "reasoning_replay_ok": false
+    },
+    {
+      "endpoint": "databricks-claude-opus-4-6", "family": "claude_foundation", "path_type": "anthropic",
+      "status": "200", "first_tokens": "pong", "latency_ms": 400.0, "tokens_out": 1,
+      "tool_call_ok": true, "error": null, "cached_path_type": "anthropic", "reasoning_replay_ok": true
+    }
+  ]
+}

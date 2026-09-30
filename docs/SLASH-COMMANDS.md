@@ -111,6 +111,14 @@ Lists every discovered sub-agent definition (built-ins plus
 the live session's own agent runtime when one is attached so it never
 drifts from what an `Agent(subagent_type=...)` call would actually see.
 
+### `/roles`
+V2c (H15): shows the resolved role table (`orchestrator`/`coder`/`reviewer`/
+`researcher`/`small`) -- model, endpoint/path type, and price per role,
+pulled from the live session's own `agent_runtime.role_table`/
+`.cli_role_overrides` (the SAME table a role-bearing `Agent`/`Task` call
+actually resolves against) so it never drifts from real behavior. See
+`docs/ROLES.md`.
+
 ### `/effort`
 Shows the active reasoning-effort level, or "not set (provider default)".
 

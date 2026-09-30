@@ -1,0 +1,20 @@
+{
+  "generated_at": "2026-09-29T12:00:00+00:00",
+  "rows": [
+    {
+      "endpoint": "databricks-claude-opus-4-6", "family": "claude_foundation", "path_type": "anthropic",
+      "status": "200", "first_tokens": "pong", "latency_ms": 410.2, "tokens_out": 1,
+      "tool_call_ok": true, "error": null, "cached_path_type": "anthropic", "reasoning_replay_ok": true
+    },
+    {
+      "endpoint": "databricks-deepseek-v4-1-flash", "family": "deepseek", "path_type": "mlflow",
+      "status": "200", "first_tokens": "pong", "latency_ms": 220.5, "tokens_out": 1,
+      "tool_call_ok": true, "error": null, "cached_path_type": "mlflow", "reasoning_replay_ok": true
+    },
+    {
+      "endpoint": "databricks-kimi-k3", "family": "kimi", "path_type": "mlflow",
+      "status": "200", "first_tokens": "pong", "latency_ms": 300.1, "tokens_out": 1,
+      "tool_call_ok": null, "error": null, "cached_path_type": "mlflow", "reasoning_replay_ok": null
+    }
+  ]
+}

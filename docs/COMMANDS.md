@@ -153,6 +153,22 @@ JSON file holding `{name: {description, prompt, tools, model, ...}}`. See
 `docs/CONFIG.md`'s agents section for the full discovery precedence these
 sit on top of.
 
+#### `--role NAME=MODEL`
+
+What: overrides one of the five roles (`orchestrator`, `coder`, `reviewer`,
+`researcher`, `small`) for this run only -- a built-in/custom sub-agent whose
+own role resolves to `NAME` uses `MODEL` instead of whatever `~/.rolo-claude/
+config.json`/`team.json`'s own `roles` table (or the cost-aware default) says,
+even beating that agent's own file `model:` (a freshly-typed, run-only
+override the user gets to trump a shared/managed agent file with). Repeatable
+(`--role coder=... --role researcher=...`); a later repeat of the SAME role
+wins. A bad `NAME=MODEL` (missing `=`, an unrecognized role name, an empty
+model) is a clean exit-2 usage error before any Session is built. See
+`docs/ROLES.md` for the full precedence chain, `/roles`, and `stats --roles`.
+```sh
+rolo-claude -p --role researcher=or:deepseek/deepseek-v4.1-flash "use the Researcher agent to summarize this repo"
+```
+
 #### `--file SPEC [SPEC ...]`
 What: attaches one or more local files as context before the first turn (an
 image becomes a real vision content block when the model profile supports
@@ -534,6 +550,56 @@ for what each WARN/MISSING line means)
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
 
+## `rolo-claude work-matrix`
+
+V2b: turns a `doctor --work --probe-all` JSON report (`~/.rolo-claude/
+work-matrix-<date>.json`, or one copied off the owner's real work VM -- the
+report holds endpoint names only, never a host or a token) into a suggested
+action per failure. See `docs/DATABRICKS.md`'s own work-matrix section for
+exactly which failure classes map to which suggestion.
+
+```sh
+rolo-claude work-matrix --help
+```
+```
+usage: rolo-claude work-matrix [-h] {show,apply} ...
+
+Interpret a `doctor --work --probe-all` JSON report.
+
+positional arguments:
+  {show,apply}
+    show        Render the report as a table with a suggested action per
+                failure
+    apply       Write the report's suggested per-endpoint overrides into
+                config.json
+
+options:
+  -h, --help    show this help message and exit
+```
+
+### `work-matrix show <report.json>`
+Prints one line per FAILING endpoint (a clean row across the board prints
+"nothing to fix"): the endpoint name, its HTTP status, the issue, and the
+suggested action. Never writes anything.
+```sh
+rolo-claude work-matrix show ~/.rolo-claude/work-matrix-2026-09-29.json
+```
+
+### `work-matrix apply <report.json> [--yes]`
+Recomputes the SAME classification and writes only the one failure class that
+maps onto a real config.json knob (`databricks.gateway.<endpoint>: anthropic`,
+for an endpoint whose default dialect failed but a `--both`-probed anthropic-
+gateway companion row answered 200) -- lists every override it's about to
+write and asks for confirmation first; `--yes` skips the prompt (for
+scripting/CI). The other three failure classes (403/IP, a family-wide
+tool-call rule, a reasoning-replay rule) have no per-endpoint config.json
+knob to write at all -- `show` reports them; fixing them is a code/model-table
+change, not a config write. Never touches `~/.claude.json`/`~/.claude/
+settings.json`.
+```sh
+rolo-claude work-matrix apply ~/.rolo-claude/work-matrix-2026-09-29.json --yes
+```
+
 ## `rolo-claude models`
 
 Lists (and refreshes) the OpenRouter and Databricks model catalogs.
@@ -700,8 +766,8 @@ rolo-claude stats --help
 ```
 ```
 usage: rolo-claude stats [-h] [--all] [--all-projects] [--cwd DIR] [--json]
-                         [--models] [--tools] [--wide] [--since SINCE]
-                         [--session ID]
+                         [--models] [--tools] [--roles] [--wide]
+                         [--since SINCE] [--session ID]
 
 Aggregate tokens/cost/tool-calls across session logs (headless /stats).
 
@@ -716,6 +782,8 @@ options:
   --models        Show the richer per-(model,provider) telemetry table
                   (repairs, edit failures, ttft/latency, ...)
   --tools         Show the per-tool telemetry table
+  --roles         Show sub-agent spend per role
+                  (orchestrator/coder/reviewer/researcher/small)
   --wide          Show every --models column instead of the terminal-fit
                   compact default
   --since SINCE   Time window for --models/--tools: "all", or "<N>d" (e.g.
@@ -724,8 +792,8 @@ options:
   --session ID    Scope to one session id
 ```
 
-Bare `rolo-claude stats` (no `--models`/`--tools`) is the original, cheap
-report: turns, total cost, per-model token/cost totals, per-tool call
+Bare `rolo-claude stats` (no `--models`/`--tools`/`--roles`) is the original,
+cheap report: turns, total cost, per-model token/cost totals, per-tool call
 counts -- works even on a session log recorded before the richer telemetry
 fields existed. `--models`/`--tools` switch to `rolo_claude.telemetry`'s
 aggregation (cached at `~/.rolo-claude/stats-cache.json`, keyed by
@@ -734,7 +802,9 @@ provider) sessions/calls/tokens/cost/avg-latency/tool-error%/repair-hit%/
 edit-failure%/steers/compactions/loop-breaker-trips (14 columns by default,
 `--wide` adds route/cached-tokens/avg-ttft/finish=length%/retries/overflow/
 interrupts -- columns are dropped right-to-left to fit the terminal width,
-never wrapped or truncated when piped to a file).
+never wrapped or truncated when piped to a file). `--roles` (V2c/H15): sub-
+agent spend (sessions/calls/tokens/cost) per role name, summed from every
+Agent-tool call's own rolled-up usage node -- see `docs/ROLES.md`.
 
 ```sh
 BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude stats

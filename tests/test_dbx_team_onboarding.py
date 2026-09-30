@@ -110,6 +110,22 @@ def test_load_team_config_strips_token_shaped_keys(ctx: Ctx):
 
 
 @test
+def test_load_team_config_roles_key_roundtrip(ctx: Ctx):
+    """V2c (H15): team.json's own `roles` map (never a token, never an
+    endpoint list -- just like every other allowed key) survives `load_
+    team_config` unchanged."""
+    from rolo_claude.team_config import load_team_config
+    cwd = Path(tempfile.mkdtemp(prefix="team-roles-"))
+    p = cwd / "team.json"
+    roles = {"researcher": "dbx:databricks-deepseek-v4-1-flash", "small": "dbx:databricks-deepseek-v4-1-flash"}
+    p.write_text(json.dumps({"host": "https://your-workspace.cloud.databricks.com", "roles": roles}),
+                 encoding="utf-8")
+    cfg, warnings = load_team_config(cwd, team_flag=str(p))
+    ctx.check(f"roles roundtrip unchanged, got {cfg}", cfg is not None and cfg.get("roles") == roles)
+    ctx.check("no warnings for a clean roles key", warnings == [])
+
+
+@test
 def test_load_team_config_bad_json_reports_a_warning_not_a_crash(ctx: Ctx):
     from rolo_claude.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-badjson-"))
@@ -141,6 +157,32 @@ def test_apply_gateway_preference_seeds_config_but_never_overwrites(ctx: Ctx):
             os.environ["BRIDGE_STATE_DIR"] = old
 
 
+@test
+def test_apply_role_preference_seeds_config_but_never_overwrites(ctx: Ctx):
+    """V2c (H15): the exact same idiom as `apply_gateway_preference` above,
+    applied to team.json's own `roles` map."""
+    from rolo_claude.roles import apply_role_preference
+    from rolo_claude.theme import get_config_value, set_config_value
+    state_dir = Path(tempfile.mkdtemp(prefix="team-rolepref-"))
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        set_config_value("roles.coder", "dbx:databricks-claude-opus-4-6")
+        apply_role_preference({"researcher": "dbx:databricks-deepseek-v4-1-flash",
+                                "coder": "dbx:databricks-kimi-k3", "not-a-real-role": "ignored"})
+        ctx.check("new role seeded", get_config_value("roles.researcher", default=None)
+                  == "dbx:databricks-deepseek-v4-1-flash")
+        ctx.check("existing local override never clobbered",
+                  get_config_value("roles.coder", default=None) == "dbx:databricks-claude-opus-4-6")
+        ctx.check("unrecognized role name never written",
+                  get_config_value("roles.not-a-real-role", default=None) is None)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
 # ---------------------------------------------------------------------------
 # End-to-end `init --preset work` onboarding.
 # ---------------------------------------------------------------------------
@@ -153,6 +195,7 @@ def test_init_work_host_from_team_json_asks_only_for_token(ctx: Ctx):
         "host": "https://your-workspace.cloud.databricks.com",
         "default_model": "dbx:databricks-glm-5-3",
         "gateway_preference": {"databricks-kimi-k3": "anthropic"},
+        "roles": {"researcher": "dbx:databricks-deepseek-v4-1-flash"},
     }), encoding="utf-8")
     result = _run(["init", "--preset", "work", "--yes", "--no-live"], home, stdin="team-token-xyz\n")
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
@@ -166,6 +209,8 @@ def test_init_work_host_from_team_json_asks_only_for_token(ctx: Ctx):
     ctx.check(f"team.json default_model applied, got {cfg}", cfg.get("model") == "dbx:databricks-glm-5-3")
     ctx.check("gateway preference seeded", cfg.get("databricks", {}).get("gateway", {}).get("databricks-kimi-k3")
               == "anthropic")
+    ctx.check(f"team.json roles seeded, got {cfg}",
+              cfg.get("roles", {}).get("researcher") == "dbx:databricks-deepseek-v4-1-flash")
 
 
 @test

@@ -198,8 +198,8 @@ def test_databricks_route_tries_ai_gateway_path_first(ctx: Ctx):
 @test
 def test_h5b_f16_databricks_bearer_header_survives_the_ai_gateway_404_fallback(ctx: Ctx):
     """The Authorization header must be present on BOTH attempts -- the
-    ai-gateway path (which may 404 on some workspaces) and the
-    serving-endpoints fallback -- not just the first one tried."""
+    ai-gateway path (which may 404 on some workspaces) and the by-name
+    invocations fallback -- not just the first one tried."""
     mock = MockAnthropic().start()
     try:
         # Force the ai-gateway path to 404 so the fallback path actually runs.
@@ -209,8 +209,10 @@ def test_h5b_f16_databricks_bearer_header_survives_the_ai_gateway_404_fallback(c
         result = call_anthropic_native(mock.base_url, "k", body, {"x-databricks-use-coding-agent-mode": "true"},
                                         Path(tempfile.mkdtemp(prefix="ant-dbx-fallback-")), route_provider="databricks")
         ctx.check(f"eventually 200, got {result.status}", result.status == 200)
-        ctx.check(f"fell back to serving-endpoints, got {mock.requests[-1]['path']}",
-                  mock.requests[-1]["path"].startswith("/serving-endpoints/anthropic/v1/messages"))
+        # V2b fix: the fallback is the endpoint's OWN by-name invocations
+        # path, never the literal (non-existent) "anthropic" endpoint name.
+        ctx.check(f"fell back to the by-name invocations path, got {mock.requests[-1]['path']}",
+                  mock.requests[-1]["path"].startswith("/serving-endpoints/claude-sonnet-ok/invocations"))
         ctx.check("Authorization header present on the FALLBACK attempt too",
                   mock.requests[-1]["headers"].get("authorization") == "Bearer k")
         # And also on the FIRST (404'd) attempt.
@@ -218,6 +220,31 @@ def test_h5b_f16_databricks_bearer_header_survives_the_ai_gateway_404_fallback(c
         ctx.check(f"at least one ai-gateway attempt recorded, got {len(ai_gateway_reqs)}", len(ai_gateway_reqs) >= 1)
         ctx.check("Authorization header present on the FIRST (404) attempt too",
                   all(r["headers"].get("authorization") == "Bearer k" for r in ai_gateway_reqs))
+    finally:
+        mock.stop()
+
+
+@test
+def test_v2b_anthropic_fallback_uses_real_endpoint_name_not_literal_anthropic(ctx: Ctx):
+    """V2b fix (flagged during V2a): the 404 fallback must be built from
+    THIS request's own real endpoint name (`body["model"]`), not a
+    hardcoded literal "anthropic" segment -- proven with a name that looks
+    nothing like the old literal, so a regression back to the hardcoded
+    string would fail this immediately."""
+    mock = MockAnthropic().start()
+    try:
+        mock.force_404_paths = {"/ai-gateway/anthropic/v1/messages"}
+        body = build_anthropic_request_body(
+            system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=None, route=_route("databricks-claude-opus-4-6", provider="databricks"), profile=_profile(),
+        )
+        result = call_anthropic_native(mock.base_url, "k", body, {}, Path(tempfile.mkdtemp(prefix="ant-dbx-name-")),
+                                        route_provider="databricks")
+        ctx.check(f"200, got {result.status}", result.status == 200)
+        ctx.check(f"fallback path names the real endpoint, got {mock.requests[-1]['path']}",
+                  mock.requests[-1]["path"].startswith("/serving-endpoints/databricks-claude-opus-4-6/invocations"))
+        ctx.check("no beta=true query flag on the plain invocations fallback",
+                  "beta=true" not in mock.requests[-1]["path"])
     finally:
         mock.stop()
 

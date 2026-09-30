@@ -197,6 +197,15 @@ _MODEL_COLUMNS = [
 ]
 _MODEL_COLUMNS_COMPACT_N = 14
 
+_ROLE_COLUMNS = [
+    ("role", lambda r: r["role"]),
+    ("sessions", lambda r: str(r["sessions"])),
+    ("calls", lambda r: str(r["calls"])),
+    ("tok in/out", lambda r: f"{r['tokens_in']}/{r['tokens_out']}"),
+    ("tok cached", lambda r: str(r["tokens_cached"])),
+    ("cost", lambda r: f"${r['cost_usd']:.4f}"),
+]
+
 _TOOL_COLUMNS = [
     ("tool", lambda r: r["tool"]),
     ("calls", lambda r: str(r["calls"])),
@@ -289,6 +298,11 @@ def _print_tools_table(rows: list) -> None:
     _print_table(console, "Per tool", _TOOL_COLUMNS, rows)
 
 
+def _print_roles_table(rows: list) -> None:
+    console = _rich_console()
+    _print_table(console, "Per role (sub-agent spend)", _ROLE_COLUMNS, rows)
+
+
 def _cmd_stats_telemetry(args) -> int:
     """The `--models`/`--tools` path -- `rolo_claude.telemetry`'s richer
     per-(model,provider)/per-tool aggregation, scoped by `--since`/
@@ -304,24 +318,31 @@ def _cmd_stats_telemetry(args) -> int:
                                 session_id=args.session)
     model_rows = telemetry.aggregate_by_model(summaries) if args.models else []
     tool_rows = telemetry.aggregate_by_tool(summaries) if args.tools else []
+    # V2c (H15): sub-agent spend per role (roles.py's ROLE_NAMES) -- summed
+    # from each session's own rolled-up-usage-node `role` tags.
+    role_rows = telemetry.aggregate_by_role(summaries) if args.roles else []
 
     if args.json:
         print(json.dumps({
             "sessions": len(summaries), "since": args.since,
-            "models": model_rows, "tools": tool_rows,
+            "models": model_rows, "tools": tool_rows, "roles": role_rows,
             "top_error_classes": telemetry.top_error_classes(summaries),
         }, ensure_ascii=False))
         return 0
 
     scope = "all projects" if args.all_projects else str(cwd)
-    # H10b defect 2: reflects whichever of --models/--tools was actually
-    # asked for -- used to hardcode "--models" even for a bare --tools run.
-    flags = " ".join(f for f, on in (("--models", args.models), ("--tools", args.tools)) if on)
+    # H10b defect 2: reflects whichever of --models/--tools/--roles was
+    # actually asked for -- used to hardcode "--models" even for a bare
+    # --tools run.
+    flags = " ".join(f for f, on in (("--models", args.models), ("--tools", args.tools),
+                                       ("--roles", args.roles)) if on)
     print(f"rolo-claude stats {flags} ({scope}, since {args.since}, {len(summaries)} session(s)):")
     if args.models:
         _print_models_table(model_rows, wide=args.wide)
     if args.tools:
         _print_tools_table(tool_rows)
+    if args.roles:
+        _print_roles_table(role_rows)
     return 0
 
 
@@ -338,6 +359,8 @@ def cmd_stats(argv: list) -> int:
     parser.add_argument("--models", action="store_true",
                          help="Show the richer per-(model,provider) telemetry table (repairs, edit failures, ttft/latency, ...)")
     parser.add_argument("--tools", action="store_true", help="Show the per-tool telemetry table")
+    parser.add_argument("--roles", action="store_true",
+                         help="Show sub-agent spend per role (orchestrator/coder/reviewer/researcher/small)")
     parser.add_argument("--wide", action="store_true",
                          help="Show every --models column instead of the terminal-fit compact default")
     parser.add_argument("--since", default="7d", type=_since_arg,
@@ -346,7 +369,7 @@ def cmd_stats(argv: list) -> int:
     parser.add_argument("--session", default=None, metavar="ID", help="Scope to one session id")
     args = parser.parse_args(argv)
 
-    if args.models or args.tools:
+    if args.models or args.tools or args.roles:
         return _cmd_stats_telemetry(args)
 
     from rolo_claude.controller import compute_session_stats, format_cache_tokens_suffix

@@ -275,6 +275,12 @@ def _ensure_databricks_creds(args, console: Console) -> Optional[Path]:
         if team_cfg and team_cfg.get("gateway_preference"):
             from rolo_claude.team_config import apply_gateway_preference
             apply_gateway_preference(team_cfg["gateway_preference"])
+        if team_cfg and team_cfg.get("roles"):
+            # V2c (H15): the SAME "seed config.json, never clobber a local
+            # override" idiom as gateway_preference above, for team.json's
+            # own shared `roles` table.
+            from rolo_claude.roles import apply_role_preference
+            apply_role_preference(team_cfg["roles"])
         return path
 
     if args.yes and sys.stdin.isatty():

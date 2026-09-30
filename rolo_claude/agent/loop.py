@@ -589,6 +589,7 @@ class Session:
         agents: Optional[dict] = None, routes: Optional[dict] = None, agent_depth: int = 0,
         agent_type_restriction: Optional[set] = None, abort: Optional[threading.Event] = None,
         agent_id: Optional[str] = None, job_registry: Optional[JobRegistry] = None,
+        roles: Optional[dict] = None, cli_roles: Optional[dict] = None,
     ):
         # H9: identifies THIS session as a particular sub-agent (passed by
         # `agent/subagent.py`'s `_build_child_session`; the parent/main
@@ -806,7 +807,17 @@ class Session:
         # Session (headless.py/tui/bootstrap.py); both default to {} for
         # every pre-H6 test and a bare Session, in which case the Agent
         # tool still works but only ever knows the 3 built-in specs.
+        # V2c (H15): `roles`/`cli_roles` (the persisted role table and this
+        # run's own `--role name=model` CLI overrides -- both resolved ONCE
+        # by whoever builds this Session, headless.py/tui/bootstrap.py) are
+        # threaded through exactly like `agents`/`routes` above; both
+        # default to {} for every pre-V2c test and a bare Session, in which
+        # case a role-bearing agent just falls through to the parent's own
+        # model (its documented "orchestrator" default anyway).
+        self.roles = roles or {}
+        self.cli_roles = cli_roles or {}
         self.agent_runtime = AgentRuntime(parent=self, agents=(agents or {}), routes=(routes or {}),
+                                           role_table=self.roles, cli_role_overrides=self.cli_roles,
                                            depth=agent_depth)
         self.agent_type_restriction = agent_type_restriction
         # H6 scope F: background sub-agent completions wait here (a plain

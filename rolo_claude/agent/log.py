@@ -162,7 +162,7 @@ class SessionLog:
                       provider: Optional[str] = None, finish_reason: Optional[str] = None,
                       latency_ms: Optional[float] = None, ttft_ms: Optional[float] = None,
                       retries: Optional[int] = None, status: Optional[str] = None,
-                      estimate: Optional[bool] = None) -> dict:
+                      estimate: Optional[bool] = None, role: Optional[str] = None) -> dict:
         """H9 whole-tree review finding 13: `agent_id`, when given, tags
         this usage node as a SUB-AGENT's rolled-up total (agent/subagent.py
         calls this on the PARENT's own log once a child finishes) rather
@@ -208,6 +208,12 @@ class SessionLog:
             node["retries"] = retries
         if status is not None:
             node["status"] = status
+        if role is not None:
+            # V2c (H15): the sub-agent call's own resolved role name (the
+            # same value `resolve_agent_model` resolved a model FROM) --
+            # `telemetry.py`'s per-role aggregation (`stats --roles`) reads
+            # this back; a plain (non-sub-agent) turn never sets it.
+            node["role"] = role
         return self._append(node)
 
     def append_error(self, message: str, *, err_type: str = "error") -> dict:

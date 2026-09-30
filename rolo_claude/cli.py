@@ -98,6 +98,11 @@ _REAL_FLAGS = [
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
     (["--agents"], dict(dest="agents", default=None, metavar="JSON_OR_FILE")),
+    # V2c (H15): repeatable NAME=MODEL override for one of the five roles
+    # (orchestrator|coder|reviewer|researcher|small) -- validated in main()
+    # right after parsing, so a bad NAME=MODEL is a clean exit-2 usage error
+    # before either run_print_mode or the TUI ever starts building a Session.
+    (["--role"], dict(dest="role", action="append", default=None, metavar="NAME=MODEL")),
     (["-c", "--continue"], dict(dest="continue_", action="store_true")),
     (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None)),
     (["--fork-session"], dict(dest="fork_session", action="store_true")),
@@ -261,6 +266,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "doctor":
         from rolo_claude.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
+    if argv and argv[0] == "work-matrix":
+        from rolo_claude.work_matrix import cmd_work_matrix
+        return cmd_work_matrix(argv[1:])
     if argv and argv[0] == "init":
         from rolo_claude.init_cli import cmd_init
         return cmd_init(argv[1:])
@@ -292,6 +300,17 @@ def main(argv: Optional[list] = None) -> int:
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
         if _flag_was_set(getattr(args, kwargs["dest"])):
             print_not_yet(label, milestone)
+
+    if getattr(args, "role", None):
+        # V2c (H15): validated ONCE, here, before either run_print_mode or
+        # the TUI ever starts building a Session -- a bad NAME=MODEL is a
+        # clean exit-2 usage error, same treatment as a bad --session-id.
+        from rolo_claude.roles import parse_role_flags
+        try:
+            parse_role_flags(args.role)
+        except ValueError as e:
+            print(f"rolo-claude: {e}", file=sys.stderr)
+            return 2
 
     if args.demo and args.print_mode:
         from rolo_claude.testing.fake_controller import run_demo
@@ -393,6 +412,7 @@ def main(argv: Optional[list] = None) -> int:
             continue_=bool(getattr(args, "continue_", False)), resume=getattr(args, "resume", None),
             fork_session_flag=bool(getattr(args, "fork_session", False)),
             agent=getattr(args, "agent", None), agents_flag=getattr(args, "agents", None),
+            roles_flag=getattr(args, "role", None),
             name=getattr(args, "name", None), file_specs=getattr(args, "file", None),
         )
     except InvalidModelError as e:

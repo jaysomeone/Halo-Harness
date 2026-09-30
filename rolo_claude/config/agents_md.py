@@ -25,7 +25,7 @@ from typing import Optional
 from rolo_claude.config.frontmatter import parse as parse_frontmatter
 from rolo_claude.config.paths import find_git_root, home, managed_dir
 
-BUILTIN_NAMES = ("general-purpose", "Explore", "Plan")
+BUILTIN_NAMES = ("general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher")
 
 
 def _split_tools(value) -> Optional[list]:
@@ -51,6 +51,13 @@ class AgentSpec:
     tools: Optional[list] = None          # None = all tools; [] = none; entries may be "Agent(type)"-restricted
     disallowed_tools: Optional[list] = None
     model: Optional[str] = None           # sonnet|opus|haiku|inherit|<ref-or-alias>|None
+    # V2c (H15): a `roles.py::ROLE_NAMES` entry this agent's model resolves
+    # from (config.json/team.json's own table, or the cost-aware default)
+    # whenever `model` above is unset -- a built-in sets this directly
+    # (below); a custom `.claude/agents/*.md` file sets it via a `role:`
+    # frontmatter key; an `Agent(role=...)` tool-call argument overrides
+    # either one for that ONE call only (see agent/subagent.py).
+    role: Optional[str] = None
     permission_mode: Optional[str] = None
     max_turns: Optional[int] = None
     skills: Optional[list] = None
@@ -120,6 +127,18 @@ class AgentSpec:
 
 def _builtin_specs() -> "dict[str, AgentSpec]":
     explore_tools = ["Read", "Glob", "Grep", "Bash", "WebFetch", "ToolSearch"]
+    research_tools = explore_tools + ["WebSearch"]
+    # V2c (H15): every built-in gets a `role=` so it resolves its model from
+    # `roles.py`'s table (config.json/team.json, or the cost-aware default)
+    # unless its OWN file sets `model:` (none of these do) -- brief: "Built-
+    # in agents general-purpose, Explore, Plan plus new Coder, Reviewer,
+    # Researcher resolve their model from the role table". `general-purpose`
+    # gets "orchestrator" (an absent/empty table entry for it just means
+    # "the session model", its documented default anyway); `Explore` and the
+    # new `Researcher` share "researcher" (cheap/exploration); `Plan` and
+    # the new `Reviewer` share "reviewer" (strong/planning+review, per the
+    # brief's own "strong model for planning and review" pairing); `Coder`
+    # gets its own "coder" role.
     return {
         "general-purpose": AgentSpec(
             name="general-purpose",
@@ -127,7 +146,7 @@ def _builtin_specs() -> "dict[str, AgentSpec]":
                 "General-purpose agent for researching complex questions, searching for code, and "
                 "executing multi-step tasks. Has access to every tool except Agent/Task (depth-1 cap)."
             ),
-            tools=None, disallowed_tools=["Agent", "Task"],
+            tools=None, disallowed_tools=["Agent", "Task"], role="orchestrator",
             body=(
                 "You are a general-purpose sub-agent, spawned by another Claude session to handle one "
                 "self-contained task. Complete it thoroughly, then report back a clear, self-contained "
@@ -142,7 +161,7 @@ def _builtin_specs() -> "dict[str, AgentSpec]":
                 "Fast read-only search agent for locating code: files by pattern, symbols/keywords, "
                 "\"where is X defined\". Never edits anything and skips CLAUDE.md."
             ),
-            tools=list(explore_tools), omit_claude_md=True,
+            tools=list(explore_tools), omit_claude_md=True, role="researcher",
             body=(
                 "You are a read-only exploration sub-agent. Use Read/Glob/Grep/Bash/WebFetch/ToolSearch "
                 "to locate the requested code or answer. You have no Edit/Write tool -- never attempt "
@@ -157,11 +176,57 @@ def _builtin_specs() -> "dict[str, AgentSpec]":
                 "critical files, architectural trade-offs. Read-only (Explore's tool set) and skips "
                 "CLAUDE.md."
             ),
-            tools=list(explore_tools), omit_claude_md=True,
+            tools=list(explore_tools), omit_claude_md=True, role="reviewer",
             body=(
                 "You are a planning sub-agent. Research using Read/Glob/Grep/Bash/WebFetch/ToolSearch, "
                 "then report a concrete, step-by-step implementation plan in your final answer -- "
                 "critical files, order of changes, and trade-offs. Never edit or write anything."
+            ),
+            source="built-in",
+        ),
+        "Coder": AgentSpec(
+            name="Coder",
+            description=(
+                "Implementation agent for writing and editing code: has the full read/write tool set "
+                "(minus Agent/Task, depth-1 cap) and reads project CLAUDE.md/conventions like a normal "
+                "session does."
+            ),
+            tools=None, disallowed_tools=["Agent", "Task"], role="coder",
+            body=(
+                "You are a coding sub-agent, spawned to implement a self-contained change. Read enough "
+                "of the surrounding code first to match its conventions, make the change, and verify it "
+                "(run the relevant tests/build when practical). Report back exactly what you changed "
+                "(file paths) and how you verified it -- your caller only sees your LAST message."
+            ),
+            source="built-in",
+        ),
+        "Reviewer": AgentSpec(
+            name="Reviewer",
+            description=(
+                "Read-only code-review agent: correctness, reuse/simplification, and consistency with "
+                "the surrounding codebase. Never edits anything."
+            ),
+            tools=list(explore_tools), omit_claude_md=True, role="reviewer",
+            body=(
+                "You are a code-review sub-agent. Use Read/Glob/Grep/Bash/WebFetch/ToolSearch to examine "
+                "the code in question -- never edit or write anything. Report concrete findings (file "
+                "paths and line numbers), each with why it matters and, where useful, a suggested fix "
+                "described in words."
+            ),
+            source="built-in",
+        ),
+        "Researcher": AgentSpec(
+            name="Researcher",
+            description=(
+                "Read-only research agent for open-ended questions across the codebase and the web: "
+                "Explore's tool set plus WebSearch. Never edits anything and skips CLAUDE.md."
+            ),
+            tools=list(research_tools), omit_claude_md=True, role="researcher",
+            body=(
+                "You are a research sub-agent. Use Read/Glob/Grep/Bash/WebFetch/WebSearch/ToolSearch to "
+                "investigate the question thoroughly -- never edit or write anything. Report a clear, "
+                "self-contained answer; when the task asks for a specific fact (a count, a file path, a "
+                "yes/no), lead with exactly that."
             ),
             source="built-in",
         ),
@@ -211,7 +276,7 @@ def load_spec_from_file(path: Path, *, source: str) -> Optional[AgentSpec]:
     return AgentSpec(
         name=str(name), description=str(description),
         tools=_split_tools(fm.get("tools")), disallowed_tools=_split_tools(fm.get("disallowedTools")),
-        model=fm.get("model"), permission_mode=fm.get("permissionMode"), max_turns=max_turns,
+        model=fm.get("model"), role=fm.get("role"), permission_mode=fm.get("permissionMode"), max_turns=max_turns,
         skills=_split_tools(fm.get("skills")), mcp_servers=fm.get("mcpServers"),
         hooks=hooks if isinstance(hooks, dict) else None, memory=fm.get("memory"),
         background=bool(fm.get("background", False)), omit_claude_md=bool(fm.get("omitClaudeMd", False)),
@@ -261,7 +326,8 @@ def parse_agents_json(text_or_path: str, *, cwd: Optional[Path] = None) -> "dict
         out[name] = AgentSpec(
             name=str(name), description=str(entry.get("description", "")),
             tools=_split_tools(entry.get("tools")), disallowed_tools=_split_tools(entry.get("disallowedTools")),
-            model=entry.get("model"), permission_mode=entry.get("permissionMode"), max_turns=max_turns,
+            model=entry.get("model"), role=entry.get("role"),
+            permission_mode=entry.get("permissionMode"), max_turns=max_turns,
             skills=_split_tools(entry.get("skills")), mcp_servers=entry.get("mcpServers"),
             hooks=hooks if isinstance(hooks, dict) else None, memory=entry.get("memory"),
             background=bool(entry.get("background", False)), omit_claude_md=bool(entry.get("omitClaudeMd", False)),
@@ -297,19 +363,40 @@ def discover_agents(cwd, settings=None, *, agents_flag: Optional[str] = None,
 
 
 def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_model: Optional[str] = None,
+                         role_name: Optional[str] = None, role_table: Optional[dict] = None,
+                         cli_role_overrides: Optional[dict] = None,
                          env: Optional[dict] = None, settings=None,
                          parent_ref, parent_profile, parent_small_ref=None, parent_small_profile=None,
                          state_dir, routes: Optional[dict] = None):
-    """`(ModelRef, ModelProfile)` for a sub-agent/`--agent` session:
-    invocation override -> frontmatter `model:` -> `CLAUDE_CODE_SUBAGENT_
-    MODEL` (env) / `settings.subagent_model` -> the PARENT's own model,
-    unchanged [D-CFG chain]. `haiku` resolves to the parent's SMALL model
-    (brief: "haiku -> small model"); `inherit`, or nothing resolving at
-    all, reuses the parent's ref/profile OBJECTS directly (never re-parsed)."""
+    """`(ModelRef, ModelProfile)` for a sub-agent/`--agent` session. Full
+    chain (V2c/H15 roles inserted into the pre-existing D-CFG chain):
+    invocation override -> a CLI `--role` override for THIS agent's own
+    role (`role_name`: an `Agent(role=...)` call-time override, else the
+    agent's own `role:` frontmatter/built-in default) -> frontmatter
+    `model:` -> `role_table` (config.json/team.json, or the cost-aware
+    default -- `roles.py::resolve_role_table`) for that same role ->
+    `CLAUDE_CODE_SUBAGENT_MODEL` (env) / `settings.subagent_model` -> the
+    PARENT's own model, unchanged. A CLI `--role` override deliberately
+    wins even over the agent file's own `model:` -- it is a freshly-typed,
+    run-only instruction the user gets to trump a shared/managed agent file
+    with; short of that, "resolve from the role table UNLESS the agent file
+    sets model:" (brief) is exactly what slotting the role-table lookup
+    BELOW frontmatter_model in this same `or` chain gives us for free.
+    `haiku` resolves to the parent's SMALL model (brief: "haiku -> small
+    model"); `inherit`, or nothing resolving at all, reuses the parent's
+    ref/profile OBJECTS directly (never re-parsed) -- unaffected by any of
+    the role plumbing above when no role applies (every new parameter here
+    defaults to None/{}, so an old caller that passes none of them behaves
+    byte-for-byte as before)."""
     from rolo_claude.model import ModelRef, parse_model_ref, resolve_model_profile
 
     env = env or {}
-    raw = (invocation_model or frontmatter_model or env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+    role_table = role_table or {}
+    cli_role_overrides = cli_role_overrides or {}
+    role_cli_raw = cli_role_overrides.get(role_name) if role_name else None
+    role_table_raw = role_table.get(role_name) if role_name else None
+    raw = (invocation_model or role_cli_raw or frontmatter_model or role_table_raw
+           or env.get("CLAUDE_CODE_SUBAGENT_MODEL")
            or (settings.subagent_model if settings is not None else None))
     if not raw or raw == "inherit":
         return parent_ref, parent_profile

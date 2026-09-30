@@ -315,6 +315,30 @@ def _cmd_agents(args: str, facade: HeadlessFacade) -> str:
     return "\n".join(lines)
 
 
+def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
+    """V2c (H15): the role table (`orchestrator`/`coder`/`reviewer`/
+    `researcher`/`small`) -- model, endpoint/path type, and price per role,
+    read from the LIVE session's own `agent_runtime.role_table`/
+    `.cli_role_overrides` (the SAME table `Agent(role=...)`/a role-bearing
+    agent actually resolves against) when one is running, exactly like
+    `/agents` above."""
+    from rolo_claude.roles import format_roles_table, resolve_all_roles, resolve_role_table
+    session = getattr(facade, "session", None)
+    if session is None:
+        return "Nothing to show yet: /roles needs a live session to resolve against."
+    runtime = getattr(session, "agent_runtime", None)
+    role_table = getattr(runtime, "role_table", None)
+    if role_table is None:
+        role_table = resolve_role_table(provider=getattr(session.model_ref, "provider", None))
+    cli_overrides = getattr(runtime, "cli_role_overrides", None) or {}
+    rows = resolve_all_roles(
+        role_table=role_table, cli_overrides=cli_overrides, parent_ref=session.model_ref,
+        parent_profile=session.model_profile, state_dir=session.state_dir,
+        routes=getattr(runtime, "routes", None),
+    )
+    return format_roles_table(rows)
+
+
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     return f"Effort level: {facade.effort or 'not set (provider default)'}"
 
@@ -466,6 +490,7 @@ _BUILTIN_SPECS = {
     "config": ("core", "Show or set a config value", "[key=value]", _cmd_config),
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
+    "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
     "effort": ("core", "Show the active reasoning effort level", None, _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this rolo-claude installation", None, _cmd_doctor),

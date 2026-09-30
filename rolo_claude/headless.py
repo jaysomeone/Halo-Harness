@@ -449,7 +449,7 @@ def build_session(
     playwright: bool = False, playwright_cdp: Optional[str] = None, playwright_headless: bool = False,
     mcp_config: Optional[list] = None, strict_mcp_config: bool = False, print_mode: bool = True,
     continue_: bool = False, resume: Optional[str] = None, fork_session_flag: bool = False,
-    agent: Optional[str] = None, agents_flag: Optional[str] = None,
+    agent: Optional[str] = None, agents_flag: Optional[str] = None, roles_flag: Optional[list] = None,
 ) -> SessionBuild:
     """The ONE shared builder (finding 9). `print_mode` (True for `-p`,
     False for the TUI) is the single knob that decides `PermissionEngine.
@@ -526,6 +526,17 @@ def build_session(
     small_ref = parse_model_ref(small_raw, routes) if small_raw else None
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
+
+    # V2c (H15): the persisted role table (config.json's own "roles" --
+    # itself already seeded from a team.json at `init` time -- or, only
+    # when that's completely empty AND this session's own model is a
+    # Databricks one, the documented cost-aware default) plus this run's
+    # own `--role name=model` CLI overrides (always win, even over the
+    # persisted table -- see `config.agents_md.resolve_agent_model`'s own
+    # docstring for the full chain).
+    from rolo_claude.roles import parse_role_flags, resolve_role_table
+    cli_roles = parse_role_flags(roles_flag)
+    persisted_roles = resolve_role_table(provider=model_ref.provider)
 
     # H12 Part C (RECOMMENDATIONS.md P0 #3): a per-family Edit context-line
     # hint, appended to the frozen registry's OWN Edit tool INSTANCE
@@ -756,6 +767,7 @@ def build_session(
         extra_headers=extra_headers, permission_engine=permission_engine,
         session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
         agents=discovered_agents, routes=routes, agent_type_restriction=agent_type_restriction,
+        roles=persisted_roles, cli_roles=cli_roles,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = session._call_model_for_hook
@@ -843,6 +855,7 @@ def run_print_mode(
     fork_session_flag: bool = False,
     agent: Optional[str] = None,
     agents_flag: Optional[str] = None,
+    roles_flag: Optional[list] = None,
     name: Optional[str] = None,
     file_specs: Optional[list] = None,
 ) -> int:
@@ -896,7 +909,7 @@ def run_print_mode(
         playwright=playwright, playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
         mcp_config=mcp_config, strict_mcp_config=strict_mcp_config, print_mode=True,
         continue_=continue_, resume=resume, fork_session_flag=fork_session_flag,
-        agent=agent, agents_flag=agents_flag,
+        agent=agent, agents_flag=agents_flag, roles_flag=roles_flag,
     )
     session, frozen_registry, model_ref = (build.session, build.tool_registry, build.model_ref)
     mcp_manager, resolved_mode, session_log = build.mcp_manager, build.resolved_mode, build.session_log

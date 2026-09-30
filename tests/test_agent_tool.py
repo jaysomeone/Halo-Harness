@@ -24,7 +24,8 @@ from tests.helpers.mock_openai import MockUpstream
 test, TESTS = new_registry()
 
 
-def _make_session(fh, *, scenario: str, mock: MockUpstream, agent_depth: int = 0, max_turns: int = 50):
+def _make_session(fh, *, scenario: str, mock: MockUpstream, agent_depth: int = 0, max_turns: int = 50,
+                   roles: "dict|None" = None, cli_roles: "dict|None" = None):
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.config.agents_md import discover_agents
@@ -39,7 +40,7 @@ def _make_session(fh, *, scenario: str, mock: MockUpstream, agent_depth: int = 0
         creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
         state_dir=Path(tempfile.mkdtemp(prefix="agent-tool-test-")), model_label=f"mock/{scenario}",
         session_context=session_ctx, openrouter_base_url=mock.base_url, max_turns=max_turns,
-        agents=agents, agent_depth=agent_depth,
+        agents=agents, agent_depth=agent_depth, roles=roles, cli_roles=cli_roles,
     )
 
 
@@ -283,6 +284,92 @@ def test_task_id_resumes_the_same_child_session(ctx: Ctx):
                       for b in (n.get("content") or []) if isinstance(b, dict)]
         ctx.check("both prompts landed in the SAME child log",
                   any("start the task" in t for t in user_texts) and any("keep going" in t for t in user_texts))
+    finally:
+        mock.stop()
+
+
+@test
+def test_agent_role_override_resolves_model_from_role_table(ctx: Ctx):
+    """V2c (H15): `Agent(role="researcher")` overrides general-purpose's own
+    default role (orchestrator) for just this call -- the child must
+    actually run against the model the ROLE TABLE names for "researcher",
+    not the parent's own model, proven end to end by which mock scenario
+    answers (MockUpstream dispatches on the wire `model` field)."""
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    mock = MockUpstream().start()
+    try:
+        parent_scn, role_scn = "agent-role-parent", "agent-role-researcher"
+        from tests.helpers.mock_openai import SCENARIOS, _finish
+        SCENARIOS[role_scn] = lambda h, b: _finish(h, _text_chunk("answer from the researcher-role model"))
+        session = _make_session(fh, scenario=parent_scn, mock=mock,
+                                 roles={"researcher": f"or:mock/{role_scn}"})
+        events_seen = _run_agent_dispatch(session, "call_1", "general-purpose", "research this",
+                                           extra_input={"role": "researcher"})
+        results = [e for e in events_seen if e.kind == "tool_result"]
+        ctx.check("Agent(role=) call succeeds", results and results[0].data.get("ok") is True)
+        ctx.check("child ran against the ROLE TABLE's model, not the parent's own",
+                  "answer from the researcher-role model" in results[0].data.get("content", ""))
+    finally:
+        mock.stop()
+
+
+@test
+def test_agent_cli_role_override_beats_role_table(ctx: Ctx):
+    """V2c (H15) precedence: a CLI `--role` override (`cli_roles`, threaded
+    the same way a top-level `--role name=model` flag would be) wins over
+    the persisted role table for the SAME role name."""
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    mock = MockUpstream().start()
+    try:
+        parent_scn, table_scn, cli_scn = "agent-role-parent2", "agent-role-table-loses", "agent-role-cli-wins"
+        from tests.helpers.mock_openai import SCENARIOS, _finish
+        SCENARIOS[cli_scn] = lambda h, b: _finish(h, _text_chunk("answer from the CLI override"))
+        session = _make_session(fh, scenario=parent_scn, mock=mock,
+                                 roles={"researcher": f"or:mock/{table_scn}"},
+                                 cli_roles={"researcher": f"or:mock/{cli_scn}"})
+        events_seen = _run_agent_dispatch(session, "call_1", "Researcher", "research this")
+        results = [e for e in events_seen if e.kind == "tool_result"]
+        ctx.check("Researcher (built-in, role=researcher) call succeeds",
+                  results and results[0].data.get("ok") is True)
+        ctx.check("CLI --role override wins over the persisted role table",
+                  "answer from the CLI override" in results[0].data.get("content", ""))
+    finally:
+        mock.stop()
+
+
+@test
+def test_custom_agent_file_role_frontmatter_resolves_from_role_table(ctx: Ctx):
+    """V2c (H15): a CUSTOM `.claude/agents/*.md` file's own `role:`
+    frontmatter (no `model:` of its own) works exactly like a built-in's
+    fixed default role -- discovered fresh (not one of the 6 built-ins),
+    invoked with NO `role=` call-time override, and still resolves its
+    model from the role table for the role its OWN file names."""
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    mock = MockUpstream().start()
+    try:
+        agents_dir = fh["proj"] / ".claude" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "my-reviewer.md").write_text(
+            "---\n"
+            "name: my-reviewer\n"
+            "description: A custom, project-defined reviewer agent\n"
+            "role: reviewer\n"
+            "---\n"
+            "You are a custom reviewer agent.\n",
+            encoding="utf-8",
+        )
+        parent_scn, role_scn = "agent-role-custom-parent", "agent-role-custom-reviewer"
+        from tests.helpers.mock_openai import SCENARIOS, _finish
+        SCENARIOS[role_scn] = lambda h, b: _finish(h, _text_chunk("answer from the custom agent's own role"))
+        session = _make_session(fh, scenario=parent_scn, mock=mock, roles={"reviewer": f"or:mock/{role_scn}"})
+        events_seen = _run_agent_dispatch(session, "call_1", "my-reviewer", "review this")
+        results = [e for e in events_seen if e.kind == "tool_result"]
+        ctx.check("the custom agent's own call succeeds", results and results[0].data.get("ok") is True)
+        ctx.check("resolved from the role table via the FILE's own role: frontmatter",
+                  "answer from the custom agent's own role" in results[0].data.get("content", ""))
     finally:
         mock.stop()
 

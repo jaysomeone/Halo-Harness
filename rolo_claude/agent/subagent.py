@@ -74,6 +74,15 @@ class AgentRuntime:
     parent: object                                  # agent.loop.Session
     agents: "dict[str, AgentSpec]" = field(default_factory=dict)
     routes: dict = field(default_factory=dict)
+    # V2c (H15) roles: the persisted role table (config.json/team.json, or
+    # the cost-aware default -- `roles.py::resolve_role_table`, resolved
+    # ONCE by whoever builds the top-level Session) and this run's own CLI
+    # `--role name=model` overrides -- both threaded down to every child's
+    # own `resolve_agent_model` call unchanged (a grandchild can never
+    # spawn per MAX_DEPTH, but `_build_child_session` still copies these
+    # onto the child's own nested AgentRuntime for consistency).
+    role_table: dict = field(default_factory=dict)
+    cli_role_overrides: dict = field(default_factory=dict)
     depth: int = 0
     tasks: dict = field(default_factory=dict)        # task_id -> {"child_session_id", "spec_name", "cwd"}
     lock: "threading.Lock" = field(default_factory=threading.Lock)
@@ -134,7 +143,8 @@ def _write_meta(meta_path: Path, data: dict) -> None:
 
 
 def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: str,
-                          model_override: Optional[str], parent_tool_use_id: str, background: bool = False):
+                          model_override: Optional[str], parent_tool_use_id: str, background: bool = False,
+                          role_override: Optional[str] = None):
     """A real `agent.loop.Session` for `spec`: its OWN fresh (or resumed)
     log, a tool subset frozen from the PARENT's own catalog (never grows
     it -- brief B), its `body` as the full system prompt (CLAUDE.md/memory
@@ -162,8 +172,13 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     if not spec.includes_memory():
         ctx.memory_snapshot_text = lambda: ""  # D-CFG: "no memory index unless general-purpose"
 
+    # V2c (H15): the Agent-tool-call's own `role=` argument, when given,
+    # overrides this agent's own file/built-in `role:` for just this one
+    # call -- see `resolve_agent_model`'s own docstring for the full chain.
     model_ref, model_profile = resolve_agent_model(
         invocation_model=model_override, frontmatter_model=spec.model,
+        role_name=(role_override or spec.role), role_table=runtime.role_table,
+        cli_role_overrides=runtime.cli_role_overrides,
         env=parent.tool_env, settings=getattr(parent.session_context, "settings", None),
         parent_ref=parent.model_ref, parent_profile=parent.model_profile,
         parent_small_ref=parent.small_model_ref, state_dir=parent.state_dir, routes=runtime.routes,
@@ -247,6 +262,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     child._subagent_live_asks = bool(parent.interactive) and not background
     child._permission_waiters = parent._permission_waiters
     child.agent_runtime = AgentRuntime(parent=child, agents=runtime.agents, routes=runtime.routes,
+                                        role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides,
                                         depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock)
     _write_meta(meta_path, {
         "agent_id": agent_id, "type": spec.name, "description": spec.description,
@@ -344,7 +360,8 @@ def _child_turn_outcome(child_events: list) -> "tuple[bool, Optional[str]]":
     return (reason in _ABNORMAL_TURN_DONE_REASONS), reason
 
 
-def _rollup_child_cost_into_parent(parent, child, *, agent_id: str, since_index: int = 0) -> None:
+def _rollup_child_cost_into_parent(parent, child, *, agent_id: str, since_index: int = 0,
+                                    role: Optional[str] = None) -> None:
     """H9 whole-tree review finding 13: a child's usage/cost used to be
     visible ONLY in its own `subagents/agent-<id>.jsonl` -- never reaching
     `parent.cost_meter` (so `--max-budget-usd`, which reads the PARENT's
@@ -365,7 +382,14 @@ def _rollup_child_cost_into_parent(parent, child, *, agent_id: str, since_index:
     itself is already scoped this way (a fresh CostMeter every Session
     construction, resumed or not), which is what makes `.turns`/`.total_usd`
     below correct as "this invocation's own total", no slicing needed for
-    those two."""
+    those two.
+
+    `role` (V2c/H15, additive): this call's own resolved role name
+    (`tool_input.get("role") or spec.role`, computed once by the caller),
+    tagged onto the SAME rolled-up "usage" node `agent_id` already is --
+    `telemetry.py`'s per-role aggregation (`stats --roles`) reads it back;
+    `None` (every pre-V2c call site, and any role-less agent) logs no
+    `role` field at all, exactly as before this parameter existed."""
     if child.cost_meter.turns <= 0:
         return
     combined: dict = {}
@@ -386,7 +410,7 @@ def _rollup_child_cost_into_parent(parent, child, *, agent_id: str, since_index:
     # module's own docstring) can reach this at the same moment, so the
     # `total_usd +=` inside it is guarded with the SAME lock `_bg_run`
     # already uses for every other write to shared parent state.
-    parent.log.append_usage(combined, child_cost, agent_id=agent_id)
+    parent.log.append_usage(combined, child_cost, agent_id=agent_id, role=role)
     with parent._agent_notices_lock:
         parent.cost_meter.add_child_total(cost_usd=child_cost, has_cost_data=child.cost_meter.has_cost_data,
                                            turns=child.cost_meter.turns)
@@ -498,11 +522,17 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     prompt = tool_input.get("prompt") or spec.initial_prompt or description
     background = bool(tool_input.get("run_in_background")) or spec.background
     model_override = tool_input.get("model")
+    # V2c (H15): `Agent(role=...)` overrides this agent's own file/built-in
+    # role for just this one call; `role_name` (used below for the cost
+    # rollup's own `stats --roles` tag) mirrors exactly what `resolve_agent_
+    # model` inside `_build_child_session` resolves the role AGAINST.
+    role_override = tool_input.get("role")
+    role_name = role_override or spec.role
 
     agent_id = _new_agent_id()
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
-        background=background,
+        background=background, role_override=role_override,
     )
     # H9 whole-tree review finding 13: captured BEFORE the child ever makes
     # a model call -- a resumed child's own log already carries every PRIOR
@@ -587,7 +617,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # is queued, so by the time the parent's next turn (which
                 # applies that notice) actually runs, `--max-budget-usd`/
                 # `/stats` already reflect it.
-                _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index)
+                _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
                 # H6/D10 (see the foreground path's own comment): merge even
                 # for a background sub-agent, under the same lock its own
                 # pending-notice append already uses.
@@ -662,7 +692,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # H9 whole-tree review finding 13: see the background path's own
     # comment above -- a FOREGROUND child's usage/cost gets the same
     # rollup, just synchronously here instead of at the end of `_bg_run`.
-    _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index)
+    _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
     # H6 known v1 gap (D10) / B must-do: a non-interactive child's own
     # "ask" denials (agent/loop.py's `_resolve_tool_call`) land in the
     # CHILD's own `permission_denials` list, which nothing outside this
@@ -714,9 +744,14 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
 
     agent_id = record["child_session_id"][len("agent-"):] if record["child_session_id"].startswith("agent-") \
         else record["child_session_id"]
+    # V2c (H15): a resume may itself carry a fresh `role=` override; else
+    # this resumed call keeps resolving against the SAME agent's own role.
+    role_override = tool_input.get("role")
+    role_name = role_override or spec.role
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=tool_input.get("model"),
         parent_tool_use_id=tool_id, background=False,  # a resume always runs in the foreground
+        role_override=role_override,
     )
     # H9 whole-tree review finding 13: see run_agent_call's own comment on
     # its identically-named local -- a resume's own child log already
@@ -736,7 +771,7 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     # own foreground path -- see its comment.
     is_error, abnormal_reason = _child_turn_outcome(child_events)
     _write_meta(meta_path, {"status": "completed"})
-    _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index)
+    _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
     parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment
     if is_error:
         text = f"[sub-agent did not finish normally ({abnormal_reason}) -- this may be a stale/partial answer]\n{text}"

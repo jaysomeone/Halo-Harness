@@ -340,11 +340,9 @@ def call_anthropic_native(base_url: str, api_key: str, body: dict, extra_headers
         `Authorization: Bearer <token>`, `x-databricks-use-coding-agent-
         mode: true` (both already merged into `extra_headers` by the
         caller, same as the OpenAI-dialect Databricks path), Databricks'
-        own `?beta=true` gateway flag and BOTH candidate paths tried on a
-        404 (mirrors `call_databricks_chat`'s own route-candidate dance,
-        applied to the two Anthropic-dialect paths from Appendix F:
-        `/ai-gateway/anthropic/v1/messages`, `/serving-endpoints/anthropic/
-        v1/messages`)."""
+        own `?beta=true` gateway flag on the primary path, and a 404
+        fallback to the endpoint's OWN by-name invocations path -- see the
+        V2b fix note below."""
     if route_provider == "anthropic":
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         headers.update(extra_headers)
@@ -363,10 +361,26 @@ def call_anthropic_native(base_url: str, api_key: str, body: dict, extra_headers
     # does for `x-api-key`.
     headers = {"Authorization": f"Bearer {api_key}"}
     headers.update(extra_headers)
-    # databricks: try the ai-gateway path first, fall back to serving-endpoints on 404.
-    for path in ("/ai-gateway/anthropic/v1/messages", "/serving-endpoints/anthropic/v1/messages"):
+    # databricks: try the ai-gateway path first, fall back on a 404 to the
+    # endpoint's OWN by-name invocations path -- `/serving-endpoints/<name>/
+    # invocations`, the SAME universal last-resort candidate `docs/
+    # DATABRICKS.md`'s routing table and `chat_route_candidates` (the
+    # openai-chat dialect's own route table) already use for every family.
+    # V2b fix (flagged during V2a): this used to hardcode the LITERAL,
+    # non-existent endpoint name "anthropic" here
+    # (`/serving-endpoints/anthropic/v1/messages`) -- no real workspace has
+    # a serving endpoint actually named "anthropic"; the real name is
+    # always `body["model"]` (`build_anthropic_request_body` always sets
+    # it to `route.upstream_model`), same field `call_databricks_chat`
+    # already reads for the identical purpose on the openai-chat side. No
+    # query suffix on the fallback -- a plain invocations call never uses
+    # Databricks' `?beta=true` AI-gateway flag (see `call_databricks_chat`/
+    # `_dbx_post`, which never appends one either).
+    endpoint_name = body.get("model") or ""
+    fallback_path = f"/serving-endpoints/{endpoint_name}/invocations"
+    for path, query_suffix in (("/ai-gateway/anthropic/v1/messages", "?beta=true"), (fallback_path, "")):
         result = proxy_anthropic(base_url, api_key, body, headers, state_dir,
-                                  path=path, query_suffix="?beta=true", on_connect=on_connect)
+                                  path=path, query_suffix=query_suffix, on_connect=on_connect)
         if result.status != 404:
             return result
         try:

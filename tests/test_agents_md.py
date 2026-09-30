@@ -107,7 +107,60 @@ def test_resolved_tools_general_purpose_excludes_agent(ctx: Ctx):
 
 @test
 def test_builtin_names_constant(ctx: Ctx):
-    ctx.check("BUILTIN_NAMES", set(BUILTIN_NAMES) == {"general-purpose", "Explore", "Plan"})
+    ctx.check("BUILTIN_NAMES", set(BUILTIN_NAMES) == {
+        "general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher",
+    })
+
+
+# ---- V2c (H15): the three new built-ins ------------------------------------
+
+@test
+def test_coder_reviewer_researcher_always_present(ctx: Ctx):
+    cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-builtins-"))
+    agents = discover_agents(cwd)
+    for name in ("Coder", "Reviewer", "Researcher"):
+        ctx.check(f"{name} discovered", name in agents)
+
+
+@test
+def test_builtin_roles_assigned(ctx: Ctx):
+    cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-roles-"))
+    agents = discover_agents(cwd)
+    expected = {
+        "general-purpose": "orchestrator", "Explore": "researcher", "Plan": "reviewer",
+        "Coder": "coder", "Reviewer": "reviewer", "Researcher": "researcher",
+    }
+    for name, role in expected.items():
+        ctx.check(f"{name}.role == {role!r}, got {agents[name].role!r}", agents[name].role == role)
+
+
+@test
+def test_coder_has_all_tools_minus_agent(ctx: Ctx):
+    cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-coder-"))
+    spec = discover_agents(cwd)["Coder"]
+    ctx.check("tools is None (all)", spec.tools is None)
+    ctx.check("Agent/Task disallowed", set(spec.disallowed_tools or []) == {"Agent", "Task"})
+    ctx.check("Coder does NOT skip CLAUDE.md", not spec.skips_claude_md())
+
+
+@test
+def test_reviewer_is_readonly(ctx: Ctx):
+    cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-reviewer-"))
+    spec = discover_agents(cwd)["Reviewer"]
+    ctx.check("no Edit", "Edit" not in (spec.tools or []))
+    ctx.check("no Write", "Write" not in (spec.tools or []))
+    ctx.check("has Read", "Read" in (spec.tools or []))
+
+
+@test
+def test_researcher_is_readonly_and_has_websearch(ctx: Ctx):
+    cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-researcher-"))
+    spec = discover_agents(cwd)["Researcher"]
+    ctx.check("no Edit", "Edit" not in (spec.tools or []))
+    ctx.check("no Write", "Write" not in (spec.tools or []))
+    ctx.check("has Read", "Read" in (spec.tools or []))
+    ctx.check("has WebSearch (distinguishes it from Explore)", "WebSearch" in (spec.tools or []))
+    ctx.check("Researcher skips CLAUDE.md", spec.skips_claude_md())
 
 
 @test
@@ -150,6 +203,7 @@ def test_load_spec_from_file_all_fields(ctx: Ctx):
         "tools: Read, Grep, Bash\n"
         "disallowedTools: Write, Edit\n"
         "model: opus\n"
+        "role: reviewer\n"
         "permissionMode: acceptEdits\n"
         "maxTurns: 12\n"
         "skills: lint, format\n"
@@ -168,6 +222,7 @@ def test_load_spec_from_file_all_fields(ctx: Ctx):
     ctx.check("tools string -> list", spec.tools == ["Read", "Grep", "Bash"])
     ctx.check("disallowedTools string -> list", spec.disallowed_tools == ["Write", "Edit"])
     ctx.check("model", spec.model == "opus")
+    ctx.check("role (V2c)", spec.role == "reviewer")
     ctx.check("permissionMode", spec.permission_mode == "acceptEdits")
     ctx.check("maxTurns coerced to int", spec.max_turns == 12 and isinstance(spec.max_turns, int))
     ctx.check("skills string -> list", spec.skills == ["lint", "format"])
@@ -434,6 +489,85 @@ def test_resolve_agent_model_haiku_falls_back_to_parent_without_small(ctx: Ctx):
     )
     ctx.check("haiku with no small ref -> parent ref", ref is parent_ref)
     ctx.check("haiku with no small ref -> parent profile", profile is parent_profile)
+
+
+# ---- V2c (H15) role resolution precedence: CLI > agent file > role table > session model ----
+
+@test
+def test_resolve_agent_model_role_table_wins_over_parent(ctx: Ctx):
+    """No invocation, no frontmatter, no CLI -- a role-table entry for this
+    agent's own role still beats the parent/session-model fallback."""
+    ref, _profile = resolve_agent_model(
+        role_name="researcher", role_table={"researcher": "or:vendor/fromtable"},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("role table used", ref.model == "vendor/fromtable")
+
+
+@test
+def test_resolve_agent_model_frontmatter_beats_role_table(ctx: Ctx):
+    """Brief: 'resolve from the role table UNLESS the agent file sets
+    model:' -- an explicit frontmatter model wins over a plain (non-CLI)
+    role-table entry for the same role."""
+    ref, _profile = resolve_agent_model(
+        frontmatter_model="or:vendor/fromfile", role_name="coder", role_table={"coder": "or:vendor/fromtable"},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("frontmatter model wins over the role table", ref.model == "vendor/fromfile")
+
+
+@test
+def test_resolve_agent_model_cli_role_override_beats_frontmatter(ctx: Ctx):
+    """A CLI `--role` override for THIS agent's own role wins even over the
+    agent file's own explicit model: -- a freshly-typed, run-only override
+    the user gets to trump a shared/managed agent file with."""
+    ref, _profile = resolve_agent_model(
+        frontmatter_model="or:vendor/fromfile", role_name="coder",
+        role_table={"coder": "or:vendor/fromtable"}, cli_role_overrides={"coder": "or:vendor/fromcli"},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("CLI role override wins over frontmatter model", ref.model == "vendor/fromcli")
+
+
+@test
+def test_resolve_agent_model_cli_role_override_for_a_different_role_is_ignored(ctx: Ctx):
+    """A CLI override for a DIFFERENT role name than this agent's own must
+    never leak in."""
+    ref, _profile = resolve_agent_model(
+        role_name="coder", role_table={"coder": "or:vendor/fromtable"},
+        cli_role_overrides={"reviewer": "or:vendor/notme"},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("mismatched-role CLI override ignored, role table still used", ref.model == "vendor/fromtable")
+
+
+@test
+def test_resolve_agent_model_invocation_still_wins_over_everything(ctx: Ctx):
+    ref, _profile = resolve_agent_model(
+        invocation_model="or:vendor/explicit", frontmatter_model="or:vendor/fromfile", role_name="coder",
+        role_table={"coder": "or:vendor/fromtable"}, cli_role_overrides={"coder": "or:vendor/fromcli"},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("explicit per-call model= still wins outright", ref.model == "vendor/explicit")
+
+
+@test
+def test_resolve_agent_model_no_role_name_ignores_role_table_and_cli(ctx: Ctx):
+    """An agent with NO role at all (role_name=None) must fall straight
+    through to the pre-existing chain, unaffected by a role table/CLI
+    overrides that happen to be populated for OTHER agents in this session."""
+    parent_ref, parent_profile = _FakeRef("or:vendor/parent"), _FakeProfile()
+    ref, profile = resolve_agent_model(
+        role_name=None, role_table={"coder": "or:vendor/fromtable"}, cli_role_overrides={"coder": "or:vendor/fromcli"},
+        parent_ref=parent_ref, parent_profile=parent_profile, state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("no role -> parent ref reused", ref is parent_ref)
+    ctx.check("no role -> parent profile reused", profile is parent_profile)
 
 
 # ---- @agent-<name> mentions --------------------------------------------------

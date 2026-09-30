@@ -102,16 +102,29 @@ def test_version_bumped_to_0_6_0_and_changelog_has_an_entry(ctx: Ctx):
 
 @test
 def test_version_bumped_to_0_7_0_and_changelog_has_an_entry(ctx: Ctx):
-    """V2a brief (docs/harness/V2-brief.md): per-family Databricks request/
-    stream/error/usage correctness across every gateway type, the fixture
-    matrix, the two work-matrix open-question probes, version bump."""
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 0.7.0, got {__version__!r}", __version__ == "0.7.0")
+    """H14's own pinning shape, kept exact (checked against the CHANGELOG's
+    own still-present [0.7.0] entry, not the CURRENT version) now that V2b/
+    V2c has bumped past it; see `test_version_bumped_to_0_8_0_and_changelog_
+    has_an_entry` below for THIS milestone's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
-    ctx.check("CHANGELOG.md has a [0.7.0] entry", "[0.7.0]" in changelog)
+    ctx.check("CHANGELOG.md still has a [0.7.0] entry", "[0.7.0]" in changelog)
     entry = changelog.split("[0.7.0]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("v2a", "reasoning replay", "route split"):
         ctx.check(f"the [0.7.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_0_8_0_and_changelog_has_an_entry(ctx: Ctx):
+    """V2 brief (docs/harness/V2-brief.md) V2b+V2c: work-matrix show/apply,
+    the `call_anthropic_native` by-name-invocations fallback fix, roles
+    (orchestrator/coder/reviewer/researcher/small), version bump."""
+    from rolo_claude import __version__
+    ctx.check(f"__version__ is 0.8.0, got {__version__!r}", __version__ == "0.8.0")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [0.8.0] entry", "[0.8.0]" in changelog)
+    entry = changelog.split("[0.8.0]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("work-matrix", "roles", "researcher"):
+        ctx.check(f"the [0.8.0] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 if __name__ == "__main__":

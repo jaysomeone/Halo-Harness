@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -405,3 +406,170 @@ def format_table(rows: list, *, tools: bool = False) -> str:
         line += f"  {r.first_tokens or r.error or ''}"
         lines.append(line)
     return "\n".join(lines)
+
+
+# =============================================================================
+# V2b -- matrix-driven fixes tooling: `rolo-claude work-matrix show/apply`.
+# Reads a `doctor --work --probe-all` JSON report (see `_write_report` above
+# -- endpoint names only, never a host or a token) and turns each FAILING
+# row into a suggested action, per the V2 brief's own rules:
+#   - 403               -> off the VPN (Databricks' IP access list).
+#   - any other non-200, with a "<name> (anthropic gateway)" companion row
+#     (only ever present when `--both` probed it) that itself answered 200
+#     -> the endpoint's DEFAULT dialect is the wrong path; the ONE real,
+#     already-implemented per-endpoint knob that can fix it is
+#     `databricks.gateway.<endpoint>: anthropic` (`providers.dbx_routing.
+#     resolve_databricks_dialect`) -- the only failure class `apply` ever
+#     writes anything for.
+#   - any other non-200 (no working companion to point at)
+#     -> genuinely unknown from this data alone; report it.
+#   - 200, but `tool_call_ok is False` (only meaningful when `--tools` ran)
+#     -> a FAMILY-wide rule (model_table.json), never a per-endpoint
+#     config.json key -- reported, never written by `apply`.
+#   - 200, but `reasoning_replay_ok is False` (only meaningful when
+#     `--tools` produced a tool_use to replay) -> reported (no existing
+#     per-endpoint "disable thinking for tool loops" config knob to write).
+# A clean 200 row with neither flag set is not a failure at all (classify_
+# row returns None for it).
+# =============================================================================
+
+def load_report(path) -> dict:
+    """Raises OSError/ValueError on a missing/malformed file -- callers
+    (`cmd_work_matrix`) turn that into a clean exit-2 message, never a
+    traceback."""
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def classify_row(row: dict, rows_by_name: dict) -> Optional[dict]:
+    """`row` is one entry of the report's own "rows" list; `rows_by_name`
+    maps every row's own `endpoint` name to itself (including a `--both`
+    companion row, named `"<name> (anthropic gateway)"`) so a companion
+    lookup never needs a second pass over the report. Returns `None` for a
+    row that isn't a failure at all (a plain 200 with neither tool/replay
+    flag set to False); otherwise `{"issue", "action", "config_key",
+    "config_value"}` -- the last two are `None` unless this failure maps
+    onto a REAL, already-implemented config.json override (only the
+    wrong-path/anthropic-gateway-companion case does)."""
+    name = row.get("endpoint", "")
+    status = str(row.get("status", ""))
+    error = (row.get("error") or "").strip()
+    if status == "403":
+        return {"issue": "403 (Databricks IP access list)", "action": "run this on the VPN, then re-probe",
+                "config_key": None, "config_value": None}
+    if status != "200":
+        companion = rows_by_name.get(f"{name} (anthropic gateway)")
+        if companion is not None and str(companion.get("status")) == "200":
+            return {
+                "issue": f"wrong path -- the default dialect failed (status {status})",
+                "action": f"set databricks.gateway.{name} = anthropic (the anthropic gateway answered correctly)",
+                "config_key": f"databricks.gateway.{name}", "config_value": "anthropic",
+            }
+        issue = f"upstream error (status {status})" + (f": {error[:80]}" if error else "")
+        return {"issue": issue, "action": "unknown -- report this endpoint for investigation",
+                "config_key": None, "config_value": None}
+    if row.get("tool_call_ok") is False:
+        return {"issue": "no tool call produced",
+                "action": "change this family's tool-call rule (tool_choice_required_supported / schema "
+                           "simplifier) in model_table.json",
+                "config_key": None, "config_value": None}
+    if row.get("reasoning_replay_ok") is False:
+        return {"issue": "reasoning replay rejected after a tool call",
+                "action": f"disable thinking for tool loops on {name}",
+                "config_key": None, "config_value": None}
+    return None
+
+
+def render_show_table(report: dict) -> str:
+    """`rolo-claude work-matrix show`'s own rendering -- endpoint/status/
+    issue/suggested-action, one line per FAILING row only (a report where
+    every probed endpoint is clean says so plainly instead of an empty
+    table)."""
+    rows = report.get("rows") or []
+    if report.get("note") and not rows:
+        return f"(nothing probed: {report['note']})"
+    rows_by_name = {r.get("endpoint"): r for r in rows if isinstance(r, dict)}
+    header = f"{'endpoint':<46} {'status':>6}  {'issue':<48} suggested action"
+    lines = [header, "-" * len(header)]
+    any_failure = False
+    for row in rows:
+        classified = classify_row(row, rows_by_name)
+        if classified is None:
+            continue
+        any_failure = True
+        name = row.get("endpoint", "?")
+        status = str(row.get("status", "?"))
+        lines.append(f"{name:<46} {status:>6}  {classified['issue']:<48} {classified['action']}")
+    if not any_failure:
+        lines.append("(every probed endpoint is green -- nothing to fix)")
+    return "\n".join(lines)
+
+
+def writable_overrides(report: dict) -> "list[tuple[str, str]]":
+    """Every `(config_key, config_value)` pair `show` would suggest AND
+    that maps onto a real config.json knob -- `apply`'s own input, in
+    report order, de-duplicated (last write for a given key wins, same as
+    `rolo-claude config set` would if run twice)."""
+    rows = report.get("rows") or []
+    rows_by_name = {r.get("endpoint"): r for r in rows if isinstance(r, dict)}
+    out: dict = {}
+    for row in rows:
+        classified = classify_row(row, rows_by_name)
+        if classified and classified.get("config_key"):
+            out[classified["config_key"]] = classified["config_value"]
+    return list(out.items())
+
+
+def cmd_work_matrix(argv: list) -> int:
+    """`rolo-claude work-matrix show|apply <report.json>` -- never touches
+    Claude Code's own files; `apply` writes only to `~/.rolo-claude/
+    config.json`, and only the `databricks.gateway.<endpoint>` overrides
+    `writable_overrides` names, after printing them and asking for
+    confirmation (`--yes` skips the prompt, for scripting/CI)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="rolo-claude work-matrix", add_help=True,
+                                      description="Interpret a `doctor --work --probe-all` JSON report.")
+    sub = parser.add_subparsers(dest="action")
+    p_show = sub.add_parser("show", help="Render the report as a table with a suggested action per failure")
+    p_show.add_argument("report", metavar="REPORT.JSON")
+    p_apply = sub.add_parser("apply", help="Write the report's suggested per-endpoint overrides into config.json")
+    p_apply.add_argument("report", metavar="REPORT.JSON")
+    p_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    args = parser.parse_args(argv)
+    if args.action not in ("show", "apply"):
+        parser.print_help()
+        return 2
+
+    try:
+        report = load_report(args.report)
+    except (OSError, ValueError) as e:
+        print(f"rolo-claude work-matrix: could not read {args.report!r}: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(report, dict):
+        print(f"rolo-claude work-matrix: {args.report!r} is not a JSON object", file=sys.stderr)
+        return 2
+
+    if args.action == "show":
+        print(render_show_table(report))
+        return 0
+
+    overrides = writable_overrides(report)
+    if not overrides:
+        print("rolo-claude work-matrix apply: nothing actionable in this report (no writable overrides).")
+        return 0
+    print("The following overrides would be written to ~/.rolo-claude/config.json:")
+    for key, value in overrides:
+        print(f"  {key} = {value!r}")
+    if not args.yes:
+        try:
+            answer = input("Apply these overrides? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted -- nothing written.")
+            return 1
+    from rolo_claude.theme import set_config_value
+    for key, value in overrides:
+        set_config_value(key, value)
+    print(f"Wrote {len(overrides)} override(s) to ~/.rolo-claude/config.json.")
+    return 0

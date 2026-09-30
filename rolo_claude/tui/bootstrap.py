@@ -82,7 +82,7 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         # `resolve_resume`'s own "most recent match" guess silently win.
         continue_=bool(getattr(args, "continue_", False)), resume=effective_resume,
         fork_session_flag=bool(getattr(args, "fork_session", False)),
-        print_mode=False,
+        print_mode=False, roles_flag=getattr(args, "role", None),
     )
     attach_cli_files(build.session, getattr(args, "file", None), cwd=cwd)
 

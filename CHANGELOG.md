@@ -5,6 +5,62 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [0.8.0] - 2026-09-29
+
+V2b+V2c: matrix-driven fixes tooling and roles. See `docs/harness/V2-brief.md`.
+
+- **`rolo-claude work-matrix show/apply`** (`rolo_claude/work_matrix.py`):
+  `show <report.json>` renders a `doctor --work --probe-all` JSON report as a
+  table with a suggested action per failing endpoint -- 403 -> run this on
+  the VPN; a non-200 row with a `--both`-probed "(anthropic gateway)"
+  companion row that itself answered 200 -> set `databricks.gateway.
+  <endpoint>: anthropic`; any other non-200 -> unknown, report it; a 200 with
+  `tool_call_ok: false` -> change the family's tool-call rule in
+  `model_table.json`; a 200 with `reasoning_replay_ok: false` -> disable
+  thinking for tool loops on that endpoint. `apply <report.json> [--yes]`
+  writes only the ONE class that maps onto a real config.json knob (the
+  gateway override), after listing every write and asking for confirmation;
+  the other three classes are report-only (no per-endpoint config key exists
+  for them). Two synthetic sample reports under `tests/fixtures/work-matrix/`
+  (`all-green.json`, `all-failures.json`, one row per failure class).
+- **Fix: `providers/http.py::call_anthropic_native`'s 404 fallback no longer
+  hardcodes the literal, non-existent endpoint name "anthropic"** (flagged
+  during V2a) -- `/serving-endpoints/anthropic/v1/messages` is not a real
+  workspace endpoint; the fallback now builds `/serving-endpoints/<the real
+  endpoint name, from body["model"]>/invocations`, the SAME by-name
+  universal fallback every other family/dialect already uses, with no query
+  suffix (a plain invocations call never uses Databricks' `?beta=true`
+  AI-gateway flag). `tests/helpers/mock_databricks.py`'s own anthropic-
+  gateway dispatch is now body-shape-based (a top-level `system` field,
+  never present on an openai-chat body) instead of matching that same wrong
+  literal path.
+- **Roles** (`rolo_claude/roles.py`, H15): `orchestrator`/`coder`/`reviewer`/
+  `researcher`/`small` in `team.json` and `~/.rolo-claude/config.json`'s own
+  `roles` key (team.json seeded into config.json once, at `init --preset
+  work` time, by the same idempotent idiom `gateway_preference` already
+  uses). Three new built-in agents -- `Coder` (full read/write tool set),
+  `Reviewer` (read-only code review), `Researcher` (Explore's tools +
+  WebSearch) -- alongside `general-purpose`/`Explore`/`Plan`, each with a
+  fixed default role; a custom `.claude/agents/*.md` agent sets the same
+  thing with a `role:` frontmatter key. Resolution precedence: an explicit
+  `model=` always wins; then a `--role NAME=MODEL` CLI override for that
+  agent's own role (repeatable; wins even over the agent's own file
+  `model:` -- a deliberate, freshly-typed, run-only override); then the
+  agent file's own `model:`; then the role table; then `CLAUDE_CODE_
+  SUBAGENT_MODEL`/`settings.subagentModel`; then the parent/session model
+  (`orchestrator`'s own documented default). The `Agent`/`Task` tool itself
+  accepts a `role` argument overriding an agent's default role for just one
+  call. Cost-aware defaults (DeepSeek V4.1 Flash for `researcher`/`small`)
+  apply ONLY when the role table is completely empty AND the session's own
+  model is a Databricks one -- documented in `docs/ROLES.md`, never
+  automatic beyond that one case. `/roles` shows the resolved table (model,
+  endpoint/path type, price) per role; `stats --roles` sums sub-agent spend
+  per role from each Agent-tool call's own rolled-up usage node (tagged
+  `role=`, additive -- a pre-V2c log simply has none).
+- **Docs**: new `docs/ROLES.md`; `docs/DATABRICKS.md`'s own work-matrix
+  section; `docs/COMMANDS.md`'s `work-matrix`/`--role`/`stats --roles`
+  sections; `docs/SLASH-COMMANDS.md`'s `/roles` section.
+
 ## [0.7.0] - 2026-09-29
 
 V2a: per-family Databricks correctness across every gateway type the harness
