@@ -10,6 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
+
+ensure_scoped_state_dir_once()
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -213,12 +217,12 @@ def test_catalog_ages_reports_missing_and_fresh(ctx: Ctx):
 def test_doctor_work_no_databricks_configured(ctx: Ctx):
     from rolo_claude.doctor import run_work_checks
     d = Path(tempfile.mkdtemp(prefix="work-none-"))
-    old_home = os.environ.get("BRIDGE_TEST_HOME")
-    old_env = os.environ.get("BRIDGE_ENV_FILE")
+    _cred_keys = ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+                  "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+    _saved = {k: os.environ.get(k) for k in (("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE") + _cred_keys)}
     os.environ["BRIDGE_TEST_HOME"] = str(d)
     os.environ["BRIDGE_ENV_FILE"] = str(d / "no-such-env-file")
-    for key in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
-                "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+    for key in _cred_keys:
         os.environ.pop(key, None)
     try:
         lines, ok = run_work_checks()
@@ -227,7 +231,13 @@ def test_doctor_work_no_databricks_configured(ctx: Ctx):
         ctx.check("no live network call attempted (clean MISSING, no traceback)",
                   all("Traceback" not in l for l in lines))
     finally:
-        for var, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_ENV_FILE", old_env)):
+        # H15 part 2 addendum 3.1 fallout: this used to bare-pop the
+        # credential keys above with no restore at all, permanently wiping
+        # this file's own module-level default credentials (tests/helpers/
+        # provider_env_defaults.py) for every test registered after this
+        # one -- is_enabled("databricks") then refused every dbx: ref for
+        # the REST of this file's run.
+        for var, old in _saved.items():
             if old is None:
                 os.environ.pop(var, None)
             else:

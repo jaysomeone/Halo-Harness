@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
 # H11b finding 27: THIS module's own scratch home -- every real Session
 # this file builds writes its session log (and, once cc: starts, its
@@ -34,6 +35,19 @@ from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run
 # import-then-run loop -- this module no longer depends on test_bash_
 # background_jobs.py (or any other module) happening to set this first.
 os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="cc-session-scratchhome-")
+
+# H15 part 2 addendum 3.1: or:/ant:/dbx: refs below need a believable
+# default credential now that parse_model_ref refuses an auto-detected-
+# disabled provider. Deliberately NOT a blanket BRIDGE_TEST_CC_AUTH_STATUS
+# default here (unlike other files) -- this file's own `_fake_claude_env`/
+# bare `cc:` tests each manage that (and `BRIDGE_CLAUDE_EXE`) themselves,
+# including two that deliberately simulate "not logged in"/"binary
+# missing" and need the REAL absence, not a default masking it; those two
+# instead call `enable("claude_subscription")` explicitly (an override
+# bypasses auto-detection) so parse_model_ref succeeds and the specific
+# failure is still exercised turn-time, inside cc_runtime's own
+# `_preflight_cc`, exactly as these tests were written to check.
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -431,18 +445,35 @@ def test_switch_from_cc_to_openrouter_and_back_queues_conversation_so_far(ctx: C
 
 @test
 def test_claude_not_logged_in_gives_a_precise_error(ctx: Ctx):
-    with _fake_claude_env(logged_in=False):
-        session, _ = _new_cc_session()
-        events_ = list(session.turn("reply with the single word pong"))
-        errors = [e for e in events_ if e.kind == "error"]
-        ctx.check(f"one error event, got {errors}", len(errors) == 1)
-        ctx.check(f"mentions logging in, got {errors[0].data['message']!r}", "log in" in errors[0].data["message"])
-        ctx.check("turn_done reason error", events_[-1].data["reason"] == "error")
-        session.close_cc()
+    from rolo_claude.providers.enablement import enable
+    from rolo_claude.theme import get_config_value, set_config_value
+    # 1.0.1 part 2 fixpass finding 10: this module's own BRIDGE_TEST_HOME is
+    # set ONCE at import time (never reset between tests) -- `enable()`'s
+    # override must be restored here, or it leaks into every cc: test that
+    # runs afterward in this same process (masking a real auto-detection
+    # regression behind a permanent override).
+    providers_before = get_config_value("providers", default=None)
+    enable("claude_subscription")  # bypass auto-detection -- see this test's own module-level note
+    try:
+        with _fake_claude_env(logged_in=False):
+            session, _ = _new_cc_session()
+            events_ = list(session.turn("reply with the single word pong"))
+            errors = [e for e in events_ if e.kind == "error"]
+            ctx.check(f"one error event, got {errors}", len(errors) == 1)
+            ctx.check(f"mentions logging in, got {errors[0].data['message']!r}",
+                      "log in" in errors[0].data["message"])
+            ctx.check("turn_done reason error", events_[-1].data["reason"] == "error")
+            session.close_cc()
+    finally:
+        set_config_value("providers", providers_before)
 
 
 @test
 def test_claude_binary_missing_gives_a_precise_error(ctx: Ctx):
+    from rolo_claude.providers.enablement import enable
+    from rolo_claude.theme import get_config_value, set_config_value
+    providers_before = get_config_value("providers", default=None)  # finding 10: see the previous test's own note
+    enable("claude_subscription")  # bypass auto-detection -- see this test's own module-level note
     saved = os.environ.get("BRIDGE_CLAUDE_EXE")
     missing = Path(tempfile.gettempdir()) / "definitely-not-claude-xyz.exe"
     os.environ["BRIDGE_CLAUDE_EXE"] = '"' + str(missing) + '"'
@@ -458,6 +489,7 @@ def test_claude_binary_missing_gives_a_precise_error(ctx: Ctx):
             os.environ.pop("BRIDGE_CLAUDE_EXE", None)
         else:
             os.environ["BRIDGE_CLAUDE_EXE"] = saved
+        set_config_value("providers", providers_before)
 
 
 # ---- --tools "" argv shape / disallowed-tools fallback ----------------------

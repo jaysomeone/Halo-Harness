@@ -42,7 +42,16 @@ unchanged and says so.
 
 ### `/cost`
 Total cost and turn count for the session so far (`"n/a"` when the route
-doesn't report cost, e.g. Databricks).
+doesn't report cost, e.g. Databricks). A second line (H15 part 2 addendum
+4) appears once a background fetch has ever succeeded -- the same cached
+figure the status bar's own "OR $12.40 left"/"OR $3.21 used" segment and
+`/providers` show, naming which of three kinds it is: "OpenRouter: $12.40
+remaining (this key's own limit; key: <label>, as of HH:MM:SS)", "...
+(account credits, via the management key; ...)", or "OpenRouter: $3.21
+used so far (this key's spend so far -- no limit set, no management key
+configured; ...)". Omitted entirely when OpenRouter isn't enabled or
+nothing has been fetched yet. See `docs/ARCHITECTURE.md`'s status bar
+section for exactly where the figure comes from and how often it refreshes.
 
 ### `/context`
 A live breakdown of the current request's system/tools/messages/pruned
@@ -54,13 +63,16 @@ No argument: opens the model picker -- a filterable, arrow-key list
 (`Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` move the highlight, typing
 filters, `Enter` confirms, `Esc` cancels; the filter box keeps keyboard
 focus throughout) grouped by provider/family with one header per group
-(OpenRouter, `claude.ai subscription` -- only shown when that subscription
+(OpenRouter, `Claude Code subscription` -- only shown when that subscription
 is actually usable, see below -- and `Databricks (<family>)` per family).
 Every row shows the SAME columns regardless of provider: context window,
 max output, and USD/1M-token prices (`ctx=200k out=64k in=$1.00/M
 out=$5.00/M`, blank -- never `?` -- for anything not published), plus,
 for a Databricks row, a `[<family> · <path>]` tag naming which gateway
-path it resolves to right now (see `docs/DATABRICKS.md`). Databricks
+path it resolves to right now (see `docs/DATABRICKS.md`); a `cc:`/`ant:`
+row's own tag instead names the resolved model id (e.g. `cc:opus` shows
+`[-> claude-opus-5-5 (latest Opus)]`, see `docs/MODELS.md`'s alias table).
+Databricks
 pricing/context data comes from models.dev (refreshed by `/models
 refresh`) when that endpoint is listed there, else from `model_table.json`
 (context only), else blank -- never guessed. With a model reference (any
@@ -68,7 +80,7 @@ form `docs/MODELS.md` documents, including a bare `databricks-*`/
 `system.ai.*` name or any name that matches a cached Databricks endpoint)
 given directly as `/model <ref>`, switches the session to it immediately,
 no picker -- mid-session model changes are logged as a fresh `meta` node.
-The `claude.ai subscription` group appears only when `claude auth status`
+The `Claude Code subscription` group appears only when `claude auth status`
 reports an actual claude.ai login (not, e.g., a Databricks work box's own
 settings-driven login) -- otherwise a `cc:` row would just fail at request
 time with no warning from the picker.
@@ -143,6 +155,26 @@ pulled from the live session's own `agent_runtime.role_table`/
 `.cli_role_overrides` (the SAME table a role-bearing `Agent`/`Task` call
 actually resolves against) so it never drifts from real behavior. See
 `docs/ROLES.md`.
+
+### `/providers [list|enable <name>|disable <name>|setup <name>]`
+H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-
+enablement table -- status, reachable, cached model count -- for
+`databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`), and
+`typesafe` (stores `TYPESAFE_API_KEY` only, for a later feature; no routed
+models yet). Each row's status is `auto (detected from <source>)` once a
+real credential/login is found (no `init` step required), `disabled by
+you`/`enabled by you` once an explicit override exists, or `not set up`.
+Bare `/providers` (or `list`) prints the table, plus a trailing OpenRouter
+balance line once a background fetch has ever succeeded (see `/cost`);
+`enable <name>`/`disable <name>` write an explicit override (`true` forces
+a provider on with no credentials at all; `false` hides one auto-detection
+would otherwise have turned on) right here (`cc`/`ant`/`dbx`/`or` are
+accepted aliases for the canonical names); `setup <name>` needs the
+interactive picker `rolo-claude init`/`rolo-claude providers setup <name>`
+show from a real terminal, so headless just points at that command instead
+of half-implementing it. See `docs/MODELS.md`'s "Provider enablement"
+section for the full prefix/label table and the exact per-provider
+detection rule.
 
 ### `/effort [level]`
 1.0.1 hotfix 19/20. Bare `/effort` shows the effective level, its source

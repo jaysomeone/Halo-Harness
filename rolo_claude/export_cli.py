@@ -41,7 +41,7 @@ from pathlib import Path
 _SECRET_ENV_NAMES = (
     "OPENROUTER_API_KEY", "DATABRICKS_TOKEN", "DATABRICKS_HOST", "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID",
-    "AWS_SESSION_TOKEN", "NPM_TOKEN",
+    "AWS_SESSION_TOKEN", "NPM_TOKEN", "OPENROUTER_MANAGEMENT_KEY", "TYPESAFE_API_KEY",
 )
 # Any identifier containing API_KEY/TOKEN/SECRET anywhere in its name (a
 # generic catch-all for names this list doesn't happen to enumerate, e.g. a

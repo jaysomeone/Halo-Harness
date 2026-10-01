@@ -267,6 +267,258 @@ see "1.0.1 follow-ups" in `docs/harness/RECOMMENDATIONS.md`.
 
 `__version__` is unchanged.
 
+### Part 2 (same release): tabbed provider setup, hang diagnostics, provider enablement, effort polish
+
+Finishes the 1.0.1 round -- item 13's tabbed provider view, item 15's
+remaining hang diagnostics, the new item 21 provider-enablement model, and
+item 22's remainder -- plus five minors the reviewer logged after the fix
+pass above. All with pinning tests; `__version__` stays 1.0.1.
+
+- **`init`'s provider setup is now tabbed** (item 13): one tab per provider
+  -- Databricks, OpenRouter, Anthropic API (key), Claude Code subscription,
+  and a new fifth tab, TypeSafe (stores `TYPESAFE_API_KEY` only, for a
+  later feature -- no routed models yet) -- replacing the one-provider-at-
+  a-time picker loop on a REAL terminal only (a piped/non-tty run, every
+  existing script, keeps the exact old sequential-picker-plus-numbered-
+  fallback path, byte for byte). Shift+Tab and Left/Right (the latter only
+  while the tab bar itself has focus -- a focused credential field's own
+  Left/Right still moves the cursor) switch tabs; Up/Down move between a
+  tab's own fields/button; Enter activates a field or button; Esc leaves
+  the dialog and `init` proceeds to the default-model/permission-mode
+  steps exactly as before. Each tab opens showing what the harness already
+  picked up ("picked up from `<source>`: `<masked>`", or a discovered
+  Databricks host with just the token field left) with the status line
+  updating live as a value is typed; a bounded background probe (the same
+  8s connect-only cap item 2 introduced) shows "reachable" / "unreachable:
+  `<reason>`" / "not set up"; finishing a tab with real credentials fetches
+  and caches that provider's catalog right then, off the UI thread. A
+  Textual runtime failure (no real terminal after all) falls back to the
+  old sequential picker instead of crashing `init` outright.
+- **Provider enablement** (item 21, new): a provider's models now reach
+  `/model`/`rolo-claude models`/the `init` default pick/`doctor` only once
+  it's EXPLICITLY enabled -- by completing its tab above, by `rolo-claude
+  providers enable <name>`/`/providers enable <name>`, or (one-time only,
+  for a box with credentials from before this existed) an automatic
+  migration `doctor`/`init` run the first time. Detected credentials or a
+  `claude.ai` login never enable a provider on their own -- a `cc:` group
+  no longer appears in `/model` just because `claude auth status` reports
+  a real login (item 9's own gate), and a hand-typed ref for a disabled
+  provider is refused with a one-line message naming the fix; a detected-
+  but-disabled provider shows one dim hint line in `/model` instead of a
+  selectable row. `rolo-claude providers`/`/providers`: a table (enabled,
+  credentials found and where, reachable, cached model count) plus
+  `enable`/`disable`/`setup <name>`. Labels used everywhere (the tabs,
+  `/model`'s group headers, `doctor`, `/providers`): `dbx:` Databricks,
+  `or:` OpenRouter, `ant:` Anthropic API (key), `cc:` Claude Code
+  subscription -- the full prefix table is in `docs/MODELS.md`.
+- **Hang diagnostics** (item 15 remainder): a daemon watchdog thread
+  (started from `on_mount`, completely independent of the UI's own event
+  loop -- the point is that it keeps working when THAT is what's stuck)
+  polls a heartbeat `_tick_spinner` bumps every second; once it's stalled
+  past 15s it dumps every thread's stack (`sys._current_frames()`), the
+  named background-worker list, and the active screen to
+  `~/.rolo-claude/hang-<UTC>.log` (one line also to `bridge.log`), at most
+  once a minute while it persists. `SIGUSR1` (POSIX) dumps the same
+  diagnostics on demand. `--debug` now also traces, to `bridge.log`: every
+  Key event (with the focused widget and active screen), window
+  focus/blur, and the start/finish/cancel of every named background
+  worker. An audit of `_drain` and every `call_from_thread` call site found
+  no unbounded blocking of the UI thread (every `subprocess.run` already
+  had a timeout and already ran on its own worker thread; no `Worker.
+  wait()`/shared-lock call exists on this path) -- the watchdog above is
+  the backstop for whatever that audit missed. (The 1Hz heartbeat timer
+  itself is now wired through a lambda instead of the bound `_tick_spinner`
+  method directly -- `set_interval` keeps calling whatever reference it was
+  first given, so a test that needs to simulate a stalled heartbeat by
+  replacing the instance's own `_tick_spinner` was silently still ticking
+  the original every second; no production behaviour changes, only what a
+  test can now actually stop.)
+- **`/effort` and the status bar show `none (tools)`** on a route where the
+  gpt-6 table rule or a LEARNED per-endpoint rule applies (item 22
+  remainder): the EFFECTIVE value actually sent on a tool-carrying turn,
+  not the configured one that route would ignore anyway, with the
+  selector card's own description line (and `/effort`'s own source line)
+  explaining why. The learned per-endpoint `reasoning_effort_with_tools`
+  rule (a live 400 proving an untabled Databricks endpoint also needs it)
+  now persists to `~/.rolo-claude/learned-rules.json`, not only in memory
+  for the rest of one session -- a NEW session against the same endpoint
+  sends it correctly from its very first request, never re-paying for the
+  failing one. A `model_table.json` row always wins over a learned entry.
+- **Five minors from the reviewer's post-fix-pass notes**, each with its
+  own pinning test: `Ctrl+Q` now calls `session.job_registry.kill_all()`
+  immediately, before its `os._exit` timer is even armed, instead of only
+  deep inside the ordinary (possibly also-wedged) `controller.quit()`
+  path it exists to route around; `clamp_effort` clamps an unsupported
+  `max` to `xhigh` on a chat-dialect route that has `xhigh` but no `max`
+  (the mirror of the existing `xhigh`-without-`max` case), instead of
+  falling all the way to the bland `medium` default; `/effort`, `/rewind`
+  and `/improve` show a one-line note instead of opening their own card
+  while any card (a live permission ask, most importantly) is already
+  pending; `init`'s per-provider default-model step no longer overwrites a
+  custom model already configured when it merely differs from that
+  provider's own hardcoded default (only the final cross-provider pick
+  previously preserved a custom value) -- an explicit `--model` this run
+  still wins outright; `cached_auth_status_is_stale`'s own TTL is now
+  actually consulted (bare `/model`'s own stale-Databricks-catalog-refresh
+  worker does the same for the claude-auth-status cache), so a `claude.ai`
+  login/logout during a long session is reflected the next time `/model`
+  opens, not only after restarting the whole app.
+- **State-dir scoping** (found during this round's own fix pass): a test
+  module that builds a real `Session`/`Controller` without scoping
+  `BRIDGE_STATE_DIR` itself used to only avoid leaking into the REAL
+  `~/.rolo-claude/sessions` because an EARLIER module happened to leave
+  `BRIDGE_TEST_HOME`/`BRIDGE_STATE_DIR` set -- `tests/run_all.py` now
+  snapshots and restores every `BRIDGE_*`/`OPENROUTER_*`/`DATABRICKS_*`/
+  `ANTHROPIC_*`/`TYPESAFE_*` env var AROUND EACH MODULE, so this can never
+  happen regardless of any one module's own hygiene or import order; its
+  own REAL SESSIONS GUARD also now catches a new DIRECTORY under the real
+  sessions dir, not only a new `.jsonl` file (1972 empty slug directories,
+  invisible to the old file-only glob, were found on the Windows build
+  host). The same unscoped-real-machine-state bug also reached
+  `~/.rolo-claude/mcp/tools-cache/` (lazy MCP tool caching, item 13's own
+  H13 Part A, also resolves via `bridge_home()`) through one compat-matrix
+  test that scoped its subprocess check but not its in-process one -- fixed
+  the same way, by scoping before the in-process `build_manager` call. The
+  `!cmd` inline-shell permission card is now registered with the session's
+  own permission-waiter table too, so Shift+Tab/`/permissions` re-evaluates
+  it through the exact same `reevaluate_pending_permission` path a live
+  tool-call ask already uses, instead of leaving it unaffected by a mode
+  change until answered by hand.
+- **Addendum**: a bare `rolo-claude` typed outside the checkout did not
+  work for the owner on the work VM, because the installed console script
+  had never been put on PATH (only the checkout's own `bin/` wrapper had
+  ever been used, from inside the checkout). `doctor` gained a "command on
+  PATH" check -- OK names the resolved path; a WARN (not found, or
+  resolving to the checkout's own `bin/` wrapper) names the exact reinstall
+  command for whichever tool is present (`uv tool install --reinstall .`
+  run from the checkout, else `pip install --user -e .`) and reminds that
+  it's needed again after every `git pull`; `init`'s own Summary ends with
+  the same check and, when it fails, the same fix line plus "run it from
+  any directory -- the checkout is only for `git pull`." README's quick
+  start and `docs/COMMANDS.md`'s `doctor`/`init` sections now say so too.
+
+### Part 2 addenda (same release, same day): Opus 5.5, provider auto-detection, catalogs without init, OpenRouter balance
+
+Four follow-up asks from the owner's live use on his personal Mac and his
+work VM, landed the same day as Part 2 above. All with pinning tests;
+`__version__` stays 1.0.1.
+
+- **`cc:`/`ant:` explicit `opus-5.5`/`sonnet-5.5` aliases**: `opus`/`sonnet`
+  are deliberately-moving "latest" pointers (today both resolve to the
+  `-5-5` point release) -- nothing was labelled "5.5" anywhere, so a reader
+  had to already know `opus` IS `claude-opus-5-5` to find it. The two new
+  names resolve to the identical id the bare pointer already does; `/model`,
+  `rolo-claude models` and the init picker now show the resolved id next to
+  EVERY `cc:`/`ant:` alias (`cc:opus -> claude-opus-5-5 (latest Opus)`,
+  `cc:opus-5.5 -> claude-opus-5-5`), reading as an enumeration the same way
+  the Databricks group's own `[<family> · <path>]` tag already does. Full
+  alias table in `docs/MODELS.md`.
+- **Provider enablement rule REPLACED** (rolo, personal Mac: "never ran
+  init... loves that the harness already finds the available keys and
+  subscription and uses those"): detected credentials/a real claude.ai
+  login now AUTO-enable a provider -- OpenRouter/Anthropic API (key)/
+  TypeSafe once their key is found (env file, shell env, or the settings
+  env chain), Databricks once a host AND token are found (same sources,
+  plus `~/.databrickscfg`), Claude Code subscription (`cc:`) ONLY when
+  `claude auth status` reports `loggedIn` with `authMethod` exactly
+  `claude.ai` (never for an API-token/custom-base-url-driven `claude`, as
+  on a work VM, loggedIn or not). `providers` in config.json now stores
+  OVERRIDES only: an explicit `enabled: true`/`false` always wins over
+  auto-detection; migration is now a permanent no-op (auto-detection
+  already computes live what it used to write once). `/providers`/
+  `rolo-claude providers` shows each provider as `auto (detected from
+  <source>)` / `disabled by you` / `enabled by you` / `not set up`. A
+  hand-typed `cc:` ref refused by pure auto-detection (never an explicit
+  override) now names the SAME precise reason (not logged in / claude not
+  installed / wrong authMethod, each with its own fix) a turn would have
+  failed with anyway, reusing `agent.cc_runtime`'s own preflight check
+  instead of a generic "not enabled" line; `doctor`'s default-model check
+  got the matching fix for a syntactically-fine-but-unconfigured ref.
+- **Catalogs exist without `init`, `/model` lists every enabled provider
+  regardless of the current model** (rolo, Mac: "`/model` showed one
+  OpenRouter row" because models.json had never been fetched, and it
+  vanished entirely after switching to a `cc:` model): a background worker
+  now fetches every ENABLED provider's catalog (OpenRouter `/models`,
+  Anthropic `/v1/models` -> a new `ant-models.json` cache, Databricks
+  endpoint discovery) once at app launch and whenever `/model` opens, if
+  missing or older than `databricks.catalog_max_age_hours` (default 24h) --
+  never on the UI thread, one dim note when something actually changed.
+  `/models refresh`/`rolo-claude models --refresh` now refresh every
+  enabled provider, not Databricks/OpenRouter only. `Controller.
+  list_models()` already built each provider's group from its own cache
+  independent of the session's current model -- the real fix was making
+  sure that cache actually gets populated; verified a cached OpenRouter
+  group survives switching the session to `cc:opus` unchanged.
+- **OpenRouter account balance in the status bar** (rolo: "put the
+  remaining balance of an api key... next to... the row of numbers under
+  the chat"; corrected mid-round against OpenRouter's real OpenAPI spec --
+  the key-info endpoint is `GET /key`, not `/auth/key`, and `/credits`
+  needs a separate Management key): a new segment right after cost, `OR
+  $12.40 left` or `OR $3.21 used`, populated by a background worker (never
+  the UI thread) at launch, every 5 minutes, and once after every turn
+  (debounced to at most once a minute). Three-way preference: THIS key's
+  own `limit_remaining` (`GET /key`, the ordinary `OPENROUTER_API_KEY`)
+  when it has a real limit; else the whole account's remaining credits
+  (`GET /credits`, requiring a SEPARATE `OPENROUTER_MANAGEMENT_KEY` --
+  never the ordinary key) when that key is configured; else this key's own
+  `usage` (a spend figure, labelled "used" not "left" -- the honest
+  fallback for an unlimited key with no management key). Both calls are
+  best-effort and never raise; a failed refresh leaves whatever was cached
+  before untouched (never blanks the segment); the figure dims (never
+  disappears) once it's more than 10 minutes old; omitted entirely when
+  OpenRouter isn't enabled or nothing has ever been fetched. `/cost` and
+  `/providers` print the same cached figure, naming which of the three
+  kinds it is, plus the key's own label and the time of the reading.
+  `OPENROUTER_MANAGEMENT_KEY` documented in `docs/CONFIG.md`.
+- **State-dir/env-scoping audit, round 2**: the SAME `BRIDGE_TEST_HOME`-
+  leak class D2.1 found earlier in this release turned up again, three
+  more times, now as a `providers`-block/credential-env leak instead of a
+  session-log one -- each a test that pops a credential env var in its own
+  setup but never restores it (only clears), silently wiping every LATER
+  test's own default credential for the rest of that file's run once
+  nothing upstream masked it anymore. Fixed in `test_h9b_findings.py`
+  (`OPENROUTER_API_KEY`), `test_dbx_work_routing.py`'s own `_EnvSandbox`,
+  and `test_work_box.py`'s `test_doctor_work_no_databricks_configured` --
+  each now saves and restores the full set it touches, not just pops it.
+  A new `tests/helpers/provider_env_defaults.py` gives the ~40 other test
+  files that build `or:`/`dbx:`/`ant:` refs to test something else
+  entirely (tool dispatch, hooks, compaction, permissions, steering, ...)
+  a believable (never real) default credential, since `parse_model_ref`
+  now refuses an auto-detected-disabled provider the same way it already
+  refused an explicitly-disabled one.
+
+`__version__` is unchanged.
+
+### Final pass (same release, same day): secret-env hygiene and trust-aware Databricks resolution
+
+Two more findings from the 1.0.1 part 2 fixpass review, each with its own pinning test; `__version__` stays 1.0.1.
+
+- **`OPENROUTER_MANAGEMENT_KEY`/`TYPESAFE_API_KEY` now strip from every tool
+  child's env**: the fixed secret-key list `tool_child_env`/`cc_child_env`
+  use (so Bash/PowerShell/MCP/hooks and the `claude` subprocess never see a
+  provider credential) was missing both -- the OpenRouter balance
+  management key and the TypeSafe key could otherwise have leaked into a
+  tool child's own environment.
+- **`resolve_databricks()`'s settings-chain re-derivation is now trust-aware**:
+  an untrusted project's own `.claude/settings.json`/`settings.local.json`
+  `env` block is dropped before it ever reaches Databricks host/token
+  resolution (the same trust gate a real session's `Settings.effective_env`
+  already enforces), so a project can never pair its own host with the
+  user's token; a token exported in the shell still pairs with a host kept
+  in the user's own settings.json env block. Credential listings
+  (`/providers`, the init tabs, doctor) apply the same trust rule, the
+  user's statusLine script runs with the same stripped child env as hooks
+  and tools, and the background catalog and balance workers detect a
+  provider through the session's effective env, so a key that lives only
+  in a settings.json env block still gets its catalog and balance. The
+  launch-time catalog refresh,
+  `/model`'s own open-time refresh, the OpenRouter balance worker, and the
+  headless session-start Databricks thread now resolve credentials from the
+  session's own trust-filtered `effective_env` instead of letting each one
+  call bare `resolve_databricks()`/read `os.environ` on its own.
+
+`__version__` is unchanged.
+
 ## [1.0.0] - 2026-09-30
 
 rolo-claude 1.0.0: the stable general harness release. Summarises the

@@ -61,6 +61,9 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fuzz_h9 import run_one
 from tests.helpers.mock_openai import MockUpstream
 from tests.helpers.fuzz_h9_extra import run_sweep_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 

@@ -360,6 +360,32 @@ def _step_credentials(provider: str, args, console: Console) -> list:
 # Step 3: default model
 # ---------------------------------------------------------------------------
 
+def _model_belongs_to_provider(model_ref_raw: str, provider: str) -> bool:
+    """1.0.1 part 2 fixpass finding 7: whether an already-configured custom
+    `config.json` model ref plausibly belongs to `provider` -- the gate for
+    init's own "keep a custom value" rule below, which must never keep
+    ANOTHER provider's ref just because the user happens to have one
+    configured. Verified live: config pinned to `or:deepseek/...`, running
+    `init --provider databricks --yes` "kept" it, so the live pong -- and
+    every later launch -- targeted OpenRouter through a Databricks setup
+    run, which the gate then refused outright (every later launch failed
+    "invalid --model")."""
+    prefix = {"databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:", "claude": "cc:"}.get(provider)
+    if prefix and model_ref_raw.startswith(prefix):
+        return True
+    if provider == "databricks":
+        if model_ref_raw.startswith("databricks-") or model_ref_raw.startswith("system.ai."):
+            return True
+        from rolo_claude.model import _is_cached_databricks_endpoint
+        return _is_cached_databricks_endpoint(model_ref_raw)
+    if provider == "openrouter":
+        # The bare `vendor/model` OpenRouter form (no `or:` prefix).
+        if "/" in model_ref_raw and model_ref_raw.count("/") == 1 and not any(ch.isspace() for ch in model_ref_raw):
+            vendor, _, rest = model_ref_raw.partition("/")
+            return bool(vendor and rest)
+    return False
+
+
 def _step_default_model(provider: str, args, console: Console, *, write: bool = True) -> "tuple[str, Optional[Path]]":
     """The provider's own STARTING default -- `write=False` (used when this
     provider isn't the only one in play, see `_step_finalize_default_model`
@@ -379,6 +405,29 @@ def _step_default_model(provider: str, args, console: Console, *, write: bool = 
     if current == chosen:
         console.print(f"   Default model: {chosen} (unchanged)")
         return chosen, None
+    # 1.0.1 part 2 (reviewer minor): a custom model already configured must
+    # survive a re-run of init for the SAME (or any) provider unless the
+    # user explicitly passed --model THIS run -- init's own module
+    # docstring already promises "re-running shows the current state and
+    # changes nothing already correctly configured", but this step used to
+    # overwrite ANY existing value with the provider's own hardcoded
+    # default the moment they merely differed (e.g. `init --provider
+    # databricks --yes` on a box already pinned to a non-default endpoint
+    # silently reset it back to the Databricks preset's own default).
+    # `_step_finalize_default_model` already applies this exact rule for
+    # the cross-provider pick (1.0.1 fixpass finding 9); this is the SAME
+    # rule for the earlier per-provider step finding 9 never touched.
+    #
+    # 1.0.1 part 2 fixpass finding 7: kept ONLY when `current` actually
+    # belongs to the PROVIDER BEING SET UP right now (never another
+    # provider's ref -- see `_model_belongs_to_provider`'s own docstring)
+    # AND no team.json default applies (a team default is an explicit,
+    # shared decision that outranks whatever one person's box happened to
+    # have configured before).
+    if (isinstance(current, str) and current and not args.model and not team_default
+            and _model_belongs_to_provider(current, provider)):
+        console.print(f"   Default model: {current} (kept -- custom value already configured)")
+        return current, None
     set_config_value("model", chosen)
     path = bridge_home() / "config.json"
     console.print(f"   Default model: {chosen} -- wrote {path}")
@@ -837,9 +886,18 @@ def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: 
         console.print("   nothing new written (already configured).")
     if no_live or pong_ok:
         console.print("   Run `rolo-claude` to start.")
-        return
-    hint = _first_fix_hint(doctor_lines)
-    console.print(f"   Next: {hint}" if hint else "   Next: run `rolo-claude doctor` for details.")
+    else:
+        hint = _first_fix_hint(doctor_lines)
+        console.print(f"   Next: {hint}" if hint else "   Next: run `rolo-claude doctor` for details.")
+    # Addendum to H15 (owner report from the work VM): `rolo-claude` typed
+    # OUTSIDE the checkout did not work -- only the checkout's own bin/
+    # wrapper had ever been used. The SAME doctor check/fix line ends every
+    # init run, success or not, so this is never missed on a first run.
+    from rolo_claude.doctor import MISSING, WARN, check_command_on_path
+    path_line = check_command_on_path()
+    console.print(f"   {path_line}")
+    if path_line.startswith(WARN) or path_line.startswith(MISSING):
+        console.print("   Run it from any directory -- the checkout is only for `git pull`.")
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +942,28 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
                        "or pick a different provider.[/red]")
         return None
     written = _step_credentials(provider, args, console)
+    # H15 item 21.1: enabled as soon as credentials/a login actually
+    # resolve -- BEFORE the catalog refresh/model-pick/live-pong steps
+    # below, every one of which resolves a real `--model`-style ref for
+    # THIS SAME provider and would otherwise refuse it outright (item
+    # 21.3's own refusal rule applies the instant a `providers` block
+    # exists, e.g. from the one-time migration above) -- completing a tab
+    # is what enables it, but "completing" starts the moment credentials
+    # are confirmed present, not only once every later step has also run.
+    # Only when the provider actually HAS credentials/a login now (the
+    # user may have declined every prompt and left it unconfigured, in
+    # which case there's nothing to enable yet).
+    #
+    # 1.0.1 part 2 fixpass finding 15: `enable_if_was_explicitly_disabled`,
+    # never a bare `enable()` -- auto-detection already covers the ordinary
+    # case; writing a permanent override here would survive a LATER
+    # revocation (a claude.ai logout, a deleted key) that auto-detection
+    # alone would otherwise have reflected immediately. Only an existing
+    # explicit `enabled: false` (e.g. a previous `providers disable`) gets
+    # flipped back to `true` by completing this provider's setup again.
+    if provider_status(provider) in ("configured", "logged in"):
+        from rolo_claude.providers.enablement import enable_if_was_explicitly_disabled
+        enable_if_was_explicitly_disabled(provider)
     model_ref_raw, model_path = _step_default_model(provider, args, console, write=write_model)
     if model_path:
         written.append(str(model_path))
@@ -897,12 +977,76 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
     return model_ref_raw, written, doctor_lines, pong_ok
 
 
+def _run_init_tabs(args, console: Console, cwd: Path) -> "Optional[tuple]":
+    """H15 Part A: runs the tabbed provider view; returns `(configured_
+    this_run, written, doctor_lines, picked_per_provider)` on success --
+    including an ordinary "nothing configured" close (Esc with nothing set
+    up still returns a real, empty result, never None) -- or None only
+    when the tabs app itself could not run at all (no real terminal after
+    all, a Textual import/runtime failure), the same "interactive picker
+    failed -> fallback" shape `_step_select_provider`/`_run_entry_picker`
+    already use elsewhere in this file.
+
+    1.0.1 part 2 fixpass finding 6: `--team`/`--no-live` are threaded into
+    the tabs app (`team`/`no_live`) -- before this fix, both flags were
+    silently ignored on the tabs path (the team host never prefilled, its
+    gateway/role preferences never applied, and `--no-live` never stopped
+    the tabs' own reachability probes/catalog fetches)."""
+    try:
+        from rolo_claude.tui.dialogs.init_tabs import run_init_tabs
+        app = run_init_tabs(team=getattr(args, "team", None), no_live=args.no_live)
+    except Exception as e:
+        console.print(f"[WARN] tabbed provider setup failed ({type(e).__name__}: {e}) -- "
+                       f"falling back to the one-provider-at-a-time picker.")
+        return None
+    configured_this_run = list(app.configured_this_run)
+    written: list = list(getattr(app, "written", []) or [])
+    for w in getattr(app, "team_warnings", None) or []:
+        console.print(f"   [WARN] {w}")
+    picked_per_provider: "dict[str, str]" = {}
+    for provider in configured_this_run:
+        if provider not in PROVIDERS:
+            # 1.0.1 part 2 fixpass finding 5: TypeSafe (TAB_PROVIDERS has it,
+            # PROVIDERS does not -- it has no default-model concept of its
+            # own, see init_providers.py's own TAB_PROVIDERS docstring) --
+            # `PROVIDER_LABEL`/`PROVIDER_DEFAULT_MODEL` have no entry for it
+            # at all, so indexing either raised a KeyError here, skipping
+            # every step after it (default-model/permission-mode/summary).
+            continue
+        console.print(f"[bold]{PROVIDER_LABEL[provider].split(' -- ', 1)[0]}[/bold] -- configured via its tab")
+        note = app.catalog_notes.get(provider)
+        if note:
+            console.print(f"   catalog: {note}")
+        # write=True (matching `_run_provider_setup`'s own `write_model=
+        # True` in the sequential flow): with exactly one provider
+        # configured this IS the real default, and `_step_finalize_
+        # default_model`'s own "only one provider" branch does NOT write
+        # again (it assumes a per-provider step already did, same as the
+        # sequential flow guarantees) -- a second configured provider's
+        # pick below simply overwrites config.json again, then `_step_
+        # finalize_default_model`'s own cross-provider pick corrects it.
+        picked_per_provider[provider], model_path = _step_default_model(provider, args, console, write=True)
+        if model_path:
+            written.append(str(model_path))
+    doctor_lines, _ok = _step_checks(args, console, cwd)
+    return configured_this_run, written, doctor_lines, picked_per_provider
+
+
 def cmd_init(argv: list) -> int:
     args = _build_parser().parse_args(argv)
     console = Console()
 
     from rolo_claude.providers.config import load_env_file
     load_env_file(_env_file_path())
+
+    # H15 item 21.4: one-time migration before anything else runs -- a box
+    # that already had credentials in its OWN env file from before provider
+    # enablement existed gets exactly those enabled; a no-op once a
+    # `providers` block already exists, however it got there.
+    from rolo_claude.providers.enablement import ensure_providers_migrated
+    migration_note = ensure_providers_migrated()
+    if migration_note:
+        console.print(f"[dim]{migration_note}[/dim]")
 
     console.print("[bold]rolo-claude init[/bold]")
     cwd = Path.cwd()
@@ -917,6 +1061,28 @@ def cmd_init(argv: list) -> int:
     if not interactive_loop and not requested:
         console.print("[red]--provider needs at least one value.[/red]")
         return 2
+
+    # H15 Part A: the tabbed provider view replaces the one-at-a-time
+    # picker loop below on a REAL terminal -- same TTY gate every other
+    # interactive picker in this file already uses (item 2/5/13's own
+    # convention), so a piped/non-tty run (every existing test, any script)
+    # is byte-for-byte unaffected and keeps using the sequential loop +
+    # numbered fallback exactly as before this item.
+    if interactive_loop and sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
+        tabs_result = _run_init_tabs(args, console, cwd)
+        if tabs_result is not None:
+            configured_this_run, written, doctor_lines, picked_per_provider = tabs_result
+            pong_ok = True
+            final_model = _step_finalize_default_model(args, console, configured_this_run, picked_per_provider)
+            _step_pick_permission_mode(args, console)
+            written.extend(_step_linux_fixes(args, console))
+            _step_summary(console, written, pong_ok, doctor_lines, no_live=args.no_live,
+                          configured_this_run=configured_this_run, final_model=final_model)
+            return 0 if (args.no_live or pong_ok) else 1
+        # The tabs app failed to run at all (not a provider failure --
+        # see _run_init_tabs's own docstring) -- fall through to the
+        # sequential loop below, same "picker failed -> fallback" shape
+        # every OTHER interactive picker in this file already uses.
 
     if interactive_loop:
         while True:

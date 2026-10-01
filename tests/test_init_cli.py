@@ -23,6 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.mock_openai import MockUpstream
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps every or:/dbx:/ant: ref below resolving exactly as it did
+# before parse_model_ref started refusing an auto-detected-disabled
+# provider; no test in this file relies on credential ABSENCE itself.
+ensure_default_provider_credentials()
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -603,6 +610,15 @@ def test_unconfigured_provider_status_tag(ctx: Ctx):
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    # 1.0.1 part 2 fixpass finding 10: snapshot every provider var cleared
+    # below so the `finally` can RESTORE them (not just pop them) --
+    # popping without restoring leaked into test_scripted_provider_loop_...
+    # (this module's own `ensure_default_provider_credentials()` module-
+    # level default), making ITS cross-provider pick see 2 or 3 configured
+    # providers depending on which order the test runner happened to pick.
+    old_provider_env = {k: os.environ.get(k) for k in
+                         ("OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "ANTHROPIC_API_KEY",
+                          "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")}
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = _NOT_LOGGED_IN
     for k in ("OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "ANTHROPIC_API_KEY",
@@ -619,8 +635,11 @@ def test_unconfigured_provider_status_tag(ctx: Ctx):
         ctx.check(f"claude flips to 'logged in', got {provider_status('claude')!r}",
                   provider_status("claude") == "logged in")
     finally:
-        for k in ("OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "ANTHROPIC_API_KEY"):
-            os.environ.pop(k, None)
+        for k, v in old_provider_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         if old_home is None:
             os.environ.pop("BRIDGE_TEST_HOME", None)
         else:
@@ -710,6 +729,42 @@ def test_scripted_provider_loop_sets_up_two_then_done_then_cross_provider_pick(c
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = old
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 part 2 fixpass finding 15: a successful provider setup must not
+# write a PERMANENT `enabled: true` override unless it's flipping an
+# existing EXPLICIT `enabled: false` -- auto-detection already covers the
+# ordinary case live, every time.
+# ---------------------------------------------------------------------------
+
+@test
+def test_provider_setup_does_not_write_a_permanent_enabled_override_on_a_fresh_box(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--provider", "openrouter", "--yes", "--no-live"], home,
+                   extra_env={"OPENROUTER_API_KEY": "sk-or-fake"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    config_path = home / ".rolo-claude" / "config.json"
+    providers_block = None
+    if config_path.exists():
+        providers_block = json.loads(config_path.read_text(encoding="utf-8")).get("providers")
+    ctx.check(f"no 'providers' block written just from a fresh successful setup, got {providers_block!r}",
+              not providers_block)
+
+
+@test
+def test_provider_setup_flips_an_existing_explicit_disable_back_on(ctx: Ctx):
+    home = _fresh_home()
+    config_dir = home / ".rolo-claude"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(
+        json.dumps({"providers": {"openrouter": {"enabled": False}}}), encoding="utf-8")
+    result = _run(["init", "--provider", "openrouter", "--yes", "--no-live"], home,
+                   extra_env={"OPENROUTER_API_KEY": "sk-or-fake"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    config = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"the explicit disable was flipped back to enabled, got {config.get('providers')}",
+              config["providers"]["openrouter"]["enabled"] is True)
 
 
 if __name__ == "__main__":

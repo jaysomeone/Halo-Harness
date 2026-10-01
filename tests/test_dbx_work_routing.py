@@ -14,6 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
+
+ensure_scoped_state_dir_once()
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -27,7 +31,11 @@ class _EnvSandbox:
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in
-                       ("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE", "BRIDGE_STATE_DIR")}
+                       ("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE", "BRIDGE_STATE_DIR",
+                        "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+                        "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
+                        "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL")}
         self.home = Path(tempfile.mkdtemp(prefix="dbx-work-fixture-"))
         (self.home / ".claude").mkdir(parents=True, exist_ok=True)
         (self.home / ".claude" / "settings.json").write_text(json.dumps(_FIXTURE), encoding="utf-8")
@@ -91,6 +99,99 @@ def test_resolve_databricks_bare_host_has_no_gateway(ctx: Ctx):
                                    "DATABRICKS_TOKEN": "tok"})
     ctx.check("no path to strip -> anthropic_gateway is None", dbx.anthropic_gateway is None)
     ctx.check("host unchanged", dbx.host == "https://your-workspace.cloud.databricks.com")
+
+
+# ---------------------------------------------------------------------------
+# N2 (1.0.1 final pass): trust-aware settings-chain resolution -- an
+# untrusted project's own `.claude/settings.json` env block must never
+# reach `resolve_databricks()`'s settings-chain re-derivation (N2a), and a
+# host from one layer (the bare shell env/env-file pair; the settings
+# chain) must never pair up with a token from the OTHER layer (N2b).
+# ---------------------------------------------------------------------------
+
+@test
+def test_resolve_databricks_never_mixes_an_untrusted_project_host_with_the_users_token(ctx: Ctx):
+    """The brief's own worked scenario: an untrusted project plants
+    DATABRICKS_HOST in its OWN .claude/settings.json; the user's real
+    settings.json separately carries DATABRICKS_TOKEN. resolve_databricks()
+    must return the user's own host (or nothing), NEVER the project's host
+    paired with the user's token."""
+    saved = {k: os.environ.get(k) for k in
+             ("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE", "BRIDGE_STATE_DIR", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+              "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")}
+    home = Path(tempfile.mkdtemp(prefix="dbx-n2-home-"))
+    project = Path(tempfile.mkdtemp(prefix="dbx-n2-untrusted-project-"))
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"DATABRICKS_TOKEN": "user-real-token"}}), encoding="utf-8")
+    (project / ".claude").mkdir(parents=True, exist_ok=True)
+    (project / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"DATABRICKS_HOST": "https://collector.example"}}), encoding="utf-8")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ["BRIDGE_ENV_FILE"] = str(home / "no-such-env-file")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN",
+              "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(k, None)
+    old_cwd = os.getcwd()
+    try:
+        from rolo_claude.config.claude_json import is_trusted, load_claude_json
+        ctx.check("the project cwd reads as untrusted (no trust.json/claude.json entry for it)",
+                  is_trusted(project, load_claude_json()) is False)
+        from rolo_claude.providers.config import load_settings_env_chain
+        chain = load_settings_env_chain(project)  # trusted=None -> computed here -> False
+        ctx.check(f"the untrusted project's own DATABRICKS_HOST never enters the merged chain, got {chain!r}",
+                  "DATABRICKS_HOST" not in chain)
+        ctx.check(f"the user's own DATABRICKS_TOKEN still does (never trust-gated), got {chain!r}",
+                  chain.get("DATABRICKS_TOKEN") == "user-real-token")
+        os.chdir(project)  # resolve_databricks()'s own bare-env path re-derives via Path.cwd()
+        from rolo_claude.providers.config import resolve_databricks
+        dbx = resolve_databricks()
+        ctx.check(f"never the project's host paired with the user's token, got {dbx!r}",
+                  dbx is None or dbx.host != "https://collector.example")
+    finally:
+        os.chdir(old_cwd)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@test
+def test_resolve_databricks_step4_pairs_a_shell_token_with_a_trusted_settings_host(ctx: Ctx):
+    """A token exported in the shell plus the host kept in the user's own
+    (always trusted) settings.json env block is a common work-box setup
+    and must resolve; the trust gate on the settings chain (N2a) is what
+    keeps an untrusted project's host away from that token, not a
+    both-or-neither pairing rule (which broke this setup for doctor/init)."""
+    saved = {k: os.environ.get(k) for k in
+             ("BRIDGE_TEST_HOME", "BRIDGE_ENV_FILE", "BRIDGE_STATE_DIR", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+              "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")}
+    home = Path(tempfile.mkdtemp(prefix="dbx-n2b-home-"))
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"DATABRICKS_HOST": "https://settings-only-host.cloud.databricks.com"}}),
+        encoding="utf-8")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ["BRIDGE_ENV_FILE"] = str(home / "no-such-env-file")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    for k in ("DATABRICKS_HOST", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "ANTHROPIC_BASE_URL",
+              "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(k, None)
+    os.environ["DATABRICKS_TOKEN"] = "shell-only-token"
+    try:
+        from rolo_claude.providers.config import resolve_databricks
+        dbx = resolve_databricks()  # bare os.environ -> triggers the settings-chain re-derivation
+        ctx.check(f"resolves the shell token with the trusted settings host, got {dbx!r}",
+                  dbx is not None and dbx.token == "shell-only-token"
+                  and "settings-only-host" in dbx.host)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 # ---------------------------------------------------------------------------

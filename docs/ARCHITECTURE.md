@@ -717,6 +717,38 @@ and only then is the model label itself left-truncated with a leading
 ellipsis (`truncate_label_left`) -- ctx and cost stay visible before cwd
 does.
 
+**OpenRouter balance (H15 part 2 addendum 4).** A segment right after
+cost, two decimals (`StatusBar.set_or_balance`) -- the one provider with a
+balance API, this round. Populated by a background worker
+(`tui/slash.py::or_balance_refresh_worker`, never the UI thread): once at
+app launch, again every `BALANCE_REFRESH_INTERVAL_S` (5 minutes,
+`providers/openrouter_account.py`), and once after every turn (debounced to
+at most once every `BALANCE_POST_TURN_DEBOUNCE_S`, 60 seconds).
+
+Two DIFFERENT OpenRouter endpoints, two different keys (`resolve_balance`'s
+own 3-way preference order, checked in this exact sequence):
+1. `"OR $12.40 left"` -- `GET /key`'s own `limit_remaining`, sent with the
+   ordinary `OPENROUTER_API_KEY` (same key every other call already uses),
+   when THIS key has a real `limit` set.
+2. `"OR $12.40 left"` -- else, when a SEPARATE, higher-privilege
+   `OPENROUTER_MANAGEMENT_KEY` is configured, `GET /credits`'s whole-account
+   `total_credits - total_usage` (OpenRouter's own spec requires the
+   management key here -- the ordinary key is never sent to `/credits`, and
+   the management key is never sent to `/key` or anywhere else).
+3. `"OR $3.21 used"` -- else, this key's own `/key` `usage` figure (a
+   SPEND, not a remaining balance -- the honest fallback for an unlimited
+   key with no management key, where no "remaining" number can be known).
+
+Both calls are best-effort and never raise; a failed refresh leaves
+whatever was cached before untouched rather than blanking the segment, and
+the segment dims (never disappears) once that reading is more than 10
+minutes old. Omitted entirely (no segment, no trailing separator) when
+OpenRouter isn't enabled or a fetch has never once succeeded. `/cost` and
+`/providers` print the same cached figure
+(`providers/openrouter_account.py::format_balance_line`), naming WHICH of
+the three it is, plus the key's own label and the wall-clock time of the
+reading.
+
 **Auto-scroll (1.0.1 hotfix 16).** `Transcript` (`tui/widgets/transcript.py`,
 a `VerticalScroll` itself) calls Textual's own `self.anchor()` once in
 `on_mount` -- the compositor then keeps `scroll_y` pinned to the live

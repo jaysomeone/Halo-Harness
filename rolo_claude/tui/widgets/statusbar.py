@@ -33,6 +33,16 @@ class StatusBar(Static):
         self.cost_usd: "float | None" = None
         self.total_input_tokens: "int | float" = 0
         self.total_output_tokens: "int | float" = 0
+        # H15 part 2 addendum 4: the OpenRouter account-balance segment,
+        # right after cost -- the ALREADY-FORMATTED text (e.g. "OR $12.40
+        # left"/"OR $3.21 used" -- providers/openrouter_account.py's own
+        # `format_status_bar_segment` decides the figure AND the verb, this
+        # widget just displays it), None (segment omitted entirely) until
+        # the first successful background fetch ever lands; a LATER failed
+        # fetch never clears a good reading, it just keeps aging (see
+        # `_refresh_display`'s own 10-minute dim threshold).
+        self.or_balance_text: "str | None" = None
+        self.or_balance_fetched_at: "float | None" = None
         # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
         # already clamped to this model's own accepted set -- None for a
         # model with no adjustable effort at all (renders no tag).
@@ -116,6 +126,20 @@ class StatusBar(Static):
             self.cost_usd = cost_usd
             self._refresh_display()
 
+    def set_or_balance(self, segment_text: "str | None", *, fetched_at: "float | None" = None) -> None:
+        """H15 part 2 addendum 4: called only on a SUCCESSFUL background
+        fetch (`tui/slash.py`'s own OpenRouter balance worker) -- a failed
+        fetch never calls this at all, so a good reading just ages (and
+        eventually dims) rather than disappearing. `segment_text` is
+        ALREADY formatted (`providers/openrouter_account.py::format_status_
+        bar_segment` -- "OR $12.40 left"/"OR $3.21 used", this widget never
+        decides the figure or the verb itself). `fetched_at` defaults to now
+        (`time.monotonic()`); a test passes an explicit backdated value to
+        simulate staleness without a real 10-minute wait."""
+        self.or_balance_text = segment_text
+        self.or_balance_fetched_at = time.monotonic() if fetched_at is None else fetched_at
+        self._refresh_display()
+
     def set_mode(self, mode: str) -> None:
         self.mode = mode
         self._refresh_display()
@@ -169,6 +193,14 @@ class StatusBar(Static):
         # genuinely isn't known.
         ctx_str = format_status_context(self.context_tokens, self.context_limit)
         cost_str = format_status_cost(self.cost_usd, self.total_input_tokens, self.total_output_tokens)
+        # H15 part 2 addendum 4: "OR $12.40 left"/"OR $3.21 used" --
+        # omitted entirely (blank, no segment at all, same convention as
+        # effort_str/permission_str below) until a fetch has ever
+        # succeeded; dimmed (never hidden) once the reading is more than
+        # 10 minutes old.
+        or_balance_str = self.or_balance_text or ""
+        or_balance_stale = (self.or_balance_fetched_at is not None
+                             and (time.monotonic() - self.or_balance_fetched_at) > 600)
         mode_str = mode_glyph(self.mode)
         mcp_style = "green" if (self.mcp_total and self.mcp_connected == self.mcp_total) else "yellow"
         mcp_str = f"MCP {self.mcp_connected}/{self.mcp_total}"
@@ -199,8 +231,8 @@ class StatusBar(Static):
         # skip shrinking entirely then, same as an unbounded-width terminal.
         width = self.size.width
         if width and self.cwd:
-            fixed_bits = [b for b in (ctx_str, cost_str, mode_str, effort_str, permission_str, mcp_str,
-                                       spinner_str, new_str) if b]
+            fixed_bits = [b for b in (ctx_str, cost_str, or_balance_str, mode_str, effort_str, permission_str,
+                                       mcp_str, spinner_str, new_str) if b]
             # Each segment below is rendered as "<text> " with a "│ "
             # separator before it -- 3 extra columns per segment is that
             # separator plus its own trailing space, a close-enough
@@ -228,6 +260,9 @@ class StatusBar(Static):
             text.append(f"{ctx_str} ", style="dim")
         text.append("│ ", style="dim")
         text.append(f"{cost_str} ", style="dim")
+        if or_balance_str:
+            text.append("│ ", style="dim")
+            text.append(f"{or_balance_str} ", style="dim" if or_balance_stale else "")
         text.append("│ ", style="dim")
         text.append(f"{mode_str} ", style="bold cyan")
         if effort_str:

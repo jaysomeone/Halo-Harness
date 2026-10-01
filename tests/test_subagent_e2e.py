@@ -19,6 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+# H15 part 2 addendum 3.1: parse_model_ref now refuses an or:/dbx:/ant: ref
+# whose provider isn't auto-detected as enabled -- a believable default
+# credential (never a real one; this file already scopes its own state dir
+# below) keeps every `or:mock/...` ref resolving exactly as it did before
+# that addendum.
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 

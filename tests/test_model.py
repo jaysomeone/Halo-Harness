@@ -9,9 +9,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
 from rolo_claude.model import parse_model_ref, resolve_model_profile, ModelProfile, CostMeter
 from rolo_claude.providers.routing import InvalidModelError
 from rolo_claude.providers.databricks import write_models_json
+
+# H15 part 2 addendum 3.1: parse_model_ref now refuses an or:/dbx:/ant:
+# ref whose provider isn't auto-detected as enabled -- this file tests
+# RESOLUTION, never enablement itself, so a believable default credential
+# per provider (never a real one) plus a scoped state dir (so is_enabled()
+# never reads the REAL machine's own config.json) keep every ref below
+# resolving exactly as it did before that addendum.
+ensure_scoped_state_dir_once()
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 

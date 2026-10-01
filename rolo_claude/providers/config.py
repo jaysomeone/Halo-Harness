@@ -93,6 +93,15 @@ def load_env_file(path: Path) -> dict[str, str]:
 _HARNESS_SECRET_ENV_KEYS = frozenset({
     "OPENROUTER_API_KEY", "DATABRICKS_TOKEN", "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY", "BRIDGE_DBX_TOKEN",
+    # N1 (1.0.1 final pass): OPENROUTER_MANAGEMENT_KEY is a SEPARATE,
+    # higher-privilege OpenRouter credential (resolve_openrouter_management_
+    # key, below) -- it must never reach a tool child either, same as the
+    # ordinary OPENROUTER_API_KEY. TYPESAFE_API_KEY is the TypeSafe provider's
+    # own credential (providers.enablement.credentials_present), added here
+    # for the same reason. Both are already covered by cc_child_env (which
+    # calls tool_child_env first) and by hooks.py's own env builder (which
+    # calls tool_child_env directly) -- no separate list to update there.
+    "OPENROUTER_MANAGEMENT_KEY", "TYPESAFE_API_KEY",
 })
 
 
@@ -135,27 +144,58 @@ def cc_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
     return {k: v for k, v in stripped.items() if not k.startswith("CLAUDE") and not k.startswith("ANTHROPIC_")}
 
 
-def load_settings_env_chain(cwd: Path) -> dict:
+def load_settings_env_chain(cwd: Path, *, trusted: "bool | None" = None) -> dict:
     """
     Merge env blocks from settings files in precedence order.
     Returns merged dict (later wins).
-    """
-    merged = {}
-    # Managed settings (skip on non-Windows)
-    if os.name == "nt":
-        # Best-effort path for managed settings
-        managed_path = Path(os.environ.get("LOCALAPPDATA", "")) / "Claude" / "managed-settings.json"
-        if managed_path.exists():
-            try:
-                with open(managed_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data.get("env"), dict):
-                        merged.update(data["env"])
-            except (json.JSONDecodeError, OSError):
-                pass
 
-    # ~/.claude/settings.json
-    user_settings = home() / ".claude" / "settings.json"
+    N2a (1.0.1 final pass): `trusted` reuses the exact trust check `resolve_
+    settings`'s own callers already compute before passing it THAT function's
+    own `trusted=` parameter (`config.claude_json.is_trusted(cwd, load_claude_
+    json())`) -- `None` (every pre-existing call site, unchanged) now means
+    "compute it here" instead of the old, unconditional "always include
+    project/local regardless of trust". An untrusted `cwd` skips THIS
+    function's own project (`<cwd>/.claude/settings.json`) and local
+    (`<cwd>/.claude/settings.local.json`) `env` blocks entirely -- managed/
+    user settings are never trust-gated (same as `resolve_settings`'s own
+    `_apply_trust_filter`) and are always included. Before this fix, an
+    untrusted project could plant a `DATABRICKS_HOST`/`ANTHROPIC_BASE_URL`
+    here that `resolve_databricks()`'s own settings-chain re-derivation (and
+    every other bare caller below) would happily read, bypassing the exact
+    trust gate `resolve_settings` already enforces for a real session's
+    `env` block.
+
+    1.0.1 part 2 fixpass finding 3: managed settings now come from
+    `config.paths.managed_settings_files()` (every `*.json` under the real
+    per-OS managed dir, `/etc/claude-code`/`/Library/Application
+    Support/ClaudeCode`/`C:\\Program Files\\ClaudeCode` -- `BRIDGE_TEST_
+    MANAGED_DIR`-overridable, same as every other managed-settings reader
+    in this tree) instead of a Windows-only, hardcoded `%LOCALAPPDATA%\\
+    Claude\\managed-settings.json` that silently found nothing on Linux/
+    macOS and ignored `BRIDGE_TEST_MANAGED_DIR`; "user" settings now come
+    from `config.paths.claude_config_dir()` (honors `CLAUDE_CONFIG_DIR`)
+    instead of a hardcoded `home()/".claude"`. Verified bug: a Linux work
+    VM whose gateway env lived in `CLAUDE_CONFIG_DIR`'s settings.json (or a
+    real managed-settings file) was invisible to this chain, so every
+    `dbx:` ref resolved through it (doctor, `/providers`, `resolve_
+    databricks()`'s own bare-env steps 2/3) read as "not configured".
+    """
+    from rolo_claude.config.paths import claude_config_dir, managed_settings_files
+    if trusted is None:
+        from rolo_claude.config.claude_json import is_trusted, load_claude_json
+        trusted = is_trusted(cwd, load_claude_json())
+    merged = {}
+    for managed_path in managed_settings_files():
+        try:
+            with open(managed_path, encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data.get("env"), dict):
+                    merged.update(data["env"])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # <claude_config_dir()>/settings.json (CLAUDE_CONFIG_DIR-aware)
+    user_settings = claude_config_dir() / "settings.json"
     if user_settings.exists():
         try:
             with open(user_settings, encoding="utf-8") as f:
@@ -165,29 +205,58 @@ def load_settings_env_chain(cwd: Path) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # <cwd>/.claude/settings.json
-    project_settings = cwd / ".claude" / "settings.json"
-    if project_settings.exists():
-        try:
-            with open(project_settings, encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data.get("env"), dict):
-                    merged.update(data["env"])
-        except (json.JSONDecodeError, OSError):
-            pass
+    # <cwd>/.claude/settings.json + <cwd>/.claude/settings.local.json --
+    # N2a: skipped entirely for an UNTRUSTED cwd (same gate `resolve_
+    # settings`'s own `_apply_trust_filter` applies to a real session's
+    # `env` block; deny/ask rules are a `resolve_settings`-only concern and
+    # were never read here regardless).
+    if trusted:
+        project_settings = cwd / ".claude" / "settings.json"
+        if project_settings.exists():
+            try:
+                with open(project_settings, encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data.get("env"), dict):
+                        merged.update(data["env"])
+            except (json.JSONDecodeError, OSError):
+                pass
 
-    # <cwd>/.claude/settings.local.json
-    local_settings = cwd / ".claude" / "settings.local.json"
-    if local_settings.exists():
-        try:
-            with open(local_settings, encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data.get("env"), dict):
-                    merged.update(data["env"])
-        except (json.JSONDecodeError, OSError):
-            pass
+        local_settings = cwd / ".claude" / "settings.local.json"
+        if local_settings.exists():
+            try:
+                with open(local_settings, encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data.get("env"), dict):
+                        merged.update(data["env"])
+            except (json.JSONDecodeError, OSError):
+                pass
 
     return merged
+
+
+def listing_effective_env(cwd: Optional[Path] = None) -> dict:
+    """1.0.1 part 2 fixpass finding 3: the merged env a credential-LISTING
+    surface with no real `Settings` object of its own (`/providers`, the
+    init tabs, `doctor`'s provider summary -- never the parse-time gate,
+    which is override-only and never reads credentials at all; a real
+    session passes its own `Settings.effective_env` directly instead of
+    calling this) uses to decide "is this provider's key/token present" --
+    `config.settings.resolve_settings(cwd).effective_env`, the SAME chain
+    (shell < user < trusted project/local < policy) a real session
+    resolves, so these surfaces never disagree with it just because a
+    credential lives only in a settings.json `env` block. A cheap,
+    read-only, no-network call (only local JSON files); any failure (a
+    malformed settings file, ...) falls back to bare `os.environ` -- the
+    unchanged pre-fix behavior for whichever caller hit it, never a crash."""
+    try:
+        from rolo_claude.config.claude_json import is_trusted, load_claude_json
+        from rolo_claude.config.settings import resolve_settings
+        where = cwd or Path.cwd()
+        # Trust-aware like a real session: an untrusted folder's project/local
+        # settings never show up as "picked up" credentials in a listing.
+        return resolve_settings(where, trusted=is_trusted(where, load_claude_json())).effective_env
+    except Exception:
+        return dict(os.environ)
 
 
 @dataclass
@@ -211,6 +280,18 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
         return None
     base_url = env.get("BRIDGE_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     return OrConfig(api_key=api_key, base_url=base_url)
+
+
+def resolve_openrouter_management_key(env: dict | None = None) -> "str | None":
+    """H15 part 2 addendum 4 (corrected): `OPENROUTER_MANAGEMENT_KEY` -- a
+    SEPARATE, higher-privilege key OpenRouter's own `/credits` endpoint
+    requires (never the ordinary inference `OPENROUTER_API_KEY`). `None`
+    when not set -- the account-wide credits figure is then simply skipped
+    (`providers/openrouter_account.py`'s own 3-way fallback), never an
+    error. Same `env` convention as `resolve_openrouter` (the harness's own
+    `Settings.effective_env` chain, or bare `os.environ`)."""
+    env = env if env is not None else os.environ
+    return env.get("OPENROUTER_MANAGEMENT_KEY") or None
 
 
 @dataclass
@@ -514,14 +595,15 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
         if anth_host and anth_token and looks_like_databricks_host(anth_host):
             return _finalize(anth_host, anth_token)
 
-    # 4. DATABRICKS_HOST + DATABRICKS_TOKEN (falling back to the proxy's
-    # own settings chain per-field when using bare os.environ) --
-    # unambiguous by name, no host filter.
-    dbx_host = env.get("DATABRICKS_HOST")
-    dbx_token = env.get("DATABRICKS_TOKEN")
-    if not dbx_host or not dbx_token:
-        dbx_host = settings_env.get("DATABRICKS_HOST") or dbx_host
-        dbx_token = settings_env.get("DATABRICKS_TOKEN") or dbx_token
+    # 4. DATABRICKS_HOST + DATABRICKS_TOKEN -- per field, shell env / env
+    # file first, then the settings chain. The settings chain is already
+    # TRUST-FILTERED (`load_settings_env_chain` skips project/local layers
+    # of an untrusted folder, N2a), which is what keeps an untrusted
+    # project's host away from the user's token; so a token exported in
+    # the shell may legitimately pair with a host kept in the user's own
+    # settings.json env block (a common work-box setup), and vice versa.
+    dbx_host = env.get("DATABRICKS_HOST") or settings_env.get("DATABRICKS_HOST")
+    dbx_token = env.get("DATABRICKS_TOKEN") or settings_env.get("DATABRICKS_TOKEN")
     if dbx_host and dbx_token:
         return _finalize(dbx_host, dbx_token)
 
@@ -559,10 +641,10 @@ def resolve_databricks_source(env: dict | None = None) -> Optional[str]:
         anth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN")
         if anth_host and anth_token and looks_like_databricks_host(anth_host):
             return "ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (Claude Code settings.json env)"
-    dbx_host, dbx_token = env.get("DATABRICKS_HOST"), env.get("DATABRICKS_TOKEN")
-    if not dbx_host or not dbx_token:
-        dbx_host = settings_env.get("DATABRICKS_HOST") or dbx_host
-        dbx_token = settings_env.get("DATABRICKS_TOKEN") or dbx_token
+    # Mirrors resolve_databricks()'s own step 4: per field, shell env / env
+    # file first, then the trust-filtered settings chain.
+    dbx_host = env.get("DATABRICKS_HOST") or settings_env.get("DATABRICKS_HOST")
+    dbx_token = env.get("DATABRICKS_TOKEN") or settings_env.get("DATABRICKS_TOKEN")
     if dbx_host and dbx_token:
         return "DATABRICKS_HOST/DATABRICKS_TOKEN"
     from rolo_claude.config.paths import claude_config_dir

@@ -14,6 +14,8 @@ snapshotted starting value).
 """
 from __future__ import annotations
 
+import functools
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -23,8 +25,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_databricks import MockDatabricks
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
-test, TESTS = new_registry()
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps every dbx:/or: ref below resolving exactly as it did before
+# parse_model_ref started refusing an auto-detected-disabled provider;
+# each test here already scopes its OWN BRIDGE_STATE_DIR (see `test`
+# wrapper below).
+ensure_default_provider_credentials()
+
+_register, TESTS = new_registry()
+
+
+def test(fn):
+    """H15 Part D2.1: `_new_dbx_session` below builds a REAL `Session`,
+    whose `SessionLog` ALWAYS resolves its storage root via `bridge_home()`
+    -- independent of the `state_dir=` this module's own `_new_dbx_session`
+    passes, which only ever sets `Session.state_dir` (config/catalog
+    caching), never where the log itself is written. `build_fake_home()`
+    alone sets no env var at all, so every `@test` here is transparently
+    wrapped in an isolated, per-test `BRIDGE_STATE_DIR` (found leaking real
+    `rolo-claude-fakehome-*-proj` slug directories into
+    `~/.rolo-claude/sessions` during the H15 fix pass), same pattern
+    `tests/test_log_derive.py` already uses."""
+    @functools.wraps(fn)
+    def wrapper(ctx):
+        old = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="hotfix101-effort-state-")))
+        try:
+            return fn(ctx)
+        finally:
+            if old is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old
+    return _register(wrapper)
 
 
 def _new_dbx_session(fh, mock, *, model: str, effort=None):
@@ -70,6 +105,37 @@ def test_clamp_effort_xhigh_stays_xhigh_when_the_route_supports_it(ctx: Ctx):
     profile = ProviderProfile(reasoning_effort_supported=True)  # default effort_values_supported = EFFORT_LEVELS
     got = clamp_effort("xhigh", profile)
     ctx.check(f"xhigh preserved on a route that supports it, got {got!r}", got == "xhigh")
+
+
+@test
+def test_clamp_effort_max_becomes_xhigh_on_a_chat_route_that_supports_it(ctx: Ctx):
+    """1.0.1 part 2 reviewer minor 2: `max` (the harness's strongest
+    ANTHROPIC-dialect-style level) on a chat-dialect route that has no
+    `max` but DOES list `xhigh` (e.g. Databricks' gpt-oss-120b row) must
+    become `xhigh`, that route's own equivalent strongest level -- not
+    fall all the way through to the bland "medium"/`reasoning_default_
+    effort` default, two full levels below what the route can actually
+    do (the mirror of xhigh -> max on an Anthropic route, already pinned
+    above)."""
+    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    profile = ProviderProfile(reasoning_effort_supported=True,
+                               effort_values_supported=("low", "medium", "high", "xhigh"),
+                               reasoning_default_effort="medium")
+    got = clamp_effort("max", profile)
+    ctx.check(f"max -> xhigh on a route with no max but xhigh, got {got!r}", got == "xhigh")
+
+
+@test
+def test_clamp_effort_max_falls_back_to_default_on_a_route_with_neither_max_nor_xhigh(ctx: Ctx):
+    """The genuinely plain case the mirror rule above must NOT swallow:
+    a route offering neither `max` nor `xhigh` still downgrades `max` to
+    its own bland default, exactly as before."""
+    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    profile = ProviderProfile(reasoning_effort_supported=True,
+                               effort_values_supported=("low", "medium", "high"),
+                               reasoning_default_effort="medium")
+    got = clamp_effort("max", profile)
+    ctx.check(f"max -> the route's own plain default, got {got!r}", got == "medium")
 
 
 @test

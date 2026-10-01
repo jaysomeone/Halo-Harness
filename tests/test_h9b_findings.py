@@ -25,9 +25,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns, _finish
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 _HOOK_SCRIPT_ARGV = [sys.executable, "-m", "tests.helpers.hook_scripts"]
+
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps every `or:mock/...` ref below resolving exactly as it did
+# before parse_model_ref started refusing an auto-detected-disabled
+# provider; each test here already scopes its OWN BRIDGE_TEST_HOME. A
+# subprocess-CLI test's own `env` dict is unaffected (os.environ.setdefault
+# here never touches it); such a test already builds its OWN explicit env.
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -633,6 +642,7 @@ def test_h9b_f05_session_start_hook_env_file_line_referencing_the_real_key_sees_
         # of `session.tool_env`, and that THAT stripped dict, not this raw
         # one, is what the env-file-sourcing subprocess actually ran with.
         env["OPENROUTER_API_KEY"] = real_secret
+        _old_openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         os.environ["OPENROUTER_API_KEY"] = real_secret
         hook_runner = HookRunner(
             {"SessionStart": [HookDef(type="command",
@@ -656,7 +666,10 @@ def test_h9b_f05_session_start_hook_env_file_line_referencing_the_real_key_sees_
         ctx.check("and definitely not the real secret value", probe_value != real_secret)
     finally:
         mock.stop()
-        os.environ.pop("OPENROUTER_API_KEY", None)
+        if _old_openrouter_key is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = _old_openrouter_key
 
 
 # =============================================================================

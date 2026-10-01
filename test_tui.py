@@ -17,15 +17,23 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps every `or:mock/...` ref below resolving exactly as it did
+# before parse_model_ref started refusing an auto-detected-disabled
+# provider; each test here already scopes its OWN BRIDGE_TEST_HOME.
+ensure_default_provider_credentials()
 
 from rolo_claude import events as ev
 from rolo_claude.testing.fake_controller import FakeController, default_demo_turns
@@ -3077,6 +3085,1460 @@ def test_stats_models_runs_off_the_ui_thread(ctx: Ctx):
                 os.environ.pop("BRIDGE_TEST_HOME", None)
             else:
                 os.environ["BRIDGE_TEST_HOME"] = old_home
+    asyncio.run(body())
+
+
+# ============================================================================
+# H15 Part A: `rolo-claude init`'s tabbed provider setup (InitTabsApp) --
+# tab navigation, masked picked-up credentials, live status on entry,
+# reachability (mocked), and the catalog cache write on tab completion.
+# ============================================================================
+
+_H15_TABS_PROVIDER_VARS = (
+    "OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "BRIDGE_ANTHROPIC_BASE_URL",
+    "TYPESAFE_API_KEY", "BRIDGE_TEST_CC_AUTH_STATUS",
+)
+
+
+class _H15TabsEnv:
+    """Scopes BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/BRIDGE_ENV_FILE plus every
+    provider variable InitTabsApp's own tabs can touch -- the real
+    ~/.rolo-claude is never written by these pilots."""
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in
+                       (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE") + _H15_TABS_PROVIDER_VARS)}
+        d = Path(tempfile.mkdtemp(prefix="h15-init-tabs-pilot-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(d)
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = '{"loggedIn": false}'
+        for k in _H15_TABS_PROVIDER_VARS:
+            if k != "BRIDGE_TEST_CC_AUTH_STATUS":
+                os.environ.pop(k, None)
+        self.home = d
+        self.state_dir = d / ".rolo-claude"
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _static_text(widget) -> str:
+    return str(widget.renderable) if hasattr(widget, "renderable") else str(widget.render())
+
+
+@test
+def test_init_tabs_shift_tab_navigates_providers_with_wraparound(ctx: Ctx):
+    from rolo_claude.init_providers import TAB_PROVIDERS
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp, _pane_id
+    from textual.widgets import TabbedContent
+
+    async def body():
+        with _H15TabsEnv():
+            app = InitTabsApp()
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                tabs = app.query_one(TabbedContent)
+                ctx.check(f"starts on the first provider, got {tabs.active!r}",
+                          tabs.active == _pane_id(TAB_PROVIDERS[0]))
+                await pilot.press("shift+tab")
+                await pilot.pause(0.05)
+                ctx.check(f"Shift+Tab wraps to the LAST provider, got {tabs.active!r}",
+                          tabs.active == _pane_id(TAB_PROVIDERS[-1]))
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_masked_picked_up_credential_with_source(ctx: Ctx):
+    """A.2: an already-resolved credential shows "picked up from <source>"
+    with the value MASKED, never the raw key."""
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Static
+
+    async def body():
+        with _H15TabsEnv():
+            os.environ["OPENROUTER_API_KEY"] = "sk-or-super-secret-value"
+            app = InitTabsApp()
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                status = _static_text(app.query_one("#openrouter-status", Static))
+                ctx.check(f"names the source, got {status!r}", "picked up from" in status)
+                ctx.check(f"the value is MASKED, got {status!r}", "sk-or-super-secret-value" not in status)
+                ctx.check(f"a redacted prefix is still shown, got {status!r}", "sk-o" in status)
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_inline_entry_updates_the_status_tag(ctx: Ctx):
+    """A.2: "the status tag updates as soon as a value is entered"."""
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Input, Static
+
+    async def body():
+        with _H15TabsEnv():
+            app = InitTabsApp()
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                before = _static_text(app.query_one("#openrouter-status", Static))
+                ctx.check(f"starts 'not set up', got {before!r}", before == "not set up")
+                key_input = app.query_one("#openrouter-field-key", Input)
+                key_input.focus()
+                await pilot.press("x")
+                await pilot.pause(0.05)
+                after = _static_text(app.query_one("#openrouter-status", Static))
+                ctx.check(f"tag updates immediately on entry, got {after!r}", after != before)
+                ctx.check(f"says a value was entered, got {after!r}", "value entered" in after)
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_reachability_tag_for_a_refused_host(ctx: Ctx):
+    """A.3: "unreachable (one-line reason)" from a bounded probe -- mocked
+    here (`providers.reachability.open_upstream`) so the pilot never
+    touches the real network."""
+    from rolo_claude.providers.http import UpstreamConnectError
+    import rolo_claude.providers.reachability as reach_mod
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Input, Static
+
+    def _fake_open_upstream(host, port, tls, *a, **kw):
+        raise UpstreamConnectError(f"cannot resolve/reach {host} -- check the machine's network, DNS or VPN "
+                                     f"(connection refused)", host=host)
+
+    async def body():
+        real_open_upstream = reach_mod.open_upstream
+        reach_mod.open_upstream = _fake_open_upstream
+        try:
+            with _H15TabsEnv():
+                app = InitTabsApp()
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.pause(0.1)
+                    key_input = app.query_one("#openrouter-field-key", Input)
+                    key_input.focus()
+                    for ch in "sk-or-fake":
+                        await pilot.press(ch)
+                    await pilot.press("enter")
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                        reach = _static_text(app.query_one("#openrouter-reach", Static))
+                        if "unreachable" in reach:
+                            break
+                    ctx.check(f"shows unreachable with a one-line reason, got {reach!r}",
+                              "unreachable" in reach and "connection refused" in reach)
+                    await pilot.press("escape")
+                    await pilot.pause(0.05)
+        finally:
+            reach_mod.open_upstream = real_open_upstream
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_catalog_cache_written_on_tab_completion(ctx: Ctx):
+    """A.4: "finishing a tab ... fetches and caches that provider's
+    catalog right then" -- `probe_openrouter_models` mocked (loopback-free,
+    deterministic), the real `write_models_json`/`load_models_json`
+    round-trip is NOT mocked, so this proves the cache file is actually
+    written to this test's own scoped state dir."""
+    from rolo_claude.providers.databricks import load_models_json
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Input, Static
+
+    def _fake_probe(base_url, api_key):
+        return [{"id": "vendor/fake-model", "context_length": 128000, "max_output_tokens": 8192,
+                 "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]
+
+    async def body():
+        import rolo_claude.providers.databricks as dbx_mod
+        real_probe = dbx_mod.probe_openrouter_models
+        dbx_mod.probe_openrouter_models = _fake_probe
+        try:
+            with _H15TabsEnv() as env:
+                app = InitTabsApp()
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.pause(0.1)
+                    key_input = app.query_one("#openrouter-field-key", Input)
+                    key_input.focus()
+                    for ch in "sk-or-fake":
+                        await pilot.press(ch)
+                    await pilot.press("enter")
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                        if "openrouter" in app.catalog_notes:
+                            break
+                    ctx.check(f"a catalog note was recorded, got {app.catalog_notes}",
+                              "openrouter" in app.catalog_notes)
+                    cached = load_models_json(env.state_dir)
+                    ctx.check(f"the model is actually cached on disk, got {list(cached)}",
+                              "vendor/fake-model" in cached)
+                    await pilot.press("escape")
+                    await pilot.pause(0.05)
+        finally:
+            dbx_mod.probe_openrouter_models = real_probe
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 (reviewer minor): /effort, /rewind and /improve must not
+# open their own card while a permission card is already pending -- a
+# one-line note instead.
+# ============================================================================
+
+def _pending_permission_card(app) -> PermissionCard:
+    card = PermissionCard(request_id="pending-1", summary="Bash(rm -rf /tmp/x)", reason="",
+                           suggested_rule=None, on_decide=lambda decision: None)
+    app.set_pending_card(card)
+    return card
+
+
+@test
+def test_effort_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
+    from rolo_claude.tui.slash import handle_slash
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            card = _pending_permission_card(app)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await handle_slash(app, "effort", "")
+            ctx.check(f"a one-line note was shown, got {notified}", len(notified) == 1)
+            ctx.check(f"names the permission card, got {notified}", "permission" in notified[0].lower())
+            ctx.check("the ORIGINAL permission card is still pending, untouched", app.pending_card is card)
+    asyncio.run(body())
+
+
+@test
+def test_rewind_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
+    from rolo_claude.tui.slash import _show_rewind_confirmation
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            card = _pending_permission_card(app)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await _show_rewind_confirmation(app, {"id": "step-1"}, "rewind")
+            ctx.check(f"a one-line note was shown, got {notified}", len(notified) == 1)
+            ctx.check("the ORIGINAL permission card is still pending, untouched", app.pending_card is card)
+    asyncio.run(body())
+
+
+@test
+def test_improve_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
+    from rolo_claude.tui.slash import _handle_improve
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            card = _pending_permission_card(app)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await _handle_improve(app, "")
+            ctx.check(f"a one-line note was shown (never drafted anything), got {notified}", len(notified) == 1)
+            ctx.check("the ORIGINAL permission card is still pending, untouched", app.pending_card is card)
+    asyncio.run(body())
+
+
+@test
+def test_effort_still_opens_normally_with_nothing_pending(ctx: Ctx):
+    """Regression guard: the fix must not block /effort when it's actually
+    safe to open."""
+    from rolo_claude.tui.slash import handle_slash
+    from rolo_claude.tui.widgets.cards import EffortCard
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            ctx.check("nothing pending to start", app.pending_card is None)
+            await handle_slash(app, "effort", "")
+            await pilot.pause(0.05)
+            ctx.check(f"the EffortCard actually opened, got {app.pending_card}",
+                      isinstance(app.pending_card, EffortCard))
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 (reviewer minor): Ctrl+Q kills background jobs BEFORE
+# arming its os._exit timer, not only deep inside the ordinary
+# controller.quit() path it exists to route around when THAT is wedged.
+# ============================================================================
+
+@test
+def test_force_quit_kills_background_jobs_before_arming_the_exit_timer(ctx: Ctx):
+    import threading as threading_mod
+
+    class _FakeJobRegistry:
+        def __init__(self):
+            self.killed = False
+
+        def kill_all(self):
+            self.killed = True
+
+    class _FakeSession:
+        def __init__(self):
+            self.job_registry = _FakeJobRegistry()
+
+    class _FakeForceQuitController:
+        def __init__(self):
+            self.session = _FakeSession()
+
+        def quit(self):
+            return 0
+
+    class _FakeTimer:
+        """Records that a timer WOULD have been armed -- never actually
+        scheduled against this (the real test) process; `.start()` is a
+        deliberate no-op so a stray real os._exit can never fire later."""
+        instances: list = []
+
+        def __init__(self, interval, function, args=()):
+            self.interval, self.function, self.args = interval, function, args
+            self.daemon = False
+            _FakeTimer.instances.append(self)
+
+        def start(self):
+            pass
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            app.controller = _FakeForceQuitController()
+            calls: list = []
+            app.call_from_thread = lambda fn, *a, **kw: calls.append((fn, a, kw))
+            real_timer_cls = threading_mod.Timer
+            threading_mod.Timer = _FakeTimer
+            try:
+                app._force_quit_worker()
+                ctx.check("job_registry.kill_all() was actually called",
+                          app.controller.session.job_registry.killed is True)
+                ctx.check(f"an exit timer was armed afterward too, got {len(_FakeTimer.instances)}",
+                          len(_FakeTimer.instances) == 1)
+                ctx.check(f"self.exit() was scheduled via call_from_thread, got {calls}", len(calls) == 1)
+            finally:
+                threading_mod.Timer = real_timer_cls
+    asyncio.run(body())
+
+
+@test
+def test_force_quit_kills_background_jobs_even_if_controller_quit_raises(ctx: Ctx):
+    """kill_all() must not be gated on a successful (or even a completed)
+    controller.quit() -- it runs BEFORE that call is even attempted."""
+    import threading as threading_mod
+
+    class _FakeJobRegistry:
+        def __init__(self):
+            self.killed = False
+
+        def kill_all(self):
+            self.killed = True
+
+    class _FakeSession:
+        def __init__(self):
+            self.job_registry = _FakeJobRegistry()
+
+    class _RaisingController:
+        def __init__(self):
+            self.session = _FakeSession()
+
+        def quit(self):
+            raise RuntimeError("simulated: the ordinary quit path is wedged/broken")
+
+    class _FakeTimer:
+        instances: list = []
+
+        def __init__(self, interval, function, args=()):
+            self.daemon = False
+            _FakeTimer.instances.append(self)
+
+        def start(self):
+            pass
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            app.controller = _RaisingController()
+            app.call_from_thread = lambda fn, *a, **kw: None
+            real_timer_cls = threading_mod.Timer
+            threading_mod.Timer = _FakeTimer
+            try:
+                app._force_quit_worker()  # must not raise even though controller.quit() does
+                ctx.check("job_registry.kill_all() still ran despite controller.quit() raising",
+                          app.controller.session.job_registry.killed is True)
+            finally:
+                threading_mod.Timer = real_timer_cls
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 (reviewer minor): cached_auth_status_is_stale's TTL is now
+# actually consulted -- /model's own stale-catalog-refresh worker does the
+# same for the claude-auth-status cache, so a claude.ai login/logout is
+# seen without restarting the whole app.
+# ============================================================================
+
+class _CcAuthStaleEnv:
+    def __enter__(self):
+        self._saved = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        from rolo_claude.providers.cc_models import reset_cached_claude_auth_status
+        reset_cached_claude_auth_status()
+        return self
+
+    def __exit__(self, *exc):
+        if self._saved is None:
+            os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        else:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = self._saved
+        from rolo_claude.providers.cc_models import reset_cached_claude_auth_status
+        reset_cached_claude_auth_status()
+
+
+@test
+def test_cc_auth_status_auto_refresh_worker_refreshes_a_cold_cache(ctx: Ctx):
+    """`cached_claude_auth_status()` itself bypasses the cache ENTIRELY
+    whenever BRIDGE_TEST_CC_AUTH_STATUS is set (by design, so a test always
+    sees its own current value) -- these two tests are specifically about
+    whether the INTERNAL cache variable gets written, so they read it
+    directly rather than through that bypass."""
+    import rolo_claude.providers.cc_models as cc_models_mod
+    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    with _CcAuthStaleEnv():
+        ctx.check("nothing cached yet", cc_models_mod._auth_status_cache is None)
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+        _cc_auth_status_auto_refresh_worker(app=None)
+        status = cc_models_mod._auth_status_cache
+        ctx.check(f"the internal cache is now populated, got {status}", status is not None and status.logged_in)
+
+
+@test
+def test_cc_auth_status_auto_refresh_worker_skips_a_fresh_cache(ctx: Ctx):
+    """The TTL actually gates the refresh -- a cache that's still fresh
+    must not be re-fetched on every single /model open."""
+    import rolo_claude.providers.cc_models as cc_models_mod
+    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
+    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    with _CcAuthStaleEnv():
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
+        refresh_cached_claude_auth_status()  # a genuinely FRESH cache entry
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+        _cc_auth_status_auto_refresh_worker(app=None)  # the cache is fresh -- must NOT re-fetch yet
+        status = cc_models_mod._auth_status_cache
+        ctx.check(f"the STALE (pre-refresh) cached value is still what's stored, got {status}",
+                  status is not None and status.logged_in is False)
+
+
+@test
+def test_cc_auth_status_auto_refresh_worker_picks_up_a_login_change_once_stale(ctx: Ctx):
+    """The exact scenario the reviewer minor names: a login change becomes
+    visible without restarting the app, once the cache is stale."""
+    import rolo_claude.providers.cc_models as cc_models_mod
+    from rolo_claude.providers.cc_models import cached_claude_auth_status, refresh_cached_claude_auth_status
+    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    with _CcAuthStaleEnv():
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
+        refresh_cached_claude_auth_status()
+        ctx.check("starts logged out", cached_claude_auth_status().logged_in is False)
+        # Force staleness directly (never sleeping CACHED_AUTH_STATUS_TTL_S
+        # seconds in a test) -- the same effect real time passing would have.
+        cc_models_mod._auth_status_cached_at -= (cc_models_mod.CACHED_AUTH_STATUS_TTL_S + 1)
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+        _cc_auth_status_auto_refresh_worker(app=None)
+        status = cached_claude_auth_status()
+        ctx.check(f"the login change is now visible, got {status}", status is not None and status.logged_in is True)
+
+
+@test
+def test_handle_model_fires_the_cc_auth_auto_refresh_worker(ctx: Ctx):
+    """Wiring check: bare /model actually starts this worker (its own
+    named group, matching every other slash.py worker's convention)."""
+    from rolo_claude.tui.slash import _handle_model
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            started: list = []
+            real_run_worker = app.run_worker
+
+            def _spy(*a, **kw):
+                if kw.get("name") == "cc-auth-auto-refresh":
+                    started.append(kw.get("group"))
+                return real_run_worker(*a, **kw)
+
+            app.run_worker = _spy
+            await _handle_model(app, "")
+            await pilot.pause(0.1)
+            ctx.check(f"the cc-auth-auto-refresh worker started with its own group, got {started}",
+                      started == ["cc-auth-auto-refresh"])
+    asyncio.run(body())
+
+
+# ============================================================================
+# H15 Part D2.3: the `!cmd` inline-shell permission card, end to end through
+# the real BridgeApp -- Shift+Tab resolves it via the SAME reevaluate_
+# pending_permission path a live tool-call ask already uses.
+# ============================================================================
+
+class _InlineAskController:
+    """A standalone double (not FakeController -- its own `decide_inline_
+    shell` always allows, and it has no register/discard/reevaluate support
+    at all) with just enough surface for D2.3's own flow: an inline `!cmd`
+    that asks, Shift+Tab mode changes that re-decide it for real."""
+
+    def __init__(self):
+        from rolo_claude.permissions import Decision
+        self._Decision = Decision
+        self.permission_mode = "default"
+        self._waiters: dict = {}
+        self.inline_runs: list = []
+        self.events = __import__("queue").Queue()
+
+    def decide_inline_shell(self, command: str):
+        return self._Decision("ask", "a plain Bash tool would ask here too", suggested_rule=None)
+
+    def run_inline_shell(self, command: str):
+        from rolo_claude.tools.base import ToolResult
+        self.inline_runs.append(command)
+        return f"inline_{len(self.inline_runs)}", ToolResult(content=f"ran: {command}")
+
+    def register_pending_permission(self, request_id, tool_name, tool_input) -> None:
+        self._waiters[request_id] = {"tool_name": tool_name, "tool_input": tool_input}
+
+    def discard_pending_permission(self, request_id) -> None:
+        self._waiters.pop(request_id, None)
+
+    def set_permission_mode(self, mode: str) -> None:
+        self.permission_mode = mode
+
+    def reevaluate_pending_permission(self, request_id):
+        """Mirrors the REAL Session.reevaluate_pending_permission's own
+        contract (re-decide, resolve only on a real verdict) using a tiny
+        stand-in rule: `auto`/`bypassPermissions` allow, everything else
+        still asks -- enough to prove the WIRING without needing a real
+        PermissionEngine."""
+        if request_id not in self._waiters:
+            return None
+        if self.permission_mode in ("auto", "bypassPermissions"):
+            return "allow"
+        return None
+
+    def add_permission_rule(self, rule, scope) -> None:
+        pass
+
+
+@test
+def test_inline_shell_ask_card_resolves_via_shift_tab_mode_change(ctx: Ctx):
+    controller = _InlineAskController()
+
+    async def body():
+        app = await _mounted(controller)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            await app._handle_bang_command("echo hi")
+            await pilot.pause(0.05)
+            from rolo_claude.tui.widgets.cards import PermissionCard
+            ctx.check(f"an inline ask card is pending, got {app.pending_card}",
+                      isinstance(app.pending_card, PermissionCard))
+            card = app.pending_card
+            ctx.check("the ask was registered for re-evaluation", card.request_id in controller._waiters)
+            # Shift+Tab default -> acceptEdits -> plan -> auto (3 presses).
+            await pilot.press("shift+tab")
+            await pilot.press("shift+tab")
+            await pilot.press("shift+tab")
+            await pilot.pause(0.1)
+            ctx.check(f"auto resolved the inline ask (card done), got done={card.done}", card.done is True)
+            ctx.check(f"the command actually ran, got {controller.inline_runs}",
+                      controller.inline_runs == ["echo hi"])
+            ctx.check("no pending card left", app.pending_card is None)
+            ctx.check("the slot was cleaned up", card.request_id not in controller._waiters)
+    asyncio.run(body())
+
+
+@test
+def test_inline_shell_ask_card_stays_pending_under_a_mode_that_still_asks(ctx: Ctx):
+    controller = _InlineAskController()
+
+    async def body():
+        app = await _mounted(controller)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            await app._handle_bang_command("rm -rf /tmp/x")
+            await pilot.pause(0.05)
+            card = app.pending_card
+            await pilot.press("shift+tab")  # default -> acceptEdits only; still "ask" in this fake
+            await pilot.pause(0.05)
+            ctx.check("still pending -- acceptEdits doesn't resolve an inline shell ask here", card.done is False)
+            ctx.check(f"the command did NOT run, got {controller.inline_runs}", controller.inline_runs == [])
+            ctx.check("still showing up as the app's own pending card", app.pending_card is card)
+    asyncio.run(body())
+
+
+# ============================================================================
+# H15 Part B: hang diagnostics -- the watchdog fires on a simulated stalled
+# heartbeat, and --debug tracing lines actually appear.
+# ============================================================================
+
+@test
+def test_watchdog_dumps_diagnostics_on_a_stalled_heartbeat(ctx: Ctx):
+    import rolo_claude.tui.app as app_mod
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state = os.environ.get("BRIDGE_STATE_DIR")
+        home = Path(tempfile.mkdtemp(prefix="h15-watchdog-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(home)
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        real_threshold = app_mod.HANG_HEARTBEAT_THRESHOLD_S
+        real_min_interval = app_mod.HANG_DUMP_MIN_INTERVAL_S
+        app_mod.HANG_HEARTBEAT_THRESHOLD_S = 0.2
+        app_mod.HANG_DUMP_MIN_INTERVAL_S = 0.2
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                # Simulate a stall WITHOUT actually blocking the loop (a
+                # real 15s+ block would make this test painfully slow) --
+                # `_tick_spinner`'s own 1Hz interval timer keeps running
+                # fine as long as asyncio itself is alive (exactly what
+                # `await pilot.pause`/`asyncio.sleep` below leaves running),
+                # so it must be stood down too, or it would keep refreshing
+                # the heartbeat right out from under the backdated value,
+                # same as a REAL hang would stop it from firing at all.
+                app._tick_spinner = lambda: None
+                app._last_heartbeat_monotonic = time.monotonic() - 5.0
+                deadline = time.monotonic() + 5.0
+                hang_files: list = []
+                from rolo_claude.config.paths import bridge_home
+                while time.monotonic() < deadline:
+                    hang_files = list(bridge_home().glob("hang-*.log"))
+                    if hang_files:
+                        break
+                    await pilot.pause(0.1)
+                ctx.check(f"a hang log was written, got {hang_files}", len(hang_files) == 1)
+                text = hang_files[0].read_text(encoding="utf-8")
+                ctx.check(f"names the stall reason, got {text[:200]!r}", "heartbeat stalled" in text)
+                ctx.check(f"names the active screen, got {text[:200]!r}", "active screen:" in text)
+                ctx.check(f"names the worker list, got {text[:200]!r}", "named workers:" in text)
+                ctx.check(f"carries real thread stacks, got {len(text)} chars", "--- thread " in text)
+        finally:
+            app_mod.HANG_HEARTBEAT_THRESHOLD_S = real_threshold
+            app_mod.HANG_DUMP_MIN_INTERVAL_S = real_min_interval
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+    asyncio.run(body())
+
+
+@test
+def test_watchdog_never_dumps_twice_within_the_minimum_interval(ctx: Ctx):
+    """"at most once a minute while it persists" -- pinned with a short
+    interval so the test itself stays fast."""
+    import rolo_claude.tui.app as app_mod
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state = os.environ.get("BRIDGE_STATE_DIR")
+        home = Path(tempfile.mkdtemp(prefix="h15-watchdog-once-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(home)
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        real_threshold = app_mod.HANG_HEARTBEAT_THRESHOLD_S
+        real_min_interval = app_mod.HANG_DUMP_MIN_INTERVAL_S
+        app_mod.HANG_HEARTBEAT_THRESHOLD_S = 0.2
+        app_mod.HANG_DUMP_MIN_INTERVAL_S = 30.0  # deliberately long -- a SECOND dump must not appear
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                app._tick_spinner = lambda: None  # see the sibling test's own comment on this
+                app._last_heartbeat_monotonic = time.monotonic() - 5.0
+                from rolo_claude.config.paths import bridge_home
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not list(bridge_home().glob("hang-*.log")):
+                    await pilot.pause(0.1)
+                first_count = len(list(bridge_home().glob("hang-*.log")))
+                ctx.check(f"exactly one dump so far, got {first_count}", first_count == 1)
+                # Still stalled 3+ seconds later -- the SAME one dump must remain.
+                await asyncio.sleep(3.0)
+                second_count = len(list(bridge_home().glob("hang-*.log")))
+                ctx.check(f"still exactly one dump (rate-limited), got {second_count}", second_count == 1)
+        finally:
+            app_mod.HANG_HEARTBEAT_THRESHOLD_S = real_threshold
+            app_mod.HANG_DUMP_MIN_INTERVAL_S = real_min_interval
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+    asyncio.run(body())
+
+
+@test
+def test_sigusr1_dumps_on_demand(ctx: Ctx):
+    if not hasattr(__import__("signal"), "SIGUSR1"):
+        raise SkipTest("SIGUSR1 is POSIX-only -- this host has no such signal")
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state = os.environ.get("BRIDGE_STATE_DIR")
+        home = Path(tempfile.mkdtemp(prefix="h15-sigusr1-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(home)
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.1)
+                import os as os_mod
+                import signal
+                os_mod.kill(os_mod.getpid(), signal.SIGUSR1)
+                await pilot.pause(0.3)
+                from rolo_claude.config.paths import bridge_home
+                hang_files = list(bridge_home().glob("hang-*.log"))
+                ctx.check(f"SIGUSR1 dumped on demand, got {hang_files}", len(hang_files) == 1)
+                ctx.check("names SIGUSR1 as the reason", "SIGUSR1" in hang_files[0].read_text(encoding="utf-8"))
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+    asyncio.run(body())
+
+
+# ---------------------------------------------------------------------------
+# --debug tracing: Key events, AppBlur/AppFocus, worker lifecycle.
+# ---------------------------------------------------------------------------
+
+@test
+def test_debug_tracing_logs_key_events_with_focus_and_screen(ctx: Ctx):
+    import logging as logging_mod
+
+    async def body():
+        logger = logging_mod.getLogger("rolo_claude.tui")
+        records: list = []
+
+        class _Capture(logging_mod.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Capture()
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging_mod.DEBUG)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.05)
+                # A plain character is consumed (and the event stopped) by
+                # the focused PromptInput/TextArea itself before it ever
+                # bubbles up to the App's own `_on_key` -- `escape` has no
+                # such built-in TextArea handling (and isn't a `priority=
+                # True` App binding, which bypasses `_on_key` the same
+                # way), so it's the key this hook actually sees, same as
+                # the SAME self-heal logic right next to this trace call
+                # already relies on.
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+            key_lines = [r for r in records if r.startswith("key: ")]
+            ctx.check(f"at least one Key trace line, got {records}", key_lines)
+            ctx.check(f"names the focused widget, got {key_lines}", "focused=" in key_lines[0])
+            ctx.check(f"names the active screen, got {key_lines}", "screen=" in key_lines[0])
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+    asyncio.run(body())
+
+
+@test
+def test_debug_tracing_logs_app_blur_and_focus(ctx: Ctx):
+    import logging as logging_mod
+    from textual import events as textual_events
+
+    async def body():
+        logger = logging_mod.getLogger("rolo_claude.tui")
+        records: list = []
+
+        class _Capture(logging_mod.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Capture()
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging_mod.DEBUG)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.05)
+                app.on_app_blur(textual_events.AppBlur())
+                app.on_app_focus(textual_events.AppFocus())
+                await pilot.pause(0.05)
+            ctx.check(f"AppBlur traced, got {records}", any("AppBlur" in r for r in records))
+            ctx.check(f"AppFocus traced, got {records}", any("AppFocus" in r for r in records))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+    asyncio.run(body())
+
+
+@test
+def test_debug_tracing_logs_named_worker_lifecycle(ctx: Ctx):
+    import logging as logging_mod
+
+    async def body():
+        logger = logging_mod.getLogger("rolo_claude.tui")
+        records: list = []
+
+        class _Capture(logging_mod.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Capture()
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging_mod.DEBUG)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.05)
+                app.run_worker(lambda: None, thread=True, name="h15-debug-trace-worker", group="h15-test")
+                for _ in range(20):
+                    await pilot.pause(0.05)
+                    if any("h15-debug-trace-worker" in r for r in records):
+                        break
+            ctx.check(f"worker start traced, got {records}",
+                      any(r.startswith("worker start: h15-debug-trace-worker") for r in records))
+            ctx.check(f"worker finish traced, got {records}",
+                      any(r.startswith("worker finish: h15-debug-trace-worker") for r in records))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+    asyncio.run(body())
+
+
+@test
+def test_troubleshooting_doc_names_the_hang_log(ctx: Ctx):
+    text = (REPO_DIR / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    ctx.check("names the exact hang log path pattern",
+              "~/.rolo-claude/hang-" in text or "hang-<UTC" in text)
+    ctx.check("names SIGUSR1 for an on-demand dump", "SIGUSR1" in text)
+    ctx.check("mentions the 15s/one-minute cadence", "15s" in text and "minute" in text)
+
+
+# ============================================================================
+# H15 part 2 addendum 3.2a: the app-launch catalog refresh worker is
+# actually wired into on_mount (not just /model's own trigger).
+# ============================================================================
+
+@test
+def test_launch_actually_populates_an_empty_openrouter_catalog(ctx: Ctx):
+    """End to end: a fresh app mount, with OPENROUTER_API_KEY set and an
+    empty models.json, ends up with a real cached catalog WITHOUT /model
+    ever being opened -- `on_mount`'s own `catalog-startup-refresh` worker,
+    not just `_handle_model`'s."""
+    from tests.helpers.mock_get_endpoints import MockGetEndpoints
+
+    async def body():
+        mock = MockGetEndpoints({"/api/v1/models": (200, {"data": [
+            {"id": "deepseek/deepseek-v3.2", "context_length": 128000},
+        ]})}).start()
+        old_key = os.environ.get("OPENROUTER_API_KEY")
+        old_base = os.environ.get("BRIDGE_OPENROUTER_BASE_URL")
+        old_no_bg_net = os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET")
+        try:
+            os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+            os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url + "/api/v1"
+            # 1.0.1 part 2 fixpass finding 10: this test's whole point is
+            # the REAL launch-time catalog worker running end to end
+            # against the mock -- override the module-level default (set
+            # by `ensure_default_provider_credentials()` above) that now
+            # makes that worker return immediately.
+            os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
+            from rolo_claude.providers.databricks import load_models_json
+            state_dir = Path(tempfile.mkdtemp(prefix="h15-launch-catalog-"))
+            fake = FakeController()
+            fake.state_dir = state_dir
+            ctx.check("models.json starts empty", load_models_json(state_dir) == {})
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                deadline = time.monotonic() + 5.0
+                models = {}
+                while time.monotonic() < deadline:
+                    models = load_models_json(state_dir)
+                    if models:
+                        break
+                    await pilot.pause(0.1)
+                ctx.check(f"catalog populated by launch alone, got {models}",
+                          "deepseek/deepseek-v3.2" in models)
+        finally:
+            mock.stop()
+            if old_key is None:
+                os.environ.pop("OPENROUTER_API_KEY", None)
+            else:
+                os.environ["OPENROUTER_API_KEY"] = old_key
+            if old_base is None:
+                os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+            else:
+                os.environ["BRIDGE_OPENROUTER_BASE_URL"] = old_base
+            if old_no_bg_net is None:
+                os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
+            else:
+                os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = old_no_bg_net
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass finding 10: BRIDGE_TEST_NO_BACKGROUND_NET (the
+# default this module's own `ensure_default_provider_credentials()` sets)
+# must actually stop every background catalog/balance worker from ever
+# reaching the network, for an ordinary mount with real-looking (fake)
+# credentials -- the exact contradiction the finding named: "building a
+# session never triggers first-time catalog discovery" vs. what a mounted
+# BridgeApp's own launch workers used to do regardless.
+# ============================================================================
+
+@test
+def test_background_net_disabled_mount_never_touches_the_network(ctx: Ctx):
+    """Mounts a real-controller BridgeApp (an or: model, same `build_
+    controller` pattern as the e2e pilot above) with `BRIDGE_TEST_NO_
+    BACKGROUND_NET=1` (this module's own ambient default, left ON here,
+    unlike the catalog-population test above) and poisons `open_upstream`
+    -- any launch worker that still tried to touch the network would raise
+    and fail this test."""
+    import argparse
+    import rolo_claude.providers.http as http_mod
+
+    async def body():
+        fh = build_fake_home()
+        mock = MockUpstream().start()  # never expected to receive a request
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_OPENROUTER_BASE_URL", "OPENROUTER_API_KEY",
+                    "BRIDGE_TEST_NO_BACKGROUND_NET")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-test-default"
+        os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = "1"
+        real_open_upstream = http_mod.open_upstream
+
+        def _poison(*a, **kw):
+            raise AssertionError("a background worker touched the network with "
+                                  "BRIDGE_TEST_NO_BACKGROUND_NET=1 set")
+
+        http_mod.open_upstream = _poison
+        controller = None
+        try:
+            from rolo_claude.tui.bootstrap import build_controller
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="or:mock/tui-e2e-read", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                for _ in range(10):
+                    await app._drain()
+                    await pilot.pause(0.05)
+            ctx.check("mounted and idled with no network call from any launch worker", True)
+        finally:
+            http_mod.open_upstream = real_open_upstream
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass critical finding 1: /providers and /doctor build their
+# result off the UI thread (a worker), never synchronously in handle_slash.
+# ============================================================================
+
+@test
+def test_slash_providers_builds_the_table_off_the_main_thread(ctx: Ctx):
+    """Proven by recording whether `reachability_tag` (the slowest per-row
+    check -- a real DNS+TCP+TLS connect in production) ever runs on the
+    main/UI thread -- it must not, regardless of timing."""
+    import threading
+    import rolo_claude.providers.reachability as reach_mod
+
+    seen_main_thread = []
+    real_tag = reach_mod.reachability_tag
+
+    def _spy_tag(name, *, detected=None):
+        seen_main_thread.append(threading.current_thread() is threading.main_thread())
+        return real_tag(name, detected=detected)
+
+    async def body():
+        reach_mod.reachability_tag = _spy_tag
+        old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="h15b-providers-thread-")))
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/providers")
+                await pilot.press("enter")
+                notes = []
+                for _ in range(60):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+                    if any("Databricks" in n for n in notes):
+                        break
+                ctx.check("reachability_tag was actually called", len(seen_main_thread) > 0)
+                ctx.check(f"it never ran on the main/UI thread, got {seen_main_thread}",
+                          all(is_main is False for is_main in seen_main_thread))
+                ctx.check(f"the table eventually reached the transcript, got {notes}",
+                          any("Databricks" in n for n in notes))
+        finally:
+            reach_mod.reachability_tag = real_tag
+            if old_state_dir is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+    asyncio.run(body())
+
+
+@test
+def test_slash_providers_enable_disable_stay_synchronous(ctx: Ctx):
+    """`enable`/`disable` are a plain local config.json write (no network/
+    subprocess) -- the decision keeps them synchronous, never a worker."""
+    async def body():
+        old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="h15b-providers-endis-")))
+        try:
+            from rolo_claude.providers.enablement import is_enabled
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/providers enable databricks")
+                await pilot.press("enter")
+                await app._drain()
+                await pilot.pause(0.05)
+                ctx.check("enabled immediately -- no worker round trip needed", is_enabled("databricks") is True)
+        finally:
+            if old_state_dir is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+    asyncio.run(body())
+
+
+@test
+def test_slash_doctor_runs_off_the_main_thread(ctx: Ctx):
+    import threading
+    import rolo_claude.doctor as doctor_mod
+
+    seen_main_thread = []
+    real_run_checks = doctor_mod.run_checks
+
+    def _spy_run_checks(cwd=None):
+        seen_main_thread.append(threading.current_thread() is threading.main_thread())
+        return real_run_checks(cwd=cwd)
+
+    async def body():
+        doctor_mod.run_checks = _spy_run_checks
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="h15b-doctor-thread-")))
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/doctor")
+                await pilot.press("enter")
+                for _ in range(60):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if seen_main_thread:
+                        break
+                ctx.check("run_checks was actually called", len(seen_main_thread) > 0)
+                ctx.check(f"it never ran on the main/UI thread, got {seen_main_thread}",
+                          all(is_main is False for is_main in seen_main_thread))
+        finally:
+            doctor_mod.run_checks = real_run_checks
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass finding 4: the init tabs app composes instantly (the
+# "claude" tab's own claude-auth-status spawn never blocks compose/mount)
+# and --no-live skips every reachability probe/catalog fetch outright.
+# ============================================================================
+
+@test
+def test_init_tabs_compose_is_instant_despite_a_slow_claude_check(ctx: Ctx):
+    import time as time_mod
+    import rolo_claude.init_providers as init_providers_mod
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Static
+
+    def _slow_claude_login():
+        time_mod.sleep(1.0)
+        return False
+
+    async def body():
+        real_login = init_providers_mod.claude_login_available
+        init_providers_mod.claude_login_available = _slow_claude_login
+        try:
+            with _H15TabsEnv():
+                start = time_mod.monotonic()
+                app = InitTabsApp()
+                async with app.run_test(size=(100, 40)) as pilot:
+                    elapsed = time_mod.monotonic() - start
+                    ctx.check(f"mounted quickly despite the slow claude check, got {elapsed:.2f}s", elapsed < 0.5)
+                    claude_status = _static_text(app.query_one("#claude-status", Static))
+                    ctx.check(f"the placeholder is shown first, got {claude_status!r}", claude_status == "checking…")
+                    # Eventually the slow worker resolves it for real.
+                    for _ in range(30):
+                        await pilot.pause(0.1)
+                        resolved = _static_text(app.query_one("#claude-status", Static))
+                        if resolved != "checking…":
+                            break
+                    ctx.check(f"resolves once the slow check finishes, got {resolved!r}", resolved == "not set up")
+                    await pilot.press("escape")
+                    await pilot.pause(0.05)
+        finally:
+            init_providers_mod.claude_login_available = real_login
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_check_login_button_does_not_block_the_ui_thread(ctx: Ctx):
+    """M3 (1.0.1 final pass): the "claude" tab's own "Check login" button
+    used to call save_tab_credentials()+tab_credential_state() (each
+    spawning `claude auth status`) directly on the UI thread -- a slow
+    subprocess froze the whole app for its duration. Now runs in a
+    thread=True worker + call_from_thread, same pattern as this file's own
+    test_init_tabs_compose_is_instant_despite_a_slow_claude_check above."""
+    import time as time_mod
+    import rolo_claude.init_providers as init_providers_mod
+    from rolo_claude.init_providers import TAB_PROVIDERS
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Static
+
+    def _slow_claude_login():
+        time_mod.sleep(2.0)
+        return False
+
+    async def body():
+        real_login = init_providers_mod.claude_login_available
+        try:
+            with _H15TabsEnv():
+                app = InitTabsApp()
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.pause(0.1)
+                    # Reach the "claude" tab (index 3 of 5: databricks,
+                    # openrouter, anthropic, claude, typesafe) -- shift+tab
+                    # wraps 0 -> 4 -> 3, same math
+                    # test_init_tabs_shift_tab_navigates_providers_with_
+                    # wraparound above already pins.
+                    ctx.check(f"claude really is index 3, got {TAB_PROVIDERS}", TAB_PROVIDERS[3] == "claude")
+                    await pilot.press("shift+tab")
+                    await pilot.press("shift+tab")
+                    await pilot.pause(0.05)
+                    # Only make the check slow AFTER mount -- __init__'s own
+                    # eager on_mount worker must not eat this patch.
+                    init_providers_mod.claude_login_available = _slow_claude_login
+                    t0 = time_mod.monotonic()
+                    await pilot.click("#claude-save")
+                    click_elapsed = time_mod.monotonic() - t0
+                    ctx.check(f"clicking Save returns promptly (off the UI thread) despite the "
+                              f"2s-sleeping claude auth check, got {click_elapsed:.2f}s", click_elapsed < 1.0)
+                    # The app is still alive and responsive right away -- a
+                    # key press is handled well before the 2s check lands.
+                    t1 = time_mod.monotonic()
+                    await pilot.press("tab")
+                    key_elapsed = time_mod.monotonic() - t1
+                    ctx.check(f"a key press right after is handled promptly too, got {key_elapsed:.2f}s",
+                              key_elapsed < 1.0)
+                    # Eventually the slow worker resolves the real result.
+                    status = "checking…"
+                    for _ in range(40):
+                        await pilot.pause(0.1)
+                        status = _static_text(app.query_one("#claude-status", Static))
+                        if "not set up" in status:
+                            break
+                    ctx.check(f"the slow check eventually lands, got {status!r}", "not set up" in status)
+                    await pilot.press("escape")
+                    await pilot.pause(0.05)
+        finally:
+            init_providers_mod.claude_login_available = real_login
+    asyncio.run(body())
+
+
+@test
+def test_init_tabs_no_live_never_touches_the_network_or_fetches_a_catalog(ctx: Ctx):
+    import rolo_claude.init_providers as init_providers_mod
+    import rolo_claude.providers.reachability as reach_mod
+    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from textual.widgets import Input, Static
+
+    def _poison_open_upstream(*a, **kw):
+        raise AssertionError("--no-live must never probe reachability")
+
+    def _poison_refresh_tab_catalog(provider):
+        raise AssertionError("--no-live must never fetch a catalog")
+
+    async def body():
+        real_open_upstream = reach_mod.open_upstream
+        real_refresh = init_providers_mod.refresh_tab_catalog
+        reach_mod.open_upstream = _poison_open_upstream
+        init_providers_mod.refresh_tab_catalog = _poison_refresh_tab_catalog
+        try:
+            with _H15TabsEnv():
+                app = InitTabsApp(no_live=True)
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.pause(0.1)
+                    reach = _static_text(app.query_one("#openrouter-reach", Static))
+                    ctx.check(f"shows skipped immediately, got {reach!r}", "skipped" in reach)
+                    key_input = app.query_one("#openrouter-field-key", Input)
+                    key_input.focus()
+                    for ch in "sk-or-fake":
+                        await pilot.press(ch)
+                    await pilot.press("enter")
+                    await pilot.pause(0.3)
+                    reach_after = _static_text(app.query_one("#openrouter-reach", Static))
+                    ctx.check(f"still skipped after Save -- no probe/catalog fetch fired, got {reach_after!r}",
+                              "skipped" in reach_after)
+                    ctx.check("openrouter was still enabled despite --no-live",
+                              "openrouter" in app.configured_this_run)
+                    await pilot.press("escape")
+                    await pilot.pause(0.05)
+        finally:
+            reach_mod.open_upstream = real_open_upstream
+            init_providers_mod.refresh_tab_catalog = real_refresh
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass finding 14: the hang watchdog pauses around a known
+# blocking call, caps dumps per process, and prunes old hang-*.log files.
+# ============================================================================
+
+@test
+def test_watchdog_paused_flag_suppresses_a_hang_dump(ctx: Ctx):
+    """Simulates a stale heartbeat directly (never actually blocks the
+    event loop for 15s+) -- no dump while `_watchdog_paused` is set (the
+    flag `_enter_suspend_for_editor`/`_exit_suspend_for_editor` toggle
+    around `self.suspend()`); the SAME stale heartbeat dumps once unpaused,
+    proving the mechanism genuinely works (not just coincidentally quiet)."""
+    import time as time_mod
+    from rolo_claude.tui.app import HANG_HEARTBEAT_THRESHOLD_S
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+        scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-pause-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(scratch)
+        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".rolo-claude")
+        try:
+            fake = FakeController()
+            fake.state_dir = scratch / ".rolo-claude"
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)):
+                # The real `_tick_spinner` interval (every 1s) refreshes
+                # `_last_heartbeat_monotonic` on its own -- stopped here so
+                # this test's OWN simulated-stale value isn't immediately
+                # overwritten by the app genuinely running fine underneath it.
+                app._tick_spinner = lambda: None
+                app._watchdog_paused = True
+                app._last_heartbeat_monotonic = time_mod.monotonic() - (HANG_HEARTBEAT_THRESHOLD_S + 5)
+                await asyncio.sleep(2.5)  # >= one 2s watchdog poll cycle
+                ctx.check(f"no dump while paused, got count={app._watchdog_dump_count}",
+                          app._watchdog_dump_count == 0)
+                app._watchdog_paused = False
+                await asyncio.sleep(2.5)
+                ctx.check(f"a dump fires once unpaused with the same stale heartbeat, got "
+                          f"count={app._watchdog_dump_count}", app._watchdog_dump_count >= 1)
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state_dir is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+    asyncio.run(body())
+
+
+@test
+def test_hang_dump_count_is_capped_per_process(ctx: Ctx):
+    from rolo_claude.tui.app import MAX_HANG_DUMPS_PER_PROCESS
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+        scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-cap-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(scratch)
+        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".rolo-claude")
+        try:
+            fake = FakeController()
+            fake.state_dir = scratch / ".rolo-claude"
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)):
+                for i in range(MAX_HANG_DUMPS_PER_PROCESS + 3):
+                    app._dump_hang_diagnostics(30.0, reason=f"test-{i}")
+                ctx.check(f"capped at {MAX_HANG_DUMPS_PER_PROCESS}, got {app._watchdog_dump_count}",
+                          app._watchdog_dump_count == MAX_HANG_DUMPS_PER_PROCESS)
+                dumps = list((scratch / ".rolo-claude").glob("hang-*.log"))
+                ctx.check(f"at most {MAX_HANG_DUMPS_PER_PROCESS} dump files landed on disk, got {len(dumps)}",
+                          0 < len(dumps) <= MAX_HANG_DUMPS_PER_PROCESS)
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state_dir is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+    asyncio.run(body())
+
+
+@test
+def test_prune_old_hang_dumps_keeps_only_the_newest_ten(ctx: Ctx):
+    from rolo_claude.tui.app import MAX_HANG_DUMP_FILES_KEPT
+
+    async def body():
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+        scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-prune-"))
+        state_dir = scratch / ".rolo-claude"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["BRIDGE_TEST_HOME"] = str(scratch)
+        os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+        try:
+            total = MAX_HANG_DUMP_FILES_KEPT + 4
+            for i in range(total):
+                (state_dir / f"hang-2026010100{i:04d}Z.log").write_text("x", encoding="utf-8")
+            fake = FakeController()
+            fake.state_dir = state_dir
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)):
+                pass  # on_mount -> _start_watchdog -> _prune_old_hang_dumps already ran
+            remaining = sorted(p.name for p in state_dir.glob("hang-*.log"))
+            ctx.check(f"pruned down to {MAX_HANG_DUMP_FILES_KEPT}, got {len(remaining)}",
+                      len(remaining) == MAX_HANG_DUMP_FILES_KEPT)
+            expected_kept = sorted(f"hang-2026010100{i:04d}Z.log"
+                                   for i in range(total - MAX_HANG_DUMP_FILES_KEPT, total))
+            ctx.check(f"kept exactly the newest ones, got {remaining}", remaining == expected_kept)
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state_dir is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass finding 17: --debug's own per-keystroke trace must
+# never be able to reconstruct a typed secret.
+# ============================================================================
+
+@test
+def test_debug_key_repr_redacts_printable_characters_only(ctx: Ctx):
+    from rolo_claude.tui.app import _debug_key_repr
+    for ch in ("a", "A", "1", "9", "!", "@", "z"):
+        ctx.check(f"{ch!r} redacted, got {_debug_key_repr(ch)!r}", _debug_key_repr(ch) == "<char>")
+    for safe in ("enter", "tab", "escape", "backspace", "space", "up", "down", "left", "right", "f5"):
+        ctx.check(f"{safe!r} passes through verbatim, got {_debug_key_repr(safe)!r}", _debug_key_repr(safe) == safe)
+    for chord in ("ctrl+c", "ctrl+x", "alt+e", "shift+tab"):
+        ctx.check(f"{chord!r} passes through verbatim, got {_debug_key_repr(chord)!r}", _debug_key_repr(chord) == chord)
+
+
+@test
+def test_on_key_debug_trace_never_logs_a_raw_printable_keystroke(ctx: Ctx):
+    """Calls `BridgeApp._on_key` directly (a plain `SimpleNamespace(key=...)`
+    stand-in -- the method only ever reads `.key` off it when no chord is
+    pending, the default state) rather than via `pilot.press`: a plain
+    character typed into the focused PromptInput's own TextArea is
+    consumed before ever reaching `_on_key` at all (see test_debug_tracing_
+    logs_key_events_with_focus_and_screen's own comment on exactly this),
+    so driving it through the UI would only ever exercise control keys --
+    this tests the handler's OWN redaction directly, the exact code path
+    finding 17 fixes, independent of which widget happens to be focused."""
+    from types import SimpleNamespace
+
+    key_calls = []
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+
+        def _spy(msg, *a):
+            if msg.startswith("key:"):
+                key_calls.append(a)
+
+        app._debug_trace = _spy
+        async with app.run_test(size=(100, 40)):
+            await app._on_key(SimpleNamespace(key="x"))  # as if typing part of a secret
+            await app._on_key(SimpleNamespace(key="escape"))
+        key_args = [a[0] for a in key_calls if a]
+        ctx.check(f"the printable 'x' never appears raw in a trace, got {key_args}", "x" not in key_args)
+        ctx.check(f"the placeholder was logged instead, got {key_args}", "<char>" in key_args)
+        ctx.check(f"a control key (escape) still logs its real name, got {key_args}", "escape" in key_args)
     asyncio.run(body())
 
 

@@ -38,6 +38,13 @@ configured. See
 `docs/harness/INSTALL.md` for the full walkthrough (offline/work-box install, PEP 668 workarounds,
 terminal notes) and `rolo-claude doctor` for a read-only environment check with a fix for every WARN.
 
+**Install once, run anywhere.** `uv tool install --editable .`/`pip install --user -e .` puts a real
+console script on PATH -- once it's there, `rolo-claude` works from any directory, not just this
+checkout (the checkout is only ever needed for `git pull`). Re-run `uv tool install --reinstall .`
+(or `pip install --user -e .` again) after every `git pull` so the installed command actually picks up
+the update; `rolo-claude doctor`'s own "command on PATH" check (and `init`'s own summary line) catches
+it and names the exact command if you forget.
+
 ### Windows (five lines)
 
 ```powershell

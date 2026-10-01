@@ -469,6 +469,125 @@ def _check_tmux_mouse() -> Optional[str]:
                 f"selection either way)", cmd="tmux set -g mouse on")
 
 
+_UNSET = object()
+
+
+def _repo_bin_dir() -> Path:
+    """This checkout's own `bin/` directory -- a `rolo-claude` that
+    resolves there is the checkout's own convenience wrapper (`bin/
+    rolo-claude`/`bin/rolo-claude.cmd`), never a real installed console
+    script, and only ever works while the current directory is inside the
+    checkout."""
+    return Path(__file__).resolve().parent.parent / "bin"
+
+
+def _externally_managed_marker_present() -> bool:
+    """1.0.1 part 2 fixpass finding 16: PEP 668 -- Debian 12+/Kali's own
+    system Python refuses a bare `pip install --user` outright once this
+    marker file exists next to it. Located via `sysconfig`'s own stdlib
+    directory (the directory the marker is documented to live beside),
+    never a hardcoded path, so this is correct on every platform/venv
+    layout; `BRIDGE_TEST_EXTERNALLY_MANAGED` (unset/"0"/"1") is a test seam
+    that skips the real filesystem check entirely."""
+    override = os.environ.get("BRIDGE_TEST_EXTERNALLY_MANAGED")
+    if override is not None:
+        return override == "1"
+    import sysconfig
+    try:
+        stdlib = Path(sysconfig.get_path("stdlib"))
+    except Exception:
+        return False
+    return (stdlib / "EXTERNALLY-MANAGED").exists()
+
+
+def _detect_install_tool(*, uv_found: Optional[bool] = None, pipx_found: Optional[bool] = None,
+                          externally_managed: Optional[bool] = None) -> str:
+    """"uv" when `uv` is on PATH; else, when PEP 668's own EXTERNALLY-
+    MANAGED marker is present (a bare `pip install --user` is refused
+    outright there -- Kali/Debian 12+), "pipx" if `pipx` is ALSO on PATH,
+    else "venv" (nothing safe to run automatically -- the fix line points
+    at making one instead); else "pip" (every other box, unchanged from
+    before this fix). Every probe is a test seam, defaulting to a real
+    `shutil.which`/marker-file check when omitted."""
+    if uv_found is None:
+        uv_found = bool(shutil.which("uv"))
+    if uv_found:
+        return "uv"
+    if externally_managed is None:
+        externally_managed = _externally_managed_marker_present()
+    if externally_managed:
+        if pipx_found is None:
+            pipx_found = bool(shutil.which("pipx"))
+        return "pipx" if pipx_found else "venv"
+    return "pip"
+
+
+def reinstall_command(*, uv_found: Optional[bool] = None, pipx_found: Optional[bool] = None,
+                       externally_managed: Optional[bool] = None) -> str:
+    """The exact command the owner's own report asked for: `uv tool
+    install --reinstall .` (run from this checkout) when `uv` is present --
+    both it and every other branch below reinstall the CONSOLE SCRIPT a
+    bare `rolo-claude` from any directory needs, and all need re-running
+    after every `git pull` (an editable/tool install does not auto-update
+    the installed script's own dependency pins or entry point).
+
+    1.0.1 part 2 fixpass finding 16: without `uv`, a bare `pip install
+    --user -e .` fails outright under PEP 668 on Kali/Debian 12+
+    (`error: externally-managed-environment`) -- `pipx install --force
+    -e .` is suggested instead when that marker is present and `pipx` is
+    on PATH, else a venv (never a bare `pip install --user` on such a
+    box).
+
+    M5 (1.0.1 final pass): the venv branch also links the venv's own
+    `.venv/bin/rolo-claude` console script into `~/.local/bin` -- a plain
+    `python -m venv` has no console-script-on-PATH story of its own (unlike
+    `uv tool install`/`pipx install`, both of which register one), so
+    without this step `check_command_on_path`'s own `shutil.which
+    ("rolo-claude")` kept failing even right after running the suggested
+    venv command; `_check_local_bin_on_path` already covers getting
+    `~/.local/bin` itself onto a non-interactive shell's PATH, so linking
+    into it (rather than some venv-specific location) is what makes THAT
+    existing fix actually resolve the command too."""
+    tool = _detect_install_tool(uv_found=uv_found, pipx_found=pipx_found, externally_managed=externally_managed)
+    if tool == "uv":
+        return "uv tool install --reinstall ."
+    if tool == "pipx":
+        return "pipx install --force -e ."
+    if tool == "venv":
+        return ('python3 -m venv .venv && .venv/bin/pip install -e . && mkdir -p ~/.local/bin && '
+                'ln -sf "$PWD/.venv/bin/rolo-claude" ~/.local/bin/rolo-claude')
+    return "pip install --user -e ."
+
+
+def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, pipx_found: Optional[bool] = None,
+                           externally_managed: Optional[bool] = None) -> str:
+    """New (owner report from the work VM, H15 addendum): a bare
+    `rolo-claude` typed OUTSIDE the checkout directory did not work --
+    only the checkout's own `bin/rolo-claude` wrapper had ever been used,
+    always run from inside it. `shutil.which("rolo-claude")` must resolve
+    to a REAL installed console script (the `uv tool install`/`pip
+    install` entry point), never this repo's own `bin/` wrapper and never
+    nothing -- the OK line names the resolved path; the WARN line's own
+    `-> fix:` names the exact reinstall command for whichever tool is
+    detected and reminds that it's needed again after every `git pull`.
+    `resolved`/`uv_found`/`pipx_found`/`externally_managed` are test seams;
+    omitted, this does real `shutil.which`/marker-file lookups."""
+    if resolved is _UNSET:
+        resolved = shutil.which("rolo-claude") or shutil.which("rolo-claude.exe")
+    fix_cmd = (f"{reinstall_command(uv_found=uv_found, pipx_found=pipx_found, externally_managed=externally_managed)}"
+               f" (run from this checkout -- repeat after every `git pull`)")
+    if not resolved:
+        return _fix(f"{WARN} rolo-claude command: not found on PATH", cmd=fix_cmd)
+    try:
+        is_repo_wrapper = Path(resolved).resolve().parent == _repo_bin_dir().resolve()
+    except OSError:
+        is_repo_wrapper = False
+    if is_repo_wrapper:
+        return _fix(f"{WARN} rolo-claude command: PATH resolves to this checkout's own bin/ wrapper "
+                    f"({resolved}) -- only works from inside the checkout", cmd=fix_cmd)
+    return f"{OK} rolo-claude command: {resolved}"
+
+
 def _check_mcp_servers(cwd: Optional[Path]) -> str:
     """New (RECOMMENDATIONS.md P0 #2 / section 3, "MCP startup cost is the
     biggest perceived-speed item"): configured MCP servers -- a pure config
@@ -551,6 +670,27 @@ def _provider_configured(ref) -> "tuple[bool, str]":
     return True, ref.provider
 
 
+def _guess_provider_for_doctor_message(configured: str) -> "Optional[str]":
+    """Best-effort prefix sniff -- the SAME shapes `model.parse_model_ref`
+    itself dispatches on, just never resolving aliases/routes.json, since
+    this only runs after `parse_model_ref` has ALREADY refused the ref
+    (`_check_default_model`'s own `InvalidModelError` branch) and needs to
+    know which provider that was ABOUT without re-parsing it."""
+    from rolo_claude.providers.enablement import PREFIXES, PROVIDER_NAMES
+    for name in PROVIDER_NAMES:
+        prefix = PREFIXES.get(name)
+        if prefix and configured.startswith(prefix):
+            return name
+    if configured.startswith("databricks-") or configured.startswith("system.ai."):
+        return "databricks"
+    if ("/" in configured and configured.count("/") == 1
+            and not any(ch.isspace() for ch in configured)):
+        parts = configured.split("/")
+        if parts[0] and parts[1]:
+            return "openrouter"
+    return None
+
+
 def _check_default_model() -> str:
     """New (RECOMMENDATIONS.md P0 #2): `~/.rolo-claude/config.json`'s own
     `"model"` key (written by `rolo-claude init` step 3, or a plain
@@ -560,6 +700,7 @@ def _check_default_model() -> str:
     session would actually pick. Not set at all is perfectly normal (the
     built-in default applies) and reported OK, never WARN."""
     from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref
+    from rolo_claude.providers.routing import InvalidModelError
     from rolo_claude.theme import get_config_value
     configured = get_config_value("model", default=None)
     if not isinstance(configured, str) or not configured:
@@ -567,11 +708,39 @@ def _check_default_model() -> str:
                 f"applies (BRIDGE_MODEL/routes.json still win when set)")
     try:
         ref = parse_model_ref(configured)
+    except InvalidModelError as e:
+        # H15 part 2 addendum 3.1: parse_model_ref now ALSO refuses a
+        # syntactically-fine ref whose provider just isn't auto-detected as
+        # enabled (not only an explicit `providers disable`) -- give the
+        # SAME specific "not configured"/"not enabled" guidance the
+        # provider_ok-but-disabled branch below already gives a ref that
+        # parses fine, instead of the generic "does not resolve" wording
+        # (meant for an actually garbled ref, where this guess finds
+        # nothing and falls through to it unchanged).
+        provider_guess = _guess_provider_for_doctor_message(configured)
+        if provider_guess is not None:
+            from rolo_claude.providers.enablement import is_provider_disabled_message
+            disabled_msg = is_provider_disabled_message(provider_guess)
+            if disabled_msg:
+                provider_flag = {"databricks": "databricks", "claude_subscription": "claude",
+                                  "anthropic": "anthropic"}.get(provider_guess, "openrouter")
+                return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
+                             cmd=f"rolo-claude init --provider {provider_flag}")
+        return _fix(f"{WARN} Default model: config.json's model={configured!r} does not resolve ({e})",
+                     cmd=f"rolo-claude config set model {DEFAULT_MODEL_REF}")
     except Exception as e:
         return _fix(f"{WARN} Default model: config.json's model={configured!r} does not resolve ({e})",
                      cmd=f"rolo-claude config set model {DEFAULT_MODEL_REF}")
     provider_ok, provider_label = _provider_configured(ref)
     if provider_ok:
+        from rolo_claude.providers.enablement import is_provider_disabled_message
+        disabled_msg = is_provider_disabled_message(ref.provider)
+        if disabled_msg:
+            # H15 item 21: credentials resolve but the provider isn't
+            # ENABLED -- a `/model`/`-p`/TUI call would be refused with
+            # this SAME message, so doctor must not call it just "OK".
+            return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
+                        cmd=f"rolo-claude providers enable {ref.provider}")
         return f"{OK} Default model: {configured} ({provider_label} configured)"
     # 1.0.1 hotfix 13 (drive-by): this suggestion still said `--preset
     # work`/`--preset home` -- the deprecated alias still works, but every
@@ -580,6 +749,29 @@ def _check_default_model() -> str:
         ref.provider, "openrouter")
     return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
                  cmd=f"rolo-claude init --provider {provider_flag}")
+
+
+def _check_providers_enabled() -> str:
+    """H15 item 21: a one-line summary of the explicit provider-enablement
+    table (`rolo-claude providers` has the full detail) -- always INFO
+    (never WARN/MISSING: a box with nothing enabled yet is normal before
+    the first `init`/`providers enable`, same as every other "not
+    configured yet" line in this module)."""
+    from rolo_claude.providers.config import listing_effective_env
+    from rolo_claude.providers.enablement import PROVIDER_NAMES, credentials_present, is_enabled
+    # 1.0.1 part 2 fixpass finding 3: the merged settings-aware env (a
+    # credential living only in a settings.json `env` block is seen here
+    # too), and `credentials_present` computed exactly once per provider --
+    # same "detection for listing" fix `/providers`'s own `provider_rows()`
+    # applies, reused here so doctor never disagrees with it.
+    env = listing_effective_env()
+    detected = {p: credentials_present(p, env=env) for p in PROVIDER_NAMES}
+    enabled = [p for p in PROVIDER_NAMES if is_enabled(p, detected=detected[p])]
+    detected_not_enabled = [p for p in PROVIDER_NAMES if detected[p] and p not in enabled]
+    line = f"{OK} Providers: {len(enabled)}/{len(PROVIDER_NAMES)} enabled ({', '.join(enabled) or 'none'})"
+    if detected_not_enabled:
+        line += f" -- detected but not enabled: {', '.join(detected_not_enabled)} (see `rolo-claude providers`)"
+    return line
 
 
 def _check_permission_mode() -> str:
@@ -1045,6 +1237,8 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
+    entries.append(("providers_enabled", _check_providers_enabled()))
+    entries.append(("command_on_path", check_command_on_path()))
     return [(cid, line) for cid, line in entries if line is not None]
 
 
@@ -1091,6 +1285,16 @@ def cmd_doctor(argv: list) -> int:
     parser.add_argument("--only", default=None, metavar="GLOB",
                          help="With --probe-all: only endpoints matching this glob")
     args = parser.parse_args(argv)
+    # H15 item 21.4: one-time migration -- a box with credentials from
+    # before provider enablement existed gets exactly those enabled. A
+    # no-op (returns None) once a `providers` block already exists,
+    # however it got there. The note is printed only OUTSIDE --json (a
+    # machine reader expects stdout to be ONE parseable JSON value, never
+    # a plain-text line ahead of it).
+    from rolo_claude.providers.enablement import ensure_providers_migrated
+    migration_note = ensure_providers_migrated()
+    if migration_note and not args.json:
+        print(migration_note)
     if args.work and args.probe_all:
         from rolo_claude.work_matrix import format_table, run_work_matrix
         print("rolo-claude doctor --work --probe-all")

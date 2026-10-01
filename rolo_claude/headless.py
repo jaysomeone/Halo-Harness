@@ -41,6 +41,7 @@ from rolo_claude.config.paths import bridge_home, home, lookup_project
 from rolo_claude.config.settings import resolve_settings
 from rolo_claude.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
 from rolo_claude.output import PrintModeSink, StreamJsonSink
+from rolo_claude.providers.routing import InvalidModelError
 from rolo_claude.permissions import (
     PermissionEngine, bare_deny_tool_names, build_rules_from_settings, freeze_tool_registry,
     mcp_deny_tool_names, normalize_permission_mode, split_tool_rule_list,
@@ -543,8 +544,27 @@ def build_session(
     # here already does.
     model_raw = model_ref_raw or resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
-    small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL") or routes.get("small") or model_raw
-    small_ref = parse_model_ref(small_raw, routes) if small_raw else None
+    explicit_small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL")
+    small_raw = explicit_small_raw or routes.get("small") or model_raw
+    try:
+        small_ref = parse_model_ref(small_raw, routes) if small_raw else None
+    except InvalidModelError:
+        # 1.0.1 part 2 fixpass finding 3: a shared/team-wide routes.json may
+        # pin "small" to a provider this particular box never set up (e.g.
+        # routes.example.json ships `"small": "or:..."`, refused outright on
+        # a Databricks-only box) -- the small model only ever backs a
+        # background compaction/title call, never the user's own turn, so
+        # refusing the WHOLE session over it is disproportionate. Falls back
+        # to the already-resolved MAIN ref (which just parsed fine above)
+        # instead of failing the session outright.
+        small_ref = model_ref
+        # M4 (1.0.1 final pass): an EXPLICIT --small-model/BRIDGE_MODEL_SMALL
+        # that gets refused must never fail SILENTLY -- only routes.json/
+        # routes.example's own lenient "small" default (nobody typed this;
+        # it's a shared file's own choice) stays quiet about falling back.
+        if explicit_small_raw:
+            print(f"rolo-claude: --small-model/BRIDGE_MODEL_SMALL {small_raw!r} does not resolve -- "
+                  f"using the main model {model_raw!r} for background calls instead", file=sys.stderr)
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
 
@@ -612,13 +632,20 @@ def build_session(
     # `init --preset work`/`/models refresh`, so an unreachable/fake `dbx:`
     # host (common in this harness's own test suite) never spawns a live
     # background probe just from building a session.
-    if not bare and model_ref.provider == "databricks" and creds is not None:
+    from rolo_claude.config.paths import background_net_disabled
+    if not bare and model_ref.provider == "databricks" and creds is not None and not background_net_disabled():
         import threading as _threading
         def _bg_dbx_refresh() -> None:
             try:
                 from rolo_claude.providers.databricks import dbx_endpoints_age_seconds, refresh_dbx_catalog_if_stale
                 if dbx_endpoints_age_seconds(state_dir) is not None:
-                    refresh_dbx_catalog_if_stale(state_dir)
+                    # N2c (1.0.1 final pass): this session's own trust-
+                    # filtered `settings.effective_env` (already resolved
+                    # above, with THIS session's real cwd/trust) -- never
+                    # bare os.environ, which could resolve a DIFFERENT
+                    # (wrong-layer-mixed, or untrusted-project-sourced)
+                    # Databricks config than the turn itself will use.
+                    refresh_dbx_catalog_if_stale(state_dir, env=settings.effective_env)
             except Exception:
                 pass
         _threading.Thread(target=_bg_dbx_refresh, daemon=True, name="rolo-claude-dbx-auto-refresh").start()

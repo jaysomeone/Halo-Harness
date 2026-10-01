@@ -313,6 +313,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "init":
         from rolo_claude.init_cli import cmd_init
         return cmd_init(argv[1:])
+    if argv and argv[0] == "providers":
+        from rolo_claude.providers_cli import cmd_providers
+        return cmd_providers(argv[1:])
     if argv and argv[0] == "stats":
         from rolo_claude.stats_cli import cmd_stats
         return cmd_stats(argv[1:])

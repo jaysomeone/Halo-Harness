@@ -67,9 +67,14 @@ class ModelPicker(ModalScreen):
         # `Controller.list_models()` returns dicts; `FakeController`'s own
         # (tests/test_fake_controller.py-pinned) shape is a bare list of ref
         # strings -- normalize both to the dict shape this dialog renders.
-        self.models = [m if isinstance(m, dict) else {"ref": m, "provider": "?"} for m in models]
+        # H15 item 21.2: a `{"hint": "..."}` entry (no "ref" at all -- a
+        # detected-but-disabled provider's dim notice) is split out here so
+        # it never reaches the filterable/selectable `self.models` list.
+        self.hints = [m.get("hint", "") for m in models if isinstance(m, dict) and "hint" in m]
+        self.models = [m if isinstance(m, dict) else {"ref": m, "provider": "?"}
+                       for m in models if not (isinstance(m, dict) and "hint" in m)]
         self.current = current
-        self._filtered = models
+        self._filtered = self.models
 
     def compose(self):
         with Vertical():
@@ -107,11 +112,18 @@ class ModelPicker(ModalScreen):
             # third, contradicting the documented "Down, Down, Enter -> the
             # third entry" behavior.
             option_list.action_first()
-            hint.update("")
+            hint.update(self._hint_text())
         else:
             refs = [m["ref"] for m in self.models]
             near = difflib.get_close_matches(query, refs, n=5, cutoff=0.4)
-            hint.update(f"No exact match. Did you mean: {', '.join(near)}" if near else "No matching models.")
+            no_match = f"No exact match. Did you mean: {', '.join(near)}" if near else "No matching models."
+            extra = self._hint_text()
+            hint.update(f"{no_match}\n{extra}" if extra else no_match)
+
+    def _hint_text(self) -> str:
+        """H15 item 21.2: one dim line per detected-but-disabled provider,
+        always shown (filter or not) -- never counted as a selectable row."""
+        return "\n".join(f"  {h}" for h in self.hints) if self.hints else ""
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._refresh_list(event.value)

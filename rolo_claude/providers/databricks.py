@@ -16,12 +16,49 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
+import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+# 1.0.1 part 2 fixpass finding 11: a quick catalog probe must never inherit
+# `open_upstream`'s own 300s idle timeout (meant for a long SSE chat
+# stream) -- a stalled read on a catalog fetch would otherwise hang a
+# normal quit behind it. Applied via `conn.sock.settimeout(...)` right
+# after `open_upstream` connects, in every catalog probe in this module.
+_CATALOG_READ_TIMEOUT_S = 30
+
+# A non-blocking lock per provider catalog (so a concurrent refresh -- the
+# launch worker, a headless session-start thread, another `/model` open --
+# collapses to ONE actual network probe instead of several racing at once)
+# plus the monotonic time of the last FAILED attempt (so an auto-refresh
+# backs off for `_AUTO_REFRESH_BACKOFF_S` after a failure instead of
+# retrying a down/VPN-less host on every single `/model` open, each paying
+# the full connect timeout). An explicit, user-requested refresh (`force=
+# True` -- `/models refresh`, `/dbx`, `rolo-claude models --refresh`) is
+# never subject to the backoff, only to the single-flight lock.
+_dbx_refresh_lock = threading.Lock()
+_dbx_last_failure_at: "dict[str, float]" = {}  # keyed by str(state_dir) -- see refresh_dbx_catalog
+_or_refresh_lock = threading.Lock()
+_or_last_failure_at: "dict[str, float]" = {}
+_AUTO_REFRESH_BACKOFF_S = 300.0
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Write `data` as JSON to `path` via a same-directory tmp file +
+    `os.replace` (atomic on both POSIX and Windows for a same-filesystem
+    rename) -- a reader (another thread, another process) never observes a
+    truncated/partial file mid-write, unlike a plain `open(path, "w")`.
+    Caller catches `OSError`, same contract every writer here already has."""
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
+
 
 def databricks_route_candidates(model: str) -> list[tuple[str, bool]]:
     """Ordered (path, body_has_model) candidates for a resolved Databricks
@@ -184,6 +221,11 @@ def probe_databricks_status(root: str, token: str) -> "tuple[int, bytes]":
     conn = None
     try:
         conn = open_upstream(host, port, tls)
+        # finding 11: 30s, never `open_upstream`'s own 300s idle timeout
+        # (meant for a long SSE chat stream) -- a stalled read on a quick
+        # catalog/status probe must not be able to hang a normal quit.
+        if conn.sock:
+            conn.sock.settimeout(_CATALOG_READ_TIMEOUT_S)
         conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
@@ -266,12 +308,17 @@ def dbx_endpoints_path(state_dir) -> Path:
 
 
 def write_dbx_endpoints_json(state_dir, endpoints: list) -> None:
-    """Write dbx-endpoints.json as {"<name>": {"task", "ready", "permission_level"}, ...}. Best-effort."""
+    """Write dbx-endpoints.json as {"<name>": {"task", "ready", "permission_level"}, ...}. Best-effort.
+
+    1.0.1 part 2 fixpass finding 11: tmp file + `os.replace` (see
+    `_atomic_write_json`) -- a reader catching this file mid-write (a
+    concurrent `rolo-claude models`, `/model` open, ...) used to be able to
+    see a truncated JSON document (read as a spurious "every endpoint
+    removed" diff) rather than either the old or the new catalog whole."""
     try:
         Path(state_dir).mkdir(parents=True, exist_ok=True)
         out = {e["name"]: {k: v for k, v in e.items() if k != "name"} for e in endpoints if e.get("name")}
-        with open(dbx_endpoints_path(state_dir), "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2)
+        _atomic_write_json(dbx_endpoints_path(state_dir), out)
     except OSError:
         pass
 
@@ -364,29 +411,60 @@ def refresh_dbx_catalog(state_dir, host: str, token: str) -> "tuple[bool, dict, 
     cached before. Returns `(ok, diff, note)` -- `ok=False` (offline/403/...)
     leaves the existing cache completely untouched and `note` says why,
     matching scope J: "failures (offline, 403 IP list) keep the cache and
-    say so"."""
-    old = load_dbx_endpoints_json(state_dir)
+    say so".
+
+    1.0.1 part 2 fixpass finding 11: single-flight -- a non-blocking lock
+    shared with `refresh_dbx_catalog_if_stale` means a concurrent caller
+    (the launch worker, a headless session-start thread, another `/model`
+    open, an explicit `/models refresh`/`/dbx`) never runs a SECOND probe
+    while one is already in flight; it just gets `ok=False` back with a
+    one-line note, same shape as any other failure, and the cache is left
+    exactly as whichever refresh IS running will soon leave it. A failure
+    here also records `time.monotonic()` (keyed by `state_dir`, so distinct
+    test scratch dirs -- or a real multi-workspace box -- never share one
+    another's backoff) for `refresh_dbx_catalog_if_stale`'s own backoff."""
+    key = str(state_dir)
+    if not _dbx_refresh_lock.acquire(blocking=False):
+        return False, {}, "a refresh is already in progress -- keeping the cached catalog"
     try:
-        status, fetched = probe_databricks_endpoints_full(host, token)
-    except Exception as e:
-        return False, {}, f"refresh failed ({type(e).__name__}: {e}) -- keeping the cached catalog"
-    if status != 200:
-        return False, {}, f"refresh failed (HTTP {status}) -- keeping the cached catalog"
-    write_dbx_endpoints_json(state_dir, fetched)
-    clear_dbx_route_cache(state_dir)
-    new = load_dbx_endpoints_json(state_dir)
-    diff = diff_dbx_catalog(old, new)
-    return True, diff, format_dbx_diff(diff)
+        old = load_dbx_endpoints_json(state_dir)
+        try:
+            status, fetched = probe_databricks_endpoints_full(host, token)
+        except Exception as e:
+            _dbx_last_failure_at[key] = time.monotonic()
+            return False, {}, f"refresh failed ({type(e).__name__}: {e}) -- keeping the cached catalog"
+        if status != 200:
+            _dbx_last_failure_at[key] = time.monotonic()
+            return False, {}, f"refresh failed (HTTP {status}) -- keeping the cached catalog"
+        _dbx_last_failure_at.pop(key, None)
+        write_dbx_endpoints_json(state_dir, fetched)
+        clear_dbx_route_cache(state_dir)
+        new = load_dbx_endpoints_json(state_dir)
+        diff = diff_dbx_catalog(old, new)
+        return True, diff, format_dbx_diff(diff)
+    finally:
+        _dbx_refresh_lock.release()
 
 
 def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = None,
-                                  force: bool = False) -> Optional["tuple[bool, dict, str]"]:
+                                  force: bool = False, env: Optional[dict] = None,
+                                  ) -> Optional["tuple[bool, dict, str]"]:
     """Scope J auto-refresh: `None` when nothing needed doing (not stale,
     or Databricks isn't configured) -- else the same `(ok, diff, note)`
     triple `refresh_dbx_catalog` returns. `max_age_hours` defaults to
     `databricks.catalog_max_age_hours` (~/.rolo-claude/config.json, itself
     defaulting to 24). Never raises -- an auto-refresh must not be able to
     break session start or opening `/model`.
+
+    `env` (N2c, 1.0.1 final pass): forwarded straight to `resolve_databricks`
+    -- `None` (every pre-existing call site, unchanged) means bare
+    `os.environ` exactly as before; a caller with a real session's own
+    trust-filtered `Settings.effective_env` (the launch-time catalog-refresh
+    worker, `/model`'s open, the headless session-start thread) passes it
+    here so credentials living only in a settings.json `env` block resolve
+    with the SAME trust rules a real turn would apply, instead of this
+    background refresh re-deriving a possibly-different answer from bare
+    `os.environ`/an untrusted cwd's settings chain on its own.
 
     1.0.1 hotfix 4 migration: an OLD-SHAPE cache (written before `api_types`
     was ever cached) is always treated as stale here, REGARDLESS of
@@ -412,8 +490,23 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
             age = max(0.0, float(age))
         if not force and not always and age is not None and age < float(max_age_hours) * 3600:
             return None
+        # finding 11: a recent FAILURE backs an AUTO-refresh off for
+        # `_AUTO_REFRESH_BACKOFF_S` -- an explicit force=True (/models
+        # refresh, /dbx, `rolo-claude models --refresh`) is never subject
+        # to this, only to the single-flight lock inside refresh_dbx_catalog
+        # itself. Without this, a down/VPN-less host got re-probed (full
+        # connect timeout apiece) on every single `/model` open.
+        #
+        # M1 (1.0.1 final pass): `time.monotonic()` counts from OS boot, not
+        # from this process's own start -- `.get(key, 0.0)` made the first
+        # `_AUTO_REFRESH_BACKOFF_S` after boot look like "a failure just
+        # happened at t=0" for a state_dir that has never actually failed.
+        # `None` (nothing recorded) now skips the backoff check entirely.
+        last_failure_at = _dbx_last_failure_at.get(str(state_dir))
+        if not force and last_failure_at is not None and (time.monotonic() - last_failure_at) < _AUTO_REFRESH_BACKOFF_S:
+            return None
         from rolo_claude.providers.config import resolve_databricks
-        dbx = resolve_databricks()
+        dbx = resolve_databricks(env)
         if dbx is None:
             return None
         return refresh_dbx_catalog(state_dir, dbx.host, dbx.token)
@@ -441,6 +534,9 @@ def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:
     conn = None
     try:
         conn = open_upstream(host, port, tls)
+        # finding 11: see probe_databricks_status's own comment.
+        if conn.sock:
+            conn.sock.settimeout(_CATALOG_READ_TIMEOUT_S)
         conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
@@ -499,8 +595,7 @@ def write_models_json(state_dir, models: list[dict]) -> None:
                 if extra_key in m:
                     entry[extra_key] = m[extra_key]
             out[mid] = entry
-        with open(models_json_path(state_dir), "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2)
+        _atomic_write_json(models_json_path(state_dir), out)  # finding 11: tmp file + os.replace
     except OSError:
         pass
 
@@ -515,5 +610,72 @@ def load_models_json(state_dir) -> dict:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def models_json_age_seconds(state_dir) -> Optional[float]:
+    """Age of models.json in seconds, or None if never cached -- the
+    OpenRouter mirror of `dbx_endpoints_age_seconds`."""
+    path = models_json_path(state_dir)
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def refresh_openrouter_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = None,
+                                         force: bool = False, env: Optional[dict] = None) -> Optional[bool]:
+    """H15 part 2 addendum: the OpenRouter mirror of
+    `refresh_dbx_catalog_if_stale` -- `None` when nothing needed doing
+    (not stale, or OpenRouter isn't configured), else `True`/`False` for
+    whether the refresh actually succeeded. Never raises -- same "must not
+    break session start/`/model`" contract. `max_age_hours` defaults to
+    `databricks.catalog_max_age_hours` too (one shared staleness knob,
+    never a second config key for the identical 24h default).
+
+    `env` (N2c, 1.0.1 final pass): forwarded to `resolve_openrouter` --
+    see `refresh_dbx_catalog_if_stale`'s own docstring for the full
+    rationale (`None` keeps every pre-existing call site unchanged).
+
+    1.0.1 part 2 fixpass finding 11: single-flight (a non-blocking lock --
+    a concurrent caller just gets `False` back, same as any other failure,
+    while whichever refresh IS already running updates the cache for
+    everyone shortly) plus a post-failure backoff for AUTO (`force=False`)
+    callers, same shape as `refresh_dbx_catalog`/`refresh_dbx_catalog_if_
+    stale`'s own pair -- keyed by `state_dir` so distinct test scratch dirs
+    never share one another's backoff."""
+    key = str(state_dir)
+    try:
+        if max_age_hours is None:
+            from rolo_claude.theme import get_config_value
+            max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
+        age = models_json_age_seconds(state_dir)
+        always = float(max_age_hours) <= 0
+        if age is not None:
+            age = max(0.0, float(age))
+        if not force and not always and age is not None and age < float(max_age_hours) * 3600:
+            return None
+        # M1: see refresh_dbx_catalog_if_stale's own comment -- None (never
+        # recorded) must never read as "a failure just happened at t=0".
+        last_failure_at = _or_last_failure_at.get(key)
+        if not force and last_failure_at is not None and (time.monotonic() - last_failure_at) < _AUTO_REFRESH_BACKOFF_S:
+            return None
+        from rolo_claude.providers.config import resolve_openrouter
+        orc = resolve_openrouter(env)
+        if orc is None:
+            return None
+        if not _or_refresh_lock.acquire(blocking=False):
+            return False
+        try:
+            fetched = probe_openrouter_models(orc.base_url, orc.api_key)
+            write_models_json(state_dir, fetched)
+            _or_last_failure_at.pop(key, None)
+            return True
+        except Exception:
+            _or_last_failure_at[key] = time.monotonic()
+            return False
+        finally:
+            _or_refresh_lock.release()
+    except Exception:
+        return False
 
 

@@ -1,6 +1,19 @@
 """tests.test_invariants -- agent/invariants.py: unpaired tool_use
 detection, synthetic result writing, well-formed-text repair.
+
+H15 Part D2.1: `SessionLog.__init__` ALWAYS resolves its own storage root
+via `bridge_home()` (`BRIDGE_STATE_DIR`, else `BRIDGE_TEST_HOME`-derived,
+else the REAL `~/.rolo-claude`) -- completely independent of whatever
+`cwd` is passed to it, and `.mkdir(parents=True, exist_ok=True)` runs
+UNCONDITIONALLY at construction time, before a single node is ever
+appended. Every `@test` here is therefore transparently wrapped in an
+isolated, per-test `BRIDGE_STATE_DIR` (found leaking real empty
+`invariants-test-*` slug directories into `~/.rolo-claude/sessions` during
+the H15 fix pass -- invisible to the OLD file-only REAL SESSIONS GUARD,
+closed by D2.2), same pattern `tests/test_log_derive.py` already uses.
 """
+import functools
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -14,7 +27,22 @@ from rolo_claude.agent.invariants import (
     highest_kimi_functions_idx, repair_truncated_text, synthesize_missing_results, validate_tool_use,
 )
 
-test, TESTS = new_registry()
+_register, TESTS = new_registry()
+
+
+def test(fn):
+    @functools.wraps(fn)
+    def wrapper(ctx):
+        old = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="invariants-test-state-")))
+        try:
+            return fn(ctx)
+        finally:
+            if old is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old
+    return _register(wrapper)
 
 
 def _fresh_log() -> SessionLog:

@@ -238,8 +238,33 @@ stuck itself), `Ctrl+Q` force-quits on its OWN timer -- a 2s head start for
 a clean shutdown, then the process exits unconditionally 2.5s after that
 regardless of what's still hung (finding 5; it no longer shares a flag
 with `Ctrl+C`'s own quit path, so it still works even when THAT is the
-thing that's stuck). Run with `--debug` and send `bridge.log` if none of
-this explains what you're seeing.
+thing that's stuck); Ctrl+Q also kills every background job
+(`job_registry.kill_all()`) before that timer is even armed, so a
+backgrounded `!cmd`/Bash job never outlives the process either, win or
+lose on the ordinary quit path. Run with `--debug` and send `bridge.log`
+if none of this explains what you're seeing.
+
+## The TUI seems hung (1.0.1 part 2)
+
+If the whole app stops responding -- no spinner movement, Ctrl+C/Ctrl+Q
+both seem to do nothing for a few seconds -- a background watchdog thread
+(independent of the UI's own event loop, so it keeps working even when
+THAT is what's stuck) is already writing diagnostics for you: once the UI
+thread's own heartbeat (bumped every second by the status bar's spinner
+timer) goes stale for more than 15s, it dumps every thread's stack, the
+named background-worker list, and the active screen to
+**`~/.rolo-claude/hang-<UTC-timestamp>.log`** (one line also lands in
+`bridge.log` naming the exact path), at most once a minute for as long as
+the stall continues. Send that file along with a bug report -- the thread
+stacks almost always show exactly which call is stuck (a lock shared with
+the session thread, an unbounded wait, a subprocess with no timeout). On
+POSIX, sending the process `SIGUSR1` (`kill -USR1 <pid>`) dumps the same
+diagnostics on demand, without waiting for the 15s threshold at all. Run
+with `--debug` for finer-grained tracing leading up to a hang -- every key
+press (with the focused widget and active screen), window focus/blur, and
+the start/finish/cancel of every named background worker all land in
+`bridge.log`, so you can usually see the LAST thing that happened before
+things went quiet.
 
 ## The starting permission mode isn't what I expected (1.0.1)
 
@@ -301,5 +326,12 @@ on next use instead of using a cached tool list).
   stderr) or `Ctrl+O` (TUI, expands every tool card and shows reasoning).
 - **The older proxy mode's own log**: `~/.claude-bridge/bridge.log`
   (`rolo-claude proxy` only -- redacted, rotated at 2 MB).
-- **`-d`/`--debug` parses but does nothing yet** (see `docs/COMMANDS.md`'s
-  not-yet-flags table) -- `--verbose` is the real equivalent today.
+- **`-d`/`--debug`** (or `--debug-file PATH`): real DEBUG-level file
+  logging for the whole run, TUI or print mode -- default
+  `~/.rolo-claude/bridge.log` (secrets redacted by the same
+  `RedactingFormatter` every route uses). In the TUI this also turns on
+  per-key/focus/worker-lifecycle tracing (see "The TUI seems hung" above);
+  `--verbose` is a separate, UI-only "expand every tool card" toggle
+  (`Ctrl+O`), not a logging level.
+- **A stuck/hung TUI**: `~/.rolo-claude/hang-<UTC-timestamp>.log` -- see
+  "The TUI seems hung" above.

@@ -640,7 +640,12 @@ class Session:
                                      price_cache_write=model_profile.price_cache_write)
         self.tool_registry: ToolRegistry = session_context.tool_registry
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
-        self.provider_profile: ProviderProfile = resolve_profile(self.route)
+        # item 22 remainder: state_dir threaded through so a Databricks
+        # endpoint with a LEARNED reasoning_effort_with_tools rule (a prior
+        # live 400 on this exact endpoint, no model_table.json row of its
+        # own) gets it from session start, not only after re-learning it
+        # live again this session.
+        self.provider_profile: ProviderProfile = resolve_profile(self.route, state_dir=state_dir)
         # 1.0.1 hotfix 19: "high" is the Anthropic-family default when
         # NOTHING more specific was set anywhere upstream (`--effort`,
         # `/effort`, settings `effortLevel`/`modelSettings.<id>.effortLevel`
@@ -1819,6 +1824,37 @@ class Session:
                     turn=turn_no, err_type="provider_failure",
                 )
                 return None
+            if effort_none_retried and not effort_stripped_retried and self.model_ref.provider == "databricks":
+                # 1.0.1 part 2 fixpass finding 13: `not effort_stripped_
+                # retried` -- without it, this block also fired when the
+                # "none" retry ITSELF then 400'd again and the SEPARATE
+                # strip-the-field retry is what actually succeeded, wrongly
+                # learning "none" as this endpoint's permanent rule even
+                # though "none" was already proven rejected earlier in this
+                # exact retry ladder. Every later session against this
+                # endpoint then paid one guaranteed-to-fail request per
+                # tool step (the learned "none" value, retried with it
+                # stripped every time) and `/effort` showed "none (tools)"
+                # for a rule that was never really true.
+                # item 22 remainder: this endpoint rejects reasoning_effort
+                # alongside tools and a retry with it forced to "none" just
+                # succeeded -- remember it for the REST OF THIS SESSION (so
+                # every later step sends it correctly the first time,
+                # instead of paying for the same failing request again)
+                # and in the per-endpoint cache on disk (so the NEXT
+                # session against this same endpoint never has to re-learn
+                # it live either). A model_table.json row already covering
+                # this endpoint means `self.provider_profile.reasoning_
+                # effort_with_tools` is already "none" here -- the dataclasses.
+                # replace below is then a harmless no-op (same value in,
+                # same value out) and the disk write short-circuits too
+                # (learn_reasoning_effort_with_tools only ever writes on a
+                # real change).
+                if self.provider_profile.reasoning_effort_with_tools != "none":
+                    self.provider_profile = dataclasses.replace(
+                        self.provider_profile, reasoning_effort_with_tools="none")
+                from rolo_claude.providers.learned_rules import learn_reasoning_effort_with_tools
+                learn_reasoning_effort_with_tools(self.state_dir, "databricks", self.model_ref.model, "none")
             if effort_stripped_retried and self.effort is not None:
                 # 1.0.1 fixpass finding 10: a successful strip-the-field
                 # retry proves THIS session's `self.effort` value is
@@ -4164,7 +4200,10 @@ class Session:
             self.creds = creds
         self.model_label = model_ref.raw
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
-        self.provider_profile = resolve_profile(self.route)
+        # item 22 remainder: same state_dir threading as __init__ above --
+        # a /model switch onto a Databricks endpoint with its own learned
+        # rule picks it up immediately, not just a freshly-started session.
+        self.provider_profile = resolve_profile(self.route, state_dir=self.state_dir)
         # 1.0.1 fixpass finding 6: `self.cost_meter` was built ONCE, at
         # Session construction time, from the STARTING model's own prices
         # (see __init__ above) and never touched again here -- every turn
@@ -4237,6 +4276,14 @@ class Session:
         needs a real number (0, not "unknown") to show "ctx 0/1M 0%"
         before the first turn rather than blanking the field."""
         mcp = self.mcp_status_fn() if self.mcp_status_fn else {"connected": 0, "total": 0}
+        # 1.0.1 part 2 (item 22 remainder): the status bar's own effort tag
+        # shows "<value> (tools)" whenever this route forces an explicit
+        # reasoning_effort override alongside tools (the gpt-6 table rule,
+        # or a learned per-endpoint rule) -- what's ACTUALLY sent on
+        # essentially every real turn, never the raw configured value that
+        # would otherwise read as a lie the moment the next turn goes out.
+        from rolo_claude.providers.profiles import effort_display_override
+        effort_tag = effort_display_override(self.provider_profile) or self.effort
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
             context_tokens=context_tokens if context_tokens is not None else (self._last_prompt_tokens or 0),
@@ -4245,7 +4292,7 @@ class Session:
             permission_mode=self.permission_engine.mode, session_id=self.log.session_id, mcp=mcp,
             total_input_tokens=self.cost_meter.total_input_tokens,
             total_output_tokens=self.cost_meter.total_output_tokens,
-            effort=self.effort,
+            effort=effort_tag,
         )
 
     @property

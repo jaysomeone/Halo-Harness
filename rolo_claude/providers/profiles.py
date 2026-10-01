@@ -252,12 +252,20 @@ def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, boo
     return "none", "empty", False
 
 
-def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfile:
+def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -> ProviderProfile:
     """Resolve a `ProviderProfile` from a `providers.routing.Route` (duck-
     typed: anything with `.provider`, `.upstream_model`, `.dialect`) plus
     `model_table.json` per-model overrides. `route.provider` is
     "databricks" | "openrouter" | "anthropic"; `route.dialect` is
-    "openai-chat" | "anthropic-passthrough"."""
+    "openai-chat" | "anthropic-passthrough".
+
+    1.0.1 part 2 (item 22 remainder): `state_dir`, when given, lets a
+    Databricks route with no `reasoning_effort_with_tools` of its own (no
+    `model_table.json` row, not a `gpt-6`/`gpt-5-6` name) fall back to a
+    LEARNED per-endpoint rule from a prior live 400 on this same endpoint
+    (`providers.learned_rules`) -- optional and additive; every existing
+    caller that omits it keeps today's behaviour (no learned-rule lookup)
+    byte for byte."""
     model_table = model_table if model_table is not None else load_model_table()
     family = model_family(route.upstream_model)
     host_key = route.provider if route.provider in ("databricks", "openrouter") else None
@@ -327,6 +335,14 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             "reasoning_effort_with_tools",
             "none" if ("gpt-6" in route.upstream_model.lower() or "gpt-5-6" in route.upstream_model.lower())
             else None)
+        if reasoning_effort_with_tools is None and state_dir is not None:
+            # item 22 remainder: a model_table.json row (including an
+            # explicit `null` there, which this `.get` default never even
+            # reaches) always wins -- the learned cache only ever fills
+            # the gap for an endpoint the table doesn't cover yet.
+            from rolo_claude.providers.learned_rules import learned_reasoning_effort_with_tools
+            reasoning_effort_with_tools = learned_reasoning_effort_with_tools(
+                state_dir, "databricks", route.upstream_model)
         return ProviderProfile(
             system_vs_developer="system", max_tokens_field="max_tokens",
             reasoning_effort_supported=effort_supported, thinking_format=thinking_format,
@@ -393,7 +409,16 @@ def clamp_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[st
     route that doesn't list it becomes `max` specifically -- not the
     generic "unknown -> route default" rule below -- since `max` is every
     such route's own equivalent strongest level, not an arbitrary fallback.
-    Any OTHER value the route's own set doesn't recognize (a typo, a stale
+    1.0.1 part 2 (reviewer minor): the mirror case -- `max` (the harness's
+    strongest ANTHROPIC-dialect-style level) on a chat-dialect route that
+    has no `max` but DOES list `xhigh` becomes `xhigh`, that route's own
+    equivalent strongest level, instead of falling all the way through to
+    the bland "medium"/`reasoning_default_effort` default below (verified:
+    a session carrying `effort="max"` -- e.g. switched from an Anthropic-
+    family route, or anything else that set the harness's own ceiling --
+    onto a plain OpenAI-dialect route used to silently downgrade to
+    "medium", two full levels below what that route can actually do). Any
+    OTHER value the route's own set doesn't recognize (a typo, a stale
     config from a level this harness has since renamed) becomes the
     route's OWN default (`reasoning_default_effort` when the profile has
     one, else the harness-wide default `"medium"`) rather than silently
@@ -406,11 +431,32 @@ def clamp_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[st
         return effort
     if effort == "xhigh" and "xhigh" not in supported:
         clamped = "max" if "max" in supported else (profile.reasoning_default_effort or "medium")
+    elif effort == "max" and "max" not in supported and "xhigh" in supported:
+        clamped = "xhigh"
     else:
         clamped = profile.reasoning_default_effort if profile.reasoning_default_effort in supported else "medium"
     log.debug("clamp_effort: %r not accepted by this route (accepts %r) -- using %r instead",
               effort, supported, clamped)
     return clamped
+
+
+def effort_display_override(profile: Optional[ProviderProfile]) -> Optional[str]:
+    """1.0.1 part 2 (item 22 remainder): the "<value> (tools)" display
+    string for `/effort`, the EffortCard's own description line, and the
+    status bar's effort tag -- when `profile`'s route forces an EXPLICIT
+    `reasoning_effort_with_tools` override (the gpt-6 table rule, or a
+    LEARNED per-endpoint rule -- see `providers.learned_rules`), that
+    override is what's actually sent on essentially every real (tool-
+    carrying) turn, regardless of whatever `--effort`/`/effort` configured
+    -- showing it here beats a configured value that reads as a lie the
+    moment the next turn goes out. None when this route has no such
+    override (the Anthropic thinking-budget shape never uses this field at
+    all) -- the caller shows its own configured/default value instead."""
+    if profile is None or not profile.reasoning_effort_with_tools:
+        return None
+    if profile.thinking_format == "anthropic_thinking":
+        return None
+    return f"{profile.reasoning_effort_with_tools} (tools)"
 
 
 def map_effort(effort: Optional[str], profile: ProviderProfile, *, has_tools: bool = False) -> dict:

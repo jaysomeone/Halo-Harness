@@ -14,6 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps every `or:mock/...` ref below resolving exactly as it did
+# before parse_model_ref started refusing an auto-detected-disabled
+# provider; each test here already scopes its OWN BRIDGE_TEST_HOME.
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 

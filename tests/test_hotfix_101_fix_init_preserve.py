@@ -69,8 +69,8 @@ def _console():
     return Console(file=io.StringIO())
 
 
-def _args(yes: bool = False):
-    return SimpleNamespace(yes=yes)
+def _args(yes: bool = False, model=None):
+    return SimpleNamespace(yes=yes, model=model, team=None)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +214,78 @@ def test_yes_with_no_existing_model_still_gets_a_working_fallback(ctx: Ctx):
                   result == PROVIDER_DEFAULT_MODEL["anthropic"])
         ctx.check("config.json now has that fallback written (a fresh box must still work)",
                   get_config_value("model", default=None) == PROVIDER_DEFAULT_MODEL["anthropic"])
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 part 2 (reviewer minor): the PER-PROVIDER default-model step
+# (_step_default_model, called early in _run_provider_setup) must not
+# overwrite a custom model on a re-run -- only _step_finalize_default_
+# model's own cross-provider pick (tested above) previously preserved it.
+# ---------------------------------------------------------------------------
+
+@test
+def test_per_provider_step_keeps_a_custom_model_on_a_rerun_with_yes(ctx: Ctx):
+    """The exact bug: re-running `init --provider databricks --yes` on a
+    box that already has a DIFFERENT (deliberately chosen) model configured
+    used to silently reset it back to that provider's own hardcoded
+    default the moment they differed."""
+    from rolo_claude.init_cli import _step_default_model
+    from rolo_claude.theme import get_config_value, set_config_value
+    with _Env():
+        set_config_value("model", "dbx:databricks-kimi-k3")  # a deliberate, non-default pick
+        chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=True)
+        ctx.check(f"the custom model is returned, not the provider default, got {chosen!r}",
+                  chosen == "dbx:databricks-kimi-k3")
+        ctx.check("nothing was (re)written -- the value didn't change", path is None)
+        ctx.check("config.json still says the custom model",
+                  get_config_value("model", default=None) == "dbx:databricks-kimi-k3")
+
+
+@test
+def test_per_provider_step_still_writes_a_fresh_box_default(ctx: Ctx):
+    """The fix must not disable writing altogether -- a genuinely fresh box
+    (no `model` key at all yet) still gets the provider's own default."""
+    from rolo_claude.init_cli import PROVIDER_DEFAULT_MODEL, _step_default_model
+    from rolo_claude.theme import get_config_value
+    with _Env():
+        chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=True)
+        ctx.check(f"the provider's own default is chosen, got {chosen!r}",
+                  chosen == PROVIDER_DEFAULT_MODEL["databricks"])
+        ctx.check("a real path was written", path is not None)
+        ctx.check("config.json now has it", get_config_value("model", default=None) == chosen)
+
+
+@test
+def test_per_provider_step_explicit_model_flag_still_overrides_a_custom_value(ctx: Ctx):
+    """An explicit --model THIS run is real user intent -- it must still
+    win over whatever was configured before, unlike the --yes/re-run case
+    above."""
+    from rolo_claude.init_cli import _step_default_model
+    from rolo_claude.theme import get_config_value, set_config_value
+    with _Env():
+        set_config_value("model", "dbx:databricks-kimi-k3")
+        chosen, path = _step_default_model("databricks", _args(yes=True, model="dbx:databricks-glm-5-3"),
+                                            _console(), write=True)
+        ctx.check(f"the explicit --model wins, got {chosen!r}", chosen == "dbx:databricks-glm-5-3")
+        ctx.check("a real path was written (the value DID change)", path is not None)
+        ctx.check("config.json reflects the explicit override",
+                  get_config_value("model", default=None) == "dbx:databricks-glm-5-3")
+
+
+@test
+def test_per_provider_step_write_false_never_touches_config_either_way(ctx: Ctx):
+    """Regression guard: the write=False path (used when more than one
+    provider is in play this run) must still never write, custom value or
+    not -- unchanged by this fix."""
+    from rolo_claude.init_cli import _step_default_model
+    from rolo_claude.theme import get_config_value, set_config_value
+    with _Env():
+        set_config_value("model", "dbx:databricks-kimi-k3")
+        chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=False)
+        ctx.check(f"computes the provider default (write=False ignores the existing value by design), "
+                  f"got {chosen!r}", chosen == "dbx:databricks-deepseek-v4-1-flash")
+        ctx.check("nothing written", path is None)
+        ctx.check("config.json untouched", get_config_value("model", default=None) == "dbx:databricks-kimi-k3")
 
 
 if __name__ == "__main__":

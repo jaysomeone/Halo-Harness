@@ -9,6 +9,7 @@ Run:
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -29,6 +30,39 @@ def discover_test_modules() -> list:
     return names
 
 
+# H15 Part D2.1: every env var name a test module's own `_Env` helper is
+# supposed to scope away (house rule: "every _Env helper must snapshot and
+# restore EVERY provider variable it or its tests touch"). Prefix-matched,
+# not a fixed list, so a future provider var is covered automatically.
+_GUARDED_ENV_PREFIXES = ("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
+
+
+def _snapshot_guarded_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k.startswith(_GUARDED_ENV_PREFIXES)}
+
+
+def _restore_guarded_env(snapshot: dict) -> None:
+    """D2.1: taken/restored around EACH module's run below (not just once
+    for the whole suite) -- the actual H15 fix-pass finding was that many
+    test modules build a real `Session`/`Controller`/`build_session` from a
+    `build_fake_home()` cwd without scoping `BRIDGE_STATE_DIR` themselves,
+    and only ever avoided writing session FILES into the real
+    `~/.rolo-claude` because an EARLIER module happened to leave
+    `BRIDGE_TEST_HOME` (or `BRIDGE_STATE_DIR`) set in `os.environ` --
+    "only avoid it by accident of import order" is exactly the bug D2.1
+    asks to close. Restoring this snapshot after every module -- success,
+    failure, or import error alike -- makes "never relying on module
+    order" true at the HARNESS level: whatever a module leaves behind
+    (an incomplete `_Env.__exit__`, an exception that skipped cleanup, no
+    `_Env` at all) can never reach the NEXT module's own `home()`/
+    `bridge_home()` resolution, regardless of that module's own hygiene."""
+    for k in list(os.environ):
+        if k.startswith(_GUARDED_ENV_PREFIXES) and k not in snapshot:
+            os.environ.pop(k, None)
+    for k, v in snapshot.items():
+        os.environ[k] = v
+
+
 def _real_sessions_snapshot() -> "set[str]":
     """H10b: the REAL sessions dir -- literal `Path.home()`, deliberately
     NOT `rolo_claude.config.paths.bridge_home()` (which would honor
@@ -42,12 +76,25 @@ def _real_sessions_snapshot() -> "set[str]":
     `or:mock/page-forever`/`ant:claude-h9fuzz-ant-*`/etc. sessions into
     rolo's actual session history) -- this is the suite-level guard against
     that ever happening again unnoticed, independent of any one test's own
-    hygiene."""
+    hygiene.
+
+    H15 Part D2.2: ALSO every slug DIRECTORY directly under `sessions/`,
+    not only `*.jsonl` FILES -- a test that builds a real `Session`/
+    `Controller`/`build_session` from a `BRIDGE_TEST_HOME`-derived cwd
+    without ALSO scoping `BRIDGE_STATE_DIR` away from here never writes a
+    session file here (an earlier module happening to leave
+    `BRIDGE_TEST_HOME` set is what prevented that), but `SessionLog`'s own
+    `mkdir(parents=True)` still creates the empty slug directory the
+    moment the Session exists -- 1972 such directories were found on the
+    Windows build host during the 1.0.1 fix pass, all invisible to the old
+    glob (which only ever looked two levels down for a `.jsonl` suffix)."""
     d = Path.home() / ".rolo-claude" / "sessions"
     try:
         if not d.is_dir():
             return set()
-        return {str(p) for p in d.glob("*/*.jsonl")}
+        paths = {str(p) for p in d.glob("*/*.jsonl")}
+        paths |= {str(p) for p in d.iterdir() if p.is_dir()}
+        return paths
     except OSError:
         return set()
 
@@ -65,6 +112,10 @@ def main() -> int:
 
     for mod_name in module_names:
         print(f"=== {mod_name} ===")
+        # D2.1: snapshotted BEFORE this module touches anything, restored
+        # in EVERY exit path below (import error, no TESTS registry, or a
+        # normal run) -- see _restore_guarded_env's own docstring.
+        env_before_module = _snapshot_guarded_env()
         try:
             module = importlib.import_module(mod_name)
         except Exception:
@@ -72,11 +123,13 @@ def main() -> int:
             traceback.print_exc()
             any_module_import_failed = True
             total_failed += 1
+            _restore_guarded_env(env_before_module)
             continue
 
         tests = getattr(module, "TESTS", None)
         if tests is None:
             print(f"[SKIP MODULE] {mod_name} has no TESTS registry (not a runner-based test file)")
+            _restore_guarded_env(env_before_module)
             continue
 
         ctx = Ctx()
@@ -89,6 +142,7 @@ def main() -> int:
         total_passed += passed
         total_failed += failed
         total_skipped += skipped
+        _restore_guarded_env(env_before_module)
 
     total = total_passed + total_failed + total_skipped
     print("-" * 74)

@@ -44,6 +44,12 @@ from typing import Optional
 CC_ALIASES: "dict[str, str]" = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
+    # H15 addendum 2: an EXPLICIT dotted-version name for the current
+    # `opus` target, so the `cc:` enumeration (doctor/models/`/model`) can
+    # show "cc:opus-5.5" as its own distinguishable row instead of making
+    # the reader infer from "cc:opus -> claude-opus-5-5" that 5.5 IS the
+    # latest -- same final id as bare "opus", never a second live target.
+    "opus-5.5": "claude-opus-5-5",
     "opus-5": "claude-opus-5",
     "opus-5.0": "claude-opus-5",
     "opus-4.8": "claude-opus-4-8",
@@ -52,6 +58,12 @@ CC_ALIASES: "dict[str, str]" = {
     # resolution (today claude-sonnet-5-5 / a dated haiku snapshot) is
     # always the live truth, never a value this table could go stale on.
     "sonnet": "sonnet",
+    # Same reasoning as opus-5.5 above, but note the bare "sonnet" alias
+    # resolves through Claude Code's OWN live "sonnet" pointer (passthrough,
+    # not this table) -- "sonnet-5.5" is pinned to TODAY's concrete id
+    # instead, so it keeps meaning 5.5 even after Code's own "sonnet"
+    # pointer later moves to a newer point release.
+    "sonnet-5.5": "claude-sonnet-5-5",
     "sonnet-5": "claude-sonnet-5",
     "haiku": "haiku",
 }
@@ -64,11 +76,13 @@ CC_ALIASES: "dict[str, str]" = {
 ANT_ALIASES: "dict[str, str]" = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
+    "opus-5.5": "claude-opus-5-5",
     "opus-5": "claude-opus-5",
     "opus-5.0": "claude-opus-5",
     "opus-4.8": "claude-opus-4-8",
     "opus-4.6": "claude-opus-4-6",
     "sonnet": "claude-sonnet-5-5",
+    "sonnet-5.5": "claude-sonnet-5-5",
     "sonnet-5": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5-20251001",
 }
@@ -190,6 +204,30 @@ def resolve_ant_alias(bare: str) -> str:
         if cached:
             return cached + suffix
     return ANT_ALIASES.get(base, base) + suffix
+
+
+# H15 addendum 2: the two names kept as deliberately-moving "latest"
+# pointers (see CC_ALIASES' own docstring) -- every OTHER alias is already
+# a specific version, so it needs no extra disambiguating note.
+_LATEST_POINTER_NOTE = {"opus": "latest Opus", "sonnet": "latest Sonnet"}
+
+
+def alias_display_detail(alias: str) -> str:
+    """`-> <resolved-id>` (plus a "(latest Opus)"/"(latest Sonnet)" note for
+    those two names) shown next to every `cc:`/`ant:` alias row in
+    `/model`, `rolo-claude models` and the init picker (`model_display.
+    format_model_row`'s own generic `detail` bracket -- the SAME mechanism
+    a Databricks row's `<family> · <path>` tag already uses, so the
+    subscription enumeration reads the same way). Without this a reader has
+    to already know that `cc:opus`/`cc:opus-5.5` are the same model.
+    Resolves through `resolve_ant_alias` (the freshest known id -- a
+    `--refresh`-cached target for `sonnet`/`haiku` when one exists, else
+    the static table) even for a `cc:` row, since Claude Code's OWN
+    unresolved `sonnet`/`haiku` pointers (CC_ALIASES' literal passthrough
+    values) are not themselves a useful thing to show."""
+    resolved = resolve_ant_alias(alias)
+    note = _LATEST_POINTER_NOTE.get(alias)
+    return f"-> {resolved}" + (f" ({note})" if note else "")
 
 
 # ---- claude binary / auth status -------------------------------------------
@@ -335,7 +373,7 @@ CACHED_AUTH_STATUS_TTL_S = 30.0
 def refresh_cached_claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
     """The ONLY function in this cache pair that actually spawns `claude
     auth status` -- always call this OFF the UI thread (a startup worker,
-    same convention as `_git_branch_worker`/`_dbx_auto_refresh_worker`).
+    same convention as `_git_branch_worker`/`catalog_auto_refresh_worker`).
     Stores the result (even `None`, "claude" not found at all) for
     `cached_claude_auth_status()` to read back, and returns it directly too
     so a caller that already IS on a worker thread can use the fresh value

@@ -19,6 +19,9 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, _finish
 from tests.helpers.mock_databricks import MockDatabricks, SCENARIOS as DBX_SCENARIOS, _finish as _dbx_finish
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+ensure_default_provider_credentials()
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 

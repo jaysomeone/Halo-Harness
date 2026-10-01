@@ -162,19 +162,45 @@ def test_item1_user_scope_server_extends_fake_home_and_connects(ctx: Ctx):
     data["mcpServers"]["fake"] = _fake_stdio_entry()
     claude_json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    from rolo_claude import mcp_setup
-    manager, notices = mcp_setup.build_manager(cwd=fh["proj"], claude_json=data, settings=None,
-                                                print_mode=False, start=True)
+    # H15 Part D2.1 (found during the state-dir scoping audit, same bug
+    # class as the REAL SESSIONS GUARD, different directory): `build_manager`
+    # with `start=True` lazily seeds/reads `mcp.tools_cache`
+    # (rolo_claude/mcp/tools_cache.py), which ALSO resolves via
+    # `bridge_home()` -- unscoped, this reads/writes the REAL
+    # ~/.rolo-claude/mcp/tools-cache/fake.json, so a stale real entry from
+    # an earlier unscoped run makes `manager.status()` report "cached"
+    # instead of a genuine live "connected" here. Scoped for the in-process
+    # call; the subprocess call just below already scoped its own `env`.
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     try:
-        status = {s["name"]: s for s in manager.status()}
-        ctx.check(f"the real user-scope server connects, got {status.get('fake')}",
-                  status["fake"]["state"] == "connected")
-        ctx.check("it coexists with the fixture's own (non-connectable) entry",
-                  "expanded-models" in status)
-        result = manager.call("fake", "echo", {"text": "user scope round trip"})
-        ctx.check("a real tool call round-trips", result.content[0].text == "user scope round trip")
+        from rolo_claude import mcp_setup
+        manager, notices = mcp_setup.build_manager(cwd=fh["proj"], claude_json=data, settings=None,
+                                                    print_mode=False, start=True)
+        try:
+            status = {s["name"]: s for s in manager.status()}
+            ctx.check(f"the real user-scope server connects, got {status.get('fake')}",
+                      status["fake"]["state"] == "connected")
+            ctx.check("it coexists with the fixture's own (non-connectable) entry",
+                      "expanded-models" in status)
+            result = manager.call("fake", "echo", {"text": "user scope round trip"})
+            ctx.check("a real tool call round-trips", result.content[0].text == "user scope round trip")
+        finally:
+            manager.close_all()
     finally:
-        manager.close_all()
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+
+    # The in-process connect just above (H13 Part A: lazy-by-default)
+    # wrote a real `mcp.tools_cache` entry for "fake" under fh["home"]
+    # itself now that it's properly scoped there -- clear it so the
+    # subprocess CLI below starts from zero cache state and genuinely
+    # exercises a fresh live connect (what this check has always meant
+    # to assert), rather than legitimately reporting the lazy "Cached"
+    # state a warm cache would now correctly produce.
+    shutil.rmtree(fh["home"] / ".rolo-claude" / "mcp" / "tools-cache", ignore_errors=True)
 
     env = dict(os.environ)
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "PYTHONPATH": str(REPO_DIR)})

@@ -263,6 +263,34 @@ class Controller:
         waiting for `request_id` any more)."""
         return self.session.reevaluate_pending_permission(request_id)
 
+    def register_pending_permission(self, request_id: str, tool_name: str, tool_input: dict) -> None:
+        """H15 Part D2.3: registers a slot in the session's own
+        `_permission_waiters` for an ask that is resolved OUTSIDE the
+        model loop entirely (today: `tui/app.py`'s `!cmd` inline-shell
+        confirmation) so a mode change (Shift+Tab/`/permissions`) can reach
+        it through the exact SAME `reevaluate_pending_permission` path a
+        live tool-call ask already uses, instead of sitting there
+        unaffected by mode changes until answered by hand. Safe by
+        construction: no worker thread ever calls `_await_permission_
+        decision`/blocks on this slot's own `event` (there is no such call
+        for an inline command), so this can never wake a nonexistent
+        waiter -- the slot exists purely so `decide()` can be re-run
+        against the ORIGINAL `tool_name`/`tool_input` under the new mode,
+        exactly like `_resolve_tool_call`'s own ask branch stashes them."""
+        import threading
+        self.session._permission_waiters[request_id] = {
+            "event": threading.Event(), "decision": None,
+            "tool_name": tool_name, "tool_input": tool_input, "tool": None,
+        }
+
+    def discard_pending_permission(self, request_id: str) -> None:
+        """Removes a slot `register_pending_permission` added, once the ask
+        is resolved through its own normal path (a digit press) -- without
+        this, a stale, already-decided slot would sit in `_permission_
+        waiters` forever (harmless -- nothing ever re-reads a request_id
+        after its card is done -- but needless)."""
+        self.session._permission_waiters.pop(request_id, None)
+
     def answer_question(self, request_id: str, answer) -> bool:
         return self.session.resolve_question(request_id, answer)
 
@@ -409,6 +437,29 @@ class Controller:
         format_model_row` with no per-provider special-casing left at
         render time."""
         from rolo_claude.providers.databricks import load_models_json
+        from rolo_claude.providers.enablement import credentials_present, is_enabled, label_for
+
+        # 1.0.1 part 2 fixpass finding 3: the session's own real `Settings.
+        # effective_env` (shell < user < trusted project/local < policy) --
+        # a credential living only in a settings.json `env` block is seen
+        # here exactly like a real turn would resolve it, instead of this
+        # listing surface disagreeing with it (a test-constructed Controller
+        # with no `settings=` passes None, falling back to bare os.environ,
+        # byte-for-byte unchanged from before this fix).
+        env = self.settings.effective_env if self.settings is not None else None
+
+        # H15 item 21.2: one dim hint entry (never a selectable `ref`) per
+        # provider that's DETECTED (real credentials/login) but not yet
+        # ENABLED -- `tui/dialogs/model_picker.py` renders these as a
+        # disabled row at the bottom instead of a selectable model.
+        hints: "list[dict]" = []
+
+        def _maybe_hint(name: str, *, detected: "Optional[bool]" = None) -> None:
+            is_detected = credentials_present(name, env=env) if detected is None else detected
+            if is_enabled(name, detected=is_detected) or not is_detected:
+                return
+            hints.append({"hint": f"{label_for(name)} detected but not enabled -- "
+                                   f"run `rolo-claude providers enable {name}`"})
 
         def _per_m(price_per_token) -> "float | None":
             # 1.0.1 fixpass finding 7: models.json stores EVERY OpenRouter
@@ -425,8 +476,14 @@ class Controller:
 
         out: list = []
         seen = set()
+        # H15 item 21.2: an openrouter alias is a `vendor/model` string with
+        # no `or:` prefix of its own -- still gated the same way, so a
+        # disabled OpenRouter never leaks its catalog through the routes.json
+        # alias table either.
+        or_detected = credentials_present("openrouter", env=env)
+        or_enabled = is_enabled("openrouter", detected=or_detected)
         try:
-            models = load_models_json(self.state_dir) or {}
+            models = load_models_json(self.state_dir) or {} if or_enabled else {}
         except Exception:
             models = {}
         for name in sorted(models):
@@ -440,10 +497,13 @@ class Controller:
                 "price_in_per_m": _per_m(pricing.get("prompt")), "price_out_per_m": _per_m(pricing.get("completion")),
                 "provider": "openrouter",
             })
-        for alias, target in sorted((self.routes.get("aliases") or {}).items()):
-            if alias not in seen:
-                out.append({"ref": alias, "provider": "alias", "target": target})
-        # H11 Part A: the "claude.ai subscription" group -- the nine cc:
+        _maybe_hint("openrouter", detected=or_detected)
+        if or_enabled:
+            for alias, target in sorted((self.routes.get("aliases") or {}).items()):
+                if alias not in seen:
+                    out.append({"ref": alias, "provider": "alias", "target": target})
+        # H11 Part A: the "Claude Code subscription" group (H15 part C's
+        # own label, see providers/enablement.py LABELS) -- the cc:
         # aliases, with real profile data when known (providers.cc_models.
         # CC_MODEL_TABLE / a --refresh cache), so they filter/sort/price
         # alongside every OpenRouter row above instead of needing a
@@ -467,14 +527,27 @@ class Controller:
         # every single time, measured as the single largest piece of a
         # 2-5s TUI freeze on a real work box. Only a startup worker
         # (tui/app.py's on_mount) ever populates that cache now.
-        from rolo_claude.providers.cc_models import CC_ALIASES, SUBSCRIPTION_AUTH_METHODS, cached_claude_auth_status, \
-            profile_fields_for_cc_model
+        from rolo_claude.providers.cc_models import CC_ALIASES, SUBSCRIPTION_AUTH_METHODS, alias_display_detail, \
+            cached_claude_auth_status, profile_fields_for_cc_model
         try:
             status = cached_claude_auth_status()
         except Exception:
             status = None
         cc_available = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
-        if cc_available:
+        # 1.0.1 part 2 fixpass critical finding 2: `detected=cc_available`
+        # -- `cc_available` is the EXACT SAME signal `credentials_present
+        # ("claude_subscription")` would compute (a real claude.ai login),
+        # just already read from the cache above; without this, both
+        # `is_enabled("claude_subscription")` calls below independently
+        # re-derived it via `credentials_present` -> `claude_login_
+        # available()` -> an UNCACHED `claude auth status` SPAWN apiece --
+        # 2 extra subprocess launches (up to a 10s timeout each) every
+        # single `/model` open, reintroducing exactly what fixpass finding
+        # 1 removed from `cc_available` itself just above.
+        # H15 item 21.2/21.6: shown only once the Claude subscription is ALSO
+        # enabled -- a real claude.ai login no longer lists cc: models on its
+        # own (item 21.1: a login never enables anything by itself).
+        if cc_available and is_enabled("claude_subscription", detected=cc_available):
             for alias, cc_target in CC_ALIASES.items():
                 ref = f"cc:{alias}"
                 if ref in seen:
@@ -484,22 +557,47 @@ class Controller:
                     "ref": ref, "context_tokens": fields.get("context_tokens"),
                     "max_output_tokens": fields.get("max_output_tokens"),
                     "price_in_per_m": _per_m(fields.get("price_in")), "price_out_per_m": _per_m(fields.get("price_out")),
-                    "provider": "cc", "group": "claude.ai subscription",
+                    # H15 addendum 2: "-> <resolved-id>" next to the alias.
+                    "detail": alias_display_detail(alias),
+                    "provider": "cc", "group": label_for("claude_subscription"),
                 })
+        if cc_available and not is_enabled("claude_subscription", detected=cc_available):
+            hints.append({"hint": f"{label_for('claude_subscription')} detected but not enabled -- "
+                                   f"run `rolo-claude providers enable claude_subscription`"})
+        # H15 item 21: the `ant:` (direct Anthropic API key) group -- the
+        # same nine subscription-model aliases as cc: above, resolved
+        # against the real API instead of the installed `claude` binary.
+        # Never shown before this item (no gate existed to hide it behind),
+        # so this is also the group's first appearance in `/model` at all.
+        from rolo_claude.providers.config import resolve_anthropic
+        ant_available = resolve_anthropic(env) is not None
+        if ant_available and is_enabled("anthropic", detected=ant_available):
+            from rolo_claude.init_providers import _cc_ant_entries
+            from rolo_claude.providers.cc_models import ANT_ALIASES
+            for entry in _cc_ant_entries("ant", ANT_ALIASES):
+                if entry["ref"] in seen:
+                    continue
+                out.append({**entry, "provider": "anthropic", "group": "ant: (Anthropic API)"})
+        elif ant_available:
+            hints.append({"hint": f"{label_for('anthropic')} detected but not enabled -- "
+                                   f"run `rolo-claude providers enable anthropic`"})
         # H14 scope I: the discovered Databricks endpoint catalog
         # (~/.rolo-claude/dbx-endpoints.json, from `init --preset work`/
         # `models --refresh` -- never a vendored list), grouped by family,
         # each row showing its chosen path type and DBU rate when known;
         # a known non-chat endpoint (embeddings/whisper) is hidden here
         # (`rolo-claude models` itself still lists it, for diagnostics).
+        dbx_detected = credentials_present("databricks", env=env)
+        dbx_enabled = is_enabled("databricks", detected=dbx_detected)
         try:
             from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
             from rolo_claude.providers.dbx_routing import (
                 PATH_TYPE_DISPLAY, classify_family, default_path_type, format_dbu_cost,
             )
-            endpoints = load_dbx_endpoints_json(self.state_dir)
+            endpoints = load_dbx_endpoints_json(self.state_dir) if dbx_enabled else {}
         except Exception:
             endpoints = {}
+        _maybe_hint("databricks", detected=dbx_detected)
         # 1.0.1 hotfix 4/addendum 10: an old-shape cache (no `api_types` ever
         # recorded) makes `default_path_type` silently degrade to
         # "invocations" for every openai-chat family -- checked ONCE here,
@@ -559,6 +657,10 @@ class Controller:
             out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,
                            "max_output_tokens": self.session.model_profile.max_output_tokens,
                            "provider": self.session.model_ref.provider})
+        # H15 item 21.2: dim, non-selectable hint rows (no "ref" at all) go
+        # LAST -- after the `current` insertion above, which indexes `out`
+        # by `m["ref"]` and would KeyError on a hint dict otherwise.
+        out.extend(hints)
         return out
 
     def list_sessions(self) -> list:

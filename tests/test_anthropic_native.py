@@ -15,6 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_anthropic import MockAnthropic
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
+
+ensure_scoped_state_dir_once()
+ensure_default_provider_credentials()
 from rolo_claude.providers.errors import parse_context_overflow
 from rolo_claude.providers.http import call_anthropic_native
 from rolo_claude.providers.profiles import ProviderProfile

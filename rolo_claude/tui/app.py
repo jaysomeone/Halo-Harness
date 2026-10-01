@@ -13,11 +13,13 @@ widget, so nothing here is ever called from another thread.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -62,6 +64,44 @@ _METHOD_ACTIONS = {
 DEFAULT_PLACEHOLDER = 'Try "read README.md and summarise it"   (/ commands, @ files)'
 
 _PASTE_PLACEHOLDER_RE = re.compile(r"\[Pasted text #(\d+) \+\d+ lines\]")
+
+# H15 Part B: hang diagnostics. `_tick_spinner` (set_interval(1.0, ...), see
+# on_mount) bumps the heartbeat every second; a SEPARATE OS thread (never
+# the asyncio loop itself -- the whole point is to keep working when THAT
+# is the thing that's stuck) polls it independently and dumps diagnostics
+# once it goes stale past this threshold, at most once a minute while it
+# persists (so a long-wedged session doesn't fill the disk with repeats).
+HANG_HEARTBEAT_THRESHOLD_S = 15.0
+HANG_DUMP_MIN_INTERVAL_S = 60.0
+# 1.0.1 part 2 fixpass finding 14: at most this many hang dumps per process
+# (a long-lived session that keeps tripping the watchdog must not fill the
+# disk), and at most this many hang-*.log files kept on disk across every
+# past process's runs (pruned once, at startup).
+MAX_HANG_DUMPS_PER_PROCESS = 5
+MAX_HANG_DUMP_FILES_KEPT = 10
+_DEBUG_LOG = logging.getLogger("rolo_claude.tui")
+
+# 1.0.1 part 2 fixpass finding 17: `--debug`'s own per-keystroke trace
+# (`_on_key` below) must never be able to reconstruct a typed secret from
+# bridge.log -- a bare printable character (a letter/digit/punctuation key,
+# whatever a live terminal happens to name it) logs as this fixed
+# placeholder; a named control/navigation key (Enter, Tab, arrows, a
+# ctrl+/alt+/shift+ chord, a function key, ...) logs verbatim, exactly as
+# before, since none of those can themselves spell out a password/token.
+_DEBUG_KEY_PLACEHOLDER = "<char>"
+_DEBUG_SAFE_KEY_NAMES = frozenset({
+    "enter", "tab", "escape", "backspace", "delete", "insert", "space",
+    "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+})
+_DEBUG_SAFE_KEY_PREFIXES = ("ctrl+", "alt+", "shift+")
+
+
+def _debug_key_repr(key: str) -> str:
+    """See `_DEBUG_KEY_PLACEHOLDER`'s own module-level comment."""
+    if key in _DEBUG_SAFE_KEY_NAMES or key.startswith(_DEBUG_SAFE_KEY_PREFIXES):
+        return key
+    return _DEBUG_KEY_PLACEHOLDER
 
 
 def _expand_pasted(text: str, pasted: Optional[dict]) -> str:
@@ -199,6 +239,17 @@ class BridgeApp(App):
         # U5 scope C: kicks off the after-first-turn auto-title exactly
         # once, the first time `turn_done` fires (see `on_turn_done`).
         self._turn_done_count = 0
+        # H15 Part B: hang watchdog -- see on_mount/_watchdog_loop.
+        self._last_heartbeat_monotonic = time.monotonic()
+        self._watchdog_last_dump_at = 0.0
+        self._watchdog_thread: Optional[threading.Thread] = None
+        # 1.0.1 part 2 fixpass finding 14: paused around a KNOWN, genuinely
+        # blocking main-thread call (`self.suspend()`, Ctrl+E/`/improve`'s
+        # own edit action) -- see `_enter_suspend_for_editor`. Capped so a
+        # long-lived session that keeps tripping the watchdog never fills
+        # the disk with dumps.
+        self._watchdog_paused = False
+        self._watchdog_dump_count = 0
 
     # ---- composition -------------------------------------------------
 
@@ -240,6 +291,21 @@ class BridgeApp(App):
         # now, never spawns the `claude auth status` subprocess itself.
         self.run_worker(self._prime_auth_status_worker, thread=True, name="auth-status-startup",
                          group="auth-status-startup")
+        # H15 part 2 addendum 3.2a: the SAME staleness-gated, every-
+        # enabled-provider catalog refresh `/model` triggers on open also
+        # runs once at launch -- a provider set up with just a key/token
+        # (no `rolo-claude init` ever run) still gets a real catalog before
+        # the FIRST time `/model` is opened, not only after.
+        self.run_worker(self._catalog_startup_refresh_worker, thread=True, name="catalog-startup-refresh",
+                         group="catalog-startup-refresh")
+        # H15 part 2 addendum 4: the OpenRouter balance status-bar segment --
+        # one fetch now (force=True, the launch case), then again every
+        # BALANCE_REFRESH_INTERVAL_S (5 minutes) for as long as the app runs;
+        # a no-op when OpenRouter isn't enabled/configured.
+        self.run_worker(self._or_balance_startup_refresh_worker, thread=True, name="or-balance-startup",
+                         group="or-balance-startup")
+        from rolo_claude.providers.openrouter_account import BALANCE_REFRESH_INTERVAL_S
+        self.set_interval(BALANCE_REFRESH_INTERVAL_S, self._or_balance_refresh)
         starter = getattr(self.controller, "start", None)
         if callable(starter):
             starter()
@@ -250,8 +316,16 @@ class BridgeApp(App):
             })
         self.set_focus(self.prompt_input)
         self.set_interval(1 / DRAIN_HZ, self._drain)
-        self.set_interval(1.0, self._tick_spinner)
+        # H15 Part B: a lambda, not the bound method itself -- `set_interval`
+        # stores whatever callable it's given and keeps calling THAT object
+        # forever, so passing the bound method directly would freeze in the
+        # method that existed at mount time; a test that monkeypatches the
+        # INSTANCE attribute `_tick_spinner` (to simulate a stalled heartbeat
+        # without a real 15s+ block) needs this timer to keep re-reading
+        # `self._tick_spinner` on every tick instead.
+        self.set_interval(1.0, lambda: self._tick_spinner())
         self.set_interval(5.0, self._refresh_cwd_branch)
+        self._start_watchdog()
         statusline_cfg = self._statusline_config()
         if statusline_cfg is not None:
             self._refresh_statusline()
@@ -314,12 +388,236 @@ class BridgeApp(App):
         except Exception:
             pass
 
+    def _catalog_startup_refresh_worker(self) -> None:
+        """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see
+        `tui/slash.py::catalog_auto_refresh_worker`'s own docstring (the
+        SAME function `/model` triggers on open); best-effort, a failure
+        here just leaves whatever was already cached (or nothing) in place."""
+        try:
+            from rolo_claude.tui.slash import catalog_auto_refresh_worker
+            catalog_auto_refresh_worker(self)
+        except Exception:
+            pass
+
+    def _or_balance_refresh(self) -> None:
+        """H15 part 2 addendum 4: spawns the OpenRouter balance worker on
+        its own thread -- same "thin method, real work on a worker"
+        convention `_refresh_cwd_branch` already uses, so this is safe to
+        call directly from `set_interval`."""
+        self.run_worker(self._or_balance_startup_refresh_worker, thread=True, exclusive=True,
+                         name="or-balance-refresh", group="or-balance-refresh")
+
+    def _or_balance_startup_refresh_worker(self) -> None:
+        try:
+            from rolo_claude.tui.slash import or_balance_refresh_worker
+            or_balance_refresh_worker(self, force=True)
+        except Exception:
+            pass
+
+    def _or_balance_turn_refresh_worker(self) -> None:
+        try:
+            from rolo_claude.tui.slash import or_balance_refresh_worker
+            or_balance_refresh_worker(self, force=False)
+        except Exception:
+            pass
+
     def _tick_spinner(self) -> None:
+        # H15 Part B: the heartbeat the watchdog thread polls -- this timer
+        # only fires at all while the asyncio event loop is itself still
+        # alive and responsive, so its own staleness IS the hang signal.
+        self._last_heartbeat_monotonic = time.monotonic()
         self.status_bar.tick_spinner()
+
+    # ---- H15 Part B: hang watchdog -----------------------------------
+
+    def _start_watchdog(self) -> None:
+        """A daemon thread, started once from `on_mount`, completely
+        independent of the asyncio event loop/Textual message pump -- the
+        whole point is that it keeps polling even when THOSE are what's
+        stuck. SIGUSR1 (POSIX only) dumps the same diagnostics on demand,
+        best-effort (never raises -- some environments refuse a non-main-
+        thread signal registration, or don't have SIGUSR1 at all)."""
+        if self._watchdog_thread is not None:
+            return
+        self._prune_old_hang_dumps()
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="rolo-watchdog")
+        self._watchdog_thread.start()
+        try:
+            import signal
+            if hasattr(signal, "SIGUSR1"):
+                signal.signal(signal.SIGUSR1, self._on_sigusr1)
+        except (ValueError, OSError, AttributeError):
+            pass  # not the main thread, not POSIX, or a platform that refuses it -- the timer-based watchdog still runs
+
+    def _on_sigusr1(self, signum, frame) -> None:
+        self._dump_hang_diagnostics(time.monotonic() - self._last_heartbeat_monotonic, reason="SIGUSR1")
+
+    def _prune_old_hang_dumps(self) -> None:
+        """1.0.1 part 2 fixpass finding 14: keeps at most `MAX_HANG_DUMP_
+        FILES_KEPT` `hang-*.log` files on disk, pruned once at startup --
+        filenames are `hang-<UTC %Y%m%dT%H%M%SZ>.log`, so lexical sort order
+        IS chronological order; best-effort, never raises."""
+        try:
+            from rolo_claude.config.paths import bridge_home
+            state_dir = bridge_home()
+            dumps = sorted(state_dir.glob("hang-*.log"))
+            for p in dumps[:-MAX_HANG_DUMP_FILES_KEPT] if len(dumps) > MAX_HANG_DUMP_FILES_KEPT else []:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    def _enter_suspend_for_editor(self) -> None:
+        """1.0.1 part 2 fixpass finding 14: pauses the hang watchdog around
+        a KNOWN, genuinely blocking main-thread call -- `self.suspend()`
+        (Ctrl+E here, `/improve`'s own edit action in tui/slash.py) stops
+        the whole asyncio loop (and therefore `_tick_spinner`'s own
+        heartbeat) for as long as the external $VISUAL/$EDITOR runs, which
+        is expected, not a hang. Call `_exit_suspend_for_editor` in a
+        `finally` right after -- both are safe to call unconditionally
+        around any future blocking-editor-style call."""
+        self._watchdog_paused = True
+
+    def _exit_suspend_for_editor(self) -> None:
+        self._watchdog_paused = False
+        self._last_heartbeat_monotonic = time.monotonic()
+
+    def _watchdog_loop(self) -> None:
+        # A short poll interval (well under the 15s threshold) so a hang
+        # that starts and ends quickly (a brief GC pause, a slow-but-
+        # finite MCP call) is never mistaken for a real stall; checked
+        # against wall-clock monotonic time, never counted in "ticks",
+        # so this is correct regardless of how long each poll itself takes.
+        # `_watchdog_stop.wait(2.0)` (never a bare `time.sleep`) so a
+        # deliberate stop (app shutdown) is noticed within this same poll,
+        # not up to 2s late.
+        while not self._watchdog_stop.wait(2.0):
+            if self._quitting or self._force_quitting or not self.is_running:
+                return  # shutting down (on purpose, or already gone) -- not a hang, stop watching
+            if self._watchdog_paused:
+                continue  # finding 14: a KNOWN blocking call is in progress -- not a hang either
+            age = time.monotonic() - self._last_heartbeat_monotonic
+            if age < HANG_HEARTBEAT_THRESHOLD_S:
+                continue
+            now = time.monotonic()
+            if now - self._watchdog_last_dump_at < HANG_DUMP_MIN_INTERVAL_S:
+                continue  # already dumped recently -- at most once a minute while it persists
+            self._watchdog_last_dump_at = now
+            self._dump_hang_diagnostics(age, reason="heartbeat stalled")
+
+    def _named_worker_summary(self) -> "list[str]":
+        try:
+            return [f"{w.name or '?'} (group={w.group}, state={w.state.name})" for w in self.workers]
+        except Exception as e:
+            return [f"<could not list workers: {type(e).__name__}: {e}>"]
+
+    def _active_screen_name(self) -> str:
+        try:
+            return type(self.screen).__name__
+        except Exception:
+            return "?"
+
+    def _dump_hang_diagnostics(self, heartbeat_age: float, *, reason: str) -> None:
+        """Writes every thread's stack (`sys._current_frames()`) plus the
+        named-worker list and the active screen name to `~/.rolo-claude/
+        hang-<UTC>.log`, and one line to bridge.log naming that path --
+        called from the watchdog thread OR a SIGUSR1 handler on the main
+        thread, never from the asyncio loop itself. Best-effort throughout
+        (a hang dump that itself raises must never take the process down
+        with it, nor ever block long enough to matter).
+
+        1.0.1 part 2 fixpass finding 14: capped at `MAX_HANG_DUMPS_PER_
+        PROCESS` -- a long-wedged session that keeps re-triggering this
+        (SIGUSR1 has no built-in rate limit of its own, unlike the
+        heartbeat path's `HANG_DUMP_MIN_INTERVAL_S`) must not fill the disk
+        with an unbounded number of these over a long process lifetime."""
+        if self._watchdog_dump_count >= MAX_HANG_DUMPS_PER_PROCESS:
+            return
+        self._watchdog_dump_count += 1
+        import traceback as tb_mod
+        from datetime import datetime, timezone
+        try:
+            from rolo_claude.config.paths import bridge_home
+            lines = [
+                f"rolo-claude hang diagnostics -- {reason} "
+                f"(heartbeat stalled {heartbeat_age:.1f}s, threshold {HANG_HEARTBEAT_THRESHOLD_S:.0f}s)",
+                f"active screen: {self._active_screen_name()}",
+                "named workers:",
+            ]
+            worker_lines = self._named_worker_summary()
+            if worker_lines:
+                lines.extend(f"  {w}" for w in worker_lines)
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            thread_names = {t.ident: t.name for t in threading.enumerate()}
+            for ident, frame in sys._current_frames().items():
+                lines.append(f"--- thread {thread_names.get(ident, '?')} (ident={ident}) ---")
+                lines.extend(line.rstrip("\n") for line in tb_mod.format_stack(frame))
+                lines.append("")
+            text = "\n".join(lines)
+            state_dir = bridge_home()
+            state_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            hang_path = state_dir / f"hang-{ts}.log"
+            hang_path.write_text(text, encoding="utf-8")
+        except Exception as e:
+            logging.getLogger("bridge").warning("hang diagnostics: could not write the dump (%s: %s)",
+                                                  type(e).__name__, e)
+            return
+        logging.getLogger("bridge").warning(
+            "hang detected (%s): heartbeat stalled %.1fs -- dumped to %s", reason, heartbeat_age, hang_path)
+
+    def _debug_trace(self, msg: str, *args) -> None:
+        """H15 Part B: `--debug` tracing -- a no-op cost-wise when the
+        `rolo_claude.tui` logger isn't at DEBUG level (stdlib logging's own
+        lazy %-formatting, same convention `clamp_effort`'s own `log.debug`
+        already uses), real lines in bridge.log once `--debug` turns it on."""
+        _DEBUG_LOG.debug(msg, *args)
+
+    # ---- H15 Part B: Textual's own worker/focus lifecycle events, traced
+    # under --debug only (see _debug_trace) ------------------------------
+
+    def on_worker_state_changed(self, event) -> None:
+        from textual.worker import WorkerState
+        worker = event.worker
+        if event.state == WorkerState.RUNNING:
+            self._debug_trace("worker start: %s (group=%s)", worker.name, worker.group)
+        elif event.state == WorkerState.CANCELLED:
+            self._debug_trace("worker cancel: %s (group=%s)", worker.name, worker.group)
+        elif event.state in (WorkerState.SUCCESS, WorkerState.ERROR):
+            self._debug_trace("worker finish: %s (group=%s, state=%s)", worker.name, worker.group, event.state.name)
+
+    def on_app_blur(self, event) -> None:
+        self._debug_trace("AppBlur (screen=%s)", self._active_screen_name())
+
+    def on_app_focus(self, event) -> None:
+        self._debug_trace("AppFocus (screen=%s)", self._active_screen_name())
 
     # ---- the drain loop (D-TUI: "30 Hz ... 8ms budget") -------------------
 
     async def _drain(self) -> None:
+        """H15 Part B.3 audit (no behaviour change -- nothing unbounded was
+        found): `source.get_nowait()` never blocks; `drain_queue`/
+        `apply_event` do no I/O of their own; every `await
+        self.transcript.mount_widget(...)` this method's own `apply_event`
+        calls reach (permission/plan/question cards, tool-call diff
+        previews) mounts onto the TRANSCRIPT on the BASE screen -- never a
+        NEW screen pushed here -- so it never contends with an already-
+        active MODAL screen's own event loop turn; Textual's `Widget.mount`
+        is itself a bounded layout operation, not a wait on anything
+        external. Every `call_from_thread` call site in this module (26 at
+        last count) hands back a plain attribute write/`Static.update`/
+        `push_screen` -- none of them call `Worker.wait()`, acquire a lock
+        shared with the session's own worker thread, or run a subprocess
+        with no timeout (the two `subprocess.run` calls in this file,
+        `_git_branch`/`_notify_send_worker`, both pass `timeout=` and both
+        run on their OWN `thread=True` worker, never here). The watchdog
+        above (`_start_watchdog`) is the backstop for whatever this audit
+        missed."""
         start = time.monotonic()
         collected: list = []
         for source in (getattr(self.controller, "events", None), self._local_events):
@@ -348,6 +646,15 @@ class BridgeApp(App):
         self._turn_done_count += 1
         if self._turn_done_count == 1 and callable(getattr(self.controller, "maybe_autoname_title", None)):
             self.run_worker(self._autoname_worker, thread=True, name="autoname-title")
+        # H15 part 2 addendum 4: a post-turn OpenRouter balance refresh --
+        # the worker itself is a no-op unless OpenRouter is actually enabled
+        # AND configured, and self-debounces to at most once every
+        # BALANCE_POST_TURN_DEBOUNCE_S regardless of how many turns fire
+        # this in between, so firing it after every turn unconditionally
+        # (rather than threading "did THIS turn use or:" through the whole
+        # event pipeline) costs nothing extra on a non-OpenRouter session.
+        self.run_worker(self._or_balance_turn_refresh_worker, thread=True, name="or-balance-turn-refresh",
+                         group="or-balance-turn-refresh")
 
     def _autoname_worker(self) -> None:
         try:
@@ -544,7 +851,20 @@ class BridgeApp(App):
         # `Controller.add_permission_rule`.
         from rolo_claude.tui.widgets.cards import PermissionCard
 
+        request_id = f"inline-{id(command)}"
+
         def on_decide(reply: dict) -> None:
+            # Part D2.3: discard the slot the SAME closure's slot-
+            # registration below added -- a no-op if `reevaluate_pending_
+            # permission` already resolved (and left in place) a since-
+            # replaced slot; either path ends here exactly once (`done`
+            # guards both PermissionCard entry points).
+            discard = getattr(self.controller, "discard_pending_permission", None)
+            if callable(discard):
+                try:
+                    discard(request_id)
+                except Exception:
+                    pass
             self.clear_pending_card()
             if reply.get("action") != "allow":
                 return
@@ -558,9 +878,23 @@ class BridgeApp(App):
                         pass
             self._start_inline_shell_worker(command)
 
-        card = PermissionCard(request_id=f"inline-{id(command)}", summary=f"Bash({command})",
+        # Part D2.3: registered so Shift+Tab/`/permissions` can re-decide
+        # THIS ask too, through the exact same `reevaluate_pending_
+        # permission` path a live tool-call ask already uses -- without
+        # this, a mode change while an inline `!cmd` card is up left it
+        # completely unaffected (a plain digit press was the only way to
+        # answer it, unlike every model-issued permission ask).
+        register = getattr(self.controller, "register_pending_permission", None)
+        if callable(register):
+            try:
+                register(request_id, "Bash", {"command": command})
+            except Exception:
+                pass
+
+        card = PermissionCard(request_id=request_id, summary=f"Bash({command})",
                                reason=getattr(decision, "reason", "") or "runs now, outside the model turn (! prefix)",
-                               suggested_rule=getattr(decision, "suggested_rule", None), on_decide=on_decide)
+                               suggested_rule=getattr(decision, "suggested_rule", None), on_decide=on_decide,
+                               on_resolved_externally=on_decide)
         await self.transcript.mount_widget(card)
         self.set_pending_card(card)
 
@@ -651,8 +985,16 @@ class BridgeApp(App):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(self.prompt_input.text)
-            with self.suspend():
-                sp.run(f'{editor} "{tmp_path}"', shell=True)
+            # 1.0.1 part 2 fixpass finding 14: pause the hang watchdog for
+            # as long as the external editor blocks the main thread --
+            # otherwise editing for more than HANG_HEARTBEAT_THRESHOLD_S
+            # (15s) writes a hang dump + WARNING every minute it stays open.
+            self._enter_suspend_for_editor()
+            try:
+                with self.suspend():
+                    sp.run(f'{editor} "{tmp_path}"', shell=True)
+            finally:
+                self._exit_suspend_for_editor()
             new_text = tmp_path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
             if new_text != self.prompt_input.text:
                 self.prompt_input.text = new_text
@@ -734,6 +1076,19 @@ class BridgeApp(App):
         # goes through `focus_next()` instead -- a no-op when it has
         # nothing focusable (exactly PagerScreen's case), the correct
         # first-focusable pick when it does (an ordinary picker dialog).
+        #
+        # H15 Part B: --debug tracing -- every Key event, with the
+        # currently-focused widget and the active screen, BEFORE the
+        # self-heal/chord logic below touches either (so a trace always
+        # shows the REAL pre-handling state a hang investigation needs).
+        focused = self.screen.focused
+        # 1.0.1 part 2 fixpass finding 17: `_debug_key_repr` -- a printable
+        # character logs as a fixed placeholder, never the real key, so a
+        # password/token typed while --debug is on can't be reconstructed
+        # from bridge.log one keystroke at a time.
+        self._debug_trace("key: %s focused=%s screen=%s", _debug_key_repr(event.key),
+                           type(focused).__name__ if focused is not None else None,
+                           self._active_screen_name())
         if self.screen.focused is None:
             if self.screen is self.screen_stack[0]:
                 if self.pending_card is not None and self.pending_card.is_mounted:
@@ -1155,6 +1510,17 @@ class BridgeApp(App):
 
     def _force_quit_worker(self) -> None:
         import threading
+        # 1.0.1 part 2 (reviewer minor): killed HERE, unconditionally,
+        # before the quit sequence below even starts -- `Controller.quit()`
+        # already does this too, but only after its own worker-join
+        # (up to QUIT_DEADLINE_S), which is exactly the path Ctrl+Q exists
+        # to route around when it's wedged. A background Bash job (or one
+        # a timed-out foreground command was moved to) must never outlive
+        # the process just because the ORDINARY quit path never got there.
+        try:
+            self.controller.session.job_registry.kill_all()
+        except Exception:
+            pass
         result = {"code": 0}
 
         def _run_quit() -> None:

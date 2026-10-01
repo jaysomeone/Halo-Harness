@@ -105,9 +105,16 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
     if session is not None:
         cm = session.cost_meter
         cost_str = f"${cm.total_usd:.4f}" if cm.has_cost_data else "n/a (provider does not report cost)"
-        return f"Total cost: {cost_str} across {cm.turns} turn(s) (model: {facade.model_ref or '?'})"
-    return (f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s) "
-            f"(model: {facade.model_ref or '?'})")
+        line = f"Total cost: {cost_str} across {cm.turns} turn(s) (model: {facade.model_ref or '?'})"
+    else:
+        line = (f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s) "
+                f"(model: {facade.model_ref or '?'})")
+    # H15 part 2 addendum 4: the same OpenRouter balance figure the status
+    # bar shows, with the key label and reading time -- omitted (no second
+    # line) when no fetch has ever succeeded (not enabled, or offline).
+    from rolo_claude.providers.openrouter_account import format_balance_line
+    balance_line = format_balance_line()
+    return f"{line}\n{balance_line}" if balance_line else line
 
 
 def _cmd_context(args: str, facade: HeadlessFacade) -> str:
@@ -150,51 +157,103 @@ def _cmd_model(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_models(args: str, facade: HeadlessFacade) -> str:
-    """H14 scope J: `/models [refresh]` (`/dbx` is a plain alias that always
+    """H14 scope J (widened to every enabled provider by the H15 part 2
+    addendum 3.2b): `/models [refresh]` (`/dbx` is a plain alias that always
     refreshes) -- headless surface for the same catalog refresh `rolo-claude
     models --refresh`/the TUI's own off-UI-thread `/models refresh` use.
     Bare `/models` reports the cached catalog's size/age without touching
-    the network. 1.0.1 hotfix 3: bare now ALSO renders the cached table
-    (family/path/chat -- same `catalog_cli.format_dbx_table_lines` the CLI
-    and the TUI's own `/models` use, so all three never drift apart); a
+    the network. 1.0.1 hotfix 3: bare now ALSO renders the cached Databricks
+    table (family/path/chat -- same `catalog_cli.format_dbx_table_lines` the
+    CLI and the TUI's own `/models` use, so all three never drift apart); a
     failed refresh shows that same (unchanged) table plus the one-line
-    error, never just the error alone."""
+    error, never just the error alone. OpenRouter/Anthropic (no per-endpoint
+    table of their own here) get a one-line cached-count/refreshed-count
+    summary alongside it -- `rolo-claude models --cc`/the full OpenRouter
+    table live elsewhere, this command's own job is the refresh trigger."""
     from rolo_claude.catalog_cli import _dbx_rows, format_dbx_table_lines
     from rolo_claude.config.paths import bridge_home
     from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
     from rolo_claude.providers.databricks import (
-        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, refresh_dbx_catalog,
+        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, load_models_json,
+        models_json_age_seconds, refresh_dbx_catalog, refresh_openrouter_catalog_if_stale,
     )
+    from rolo_claude.providers.anthropic_catalog import (
+        ant_models_age_seconds, load_ant_models_json, refresh_anthropic_catalog_if_stale,
+    )
+    from rolo_claude.providers.enablement import is_enabled
     state_dir = bridge_home()
-    dbx = resolve_databricks()
-    if dbx is None:
-        return "Databricks is not configured -- nothing to refresh (see `rolo-claude doctor --work`)."
-    root = derive_workspace_root(dbx.host)
+    wants_refresh = args.strip().lower() in ("refresh", "--refresh")
+    dbx_enabled = is_enabled("databricks")
+    dbx = resolve_databricks() if dbx_enabled else None
 
-    def _table_text(endpoints: dict) -> str:
+    def _table_text(endpoints: dict, root: str) -> str:
         if not endpoints:
             return ""
         rows = _dbx_rows(endpoints, root, state_dir, urls=False)
         return "\n".join(format_dbx_table_lines(rows)) + "\n\n"
 
-    if args.strip().lower() in ("refresh", "--refresh"):
-        ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
-        endpoints = load_dbx_endpoints_json(state_dir)
-        if not ok:
-            return f"{_table_text(endpoints)}Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached)."
-        # 1.0.1 hotfix 12: see tui/slash.py's matching comment -- keeps the
-        # headless and TUI /models refresh surfaces from disagreeing on
-        # whether ctx/price data gets refreshed too.
-        from rolo_claude.providers.models_dev import refresh_models_dev_cache
-        md_ok, md_note = refresh_models_dev_cache(state_dir)
-        suffix = "" if md_ok else f" (models.dev refresh failed: {md_note} -- cached price data stays in use.)"
-        return (f"{_table_text(endpoints)}Refreshed: {len(endpoints)} endpoint(s) cached. "
-                f"Diff: {format_dbx_diff(diff)}{suffix}")
-    endpoints = load_dbx_endpoints_json(state_dir)
-    age = dbx_endpoints_age_seconds(state_dir)
-    age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
-    return (f"{_table_text(endpoints)}{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}). "
-            f"Use `/models refresh` (or `/dbx`) to update.")
+    lines = []
+    dbx_text = ""
+    if dbx is not None:
+        root = derive_workspace_root(dbx.host)
+        if wants_refresh:
+            ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
+            endpoints = load_dbx_endpoints_json(state_dir)
+            dbx_text = _table_text(endpoints, root)
+            if not ok:
+                # Exact pre-existing wording (tests/test_dbx_tui_surface.py
+                # pins "Refresh failed"/"endpoint(s) still cached" verbatim).
+                lines.append(f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached).")
+            else:
+                from rolo_claude.providers.models_dev import refresh_models_dev_cache
+                md_ok, md_note = refresh_models_dev_cache(state_dir)
+                suffix = "" if md_ok else f" (models.dev refresh failed: {md_note} -- cached price data stays in use.)"
+                # Exact pre-existing wording ("Refreshed: N" pinned verbatim).
+                lines.append(f"Refreshed: {len(endpoints)} endpoint(s) cached. "
+                             f"Diff: {format_dbx_diff(diff)}{suffix}")
+        else:
+            endpoints = load_dbx_endpoints_json(state_dir)
+            dbx_text = _table_text(endpoints, root)
+            age = dbx_endpoints_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            # Exact pre-existing wording ("N Databricks endpoint(s) cached").
+            lines.append(f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}).")
+    elif dbx_enabled:
+        lines.append("Databricks is not configured -- nothing to refresh (see `rolo-claude doctor --work`).")
+
+    if is_enabled("openrouter"):
+        if wants_refresh:
+            ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
+            if ok is False:
+                lines.append("OpenRouter refresh failed -- see `rolo-claude doctor`.")
+            elif ok is None:
+                lines.append("OpenRouter: not configured -- nothing to refresh.")
+            else:
+                lines.append(f"OpenRouter refreshed: {len(load_models_json(state_dir))} model(s) cached.")
+        else:
+            age = models_json_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            lines.append(f"OpenRouter: {len(load_models_json(state_dir))} model(s) cached (last refreshed {age_str}).")
+
+    if is_enabled("anthropic"):
+        if wants_refresh:
+            ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
+            if ok is False:
+                lines.append("Anthropic refresh failed -- see `rolo-claude doctor`.")
+            elif ok is None:
+                lines.append("Anthropic: not configured -- nothing to refresh.")
+            else:
+                lines.append(f"Anthropic refreshed: {len(load_ant_models_json(state_dir))} model(s) cached.")
+        else:
+            age = ant_models_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            lines.append(f"Anthropic: {len(load_ant_models_json(state_dir))} model(s) cached (last refreshed {age_str}).")
+
+    if not lines:
+        return ("No provider is set up -- not configured (see `rolo-claude providers`, "
+                 "or run `rolo-claude init`).")
+    suffix = "" if wants_refresh else "\nUse `/models refresh` (or `/dbx`) to update."
+    return f"{dbx_text}{chr(10).join(lines)}{suffix}"
 
 
 def _cmd_dbx(args: str, facade: HeadlessFacade) -> str:
@@ -359,6 +418,36 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
     return format_roles_table(rows)
 
 
+def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
+    """H15 item 21.5: `/providers` -- the SAME table `rolo-claude providers`
+    prints (`format_providers_table`/`provider_rows`, so the two surfaces
+    never drift apart), plus `enable <name>`/`disable <name>` right here.
+    `setup <name>` needs the interactive provider picker/tabs `init` itself
+    shows -- not available headless, so this just points at the real
+    command instead of half-implementing it."""
+    from rolo_claude.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
+    from rolo_claude.providers_cli import format_providers_table, provider_rows
+    tokens = (args or "").split()
+    if not tokens or tokens[0] == "list":
+        return format_providers_table(provider_rows())
+    action = tokens[0]
+    if action in ("enable", "disable"):
+        if len(tokens) < 2:
+            return f"/providers {action}: needs a provider name ({', '.join(PROVIDER_NAMES)})"
+        name = canonical(tokens[1])
+        if name not in PROVIDER_NAMES:
+            return f"/providers {action}: unknown provider {tokens[1]!r} (expected one of {', '.join(PROVIDER_NAMES)})"
+        if action == "enable":
+            enable(name)
+            return f"{label_for(name)}: enabled"
+        disable(name)
+        return f"{label_for(name)}: disabled"
+    if action == "setup":
+        return ("/providers setup needs the interactive picker -- run `rolo-claude providers setup "
+                f"{tokens[1] if len(tokens) > 1 else '<name>'}` (or `rolo-claude init`) from a real terminal.")
+    return "Usage: /providers [list|enable <name>|disable <name>|setup <name>]"
+
+
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     """1.0.1 hotfix 19/20. Bare `/effort`: the effective level, its source,
     and this route's own accepted levels (print mode's whole answer; the
@@ -389,6 +478,18 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     requested = (args or "").strip().lower()
     if not requested:
         levels = ", ".join(supported) if supported else "(this model has no adjustable effort)"
+        # 1.0.1 part 2 (item 22 remainder): this route forces an explicit
+        # reasoning_effort override whenever a turn carries tools (the
+        # gpt-6 table rule, or a learned per-endpoint rule) -- shown as the
+        # EFFECTIVE value ("none (tools)"), with the source line explaining
+        # why, instead of the configured value that the next (tool-
+        # carrying) turn will ignore anyway.
+        from rolo_claude.providers.profiles import effort_display_override
+        override_display = effort_display_override(profile)
+        if override_display:
+            return (f"Effort level: {override_display} (source: this route forces reasoning_effort="
+                     f"{profile.reasoning_effort_with_tools!r} whenever a turn carries tools)\n"
+                     f"Accepted for this model: {levels}")
         return (f"Effort level: {current or 'not set (provider default)'} (source: {source or 'default'})\n"
                 f"Accepted for this model: {levels}")
 
@@ -552,6 +653,8 @@ _BUILTIN_SPECS = {
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
     "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
+    "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
+                  _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this rolo-claude installation", None, _cmd_doctor),

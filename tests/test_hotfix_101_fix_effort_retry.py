@@ -20,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_databricks import MockDatabricks
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -152,6 +155,45 @@ def test_strip_retry_fires_as_a_second_fallback_after_a_failed_none_retry(ctx: C
                       "reasoning_effort" not in bodies[2])
             ctx.check(f"self.effort reset after the successful strip, got {session.effort!r}",
                       session.effort is None)
+        finally:
+            mock.stop()
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 part 2 fixpass finding 13: the "none" rule must be learned only when
+# the "none" retry ITSELF succeeded -- not when it also 400'd and the
+# separate strip-retry is what actually rescued the turn (the exact scenario
+# `test_strip_retry_fires_as_a_second_fallback_after_a_failed_none_retry`
+# above already drives: 3 attempts, "none" rejected, strip succeeds).
+# ---------------------------------------------------------------------------
+
+@test
+def test_rule_is_not_learned_when_the_none_retry_itself_failed(ctx: Ctx):
+    """Before this fix: `effort_none_retried` alone gated the learn, so this
+    exact 3-attempt sequence (original rejected, "none" ALSO rejected, the
+    independent strip-retry succeeds) wrongly recorded "none" as this
+    endpoint's permanent rule -- every later tool step on this route would
+    then pay one guaranteed-to-fail "none" request before the strip retry
+    rescued it, forever, and `/effort` would falsely show "none (tools)"."""
+    from rolo_claude.providers.learned_rules import learned_reasoning_effort_with_tools
+    fh = build_fake_home()
+    with _Env(fh):
+        mock = MockDatabricks().start()
+        try:
+            session = _new_dbx_session(
+                fh, mock, model="dbx:databricks-gpt-5-reasoning-effort-tools-reject-even-with-none",
+                effort="high")
+            events_seen = list(session.turn("read a file"))
+            errors = [e for e in events_seen if e.kind == "error"]
+            ctx.check(f"no error surfaced, got kinds={[e.kind for e in events_seen]}", errors == [])
+            ctx.check(f"3 attempts as before (original, none-retry, strip-retry), got {len(mock.requests)}",
+                      len(mock.requests) == 3)
+            ctx.check(f"the 'none' rule was NOT learned on the live session profile, got "
+                      f"{session.provider_profile.reasoning_effort_with_tools!r}",
+                      session.provider_profile.reasoning_effort_with_tools != "none")
+            ctx.check("nothing was persisted to the on-disk learned-rules cache either",
+                      learned_reasoning_effort_with_tools(session.state_dir, "databricks",
+                                                           session.model_ref.model) is None)
         finally:
             mock.stop()
 

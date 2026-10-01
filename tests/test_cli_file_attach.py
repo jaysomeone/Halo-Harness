@@ -6,7 +6,9 @@ rolo-claude has no such backing store, so that SPEC shape gets a clear
 stderr notice instead, while an actual local path (the practically useful
 case, and the one the TUI's `@path` mention shares) attaches for real.
 """
+import functools
 import io
+import os
 import sys
 import tempfile
 from contextlib import redirect_stderr
@@ -15,8 +17,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
-test, TESTS = new_registry()
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) keeps `or:mock/model` below resolving exactly as it did before
+# parse_model_ref started refusing an auto-detected-disabled provider.
+ensure_default_provider_credentials()
+
+_register, TESTS = new_registry()
+
+
+def test(fn):
+    # H15 Part D2.1: `_real_session_and_controller` below builds a real
+    # `Session`, whose `SessionLog` ALWAYS resolves its storage root via
+    # `bridge_home()` (`BRIDGE_STATE_DIR`, else `BRIDGE_TEST_HOME`-derived,
+    # else the REAL `~/.rolo-claude`) -- independent of the `state_dir=`
+    # passed to `Session` itself. Every `@test` here is transparently
+    # wrapped in an isolated, per-test `BRIDGE_STATE_DIR` so that path can
+    # never resolve to the real machine, same pattern `tests/test_log_derive.py`
+    # and `tests/test_invariants.py` already use.
+    @functools.wraps(fn)
+    def wrapper(ctx):
+        old = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="file-attach-test-state-")))
+        try:
+            return fn(ctx)
+        finally:
+            if old is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old
+    return _register(wrapper)
 
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"

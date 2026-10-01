@@ -196,9 +196,14 @@ def cmd_models(argv) -> int:
     # first-use exception, which this leaves alone). A DNS/VPN-down box
     # must be able to run this to see "nothing cached yet" instantly rather
     # than hanging on an unreachable host it never asked to probe.
+    # H15 part 2 addendum 3.2b: `--refresh` refreshes every ENABLED
+    # provider's catalog now -- an explicitly-disabled provider (even with
+    # real credentials) is left alone, same rule every other surface
+    # follows.
+    from rolo_claude.providers.enablement import is_enabled
     models = load_models_json(state_dir)
     if args.refresh:
-        orc = resolve_openrouter()
+        orc = resolve_openrouter() if is_enabled("openrouter") else None
         if orc is not None:
             try:
                 fetched = probe_openrouter_models(orc.base_url, orc.api_key)
@@ -207,7 +212,7 @@ def cmd_models(argv) -> int:
             except Exception as e:
                 print(f"rolo-claude models: could not refresh from OpenRouter: {e}", file=sys.stderr)
 
-    dbx = resolve_databricks()
+    dbx = resolve_databricks() if is_enabled("databricks") else None
     endpoints = load_dbx_endpoints_json(state_dir)
     dbx_diff = None
     if dbx is not None and args.refresh:
@@ -220,15 +225,39 @@ def cmd_models(argv) -> int:
         else:
             print(f"rolo-claude models: could not refresh from Databricks: {note}", file=sys.stderr)
 
+    if args.refresh and is_enabled("anthropic"):
+        from rolo_claude.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale
+        ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
+        if ok is False:
+            print("rolo-claude models: could not refresh from Anthropic", file=sys.stderr)
+
+    # H15 item 21.2: a provider with real credentials but not ENABLED shows
+    # one line instead of its table -- same rule `/model`/the init picker/
+    # doctor all follow; `rolo-claude providers enable <name>` is the fix
+    # every one of those surfaces names too.
+    from rolo_claude.providers.enablement import is_enabled
+    or_enabled = is_enabled("openrouter")
+    dbx_enabled = is_enabled("databricks")
+
     if args.json:
-        payload = {"openrouter": models}
+        payload = {"openrouter": models if or_enabled else {}}
+        if not or_enabled and models:
+            payload["openrouter_disabled"] = True
         if dbx is not None:
-            payload["databricks"] = _dbx_rows(endpoints, derive_workspace_root(dbx.host), state_dir, urls=args.urls)
-            if dbx_diff is not None:
-                payload["databricks_diff"] = dbx_diff
+            if dbx_enabled:
+                payload["databricks"] = _dbx_rows(endpoints, derive_workspace_root(dbx.host), state_dir,
+                                                    urls=args.urls)
+                if dbx_diff is not None:
+                    payload["databricks_diff"] = dbx_diff
+            elif endpoints:
+                payload["databricks_disabled"] = True
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
+    if not or_enabled and models:
+        print(f"OpenRouter: {len(models)} model(s) cached, but OpenRouter is not enabled -- "
+              f"run `rolo-claude providers enable openrouter` to show them.")
+        models = {}
     print("OpenRouter models (models.json):")
     print(f"{'id':<48} {'ctx':>8} {'out':>8} {'in/M':>10} {'out/M':>10}    ({ROW_HEADER})")
     for mid in sorted(models):
@@ -250,7 +279,10 @@ def cmd_models(argv) -> int:
               f"{format_price_per_m(_price_per_m(pricing.get('prompt'))):>10} "
               f"{format_price_per_m(_price_per_m(pricing.get('completion'))):>10}")
 
-    if dbx is not None and endpoints:
+    if dbx is not None and endpoints and not dbx_enabled:
+        print(f"\nDatabricks: {len(endpoints)} endpoint(s) cached, but Databricks is not enabled -- "
+              f"run `rolo-claude providers enable databricks` to show them.")
+    elif dbx is not None and endpoints:
         root = derive_workspace_root(dbx.host)
         rows = _dbx_rows(endpoints, root, state_dir, urls=args.urls)
         print("\nDatabricks endpoints (dbx-endpoints.json):")

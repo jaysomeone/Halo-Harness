@@ -30,6 +30,77 @@ nothing raises a clean `InvalidModelError` naming every accepted form (exit
 A trailing `[1m]` suffix (a long-context variant marker) passes through
 unchanged on every full id/alias form.
 
+### `cc:`/`ant:` alias table
+
+The same bare names resolve for both prefixes (`providers/cc_models.py`
+`CC_ALIASES`/`ANT_ALIASES`); `opus` and `sonnet` are deliberately-moving
+"latest" pointers (today both resolve to the `-5-5` point release) --
+every other name is a specific, pinned version. `/model`, `rolo-claude
+models` and the init picker show the resolved id next to each alias (e.g.
+`cc:opus -> claude-opus-5-5 (latest Opus)`) for exactly this reason: `opus`
+and `opus-5.5` are the same model.
+
+| Alias | `cc:` resolves to | `ant:` resolves to |
+|---|---|---|
+| `fable` | `claude-fable-5-1` | `claude-fable-5-1` |
+| `opus` (latest Opus) | `claude-opus-5-5` | `claude-opus-5-5` |
+| `opus-5.5` | `claude-opus-5-5` | `claude-opus-5-5` |
+| `opus-5` / `opus-5.0` | `claude-opus-5` | `claude-opus-5` |
+| `opus-4.8` | `claude-opus-4-8` | `claude-opus-4-8` |
+| `opus-4.6` | `claude-opus-4-6` | `claude-opus-4-6` |
+| `sonnet` (latest Sonnet) | Claude Code's own `sonnet` pointer (today `claude-sonnet-5-5`) | `claude-sonnet-5-5` |
+| `sonnet-5.5` | `claude-sonnet-5-5` | `claude-sonnet-5-5` |
+| `sonnet-5` | `claude-sonnet-5` | `claude-sonnet-5` |
+| `haiku` | Claude Code's own `haiku` pointer (today `claude-haiku-4-5-20251001`) | `claude-haiku-4-5-20251001` |
+
+`rolo-claude models --cc --refresh` re-pings each alias (a cheap `-p
+--max-turns 1` call) and caches the REAL id it got back to
+`~/.rolo-claude/cc-models.json`, consulted before this static table for
+`sonnet`/`haiku` specifically (the two whose target moves as Anthropic
+ships new point releases) -- so a stale hardcoded id here is never the
+only source once a refresh has run.
+
+## Provider enablement
+
+A provider's models reach `/model`/`rolo-claude models`/the `init` default
+pick/`doctor` once it is **enabled** -- and (H15 part 2 addendum) that
+happens AUTOMATICALLY, straight from real credentials, no `init`/`providers
+enable` step required: OpenRouter/Anthropic API (key)/TypeSafe auto-enable
+once their key is found (env file, shell env, or the settings env chain);
+Databricks once a host AND token are found (same sources, plus
+`~/.databrickscfg`); Claude Code subscription (`cc:`) ONLY when `claude
+auth status` reports `loggedIn` with `authMethod` exactly `claude.ai` -- a
+`claude` driven by an API token or a custom base URL (a work box's own
+settings-driven login) never auto-enables it. `~/.rolo-claude/config.json`'s
+`"providers"` block stores OVERRIDES only: `rolo-claude providers enable/
+disable <name>` (or `/providers enable/disable <name>`, or completing a
+tab in `rolo-claude init`) writes an explicit `true`/`false` there that
+always wins over auto-detection -- `enabled: false` hides an auto-enabled
+provider, `enabled: true` forces one on with no credentials at all. The
+prefix table (also used by the `/model` picker's group headers, `init`'s
+own tabs, `rolo-claude providers`/`/providers`, and `doctor`):
+
+| Prefix | Label | Provider name (`rolo-claude providers`) |
+|---|---|---|
+| `dbx:` | Databricks | `databricks` |
+| `or:` | OpenRouter | `openrouter` |
+| `ant:` | Anthropic API (key) | `anthropic` |
+| `cc:` | Claude Code subscription | `claude_subscription` |
+| *(none yet)* | TypeSafe | `typesafe` -- stores `TYPESAFE_API_KEY` only, for a later feature |
+
+A hand-typed ref whose provider isn't enabled is refused with a one-line
+message -- for `claude_subscription` specifically (when auto-detection
+found nothing, never for an explicit override) that message is the SAME
+precise reason (not logged in / claude not installed / logged in via a
+non-claude.ai authMethod, each with its own fix) a turn would have failed
+with anyway, just surfaced earlier; every other provider names the
+`rolo-claude providers enable <name>` fix. A provider that's detected (real
+credentials/login) but explicitly disabled shows one dim hint line in
+`/model` instead of a selectable row. `rolo-claude providers`/`/providers`
+shows each provider's status as one of `auto (detected from <source>)`,
+`disabled by you`, `enabled by you`, or `not set up`, plus reachable/cached
+model count.
+
 ## Families and their rules
 
 `providers/profiles.py::model_family(model_id)` classifies a bare upstream
@@ -286,7 +357,7 @@ changed. The picker is a filterable, arrow-key list (`Up`/`Down`/
 `PageUp`/`PageDown`/`Home`/`End` move the highlight, typing filters,
 `Enter` confirms, `Esc` cancels -- the filter box itself keeps keyboard
 focus throughout) grouped by provider/family, one header per group:
-OpenRouter, `claude.ai subscription` (shown only when `claude auth status`
+OpenRouter, `Claude Code subscription` (shown only when `claude auth status`
 reports an actual claude.ai login -- never on a box whose `claude` is only
 logged in via, say, a Databricks work box's own settings), and
 `Databricks (<family>)` per family, each row showing which gateway path

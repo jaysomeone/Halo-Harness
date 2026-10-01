@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -150,6 +153,14 @@ class _FakeApp:
     def suspend(self):
         import contextlib
         return contextlib.nullcontext()
+
+    def _enter_suspend_for_editor(self):
+        # 1.0.1 part 2 fixpass finding 14: real BridgeApp pauses its hang
+        # watchdog around suspend() -- nothing to pause in this fake.
+        pass
+
+    def _exit_suspend_for_editor(self):
+        pass
 
 
 @test

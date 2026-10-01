@@ -519,6 +519,14 @@ to filter, same `ctx`/`out`/price columns documented under
 the interactive picker itself falls back to a numbered list with no real
 terminal to draw into.
 
+**Install once, run anywhere.** `init`'s own Summary step ends with the SAME
+"command on PATH" line `doctor` prints (see above) -- when `rolo-claude`
+doesn't resolve to a real installed console script, it names the exact fix
+(`uv tool install --reinstall .` when `uv` is present, else `pip install
+--user -e .`, both re-run after every `git pull`) and reminds you to run the
+command from any directory, since the checkout itself is only ever needed
+for `git pull`.
+
 Worked example (a scratch home, so nothing real is touched):
 ```sh
 BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude init --provider openrouter --yes --no-live
@@ -543,6 +551,8 @@ Summary:
    default model: or:deepseek/deepseek-v4.1-flash
    wrote /tmp/demo-home/.rolo-claude/config.json
    Run `rolo-claude` to start.
+   [WARN] rolo-claude command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
+   Run it from any directory -- the checkout is only for `git pull`.
 ```
 
 ## `rolo-claude doctor`
@@ -580,9 +590,20 @@ file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
 plugin-provided MCP servers, the OS/WSL/Kali platform hint, `~/.local/bin` on
 PATH (Linux), tmux mouse mode (inside tmux), the three cached-catalog ages,
 session count + `/improve` config, clipboard backend, configured MCP servers
-(eager vs. lazy), and the resolved default model. Exit 0 unless something is
-`[MISSING]` (a `[WARN]` alone, e.g. "no Databricks configured", never fails
-the command).
+(eager vs. lazy), the resolved default model, how many of the five providers
+are enabled (`databricks`/`openrouter`/`anthropic`/`claude_subscription`/
+`typesafe` -- see "`rolo-claude providers`" below), and the `rolo-claude`
+command itself on PATH. Exit 0 unless something is `[MISSING]` (a `[WARN]`
+alone, e.g. "no Databricks configured", never fails the command).
+
+**Install once, run anywhere.** The "command on PATH" check fails WARN when
+`rolo-claude` either isn't found at all or resolves to this checkout's own
+`bin/` wrapper (which only works from inside the checkout) -- its own
+`-> fix:` names the exact reinstall command for whichever tool is on this
+box: `uv tool install --reinstall .` (run from the checkout) when `uv` is
+present, else `pip install --user -e .`. Either one needs re-running after
+every `git pull` -- an editable/tool install does not auto-refresh the
+installed console script on its own.
 
 ```sh
 BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude doctor
@@ -597,12 +618,53 @@ rolo-claude doctor
   [OK] /improve: enabled=True hint=True model=(small/session model) since_days=7 max_candidates=8
   [OK] MCP servers: none configured
   [OK] Default model: not set in config.json -- built-in default 'or:deepseek/deepseek-v4.1-flash' applies (BRIDGE_MODEL/routes.json still win when set)
+  [OK] Providers: 0/5 enabled (none)
+  [WARN] rolo-claude command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
 ```
 (trimmed -- a real run has one line per check; see `docs/TROUBLESHOOTING.md`
 for what each WARN/MISSING line means)
 
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
+
+## `rolo-claude providers`
+
+```
+Usage: rolo-claude providers [list|enable <name>|disable <name>|setup <name>]
+Providers: databricks, openrouter, anthropic, claude_subscription, typesafe
+```
+
+Detected credentials/a real claude.ai login AUTO-enable a provider (H15
+part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe once their key
+is found (env file, shell env, or the settings env chain), Databricks once
+a host AND token are found (same sources, plus `~/.databrickscfg`), Claude
+Code subscription (`cc:`) ONLY when `claude auth status` reports
+`loggedIn` with `authMethod` exactly `claude.ai`. No `rolo-claude init` run
+is required for this. `~/.rolo-claude/config.json`'s `"providers"` block
+stores OVERRIDES only -- `enable <name>`/`disable <name>` write an explicit
+`true`/`false` there that always wins over auto-detection (`cc`/`ant`/
+`dbx`/`or` are accepted aliases for the canonical names); `setup <name>`
+needs a real terminal and runs the same per-provider tab `rolo-claude init`
+shows.
+
+Bare `rolo-claude providers` (or `list`) prints one row per provider --
+status (`auto (detected from <source>)` / `disabled by you` / `enabled by
+you` / `not set up`), reachable, cached model count -- plus a trailing
+OpenRouter balance line once a background fetch has ever succeeded (see
+`rolo-claude models`/`/cost`). See `docs/MODELS.md`'s "Provider
+enablement" section for the full prefix/label table.
+
+```sh
+rolo-claude providers
+```
+```
+provider                    status                                   reachable                                  models
+Databricks                  not set up                               not set up                                      -
+OpenRouter                  auto (detected from env file / shell env) reachable                                     412
+Anthropic API (key)         not set up                                not set up                                      -
+Claude Code subscription    not set up                                not set up                                      -
+TypeSafe                    not set up                                not set up                                      -
+```
 
 ## `rolo-claude work-matrix`
 

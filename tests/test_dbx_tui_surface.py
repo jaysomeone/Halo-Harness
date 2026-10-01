@@ -22,11 +22,20 @@ class _Env:
                        ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE",
                         "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
+                        "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY",
                         "BRIDGE_TEST_CC_AUTH_STATUS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-tui-surface-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
         os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
+        # H15 part 2 addendum: `anthropic`/`openrouter`/`typesafe` now
+        # auto-enable straight from these keys (providers/enablement.py) --
+        # popped here too (never just left to whatever the real shell/an
+        # earlier test happened to leave behind) so is_enabled()/
+        # credentials_present() are as deterministic here as the Databricks
+        # vars above already were.
+        for k in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
+            os.environ.pop(k, None)
         # 1.0.1 hotfix addendum 9: Controller.list_models() now calls
         # claude_auth_status() to decide whether to show the cc: group --
         # pinned to a deterministic "not logged in" here (same convention
@@ -159,6 +168,12 @@ def _controller(state_dir):
 def test_list_models_includes_databricks_grouped_by_family_hides_non_chat(ctx: Ctx):
     from rolo_claude.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
+        # H15 part 2 addendum: Databricks now auto-enables from real
+        # credentials, not "no providers block at all" -- this test cares
+        # about grouping/rendering an already-cached catalog, not live
+        # credential resolution, so a fake host/token is enough.
+        os.environ["BRIDGE_DBX_BASE_URL"] = "https://your-workspace.cloud.databricks.com"
+        os.environ["BRIDGE_DBX_TOKEN"] = "tok"
         write_dbx_endpoints_json(env.state_dir, [
             _parsed("databricks-glm-5-3", "glm-5-3", ["mlflow/v1/chat/completions", "anthropic/v1/messages"]),
             _parsed("databricks-claude-opus-4-6", "claude-opus-4-6",
@@ -214,7 +229,7 @@ def test_list_models_shows_cc_group_when_logged_in_via_claude_ai(ctx: Ctx):
             cc_rows = [m for m in models if m.get("provider") == "cc"]
             ctx.check(f"cc: rows present, got {len(cc_rows)}", len(cc_rows) > 0)
             ctx.check(f"grouped under the subscription label, got {cc_rows[0].get('group')}",
-                      cc_rows[0].get("group") == "claude.ai subscription")
+                      cc_rows[0].get("group") == "Claude Code subscription")
     finally:
         if old is None:
             os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)

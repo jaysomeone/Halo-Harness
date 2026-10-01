@@ -196,6 +196,7 @@ directly by the features that own them:
 | Variable | Purpose |
 |---|---|
 | `OPENROUTER_API_KEY` | OpenRouter credential |
+| `OPENROUTER_MANAGEMENT_KEY` | a SEPARATE, higher-privilege OpenRouter key (never the ordinary one above) for the whole-account balance (`GET /credits`) the status bar's "OR $X left" segment/`/cost`/`/providers` show (H15 part 2 addendum 4) -- optional; without it, that segment falls back to the ordinary key's own `/key` usage/limit figures |
 | `BRIDGE_OPENROUTER_BASE_URL` | override the OpenRouter base URL (default `https://openrouter.ai/api/v1`) |
 | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Databricks credential (see `docs/DATABRICKS.md` for the full discovery chain) |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` | Claude Code's own work-box env names -- read as a Databricks credential when the host matches a Databricks domain |

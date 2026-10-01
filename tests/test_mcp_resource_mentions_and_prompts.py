@@ -12,7 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_mcp_server import running_manager
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 from rolo_claude.mcp.manager import McpServerConfig
+
+ensure_default_provider_credentials()
 
 test, TESTS = new_registry()
 
@@ -88,44 +91,58 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
     """The two real call sites (Controller.ingest_at_mentions, headless.py's
     _append_at_mention_snapshots) actually append a log snapshot for a
     resource-only mention -- not just the standalone mentions.py functions."""
+    import os
     import tempfile
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
 
-    with running_manager(_fake_config()) as mgr:
-        cwd = Path(tempfile.mkdtemp(prefix="mcp-mentions-"))
-        session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
-        model_ref = parse_model_ref("or:mock/model")
-        session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
-                           state_dir=Path(tempfile.mkdtemp(prefix="mcp-mentions-state-")), model_label="or:mock/model",
-                           session_context=session_ctx, mcp_manager=mgr)
+    # H15 Part D2.1: `Session`'s own `SessionLog` ALWAYS resolves its
+    # storage root via `bridge_home()` -- independent of the `state_dir=`
+    # passed to `Session` itself (that only sets `Session.state_dir`,
+    # config/catalog caching, never where the log is written) -- scoped
+    # here, the one place in this module that builds a real Session.
+    old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="mcp-mentions-state-env-")))
+    try:
+        with running_manager(_fake_config()) as mgr:
+            cwd = Path(tempfile.mkdtemp(prefix="mcp-mentions-"))
+            session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
+            model_ref = parse_model_ref("or:mock/model")
+            session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
+                               state_dir=Path(tempfile.mkdtemp(prefix="mcp-mentions-state-")), model_label="or:mock/model",
+                               session_context=session_ctx, mcp_manager=mgr)
 
-        from rolo_claude.headless import _append_at_mention_snapshots
-        _append_at_mention_snapshots(session, "look at @fake:fake://note please", cwd)
-        snapshot_nodes = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
-        ctx.check(f"headless path appended a snapshot, got {len(snapshot_nodes)}", len(snapshot_nodes) == 1)
-        text = snapshot_nodes[0]["content"][0]["text"]
-        ctx.check(f"contains the real resource text, got {text!r}", "fake MCP resource" in text)
+            from rolo_claude.headless import _append_at_mention_snapshots
+            _append_at_mention_snapshots(session, "look at @fake:fake://note please", cwd)
+            snapshot_nodes = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
+            ctx.check(f"headless path appended a snapshot, got {len(snapshot_nodes)}", len(snapshot_nodes) == 1)
+            text = snapshot_nodes[0]["content"][0]["text"]
+            ctx.check(f"contains the real resource text, got {text!r}", "fake MCP resource" in text)
 
-        from rolo_claude.controller import Controller
-        controller = Controller(session=session, cwd=cwd)
-        controller.ingest_at_mentions("also see @fake:fake://note")
-        # H9 whole-tree review finding 14: the `@server:resource` fetch now
-        # runs on a background thread (never blocking `ingest_at_mentions`
-        # itself, which is called synchronously on the UI thread on every
-        # real submit/steer) -- the snapshot lands whenever that thread
-        # finishes, which is soon but not necessarily by the time this
-        # call returns.
-        deadline = time.monotonic() + 10.0
-        snapshot_nodes2 = []
-        while time.monotonic() < deadline:
-            snapshot_nodes2 = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
-            if len(snapshot_nodes2) >= 2:
-                break
-            time.sleep(0.05)
-        ctx.check(f"Controller.ingest_at_mentions ALSO appended one (now 2 total), got {len(snapshot_nodes2)}",
-                  len(snapshot_nodes2) == 2)
+            from rolo_claude.controller import Controller
+            controller = Controller(session=session, cwd=cwd)
+            controller.ingest_at_mentions("also see @fake:fake://note")
+            # H9 whole-tree review finding 14: the `@server:resource` fetch now
+            # runs on a background thread (never blocking `ingest_at_mentions`
+            # itself, which is called synchronously on the UI thread on every
+            # real submit/steer) -- the snapshot lands whenever that thread
+            # finishes, which is soon but not necessarily by the time this
+            # call returns.
+            deadline = time.monotonic() + 10.0
+            snapshot_nodes2 = []
+            while time.monotonic() < deadline:
+                snapshot_nodes2 = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
+                if len(snapshot_nodes2) >= 2:
+                    break
+                time.sleep(0.05)
+            ctx.check(f"Controller.ingest_at_mentions ALSO appended one (now 2 total), got {len(snapshot_nodes2)}",
+                      len(snapshot_nodes2) == 2)
+    finally:
+        if old_state_dir is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir
 
 
 # ---- /mcp__server__prompt slash commands -----------------------------------

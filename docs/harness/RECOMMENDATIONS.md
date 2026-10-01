@@ -122,7 +122,8 @@ sessions were removed:
 ## 1.0.1 follow-ups
 
 Two minor findings from the H14c fixpass review (`review-findings-101.md`, findings 16 and 18)
-were deliberately left out of that pass -- noted here for the next round, code untouched:
+were deliberately left out of that pass -- noted here for the next round, code untouched. A third,
+from the 1.0.1 part 2 (H15) effort-remainder work, is added below for the same reason.
 
 - **Finding 16 -- one pending-card slot, up to 4 concurrent sub-agent asks.** `tui/app.py`'s
   `self.pending_card` is a single slot; when a second foreground sub-agent raises a
@@ -145,3 +146,57 @@ were deliberately left out of that pass -- noted here for the next round, code u
   specifically (the retry has no chance of helping a DNS/routing problem the way it can help a
   dropped keep-alive) or just documenting the real 16s figure; the socket leak needs a weak
   reference or an explicit close callback threaded through `_bounded_connect`'s abandoned thread.
+- **Finding 19 (H15) -- the gpt-6 family's own fix suggestion is never taken.** The live 400 this
+  harness retries around (`is_effort_with_tools_rejected_message` in `providers/errors.py`: "Function
+  tools with reasoning_effort are not supported for gpt-6-sol in /v1/chat/completions... To use
+  function tools, use /v1/responses or set reasoning_effort to 'none'") names TWO fixes; this
+  harness only ever takes the second (retry the SAME `/v1/chat/completions` call with
+  `reasoning_effort: "none"`, now also learned per-endpoint across sessions via
+  `providers/learned_rules.py` so the live 400 only has to happen once per model). The first --
+  actually switching that route to OpenAI's newer `/v1/responses` endpoint, which this harness has
+  no dialect for at all -- would let a tool-using turn on gpt-6-sol/gpt-oss-family models keep real
+  reasoning effort instead of being forced to `none` for the turn's whole tool-calling portion.
+  Adding a `/v1/responses` dialect is a real body/stream-shape project (different request envelope,
+  different SSE event names, different tool-call accumulation), not a small patch -- worth scoping
+  as its own piece of work rather than folded into a future hotfix.
+- **Finding 20 (H15 part 2 addendum) -- OpenRouter/Anthropic/TypeSafe auto-detection only ever
+  checks bare `os.environ`, never the settings env chain it's documented to.** The addendum's own
+  wording for provider auto-detection is "env file, shell env, or the settings env chain" for all
+  three -- `providers/enablement.py::credentials_present` calls `resolve_openrouter()`/
+  `resolve_anthropic()` with no `env=` override, and unlike `resolve_databricks()` (which already
+  has its own internal `load_settings_env_chain(Path.cwd())` fallback for exactly this reason,
+  confirmed still working via `tests/test_dbx_work_routing.py`), neither function has an equivalent
+  -- a key set ONLY in a project's trusted `.claude/settings.json`/`settings.local.json` `env` block
+  (never shell env, never the harness's own env file) is invisible to auto-detection, even though a
+  REAL session (`headless.build_session`, which always passes `Settings.effective_env` explicitly)
+  would resolve it fine. Narrow in practice (Databricks work-box users, this harness's own central
+  use case, are unaffected), but worth giving `resolve_openrouter`/`resolve_anthropic` the same
+  `_settings_env()`-style fallback `resolve_databricks` already has, rather than leaving the three
+  providers inconsistent with each other.
+- **Finding 21 (1.0.1 final pass, N2) -- settings-only keys may still never get a catalog.** The
+  three catalog refreshers (`refresh_dbx_catalog_if_stale`/`refresh_openrouter_catalog_if_stale`/
+  `refresh_anthropic_catalog_if_stale`) each detect "is this provider configured at all" through
+  whatever `env` they're handed; now that the launch-time/`/model`-open catalog worker, the
+  OpenRouter balance worker, and the headless session-start Databricks thread all pass the session's real
+  trust-filtered `effective_env` (N2c), a key living only in a settings.json `env` block should
+  already reach them -- worth a dedicated verification pass to confirm this finding is actually
+  closed rather than assuming it from the plumbing alone.
+- **Finding 22 -- `listing_effective_env()` ignores `--cwd`.** It always resolves against
+  `cwd or Path.cwd()`, never a caller-supplied `--cwd` flag value, so a listing surface (`/providers`,
+  doctor, the init tabs) invoked against an explicit `--cwd` can disagree with what a real session
+  against that same path would resolve.
+- **Finding 23 -- `--settings` env is invisible to the listing surfaces.** `listing_effective_env()`'s
+  own `resolve_settings()` call never passes a `settings_flag`, so a key supplied only via `--settings`
+  is invisible to `/providers`/doctor/the init tabs even though a real session resolves `--settings`
+  into its own `effective_env`.
+- **Finding 24 -- a `/models refresh` that loses the single-flight lock reports "refresh failed".**
+  The generic single-flight-busy note ("a refresh is already in progress -- keeping the cached
+  catalog") surfaces to an explicit, user-requested `/models refresh`/`/dbx` exactly like a real
+  network/auth failure would, with no way to tell "try again in a second" from "something is actually
+  wrong."
+- **Finding 25 -- SIGUSR1 dumps stop silently after the per-process cap.** Once the hang-diagnostics
+  per-process dump cap is reached, a further SIGUSR1 produces no file and no log line, leaving
+  whoever sent the signal with no indication it was even received.
+- **Finding 26 -- the bare-alias path (`/model opus`) still spawns `claude auth status` on the UI
+  thread when `ANTHROPIC_API_KEY` is unset.** Pre-existing since H11; unrelated to this pass's M3 fix
+  (the init tabs' own "Check login" button), which only moved THAT spawn off the init app's UI thread.

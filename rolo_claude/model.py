@@ -103,12 +103,28 @@ def _databricks_model_ref(raw: str, bare: str) -> "ModelRef":
     (`providers.dbx_routing.resolve_databricks_dialect`), and refuses a
     known non-chat endpoint (embeddings/whisper) with a clear message
     instead of quietly building a ModelRef nothing can actually drive."""
+    _refuse_if_disabled("databricks")
     from rolo_claude.providers.dbx_routing import refuse_if_non_chat, resolve_databricks_dialect
     clean, dialect = resolve_databricks_dialect(bare)
     err = refuse_if_non_chat(clean)
     if err:
         raise InvalidModelError(err)
     return ModelRef(raw=raw, provider="databricks", model=clean, dialect=dialect)
+
+
+def _refuse_if_disabled(provider_key: str) -> None:
+    """H15 item 21.3: a hand-typed ref whose provider resolves fine but
+    isn't ENABLED is refused with the same one-line message `/model`'s own
+    dim hint uses for a detected-but-disabled provider -- never silently
+    allowed just because credentials happen to be present (item 21.1:
+    detected credentials/a claude.ai login never enable anything on their
+    own). A box with no `providers` block at all (every pre-H15 install,
+    and most existing tests) is unaffected -- `is_provider_disabled_
+    message` fails open in that case."""
+    from rolo_claude.providers.enablement import is_provider_disabled_message
+    msg = is_provider_disabled_message(provider_key)
+    if msg:
+        raise InvalidModelError(msg)
 
 
 @dataclass(frozen=True)
@@ -157,14 +173,17 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         return _databricks_model_ref(raw, bare)
     if resolved.startswith(_OR_PREFIX):
         bare = resolved[len(_OR_PREFIX):]
+        _refuse_if_disabled("openrouter")
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
     if resolved.startswith(_CC_PREFIX):
         from rolo_claude.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
+        _refuse_if_disabled("claude_subscription")
         return ModelRef(raw=raw, provider="cc", model=resolve_cc_alias(bare), dialect="cc-subprocess")
     if resolved.startswith(_ANT_PREFIX):
         from rolo_claude.providers.cc_models import resolve_ant_alias
         bare = resolved[len(_ANT_PREFIX):]
+        _refuse_if_disabled("anthropic")
         return ModelRef(raw=raw, provider="anthropic", model=resolve_ant_alias(bare), dialect="anthropic-passthrough")
     if "/" in resolved and resolved.count("/") == 1:
         # The bare `vendor/model` OpenRouter form needs BOTH halves: a
@@ -173,6 +192,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         # only to fail at request time with an upstream 400.
         vendor, _, model_part = resolved.partition("/")
         if vendor and model_part and not any(ch.isspace() for ch in resolved):
+            _refuse_if_disabled("openrouter")
             return ModelRef(raw=raw, provider="openrouter", model=resolved, dialect="openai-chat")
     # 1.0.1 hotfix 6: a bare name resolves to the Databricks route whenever
     # it EITHER matches the generic `databricks-*`/`system.ai.*` shape OR is

@@ -14,6 +14,7 @@ timeout guarantee from us to rely on).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -65,9 +66,12 @@ def run_statusline_command(command: str, payload: dict, *, cwd: "Path | str",
     if not command or not command.strip():
         return None
     try:
+        # Same child-env hygiene as hooks and tools: the user's statusLine
+        # script never inherits the harness's provider secrets.
+        from rolo_claude.providers.config import tool_child_env
         proc = subprocess.run(
             command, shell=True, cwd=str(cwd), input=json.dumps(payload), capture_output=True,
-            text=True, timeout=timeout_s,
+            text=True, timeout=timeout_s, env=tool_child_env(dict(os.environ)),
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

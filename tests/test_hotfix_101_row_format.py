@@ -250,34 +250,48 @@ def test_controller_list_models_openrouter_string_prices_not_blank(ctx: Ctx):
         model_ref = _FakeModelRef()
         model_profile = _FakeModelProfile()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        state_dir = Path(tmp)
-        write_models_json(state_dir, [{
-            "id": "vendor/model-x", "context_length": 128000, "max_output_tokens": 8192,
-            "pricing": {"prompt": "0.0000008", "completion": "0.0000024"},
-        }])
-        ctrl = Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=state_dir, routes={})
-        rows = {m["ref"]: m for m in ctrl.list_models()}
-        row = rows["or:vendor/model-x"]
-        ctx.check(f"price_in_per_m populated (not None) from a string price, got {row}",
-                  row.get("price_in_per_m") is not None)
-        ctx.check(f"price_out_per_m populated (not None) from a string price, got {row}",
-                  row.get("price_out_per_m") is not None)
+    # H15 part 2 addendum: OpenRouter's group in list_models() is now gated
+    # by is_enabled("openrouter"), which auto-detects from a real key --
+    # scoped here (save/restore) so this test's own catalog isn't hidden.
+    old_key = os.environ.get("OPENROUTER_API_KEY")
+    os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            write_models_json(state_dir, [{
+                "id": "vendor/model-x", "context_length": 128000, "max_output_tokens": 8192,
+                "pricing": {"prompt": "0.0000008", "completion": "0.0000024"},
+            }])
+            ctrl = Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=state_dir, routes={})
+            rows = {m["ref"]: m for m in ctrl.list_models()}
+            row = rows["or:vendor/model-x"]
+            ctx.check(f"price_in_per_m populated (not None) from a string price, got {row}",
+                      row.get("price_in_per_m") is not None)
+            ctx.check(f"price_out_per_m populated (not None) from a string price, got {row}",
+                      row.get("price_out_per_m") is not None)
+    finally:
+        if old_key is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = old_key
 
 
 class _Env:
-    """Scopes ONLY what test_cmd_models_cli_prints_openrouter_prices_not_
-    blank below touches -- cmd_models(argv) (no --refresh) never reads any
-    provider credential, only BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/BRIDGE_ENV_
-    FILE (bridge_home()'s own lookup)."""
+    """Scopes what test_cmd_models_cli_prints_openrouter_prices_not_blank
+    below touches -- cmd_models(argv) (no --refresh) never reads the
+    network, but (H15 part 2 addendum) DOES now consult is_enabled
+    ("openrouter"), which auto-detects from a real OPENROUTER_API_KEY, so
+    that's scoped here too alongside BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/
+    BRIDGE_ENV_FILE (bridge_home()'s own lookup)."""
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in
-                       ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE")}
+                       ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE", "OPENROUTER_API_KEY")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-price-cli-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
         os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         self.state_dir = d / ".rolo-claude"
         return self
 

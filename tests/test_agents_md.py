@@ -10,6 +10,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
+
+# H15 part 2 addendum 3.1: a believable default credential (never a real
+# one) plus a scoped state dir keep every or:/dbx:/ant: ref below resolving
+# exactly as it did before parse_model_ref started refusing an
+# auto-detected-disabled provider.
+ensure_scoped_state_dir_once()
+ensure_default_provider_credentials()
 from rolo_claude.config.agents_md import (
     AgentSpec, BUILTIN_NAMES, agent_mention_instruction, discover_agents, find_agent_mentions,
     load_spec_from_file, parse_agents_json, resolve_agent_model,

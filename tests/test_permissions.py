@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import _SETTINGS_LOCAL_JSON
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+
+ensure_default_provider_credentials()
 from rolo_claude import permissions as P
 from rolo_claude.tools.read import ReadTool
 from rolo_claude.tools.edit import EditTool
@@ -791,23 +794,36 @@ def test_h9b_f21_explicit_user_deny_rule_still_wins_over_the_spill_dir_allow(ctx
 def test_h9b_f21_real_session_wires_tool_results_dir_from_its_own_log(ctx: Ctx):
     """End to end: a real Session sets this up automatically -- no caller
     has to remember to."""
+    import os
     from rolo_claude.agent.assemble import SessionContext
     from rolo_claude.agent.loop import Session
     from rolo_claude.model import ModelProfile, parse_model_ref
 
-    cwd = Path(tempfile.mkdtemp(prefix="h9b-f21-session-"))
-    session_ctx = SessionContext(cwd=cwd, model_label="or:mock/x", bare=True)
-    model_ref = parse_model_ref("or:mock/x")
-    engine = P.PermissionEngine(mode="default", cwd=cwd)
-    session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
-                       state_dir=Path(tempfile.mkdtemp(prefix="h9b-f21-state-")), model_label="or:mock/x",
-                       session_context=session_ctx, permission_engine=engine)
-    ctx.check("tool_results_dir was wired automatically", engine.tool_results_dir is not None)
-    ctx.check(f"it matches THIS session's own log dir/session_id, got {engine.tool_results_dir}",
-              engine.tool_results_dir == session.log.dir / session.log.session_id / "tool-results")
-    spill_file = engine.tool_results_dir / "call_1.txt"
-    d = engine.decide("Read", {"file_path": str(spill_file)})
-    ctx.check(f"and Read on it is allowed, got {d.action}", d.action == "allow")
+    # H15 Part D2.1: `Session`'s own `SessionLog` ALWAYS resolves its
+    # storage root via `bridge_home()` -- independent of the `state_dir=`
+    # passed to `Session` itself -- scoped here, the one test in this file
+    # that builds a real Session.
+    old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="h9b-f21-state-env-")))
+    try:
+        cwd = Path(tempfile.mkdtemp(prefix="h9b-f21-session-"))
+        session_ctx = SessionContext(cwd=cwd, model_label="or:mock/x", bare=True)
+        model_ref = parse_model_ref("or:mock/x")
+        engine = P.PermissionEngine(mode="default", cwd=cwd)
+        session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
+                           state_dir=Path(tempfile.mkdtemp(prefix="h9b-f21-state-")), model_label="or:mock/x",
+                           session_context=session_ctx, permission_engine=engine)
+        ctx.check("tool_results_dir was wired automatically", engine.tool_results_dir is not None)
+        ctx.check(f"it matches THIS session's own log dir/session_id, got {engine.tool_results_dir}",
+                  engine.tool_results_dir == session.log.dir / session.log.session_id / "tool-results")
+        spill_file = engine.tool_results_dir / "call_1.txt"
+        d = engine.decide("Read", {"file_path": str(spill_file)})
+        ctx.check(f"and Read on it is allowed, got {d.action}", d.action == "allow")
+    finally:
+        if old_state_dir is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir
 
 
 if __name__ == "__main__":

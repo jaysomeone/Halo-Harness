@@ -41,6 +41,22 @@ def bridge_home() -> Path:
     return home() / ".rolo-claude"
 
 
+def background_net_disabled() -> bool:
+    """Test seam (1.0.1 part 2 fixpass finding 10): `BRIDGE_TEST_NO_
+    BACKGROUND_NET=1` tells every background catalog/balance-refresh
+    worker (the TUI's launch-time catalog refresh, the OpenRouter balance
+    worker, `/model`'s own open-time refresh, and `headless.build_session`'s
+    session-start Databricks thread) to return immediately instead of
+    touching the network -- set by `tests.helpers.provider_env_defaults.
+    ensure_default_provider_credentials`, so mounting a BridgeApp or
+    building a session in a test never races a real (or fake-credentialed)
+    HTTP call against openrouter.ai/api.anthropic.com/a fake Databricks
+    host just from being constructed (contradicting `headless.py`'s own
+    documented contract that building a session never triggers first-time
+    catalog discovery)."""
+    return os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET") == "1"
+
+
 def managed_dir() -> Path:
     """Return per-OS managed-settings directory (best effort, may not
     exist). Test seam: BRIDGE_TEST_MANAGED_DIR overrides everything below

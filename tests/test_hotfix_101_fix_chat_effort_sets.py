@@ -50,14 +50,22 @@ def test_openrouter_chat_route_no_longer_accepts_max(ctx: Ctx):
 def test_clamp_effort_downgrades_max_on_a_plain_chat_route(ctx: Ctx):
     """The end-to-end consequence: /effort max (or a stale settings value)
     on an ordinary chat route no longer reaches the wire as 'max' -- it
-    downgrades instead of 400ing every turn until the user changes it."""
+    downgrades instead of 400ing every turn until the user changes it.
+
+    1.0.1 part 2 reviewer minor 2 update: gpt-oss-120b's row (checked
+    just above) lists `xhigh` as its own strongest real level, so `max`
+    now downgrades specifically TO `xhigh` (that route's equivalent
+    ceiling) rather than falling all the way to the bland "medium"
+    default -- the plain-default fallback for a route with neither `max`
+    nor `xhigh` is covered separately in
+    tests/test_hotfix_101_effort.py::
+    test_clamp_effort_max_falls_back_to_default_on_a_route_with_neither_max_nor_xhigh."""
     from rolo_claude.providers.profiles import clamp_effort, reset_model_table_cache, resolve_profile
     reset_model_table_cache()
     profile = resolve_profile(_route("databricks", "databricks-gpt-oss-120b"))
     clamped = clamp_effort("max", profile)
     ctx.check(f"'max' is downgraded, never sent as-is, got {clamped!r}", clamped != "max")
-    ctx.check(f"downgrades to the route's own real default, got {clamped!r}",
-              clamped == (profile.reasoning_default_effort or "medium"))
+    ctx.check(f"downgrades to this route's own xhigh ceiling, got {clamped!r}", clamped == "xhigh")
 
 
 @test

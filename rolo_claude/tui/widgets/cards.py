@@ -194,13 +194,21 @@ class PermissionCard(Static, can_focus=True):
     ]
 
     def __init__(self, *, request_id: str, summary: str, reason: str,
-                 suggested_rule: Optional[str], on_decide: Callable) -> None:
+                 suggested_rule: Optional[str], on_decide: Callable,
+                 on_resolved_externally: Optional[Callable] = None) -> None:
         super().__init__("", markup=False, classes="permission-card")
         self.request_id = request_id
         self.summary = summary
         self.reason = reason
         self.suggested_rule = suggested_rule
         self._on_decide = on_decide
+        # H15 Part D2.3: for a card resolved OUTSIDE the model loop (the
+        # `!cmd` inline-shell ask has no worker thread of its own to wake
+        # up when `reevaluate_pending_permission` resolves its slot) --
+        # None (every live tool-call card, unchanged) means `resolve_
+        # externally` below stays exactly as finding 4 left it: display-
+        # only, never re-firing anything.
+        self._on_resolved_externally = on_resolved_externally
         self.awaiting_feedback = False
         self.done = False
         self._refresh()
@@ -273,6 +281,14 @@ class PermissionCard(Static, can_focus=True):
         outcome = "allowed" if action == "allow" else "denied"
         self.summary = f"{self.summary} -- {outcome} (mode changed)"
         self._refresh()
+        # H15 Part D2.3: for an inline-shell card specifically (the ONLY
+        # caller that ever passes this), the engine call above resolved
+        # its slot but nothing else is listening for that -- `on_decide`'s
+        # OWN closure (reused verbatim as `on_resolved_externally`) is
+        # what actually starts the command on allow / does nothing on
+        # deny, same as a normal digit-press would.
+        if self._on_resolved_externally is not None:
+            self._on_resolved_externally({"action": action, "scope": None, "rule": None, "message": ""})
 
 
 def _option_texts(options) -> list:
@@ -465,7 +481,7 @@ class EffortCard(Static, can_focus=True):
     }
 
     def __init__(self, *, levels: list, current: "str | None", model_id: str, on_select: Callable,
-                 descriptions: "Optional[dict]" = None) -> None:
+                 descriptions: "Optional[dict]" = None, override_note: "Optional[str]" = None) -> None:
         super().__init__("", markup=False, classes="effort-card")
         self.levels = list(levels)
         self.model_id = model_id
@@ -473,6 +489,13 @@ class EffortCard(Static, can_focus=True):
         self.index = self.levels.index(current) if current in self.levels else 0
         self._on_select = on_select
         self.done = False
+        # 1.0.1 part 2 (item 22 remainder): "the selector's description
+        # line says why" -- set when this route forces an explicit
+        # reasoning_effort override alongside tools (gpt-6's table rule, or
+        # a learned per-endpoint rule), so picking a level here still shows
+        # the user why their choice won't change what actually goes out on
+        # a tool-carrying turn.
+        self._override_note = override_note
         self._refresh()
 
     def _refresh(self) -> None:
@@ -484,6 +507,8 @@ class EffortCard(Static, can_focus=True):
         lines = [f"Effort level for {self.model_id}:", f"  {row}"]
         if desc:
             lines.append(f"  {desc}")
+        if self._override_note:
+            lines.append(f"  {self._override_note}")
         if not self.done:
             lines.append("  ←/→ (or h/l) move   Enter apply   Esc cancel")
         self.update("\n".join(lines))

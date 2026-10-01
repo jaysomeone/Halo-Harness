@@ -9,6 +9,25 @@ headless-text fallback (used for everything else: /help, /cost, /context,
 
 from __future__ import annotations
 
+from typing import Optional
+
+
+def _pending_card_note(app, cmd: str) -> "Optional[str]":
+    """1.0.1 part 2 (reviewer minor): `/effort`, `/rewind` and `/improve`
+    must not open their own card while ANY card (a live permission ask,
+    most importantly) is already pending -- that would silently replace
+    it with no way back to the original (the same one-pending-card-slot
+    class of bug deferred as finding 16), leaving a blocked tool call with
+    no visible way to answer it. Returns a one-line note to show instead,
+    or None when nothing is pending and the caller should proceed."""
+    from rolo_claude.tui.widgets.cards import PermissionCard
+    card = app.pending_card
+    if card is None:
+        return None
+    if isinstance(card, PermissionCard):
+        return f"A permission request is pending -- answer it before using /{cmd}."
+    return f"Another card is already pending -- answer it before using /{cmd}."
+
 
 async def handle_slash(app, name: str, args: str) -> None:
     name = name.lower()
@@ -17,6 +36,14 @@ async def handle_slash(app, name: str, args: str) -> None:
         # H14 scope J: /models refresh (alias /dbx) -- always off the UI
         # thread (a live Databricks probe is a real network call).
         "models": _handle_models, "dbx": _handle_dbx,
+        # 1.0.1 part 2 fixpass critical finding 1: /providers and /doctor
+        # used to have no entry here at all, so both fell through to
+        # `controller.run_slash` on the UI thread -- `/providers`'s own
+        # table build runs a real DNS+TCP+TLS reachability probe per
+        # configured host PLUS a `claude auth status` spawn, and `doctor`
+        # shells out even more; both now build their result in a
+        # `thread=True` worker and post it back with `call_from_thread`.
+        "providers": _handle_providers, "doctor": _handle_doctor,
         "resume": _handle_resume, "permissions": _handle_permissions,
         "exit": _handle_exit, "quit": _handle_exit, "theme": _handle_theme,
         # U5 scope C: sessions UX.
@@ -45,17 +72,31 @@ async def _handle_model(app, args: str) -> None:
     if args:
         _apply_model(app, args)
         return
-    # H14 scope J: auto-refresh the Databricks catalog when stale
-    # (databricks.catalog_max_age_hours, default 24), off the UI thread --
-    # the picker opens immediately with whatever's cached; a background
-    # refresh just notifies once it lands, it never blocks /model itself.
+    # H14 scope J (widened to every enabled provider by the H15 part 2
+    # addendum, see `catalog_auto_refresh_worker`): auto-refresh a stale
+    # catalog (databricks.catalog_max_age_hours, default 24) off the UI
+    # thread -- the picker opens immediately with whatever's cached; a
+    # background refresh just notifies once it lands, it never blocks
+    # /model itself.
     # 1.0.1 hotfix 15.4: own group= (every slash.py worker below gets one
     # named after its job) so no future exclusive=True worker anywhere in
     # the app can cancel one of these mid-flight by sharing the default
     # group -- see tui/app.py's git-branch/statusline fix for the bug this
     # class of omission caused.
-    app.run_worker(lambda: _dbx_auto_refresh_worker(app), thread=True, name="dbx-auto-refresh",
-                    group="dbx-auto-refresh")
+    app.run_worker(lambda: catalog_auto_refresh_worker(app), thread=True, name="catalog-auto-refresh",
+                    group="catalog-auto-refresh")
+    # 1.0.1 part 2 (reviewer minor): `cached_auth_status_is_stale`'s own
+    # TTL was never actually consulted anywhere -- the ONLY other caller
+    # (tui/app.py's on_mount) primes the cache exactly ONCE at startup, so
+    # a claude.ai login/logout during a long session stayed invisible to
+    # `/model` until the whole app restarted. Same "stale -> refresh in
+    # the background, off the UI thread" shape `catalog_auto_refresh_worker`
+    # already uses just above -- this /model open won't necessarily see
+    # the fresh value itself (the refresh races `_list_models_worker`
+    # below), but the NEXT one will, same as a Databricks catalog refresh
+    # triggered the same way.
+    app.run_worker(lambda: _cc_auth_status_auto_refresh_worker(app), thread=True, name="cc-auth-auto-refresh",
+                    group="cc-auth-auto-refresh")
     # 1.0.1 fixpass finding 1: `list_models()` -- builds ctx/price columns
     # per Databricks endpoint and (pre-fix) span the `claude auth status`
     # subprocess -- runs off the UI thread now, the exact same `thread=True`
@@ -63,6 +104,22 @@ async def _handle_model(app, args: str) -> None:
     # bound `list_sessions()` already uses just below. Measured 2-5s TUI
     # freezes on a real Kali work box before this fix.
     app.run_worker(lambda: _list_models_worker(app), thread=True, name="list-models", group="list-models")
+
+
+def _cc_auth_status_auto_refresh_worker(app) -> None:
+    """1.0.1 part 2 (reviewer minor): the ONE place `cc_models.
+    cached_auth_status_is_stale`'s TTL is actually consulted -- a cold
+    cache (nothing primed yet) or one older than `CACHED_AUTH_STATUS_TTL_S`
+    gets a real (bounded, off-the-UI-thread) `claude auth status` re-run.
+    Best-effort: any failure here is identical to the cache simply staying
+    whatever it was (list_models()'s own try/except around the read is
+    unaffected either way)."""
+    try:
+        from rolo_claude.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+        if cached_auth_status_is_stale():
+            refresh_cached_claude_auth_status()
+    except Exception:
+        pass
 
 
 def _list_models_worker(app) -> None:
@@ -75,20 +132,92 @@ def _open_model_picker(app, models) -> None:
     app.push_screen(ModelPicker(models, current=app.status_bar.model), lambda ref: _apply_model(app, ref))
 
 
-def _dbx_auto_refresh_worker(app) -> None:
-    from rolo_claude.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
+def catalog_auto_refresh_worker(app) -> None:
+    """H15 part 2 addendum 3.2a: staleness-gated (missing or
+    `databricks.catalog_max_age_hours`-old, default 24h) background refresh
+    for EVERY enabled provider's catalog -- OpenRouter/Anthropic/Databricks
+    alike -- never on the UI thread. Called both when `/model` opens
+    (`_handle_model` above) AND once at app launch (`tui/app.py`'s own
+    `on_mount`), so a provider set up with just a key/token (no `init` ever
+    run) still gets a real catalog without the user doing anything extra.
+    One combined dim notification per provider that actually changed;
+    Databricks keeps its own richer added/removed/path-type diff text,
+    OpenRouter/Anthropic just name the model count once populated."""
+    from rolo_claude.config.paths import background_net_disabled
+    if background_net_disabled():
+        return  # 1.0.1 part 2 fixpass finding 10: test seam, never touch the network
     state_dir = getattr(app.controller, "state_dir", None)
     if state_dir is None:
         return
-    result = refresh_dbx_catalog_if_stale(state_dir)
-    if result is None:
-        return  # not stale, or Databricks isn't configured -- nothing to do
-    ok, diff, _note = result
-    if not ok:
-        return  # scope J: offline/403 keeps the cache silently here -- doctor/--refresh explain why
-    summary = format_dbx_diff(diff)
-    if summary != "no changes":
-        app.call_from_thread(app.notify, f"Databricks catalog updated: {summary}", title="/model")
+    # N2c (1.0.1 final pass): the session's own trust-filtered `Settings.
+    # effective_env` (shell < user < trusted project/local < policy) --
+    # `None` (a test-constructed controller with no `settings=`) falls back
+    # to bare `os.environ`/the settings chain re-derivation, unchanged.
+    settings = getattr(app.controller, "settings", None)
+    env = settings.effective_env if settings is not None else None
+    from rolo_claude.providers.enablement import is_enabled_with_env
+    notes = []
+    if is_enabled_with_env("openrouter", env):
+        from rolo_claude.providers.databricks import load_models_json, refresh_openrouter_catalog_if_stale
+        if refresh_openrouter_catalog_if_stale(state_dir, env=env):
+            notes.append(f"OpenRouter ({len(load_models_json(state_dir))} models)")
+    if is_enabled_with_env("anthropic", env):
+        from rolo_claude.providers.anthropic_catalog import load_ant_models_json, refresh_anthropic_catalog_if_stale
+        if refresh_anthropic_catalog_if_stale(state_dir, env=env):
+            notes.append(f"Anthropic ({len(load_ant_models_json(state_dir))} models)")
+    if is_enabled_with_env("databricks", env):
+        from rolo_claude.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
+        result = refresh_dbx_catalog_if_stale(state_dir, env=env)
+        if result is not None:
+            ok, diff, _note = result
+            if ok:
+                summary = format_dbx_diff(diff)
+                if summary != "no changes":
+                    notes.append(f"Databricks ({summary})")
+    if notes:
+        app.call_from_thread(app.notify, f"Catalog refreshed: {'; '.join(notes)}", title="/model")
+
+
+def or_balance_refresh_worker(app, *, force: bool = False) -> None:
+    """H15 part 2 addendum 4 (corrected): background refresh for the
+    OpenRouter account-balance status bar segment -- never on the UI
+    thread. Called at app launch and every `BALANCE_REFRESH_INTERVAL_S`
+    (both `force=True`, always attempt) from `tui/app.py`'s own `on_mount`,
+    and once after every turn that used an OpenRouter route (`force=False`,
+    gated by the post-turn debounce -- a chatty multi-turn session must not
+    hammer this endpoint once per turn). `GET /key` always uses the ordinary
+    `OPENROUTER_API_KEY`; `GET /credits` only runs (with the SEPARATE
+    `OPENROUTER_MANAGEMENT_KEY`) when that key is actually configured.
+    Scope for this round is OpenRouter only (the one provider with a
+    balance API)."""
+    from rolo_claude.config.paths import background_net_disabled
+    if background_net_disabled():
+        return  # 1.0.1 part 2 fixpass finding 10: test seam, never touch the network
+    # N2c (1.0.1 final pass): the session's own trust-filtered `Settings.
+    # effective_env`, same as catalog_auto_refresh_worker just above --
+    # `None` (no controller/settings attached, e.g. a bare test double)
+    # falls back to bare os.environ exactly as before this fix. The
+    # enablement check uses the same env, so a key that lives only in a
+    # settings.json env block still gets its balance segment.
+    settings = getattr(getattr(app, "controller", None), "settings", None)
+    env = settings.effective_env if settings is not None else None
+    from rolo_claude.providers.enablement import is_enabled_with_env
+    if not is_enabled_with_env("openrouter", env):
+        return
+    from rolo_claude.providers.config import resolve_openrouter, resolve_openrouter_management_key
+    orc = resolve_openrouter(env)
+    if orc is None:
+        return
+    if not force:
+        from rolo_claude.providers.openrouter_account import openrouter_balance_refresh_due_after_turn
+        if not openrouter_balance_refresh_due_after_turn():
+            return
+    management_key = resolve_openrouter_management_key(env)
+    from rolo_claude.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
+    entry = refresh_cached_openrouter_balance(orc.base_url, orc.api_key, management_key=management_key)
+    if entry is not None:
+        segment = format_status_bar_segment()
+        app.call_from_thread(app.status_bar.set_or_balance, segment, fetched_at=entry["fetched_at"])
 
 
 def _apply_model(app, ref) -> None:
@@ -108,7 +237,23 @@ def _apply_model(app, ref) -> None:
 # argument-taking builtin.
 # ============================================================================
 
+def _effort_status_text(session) -> "str | None":
+    """1.0.1 part 2 (item 22 remainder): the status bar's own effort tag --
+    "<value> (tools)" whenever this route forces an explicit override
+    alongside tools, else the plain configured value."""
+    from rolo_claude.providers.profiles import effort_display_override
+    profile = getattr(session, "provider_profile", None) if session is not None else None
+    return effort_display_override(profile) or (getattr(session, "effort", None) if session is not None else None)
+
+
 async def _handle_effort(app, args: str) -> None:
+    # 1.0.1 part 2 (reviewer minor): must not open the card while a
+    # permission (or any other) card is already pending -- it would
+    # silently replace it, same class of bug as finding 16.
+    note = _pending_card_note(app, "effort")
+    if note:
+        app.notify(note, title="/effort")
+        return
     session = getattr(app.controller, "session", None)
     args = args.strip()
     if args:
@@ -119,19 +264,25 @@ async def _handle_effort(app, args: str) -> None:
         # `effort` directly (no event round-trip) -- push the status bar's
         # tag right away rather than waiting for the next turn's status
         # event to happen to carry it.
-        app.status_bar.set_effort(getattr(session, "effort", None))
+        app.status_bar.set_effort(_effort_status_text(session))
         return
 
+    from rolo_claude.providers.profiles import effort_display_override
     from rolo_claude.tui.widgets.cards import EffortCard
 
     profile = getattr(session, "provider_profile", None) if session is not None else None
     if session is None or profile is None or not profile.reasoning_effort_supported:
         levels, current = [], None
         model_id = app.status_bar.model
+        override_note = None
     else:
         levels = list(profile.effort_values_supported or ())
         current = getattr(session, "effort", None)
         model_id = session.model_ref.raw
+        override_display = effort_display_override(profile)
+        override_note = (f"Note: this route sends reasoning_effort={profile.reasoning_effort_with_tools!r} "
+                          f"whenever a turn carries tools, regardless of the level picked here "
+                          f"(effective: {override_display}).") if override_display else None
 
     def on_select(level) -> None:
         app.clear_pending_card()
@@ -139,9 +290,10 @@ async def _handle_effort(app, args: str) -> None:
             return  # Esc -- keep the old value, nothing to announce
         result = app.controller.run_slash("effort", level)
         app.notify(result or f"Effort level set to '{level}'", title="/effort")
-        app.status_bar.set_effort(getattr(session, "effort", None))
+        app.status_bar.set_effort(_effort_status_text(session))
 
-    card = EffortCard(levels=levels, current=current, model_id=model_id, on_select=on_select)
+    card = EffortCard(levels=levels, current=current, model_id=model_id, on_select=on_select,
+                       override_note=override_note)
     await app.transcript.mount_widget(card)
     app.set_pending_card(card)
 
@@ -163,62 +315,173 @@ async def _handle_models(app, args: str) -> None:
 
 
 async def _handle_dbx(app, _args: str) -> None:
-    app.run_worker(lambda: _models_refresh_worker(app, True), thread=True, name="models-refresh",
+    app.run_worker(lambda: _models_refresh_worker(app, True, dbx_explicit=True), thread=True, name="models-refresh",
                     group="models-refresh")
 
 
-def _models_refresh_worker(app, do_refresh: bool) -> None:
+def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False) -> None:
+    """1.0.1 part 2 fixpass finding 12: `/models [refresh]` and `/dbx`
+    (`dbx_explicit=True`) now refresh/report on EVERY enabled provider
+    (OpenRouter/Anthropic/Databricks alike), matching the headless `/models`
+    surface (`commands/builtins.py::_cmd_models`) that already did this --
+    before this fix the TUI's own worker only ever touched Databricks, so
+    an OpenRouter-only box's `/models refresh` answered "Databricks is not
+    configured" instead of doing anything useful. `dbx_explicit` (set only
+    by `/dbx`, an explicit ask about Databricks specifically) is what makes
+    Databricks resolve even when it isn't formally enabled, and is the ONLY
+    path that still shows the "Databricks is not configured" wording -- a
+    plain `/models` on a box where Databricks just isn't enabled silently
+    skips it instead, same as it already silently skips a disabled
+    OpenRouter/Anthropic."""
     from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
     from rolo_claude.providers.databricks import (
-        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, refresh_dbx_catalog,
+        dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, load_models_json,
+        models_json_age_seconds, refresh_dbx_catalog, refresh_openrouter_catalog_if_stale,
+    )
+    from rolo_claude.providers.anthropic_catalog import (
+        ant_models_age_seconds, load_ant_models_json, refresh_anthropic_catalog_if_stale,
     )
     from rolo_claude.catalog_cli import format_dbx_table_lines, _dbx_rows
+    from rolo_claude.providers.enablement import is_enabled
     state_dir = getattr(app.controller, "state_dir", None)
-    dbx = resolve_databricks()
-    if dbx is None:
-        app.call_from_thread(app.notify, "Databricks is not configured.", severity="warning", title="/models")
-        return
-    root = derive_workspace_root(dbx.host)
 
-    def _table_text(endpoints: dict) -> str:
+    def _table_text(endpoints: dict, root: str) -> str:
         if not endpoints:
             return ""
         rows = _dbx_rows(endpoints, root, state_dir, urls=False)
         return "\n".join(format_dbx_table_lines(rows)) + "\n\n"
 
-    if not do_refresh:
-        # 1.0.1 hotfix 3: renders the CACHED table immediately -- no
-        # network call at all (family/path/chat, same columns/wording
-        # `rolo-claude models` prints) -- plus the catalog age.
-        endpoints = load_dbx_endpoints_json(state_dir)
-        age = dbx_endpoints_age_seconds(state_dir)
-        age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
-        text = (f"{_table_text(endpoints)}{len(endpoints)} Databricks endpoint(s) cached "
-                f"(last refreshed {age_str}).")
-        app.call_from_thread(app.transcript.add_note, text, kind="command")
+    sections: list = []
+    dbx_enabled = dbx_explicit or is_enabled("databricks")
+    dbx = resolve_databricks() if dbx_enabled else None
+    if dbx is not None:
+        root = derive_workspace_root(dbx.host)
+        if not do_refresh:
+            # 1.0.1 hotfix 3: renders the CACHED table immediately -- no
+            # network call at all (family/path/chat, same columns/wording
+            # `rolo-claude models` prints) -- plus the catalog age.
+            endpoints = load_dbx_endpoints_json(state_dir)
+            age = dbx_endpoints_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            sections.append(f"{_table_text(endpoints, root)}{len(endpoints)} Databricks endpoint(s) cached "
+                             f"(last refreshed {age_str}).")
+        else:
+            ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
+            endpoints = load_dbx_endpoints_json(state_dir)
+            if not ok:
+                # 1.0.1 hotfix 3: a failed refresh still shows the
+                # (unchanged) cached table, plus exactly ONE line naming
+                # the error -- never just a bare toast with no context for
+                # what's still usable.
+                sections.append(f"{_table_text(endpoints, root)}Databricks refresh failed: {note}")
+                app.call_from_thread(app.notify, f"Databricks refresh failed: {note}", severity="warning",
+                                      title="/models")
+            else:
+                # 1.0.1 hotfix 12: also refreshes models.dev (best-effort
+                # -- a failure here never fails the whole refresh, it just
+                # leaves the existing ctx/price data, if any, in place).
+                from rolo_claude.providers.models_dev import refresh_models_dev_cache
+                md_ok, md_note = refresh_models_dev_cache(state_dir)
+                text = (f"{_table_text(endpoints, root)}Refreshed {len(endpoints)} Databricks endpoint(s). "
+                        f"{format_dbx_diff(diff)}")
+                if not md_ok:
+                    text += (f"\n(models.dev refresh failed: {md_note} -- the vendored/cached price data "
+                             f"stays in use.)")
+                sections.append(text)
+                app.call_from_thread(app.notify, format_dbx_diff(diff), title="/models refresh")
+    elif dbx_explicit:
+        sections.append("Databricks is not configured.")
+        app.call_from_thread(app.notify, "Databricks is not configured.", severity="warning", title="/models")
+
+    if is_enabled("openrouter"):
+        if not do_refresh:
+            age = models_json_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            sections.append(f"OpenRouter: {len(load_models_json(state_dir))} model(s) cached "
+                             f"(last refreshed {age_str}).")
+        else:
+            ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
+            if ok is False:
+                sections.append("OpenRouter refresh failed -- see `rolo-claude doctor`.")
+            elif ok is None:
+                sections.append("OpenRouter: not configured -- nothing to refresh.")
+            else:
+                sections.append(f"OpenRouter refreshed: {len(load_models_json(state_dir))} model(s) cached.")
+
+    if is_enabled("anthropic"):
+        if not do_refresh:
+            age = ant_models_age_seconds(state_dir)
+            age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
+            sections.append(f"Anthropic: {len(load_ant_models_json(state_dir))} model(s) cached "
+                             f"(last refreshed {age_str}).")
+        else:
+            ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
+            if ok is False:
+                sections.append("Anthropic refresh failed -- see `rolo-claude doctor`.")
+            elif ok is None:
+                sections.append("Anthropic: not configured -- nothing to refresh.")
+            else:
+                sections.append(f"Anthropic refreshed: {len(load_ant_models_json(state_dir))} model(s) cached.")
+
+    if not sections:
+        sections.append("No providers are enabled yet -- see `rolo-claude providers`.")
+    app.call_from_thread(app.transcript.add_note, "\n\n".join(sections), kind="command")
+
+
+# ============================================================================
+# 1.0.1 part 2 fixpass critical finding 1: /providers and /doctor, off the
+# UI thread. `enable`/`disable` stay synchronous (a plain local config.json
+# write, no network/subprocess); listing builds its text in a worker.
+# ============================================================================
+
+async def _handle_providers(app, args: str) -> None:
+    from rolo_claude.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
+    tokens = (args or "").split()
+    action = tokens[0] if tokens else "list"
+    if action in ("enable", "disable"):
+        if len(tokens) < 2:
+            app.notify(f"/providers {action}: needs a provider name ({', '.join(PROVIDER_NAMES)})",
+                       severity="error", title="/providers")
+            return
+        name = canonical(tokens[1])
+        if name not in PROVIDER_NAMES:
+            app.notify(f"/providers {action}: unknown provider {tokens[1]!r} "
+                       f"(expected one of {', '.join(PROVIDER_NAMES)})", severity="error", title="/providers")
+            return
+        if action == "enable":
+            enable(name)
+            await app.transcript.add_note(f"{label_for(name)}: enabled", kind="command")
+        else:
+            disable(name)
+            await app.transcript.add_note(f"{label_for(name)}: disabled", kind="command")
         return
-    ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
-    endpoints = load_dbx_endpoints_json(state_dir)
-    if not ok:
-        # 1.0.1 hotfix 3: a failed refresh still shows the (unchanged)
-        # cached table, plus exactly ONE line naming the error -- never
-        # just a bare toast with no context for what's still usable.
-        text = f"{_table_text(endpoints)}Databricks refresh failed: {note}"
-        app.call_from_thread(app.transcript.add_note, text, kind="command")
-        app.call_from_thread(app.notify, f"Databricks refresh failed: {note}", severity="warning", title="/models")
+    if action == "setup":
+        name = tokens[1] if len(tokens) > 1 else "<name>"
+        await app.transcript.add_note(
+            f"/providers setup needs the interactive picker -- run `rolo-claude providers setup {name}` "
+            f"(or `rolo-claude init`) from a real terminal.", kind="command")
         return
-    # 1.0.1 hotfix 12: also refreshes models.dev (best-effort -- a failure
-    # here never fails the whole /models refresh, it just leaves the
-    # existing ctx/price data, if any, in place) so a Databricks row's own
-    # context/output/price columns (model_display.databricks_row_fields)
-    # pick up anything models.dev added since the last refresh.
-    from rolo_claude.providers.models_dev import refresh_models_dev_cache
-    md_ok, md_note = refresh_models_dev_cache(state_dir)
-    text = f"{_table_text(endpoints)}Refreshed {len(endpoints)} Databricks endpoint(s). {format_dbx_diff(diff)}"
-    if not md_ok:
-        text += f"\n(models.dev refresh failed: {md_note} -- the vendored/cached price data stays in use.)"
+    if action != "list":
+        await app.transcript.add_note("Usage: /providers [list|enable <name>|disable <name>|setup <name>]",
+                                       kind="command")
+        return
+    app.run_worker(lambda: _providers_list_worker(app), thread=True, name="providers-list", group="providers-list")
+
+
+def _providers_list_worker(app) -> None:
+    from rolo_claude.providers_cli import format_providers_table, provider_rows
+    text = format_providers_table(provider_rows())
     app.call_from_thread(app.transcript.add_note, text, kind="command")
-    app.call_from_thread(app.notify, format_dbx_diff(diff), title="/models refresh")
+
+
+async def _handle_doctor(app, _args: str) -> None:
+    app.run_worker(lambda: _doctor_worker(app), thread=True, name="doctor", group="doctor")
+
+
+def _doctor_worker(app) -> None:
+    from rolo_claude.doctor import run_checks
+    lines, _ok = run_checks(cwd=app.cwd)
+    app.call_from_thread(app.transcript.add_note, "\n".join(lines), kind="command")
 
 
 async def _handle_mcp(app, _args: str) -> None:
@@ -436,6 +699,13 @@ def _open_rewind_picker(app, steps: list) -> None:
 
 
 async def _show_rewind_confirmation(app, step: dict, verb: str) -> None:
+    # 1.0.1 part 2 (reviewer minor): the ONE choke point every /rewind,
+    # /undo, /redo and rewind-picker-pick path funnels through before
+    # mounting the actual confirmation card -- see _pending_card_note.
+    note = _pending_card_note(app, verb)
+    if note:
+        app.notify(note, title=f"/{verb}")
+        return
     from rolo_claude.tui.widgets.cards import RewindCard
 
     def on_decide(confirmed: bool) -> None:
@@ -505,6 +775,13 @@ async def _handle_keybindings(app, _args: str) -> None:
 # ============================================================================
 
 async def _handle_improve(app, _args: str) -> None:
+    # 1.0.1 part 2 (reviewer minor): checked before the scan/draft worker
+    # even starts (a real model call) -- no point drafting candidates only
+    # to discover the review card can't be shown.
+    note = _pending_card_note(app, "improve")
+    if note:
+        app.notify(note, title="/improve")
+        return
     session = getattr(app.controller, "session", None)
     if session is None:
         app.notify("/improve needs a real session.", severity="warning", title="/improve")
@@ -645,8 +922,16 @@ def _edit_candidate_then_apply(app, session, candidate) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(candidate.body)
-        with app.suspend():
-            sp.run(f'{editor} "{tmp_path}"', shell=True)
+        # 1.0.1 part 2 fixpass finding 14: same watchdog-pause pair
+        # tui/app.py's own Ctrl+E handler uses -- `app.suspend()` blocks the
+        # main thread for as long as the external editor runs, which is not
+        # a hang.
+        app._enter_suspend_for_editor()
+        try:
+            with app.suspend():
+                sp.run(f'{editor} "{tmp_path}"', shell=True)
+        finally:
+            app._exit_suspend_for_editor()
         new_body = tmp_path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
         if new_body:
             candidate.body = new_body
