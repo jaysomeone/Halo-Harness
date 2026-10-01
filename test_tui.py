@@ -4888,6 +4888,878 @@ def test_state_dir_is_scoped_away_from_the_real_machine_home(ctx: Ctx):
               bridge_home() != Path.home() / ".halo")
 
 
+# ============================================================================
+# Halo 2.0.1 W2b (HALO-2.0.1-liveness-tips-brief.md Part A): the live phase
+# line, the reasoning preview, the status-bar cluster, tool/sub-agent
+# elapsed counters. Most pilots inject synthetic `phase`/delta events
+# directly into `app._local_events` (bypassing FakeController.submit()
+# entirely) for full control over EXACT event ordering/timing -- the
+# upstream-to-event mapping itself is W2a's own pinned responsibility
+# (tests/test_w2a_finish_reasons_and_phase.py, against MockDatabricks);
+# this file's job is "given these events, does the TUI render correctly AND
+# keep ticking on its own between events". `test_real_e2e_pilot_against_a_
+# slow_databricks_mock_shows_the_phase_line_live` below is the one genuine
+# end-to-end exception, reusing the EXACT MockDatabricks scenarios W2a's
+# own suite already proved produce the right phase events.
+# ============================================================================
+
+@test
+def test_phase_line_progresses_sending_thinking_writing_then_summary(ctx: Ctx):
+    """A1/A2: the live phase line passes through every documented state as
+    the matching `phase`/`thinking_delta`/`text_delta` events arrive, the
+    last-3-lines reasoning preview while expanded, and collapses to a
+    "Thought for Ns" summary (removed from the live-lines registry) once
+    reasoning happened."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            line = app.transcript._phase_lines.get((None, 1))
+            ctx.check("the phase line is mounted the moment the request is sent", line is not None)
+            ctx.check(f"sending state names the model, got {str(line.render())!r}",
+                      "Sending request to or:mock/x" in str(line.render()))
+
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            rendered = str(line.render())
+            ctx.check(f"headers-in state: thinking, no tokens yet, got {rendered!r}",
+                      "Thinking…" in rendered and "no tokens yet" in rendered)
+
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="reasoning"))
+            app._local_events.put(ev.thinking_delta(
+                "thinking step one\nstep two\nstep three\nstep four", turn=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            rendered = str(line.render())
+            ctx.check(f"reasoning state shows a live token count, got {rendered!r}",
+                      "Thinking…" in rendered and "reasoning tokens" in rendered)
+            ctx.check(f"the preview shows only the LAST three lines, got {rendered!r}",
+                      "step four" in rendered and "step one" not in rendered)
+
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="text"))
+            app._local_events.put(ev.text_delta("the final answer", turn=1, index=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"writing state shows a token count, got {str(line.render())!r}",
+                      "Writing…" in str(line.render()))
+
+            app._local_events.put(ev.message_end(turn=1, stop_reason="end_turn"))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            rendered = str(line.render())
+            ctx.check(f"collapses to a Thought-for summary once reasoning happened, got {rendered!r}",
+                      "Thought for" in rendered and "reasoning tokens" not in rendered)
+            ctx.check("the phase line is finalized (no longer the live one for this call)",
+                      (None, 1) not in app.transcript._phase_lines)
+    asyncio.run(body())
+
+
+@test
+def test_phase_line_elapsed_ticks_via_the_drain_timer_with_no_new_events(ctx: Ctx):
+    """A1: "updated in place at least once a second ... never only on chunk
+    arrival" -- NO new event arrives during the whole sampling window; the
+    rendered text must still advance, purely from wall-clock elapsed time
+    recomputed every drain tick."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            line = app.transcript._phase_lines[(None, 1)]
+            texts = []
+            for _ in range(18):
+                await pilot.pause(0.25)
+                await app._drain()
+                texts.append(str(line.render()))
+            ctx.check(f"the elapsed counter advanced at least 4 times with zero new events, "
+                      f"got {len(set(texts))} distinct renders across {len(texts)} ticks "
+                      f"(samples: {sorted(set(texts))})", len(set(texts)) >= 4)
+    asyncio.run(body())
+
+
+@test
+def test_reasoning_only_in_final_chunk_shows_summary_with_no_live_preview(ctx: Ctx):
+    """A2: "Reasoning that arrives only with the final chunk (Databricks
+    GLM when the gateway does not stream it) is shown as the collapsed
+    summary at that moment" -- no `first_token(kind="reasoning")` ever
+    fires; the ONE `thinking_delta` lands immediately before `message_end`,
+    so the line must never show a multi-line expanded preview, only ever
+    the elapsed-counter states and then the final collapsed summary."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            line = app.transcript._phase_lines[(None, 1)]
+            ctx.check("no reasoning-token wording before the reasoning ever arrives",
+                      "reasoning tokens" not in str(line.render()))
+            app._local_events.put(ev.thinking_delta("the whole reasoning, all at once", turn=1))
+            app._local_events.put(ev.text_delta("final answer", turn=1, index=1))
+            app._local_events.put(ev.message_end(turn=1, stop_reason="end_turn"))
+            await _drain_a_few(app, pilot, n=4, pause=0.02)
+            rendered = str(line.render())
+            ctx.check(f"collapses straight to the Thought-for summary, got {rendered!r}",
+                      "Thought for" in rendered)
+            ctx.check(f"a single summary line, never a multi-line preview, got {rendered!r}",
+                      "\n" not in rendered)
+    asyncio.run(body())
+
+
+@test
+def test_phase_line_no_data_suffix_appears_past_threshold_and_refreshes(ctx: Ctx):
+    """A1: "after 30s with no chunk the line gains the dim suffix ... no
+    data for 30s ... refreshed every 10s" -- via a test seam that shrinks
+    both numbers so this never actually waits 30 real seconds."""
+    from halo_harness.tui.widgets.transcript import ThinkingBlock
+    real_threshold, real_refresh = ThinkingBlock.NO_DATA_THRESHOLD_S, ThinkingBlock.NO_DATA_REFRESH_S
+    ThinkingBlock.NO_DATA_THRESHOLD_S = 0.6
+    ThinkingBlock.NO_DATA_REFRESH_S = 0.3
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+                app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+                await _drain_a_few(app, pilot, n=2, pause=0.02)
+                line = app.transcript._phase_lines[(None, 1)]
+                ctx.check("no suffix yet, under the (shrunk) threshold",
+                          "no data for" not in str(line.render()))
+                await pilot.pause(0.7)
+                await app._drain()
+                rendered = str(line.render())
+                ctx.check(f"the suffix appears past the (shrunk) threshold and names both actions, "
+                          f"got {rendered!r}",
+                          "no data for" in rendered and "Esc interrupts, typing steers" in rendered)
+                first_suffix = rendered
+                await pilot.pause(0.4)
+                await app._drain()
+                second = str(line.render())
+                ctx.check(f"the suffix's own number refreshes past the (shrunk) refresh interval, "
+                          f"got {first_suffix!r} -> {second!r}", second != first_suffix)
+                ctx.check("never says the harness is stuck/hung/frozen",
+                          not any(w in second.lower() for w in ("stuck", "hung", "frozen")))
+        asyncio.run(body())
+    finally:
+        ThinkingBlock.NO_DATA_THRESHOLD_S = real_threshold
+        ThinkingBlock.NO_DATA_REFRESH_S = real_refresh
+
+
+@test
+def test_waiting_line_between_a_tool_result_and_the_next_call_reuses_the_line(ctx: Ctx):
+    """A1: "after tool results are sent back: Waiting for model… (3s)" --
+    the prior call's own line (no reasoning) is removed at its message_end,
+    a fresh "waiting" line appears for the gap, and the NEXT call's own
+    request_sent continues that SAME widget (no flicker of remove-then-
+    mount with nothing shown in between)."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="tool"))
+            app._local_events.put(ev.Event(
+                "tool_use_ready", {"id": "t1", "name": "Bash", "input": {"command": "echo hi"},
+                                    "repaired": False}, turn=1))
+            app._local_events.put(ev.Event("tool_result", {"id": "t1", "ok": True, "summary": "hi"}, turn=1))
+            app._local_events.put(ev.message_end(turn=1, stop_reason="tool_use"))
+            await _drain_a_few(app, pilot, n=4, pause=0.02)
+            ctx.check("no reasoning happened on the tool-only call -- its own line is removed",
+                      (None, 1) not in app.transcript._phase_lines)
+
+            app._local_events.put(ev.phase(state="waiting_for_model", turn=1))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            waiting_line = app.transcript._phase_lines.get((None, 1))
+            ctx.check("a fresh line appears for the waiting gap", waiting_line is not None)
+            ctx.check(f"it names waiting for the model, got {str(waiting_line.render())!r}",
+                      "Waiting for model…" in str(waiting_line.render()))
+            await pilot.pause(1.1)
+            await app._drain()
+            ctx.check(f"its own elapsed ticks too, got {str(waiting_line.render())!r}",
+                      "Waiting for model… (1 s)" in str(waiting_line.render())
+                      or "Waiting for model… (2 s)" in str(waiting_line.render()))
+
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x2"))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            reused = app.transcript._phase_lines.get((None, 1))
+            ctx.check("the NEXT call's request_sent reuses the SAME waiting widget",
+                      reused is waiting_line)
+            ctx.check(f"it now shows the new call being sent, got {str(reused.render())!r}",
+                      "Sending request to or:mock/x2" in str(reused.render()))
+    asyncio.run(body())
+
+
+@test
+def test_turn_done_resets_the_status_bar_cluster_and_writing_shows_its_own_token_count(ctx: Ctx):
+    """A3: the phase word, elapsed and received-token counter all move
+    while a turn runs (thinking -> writing resets the token counter to
+    THAT phase's own count, never a running total across both, while the
+    elapsed clock keeps counting from the same call); `turn_done` returns
+    the whole cluster to idle with no stale counter/tool-name surviving."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="reasoning"))
+            app._local_events.put(ev.thinking_delta("x" * 40, turn=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            rendered_a = str(app.status_bar.render())
+            ctx.check(f"status bar shows thinking with a received-token count, got {rendered_a!r}",
+                      "thinking" in rendered_a and "↓" in rendered_a)
+
+            await pilot.pause(1.1)
+            await app._drain()
+            rendered_b = str(app.status_bar.render())
+            ctx.check(f"consecutive drain ticks differ with no new event (elapsed moved), "
+                      f"got {rendered_a!r} vs {rendered_b!r}", rendered_a != rendered_b)
+
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="text"))
+            app._local_events.put(ev.text_delta("y" * 4800, turn=1, index=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            rendered_c = str(app.status_bar.render())
+            ctx.check(f"writing shows ITS OWN token count (not the earlier reasoning total), "
+                      f"got {rendered_c!r}", "writing" in rendered_c and "↓1.2k" in rendered_c)
+
+            app._local_events.put(ev.message_end(turn=1, stop_reason="end_turn"))
+            app._local_events.put(ev.turn_done(turn=1, reason="end_turn"))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"turn_done returns the cluster to idle, got phase={app.status_bar.phase!r}",
+                      app.status_bar.phase == "idle")
+            rendered_d = str(app.status_bar.render())
+            ctx.check(f"no stale counter/word survives into idle, got {rendered_d!r}",
+                      "↓" not in rendered_d and "thinking" not in rendered_d and "writing" not in rendered_d)
+    asyncio.run(body())
+
+
+@test
+def test_tool_card_header_shows_elapsed_seconds_while_running_only(ctx: Ctx):
+    """A4: "A running card shows elapsed seconds in its header" -- ticks
+    via `Transcript.tick_tool_cards` (the same drain-timer mechanism as the
+    phase line), and stops/omits it once resolved."""
+    import re
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.Event(
+                "tool_use_ready", {"id": "t1", "name": "Bash", "input": {"command": "pytest -q"},
+                                    "repaired": False}, turn=1))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            card = app.transcript.tool_cards["t1"]
+            texts = []
+            for _ in range(10):
+                await pilot.pause(0.25)
+                await app._drain()
+                texts.append(str(card.render()))
+            ctx.check(f"the running card's own elapsed seconds advance on their own, "
+                      f"got {len(set(texts))} distinct renders (samples: {sorted(set(texts))})",
+                      len(set(texts)) >= 2)
+            ctx.check(f"the header carries the elapsed suffix right after the tool summary, "
+                      f"got {texts[-1]!r}", re.search(r"⏺ Bash\([^)]*\) · \d+ s\n", texts[-1]) is not None)
+            app._local_events.put(ev.Event("tool_result", {"id": "t1", "ok": True, "summary": "ok"}, turn=1))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            resolved_text = str(card.render())
+            await pilot.pause(0.3)
+            await app._drain()
+            ctx.check(f"a resolved card's header no longer ticks/changes, got {resolved_text!r} "
+                      f"vs {str(card.render())!r}", resolved_text == str(card.render()))
+    asyncio.run(body())
+
+
+@test
+def test_nested_subagent_card_shows_live_phase_and_tool_count(ctx: Ctx):
+    """A5: "the parent's nested card shows the child's phase and tool
+    count live" -- a real foreground sub-agent (Task tool), its own `phase`/
+    `tool_use_ready` events (agent_id-tagged, same mechanism finding 11
+    already relies on elsewhere) drive a live `SubAgentCard` the parent's
+    transcript shows, frozen once the child finishes."""
+    import argparse
+    import re
+
+    async def body():
+        fh = build_fake_home()
+        SCENARIOS["a5-parent"] = ScriptedTurns([
+            _tool_call_chunk("call_a5", "Task", {"description": "look", "prompt": "go",
+                                                   "subagent_type": "general-purpose",
+                                                   "model": "or:mock/a5-child"}),
+            _final_text_chunk("parent done"),
+        ])
+        SCENARIOS["a5-child"] = ScriptedTurns([
+            _tool_call_chunk("call_a5_child_tool", "Read", {"file_path": "pong.txt"}),
+            _final_text_chunk("child done"),
+        ])
+        mock = MockUpstream().start()
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_OPENROUTER_BASE_URL", "OPENROUTER_API_KEY")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        controller = None
+        try:
+            from halo_harness.tui.bootstrap import build_controller
+            from halo_harness.tui.widgets.cards import SubAgentCard
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=False,
+                tools=None, add_dir=None, model="or:mock/a5-parent", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "spawn a sub-agent")
+                await pilot.press("enter")
+                for _ in range(150):
+                    await app._drain()
+                    await pilot.pause(0.03)
+                    texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+                    if any("parent done" in t for t in texts):
+                        break
+                # Everything above may coalesce within very few drain ticks
+                # once the parent's final text streams in (the whole child
+                # run genuinely can finish between two polls) -- `subagent_
+                # marks` (unlike the `subagent_cards` dict, which loses an
+                # entry the moment `subagent_end` pops it) keeps the SAME
+                # card object forever, so its final state alone is already
+                # full proof the live updates reached it correctly; no
+                # separate "caught it mid-flight" poll is needed.
+                marks = [m for m in app.transcript.subagent_marks if isinstance(m, SubAgentCard)]
+                ctx.check(f"a SubAgentCard was mounted for the child, got marks={marks}", len(marks) == 1)
+                card = marks[0]
+                ctx.check(f"it names the child's own subagent_type, got {card.agent_name!r}",
+                          card.agent_name == "general-purpose")
+                ctx.check(f"it recorded the child's one tool call, got tool_count={card.tool_count}",
+                          card.tool_count >= 1)
+                ctx.check(f"it is frozen (done) once the child finished, got done={card.done}", card.done)
+                ctx.check(f"its rendered text matches the brief's own shape, got {str(card.render())!r}",
+                          re.match(r"agent general-purpose · \w+ \d+ s · \d+ tools", str(card.render())))
+        finally:
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
+@test
+def test_real_e2e_pilot_against_a_slow_databricks_mock_shows_the_phase_line_live(ctx: Ctx):
+    """A1: a genuine end-to-end pilot -- a REAL Controller/Session against
+    a REAL (if local) upstream with controllable delays, reusing W2a's own
+    proven `MockDatabricks` "phase-sequence" scenario (headers delayed,
+    then a silent gap, then reasoning, then text) and "tool-call-ok" (the
+    waiting-for-model gap) -- not a synthetic event script, so this proves
+    the full real stack (loop -> events -> dispatch -> widgets), not just
+    this worker's own dispatch code reacting to a hand-built event."""
+    import argparse
+
+    from tests.helpers.mock_databricks import MockDatabricks
+
+    async def body():
+        fh = build_fake_home()
+        mock = MockDatabricks().start()
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_DBX_BASE_URL"] = mock.root
+        os.environ["BRIDGE_DBX_TOKEN"] = "t"
+        controller = None
+        try:
+            from halo_harness.tui.bootstrap import build_controller
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="dbx:databricks-glm-5-3-phase-sequence", small_model=None,
+                session_id=None, max_turns=10, effort=None, append_system_prompt=None, chrome=False,
+                no_chrome=False, playwright=False, playwright_cdp=None, playwright_headless=False,
+                mcp_config=None, strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "howdy")
+                await pilot.press("enter")
+                seen_sending_or_headers = False
+                seen_reasoning = False
+                for _ in range(150):
+                    await app._drain()
+                    await pilot.pause(0.03)
+                    line = app.transcript._phase_lines.get((None, 1))
+                    if line is not None:
+                        rendered = str(line.render())
+                        if "Sending request" in rendered or "no tokens yet" in rendered:
+                            seen_sending_or_headers = True
+                        if "reasoning tokens" in rendered:
+                            seen_reasoning = True
+                    texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+                    if any("the answer" in t for t in texts):
+                        break
+                ctx.check("the real stack showed the sending/headers phase live", seen_sending_or_headers)
+                ctx.check("the real stack showed the live reasoning phase too", seen_reasoning)
+                texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+                ctx.check(f"the real model's final answer streamed through, got {texts}",
+                          any("the answer" in t for t in texts))
+        finally:
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
+# ============================================================================
+# Halo 2.0.1 W2b (liveness-tips-brief Part B): rotating tips. Pure checks
+# against halo_harness.tui.tips (B5's own validation) need no Textual app;
+# the rotation-timing checks below them do.
+# ============================================================================
+
+@test
+def test_every_curated_tip_is_under_97_chars_and_never_mentions_rolo_claude(ctx: Ctx):
+    from halo_harness.tui import tips as tips_mod
+    too_long = [t.text for t in tips_mod.TIPS if len(t.text) >= 97]
+    ctx.check(f"every curated tip is under 97 chars, got too-long: {too_long}", not too_long)
+    mentions = [t.text for t in tips_mod.TIPS if "rolo-claude" in t.text.lower()]
+    ctx.check(f"no tip mentions rolo-claude, got: {mentions}", not mentions)
+    banned = ("stuck", "hung", "frozen", "not allowed", "can't do that", "for safety", "refus")
+    bad = [t.text for t in tips_mod.TIPS if any(w in t.text.lower() for w in banned)]
+    ctx.check(f"no safety/refusal/stuck-hung-frozen wording in any tip, got: {bad}", not bad)
+
+
+@test
+def test_every_tip_word_flag_and_key_resolves_to_something_real(ctx: Ctx):
+    """B5: "Tips may only name things that exist" -- every `/word` resolves
+    in the real command registry, every `--flag` is a real CLI flag outside
+    the not-yet list, every Ctrl+X/Shift+Tab/Esc names a bound key."""
+    from halo_harness.commands.registry import Registry
+    from halo_harness.tui import tips as tips_mod
+    from halo_harness.tui.keys import load_keymap
+    import halo_harness.cli as cli_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry.discover(Path(tmp))
+    names = {c.name for c in reg.all()}
+    real_flags = {f for flags, _kwargs in cli_mod._REAL_FLAGS for f in flags}
+    not_yet_flags = {f for item in cli_mod._NOT_YET_FLAGS for f in item[0]}
+    # Slash-command/subcommand-local tokens -- never a cli.py main-parser
+    # flag, but genuinely real: `/stats --models`/`--tools` (tui/slash.py::
+    # _handle_stats's own token parsing), `halo stats --since` (stats_cli.
+    # py's own separate subcommand parser).
+    extra_real_flags = {"--models", "--tools", "--since"}
+    keymap = load_keymap()
+
+    bad_words, bad_flags, bad_keys = [], [], []
+    for tip in tips_mod.TIPS:
+        for word in tips_mod.slash_words_in(tip.text):
+            if word not in names:
+                bad_words.append((tip.text, word))
+        for flag in tips_mod.flags_in(tip.text):
+            if flag in not_yet_flags or (flag not in real_flags and flag not in extra_real_flags):
+                bad_flags.append((tip.text, flag))
+        for key in tips_mod.key_names_in(tip.text):
+            if not tips_mod.key_is_bound(key, keymap):
+                bad_keys.append((tip.text, key))
+    ctx.check(f"every /word resolves in the registry, got: {bad_words}", not bad_words)
+    ctx.check(f"every --flag is real (outside the not-yet list), got: {bad_flags}", not bad_flags)
+    ctx.check(f"every key mention is actually bound, got: {bad_keys}", not bad_keys)
+
+
+@test
+def test_generated_tips_cover_every_builtin_command_not_already_curated(ctx: Ctx):
+    """B1: "GENERATED tips for every slash command in the registry that no
+    curated tip covers"."""
+    import re
+    from halo_harness.commands.registry import Registry
+    from halo_harness.tui import tips as tips_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry.discover(Path(tmp))
+    names = {c.name for c in reg.all()}
+    covered = tips_mod._covered_command_names(tips_mod.TIPS)
+    generated = tips_mod.generated_tips_for_registry(reg)
+    generated_names = set()
+    for t in generated:
+        m = re.match(r"/([a-zA-Z][\w-]*)", t.text)
+        if m:
+            generated_names.add(m.group(1))
+    missing = names - covered - generated_names
+    ctx.check(f"every registered command has a curated or generated tip, missing: {missing}", not missing)
+    ctx.check("no command gets BOTH a curated and a generated tip", not (covered & generated_names))
+
+
+@test
+def test_tip_needs_filtering_hides_a_cc_tip_when_cc_is_not_enabled(ctx: Ctx):
+    """B1/B6: "needs" filtering -- a `cc` tip hidden when cc is not enabled."""
+    from halo_harness.tui import tips as tips_mod
+    cc_tip = next(t for t in tips_mod.TIPS if "cc" in t.needs)
+    shown_without = tips_mod.applicable_tips([cc_tip], frozenset())
+    shown_with = tips_mod.applicable_tips([cc_tip], frozenset({"cc"}))
+    ctx.check("a cc-needing tip is hidden when cc is not enabled", shown_without == [])
+    ctx.check("it reappears once cc is enabled", shown_with == [cc_tip])
+
+
+@test
+def test_format_tip_placeholder_fits_the_width_minus_6_with_an_ellipsis(ctx: Ctx):
+    from halo_harness.tui import tips as tips_mod
+    fitted = tips_mod.format_tip_placeholder("x" * 50, 30)
+    ctx.check(f"fits within width-6, got {fitted!r} (len={len(fitted)})", len(fitted) <= 24)
+    ctx.check(f"ends with an ellipsis when truncated, got {fitted!r}", fitted.endswith("…"))
+    untouched = tips_mod.format_tip_placeholder("short", 80)
+    ctx.check(f"a short tip is shown whole with the Tip: prefix, got {untouched!r}",
+              untouched == "Tip: short")
+
+
+@test
+def test_tip_rotator_shuffles_with_no_repeat_until_exhausted(ctx: Ctx):
+    import random
+    from halo_harness.tui.tips import Tip, TipRotator
+    tips = [Tip("a"), Tip("b"), Tip("c")]
+    rotator = TipRotator(tips, rng=random.Random(42))
+    seen = [rotator.current.text]
+    for _ in range(3):
+        seen.append(rotator.advance().text)
+    ctx.check(f"no repeat across the first full cycle (all 3 distinct), got {seen[:3]}",
+              sorted(seen[:3]) == ["a", "b", "c"])
+    ctx.check(f"a 4th draw, after reshuffling, is still a real tip, got {seen[3]!r}",
+              seen[3] in ("a", "b", "c"))
+
+
+@test
+def test_tips_enabled_respects_config_and_env_off_switches(ctx: Ctx):
+    """B3: `tips: false` in ~/.halo/config.json, or HALO_TIPS=0 (legacy
+    BRIDGE_TIPS=0 via env_compat)."""
+    from halo_harness import theme as theme_mod
+    from halo_harness.tui import tips as tips_mod
+
+    old_state = os.environ.get("BRIDGE_STATE_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BRIDGE_STATE_DIR"] = tmp
+        try:
+            ctx.check("tips are on by default (fresh config)", tips_mod.tips_enabled() is True)
+            theme_mod.set_config_value("tips", False)
+            ctx.check("tips: false in config.json turns them off", tips_mod.tips_enabled() is False)
+            theme_mod.set_config_value("tips", True)
+            ctx.check("tips: true turns them back on", tips_mod.tips_enabled() is True)
+            os.environ["HALO_TIPS"] = "0"
+            try:
+                ctx.check("HALO_TIPS=0 turns them off even with config tips: true",
+                          tips_mod.tips_enabled() is False)
+            finally:
+                os.environ.pop("HALO_TIPS", None)
+            os.environ["BRIDGE_TIPS"] = "0"
+            try:
+                ctx.check("legacy BRIDGE_TIPS=0 (env_compat) also turns them off",
+                          tips_mod.tips_enabled() is False)
+            finally:
+                os.environ.pop("BRIDGE_TIPS", None)
+        finally:
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+
+
+@test
+def test_tips_off_switch_shows_the_static_placeholder_instead(ctx: Ctx):
+    from halo_harness import theme as theme_mod
+    from halo_harness.tui import tips as tips_mod
+
+    old_state = os.environ.get("BRIDGE_STATE_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BRIDGE_STATE_DIR"] = tmp
+        theme_mod.set_config_value("tips", False)
+        try:
+            async def body():
+                fake = FakeController()
+                app = await _mounted(fake)
+                ctx.check("tips off -> no rotator at all", app._tip_rotator is None)
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.pause(0.05)
+                    ctx.check(f"the static placeholder is shown, got {app.prompt_input.placeholder!r}",
+                              app.prompt_input.placeholder == tips_mod.STATIC_PLACEHOLDER)
+            asyncio.run(body())
+        finally:
+            theme_mod.set_config_value("tips", True)
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+
+
+@test
+def test_tips_command_lists_multiple_real_tips(ctx: Ctx):
+    """B4: "/tips prints every applicable tip to the transcript as a list"."""
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_tips
+    from halo_harness.commands.registry import Registry
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp)
+        reg = Registry.discover(cwd)
+        facade = HeadlessFacade(cwd=cwd, registry=reg)
+        result = _cmd_tips("", facade)
+    lines = result.splitlines()
+    ctx.check(f"/tips lists multiple real tips, got {len(lines)} line(s)", len(lines) > 5)
+    ctx.check("every line is a list item", all(line.startswith("- ") for line in lines))
+    ctx.check("/tips itself is listed (it names things that exist, including itself)",
+              any("/tips" in line for line in lines))
+
+
+@test
+def test_help_lists_tips(ctx: Ctx):
+    """B4: "/help lists /tips"."""
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_help
+    from halo_harness.commands.registry import Registry
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp)
+        reg = Registry.discover(cwd)
+        facade = HeadlessFacade(cwd=cwd, registry=reg)
+        result = _cmd_help("", facade)
+    ctx.check(f"/help lists /tips, got a line with it: {'/tips' in result}", "/tips" in result)
+
+
+@test
+def test_launch_tip_differs_from_the_after_turn_tip_seeded_rng(ctx: Ctx):
+    """B2/B6: "launch tip differs from the after-turn tip (seeded RNG)"."""
+    import random
+    from halo_harness.tui import tips as tips_mod
+
+    async def body():
+        fake = FakeController(turns=[[
+            ev.user_message("hi", turn=1),
+            ev.Event("message_start", {"model": "x"}, turn=1),
+            ev.text_delta("ok", turn=1),
+            ev.message_end(turn=1, stop_reason="end_turn"),
+            ev.turn_done(turn=1, reason="end_turn"),
+        ]])
+        app = await _mounted(fake)
+        ctx.check("a real tip pool was built at construction", app._tip_rotator is not None)
+        app._tip_rotator = tips_mod.TipRotator(app._tip_rotator._tips, rng=random.Random(42))
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._refresh_tip_placeholder()
+            launch_tip = app._tip_rotator.current.text
+            ctx.check(f"the launch placeholder shows a tip, got {app.prompt_input.placeholder!r}",
+                      app.prompt_input.placeholder.startswith("Tip: "))
+            await pilot.click("#prompt-input")
+            await _type(pilot, "hi")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=10)
+            after_turn_tip = app._tip_rotator.current.text
+            ctx.check(f"turn_done rotated to a DIFFERENT tip, got {launch_tip!r} -> {after_turn_tip!r}",
+                      after_turn_tip != launch_tip)
+            expected = tips_mod.format_tip_placeholder(after_turn_tip, app.prompt_input.size.width or 80)
+            ctx.check(f"the placeholder itself reflects the new tip, got "
+                      f"{app.prompt_input.placeholder!r} expected {expected!r}",
+                      app.prompt_input.placeholder == expected)
+    asyncio.run(body())
+
+
+@test
+def test_idle_tip_rotation_via_the_shrunk_15s_seam(ctx: Ctx):
+    """B2/B6: "idle rotation with the 15s timer shrunk by a seam"."""
+    import halo_harness.tui.app as app_mod
+    real_interval = app_mod.TIP_ROTATE_INTERVAL_S
+    app_mod.TIP_ROTATE_INTERVAL_S = 0.3
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                first = app._tip_rotator.current.text
+                await pilot.pause(0.5)
+                await app._drain()
+                ctx.check(f"idle rotation advanced via the (shrunk) 15s timer with nothing typed "
+                          f"and no turn running, got {first!r} -> {app._tip_rotator.current.text!r}",
+                          app._tip_rotator.current.text != first)
+        asyncio.run(body())
+    finally:
+        app_mod.TIP_ROTATE_INTERVAL_S = real_interval
+
+
+@test
+def test_tip_does_not_rotate_while_the_input_has_text(ctx: Ctx):
+    """B2/B6: "no change while typing"."""
+    import halo_harness.tui.app as app_mod
+    real_interval = app_mod.TIP_ROTATE_INTERVAL_S
+    app_mod.TIP_ROTATE_INTERVAL_S = 0.3
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "still composing")
+                first = app._tip_rotator.current.text
+                await pilot.pause(0.5)
+                await app._drain()
+                ctx.check(f"no rotation while the input has text, got {first!r} -> "
+                          f"{app._tip_rotator.current.text!r}", app._tip_rotator.current.text == first)
+        asyncio.run(body())
+    finally:
+        app_mod.TIP_ROTATE_INTERVAL_S = real_interval
+
+
+@test
+def test_tip_does_not_rotate_while_a_turn_is_running(ctx: Ctx):
+    """B2/B6: "no change ... while a turn runs"."""
+    import halo_harness.tui.app as app_mod
+    real_interval = app_mod.TIP_ROTATE_INTERVAL_S
+    app_mod.TIP_ROTATE_INTERVAL_S = 0.3
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                app._turn_running = True
+                first = app._tip_rotator.current.text
+                await pilot.pause(0.5)
+                await app._drain()
+                ctx.check(f"no rotation while a turn is marked running, got {first!r} -> "
+                          f"{app._tip_rotator.current.text!r}", app._tip_rotator.current.text == first)
+                app._turn_running = False
+                await pilot.pause(0.5)
+                await app._drain()
+                ctx.check(f"rotation resumes once the turn is no longer running, got "
+                          f"{first!r} -> {app._tip_rotator.current.text!r}",
+                          app._tip_rotator.current.text != first)
+        asyncio.run(body())
+    finally:
+        app_mod.TIP_ROTATE_INTERVAL_S = real_interval
+
+
+# ============================================================================
+# Halo 2.0.1 W2b (liveness-tips-brief Part C): effective-value rendering --
+# the /effort card and the status-bar chip both show the SENT value, never
+# silently just the requested one. A plain, real `ProviderProfile` (never a
+# fake duck-typed stand-in) so `clamp_effort` itself proves the clamp is
+# real, not just assumed by the test.
+# ============================================================================
+
+@test
+def test_effort_card_and_chip_show_sent_as_high_for_a_glm_route_requesting_medium(ctx: Ctx):
+    """Part C: "a GLM route with --effort medium shows 'sent as high' in
+    the card [and] the chip"."""
+    from types import SimpleNamespace
+    from halo_harness.providers.profiles import ProviderProfile, clamp_effort
+    from halo_harness.tui import slash as slash_mod
+    from halo_harness.tui.widgets.cards import EffortCard
+
+    profile = ProviderProfile(
+        reasoning_effort_supported=True, effort_values_supported=("low", "high", "max"),
+        effort_clamp_map={"medium": "high", "minimal": "low", "xhigh": "max", "none": "low"},
+        reasoning_default_effort="high", thinking_format="deepseek_reasoning_content",
+    )
+    sent = clamp_effort("medium", profile)
+    ctx.check(f"sanity: this route really does clamp medium to high, got {sent!r}", sent == "high")
+    session = SimpleNamespace(provider_profile=profile, effort=sent, effort_requested="medium",
+                               effort_source="session", model_ref=SimpleNamespace(raw="dbx:databricks-glm-5-3"))
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.controller.session = session
+            await slash_mod._handle_effort(app, "")
+            await pilot.pause(0.05)
+            card = app.pending_card
+            ctx.check(f"an EffortCard opened, got {type(card).__name__}", isinstance(card, EffortCard))
+            ctx.check(f"the card marks the clamp inline, got {str(card.render())!r}",
+                      "sent as high" in str(card.render()))
+
+            app.status_bar.set_effort(slash_mod._effort_status_text(session))
+            ctx.check(f"the status chip also shows the sent value with the clamp note, got "
+                      f"{str(app.status_bar.render())!r}", "sent as high" in str(app.status_bar.render()))
+    asyncio.run(body())
+
+
+@test
+def test_effort_card_and_chip_show_sent_as_max_for_an_anthropic_route_requesting_xhigh(ctx: Ctx):
+    """Part C: "an Anthropic route with xhigh on a model that lacks it
+    shows 'sent as max'"."""
+    from types import SimpleNamespace
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
+    from halo_harness.tui import slash as slash_mod
+    from halo_harness.tui.widgets.cards import EffortCard
+
+    profile = ProviderProfile(reasoning_effort_supported=True, thinking_format="anthropic_thinking",
+                               effort_values_supported=ANTHROPIC_EFFORT_LEVELS)
+    ctx.check(f"sanity: xhigh is genuinely outside this route's own vocabulary, got {ANTHROPIC_EFFORT_LEVELS}",
+              "xhigh" not in ANTHROPIC_EFFORT_LEVELS)
+    sent = clamp_effort("xhigh", profile)
+    ctx.check(f"sanity: this route narrows xhigh to max, got {sent!r}", sent == "max")
+    session = SimpleNamespace(provider_profile=profile, effort=sent, effort_requested="xhigh",
+                               effort_source="session", model_ref=SimpleNamespace(raw="ant:claude-x"))
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.controller.session = session
+            await slash_mod._handle_effort(app, "")
+            await pilot.pause(0.05)
+            card = app.pending_card
+            ctx.check(f"an EffortCard opened, got {type(card).__name__}", isinstance(card, EffortCard))
+            ctx.check(f"the card marks the clamp inline, got {str(card.render())!r}",
+                      "sent as max" in str(card.render()))
+            app.status_bar.set_effort(slash_mod._effort_status_text(session))
+            ctx.check(f"the status chip also shows it, got {str(app.status_bar.render())!r}",
+                      "sent as max" in str(app.status_bar.render()))
+    asyncio.run(body())
+
+
+# ============================================================================
+# SVG snapshots (Part A/B): the phase-line states and the rotating tips
+# placeholder, alongside the existing main/permission/question/model-picker
+# set (D-TUI: regenerated freely, the substantive check is the rendered TEXT).
+# ============================================================================
+
+@test
+def test_svg_snapshots_phase_line_and_tips_placeholder(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="reasoning"))
+            app._local_events.put(ev.thinking_delta("considering the request carefully", turn=1))
+            await _drain_a_few(app, pilot, n=5, pause=0.03)
+            path, svg = _write_snapshot(app, "phase-line-thinking")
+            ctx.check(f"phase-line snapshot written to {path}", path.exists() and len(svg) > 0)
+            ctx.check(f"phase-line SVG shows the thinking state, got len={len(svg)}", "Thinking" in svg)
+
+        fake2 = FakeController()
+        app2 = await _mounted(fake2)
+        async with app2.run_test(size=(100, 40)) as pilot2:
+            await pilot2.pause(0.1)
+            path2, svg2 = _write_snapshot(app2, "tips-placeholder")
+            ctx.check(f"tips placeholder snapshot written to {path2}", path2.exists() and len(svg2) > 0)
+            from halo_harness.tui import tips as tips_mod
+            placeholder = app2.prompt_input.placeholder
+            ctx.check(f"the input placeholder is a rotating tip or the static fallback, got {placeholder!r}",
+                      placeholder.startswith("Tip: ") or placeholder == tips_mod.STATIC_PLACEHOLDER)
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

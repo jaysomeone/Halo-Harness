@@ -21,6 +21,28 @@ _SEVERITY = {"error": "error", "warning": "warning"}
 _SHADOW_TOOLS = frozenset({"Write", "Edit"})
 
 
+def _phase_word_for(state: "str | None", kind: "str | None") -> "str | None":
+    """Halo 2.0.1 W2b (liveness-tips-brief Part A3/A5): a `phase` event's
+    (state, kind) -> the short display word the main status bar AND a
+    sub-agent's own `SubAgentCard` both show -- ONE mapping, read by both,
+    so a main-session call and a sub-agent's own call are always described
+    the same way. None for a `phase` state that never changes the word on
+    its own (`headers` alone stays "thinking" -- the richer "no tokens
+    yet"/token-count text is the transcript's own phase line's job, not
+    this compact word)."""
+    if state in ("request_sent", "headers"):
+        return "thinking"
+    if state == "first_token":
+        if kind == "reasoning":
+            return "thinking"
+        if kind == "tool":
+            return "tool"
+        return "writing"
+    if state == "waiting_for_model":
+        return "waiting"
+    return None
+
+
 def _tool_header(app, name: str, input_data: dict) -> str:
     tool = app.tool_registry.get(name) if app.tool_registry is not None else None
     body = tool.summary(input_data) if tool is not None else _summarize_call(name, input_data)
@@ -216,11 +238,29 @@ async def _apply_event_inner(app, event) -> None:
         if agent_id is None:
             app.status_bar.apply_status({"phase": "thinking"})
     elif kind == "text_delta":
-        await app.transcript.append_text(turn, data.get("index", 0), data.get("text", ""), agent_id=agent_id)
+        text = data.get("text", "")
+        await app.transcript.append_text(turn, data.get("index", 0), text, agent_id=agent_id)
+        # A3: the status bar's own received-token counter -- never for a
+        # child's delta (finding 11's own "never touch the MAIN status bar"
+        # rule, unchanged by this brief).
+        if agent_id is None:
+            app.status_bar.add_received_chars(len(text))
     elif kind == "thinking_delta":
-        await app.transcript.append_thinking(turn, data.get("index", 0), data.get("text", ""), agent_id=agent_id)
+        text = data.get("text", "")
+        await app.transcript.append_thinking(turn, data.get("index", 0), text, agent_id=agent_id)
+        if agent_id is None:
+            app.status_bar.add_received_chars(len(text))
     elif kind == "tool_use_ready":
         await _mount_tool_card(app, data)
+        # A3/A5: "tool <Name> <Ns>" on the main status bar, or the running
+        # count on the sub-agent's own card -- never both for one event.
+        if agent_id is None:
+            app.status_bar.set_phase_word("tool")
+            app.status_bar.set_tool_name(data.get("name"))
+        else:
+            card = app.transcript.subagent_cards.get(agent_id)
+            if card is not None:
+                card.note_tool_call()
     elif kind == "tool_progress":
         card = app.transcript.tool_cards.get(data.get("id"))
         if card is not None:
@@ -261,7 +301,21 @@ async def _apply_event_inner(app, event) -> None:
         # briefly showed the child's own model and a cost that dropped
         # from the parent's real running total).
         if agent_id is None:
-            app.status_bar.apply_status(data)
+            status_data = data
+            # Halo 2.0.1 W2b (liveness-tips-brief Part C): "the status-bar
+            # effort chip shows the SENT value" for EVERY status event, not
+            # only the ones `/effort` itself pushes -- re-derives the same
+            # "requested (sent as X on this route)" text `tui/slash.py`'s
+            # own `_effort_status_text` already computes for `/effort`'s
+            # card/confirmation, from the live session, so a route
+            # configured via `--effort medium` at launch (never touching
+            # `/effort` interactively at all) shows the clamp too.
+            if data.get("effort") is not None:
+                from halo_harness.tui.slash import _effort_status_text
+                enriched = _effort_status_text(getattr(app.controller, "session", None))
+                if enriched is not None:
+                    status_data = {**data, "effort": enriched}
+            app.status_bar.apply_status(status_data)
     elif kind == "message_end":
         if agent_id is None:
             # 1.0.1 hotfix 14: pass the raw context_tokens/context_limit and
@@ -270,12 +324,27 @@ async def _apply_event_inner(app, event) -> None:
             # the derived context_pct -- apply_status needs the raw numbers
             # itself now, to show "ctx 12k/1M 1%" or fall back to "in 12k
             # out 3k" when cost_usd is None.
+            #
+            # Halo 2.0.1 W2b: no "phase": "idle" here any more -- a message_
+            # end mid-turn (a tool-calling step, stop_reason="tool_use") is
+            # NOT the turn ending, and the old unconditional idle flash was
+            # exactly the kind of misleading non-liveness signal A1/A3 are
+            # about (the status bar briefly going blank while the turn was
+            # still very much running, between steps). `phase(state=
+            # "waiting_for_model")` (below) now fills that gap with a real
+            # "waiting" word instead; `turn_done`'s own `go_idle()` is the
+            # ONLY place idle is ever set from here on.
             app.status_bar.apply_status({
-                "phase": "idle", "cost_usd": data.get("cost_usd"),
+                "cost_usd": data.get("cost_usd"),
                 "context_tokens": data.get("context_tokens"), "context_limit": data.get("context_limit"),
                 "total_input_tokens": data.get("total_input_tokens"),
                 "total_output_tokens": data.get("total_output_tokens"),
             })
+        # A1: "collapses to a Thought-for summary ... or is removed when
+        # there was none" -- resolved BEFORE finish_open_streams below
+        # (which only pops bookkeeping/harvests plain-text, never touches
+        # the DOM) so the two never race over the same widget.
+        await app.transcript.finish_phase_line(turn, agent_id=agent_id)
         await app.transcript.finish_open_streams(agent_id=agent_id)
     elif kind == "error":
         message = data.get("message", "")
@@ -290,19 +359,85 @@ async def _apply_event_inner(app, event) -> None:
         # was still running) -- its OWN open streams still get closed
         # either way, via the agent_id-scoped finish_open_streams below.
         if agent_id is None:
-            app.status_bar.apply_status({"phase": "idle"})
+            # A3: "After turn_done the cluster returns to idle" -- also
+            # resets the received-token counter/running tool name, so
+            # neither can ever carry a stale reading into the next turn.
+            app.status_bar.go_idle()
         await app.transcript.finish_open_streams(agent_id=agent_id)
         if agent_id is None:
             app.on_turn_done(data.get("reason", "end_turn"))
+    elif kind == "phase":
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A1/A3/A5): drives the
+        # transcript's own live phase line (every state, main session or a
+        # sub-agent's own call alike -- `agent_id` threaded straight
+        # through) and, separately, whichever COMPACT live summary this
+        # call belongs to -- the main status bar for `agent_id is None`,
+        # that sub-agent's own `SubAgentCard` otherwise. See `_phase_word_
+        # for`'s own docstring for the one (state, kind) -> word mapping
+        # both summaries share.
+        state = data.get("state")
+        word = _phase_word_for(state, data.get("kind"))
+        card = None if agent_id is None else app.transcript.subagent_cards.get(agent_id)
+        if state == "request_sent":
+            if agent_id is None:
+                app.status_bar.start_phase_clock(word or "thinking")
+            elif card is not None and word:
+                card.set_phase_word(word)
+            await app.transcript.begin_phase_line(turn, agent_id=agent_id, model_label=data.get("model"))
+        elif state == "headers":
+            app.transcript.phase_headers(turn, agent_id=agent_id, ttfb_ms=data.get("ttfb_ms"))
+        elif state == "first_token":
+            if word:
+                if agent_id is None:
+                    app.status_bar.set_phase_word(word)
+                elif card is not None:
+                    card.set_phase_word(word)
+            app.transcript.phase_first_token(turn, agent_id=agent_id, kind=data.get("kind"))
+        elif state == "waiting_for_model":
+            if agent_id is None:
+                app.status_bar.start_phase_clock("waiting")
+            elif card is not None:
+                card.set_phase_word("waiting")
+            await app.transcript.begin_waiting_line(turn, agent_id=agent_id)
+    elif kind == "steer_restart":
+        # GLM-brief.md item 3 / W2-plan item 2: the in-flight call was
+        # silently aborted (no chunk had arrived yet) and is being resent
+        # with the steer appended -- nothing was lost. Mirrors print mode's
+        # own `--verbose` one-liner (output.py); shown unconditionally here
+        # (never gated on verbose) since the TUI already shows every other
+        # steer as a transcript note (steer_queued's own "↳ steering…").
+        await app.transcript.add_note("↳ steering (restarting the model call)", kind="steer")
     elif kind == "subagent_start":
-        # U5 scope C: `agent_id`/`parent_tool_use_id` (D-Contract) are read
-        # defensively -- H6's sub-agent event payload is still landing --
-        # so this degrades to the plain note it always was if either is
-        # absent. Tracked in `subagent_marks` for child-session navigation.
-        suffix = f" (agent_id={data['agent_id']})" if data.get("agent_id") else ""
-        widget = await app.transcript.add_note(f"→ sub-agent: {data.get('name', '?')}{suffix}", kind="subagent")
-        app.transcript.subagent_marks.append(widget)
+        # U5 scope C / H6: `agent/subagent.py` tags THIS event's own
+        # top-level `agent_id` with the CHILD's id (`start_ev.agent_id =
+        # agent_id`, the same field every other event of that child's own
+        # run carries) -- `agent_id` (extracted at the top of this
+        # function) is therefore already the right routing key; `data`'s
+        # OWN "agent_id" is read only as a defensive fallback (an older/
+        # incomplete event shape that set the data field but not the
+        # top-level one). Tracked in `subagent_marks` for child-session
+        # navigation either way.
+        #
+        # Halo 2.0.1 W2b (Part A5): a LIVE `SubAgentCard` in place of the
+        # old plain note when a child id IS known -- "agent <name> ·
+        # <phase> <Ns> · <N> tools", updated from that child's own `phase`/
+        # `tool_use_ready` events (the `elif kind == "phase"`/`tool_use_
+        # ready` branches above, matched by this SAME agent_id) and frozen
+        # on `subagent_end` below.
+        name = data.get("name", "?")
+        child_agent_id = agent_id or data.get("agent_id")
+        if child_agent_id:
+            from halo_harness.tui.widgets.cards import SubAgentCard
+            card = SubAgentCard(agent_id=child_agent_id, name=name)
+            await app.transcript.mount_subagent_card(card)
+        else:
+            widget = await app.transcript.add_note(f"→ sub-agent: {name}", kind="subagent")
+            app.transcript.subagent_marks.append(widget)
     elif kind == "subagent_end":
+        child_agent_id = agent_id or data.get("agent_id")
+        card = app.transcript.subagent_cards.pop(child_agent_id, None) if child_agent_id else None
+        if card is not None:
+            card.finish()
         widget = await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}", kind="subagent")
         app.transcript.subagent_marks.append(widget)
     elif kind == "replay":

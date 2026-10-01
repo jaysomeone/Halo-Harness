@@ -57,7 +57,15 @@ class ToolCard(Static, can_focus=True):
     """Keyed by `tool_use_id`. `header` is already the fully-formed one-line
     summary (`"⏺ Bash(git status -sb)"` -- app.py builds it via the
     tool registry's own `summary()`/`permission_content()` so this widget
-    never needs a registry reference itself)."""
+    never needs a registry reference itself).
+
+    Halo 2.0.1 W2b (liveness-tips-brief Part A4): a RUNNING card's header
+    also carries its own elapsed seconds (`⏺ Bash(pytest -q) · 12 s`),
+    ticking every drain tick (`tick()`, called from `Transcript.
+    tick_tool_cards`/`BridgeApp._drain` for every still-running card) the
+    same way the transcript's own phase line does -- Grep/Glob/WebFetch/
+    MCP/Agent calls get at least this counter even though only Bash
+    streams `tool_progress` lines of its own."""
 
     BINDINGS = [Binding("o", "open_pager", "Pager", show=False)]
 
@@ -68,7 +76,16 @@ class ToolCard(Static, can_focus=True):
         self.body_text = ""
         self.status = "running"
         self.expanded = False
+        self.started_at = time.monotonic()
+        self._last_rendered: Optional[str] = None
         self._refresh()
+
+    def tick(self) -> None:
+        """A no-op render-wise unless the displayed elapsed seconds
+        actually changed (`_refresh`'s own `_last_rendered` cache) --
+        cheap to call unconditionally every drain tick."""
+        if self.status == "running":
+            self._refresh()
 
     def append_progress(self, chunk: str) -> None:
         self.body_text += chunk
@@ -160,15 +177,26 @@ class ToolCard(Static, can_focus=True):
         self.app.push_screen(PagerScreen(self.header, self.body_text or "(no output yet)"))
 
     def _refresh(self) -> None:
+        from halo_harness.model_display import format_elapsed_seconds
+
         glyph = STATUS_GLYPHS[self.status]
-        spinner = " ⋯" if self.status == "running" else ""
+        # A4: a running card's own elapsed seconds, right in the header --
+        # replaces the old bare "⋯" spinner (the counter itself is now the
+        # liveness signal); a resolved card (ok/error/skipped) shows no
+        # elapsed suffix at all, same as before this brief.
+        header = (f"{self.header} · {format_elapsed_seconds(time.monotonic() - self.started_at)}"
+                  if self.status == "running" else self.header)
         if self.expanded:
             body, extra = self.body_text, 0
         else:
             body, extra = _truncate_lines(self.body_text, 3)
         hint = f"\n  … +{extra} lines (ctrl+o, or o for a pager)" if extra else ""
         indented = "\n".join(f"  {line}" for line in body.splitlines())
-        self.update(f"{self.header}{spinner}\n  {glyph}\n{indented}{hint}")
+        text = f"{header}\n  {glyph}\n{indented}{hint}"
+        if text == self._last_rendered:
+            return
+        self._last_rendered = text
+        self.update(text)
 
 
 def _summarize_call(name: str, input_data: dict) -> str:
@@ -177,6 +205,73 @@ def _summarize_call(name: str, input_data: dict) -> str:
     except (TypeError, ValueError):
         body = str(input_data)
     return f"{name}({body[:80]})" if len(body) <= 80 else f"{name}({body[:80]}...)"
+
+
+class SubAgentCard(Static):
+    """Halo 2.0.1 W2b (liveness-tips-brief Part A5): the parent's own live
+    summary of ONE running sub-agent -- `"agent reviewer · thinking 9 s ·
+    3 tools"` -- mounted (by `tui/dispatch.py`) on `subagent_start` in
+    place of the old plain "-> sub-agent: X" note, updated from the
+    CHILD's own `phase`/`tool_use_ready` events (every one of them already
+    tagged with this card's own `agent_id`, the same tagging every other
+    child event carries -- see `Transcript`'s own class docstring),
+    finalized (frozen, stops ticking) on `subagent_end`.
+
+    Never focusable -- purely informational, like a SystemNote, never
+    stealing focus the way an answerable card correctly does. This is
+    IN ADDITION TO the child's own inline text/thinking blocks (which
+    already render directly in the transcript, CSS-tagged `*-child`) --
+    this card is the at-a-glance summary a reader can check without
+    reading the child's full streamed output. `started_at` is set ONCE,
+    at construction, and never reset -- "9 s" is how long the WHOLE
+    sub-agent invocation has been running, not any one internal call's
+    own elapsed (unlike the main session's own per-call phase line)."""
+
+    def __init__(self, *, agent_id: str, name: str) -> None:
+        super().__init__("", markup=False, classes="system-note system-note-subagent")
+        self.agent_id = agent_id
+        # NEVER `self.name` -- Textual's own `Widget.name` is a read-only
+        # property (the widget's DOM name), and assigning to it raises
+        # "property 'name' ... has no setter" (caught and swallowed by
+        # dispatch.py's own apply_event try/except, which is what let this
+        # slip through as a silent per-event error note instead of a loud
+        # crash the first time around).
+        self.agent_name = name
+        self.phase_word = "thinking"
+        self.tool_count = 0
+        self.done = False
+        self.started_at = time.monotonic()
+        self._last_rendered: Optional[str] = None
+        self._refresh()
+
+    def set_phase_word(self, word: str) -> None:
+        if not self.done and word != self.phase_word:
+            self.phase_word = word
+            self._refresh()
+
+    def note_tool_call(self) -> None:
+        if not self.done:
+            self.tool_count += 1
+            self._refresh()
+
+    def finish(self) -> None:
+        self.done = True
+        self._refresh()
+
+    def tick(self) -> None:
+        if not self.done:
+            self._refresh()
+
+    def _refresh(self) -> None:
+        from halo_harness.model_display import format_elapsed_seconds
+
+        elapsed = format_elapsed_seconds(time.monotonic() - self.started_at)
+        word = "done" if self.done else self.phase_word
+        text = f"agent {self.agent_name} · {word} {elapsed} · {self.tool_count} tools"
+        if text == self._last_rendered:
+            return
+        self._last_rendered = text
+        self.update(text)
 
 
 class PermissionCard(Static, can_focus=True):
@@ -481,7 +576,8 @@ class EffortCard(Static, can_focus=True):
     }
 
     def __init__(self, *, levels: list, current: "str | None", model_id: str, on_select: Callable,
-                 descriptions: "Optional[dict]" = None, override_note: "Optional[str]" = None) -> None:
+                 descriptions: "Optional[dict]" = None, override_note: "Optional[str]" = None,
+                 requested: "Optional[str]" = None) -> None:
         super().__init__("", markup=False, classes="effort-card")
         self.levels = list(levels)
         self.model_id = model_id
@@ -496,6 +592,17 @@ class EffortCard(Static, can_focus=True):
         # the user why their choice won't change what actually goes out on
         # a tool-carrying turn.
         self._override_note = override_note
+        # Halo 2.0.1 W2b (liveness-tips-brief Part C): "the /effort card
+        # marks a clamped choice inline, e.g. 'medium (sent as high on
+        # this route)'" -- `current` is already the SENT value (`Session.
+        # effort`); `requested` (`Session.effort_requested`) is the raw
+        # value last explicitly asked for, before clamping. Computed ONCE,
+        # describing the state the card opened with -- arrowing through
+        # the row changes `self.index`, never this note (nothing has been
+        # applied yet while the card is still open).
+        self._clamp_note = (f"Current: {requested} (sent as {current} on this route)."
+                             if requested is not None and current is not None and requested != current
+                             else None)
         self._refresh()
 
     def _refresh(self) -> None:
@@ -507,6 +614,8 @@ class EffortCard(Static, can_focus=True):
         lines = [f"Effort level for {self.model_id}:", f"  {row}"]
         if desc:
             lines.append(f"  {desc}")
+        if self._clamp_note:
+            lines.append(f"  {self._clamp_note}")
         if self._override_note:
             lines.append(f"  {self._override_note}")
         if not self.done:

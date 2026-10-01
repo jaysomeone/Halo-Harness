@@ -61,9 +61,14 @@ _METHOD_ACTIONS = {
     "session:prevChild": "action_prev_subagent",
 }
 
-DEFAULT_PLACEHOLDER = 'Try "read README.md and summarise it"   (/ commands, @ files)'
-
 _PASTE_PLACEHOLDER_RE = re.compile(r"\[Pasted text #(\d+) \+\d+ lines\]")
+
+# Halo 2.0.1 W2b (liveness-tips-brief Part B2): "every 15s while the input
+# is empty and no turn is running" -- a module-level seam (same convention
+# as HANG_HEARTBEAT_THRESHOLD_S just below) a test shrinks before
+# constructing/mounting the app, so "idle rotation" doesn't need a real
+# 15s wait.
+TIP_ROTATE_INTERVAL_S = 15.0
 
 # H15 Part B: hang diagnostics. `_tick_spinner` (set_interval(1.0, ...), see
 # on_mount) bumps the heartbeat every second; a SEPARATE OS thread (never
@@ -220,6 +225,22 @@ class BridgeApp(App):
             detect_image_protocol(dict(os.environ), isatty=sys.stdout.isatty())
             if self.images_render_mode == "inline" else "none")
 
+        # Halo 2.0.1 W2b (liveness-tips-brief Part B): the rotating-tip
+        # placeholder -- `None` (the off switch, `tips: false`/`HALO_
+        # TIPS=0`, OR simply no applicable tip exists at all) means the
+        # STATIC placeholder is shown instead, computed fresh every time
+        # from `_current_placeholder_text` rather than stored once. B2:
+        # "never change while the input has text or while a turn runs" --
+        # `_turn_running` is the one flag `_submit_prompt`/`on_turn_done`
+        # both maintain for exactly that gate (see `_maybe_rotate_tip`).
+        from halo_harness.tui import tips as tips_mod
+        self._tip_rotator: "Optional[tips_mod.TipRotator]" = None
+        if tips_mod.tips_enabled():
+            pool = tips_mod.all_applicable_tips(self.registry, facade=self.facade)
+            if pool:
+                self._tip_rotator = tips_mod.TipRotator(pool)
+        self._turn_running = False
+
         self._local_events: "queue.Queue" = queue.Queue()
         self.verbose = False
         self.pending_card = None
@@ -262,6 +283,35 @@ class BridgeApp(App):
         self._watchdog_paused = False
         self._watchdog_dump_count = 0
 
+    # ---- Halo 2.0.1 W2b: rotating tip placeholder (liveness-tips-brief
+    # Part B2) ------------------------------------------------------------
+
+    def _current_placeholder_text(self) -> str:
+        from halo_harness.tui import tips as tips_mod
+        if self._tip_rotator is None or self._tip_rotator.current is None:
+            return tips_mod.STATIC_PLACEHOLDER
+        prompt_input = getattr(self, "prompt_input", None)
+        width = prompt_input.size.width if prompt_input is not None else 0
+        return tips_mod.format_tip_placeholder(self._tip_rotator.current.text, width or 80)
+
+    def _refresh_tip_placeholder(self) -> None:
+        prompt_input = getattr(self, "prompt_input", None)
+        if prompt_input is not None:
+            prompt_input.placeholder = self._current_placeholder_text()
+
+    def _maybe_rotate_tip(self) -> None:
+        """B2: the 15s idle-rotation timer AND `on_turn_done`'s own
+        after-turn rotation both call this -- "never change while the
+        input has text or while a turn runs" is enforced HERE, once, for
+        both triggers, rather than duplicated at each call site."""
+        if self._tip_rotator is None:
+            return
+        prompt_input = getattr(self, "prompt_input", None)
+        if self._turn_running or (prompt_input is not None and prompt_input.text):
+            return
+        self._tip_rotator.advance()
+        self._refresh_tip_placeholder()
+
     # ---- composition -------------------------------------------------
 
     def compose(self) -> ComposeResult:
@@ -277,7 +327,7 @@ class BridgeApp(App):
         with Vertical(id="bottom-dock"):
             with Horizontal(id="prompt-row"):
                 yield Static("❯", id="prompt-glyph")
-                yield PromptInput(placeholder=DEFAULT_PLACEHOLDER)
+                yield PromptInput(placeholder=self._current_placeholder_text())
             yield StatusBar(cwd=str(self.cwd))
 
     def get_css_variables(self) -> dict:
@@ -298,6 +348,14 @@ class BridgeApp(App):
         self.which_key = self.query_one(WhichKeyOverlay)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
+        # B2: the compose()-time placeholder was fitted against a guessed
+        # width (prompt_input.size isn't real until after the first layout
+        # pass) -- recompute now that it is, and start the 15s idle-
+        # rotation timer (a no-op call every tick when tips are off/empty,
+        # same "cheap to call unconditionally" convention as the drain
+        # timer's own liveness ticks).
+        self._refresh_tip_placeholder()
+        self.set_interval(TIP_ROTATE_INTERVAL_S, self._maybe_rotate_tip)
         # 2.0.0 Launch intro: mounted FIRST, before anything else below --
         # including `--continue`/`--resume`'s own replayed transcript,
         # which only ever starts arriving once `starter()`/the initial-
@@ -683,10 +741,28 @@ class BridgeApp(App):
         if real_events:
             self.transcript.mark_seen()
             self.status_bar.set_new_count(self.transcript.new_since_scroll)
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A1/A4/A5): "something
+        # visible changes every second while a turn runs" -- the elapsed/
+        # no-data text on every live phase line, running tool card and
+        # sub-agent card is recomputed EVERY drain tick, unconditionally,
+        # never only in reaction to a new event (`real_events` above can
+        # be empty while the model is silently thinking -- that's exactly
+        # the case this is for). Each is a no-op render-wise unless the
+        # computed text actually changed (its own `_last_rendered` cache),
+        # so this costs nothing extra on an idle session (no live widgets
+        # at all -- every dict this walks is simply empty).
+        self.transcript.tick_phase_lines()
+        self.transcript.tick_tool_cards()
+        self.transcript.tick_subagent_cards()
 
     def on_turn_done(self, reason: str) -> None:
         if reason == "interrupted":
             self.notify("Interrupted.", timeout=2)
+        # B2: "the next tip ... at every turn_done" -- `_maybe_rotate_tip`
+        # itself still gates on the input being empty (a steer draft the
+        # user typed mid-turn and hasn't submitted yet).
+        self._turn_running = False
+        self._maybe_rotate_tip()
         # U5 scope C: "session titles via the small model after the first
         # turn" -- kicked off exactly once, off the UI thread (a small-
         # model call is network I/O); `Controller.maybe_autoname_title`
@@ -775,7 +851,7 @@ class BridgeApp(App):
             card = self._borrowing_card
             self._borrowing_card = None
             self.prompt_input.clear_submitted()
-            self.prompt_input.placeholder = DEFAULT_PLACEHOLDER
+            self.prompt_input.placeholder = self._current_placeholder_text()
             # finding 14: expanded, never the raw "[Pasted text #n ...]"
             # placeholder -- same reasoning as review finding 4's own fix
             # for the ordinary prompt path just below.
@@ -876,6 +952,11 @@ class BridgeApp(App):
                 ingest(expanded)
             except Exception:
                 pass
+        # B2: "never change [the tip] while ... a turn runs" -- set ONLY
+        # here (a real model turn), never for the "!"/"/" branches above
+        # (which return early and may never fire a matching `turn_done` at
+        # all -- this flag would otherwise freeze tip rotation forever).
+        self._turn_running = True
         result = self.controller.submit(expanded, pasted=pasted or None)
         if result is not None:  # FakeController: a synchronous scripted turn
             for e in result:
@@ -1321,7 +1402,7 @@ class BridgeApp(App):
 
     def clear_pending_card(self) -> None:
         self.pending_card = None
-        self.prompt_input.placeholder = DEFAULT_PLACEHOLDER
+        self.prompt_input.placeholder = self._current_placeholder_text()
         self.status_bar.set_pending_permission(False)
         self.set_focus(self.prompt_input)
         # 1.0.1 fixpass finding 15: re-anchor if the transcript was
@@ -1487,7 +1568,7 @@ class BridgeApp(App):
             card = self._borrowing_card
             self._borrowing_card = None
             self.prompt_input.clear_submitted()
-            self.prompt_input.placeholder = DEFAULT_PLACEHOLDER
+            self.prompt_input.placeholder = self._current_placeholder_text()
             card.resolve_with_message("")
             return
         if self.pending_card is not None:

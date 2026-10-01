@@ -10,11 +10,15 @@ folding counts everything uniformly).
 
 from __future__ import annotations
 
+import textwrap
+import time
+from typing import Optional
 
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Markdown, Static
 
+from halo_harness.model_display import format_elapsed_seconds, format_live_token_count
 from halo_harness.tui.keys import FOLD_AFTER_WIDGETS
 
 
@@ -122,18 +126,132 @@ class FoldedHistory(Static):
 
 
 class ThinkingBlock(Static):
-    """Dim, collapsed by default: "✻ Thinking… <last line>".
-    Ctrl+O (app-level, `BridgeApp.action_toggle_verbose`) or a click expands
-    to the full accumulated text."""
+    """Halo 2.0.1 W2b (HALO-2.0.1-liveness-tips-brief.md Part A1/A2): the
+    ONE live status line for a single model call -- "something visible
+    changes every second while a turn runs" -- extended in place from the
+    original "collapsed reasoning preview" widget rather than adding a
+    parallel widget tree (phase line A1 and the reasoning preview A2 are
+    literally the same widget, collapsed vs. expanded).
+
+    Lifecycle (driven by `Transcript.begin_phase_line`/`phase_headers`/
+    `phase_first_token`/`begin_waiting_line`/`finish_phase_line`, called
+    from `tui/dispatch.py`'s own `phase`/`message_end` handlers):
+
+      sending -> headers -> reasoning|writing -> done (collapses to a
+      "Thought for Ns" summary) or REMOVED (message_end's own "or is
+      removed when there was none") -- `waiting` is its own short-lived
+      state between a tool result and the next call, always a FRESH
+      widget (the previous call's own line already finalized at its own
+      message_end).
+
+    A bare `ThinkingBlock(phase_state="reasoning")` with no phase events
+    at all (how `append_thinking` always worked before this brief, and how
+    `Transcript.append_thinking` still falls back when no `phase(request_
+    sent)` ever ran for this call -- a bare scripted test, or a dialect
+    this harness hasn't wired phase events for yet) behaves exactly as
+    the pre-2.0.1 widget did: content shows the moment it arrives, no
+    "sending"/"no tokens yet" wait.
+
+    `NO_DATA_THRESHOLD_S`/`NO_DATA_REFRESH_S` are class attributes (same
+    seam convention as `IntroLine.BASE_DELAY_S`) so a test can shrink the
+    real 30s/10s to something it can actually wait out."""
 
     expanded = reactive(False)
 
-    def __init__(self) -> None:
+    NO_DATA_THRESHOLD_S = 30.0
+    NO_DATA_REFRESH_S = 10.0
+    # A model call with no reasoning/text/tool activity at all for this
+    # long is still "sending"/"headers" -- not a realistic wait, just a
+    # safety cap so `_elapsed()` never prints an absurd number if a test
+    # (or a real, genuinely very slow route) leaves one hanging.
+    _STATES_WITH_NO_DATA_SUFFIX = frozenset({"sending", "headers", "waiting"})
+
+    def __init__(self, *, model_label: Optional[str] = None, phase_state: str = "sending") -> None:
         super().__init__("", markup=False, classes="thinking-block")
-        self.text = ""
+        self.model_label = model_label
+        self.phase_state = phase_state
+        self.reasoning_text = ""
+        self.written_chars = 0
+        self.ttfb_ms: Optional[float] = None
+        now = time.monotonic()
+        self.started_at = now
+        self.last_activity_at = now
+        self.final_elapsed = 0.0
+        self._last_rendered: Optional[str] = None
+        # Back-compat: `action_toggle_verbose` iterates `transcript._blocks.
+        # values()` and `finish_open_streams` checks `widget.text.strip()`
+        # for the plain-text scrollback -- both pre-date this brief and
+        # read `.text` directly; kept as a live alias of `reasoning_text`
+        # rather than touching either call site.
+        self._refresh_display()
+
+    @property
+    def text(self) -> str:
+        return self.reasoning_text
+
+    def had_reasoning(self) -> bool:
+        return bool(self.reasoning_text.strip())
+
+    # ---- phase-event transitions (called by Transcript, never by dispatch
+    # directly -- see that module's own begin_phase_line/phase_headers/
+    # phase_first_token/begin_waiting_line/finish_phase_line) -------------
+
+    def restart(self, model_label: Optional[str]) -> None:
+        """A `waiting` line reused as the NEXT call's own `sending` state
+        (Transcript.begin_phase_line's own "waiting -> request_sent is one
+        continuous line, never a flicker of remove-then-mount" choice)."""
+        self.model_label = model_label
+        self.phase_state = "sending"
+        self.reasoning_text = ""
+        self.written_chars = 0
+        self.ttfb_ms = None
+        now = time.monotonic()
+        self.started_at = now
+        self.last_activity_at = now
+        self._refresh_display()
+
+    def enter_headers(self, ttfb_ms: Optional[float]) -> None:
+        self.phase_state = "headers"
+        self.ttfb_ms = ttfb_ms
+        self.last_activity_at = time.monotonic()
+        self._refresh_display()
+
+    def enter_first_token(self, kind: Optional[str]) -> None:
+        self.phase_state = "reasoning" if kind == "reasoning" else "writing"
+        self.last_activity_at = time.monotonic()
+        self._refresh_display()
+
+    def enter_reasoning(self) -> None:
+        self.phase_state = "reasoning"
+        self._refresh_display()
+
+    def enter_writing(self, delta_chars: int = 0) -> None:
+        self.phase_state = "writing"
+        self.written_chars += max(0, delta_chars)
+        self.last_activity_at = time.monotonic()
+        self._refresh_display()
+
+    def enter_done(self) -> None:
+        self.final_elapsed = self._elapsed()
+        self.phase_state = "done"
+        self._refresh_display()
+
+    def tick(self) -> None:
+        """Called every drain tick (`Transcript.tick_phase_lines`, from
+        `BridgeApp._drain`) for every STILL-LIVE phase line, whether or not
+        any new event arrived this tick -- A1: "updated in place at least
+        once a second ... never only on chunk arrival". A no-op render-
+        wise unless the computed text actually changed (the elapsed/no-
+        data text only changes once a whole second ticks over, even though
+        this is called up to 30x/s)."""
+        self._refresh_display()
+
+    # ---- reasoning-preview content (Transcript.append_thinking/append_text
+    # feed deltas in; append_thinking also calls enter_reasoning/append) ---
 
     def append(self, delta: str) -> None:
-        self.text += delta
+        self.reasoning_text += delta
+        self.last_activity_at = time.monotonic()
         self._refresh_display()
 
     def set_expanded(self, value: bool) -> None:
@@ -142,16 +260,65 @@ class ThinkingBlock(Static):
     def watch_expanded(self, _value: bool) -> None:
         self._refresh_display()
 
-    def _refresh_display(self) -> None:
-        stripped = self.text.strip()
-        if self.expanded:
-            self.update(f"✻ Thinking\n{self.text}")
-            return
-        last_line = stripped.splitlines()[-1] if stripped else ""
-        self.update((f"✻ Thinking… {last_line}")[:200])
-
     def on_click(self) -> None:
         self.expanded = not self.expanded
+
+    # ---- rendering ------------------------------------------------------
+
+    def _elapsed(self) -> float:
+        return time.monotonic() - self.started_at
+
+    def _reasoning_tokens(self) -> int:
+        return len(self.reasoning_text) // 4
+
+    def _no_data_suffix(self) -> str:
+        if self.phase_state not in self._STATES_WITH_NO_DATA_SUFFIX:
+            return ""
+        stall = time.monotonic() - self.last_activity_at
+        threshold, refresh = self.NO_DATA_THRESHOLD_S, self.NO_DATA_REFRESH_S
+        if stall < threshold or refresh <= 0:
+            return ""
+        shown = int(stall // refresh) * refresh
+        shown_str = f"{shown:g}"
+        return f" · no data for {shown_str} s, Esc interrupts, typing steers"
+
+    def _preview_lines(self, n: int = 3) -> str:
+        width = max(20, (self.size.width or 76) - 4)
+        wrapped: "list[str]" = []
+        for para in self.reasoning_text.splitlines() or [""]:
+            wrapped.extend(textwrap.wrap(para, width=width) or [""])
+        return "\n".join(wrapped[-n:])
+
+    def _refresh_display(self) -> None:
+        if self.phase_state == "sending":
+            label = f" to {self.model_label}" if self.model_label else ""
+            text = f"✻ Sending request{label}…"
+        elif self.phase_state == "headers":
+            text = f"✻ Thinking… ({format_elapsed_seconds(self._elapsed())}, no tokens yet){self._no_data_suffix()}"
+        elif self.phase_state == "reasoning":
+            header = (f"✻ Thinking… ({format_elapsed_seconds(self._elapsed())} · "
+                      f"{format_live_token_count(self._reasoning_tokens())} reasoning tokens)")
+            # A2: expanded (the last 3 wrapped lines) WHILE actively
+            # streaming, regardless of Ctrl+O -- or whenever Ctrl+O/verbose
+            # is on (so toggling it mid-stream still does something, even
+            # though streaming is already auto-expanded).
+            text = f"{header}\n{self._preview_lines()}" if self.reasoning_text.strip() else header
+        elif self.phase_state == "writing":
+            text = (f"✻ Writing… ({format_elapsed_seconds(self._elapsed())} · "
+                    f"{format_live_token_count(self.written_chars // 4)} tokens){self._no_data_suffix()}")
+        elif self.phase_state == "waiting":
+            text = f"✻ Waiting for model… ({format_elapsed_seconds(self._elapsed())}){self._no_data_suffix()}"
+        else:  # "done"
+            summary = (f"✻ Thought for {format_elapsed_seconds(self.final_elapsed)} "
+                      f"({format_live_token_count(self._reasoning_tokens())} tokens)")
+            # A1: "Ctrl+O ... expands the full reasoning text under the
+            # summary" -- the WHOLE text now (streaming is over), not the
+            # 3-line preview.
+            text = f"{summary}\n{self.reasoning_text}" if self.expanded and self.reasoning_text.strip() else summary
+        if text == self._last_rendered:
+            return
+        self._last_rendered = text
+        self.update(text)
 
 
 class AssistantText(Markdown):
@@ -218,6 +385,17 @@ class Transcript(VerticalScroll):
         self._blocks: dict = {}  # (agent_id, turn, seq, kind, index) -> AssistantText|ThinkingBlock
         self._message_seq: dict = {}  # (agent_id, turn) -> current message sequence number
         self.tool_cards: dict = {}  # tool_use_id -> ToolCard
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A5): agent_id -> the
+        # live SubAgentCard summarizing that sub-agent's own run -- see
+        # `tui/dispatch.py`'s `subagent_start`/`subagent_end`/`phase`/
+        # `tool_use_ready` handlers, the only writers.
+        self.subagent_cards: dict = {}
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A1): (agent_id, turn) ->
+        # the CURRENTLY LIVE ThinkingBlock acting as that call's phase line
+        # -- present only between `begin_phase_line`/`begin_waiting_line`
+        # and the matching `finish_phase_line`; see `tui/dispatch.py`'s own
+        # `phase`/`message_end` handlers, the only callers of all four.
+        self._phase_lines: dict = {}
         self.new_since_scroll = 0
         self.folded_count = 0
         # Plain-text scrollback (D-TUI: printed on exit when settings `tui
@@ -299,6 +477,8 @@ class Transcript(VerticalScroll):
         self._blocks = {}
         self._message_seq = {}
         self.tool_cards = {}
+        self.subagent_cards = {}
+        self._phase_lines = {}
         self.new_since_scroll = 0
         self.folded_count = 0
 
@@ -311,6 +491,8 @@ class Transcript(VerticalScroll):
         victim_ids = {id(w) for w in victims}
         self._blocks = {k: w for k, w in self._blocks.items() if id(w) not in victim_ids}
         self.tool_cards = {k: w for k, w in self.tool_cards.items() if id(w) not in victim_ids}
+        self.subagent_cards = {k: w for k, w in self.subagent_cards.items() if id(w) not in victim_ids}
+        self._phase_lines = {k: w for k, w in self._phase_lines.items() if id(w) not in victim_ids}
         for w in victims:
             await w.remove()
         self.folded_count += len(victims)
@@ -361,7 +543,84 @@ class Transcript(VerticalScroll):
         self._message_seq[mkey] = seq
         return seq
 
+    # ---- Halo 2.0.1 W2b: phase line lifecycle (liveness-tips-brief Part A1)
+    # -- called from tui/dispatch.py's own `phase`/`message_end` handlers,
+    # never from anywhere else. See ThinkingBlock's own class docstring for
+    # the full state diagram these four drive it through. -------------------
+
+    async def begin_phase_line(self, turn: int, *, agent_id: "str | None" = None,
+                                model_label: "str | None" = None) -> None:
+        """`phase(state="request_sent")`: mount a fresh line, UNLESS the
+        previous call's own line is still showing `waiting` (the gap
+        between a tool result and this next call) -- reusing it there
+        makes "waiting for model" -> "sending" one continuous line instead
+        of a remove-then-mount flicker with nothing in between."""
+        key = (agent_id, turn)
+        existing = self._phase_lines.get(key)
+        if existing is not None and existing.phase_state == "waiting":
+            existing.restart(model_label)
+            return
+        if existing is not None:
+            # Defensive: a line from an EARLIER call at this same key that
+            # was never finalized (shouldn't happen given the real event
+            # contract's own ordering) -- finalize it first rather than
+            # silently leaking a second untracked widget under one key.
+            await self.finish_phase_line(turn, agent_id=agent_id)
+        widget = ThinkingBlock(model_label=model_label, phase_state="sending")
+        if agent_id is not None:
+            widget.add_class("thinking-block-child")
+        await self._mount_tracked(widget)
+        self._phase_lines[key] = widget
+
+    def phase_headers(self, turn: int, *, agent_id: "str | None" = None, ttfb_ms=None) -> None:
+        widget = self._phase_lines.get((agent_id, turn))
+        if widget is not None:
+            widget.enter_headers(ttfb_ms)
+
+    def phase_first_token(self, turn: int, *, agent_id: "str | None" = None, kind=None) -> None:
+        widget = self._phase_lines.get((agent_id, turn))
+        if widget is not None:
+            widget.enter_first_token(kind)
+
+    async def begin_waiting_line(self, turn: int, *, agent_id: "str | None" = None) -> None:
+        """`phase(state="waiting_for_model")`: always a FRESH line -- the
+        call that just finished already had its own line finalized by
+        `finish_phase_line` at its own `message_end` (defensively finalized
+        here too, if that somehow hasn't happened yet)."""
+        key = (agent_id, turn)
+        if key in self._phase_lines:
+            await self.finish_phase_line(turn, agent_id=agent_id)
+        widget = ThinkingBlock(phase_state="waiting")
+        if agent_id is not None:
+            widget.add_class("thinking-block-child")
+        await self._mount_tracked(widget)
+        self._phase_lines[key] = widget
+
+    async def finish_phase_line(self, turn: int, *, agent_id: "str | None" = None) -> None:
+        """`message_end`: "collapses to a Thought-for summary... or is
+        removed when there was none" -- a no-op if no line is live for this
+        (agent_id, turn) at all (a plain-text-only call with no phase
+        events wired, or already finalized)."""
+        widget = self._phase_lines.pop((agent_id, turn), None)
+        if widget is None:
+            return
+        if widget.had_reasoning():
+            widget.enter_done()
+        else:
+            await widget.remove()
+            self._history = [w for w in self._history if w is not widget]
+
+    def tick_phase_lines(self) -> None:
+        """Called every drain tick (`BridgeApp._drain`) regardless of
+        whether any new event arrived -- A1: the elapsed/no-data text is
+        driven by the TIMER, not chunk arrival."""
+        for widget in list(self._phase_lines.values()):
+            widget.tick()
+
     async def append_text(self, turn: int, index: int, text: str, agent_id: "str | None" = None) -> None:
+        phase_widget = self._phase_lines.get((agent_id, turn))
+        if phase_widget is not None:
+            phase_widget.enter_writing(len(text))
         seq = self._message_seq.get((agent_id, turn), 1)
         key = (agent_id, turn, seq, "text", index)
         widget = self._blocks.get(key)
@@ -387,19 +646,33 @@ class Transcript(VerticalScroll):
         key = (agent_id, turn, seq, "thinking", index)
         widget = self._blocks.get(key)
         if widget is None:
-            widget = ThinkingBlock()
+            # Halo 2.0.1 W2b: a `phase(request_sent/headers/first_token)`
+            # sequence for this call already mounted a live phase line
+            # (ThinkingBlock) BEFORE any content ever arrived -- reuse it
+            # (transition to "reasoning") rather than mounting a second,
+            # redundant widget. No phase line active (a bare scripted test,
+            # or a dialect this harness hasn't wired phase events for) ->
+            # exactly the pre-2.0.1 fallback: a fresh widget, content shown
+            # the moment it arrives.
+            phase_widget = self._phase_lines.get((agent_id, turn))
+            if phase_widget is not None:
+                widget = phase_widget
+                widget.enter_reasoning()
+            else:
+                widget = ThinkingBlock(phase_state="reasoning")
+                # review/U5 must-do: a ThinkingBlock renders ABOVE this
+                # message's answer text regardless of event ARRIVAL order --
+                # OpenAI-dialect reasoning can stream its text delta before
+                # its own reasoning delta, and the old unconditional append
+                # put the thinking block wherever it happened to arrive
+                # (below the answer, in that case). If a text widget for this
+                # SAME message already exists, mount right before it;
+                # otherwise (the common, correctly-ordered case) this is
+                # exactly the old behaviour.
+                await self._mount_tracked(widget, before=self._first_text_widget_for(agent_id, turn, seq))
+                self._phase_lines[(agent_id, turn)] = widget
             if agent_id is not None:
                 widget.add_class("thinking-block-child")
-            # review/U5 must-do: a ThinkingBlock renders ABOVE this
-            # message's answer text regardless of event ARRIVAL order --
-            # OpenAI-dialect reasoning can stream its text delta before
-            # its own reasoning delta, and the old unconditional append
-            # put the thinking block wherever it happened to arrive
-            # (below the answer, in that case). If a text widget for this
-            # SAME message already exists, mount right before it;
-            # otherwise (the common, correctly-ordered case) this is
-            # exactly the old behaviour.
-            await self._mount_tracked(widget, before=self._first_text_widget_for(agent_id, turn, seq))
             self._blocks[key] = widget
         else:
             self.note_growth()
@@ -441,6 +714,23 @@ class Transcript(VerticalScroll):
     async def mount_tool_card(self, card) -> None:
         self.tool_cards[card.tool_use_id] = card
         await self._mount_tracked(card)
+
+    def tick_tool_cards(self) -> None:
+        """A4: every drain tick, regardless of new events -- same "driven
+        by the timer, not chunk arrival" rule as `tick_phase_lines`."""
+        for card in self.tool_cards.values():
+            card.tick()
+
+    # ---- sub-agent summary cards (A5) ------------------------------------
+
+    async def mount_subagent_card(self, card) -> None:
+        self.subagent_cards[card.agent_id] = card
+        await self._mount_tracked(card)
+        self.subagent_marks.append(card)
+
+    def tick_subagent_cards(self) -> None:
+        for card in self.subagent_cards.values():
+            card.tick()
 
     async def mount_widget(self, widget) -> None:
         """Generic hook for permission/question/plan cards -- tracked for

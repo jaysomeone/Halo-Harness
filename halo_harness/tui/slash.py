@@ -242,10 +242,30 @@ def _apply_model(app, ref) -> None:
 def _effort_status_text(session) -> "str | None":
     """1.0.1 part 2 (item 22 remainder): the status bar's own effort tag --
     "<value> (tools)" whenever this route forces an explicit override
-    alongside tools, else the plain configured value."""
+    alongside tools, else the plain configured value.
+
+    Halo 2.0.1 W2b (liveness-tips-brief Part C): "the status-bar effort
+    chip shows the SENT value" -- `session.effort` already IS that (every
+    branch that sets it clamps first, see `Session.__init__`/`_cmd_
+    effort`), so the plain case needs no change. When what was last
+    explicitly REQUESTED (`session.effort_requested`) differs from it, the
+    chip says so inline (`"medium (sent as high on this route)"`), the
+    same wording the bare `/effort` card/text use -- never just the sent
+    value alone with no explanation of why it isn't what was asked for."""
     from halo_harness.providers.profiles import effort_display_override
     profile = getattr(session, "provider_profile", None) if session is not None else None
-    return effort_display_override(profile) or (getattr(session, "effort", None) if session is not None else None)
+    override = effort_display_override(profile)
+    if override:
+        return override
+    if session is None:
+        return None
+    sent = getattr(session, "effort", None)
+    if sent is None:
+        return None
+    requested = getattr(session, "effort_requested", None)
+    if requested is not None and requested != sent:
+        return f"{requested} (sent as {sent} on this route)"
+    return sent
 
 
 async def _handle_effort(app, args: str) -> None:
@@ -274,12 +294,15 @@ async def _handle_effort(app, args: str) -> None:
 
     profile = getattr(session, "provider_profile", None) if session is not None else None
     if session is None or profile is None or not profile.reasoning_effort_supported:
-        levels, current = [], None
+        levels, current, requested = [], None, None
         model_id = app.status_bar.model
         override_note = None
     else:
         levels = list(profile.effort_values_supported or ())
         current = getattr(session, "effort", None)
+        # Part C: the RAW value last explicitly requested, before clamping
+        # -- `EffortCard` marks the gap inline when it differs from `current`.
+        requested = getattr(session, "effort_requested", None)
         model_id = session.model_ref.raw
         override_display = effort_display_override(profile)
         override_note = (f"Note: this route sends reasoning_effort={profile.reasoning_effort_with_tools!r} "
@@ -295,7 +318,7 @@ async def _handle_effort(app, args: str) -> None:
         app.status_bar.set_effort(_effort_status_text(session))
 
     card = EffortCard(levels=levels, current=current, model_id=model_id, on_select=on_select,
-                       override_note=override_note)
+                       override_note=override_note, requested=requested)
     await app.transcript.mount_widget(card)
     app.set_pending_card(card)
 

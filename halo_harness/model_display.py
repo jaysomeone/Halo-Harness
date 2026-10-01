@@ -123,6 +123,48 @@ def truncate_label_left(label: str, max_width: int) -> str:
     return "…" + label[-(max_width - 1):]
 
 
+def format_live_token_count(n) -> str:
+    """Halo 2.0.1 W2b (HALO-2.0.1-liveness-tips-brief.md Part A1/A3): a
+    LIVE, still-growing token counter during streaming -- "412"/"1.2k" --
+    shared by the transcript's own phase line (`✻ Thinking… (18 s · 412
+    reasoning tokens)`/`✻ Writing… (23 s · 1.2k tokens)`) and the status
+    bar's received-token segment (`↓412`/`↓1.2k`) so neither surface can
+    ever show a different number for the same count. Unlike
+    `format_token_count` (a catalog column, rounds a stable number of
+    tokens to the nearest whole k/M), this keeps ONE decimal place from
+    1,000 up to 10,000 -- a live counter changes every delta, so a reader
+    watching it tick needs the extra digit "1.2k" gives over a 1,000-wide
+    "1k" bucket that won't visibly move again for a while. "0" at zero
+    (never blank -- a live counter that hasn't received anything yet is
+    still a real reading, same reasoning as `_fmt_status_tokens`)."""
+    if not isinstance(n, (int, float)) or isinstance(n, bool) or n < 0:
+        n = 0
+    n = int(n)
+    if n < 1000:
+        return str(n)
+    if n < 10_000:
+        return f"{n / 1000:.1f}k"
+    if n < 1_000_000:
+        return f"{round(n / 1000)}k"
+    return f"{round(n / 1_000_000)}M"
+
+
+def format_elapsed_seconds(seconds) -> str:
+    """Halo 2.0.1 W2b (liveness-tips-brief Part A1/A3/A4/A5): the ONE
+    "N s" elapsed-time wording every liveness surface shares -- the phase
+    line (`12 s`), the status-bar cluster (`18 s`), a running tool card's
+    header (`12 s`) and a sub-agent card (`9 s`). Always whole seconds
+    (floored, never rounded up past a second that hasn't fully elapsed
+    yet), always with the space before "s" -- a surface that drifted to
+    "18s" (no space) would read as a different convention than the rest
+    of the liveness UI for no reason."""
+    try:
+        n = int(max(0.0, float(seconds)))
+    except (TypeError, ValueError):
+        n = 0
+    return f"{n} s"
+
+
 # Shown ONCE above any list of `format_model_row` lines (not per-row).
 ROW_HEADER = "ctx = context window · out = max output · prices in USD per 1M tokens · blank = not published"
 

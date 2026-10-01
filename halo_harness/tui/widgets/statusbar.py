@@ -12,8 +12,17 @@ import time
 from rich.text import Text
 from textual.widgets import Static
 
-from halo_harness.model_display import format_status_context, format_status_cost, truncate_label_left
+from halo_harness.model_display import (
+    format_elapsed_seconds, format_live_token_count, format_status_context, format_status_cost,
+    truncate_label_left,
+)
 from halo_harness.tui.theme import mode_glyph
+
+# Halo 2.0.1 W2b (liveness-tips-brief Part A3): phase words that get the
+# rich "word elapsed · tokens"/"word elapsed" treatment -- distinct from
+# the older "running"/"compacting" words, which keep their pre-2.0.1 bare
+# "glyph elapsed" rendering (out of this brief's scope; left unchanged).
+_LIVE_PHASE_WORDS = frozenset({"thinking", "writing", "tool", "waiting"})
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -59,6 +68,20 @@ class StatusBar(Static):
         self.phase = "idle"
         self._phase_started_at = time.monotonic()
         self.spinner_index = 0
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A3): the received-token
+        # counter ("↓412"/"↓1.2k") -- RAW character count, same convention
+        # as ThinkingBlock's own `written_chars` (tokens computed as
+        # chars//4 at render time so incremental small deltas never
+        # under-count via repeated integer-division truncation). Reset
+        # whenever the phase WORD changes (a fresh sub-phase's own count,
+        # e.g. reasoning tokens while "thinking" vs. text tokens while
+        # "writing" -- never a running total across both) and at
+        # `start_phase_clock`/`go_idle`.
+        self.received_chars = 0
+        # The currently-running tool's own name ("Bash" in "tool Bash
+        # 4 s") -- set by `set_tool_name`, cleared whenever the phase word
+        # changes away from "tool".
+        self.running_tool_name: "str | None" = None
         self.new_count = 0
         # U5 scope D: the `statusLine` command's own last output (None
         # until the first successful run, or if none is configured).
@@ -116,6 +139,59 @@ class StatusBar(Static):
             self._phase_started_at = time.monotonic()
         self._refresh_display()
 
+    # ---- Halo 2.0.1 W2b: the liveness cluster (liveness-tips-brief Part A3)
+    # -- `tui/dispatch.py`'s own `phase`/`tool_use_ready`/`thinking_delta`/
+    # `text_delta`/`turn_done` handlers are the only callers. Kept SEPARATE
+    # from `apply_status`'s own generic phase diffing above (still used
+    # as-is for "compacting"/"idle" from a plain `status` event) because
+    # the elapsed CLOCK and the phase WORD reset independently here: the
+    # clock only resets at a NEW model call (`phase(request_sent)`) or a
+    # fresh wait (`phase(waiting_for_model)`), never at an internal word
+    # change like thinking -> writing within the SAME call (A3's own
+    # "⠋ thinking 18 s"/"⠙ writing 23 s" -- 5 more seconds, not reset to
+    # zero), while the received-token counter resets at EVERY word change
+    # (a fresh sub-phase's own count, not a running total across both). ---
+
+    def start_phase_clock(self, word: str) -> None:
+        """A NEW model call is starting (`phase(state="request_sent")`) or
+        a fresh wait begins (`phase(state="waiting_for_model")`): resets
+        the elapsed clock AND the received-token counter to zero."""
+        self.phase = word
+        self._phase_started_at = time.monotonic()
+        self.received_chars = 0
+        self.running_tool_name = None
+        self._refresh_display()
+
+    def set_phase_word(self, word: str) -> None:
+        """An internal transition WITHIN the current call (thinking ->
+        writing -> tool, or back) -- the elapsed clock keeps running;
+        only a CHANGED word resets the received-token counter (and clears
+        the running tool's name once the word moves away from "tool")."""
+        if word != self.phase:
+            self.phase = word
+            self.received_chars = 0
+            if word != "tool":
+                self.running_tool_name = None
+        self._refresh_display()
+
+    def set_tool_name(self, name: "str | None") -> None:
+        self.running_tool_name = name
+        self._refresh_display()
+
+    def add_received_chars(self, n: int) -> None:
+        self.received_chars += max(0, n)
+        self._refresh_display()
+
+    def go_idle(self) -> None:
+        """`turn_done`: "the cluster returns to idle" -- also where the
+        received-token counter/running tool name get their own reset, so
+        neither can ever carry a stale reading into the NEXT turn (the
+        "stuck-glyph defect" this brief's A3 calls out by name)."""
+        self.phase = "idle"
+        self.received_chars = 0
+        self.running_tool_name = None
+        self._refresh_display()
+
     def apply_context_pct(self, pct) -> None:
         if pct is not None:
             self.context_pct = pct
@@ -167,7 +243,7 @@ class StatusBar(Static):
         self._refresh_display()
 
     def tick_spinner(self) -> None:
-        if self.phase in ("thinking", "running", "compacting"):
+        if self.phase in _LIVE_PHASE_WORDS or self.phase in ("running", "compacting"):
             self.spinner_index = (self.spinner_index + 1) % len(SPINNER_FRAMES)
         self._refresh_display()
 
@@ -204,10 +280,28 @@ class StatusBar(Static):
         mode_str = mode_glyph(self.mode)
         mcp_style = "green" if (self.mcp_total and self.mcp_connected == self.mcp_total) else "yellow"
         mcp_str = f"MCP {self.mcp_connected}/{self.mcp_total}"
+        # Halo 2.0.1 W2b (liveness-tips-brief Part A3): "⠋ thinking 18 s ·
+        # ↓412", "⠙ writing 23 s · ↓1.2k", "⠹ tool Bash 4 s", "⠸ waiting
+        # 3 s" -- the phase WORD plus elapsed (and, for thinking/writing, a
+        # received-token counter) so a frozen UI is distinguishable from a
+        # silent model purely by whether this segment is still changing.
+        # "running"/"compacting" keep their pre-2.0.1 bare "glyph elapsed"
+        # form -- outside this brief's scope.
         spinner_str = ""
-        if self.phase in ("thinking", "running", "compacting"):
+        glyph = SPINNER_FRAMES[self.spinner_index]
+        if self.phase in _LIVE_PHASE_WORDS:
+            elapsed_str = format_elapsed_seconds(time.monotonic() - self._phase_started_at)
+            if self.phase == "tool":
+                word = f"tool {self.running_tool_name}" if self.running_tool_name else "tool"
+                spinner_str = f"{glyph} {word} {elapsed_str}"
+            elif self.phase == "waiting":
+                spinner_str = f"{glyph} waiting {elapsed_str}"
+            else:  # "thinking" | "writing"
+                tok_str = format_live_token_count(self.received_chars // 4)
+                spinner_str = f"{glyph} {self.phase} {elapsed_str} · ↓{tok_str}"
+        elif self.phase in ("running", "compacting"):
             elapsed = time.monotonic() - self._phase_started_at
-            spinner_str = f"{SPINNER_FRAMES[self.spinner_index]} {elapsed:.0f}s"
+            spinner_str = f"{glyph} {elapsed:.0f}s"
         new_str = f"↓ {self.new_count} new" if self.new_count else ""
         # 1.0.1 hotfix 20.3: a short effort tag next to the mode glyph --
         # blank (no segment at all) for a model with no adjustable effort,

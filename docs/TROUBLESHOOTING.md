@@ -284,6 +284,53 @@ backgrounded `!cmd`/Bash job never outlives the process either, win or
 lose on the ordinary quit path. Run with `--debug` and send `bridge.log`
 if none of this explains what you're seeing.
 
+## Is it frozen? (2.0.1)
+
+Short answer: if ANY of the pieces below are still changing, the model is
+working (or the network is slow) -- nothing is actually stuck. A real
+freeze (the whole app stops responding to keys too) is the separate,
+rarer case covered next, in "The TUI seems hung".
+
+- **The live phase line**, one per model call, directly above wherever
+  the answer is about to stream in: `✻ Sending request to <model>…` until
+  the connection is made, `✻ Thinking… (12 s, no tokens yet)` once
+  headers arrive but nothing has streamed yet, `✻ Thinking… (18 s · 412
+  reasoning tokens)` once reasoning starts arriving, `✻ Writing… (23 s ·
+  1.2k tokens)` once the answer (or a tool call) starts streaming,
+  `✻ Waiting for model… (3 s)` between a tool result and the next call.
+  The elapsed seconds tick every second on their own, driven by a timer,
+  not by whatever the model happens to send -- a number that stopped
+  moving for well over 30 seconds is the real signal to look at twice (see
+  the next bullet), not silence by itself. On completion it collapses to
+  `✻ Thought for 18 s (412 tokens)` when there was any reasoning, or
+  disappears entirely when there wasn't; Ctrl+O expands the full reasoning
+  text back out from the collapsed summary.
+- **After 30 seconds with no data at all**, the phase line adds
+  ` · no data for 30 s, Esc interrupts, typing steers` (refreshed every 10
+  seconds: 40 s, 50 s, ...) -- naming the two things you can actually do
+  about it right there, rather than just making you wait and wonder.
+- **The status bar's own right-hand cluster** mirrors the same liveness
+  while a turn runs: `⠋ thinking 18 s · ↓412`, `⠙ writing 23 s · ↓1.2k`,
+  `⠹ tool Bash 4 s`, `⠸ waiting 3 s` -- the spinner frame and the elapsed
+  number both change at least once a second, so a frozen terminal (nothing
+  in this cluster moving at all, keys doing nothing either) reads
+  completely differently from a model that's just being slow. It returns
+  to idle the moment the turn actually finishes.
+- **A running tool card** shows its own elapsed seconds right in the
+  header (`⏺ Bash(pytest -q) · 12 s`) -- Bash also streams its live output
+  underneath; Grep/Glob/WebFetch/MCP/Agent calls at least get the counter.
+- **A running sub-agent** gets a one-line live summary in the parent's own
+  transcript: `agent reviewer · thinking 9 s · 3 tools` -- its own phase
+  and tool count, updating the same way.
+- Tips cycle through the empty input box's placeholder (`/tips` lists them
+  all) -- if even THAT has stopped changing after 15+ idle seconds with
+  nothing typed and no turn running, something is more seriously wrong;
+  see the next section.
+
+If every one of these has been genuinely frozen -- not just slow -- for
+more than about 15 seconds (no spinner movement, Ctrl+C/Ctrl+Q also doing
+nothing), that's a real hang, not a slow model; see the next section.
+
 ## The TUI seems hung (1.0.1 part 2)
 
 If the whole app stops responding -- no spinner movement, Ctrl+C/Ctrl+Q

@@ -688,6 +688,21 @@ def _cmd_intro(args: str, facade: HeadlessFacade) -> str:
     return "halo: /intro needs the interactive TUI (it replays the launch typewriter line)."
 
 
+def _cmd_tips(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.1 W2b (liveness-tips-brief Part B4): `/tips` prints every
+    tip applicable to THIS session as a list -- the same curated+generated,
+    `needs`-filtered set the input placeholder rotates through (`tui/tips.
+    py::all_applicable_tips`), so the two surfaces never drift apart.
+    Works headlessly too (no TUI/controller needed) -- `needs` detection
+    degrades gracefully with no session/registry at all (a bare `-p
+    "/tips"` still shows every provider-neutral tip)."""
+    from halo_harness.tui import tips as tips_mod
+    applicable = tips_mod.all_applicable_tips(facade.registry, facade=facade)
+    if not applicable:
+        return "No tips available."
+    return "\n".join(f"- {t.text}" for t in applicable)
+
+
 def _cmd_keybindings(args: str, facade: HeadlessFacade) -> str:
     from halo_harness.tui.keys import load_keymap
     keymap = load_keymap()
@@ -737,6 +752,7 @@ _BUILTIN_SPECS = {
     "redo": ("ui", "Rewind one recorded step forward", None, _cmd_redo),
     "intro": ("ui", "Replay the launch intro", None, _cmd_intro),
     "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
+    "tips": ("core", "List tips for using halo's features", None, _cmd_tips),
     "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
 }
 
