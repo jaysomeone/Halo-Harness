@@ -17,6 +17,21 @@ Prerequisite everywhere: Python 3.10+. [`uv`](https://docs.astral.sh/uv/getting-
 is recommended but optional -- every command below has a plain-`pip`
 alternative that needs no `uv` at all.
 
+### Fresh install, nothing downloaded yet (Linux / macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.sh | bash
+```
+
+`scripts/install-halo.sh` checks for Python 3.10+, installs `uv` if it is
+missing, offers to uninstall an old `rolo-claude` (uv, pipx or pip) so it
+can never run by mistake, clones to `~/Halo-Harness` (or pulls an existing
+clone), runs `uv tool install --reinstall .`, checks PATH, verifies that
+`halo` is the installed command, and finishes with `halo doctor`. Options:
+`--yes` (no questions), `--no-clone` (install straight from GitHub),
+`HALO_CLONE_DIR=/some/dir`. Then `cd ~ && halo init`. The sections below
+are the same steps by hand.
+
 ### From a clone (recommended -- this is also how you get `git pull` updates)
 
 ```sh

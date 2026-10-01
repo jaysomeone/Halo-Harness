@@ -26,26 +26,38 @@ subcommand -- see **Proxy mode** near the end.
 
 ## Quick start (Kali / Linux)
 
-New here? **[docs/INSTALL.md](docs/INSTALL.md)** is the one-page version of
-this whole section -- one install line per platform, then "cd anywhere,
-type `halo`". Already have `rolo-claude` 1.0.1 installed? The install
-below works as-is either way (`halo`'s own distribution ships exactly one
-executable); see "Upgrading from rolo-claude 1.0.1" in `docs/INSTALL.md`
-for the still-recommended old-tool uninstall command (`uv tool uninstall
-rolo-claude`, or whichever installer you used).
+**Fresh install, nothing downloaded yet.** Prerequisites: `git`, Python
+3.10+, and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`, then open a new shell).
+One line does the rest -- clone, install, verify, `halo doctor`:
 
 ```sh
-cd /path/to/halo-harness
-uv tool install --reinstall .       # or: pipx install --force -e . (PEP 668 note: docs/INSTALL.md)
-halo init                    # one command: pick a provider, credentials, default model, doctor, live pong
-halo                         # full-screen TUI
+curl -fsSL https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.sh | bash
 ```
 
-Nothing cloned yet? `uv tool install git+https://github.com/roloVibes/Halo-Harness`
-installs the same thing straight from GitHub, no `cd` at all (see
-docs/INSTALL.md's "Directly from GitHub" section -- there's no local clone
-to `git pull` afterward, so a later release just means re-running that
-same command again).
+Or by hand, the same four steps:
+
+```sh
+git clone https://github.com/roloVibes/Halo-Harness.git
+cd Halo-Harness
+uv tool install --reinstall .       # or: pipx install --force -e . (PEP 668 note: docs/INSTALL.md)
+cd ~                                # cd anywhere: `halo` is now a real command on PATH
+halo init                           # one command: pick a provider, credentials, default model, doctor, live pong
+halo                                # full-screen TUI
+```
+
+No clone at all? `uv tool install git+https://github.com/roloVibes/Halo-Harness`
+installs the same thing straight from GitHub (see docs/INSTALL.md's
+"Directly from GitHub" section -- there's no local clone to `git pull`
+afterward, so a later release just means re-running that same command).
+
+**[docs/INSTALL.md](docs/INSTALL.md)** is the one-page version of this
+whole section. Already have `rolo-claude` 1.0.1 installed? The install
+above works as-is either way (`halo`'s own distribution ships exactly one
+executable, and the install script offers to remove the old tool); see
+"Upgrading from rolo-claude 1.0.1" in `docs/INSTALL.md` for the
+still-recommended uninstall command (`uv tool uninstall rolo-claude`, or
+whichever installer you used).
 
 `halo init` shows an arrow-key list of the four providers it can set up (Databricks, OpenRouter,
 the Anthropic API, your Claude subscription), cursor already on whichever one auto-detection would pick
@@ -66,11 +78,16 @@ installed command actually picks up the update; `halo doctor`'s own "command on 
 `init`'s own summary line) catches it, names WHICH copy of `halo` you're actually running, and
 names the exact command if you forget.
 
-### Windows (five lines)
+### Windows
+
+Install `uv` first (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`,
+then open a new terminal), then:
 
 ```powershell
-cd C:\path\to\halo-harness
+git clone https://github.com/roloVibes/Halo-Harness.git
+cd Halo-Harness
 uv tool install --reinstall .
+cd ~
 halo init
 halo --version
 halo
@@ -198,16 +215,20 @@ environment workarounds, PATH setup, reproducible installs via
 PyPI access, and terminal-specific notes). Short version:
 
 ```sh
-# Kali / any Linux, recommended (never touches system/apt Python):
-cd /path/to/halo-harness && uv tool install --reinstall .
+# Fresh install, one line (Linux / macOS): clone, install, verify, doctor
+curl -fsSL https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.sh | bash
+
+# Kali / any Linux by hand, recommended (never touches system/apt Python):
+git clone https://github.com/roloVibes/Halo-Harness.git && cd Halo-Harness && uv tool install --reinstall .
 
 # or plain pip:
-cd /path/to/halo-harness && pip install --user -e .
+git clone https://github.com/roloVibes/Halo-Harness.git && cd Halo-Harness && pip install --user -e .
 ```
 
 ```powershell
 # Windows (build host):
-cd C:\path\to\halo-harness
+git clone https://github.com/roloVibes/Halo-Harness.git
+cd Halo-Harness
 uv tool install --reinstall .
 ```
 
