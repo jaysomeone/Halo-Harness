@@ -731,6 +731,128 @@ def test_slash_providers_enable_disable(ctx: Ctx):
         ctx.check("openrouter actually enabled", is_enabled("openrouter") is True)
 
 
+# =============================================================================
+# 2.0.1 launch-hang fix: claude_login_available()/credentials_present(
+# "claude_subscription") are cache-only now (never spawn `claude auth
+# status` themselves); a gateway-driven `claude` gets its own specific
+# "not set up" message.
+# =============================================================================
+
+@test
+def test_claude_login_available_is_cache_only_never_spawns(ctx: Ctx):
+    """Poisons `cc_models.claude_auth_status` to prove `claude_login_
+    available()` never reaches it, even once a real answer is cached: a
+    cold cache reads as "not detected yet" (False); the cache is then
+    primed the way the startup worker legitimately would (the REAL
+    `claude_auth_status`, restored first, via the BRIDGE_TEST_CC_AUTH_
+    STATUS seam so nothing real is ever spawned) -- poisoned again right
+    after to prove `claude_login_available()`'s OWN read still never calls
+    it, just reflects the now-primed cache."""
+    import halo_harness.providers.cc_models as cc_models_mod
+    import halo_harness.init_providers as init_providers_mod
+
+    def _poison(*, timeout=10.0, env=None):
+        raise AssertionError("claude_login_available() must never spawn claude auth status itself")
+
+    with _Env():
+        # `_Env` itself defaults BRIDGE_TEST_CC_AUTH_STATUS to a "not logged
+        # in" shape (its own docstring, for every OTHER test in this file)
+        # -- `cached_claude_auth_status()`'s own test seam bypasses the REAL
+        # cache entirely whenever that var is set, so it must be popped
+        # here to actually exercise the cache this test is about.
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        real_claude_auth_status = cc_models_mod.claude_auth_status
+        cc_models_mod.claude_auth_status = _poison
+        cc_models_mod.reset_cached_claude_auth_status()
+        try:
+            ctx.check("cold cache reads as not available, never raises",
+                      init_providers_mod.claude_login_available() is False)
+            # Prime the REAL cache the way the startup worker legitimately
+            # would -- the REAL claude_auth_status, restored first, via ITS
+            # OWN BRIDGE_TEST_CC_AUTH_STATUS seam so nothing real spawns --
+            # then pop that seam again so the next read below exercises the
+            # cache itself, not the seam's own "bypass the cache" branch.
+            cc_models_mod.claude_auth_status = real_claude_auth_status
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+            cc_models_mod.refresh_cached_claude_auth_status()
+            os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+            cc_models_mod.claude_auth_status = _poison  # re-poison: THIS read must still never reach it
+            ctx.check("primed cache now reads as available, still never calling claude_auth_status",
+                      init_providers_mod.claude_login_available() is True)
+        finally:
+            cc_models_mod.claude_auth_status = real_claude_auth_status
+            cc_models_mod.reset_cached_claude_auth_status()
+
+
+@test
+def test_enablement_display_names_the_gateway_for_claude_subscription(ctx: Ctx):
+    from halo_harness.providers.enablement import enablement_display
+    with _Env():
+        os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
+        ctx.check('reads "not set up (claude is configured for a gateway)"',
+                  enablement_display("claude_subscription") == "not set up (claude is configured for a gateway)")
+
+
+@test
+def test_enablement_display_plain_not_set_up_when_not_gateway_driven(ctx: Ctx):
+    from halo_harness.providers.enablement import enablement_display
+    with _Env():
+        ctx.check('plain "not set up" with no gateway signal at all',
+                  enablement_display("claude_subscription") == "not set up")
+
+
+@test
+def test_halo_providers_list_primes_the_auth_cache_once_and_never_for_a_gateway(ctx: Ctx):
+    """`halo providers` (the CLI subcommand, always a fresh process) reaches
+    `claude_login_available()` through `provider_rows()`, cache-only since
+    the 2.0.1 launch-hang fix -- so its list branch must prime the cache
+    itself exactly once (the same staleness-gated refresh the headless
+    `/providers` does), or a real claude.ai login prints "not set up" (seen
+    live on the Kali VM). With a gateway signal set nothing is spawned at
+    all and the row names the gateway."""
+    import contextlib
+    import io
+    import halo_harness.providers.cc_models as cc_models_mod
+    from halo_harness.providers_cli import cmd_providers
+
+    calls: list = []
+
+    def _fake_auth_status(*, timeout=10.0, env=None):
+        calls.append(timeout)
+        return cc_models_mod.ClaudeAuthStatus(logged_in=True, auth_method="claude.ai", version="9.9.9")
+
+    def _subscription_row(text: str) -> str:
+        return next((ln for ln in text.splitlines() if ln.startswith("Claude Code subscription")), "")
+
+    with _Env():
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        real_claude_auth_status = cc_models_mod.claude_auth_status
+        cc_models_mod.claude_auth_status = _fake_auth_status
+        cc_models_mod.reset_cached_claude_auth_status()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cmd_providers(["list"])
+            row = _subscription_row(out.getvalue())
+            ctx.check("list exits 0", rc == 0)
+            ctx.check(f"primed the cache exactly once, got {len(calls)} spawn(s)", len(calls) == 1)
+            ctx.check(f"row shows the detected login, got {row!r}", "auto" in row and "not set up" not in row)
+
+            calls.clear()
+            cc_models_mod.reset_cached_claude_auth_status()
+            os.environ["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:9"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_providers(["list"])
+            row = _subscription_row(out.getvalue())
+            ctx.check(f"gateway-driven: never spawned, got {len(calls)}", len(calls) == 0)
+            ctx.check(f"gateway-driven: row names the gateway, got {row!r}", "gateway" in row)
+        finally:
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
+            cc_models_mod.claude_auth_status = real_claude_auth_status
+            cc_models_mod.reset_cached_claude_auth_status()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

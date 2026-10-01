@@ -36,11 +36,19 @@ images = [
 ]
 
 [project.scripts]
+# 2.0.1: this distribution ships EXACTLY ONE executable. The 2.0.0 comment
+# here used to say `rolo-claude` would keep working "forever" as a second,
+# installed console-script alias -- superseded by the owner's own first
+# real install attempt on a work VM: an old, separately-installed
+# `rolo-claude` tool already owned that name, so `uv tool install
+# --editable .` of Halo failed outright ("Executable already exists:
+# rolo-claude (use --force to overwrite)") and `halo` never got installed
+# at all. See CHANGELOG [2.0.1]. `rolo-claude` keeps working as a
+# deprecated, UNINSTALLED alias two other ways instead: `bin/rolo-claude`
+# (run straight from a checkout, never registered here) and
+# `cli.main_deprecated_alias` (kept in the source for that script/any
+# future reuse, just no longer wired to a pyproject entry point).
 halo = "halo_harness.cli:main"
-# 2.0.0 rename: `rolo-claude` keeps working as a deprecated alias -- prints
-# one notice line to stderr (cli.main_deprecated_alias), then runs exactly
-# like `halo`. Never remove without a deprecation cycle of its own.
-rolo-claude = "halo_harness.cli:main_deprecated_alias"
 
 [tool.setuptools]
 py-modules = ["bridge"]

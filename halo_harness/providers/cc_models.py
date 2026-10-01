@@ -292,6 +292,56 @@ class ClaudeAuthStatus:
 # at `ant:`).
 SUBSCRIPTION_AUTH_METHODS = frozenset({"claude.ai"})
 
+# 2.0.1 launch-hang fix: the synthetic `ClaudeAuthStatus.auth_method` used
+# whenever `is_claude_gateway_driven()` says the installed `claude` is
+# wired to a gateway -- never a value `claude auth status` itself would
+# ever print, so a caller inspecting `auth_method` can tell "we never even
+# asked" apart from a real "asked and got some other method" answer, while
+# still failing the (never equal to "claude.ai") SUBSCRIPTION_AUTH_METHODS
+# check exactly like a real non-subscription login would.
+GATEWAY_AUTH_METHOD = "gateway"
+
+
+def is_claude_gateway_driven(env: Optional[dict] = None) -> bool:
+    """True when the installed `claude` binary is wired to a gateway
+    (Databricks or otherwise) rather than a real claude.ai subscription --
+    `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (the shell env, or Claude
+    Code's own settings.json `env` block) or a top-level `apiKeyHelper`
+    command. In every one of these cases `claude auth status` would report
+    some `authMethod` other than `"claude.ai"` (never a real subscription),
+    so the answer is already known without ever spawning the 10s-timeout
+    subprocess -- the owner's own work-VM repro (`claude` wired to
+    Databricks through Claude Code's settings) hung on exactly this spawn,
+    every single time, since the gateway's own auth check never returned.
+
+    `env=None` (every existing call site) checks bare `os.environ` first,
+    then -- cheap disk reads only, never a subprocess or network call --
+    Claude Code's own trust-filtered settings chain (`config.settings.
+    resolve_settings`, `trusted=True` default: this only ever SKIPS a
+    pointless subprocess spawn, it never grants anything, so the permissive
+    default is fine here even for an untrusted cwd) for the same two env
+    vars plus `apiKeyHelper`. A caller that already resolved a real
+    `Settings.effective_env` and passes it here as `env` gets that chain's
+    `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` folded in already (it's
+    layered straight over `os.environ`); `apiKeyHelper` is never part of
+    any `env` dict (it's a separate top-level settings key, never run just
+    to check whether it's merely PRESENT), so it's only checked on the
+    bare-`os.environ` path below."""
+    e = env if env is not None else os.environ
+    if e.get("ANTHROPIC_BASE_URL") or e.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    if env is not None:
+        return False
+    from pathlib import Path as _Path
+    from halo_harness.config.settings import resolve_settings
+    try:
+        settings = resolve_settings(_Path.cwd())
+    except Exception:
+        return False
+    if settings.env.get("ANTHROPIC_BASE_URL") or settings.env.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    return bool(settings.raw.get("apiKeyHelper"))
+
 
 def claude_auth_status(*, timeout: float = 10.0, env: Optional[dict] = None) -> Optional[ClaudeAuthStatus]:
     """Runs `claude auth status` and parses its JSON -- NEVER opens
@@ -372,15 +422,33 @@ CACHED_AUTH_STATUS_TTL_S = 30.0
 
 
 def refresh_cached_claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
-    """The ONLY function in this cache pair that actually spawns `claude
-    auth status` -- always call this OFF the UI thread (a startup worker,
-    same convention as `_git_branch_worker`/`catalog_auto_refresh_worker`).
-    Stores the result (even `None`, "claude" not found at all) for
-    `cached_claude_auth_status()` to read back, and returns it directly too
-    so a caller that already IS on a worker thread can use the fresh value
-    without a second round trip."""
+    """The ONLY function in this cache pair that may spawn `claude auth
+    status` -- call this OFF the UI thread wherever one exists (a startup
+    worker, same convention as `_git_branch_worker`/`catalog_auto_refresh_
+    worker`); headless mode has no UI thread to protect at all, so its own
+    callers (`commands/builtins.py::_cmd_providers`'s "list" branch,
+    staleness-gated) call this inline instead -- NEVER from every
+    `headless.build_session` call, which this milestone verified live
+    turns "one spawn, when actually needed" into one real subprocess PER
+    SESSION BUILT, measurably slowing a whole test run on a box with a
+    real `claude` install on PATH. Stores the result (even `None`, "claude"
+    not found at all) for `cached_claude_auth_status()` to read back, and
+    returns it directly too so a caller that already IS on a worker thread
+    can use the fresh value without a second round trip.
+
+    2.0.1 launch-hang fix: `is_claude_gateway_driven()` is checked FIRST --
+    when true, a synthetic `ClaudeAuthStatus(logged_in=False, auth_method=
+    GATEWAY_AUTH_METHOD)` is cached WITHOUT ever spawning the subprocess at
+    all (gateway rule: "claude auth status is never spawned at all, by any
+    worker"). This is the ONE place that rule is enforced for every
+    caller of this function at once -- doctor's own claude check
+    (`_check_claude_subscription`) now calls this instead of
+    `claude_auth_status()` directly, so it gets the same short-circuit."""
     global _auth_status_cache, _auth_status_cached_at
-    status = claude_auth_status(timeout=timeout)
+    if is_claude_gateway_driven():
+        status = ClaudeAuthStatus(logged_in=False, auth_method=GATEWAY_AUTH_METHOD)
+    else:
+        status = claude_auth_status(timeout=timeout)
     with _AUTH_STATUS_CACHE_LOCK:
         _auth_status_cache = status
         _auth_status_cached_at = time.monotonic()
@@ -438,12 +506,30 @@ def default_bare_alias_route(*, api_key: Optional[str] = None,
     ANTHROPIC_API_KEY is set, to `"ant"` when the key IS set (a deliberate
     key always wins over an incidental subscription login -- never
     silently overridden), else `"none"` (the caller raises, naming both
-    options)."""
+    options).
+
+    2.0.1 launch-hang fix: this runs SYNCHRONOUSLY on `model.
+    parse_model_ref`'s own call path (inside `headless.build_session`,
+    before the TUI's first paint or headless -p's first turn) whenever the
+    resolved model is a bare alias with no explicit provider prefix -- a
+    real work-VM repro (`claude` wired to a gateway, bare `opus`/`sonnet`/
+    `haiku` as the default model, outside the `databricks_work_env_active`
+    shortcut this same module's caller already has for those three names)
+    hung here for the full 10s timeout. `is_claude_gateway_driven()` is
+    checked first (never spawns anything when true -- same gateway rule
+    `refresh_cached_claude_auth_status` enforces for every cached-only
+    caller); otherwise, with no `status` already supplied and no cache
+    primed yet (the common case: this runs before any startup worker has
+    had a chance to), a direct, live check is still unavoidable -- the
+    session needs a real, synchronous answer right now to resolve the
+    model at all, and there's no later retry to defer it to."""
     if api_key is None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
         return "ant"
     if status is None:
+        if is_claude_gateway_driven():
+            return "none"
         status = claude_auth_status()
     if status is not None and status.logged_in:
         return "cc"

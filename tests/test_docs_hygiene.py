@@ -105,7 +105,7 @@ def test_docs_dir_has_the_expected_top_level_files(ctx: Ctx):
     with a clear message, instead."""
     docs = REPO_DIR / "docs"
     expected = [
-        "COMMANDS.md", "SLASH-COMMANDS.md", "ARCHITECTURE.md", "CONFIG.md",
+        "INSTALL.md", "COMMANDS.md", "SLASH-COMMANDS.md", "ARCHITECTURE.md", "CONFIG.md",
         "MODELS.md", "DATABRICKS.md", "TROUBLESHOOTING.md", "DEVELOPMENT.md",
     ]
     for name in expected:

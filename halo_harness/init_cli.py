@@ -1088,6 +1088,23 @@ def cmd_init(argv: list) -> int:
         # sequential loop below, same "picker failed -> fallback" shape
         # every OTHER interactive picker in this file already uses.
 
+    # 2.0.1 launch-hang fix: `claude_login_available()` (read below by
+    # `_step_select_provider`/`detect_default_provider`, `_run_provider_
+    # setup`'s own "claude" branch, and `configured_providers()`) is now
+    # cache-only -- it never spawns `claude auth status` itself any more.
+    # Only the paths that reach HERE (never the tabs branch above, which
+    # already does its own live check off a worker thread -- see
+    # tui/dialogs/init_tabs.py's `_claude_state_worker`/`_save_claude_
+    # worker`) are a plain console flow with no first paint to protect, so
+    # one explicit, synchronous, best-effort live refresh right here keeps
+    # every one of those reads accurate, exactly like before this fix,
+    # instead of always seeing a cold cache.
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    try:
+        refresh_cached_claude_auth_status()
+    except Exception:
+        pass
+
     if interactive_loop:
         while True:
             header = ("Select a provider to set up:" if not configured_this_run

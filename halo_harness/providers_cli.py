@@ -99,6 +99,19 @@ def cmd_providers(argv: list) -> int:
         print(migration_note)
 
     if not argv or argv[0] in ("list",):
+        # 2.0.1 launch-hang follow-up: `provider_rows()` reaches
+        # `claude_login_available()`, which is cache-only since the fix --
+        # and this subcommand is always a fresh process, so without priming
+        # the cache once here a real claude.ai login printed "not set up"
+        # (seen live on the Kali VM). Same staleness-gated refresh the
+        # headless `/providers` does; `refresh_cached_claude_auth_status()`
+        # itself never spawns anything when `claude` is gateway-driven.
+        try:
+            from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+            if cached_auth_status_is_stale():
+                refresh_cached_claude_auth_status()
+        except Exception:
+            pass
         print(format_providers_table(provider_rows()))
         return 0
     action = argv[0]

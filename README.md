@@ -3,7 +3,8 @@
 Halo Harness continues `rolo-claude` 1.0.1 under a new name (see
 [CHANGELOG.md](CHANGELOG.md)'s `[2.0.0]` entry for the rename itself) --
 same behavior, a new product/command name (`halo`; `rolo-claude` keeps
-working as a deprecated alias).
+working as a deprecated alias -- a checkout's own `bin/rolo-claude` script,
+never a second installed console script, since 2.0.1).
 
 A standalone, Claude-Code-compatible agent harness: full-screen TUI, `-p`
 print mode, and the same config, session and tool conventions as the real
@@ -25,16 +26,26 @@ subcommand -- see **Proxy mode** near the end.
 
 ## Quick start (Kali / Linux)
 
-Already have `rolo-claude` 1.0.1 installed? See "Upgrading from rolo-claude
-1.0.1" in `docs/harness/INSTALL.md` first -- `uv tool uninstall rolo-claude`
-(or whichever installer you used), or pass `--force` below instead.
+New here? **[docs/INSTALL.md](docs/INSTALL.md)** is the one-page version of
+this whole section -- one install line per platform, then "cd anywhere,
+type `halo`". Already have `rolo-claude` 1.0.1 installed? The install
+below works as-is either way (`halo`'s own distribution ships exactly one
+executable); see "Upgrading from rolo-claude 1.0.1" in `docs/INSTALL.md`
+for the still-recommended old-tool uninstall command (`uv tool uninstall
+rolo-claude`, or whichever installer you used).
 
 ```sh
 cd /path/to/halo-harness
-uv tool install --editable .        # or: pipx install --editable .
+uv tool install --reinstall .       # or: pipx install --force -e . (PEP 668 note: docs/INSTALL.md)
 halo init                    # one command: pick a provider, credentials, default model, doctor, live pong
 halo                         # full-screen TUI
 ```
+
+Nothing cloned yet? `uv tool install git+https://github.com/roloVibes/Halo-Harness`
+installs the same thing straight from GitHub, no `cd` at all (see
+docs/INSTALL.md's "Directly from GitHub" section -- there's no local clone
+to `git pull` afterward, so a later release just means re-running that
+same command again).
 
 `halo init` shows an arrow-key list of the four providers it can set up (Databricks, OpenRouter,
 the Anthropic API, your Claude subscription), cursor already on whichever one auto-detection would pick
@@ -47,18 +58,19 @@ configured. See
 `docs/harness/INSTALL.md` for the full walkthrough (offline/work-box install, PEP 668 workarounds,
 terminal notes) and `halo doctor` for a read-only environment check with a fix for every WARN.
 
-**Install once, run anywhere.** `uv tool install --editable .`/`pip install --user -e .` puts a real
+**Install once, run anywhere.** `uv tool install --reinstall .`/`pip install --user -e .` puts a real
 console script on PATH -- once it's there, `halo` works from any directory, not just this
-checkout (the checkout is only ever needed for `git pull`). Re-run `uv tool install --reinstall .`
-(or `pip install --user -e .` again) after every `git pull` so the installed command actually picks up
-the update; `halo doctor`'s own "command on PATH" check (and `init`'s own summary line) catches
-it and names the exact command if you forget.
+checkout (the checkout is only ever needed for `git pull`). Re-run the exact same
+`uv tool install --reinstall .` (or `pip install --user -e .` again) after every `git pull` so the
+installed command actually picks up the update; `halo doctor`'s own "command on PATH" check (and
+`init`'s own summary line) catches it, names WHICH copy of `halo` you're actually running, and
+names the exact command if you forget.
 
 ### Windows (five lines)
 
 ```powershell
 cd C:\path\to\halo-harness
-uv tool install --editable .
+uv tool install --reinstall .
 halo init
 halo --version
 halo
@@ -146,6 +158,7 @@ halo                         # full-screen TUI
 
 | Doc | Covers |
 |---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | one install line per platform, then "cd anywhere, type `halo`" |
 | [docs/COMMANDS.md](docs/COMMANDS.md) | every CLI subcommand and flag, with worked examples |
 | [docs/SLASH-COMMANDS.md](docs/SLASH-COMMANDS.md) | every `/command`, key binding, chord, and `@file`/`!cmd` prefix |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the session log, request derivation, providers, permissions, hooks, MCP, compaction, sub-agents, the `cc:` bridge, telemetry, the TUI event model |
@@ -160,27 +173,33 @@ halo                         # full-screen TUI
 
 ## Install
 
-**Upgrading from `rolo-claude` 1.0.1?** Every installer trips over the
-already-installed `rolo-claude` console script (`uv tool install` aborts,
-`pipx` silently refuses, plain `pip` silently overwrites it) -- uninstall
-the old tool first (`uv tool uninstall rolo-claude` / `pipx uninstall
-rolo-claude` / `pip uninstall rolo-claude`, matching whichever you used),
-or install with `--force`. The state directory then migrates itself on
-first run (`~/.rolo-claude` -> `~/.halo`, no link left behind -- the old
-directory is simply gone afterward, so the separate 1.0.1 `rolo-claude`
-install must not be run again); `halo`'s own `rolo-claude` console-script
-ALIAS keeps working forever, but use `halo` itself from here on. See
-`docs/harness/INSTALL.md`'s own "Upgrading from rolo-claude 1.0.1" section
-for the full detail.
+**Upgrading from `rolo-claude` 1.0.1?** As of 2.0.1, `halo`'s own
+distribution ships exactly one executable (`halo` itself) -- installing it
+no longer trips over an already-installed `rolo-claude` 1.0.1 console
+script at all (2.0.0 briefly did: `uv tool install` aborted, `pipx`
+silently refused, plain `pip` silently overwrote it). Uninstalling the old
+tool first is still recommended, so the stale 1.0.1 command can't run by
+mistake (`uv tool uninstall rolo-claude` / `pipx uninstall rolo-claude` /
+`pip uninstall rolo-claude`, matching whichever you used -- `halo doctor`
+WARNs with this exact command if one is still on PATH). The state
+directory then migrates itself on first run (`~/.rolo-claude` -> `~/.halo`,
+no link left behind -- the old directory is simply gone afterward, so the
+separate 1.0.1 `rolo-claude` install must not be run again); `rolo-claude`
+typed after installing `halo` now only ever means this repo's own
+`bin/rolo-claude` fallback script (run from a checkout, never installed),
+not a second console script. See `docs/harness/INSTALL.md`'s own
+"Upgrading from rolo-claude 1.0.1" section for the full detail.
 
-See `docs/harness/INSTALL.md` for the full walkthrough (PEP 668/externally-
-managed-environment workarounds, PATH setup, reproducible installs via
+See [docs/INSTALL.md](docs/INSTALL.md) for the one-page version (one
+install line per platform, "cd anywhere, type `halo`") or `docs/harness/
+INSTALL.md` for the full walkthrough (PEP 668/externally-managed-
+environment workarounds, PATH setup, reproducible installs via
 `requirements.lock`, an offline **work box** recipe for a machine with no
 PyPI access, and terminal-specific notes). Short version:
 
 ```sh
 # Kali / any Linux, recommended (never touches system/apt Python):
-cd /path/to/halo-harness && uv tool install --editable .
+cd /path/to/halo-harness && uv tool install --reinstall .
 
 # or plain pip:
 cd /path/to/halo-harness && pip install --user -e .
@@ -189,7 +208,7 @@ cd /path/to/halo-harness && pip install --user -e .
 ```powershell
 # Windows (build host):
 cd C:\path\to\halo-harness
-uv tool install --editable .
+uv tool install --reinstall .
 ```
 
 Both produce a `halo` console script. Prerequisite: Python 3.10+;

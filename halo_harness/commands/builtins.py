@@ -424,11 +424,25 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
     never drift apart), plus `enable <name>`/`disable <name>` right here.
     `setup <name>` needs the interactive provider picker/tabs `init` itself
     shows -- not available headless, so this just points at the real
-    command instead of half-implementing it."""
+    command instead of half-implementing it.
+
+    2.0.1 launch-hang fix: `claude_login_available()`/`credentials_present
+    ("claude_subscription")` (what `provider_rows()` reads for its own row)
+    are cache-only now and never spawn `claude auth status` themselves --
+    the "list" branch below does the one, staleness-gated, synchronous
+    refresh this headless surface needs (same `cached_auth_status_is_stale`
+    gate the TUI's own `/model`-open worker uses; print mode has no UI
+    thread to protect here, so this runs inline rather than on a worker)."""
     from halo_harness.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
     from halo_harness.providers_cli import format_providers_table, provider_rows
     tokens = (args or "").split()
     if not tokens or tokens[0] == "list":
+        try:
+            from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+            if cached_auth_status_is_stale():
+                refresh_cached_claude_auth_status()
+        except Exception:
+            pass
         return format_providers_table(provider_rows())
     action = tokens[0]
     if action in ("enable", "disable"):

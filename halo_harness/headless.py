@@ -467,10 +467,12 @@ def build_session(
     even if `--tools`/a deny rule would otherwise have excluded it -- a
     `--tools Read,Bash`-style TUI launch used to leave the whole deferred
     MCP pool unreachable while the prompt still said "call ToolSearch"."""
+    from halo_harness import debug_timeline
     claude_json = load_claude_json()
     trusted = is_trusted(cwd, claude_json)
     settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
     claude_json_allowed_tools = lookup_project(claude_json, cwd).get("allowedTools")
+    debug_timeline.mark("settings")
 
     # H14 scope C: `effortLevel`/`modelSettings.<id>.effortLevel` from
     # settings.json become the session's default effort -- only when
@@ -651,6 +653,24 @@ def build_session(
                 pass
         _threading.Thread(target=_bg_dbx_refresh, daemon=True, name="halo-dbx-auto-refresh").start()
 
+    # 2.0.1 launch-hang fix, item (b) ("headless -p runs refresh in a
+    # thread under the same rule"): deliberately NOT a thread spawned from
+    # every single `build_session` call -- an earlier draft did exactly
+    # that (mirroring the TUI's own once-per-App-lifetime worker) and,
+    # verified live on a box with a real `claude` install on PATH and no
+    # gateway signal, it spawned one real `claude auth status` subprocess
+    # PER SESSION BUILT -- a far higher frequency than the TUI case, since
+    # `build_session` runs once per turn in many print-mode/test flows.
+    # `claude_login_available()`/`credentials_present("claude_subscription")`
+    # are cache-only now and never spawn it themselves, so the equivalent
+    # "refresh in a thread" for headless mode lives where it's actually
+    # needed instead: `/model`/`/providers` run headlessly
+    # (`commands/builtins.py::_cmd_providers`) are ALREADY fully
+    # synchronous (no UI thread to protect in print mode at all), so that
+    # command does its own one-time, staleness-gated refresh right there --
+    # never here, on every session build regardless of whether either
+    # command is ever used.
+
     if (not bare and websearch_allowed and model_ref.provider == "openrouter" and creds is not None
             and frozen_registry.get("WebSearch") is None):
         from halo_harness.tools.websearch import build_websearch_tool
@@ -730,6 +750,7 @@ def build_session(
                 {"name": name, "instructions": h.instructions}
                 for name, h in mcp_manager.handles.items() if h.state == "connected"
             ]
+    debug_timeline.mark("mcp discovery")
 
     effective_append = append_system_prompt
     if json_schema:
@@ -764,6 +785,7 @@ def build_session(
         ctx.system_prompt = agent_spec.body
     if system_prompt:
         ctx.system_prompt = system_prompt
+    debug_timeline.mark("instructions")
 
     openrouter_base_url = env_compat("OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = None
@@ -854,6 +876,7 @@ def build_session(
         mcp_status=(mcp_manager.status() if mcp_manager is not None else None),
         session=session,  # H5 scope D: live /cost, /context, /status, /compact
     )
+    debug_timeline.mark("session build")
 
     return SessionBuild(
         session=session, command_registry=command_registry, tool_registry=frozen_registry, facade=facade,

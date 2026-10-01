@@ -200,6 +200,63 @@ def test_a_real_installed_script_elsewhere_is_ok(ctx: Ctx):
 
 
 # ---------------------------------------------------------------------------
+# 2.0.1: `rolo-claude` is no longer one of halo's OWN console scripts
+# (pyproject.toml ships exactly `halo`) -- doctor WARNs when one is still
+# found on PATH anyway (an old, separate 1.0.1 install), naming the
+# matching uninstall command; silent for this checkout's own bin/rolo-claude
+# SCRIPT (never an installed console script) and when nothing is found.
+# Every case here uses the `resolved=`/`uv_found=`/`pipx_found=` test seams
+# directly -- never the real `shutil.which`, which could find a genuinely
+# real, separately-installed `rolo-claude` on a developer's own box.
+# ---------------------------------------------------------------------------
+
+@test
+def test_old_rolo_claude_leftover_is_silent_when_nothing_on_path(ctx: Ctx):
+    from halo_harness.doctor import _check_old_rolo_claude_leftover
+    with _Env():
+        line = _check_old_rolo_claude_leftover(resolved=None)
+        ctx.check(f"None -- nothing to report, got {line!r}", line is None)
+
+
+@test
+def test_old_rolo_claude_leftover_is_silent_for_this_checkouts_own_shim(ctx: Ctx):
+    """`bin/rolo-claude` is the deprecated-alias SCRIPT this repo keeps on
+    purpose (never an installed console script) -- resolving to it must
+    never WARN, same `is_repo_wrapper` gate `check_command_on_path` uses
+    for `halo` itself."""
+    from halo_harness.doctor import _check_old_rolo_claude_leftover, _repo_bin_dir
+    with _Env():
+        shim_path = str(_repo_bin_dir() / "rolo-claude")
+        line = _check_old_rolo_claude_leftover(resolved=shim_path, uv_found=True)
+        ctx.check(f"None -- this checkout's own shim is never a leftover, got {line!r}", line is None)
+
+
+@test
+def test_old_rolo_claude_leftover_warns_with_the_uv_uninstall_command(ctx: Ctx):
+    from halo_harness.doctor import WARN, _check_old_rolo_claude_leftover
+    with _Env():
+        fake_old_install = str(Path(tempfile.mkdtemp(prefix="h15-old-rolo-claude-")) / "rolo-claude")
+        line = _check_old_rolo_claude_leftover(resolved=fake_old_install, uv_found=True)
+        ctx.check(f"a WARN, got {line!r}", line is not None and line.startswith(WARN))
+        ctx.check(f"names the leftover path, got {line!r}", fake_old_install in line)
+        ctx.check(f"says halo no longer ships this executable, got {line!r}",
+                  "halo no longer ships this executable" in line)
+        ctx.check(f"fix names the uv uninstall command, got {line!r}",
+                  "-> fix: uv tool uninstall rolo-claude" in line)
+
+
+@test
+def test_old_rolo_claude_leftover_warns_with_the_pip_uninstall_command_when_no_uv_or_pipx(ctx: Ctx):
+    from halo_harness.doctor import _check_old_rolo_claude_leftover
+    with _Env():
+        fake_old_install = str(Path(tempfile.mkdtemp(prefix="h15-old-rolo-claude-")) / "rolo-claude")
+        line = _check_old_rolo_claude_leftover(resolved=fake_old_install, uv_found=False, pipx_found=False,
+                                                externally_managed=False)
+        ctx.check(f"fix names the plain pip uninstall command, got {line!r}",
+                  line is not None and "-> fix: pip uninstall rolo-claude" in line)
+
+
+# ---------------------------------------------------------------------------
 # doctor's own check list carries it.
 # ---------------------------------------------------------------------------
 
@@ -256,6 +313,54 @@ def test_init_summary_omits_the_extra_sentence_once_the_command_resolves_for_rea
                       "Run it from any directory" not in out)
     finally:
         doctor_mod.check_command_on_path = real_check
+
+
+# ---------------------------------------------------------------------------
+# 2.0.1 ("run from any directory" release): the check now names WHICH of
+# the three copies resolved, and says plainly on both WARN branches that
+# it is not the installed one.
+# ---------------------------------------------------------------------------
+
+@test
+def test_ok_line_names_it_an_installed_console_script(ctx: Ctx):
+    from halo_harness.doctor import OK, check_command_on_path
+    with _Env():
+        fake_installed = str(Path(tempfile.mkdtemp(prefix="h15-fake-install-2-")) / "halo")
+        line = check_command_on_path(resolved=fake_installed)
+        ctx.check(f"still an OK line, got {line!r}", line.startswith(OK))
+        ctx.check(f"names it an installed console script, got {line!r}",
+                  "installed console script" in line)
+
+
+@test
+def test_repo_bin_wrapper_line_says_plainly_it_is_not_the_installed_copy(ctx: Ctx):
+    from halo_harness.doctor import WARN, _repo_bin_dir, check_command_on_path
+    with _Env():
+        wrapper_path = str(_repo_bin_dir() / "halo")
+        line = check_command_on_path(resolved=wrapper_path, uv_found=False, externally_managed=False)
+        ctx.check(f"a WARN, got {line!r}", line.startswith(WARN))
+        ctx.check(f"says plainly it is not the installed console script, got {line!r}",
+                  "not the installed console script" in line)
+
+
+@test
+def test_not_found_line_names_the_pythonpath_fallback_plainly(ctx: Ctx):
+    """The brief's third category: nothing named `halo` resolves on PATH
+    at all -- the only thing that currently runs the harness is a bare
+    `PYTHONPATH=<repo> python -m halo_harness` fallback (what `bin/halo`
+    itself falls back to, and how this suite drives the harness without
+    installing it). The WARN line must name that plainly, not just say
+    "not found". Kept short on purpose (H15's own `_console()` note: a
+    Rich Console wraps a line over its configured width, which would
+    break the `_step_summary` test's plain substring check below)."""
+    from halo_harness.doctor import WARN, check_command_on_path
+    with _Env():
+        line = check_command_on_path(resolved=None, uv_found=False, externally_managed=False)
+        ctx.check(f"a WARN, got {line!r}", line.startswith(WARN))
+        ctx.check(f"still names 'not found on PATH', got {line!r}", "not found on PATH" in line)
+        ctx.check(f"says plainly it is not an installed console script, got {line!r}",
+                  "not an installed console script" in line)
+        ctx.check(f"names the PYTHONPATH fallback by name, got {line!r}", "PYTHONPATH fallback" in line)
 
 
 if __name__ == "__main__":

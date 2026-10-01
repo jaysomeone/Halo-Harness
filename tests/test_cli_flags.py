@@ -360,6 +360,33 @@ def test_real_sigint_delivers_exit_130_posix(ctx: Ctx):
         mock.stop()
 
 
+@test
+def test_main_deprecated_alias_prints_notice_then_delegates_to_main(ctx: Ctx):
+    """2.0.1: `rolo-claude` is no longer a `pyproject.toml` console-script
+    entry point (see tests/test_packaging.py's own pinning test), but
+    `cli.main_deprecated_alias` is kept in the source, still directly
+    callable -- `bin/rolo-claude` (test_h9b_findings.py's own symlink
+    pilot) is the shim that actually ships; this is a fast, direct-call
+    unit pin for the function itself: one notice line to stderr, then
+    EXACTLY `main(argv)` -- same parser, same behavior, e.g. `--version`."""
+    import contextlib
+    import io
+    from halo_harness import __version__
+    from halo_harness.cli import main, main_deprecated_alias
+
+    buf_alias, buf_real = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stderr(buf_alias), contextlib.redirect_stdout(io.StringIO()):
+        alias_code = main_deprecated_alias(["--version"])
+    with contextlib.redirect_stderr(buf_real), contextlib.redirect_stdout(io.StringIO()):
+        real_code = main(["--version"])
+    ctx.check("prints exactly one deprecation notice line to stderr",
+              buf_alias.getvalue().strip() == "halo: 'rolo-claude' is deprecated, use 'halo' instead")
+    ctx.check(f"returns exactly what main(argv) itself returns, got {alias_code!r} vs {real_code!r}",
+              alias_code == real_code)
+    ctx.check(f"halo itself never prints that notice, got {buf_real.getvalue()!r}",
+              "deprecated" not in buf_real.getvalue())
+
+
 def _hermetic_child_env() -> dict:
     """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
     (would let bridge_home() escape this test's own BRIDGE_TEST_HOME

@@ -99,6 +99,119 @@ alias notices below -- every 1.0.1 fix ships exactly as it was.
    Windows' 260-character limit under a long home or cwd, which git itself
    refuses without this setting.
 
+## [2.0.1] - 2026-10-01
+
+The "run from any directory" release: `halo` already discovered a
+directory's `CLAUDE.md` chain, `.claude/rules`, settings, `.mcp.json`,
+skills, commands and agents from the cwd the same way `claude` does --
+this release makes the INSTALL unmistakable and proves the no-repo-needed
+claim with tests, rather than changing that discovery behavior itself.
+
+1. **`docs/INSTALL.md`** (new, top-level, linked from the README):
+   leads with one install line per platform -- from a clone,
+   `uv tool install --reinstall .` (or `pipx install --force -e .`, with
+   a PEP 668 note for Kali/Debian 12+), or directly from GitHub with no
+   clone at all, `uv tool install git+https://github.com/roloVibes/Halo-
+   Harness` -- then "cd anywhere, type `halo`". The clone directory is for
+   `git pull` only; the exact same reinstall command runs again after
+   every pull. Keeps its own "Upgrading from rolo-claude 1.0.1" section;
+   `docs/harness/INSTALL.md` (the exhaustive walkthrough -- PEP 668 detail,
+   the offline work-box recipe, terminal notes) is unchanged and linked
+   from the new page.
+2. **`doctor`/`init`'s PATH check now names which of three things `halo`
+   resolves to**, not just OK/WARN: the installed console script (OK, now
+   labelled "installed console script" in the line itself), this
+   checkout's own `bin/halo`/`bin/halo.cmd` wrapper (WARN, now says
+   plainly "not the installed console script"), or neither at all (WARN,
+   now names the PYTHONPATH fallback by name instead of just "not found").
+   `halo init`'s summary still ends with this same check plus "Run it
+   from any directory -- the checkout is only for `git pull`." whenever
+   it isn't the installed copy.
+3. **No remaining dependency on the repo directory, proven by test**:
+   `bin/halo`, `bin/halo.cmd` and `bin/rolo-claude` were already thin
+   fallbacks (prefer an installed console script on PATH, only then fall
+   back to `PYTHONPATH=<repo>`) and every vendored data file (the model
+   table, the OpenRouter/Databricks catalog fallbacks, the TUI's
+   `styles.tcss`) already loaded relative to the package, not the cwd --
+   a new test now imports the package with the process `cwd` set to a
+   directory outside the checkout and loads each of them directly, so a
+   future regression back to a cwd- or repo-relative path fails loudly.
+   No test in the suite assumes its own cwd is the repo root (audited).
+4. **New tests prove the acceptance criteria directly**: `halo --version`,
+   `halo doctor` and `halo -p` each run as a subprocess from a scratch
+   directory outside the checkout (literally under the OS temp dir --
+   `/tmp` on Linux/Kali); a further `halo -p` test builds a scratch
+   project whose `CLAUDE.md` holds one unique sentence and, with a mock
+   upstream standing in for the model, asserts that exact sentence
+   reached the assembled request body.
+5. **Launch hang fixed** (owner's own live use on a Databricks-only work
+   VM): `halo` printed the migration line, then sat for a long time before
+   the TUI appeared. Cause: `providers.enablement.credentials_present
+   ("claude_subscription")`/`init_providers.claude_login_available()` each
+   called `claude auth status` directly, uncached, from several places
+   startup reaches synchronously -- on a box where the installed `claude`
+   is wired to a gateway (Databricks, through Claude Code's own settings
+   env) that subprocess hung for its full 10s timeout, every single call.
+   Fixed:
+   - `credentials_present("claude_subscription")`/`claude_login_
+     available()` now read ONLY the existing startup worker's cache
+     (`cc_models.cached_claude_auth_status()`) -- a cache miss reads as
+     "not detected yet" and never spawns anything itself. The flows that
+     genuinely need a fresh, live answer right now (`halo init`'s tabs
+     and sequential/`--provider claude` paths, `halo doctor`, and the
+     `halo providers` / headless `/providers` listings, which are always
+     a fresh process and otherwise printed a real claude.ai login as
+     "not set up") call the existing `refresh_cached_claude_auth_status()`
+     explicitly instead, once, off the UI thread where one exists.
+   - New gateway rule (`cc_models.is_claude_gateway_driven`): when
+     `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (shell env or Claude
+     Code's own trust-filtered settings chain) or a settings `apiKeyHelper`
+     are present, `claude` is gateway-driven and `claude auth status` is
+     never spawned at all, by any caller, including the startup worker and
+     `halo doctor`'s own check -- `/providers`/`halo providers` show "not
+     set up (claude is configured for a gateway)" instead of an ambiguous
+     "not set up". The same check also short-circuits `model.
+     parse_model_ref`'s bare-alias resolution (`cc_models.default_bare_
+     alias_route`), the other place this exact subprocess could hang
+     synchronously before a session's first turn.
+   - `tui/app.py`'s existing startup worker remains the ONLY launch-time
+     spawner for the TUI; it now also posts a one-time, quiet notify once
+     it lands, when (and only when) a usable subscription is actually
+     found. Headless mode has no UI thread to protect and no startup
+     worker of its own -- `/providers` run headlessly refreshes inline,
+     staleness-gated, right there (`commands/builtins.py::_cmd_providers`),
+     instead of a thread on every `build_session` call -- verified live,
+     that ran one real `claude auth status` subprocess PER SESSION BUILT
+     on a box with a genuine `claude` install, slowing this project's own
+     test suite considerably; refreshing only where `/providers` is
+     actually used headlessly avoids that entirely.
+   - `--debug`/`-d` now also prints a `[timeline]` line per startup phase
+     (settings, instructions, session build, MCP discovery, first paint),
+     each with milliseconds elapsed, to both stderr and `bridge.log`
+     (`halo_harness/debug_timeline.py`).
+6. **Single executable**: `pyproject.toml`'s `[project.scripts]` now ships
+   exactly `halo` -- `rolo-claude` is no longer a second installed console
+   script. The 2.0.0 CHANGELOG entry above promised the `rolo-claude`
+   alias would keep working "forever" as an installed console script; that
+   is superseded by the owner's own first real install attempt on a work
+   VM, where an old, separately-installed `rolo-claude` 1.0.1 tool already
+   owned that name and made a fresh `uv tool install --editable .` of Halo
+   fail outright (`Executable already exists: rolo-claude (use --force to
+   overwrite)`) -- `halo` never got installed at all. `rolo-claude` keeps
+   working as a deprecated alias two other ways that never register a
+   second console script: `bin/rolo-claude` (run straight from a checkout)
+   and `cli.main_deprecated_alias` (kept in the source, just no longer a
+   pyproject entry point). Uninstalling the old tool first is still
+   recommended, so the stale command can't run by mistake -- but a Halo
+   install itself must never fail because the old tool exists, and now it
+   can't. `halo doctor` gains a WARN when a `rolo-claude` other than this
+   checkout's own `bin/rolo-claude` script is still found on PATH, naming
+   the matching uninstall command (`uv tool uninstall rolo-claude`/`pipx
+   uninstall rolo-claude`/`pip uninstall rolo-claude`) as its fix.
+   `docs/INSTALL.md`, `docs/harness/INSTALL.md` and the README's upgrading
+   sections are updated to match: uninstalling the old tool is a
+   recommendation, not a precondition.
+
 ## [1.0.1] - 2026-09-30
 
 A hotfix release from the owner's first real 1.0.0 run on the Kali work VM

@@ -25,7 +25,12 @@ test, TESTS = new_registry()
 
 
 def _clear_cc_env():
-    for k in ("BRIDGE_TEST_CC_AUTH_STATUS", "ANTHROPIC_API_KEY", "BRIDGE_CLAUDE_EXE"):
+    # 2.0.1: ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN added -- the gateway
+    # rule (cc_models.is_claude_gateway_driven) reads them too now, and a
+    # stray one left over from an earlier test/the real shell would make
+    # every "not gateway-driven" test below unexpectedly see a gateway.
+    for k in ("BRIDGE_TEST_CC_AUTH_STATUS", "ANTHROPIC_API_KEY", "BRIDGE_CLAUDE_EXE",
+              "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
         os.environ.pop(k, None)
 
 
@@ -347,6 +352,105 @@ def test_credentials_file_is_never_opened(ctx: Ctx):
 
     ctx.check(f"credentials file never opened, got opens={opened_creds}", opened_creds == [])
     ctx.check("sentinel content unchanged", json.loads(creds_path.read_text())["sentinel"] == "must-never-be-read")
+
+
+# ---------------------------------------------------------------------------
+# 2.0.1 launch-hang fix -- gateway rule: ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_
+# TOKEN (or a settings apiKeyHelper) mean `claude` is gateway-driven, so
+# `claude auth status` is never spawned at all, by any caller.
+# ---------------------------------------------------------------------------
+
+@test
+def test_is_claude_gateway_driven_true_from_base_url_in_given_env(ctx: Ctx):
+    from halo_harness.providers.cc_models import is_claude_gateway_driven
+    ctx.check("True with ANTHROPIC_BASE_URL in the given env",
+              is_claude_gateway_driven({"ANTHROPIC_BASE_URL": "https://gw.example.test"}) is True)
+
+
+@test
+def test_is_claude_gateway_driven_true_from_auth_token_in_given_env(ctx: Ctx):
+    from halo_harness.providers.cc_models import is_claude_gateway_driven
+    ctx.check("True with ANTHROPIC_AUTH_TOKEN in the given env",
+              is_claude_gateway_driven({"ANTHROPIC_AUTH_TOKEN": "tok-fake"}) is True)
+
+
+@test
+def test_is_claude_gateway_driven_false_for_an_explicit_empty_env(ctx: Ctx):
+    """An explicitly-given env (never bare os.environ) skips the cold
+    settings-chain re-derivation entirely -- a hermetic, no-file-I/O
+    "definitely not gateway-driven" answer."""
+    from halo_harness.providers.cc_models import is_claude_gateway_driven
+    ctx.check("False for {} (no BASE_URL/TOKEN, no cold-path re-derivation)",
+              is_claude_gateway_driven({}) is False)
+
+
+@test
+def test_is_claude_gateway_driven_true_from_apikeyhelper_in_user_settings(ctx: Ctx):
+    """The cold path (env=None, bare os.environ): Claude Code's own user
+    settings.json carrying a top-level `apiKeyHelper` is enough, even with
+    no static ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN anywhere."""
+    from halo_harness.providers.cc_models import is_claude_gateway_driven
+    _clear_cc_env()
+    config_dir = Path(tempfile.mkdtemp(prefix="cc-gateway-config-"))
+    (config_dir / "settings.json").write_text(
+        json.dumps({"apiKeyHelper": "echo fake-token-from-helper"}), encoding="utf-8")
+    old_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    try:
+        ctx.check("True purely from apiKeyHelper, no env vars at all", is_claude_gateway_driven() is True)
+    finally:
+        _clear_cc_env()
+        if old_claude_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old_claude_config_dir
+
+
+@test
+def test_refresh_cached_claude_auth_status_never_spawns_when_gateway_driven(ctx: Ctx):
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    def _poison(*, timeout=10.0, env=None):
+        raise AssertionError("claude auth status must never be spawned when gateway-driven")
+
+    _clear_cc_env()
+    os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
+    real_claude_auth_status = cc_models_mod.claude_auth_status
+    cc_models_mod.claude_auth_status = _poison
+    cc_models_mod.reset_cached_claude_auth_status()
+    try:
+        status = cc_models_mod.refresh_cached_claude_auth_status()
+        ctx.check(f"a synthetic not-logged-in status, never raised, got {status!r}",
+                  status is not None and status.logged_in is False)
+        ctx.check(f"auth_method marks it as the gateway sentinel, got {status.auth_method!r}",
+                  status.auth_method == cc_models_mod.GATEWAY_AUTH_METHOD)
+        cached = cc_models_mod.cached_claude_auth_status()
+        ctx.check(f"the cache holds the same synthetic status, got {cached!r}",
+                  cached is not None and cached.auth_method == cc_models_mod.GATEWAY_AUTH_METHOD)
+    finally:
+        cc_models_mod.claude_auth_status = real_claude_auth_status
+        cc_models_mod.reset_cached_claude_auth_status()
+        _clear_cc_env()
+
+
+@test
+def test_default_bare_alias_route_never_spawns_when_gateway_driven(ctx: Ctx):
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    def _poison(*, timeout=10.0, env=None):
+        raise AssertionError("claude auth status must never be spawned when gateway-driven")
+
+    _clear_cc_env()
+    os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
+    real_claude_auth_status = cc_models_mod.claude_auth_status
+    cc_models_mod.claude_auth_status = _poison
+    try:
+        route = cc_models_mod.default_bare_alias_route()
+        ctx.check(f"'none' (no ANTHROPIC_API_KEY, gateway-driven -- never raised), got {route!r}",
+                  route == "none")
+    finally:
+        cc_models_mod.claude_auth_status = real_claude_auth_status
+        _clear_cc_env()
 
 
 # ---- profile fields ---------------------------------------------------------

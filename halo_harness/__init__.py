@@ -11,6 +11,13 @@ deprecated alias -- see cli.main_deprecated_alias), `~/.halo` state dir
 `python bridge.py ...` directly -- today's launcher+server, unchanged
 behavior) and imports this package as a library. See wip/SIGNATURES.md and
 docs/ for the cross-section contract.
+
+2.0.1 ("run from any directory" release): no behavior changed from 2.0.0 --
+`docs/INSTALL.md` makes the one-line install unmistakable, `doctor`/`init`'s
+PATH check now names which of the three copies of `halo` it found, and
+every vendored data file (model table, catalogs, the TCSS stylesheet) is
+proven, by test, to load the same way regardless of which directory `halo`
+is started from.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"

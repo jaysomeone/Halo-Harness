@@ -2390,6 +2390,14 @@ def _real_controller(cwd: Path, *, mode: str = "bypassPermissions"):
             self.log = SessionLog(cwd)
             self.busy = False  # Controller.submit reads this; no real turn ever runs in these pilots
             self.interactive = False
+            # 2.0.1: Controller.list_models() reads `self.session.model_ref.
+            # raw` to mark the "current" model -- an empty `raw` (falsy)
+            # keeps that whole branch a no-op (it would otherwise also need
+            # `self.session.model_profile`, which no pilot using this stub
+            # has ever needed before list_models() itself was first called
+            # against one).
+            from halo_harness.model import ModelRef
+            self.model_ref = ModelRef(raw="", provider="openrouter", model="", dialect="openai-chat")
 
         def run(self, commands, emit, mcp_status_fn=None) -> int:
             return 0  # Controller.start()'s worker thread target; nothing is ever queued to it here
@@ -4254,6 +4262,142 @@ def test_slash_doctor_runs_off_the_main_thread(ctx: Ctx):
             else:
                 os.environ["BRIDGE_TEST_HOME"] = old_home
     asyncio.run(body())
+
+
+# ============================================================================
+# 2.0.1 launch-hang fix: the owner's own live use on a Databricks-only work
+# VM -- `halo` printed the migration line, then sat for a long time before
+# the TUI appeared, because `claude auth status` (hung on a gateway-driven
+# `claude`, full 10s timeout) was reachable synchronously from startup.
+# tui/app.py's own startup worker (`_prime_auth_status_worker`) is now the
+# ONLY launch-time spawner, off the UI thread, and a gateway-driven `claude`
+# is never spawned at all, by anyone.
+# ============================================================================
+
+_CC_AUTH_ENV_VARS = ("BRIDGE_TEST_CC_AUTH_STATUS", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _save_cc_auth_env() -> dict:
+    return {k: os.environ.get(k) for k in _CC_AUTH_ENV_VARS}
+
+
+def _restore_cc_auth_env(saved: dict) -> None:
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+@test
+def test_first_frame_renders_fast_despite_a_slow_claude_auth_check_then_cc_group_lands(ctx: Ctx):
+    """The owner's own repro, simulated: `claude auth status` sleeps 5s
+    (standing in for a gateway-driven `claude` hanging its full 10s
+    timeout). The first frame must still render within 1s -- only the
+    startup worker, off the UI thread, ever calls it -- and once that
+    worker's slow result lands, `/model`'s own "Claude Code subscription"
+    group appears from the SAME cache `Controller.list_models()` reads,
+    with no second spawn needed."""
+    import time as time_mod
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    real_claude_auth_status = cc_models_mod.claude_auth_status
+
+    def _slow_claude_auth_status(*, timeout=10.0, env=None):
+        time_mod.sleep(5.0)
+        return cc_models_mod.ClaudeAuthStatus(logged_in=True, auth_method="claude.ai")
+
+    saved_env = _save_cc_auth_env()
+    for k in _CC_AUTH_ENV_VARS:
+        os.environ.pop(k, None)  # a real gateway/test-seam env var here would mask the scenario under test
+    cc_models_mod.claude_auth_status = _slow_claude_auth_status
+    cc_models_mod.reset_cached_claude_auth_status()
+
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            controller = _real_controller(cwd)
+            start = time_mod.monotonic()
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                elapsed = time_mod.monotonic() - start
+                ctx.check(f"first frame rendered quickly despite a 5s-sleeping claude auth check, "
+                          f"got {elapsed:.2f}s", elapsed < 1.0)
+                status = None
+                for _ in range(90):
+                    await pilot.pause(0.1)
+                    status = cc_models_mod.cached_claude_auth_status()
+                    if status is not None:
+                        break
+                ctx.check(f"the slow startup worker eventually lands in the cache, got {status!r}",
+                          bool(status and status.logged_in and status.auth_method == "claude.ai"))
+                models = controller.list_models()
+                groups = {m.get("group") for m in models if isinstance(m, dict) and m.get("group")}
+                ctx.check(f"the Claude Code subscription group appears once the worker lands, got {groups}",
+                          "Claude Code subscription" in groups)
+    try:
+        asyncio.run(body())
+    finally:
+        cc_models_mod.claude_auth_status = real_claude_auth_status
+        cc_models_mod.reset_cached_claude_auth_status()
+        _restore_cc_auth_env(saved_env)
+
+
+@test
+def test_gateway_driven_claude_never_spawns_auth_status_from_providers_or_model(ctx: Ctx):
+    """Gateway rule: a shell/settings env that sets ANTHROPIC_BASE_URL means
+    the installed `claude` is gateway-driven -- `claude auth status` must
+    never be spawned at all, by `/providers`, `/model`, or the startup
+    worker, and `/providers`' own claude_subscription row names the gateway
+    specifically rather than an ambiguous plain "not set up"."""
+    import halo_harness.providers.cc_models as cc_models_mod
+    from halo_harness.tui.slash import handle_slash
+
+    calls: list = []
+    real_claude_auth_status = cc_models_mod.claude_auth_status
+
+    def _poison(*a, **kw):
+        calls.append(True)
+        raise AssertionError("claude auth status must never be spawned when claude is gateway-driven")
+
+    saved_env = _save_cc_auth_env()
+    os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+    os.environ["ANTHROPIC_BASE_URL"] = "https://my-work-gateway.example.test"
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    cc_models_mod.claude_auth_status = _poison
+    cc_models_mod.reset_cached_claude_auth_status()
+
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            controller = _real_controller(cwd)
+            app = await _mounted(controller, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.2)  # let the startup worker land first (it must stay silent, never spawn)
+                await handle_slash(app, "providers", "")
+                notes = []
+                for _ in range(60):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+                    if any("Claude Code subscription" in n for n in notes):
+                        break
+                ctx.check(f"the providers table reached the transcript, got {notes}",
+                          any("Claude Code subscription" in n for n in notes))
+                ctx.check("the claude_subscription row names the gateway, not a plain 'not set up'",
+                          any("not set up (claude is configured for a gateway)" in n for n in notes))
+                await handle_slash(app, "model", "")
+                await pilot.pause(0.2)
+                await pilot.press("escape")  # close the model picker /model just opened
+                await pilot.pause(0.05)
+                ctx.check("claude auth status was never spawned by the startup worker, /providers or /model",
+                          not calls)
+    try:
+        asyncio.run(body())
+    finally:
+        cc_models_mod.claude_auth_status = real_claude_auth_status
+        cc_models_mod.reset_cached_claude_auth_status()
+        _restore_cc_auth_env(saved_env)
 
 
 # ============================================================================

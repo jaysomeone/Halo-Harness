@@ -196,6 +196,13 @@ def _enable_debug_logging(debug_file: Optional[str]) -> None:
                     child.addHandler(hdlr)
         logger.debug("debug logging enabled (halo %s, argv=%s)", __version__, sys.argv[1:])
         print(f"halo: debug log -> {log_path}", file=sys.stderr)
+        # 2.0.1 launch-hang investigation: one [timeline] line per startup
+        # phase (settings, instructions, session build, MCP discovery,
+        # first paint), each with milliseconds elapsed since THIS call --
+        # see halo_harness/debug_timeline.py. A no-op cost everywhere else
+        # (`mark()` is a bool check unless `enable()` ran).
+        from halo_harness import debug_timeline
+        debug_timeline.enable()
     except Exception as e:  # pragma: no cover - defensive
         print(f"halo: could not enable debug logging: {e}", file=sys.stderr)
 
@@ -492,12 +499,20 @@ def main(argv: Optional[list] = None) -> int:
 
 
 def main_deprecated_alias(argv: Optional[list] = None) -> int:
-    """`rolo-claude` console-script entry point (2.0.0 rename): one notice
-    line to stderr, then exactly `main(argv)` -- same process, same parser,
-    same behavior, so every flag/subcommand (including `rolo-claude proxy`)
-    keeps working under the old name indefinitely, not just for one
-    deprecation window. Never prints the notice more than once per process
-    (there's only ever one entry into argv handling per invocation)."""
+    """`rolo-claude`'s deprecated-alias entry point: one notice line to
+    stderr, then exactly `main(argv)` -- same process, same parser, same
+    behavior, so every flag/subcommand (including `rolo-claude proxy`)
+    keeps working under the old name. Never prints the notice more than
+    once per process (there's only ever one entry into argv handling per
+    invocation).
+
+    2.0.1: no longer a `pyproject.toml` console-script entry point (an old,
+    separately-installed `rolo-claude` tool owning that name made a fresh
+    `uv tool install --editable .` of Halo fail outright -- see CHANGELOG
+    [2.0.1]). `bin/rolo-claude` (the no-install-at-all POSIX fallback) does
+    NOT call this -- it prints its own notice and execs `bin/halo` directly
+    -- this function is kept only as a small, still-tested, directly
+    callable building block for any future reuse."""
     print("halo: 'rolo-claude' is deprecated, use 'halo' instead", file=sys.stderr)
     return main(argv)
 

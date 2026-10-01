@@ -50,8 +50,20 @@ PRESET_TO_PROVIDER = {"home": "openrouter", "work": "databricks", "claude": "cla
 
 
 def claude_login_available() -> bool:
-    from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
-    status = claude_auth_status()
+    """2.0.1 launch-hang fix: reads ONLY `cc_models.cached_claude_auth_
+    status()` now -- NEVER spawns `claude auth status` itself. A cache miss
+    (nothing has primed it yet in this process) means "not detected yet",
+    same as every other cache-only reader of this exact cache
+    (`Controller.list_models()`'s own `cc_available`). The one legitimate
+    LIVE spawn this function used to do unconditionally is now the startup
+    worker's job (`tui/app.py::_prime_auth_status_worker`, headless -p's own
+    background thread) or an explicit, caller-requested `refresh_cached_
+    claude_auth_status()` right before a flow that genuinely needs a fresh
+    answer right now (`halo init`'s tabs -- `tui/dialogs/init_tabs.py`'s
+    `_claude_state_worker`/`_save_claude_worker`, already off the UI thread
+    -- and `init_cli.py::cmd_init`'s own sequential/non-interactive path)."""
+    from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, cached_claude_auth_status
+    status = cached_claude_auth_status()
     return bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
 
 

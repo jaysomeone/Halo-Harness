@@ -117,7 +117,14 @@ def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = 
     """`"auto (detected from <source>)"` / `"disabled by you"` / `"enabled
     by you"` / `"not set up"` -- the exact wording `/providers`/`halo
     providers` show per provider. `detected`: see `is_enabled`'s own
-    docstring."""
+    docstring.
+
+    2.0.1 gateway rule: a `claude_subscription` row that's `"not set up"`
+    gets one extra clause, `"(claude is configured for a gateway)"`,
+    whenever `cc_models.is_claude_gateway_driven()` says so -- the owner's
+    own work-VM case, where `claude` is deliberately wired to Databricks
+    and will NEVER report a real claude.ai login, so plain "not set up"
+    (indistinguishable from "just never logged in") would be misleading."""
     name = canonical(name)
     status = enablement_status(name, state_dir=state_dir, detected=detected)
     if status == "auto":
@@ -127,6 +134,10 @@ def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = 
     if status == "enabled_by_user":
         source = credentials_source(name, detected=detected)
         return f"enabled by you (detected from {source})" if source else "enabled by you"
+    if name == "claude_subscription":
+        from halo_harness.providers.cc_models import is_claude_gateway_driven
+        if is_claude_gateway_driven():
+            return "not set up (claude is configured for a gateway)"
     return "not set up"
 
 

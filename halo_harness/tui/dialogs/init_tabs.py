@@ -196,6 +196,16 @@ class InitTabsApp(App):
             pass
 
     def _claude_state_worker(self) -> None:
+        # 2.0.1 launch-hang fix: `claude_login_available()` (what `tab_
+        # credential_state("claude", ...)` calls below) is now cache-only
+        # and never spawns anything itself -- this worker is the one place
+        # that's ALREADY correctly off the UI thread for exactly this
+        # reason (finding 4, see this module's own docstring), so it's the
+        # right place to do the one real, live spawn this tab needs to show
+        # an accurate "checking…" -> real-answer transition instead of
+        # reading a cold/stale cache.
+        from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+        refresh_cached_claude_auth_status()
         state = tab_credential_state("claude", team_cfg=self._team_cfg)
         # `detected=state["configured"]` -- reuses the ALREADY-known answer
         # (this same worker's own `claude_login_available()` call just
@@ -336,9 +346,17 @@ class InitTabsApp(App):
         """M3 (1.0.1 final pass): the "claude" tab's own "Check login"
         button, off the UI thread -- `_collect_values("claude")` always
         returns `{}` (this tab has no input fields at all), so there is
-        nothing to read off a widget here; both calls below spawn `claude
-        auth status`, exactly like the synchronous code this replaces did."""
+        nothing to read off a widget here.
+
+        2.0.1 launch-hang fix: `claude_login_available()` (what both calls
+        below read, via `save_tab_credentials`/`tab_credential_state`) is
+        now cache-only -- this worker does the ONE live, explicit refresh
+        itself first (still off the UI thread, still exactly one spawn
+        total, same as before this fix), so "Check login" keeps doing what
+        its own label promises instead of silently reading a stale answer."""
+        from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
         from halo_harness.init_providers import save_tab_credentials, tab_credential_state
+        refresh_cached_claude_auth_status()
         ok, message = save_tab_credentials("claude", {}, team_cfg=self._team_cfg)
         state = tab_credential_state("claude", team_cfg=self._team_cfg) if ok else None
         self.call_from_thread(self._apply_claude_save, ok, message, state)

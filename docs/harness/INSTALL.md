@@ -18,20 +18,21 @@ offline/work-box and reproducible-install recipes it doesn't cover.
 
 ## Upgrading from rolo-claude 1.0.1
 
-`halo` 2.0.0 is a rename, not a fresh product -- but the installed console
-script from 1.0.1 is already named `rolo-claude`, and every installer
-either refuses outright or does something surprising when this checkout's
-NEW `halo`/`rolo-claude` pair tries to land next to it:
+`halo` is a rename, not a fresh product -- the installed console script
+from 1.0.1 is still named `rolo-claude`. In 2.0.0, installing `halo` right
+next to it was its own small mess (every installer either refused outright
+or did something surprising); **as of 2.0.1, `halo`'s own distribution no
+longer registers a `rolo-claude` executable at all** (`pyproject.toml`
+ships exactly one, `halo` -- see CHANGELOG [2.0.1]), so none of that
+applies any more: `uv tool install --editable .` / `pipx install --editable
+.` / `pip install --user -e .` all install `halo` cleanly whether or not
+the old 1.0.1 `rolo-claude` tool is still sitting on PATH, no `--force`
+needed, nothing silently overwritten.
 
-- `uv tool install --editable .` aborts with `Executable already exists:
-  rolo-claude (use --force)`.
-- `pipx install --editable .` prints `File exists ... Not modifying`, so
-  the OLD `rolo-claude` keeps running 1.0.1.
-- `pip install --user -e .` silently overwrites it, and a LATER
-  `pip uninstall rolo-claude` would delete halo's own alias with it.
-
-**Uninstall the old tool first**, with whichever installer you used for
-it:
+**Uninstalling the old tool first is still recommended**, though -- not to
+make the install succeed (it already will), but so the stale 1.0.1 command
+can never run by mistake once `halo` exists. Whichever installer you used
+for it:
 
 ```sh
 uv tool uninstall rolo-claude      # installed with `uv tool install`
@@ -39,8 +40,9 @@ pipx uninstall rolo-claude         # installed with `pipx`
 pip uninstall rolo-claude          # installed with `pip install --user -e .`
 ```
 
-Then install `halo` normally (Option 1/2 below). Or skip the uninstall and
-pass `--force` instead: `uv tool install --editable . --force`.
+`halo doctor` WARNs if it finds a `rolo-claude` left on PATH that isn't
+this checkout's own `bin/rolo-claude` script (below) -- that WARN's own fix
+line names the exact uninstall command for your box.
 
 Either way, once `halo` is installed:
 
@@ -51,24 +53,22 @@ Either way, once `halo` is installed:
   trailing-slash `rm -rf ~/.rolo-claude/` on a leftover link would follow
   it and empty `~/.halo` right along with it, so the decision is to leave
   nothing behind there at all).
-- Use only `halo` from here on, and **do not use the separate, actually-
-  still-installed `rolo-claude` 1.0.1 binary again** once `~/.halo` exists
-  -- with the real `~/.rolo-claude` renamed away and no link left behind,
-  it would start from a truly empty state directory the next time it runs.
-  (`rolo-claude` the deprecated CONSOLE-SCRIPT ALIAS that ships inside
-  `halo` itself is a different thing and keeps working forever -- one
-  notice line, then runs exactly like `halo`; it's the separate 1.0.1
-  *install* that must not be used again.)
+- Use only `halo` from here on -- the separate, actually-still-installed
+  `rolo-claude` 1.0.1 binary (if you kept it on PATH instead of
+  uninstalling) **must not be used again** once `~/.halo` exists -- with the real
+  `~/.rolo-claude` renamed away and no link left behind, it would start
+  from a truly empty state directory the next time it runs. (`rolo-claude`
+  typed after installing `halo` now only ever means `bin/rolo-claude` --
+  this repo's own no-install-at-all fallback SCRIPT, run straight from a
+  checkout, never an installed console script -- or whichever separate
+  1.0.1 install is still on PATH; `halo`'s own distribution installs
+  nothing under that name any more.)
 - If your box somehow ends up with both `~/.rolo-claude` and `~/.halo`
   holding real data (most commonly a rename that failed partway through,
   e.g. a locked file on Windows), `halo doctor` reports a WARN naming both
   paths -- follow its fix.
 
 ## Kali / Linux
-
-Upgrading from rolo-claude 1.0.1? Read "Upgrading from rolo-claude 1.0.1"
-above FIRST -- the plain `uv tool install --editable .` below aborts
-outright on a box that already has the 1.0.1 tool installed.
 
 ### Option 1 -- `uv tool install` (recommended)
 

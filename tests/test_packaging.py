@@ -91,6 +91,27 @@ def test_h9_wheel_ships_the_required_runtime_data_files(ctx: Ctx):
         ctx.check(f"{required_suffix} is in the wheel", any(n.endswith(required_suffix) for n in names))
 
 
+@test
+def test_pyproject_scripts_table_ships_exactly_one_executable(ctx: Ctx):
+    """2.0.1: an old, separately-installed `rolo-claude` 1.0.1 tool owning
+    that name made a fresh `uv tool install --editable .` of Halo fail
+    outright ("Executable already exists: rolo-claude") -- see CHANGELOG
+    [2.0.1]. `[project.scripts]` now ships exactly one console script,
+    `halo`; `rolo-claude` keeps working as a deprecated alias two other
+    ways that never register a second one: `bin/rolo-claude` (a plain
+    script, tested by test_h9b_findings.py's own symlink pilot) and
+    `cli.main_deprecated_alias` (tests/test_cli_flags.py's own direct-call
+    pin), kept in the source but no longer a pyproject entry point."""
+    try:
+        import tomllib
+    except ImportError:
+        raise SkipTest("tomllib is Python 3.11+ only -- this host's own test runner is 3.11")
+    with open(REPO_DIR / "pyproject.toml", "rb") as f:
+        data = tomllib.load(f)
+    scripts = data.get("project", {}).get("scripts")
+    ctx.check(f"exactly one console script (halo), got {scripts}", scripts == {"halo": "halo_harness.cli:main"})
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

@@ -202,10 +202,21 @@ def _check_claude_subscription() -> str:
     Finding 2: WARNs (never OK) unless `authMethod == "claude.ai"` -- an
     `api_key` authMethod (an ANTHROPIC_API_KEY visible to `claude auth
     status`'s own -- now stripped -- environment) means cc: would NOT use
-    the subscription even though `loggedIn` is true."""
-    from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
+    the subscription even though `loggedIn` is true.
+
+    2.0.1 launch-hang fix: calls `refresh_cached_claude_auth_status()`
+    (never bare `claude_auth_status()`) -- same live, synchronous spawn
+    `halo doctor` always did here (this check's own timing is unchanged),
+    but it also warms the SAME cache `_check_providers_enabled()` reads
+    later in this same run, so the two checks can never disagree, and it
+    picks up the gateway short-circuit (`is_claude_gateway_driven()`) for
+    free -- the owner's own work-VM repro hung on this exact doctor line
+    too, every time `halo doctor` ran, not just on TUI launch."""
+    from halo_harness.providers.cc_models import (
+        GATEWAY_AUTH_METHOD, SUBSCRIPTION_AUTH_METHODS, refresh_cached_claude_auth_status,
+    )
     try:
-        status = claude_auth_status()
+        status = refresh_cached_claude_auth_status()
     except Exception as e:  # never let a doctor check crash the whole command
         return _fix(f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})",
                      cmd="halo doctor")
@@ -215,6 +226,10 @@ def _check_claude_subscription() -> str:
     if getattr(status, "timed_out", False):
         return _fix(f"{WARN} Claude subscription: `claude auth status` timed out (try again -- cc: models "
                      f"unavailable for now)", cmd="halo doctor")
+    if status.auth_method == GATEWAY_AUTH_METHOD:
+        return _fix(f"{WARN} Claude subscription: claude is configured for a gateway "
+                     f"(ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/apiKeyHelper set) -- cc: will not use this "
+                     f"(that's the dbx:/ant: route); expected on a work box, nothing to fix", cmd="halo providers")
     if not status.logged_in:
         return _fix(f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in "
                      f"for cc: models)", cmd="claude")
@@ -595,6 +610,18 @@ def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, p
     nothing -- the OK line names the resolved path; the WARN line's own
     `-> fix:` names the exact reinstall command for whichever tool is
     detected and reminds that it's needed again after every `git pull`.
+
+    2.0.1 ("run from any directory" release): the message now spells out
+    WHICH of the three copies `halo` resolves to, by name, and says
+    plainly on BOTH warning branches that it is not the installed one --
+    the installed console script itself (OK), this checkout's own
+    `bin/halo`/`bin/halo.cmd` wrapper (WARN -- only works from inside the
+    checkout), or neither at all, meaning the only thing that currently
+    runs `halo` is a bare `PYTHONPATH=<repo> python -m halo_harness`
+    fallback (WARN -- that's how `bin/halo` itself behaves once it finds
+    no installed script either, and exactly how this repo's own test
+    suite drives the harness without installing it).
+
     `resolved`/`uv_found`/`pipx_found`/`externally_managed` are test seams;
     omitted, this does real `shutil.which`/marker-file lookups."""
     if resolved is _UNSET:
@@ -602,15 +629,55 @@ def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, p
     fix_cmd = (f"{reinstall_command(uv_found=uv_found, pipx_found=pipx_found, externally_managed=externally_managed)}"
                f" (run from this checkout -- repeat after every `git pull`)")
     if not resolved:
-        return _fix(f"{WARN} halo command: not found on PATH", cmd=fix_cmd)
+        return _fix(f"{WARN} halo command: not found on PATH -- not an installed console script, only a "
+                    f"PYTHONPATH fallback", cmd=fix_cmd)
     try:
         is_repo_wrapper = Path(resolved).resolve().parent == _repo_bin_dir().resolve()
     except OSError:
         is_repo_wrapper = False
     if is_repo_wrapper:
         return _fix(f"{WARN} halo command: PATH resolves to this checkout's own bin/ wrapper "
-                    f"({resolved}) -- only works from inside the checkout", cmd=fix_cmd)
-    return f"{OK} halo command: {resolved}"
+                    f"({resolved}) -- not the installed console script, only works from inside the checkout",
+                    cmd=fix_cmd)
+    return f"{OK} halo command: {resolved} (installed console script)"
+
+
+def _check_old_rolo_claude_leftover(*, resolved=_UNSET, uv_found: Optional[bool] = None,
+                                     pipx_found: Optional[bool] = None,
+                                     externally_managed: Optional[bool] = None) -> Optional[str]:
+    """2.0.1: `rolo-claude` is no longer one of this distribution's own
+    console scripts -- `pyproject.toml`'s `[project.scripts]` ships exactly
+    one executable, `halo`, since an old, separately-installed `rolo-claude`
+    tool owning that name made a fresh `uv tool install --editable .` of
+    Halo fail outright ("Executable already exists: rolo-claude") and
+    `halo` never got installed at all (see CHANGELOG [2.0.1]). So any
+    `rolo-claude` found on PATH now, other than this checkout's own
+    `bin/rolo-claude` (a plain script, never an installed console script --
+    same `is_repo_wrapper` check `check_command_on_path` uses for `halo`
+    itself), is a leftover from that old, separate install -- still runnable
+    by mistake, and never updated by a `halo`-side `git pull`/reinstall.
+
+    `None` (skipped entirely, same "nothing to report" convention every
+    other optional check in this module uses) when nothing is found there,
+    or when what's found IS this checkout's own shim. `resolved`/
+    `uv_found`/`pipx_found`/`externally_managed` are test seams, identical
+    in shape to `check_command_on_path`'s own."""
+    if resolved is _UNSET:
+        resolved = shutil.which("rolo-claude") or shutil.which("rolo-claude.exe")
+    if not resolved:
+        return None
+    try:
+        is_repo_wrapper = Path(resolved).resolve().parent == _repo_bin_dir().resolve()
+    except OSError:
+        is_repo_wrapper = False
+    if is_repo_wrapper:
+        return None
+    tool = _detect_install_tool(uv_found=uv_found, pipx_found=pipx_found, externally_managed=externally_managed)
+    uninstall_cmd = {"uv": "uv tool uninstall rolo-claude", "pipx": "pipx uninstall rolo-claude"}.get(
+        tool, "pip uninstall rolo-claude")
+    return _fix(f"{WARN} rolo-claude: an old, separate install is still on PATH ({resolved}) -- halo no longer "
+                f"ships this executable (use `halo` instead); uninstall the old tool so it can never run by "
+                f"mistake", cmd=uninstall_cmd)
 
 
 def _check_mcp_servers(cwd: Optional[Path]) -> str:
@@ -1265,6 +1332,7 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled()))
     entries.append(("command_on_path", check_command_on_path()))
+    entries.append(("old_rolo_claude_on_path", _check_old_rolo_claude_leftover()))
     return [(cid, line) for cid, line in entries if line is not None]
 
 

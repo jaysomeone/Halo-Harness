@@ -286,6 +286,13 @@ class BridgeApp(App):
         return variables
 
     async def on_mount(self) -> None:
+        # 2.0.1 launch-hang investigation: scheduled FIRST (before any of
+        # this method's own work below), so it fires right after the
+        # NEXT real screen refresh -- the closest this app can get to a
+        # true "first paint" timestamp without framework surgery. A no-op
+        # unless `--debug` was passed (debug_timeline.mark's own contract).
+        from halo_harness import debug_timeline
+        self.call_after_refresh(lambda: debug_timeline.mark("first paint"))
         self.transcript = self.query_one(Transcript)
         self.completion_popup = self.query_one(CompletionPopup)
         self.which_key = self.query_one(WhichKeyOverlay)
@@ -399,15 +406,36 @@ class BridgeApp(App):
     def _prime_auth_status_worker(self) -> None:
         """1.0.1 fixpass finding 1: the ONE place that ever spawns `claude
         auth status` for the model picker's own cc: group -- everywhere
-        else (`Controller.list_models()`) only ever reads the cache this
-        populates. Best-effort: a failure here just leaves the cache empty
-        (list_models()'s own try/except already treats that the same as
-        "not logged in" -- no cc: group shown, never a crash)."""
+        else (`Controller.list_models()`, `init_providers.claude_login_
+        available()`) only ever reads the cache this populates. Best-
+        effort: a failure here just leaves the cache empty (list_models()'s
+        own try/except already treats that the same as "not logged in" --
+        no cc: group shown, never a crash). `refresh_cached_claude_auth_
+        status()` itself skips the actual spawn entirely when `claude` is
+        gateway-driven (2.0.1 launch-hang fix) -- this is the ONLY
+        launch-time spawner for the TUI; headless mode has no startup
+        worker of its own, since it has no UI thread to protect -- see
+        `commands/builtins.py::_cmd_providers`'s own inline refresh."""
         try:
-            from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
-            refresh_cached_claude_auth_status()
+            from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, refresh_cached_claude_auth_status
+            status = refresh_cached_claude_auth_status()
         except Exception:
-            pass
+            return
+        # 2.0.1: `/model`'s own cc: group and `/providers`' own claude_
+        # subscription row both already read this same cache fresh on
+        # their NEXT open (no change needed there) -- but a session that
+        # never reopens either would otherwise never learn a just-
+        # discovered subscription login is now usable. One quiet, once-
+        # per-launch notify, only when it actually becomes available --
+        # never for "not available" (the common case on a Databricks/
+        # OpenRouter-first or gateway-driven box), which must never be
+        # announced as an absence on every single launch.
+        available = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
+        if available:
+            self.call_from_thread(
+                self.notify, "Claude subscription detected -- cc: models available (see /model).",
+                title="providers", timeout=4,
+            )
 
     def _catalog_startup_refresh_worker(self) -> None:
         """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see

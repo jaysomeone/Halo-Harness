@@ -174,17 +174,33 @@ def test_version_bumped_to_1_0_1_and_changelog_has_an_entry(ctx: Ctx):
 def test_version_bumped_to_2_0_0_and_changelog_has_an_entry(ctx: Ctx):
     """Halo Harness 2.0.0: the rename release -- rolo-claude 1.0.1
     continues unchanged as its own repository; this one is where every
-    later feature lands. THIS release's own version-bump pin (the single
-    `__version__ == ...` exact-match check lives in the newest-added test
-    only, per this file's own established convention -- see the 1.0.1
-    test above, which no longer carries one)."""
-    from halo_harness import __version__
-    ctx.check(f"__version__ is 2.0.0, got {__version__!r}", __version__ == "2.0.0")
+    later feature lands. H14c's own pinning shape, kept exact (checked
+    against the CHANGELOG's own still-present [2.0.0] entry, not the
+    CURRENT version) now that the 2.0.1 "run from any directory" release
+    has bumped past it; see `test_version_bumped_to_2_0_1_and_changelog_
+    has_an_entry` below for THIS release's own version-bump pin (the
+    single `__version__ == ...` exact-match check lives in the
+    newest-added test only, per this file's own established convention)."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
     ctx.check("CHANGELOG.md has a [2.0.0] entry", "[2.0.0]" in changelog)
     entry = changelog.split("[2.0.0]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("halo", "migration", "rename", "intro"):
         ctx.check(f"the [2.0.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_2_0_1_and_changelog_has_an_entry(ctx: Ctx):
+    """Halo Harness 2.0.1: the "run from any directory" release -- makes
+    the install unmistakable and proves (by test) that no behavior
+    depends on `halo` being started from inside the checkout. THIS
+    release's own version-bump pin."""
+    from halo_harness import __version__
+    ctx.check(f"__version__ is 2.0.1, got {__version__!r}", __version__ == "2.0.1")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [2.0.1] entry", "[2.0.1]" in changelog)
+    entry = changelog.split("[2.0.1]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("install.md", "pythonpath fallback", "scratch", "unique sentence"):
+        ctx.check(f"the [2.0.1] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 @test
@@ -203,11 +219,15 @@ def test_changelog_2_0_0_mentions_the_fixpass_additions(ctx: Ctx):
 
 @test
 def test_upgrading_section_exists_in_readme_and_install_md(ctx: Ctx):
-    """2.0.0 fixpass finding 3: an upgrader's install command breaks
-    outright against an already-installed rolo-claude 1.0.1 console
-    script (uv aborts, pipx silently refuses, pip silently overwrites) --
-    both README.md and INSTALL.md must say so plainly, with the exact
-    uninstall command for each of the three installers."""
+    """2.0.0 fixpass finding 3 (superseded by 2.0.1, see CHANGELOG): 2.0.0
+    briefly had an upgrader's install command break outright against an
+    already-installed rolo-claude 1.0.1 console script (uv aborted, pipx
+    silently refused, pip silently overwrote) -- as of 2.0.1, `halo`'s own
+    distribution ships exactly one console script and never conflicts with
+    it at all, so there is no `--force` escape hatch left to document; both
+    README.md and INSTALL.md must still say plainly that uninstalling the
+    old tool first is recommended (not required), with the exact uninstall
+    command for each of the three installers."""
     readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
     install = (REPO_DIR / "docs" / "harness" / "INSTALL.md").read_text(encoding="utf-8")
     ctx.check("README.md names the upgrade path", "upgrading from" in readme.lower()
@@ -217,7 +237,8 @@ def test_upgrading_section_exists_in_readme_and_install_md(ctx: Ctx):
     install_section = install.split("## Upgrading from rolo-claude 1.0.1", 1)[1].split("\n## ", 1)[0]
     for cmd in ("uv tool uninstall rolo-claude", "pipx uninstall rolo-claude", "pip uninstall rolo-claude"):
         ctx.check(f"INSTALL.md's upgrade section names the exact command {cmd!r}", cmd in install_section)
-    ctx.check("INSTALL.md's upgrade section also mentions the --force escape hatch", "--force" in install_section)
+    ctx.check("INSTALL.md's upgrade section says plainly that uninstalling is recommended, not required",
+              "recommended" in install_section.lower())
     ctx.check("INSTALL.md's upgrade section says plainly that no link is left at the old location",
               "no link is created" in install_section.lower())
     ctx.check("...and that the separate 1.0.1 install must not be used again",
@@ -226,6 +247,36 @@ def test_upgrading_section_exists_in_readme_and_install_md(ctx: Ctx):
               install.index("## Upgrading from rolo-claude 1.0.1") < install.index("uv tool install --editable .\n```")
               if "uv tool install --editable .\n```" in install
               else install.index("## Upgrading from rolo-claude 1.0.1") < install.index("## Kali / Linux"))
+
+
+@test
+def test_install_md_top_level_exists_is_linked_from_readme_and_leads_with_one_liners(ctx: Ctx):
+    """2.0.1 "run from any directory" release: a NEW top-level docs/
+    INSTALL.md (distinct from the existing docs/harness/INSTALL.md, which
+    keeps its own exhaustive walkthrough and its own "Upgrading from
+    rolo-claude 1.0.1" section pinned above) leads with one install line
+    per platform and is linked from the README, not just sitting there
+    unreferenced."""
+    readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
+    install_path = REPO_DIR / "docs" / "INSTALL.md"
+    ctx.check("docs/INSTALL.md exists", install_path.is_file())
+    install = install_path.read_text(encoding="utf-8")
+    ctx.check("README links to docs/INSTALL.md", "[docs/INSTALL.md](docs/INSTALL.md)" in readme)
+    ctx.check("docs/INSTALL.md names the --reinstall form (the one command for first install AND "
+              "every post-`git pull` reinstall)", "uv tool install --reinstall ." in install)
+    ctx.check("docs/INSTALL.md names the pipx alternative", "pipx install --force -e ." in install)
+    ctx.check("docs/INSTALL.md mentions the PEP 668 externally-managed-environment note",
+              "externally-managed-environment" in install)
+    ctx.check("docs/INSTALL.md names the direct-from-GitHub install",
+              "uv tool install git+https://github.com/roloVibes/Halo-Harness" in install)
+    ctx.check("docs/INSTALL.md says to cd anywhere and type halo",
+              "cd anywhere" in install.lower() and "type `halo`" in install.lower())
+    ctx.check("docs/INSTALL.md says the clone is for git pull only",
+              "git pull` only" in install.lower() or "git pull only" in install.lower())
+    ctx.check("docs/INSTALL.md keeps its own Upgrading-from-rolo-claude section",
+              "## Upgrading from rolo-claude 1.0.1" in install)
+    ctx.check("docs/INSTALL.md links onward to the exhaustive docs/harness/INSTALL.md",
+              "harness/INSTALL.md" in install)
 
 
 if __name__ == "__main__":
