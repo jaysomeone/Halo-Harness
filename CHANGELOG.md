@@ -211,6 +211,58 @@ claim with tests, rather than changing that discovery behavior itself.
    `docs/INSTALL.md`, `docs/harness/INSTALL.md` and the README's upgrading
    sections are updated to match: uninstalling the old tool is a
    recommendation, not a precondition.
+7. **GLM on Databricks: the "pause" was a silent effort mismatch, not a
+   hang** (W2a, provider/loop/telemetry side -- see
+   [MODELS.md](docs/MODELS.md#databricks-glm-201-glm-briefmd) and
+   [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#glm-seems-to-pause-201)):
+   - **The default is sent, not omitted**: an omitted `reasoning_effort`
+     on this route means `max`, so a call with no effort configured sends
+     `high` explicitly (`ProviderProfile.default_effort_when_unset`, on
+     for the Databricks GLM family only), and an effort inherited from
+     Claude Code's settings (`effortLevel`, typically `xhigh`) that the
+     route does not accept lands on `high` too; an explicit `--effort` or
+     `/effort xhigh` is still clamped to `max` as a deliberate choice.
+     Switching into a GLM route mid-session applies the same default.
+   - **Effort clamp table**: every `databricks-glm-*` endpoint (tabled or
+     not) now accepts exactly `low`/`high`/`max`, default `high` (was
+     silently sent as whatever the user picked, including values the
+     gateway itself then silently coerced to `max` with no error at all --
+     `medium -> high`, `minimal -> low`, `xhigh -> max`, `none -> low`,
+     via a new `ProviderProfile.effort_clamp_map` `clamp_effort`/`map_effort`
+     consult before the generic xhigh/max narrowing). OpenRouter
+     `z-ai/glm-5*` keeps the full seven Z.ai-direct values. `--effort`/
+     `/effort` show the value actually sent (`medium (sent as high on this
+     route)`); a new `providers/effort.py` (`effort_set`, `sent_effort`,
+     `requested_vs_sent`) is the one place `/effort`, `/status`, `/context`
+     and the stream-json `system/init` line's new `effort`/`effort_sent`
+     fields all read this comparison from.
+   - **Steer during the silent pre-first-token wait now restarts the
+     call**: config `steer.restart_when_silent` (default true) -- when a
+     steer arrives and no content has streamed yet for the in-flight call,
+     it's aborted and resent immediately with the steer appended (a new
+     `steer_restart` event; `--verbose` prints one line) instead of
+     waiting for the first chunk to cut in, the way an ordinary mid-stream
+     steer already did.
+   - **Finish-reason handling**: a chat-dialect `finish_reason:
+     "model_context_window_exceeded"` now feeds the existing overflow ->
+     compaction -> retry path (previously read as a plain "end_turn");
+     `"sensitive"` becomes a clear, never-retried error naming whatever
+     text the provider did stream.
+   - **GLM never receives `tool_choice: "required"`** (already true via
+     `tool_choice_required_supported`, now pinned by test) and temperature
+     is clamped to `[0, 1]` on every GLM-family route.
+   - **New per-call telemetry** in the session log: `ttfb_ms`,
+     `first_reasoning_ms`, `first_text_ms`, `first_tool_ms`,
+     `reasoning_streamed` (does this gateway actually stream reasoning
+     incrementally, or does it arrive as one lump?). `halo stats --models
+     --wide` adds TTFT p50/p95, a count of calls that waited over 20s for
+     their first token, and "reasoning streamed" as a percentage, per
+     model.
+   - **`phase` events** (`events.py`): `request_sent`, `headers`,
+     `first_token` (kind: reasoning/text/tool), `waiting_for_model` -- the
+     data-side contract a later TUI liveness pass renders a live phase
+     line from; print/stream-json output is unchanged (no new stdout
+     noise).
 
 ## [1.0.1] - 2026-09-30
 

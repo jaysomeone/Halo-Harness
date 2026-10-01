@@ -1034,12 +1034,20 @@ def run_print_mode(
 
         def _make_sink():
             if output_format == "stream-json":
+                # Halo 2.0.1 W2a: `effort_sent` mirrors the status bar's own
+                # chip logic (`Session.status_event`'s `effort_tag`) -- a
+                # route forcing an explicit `reasoning_effort_with_tools`
+                # override is what's ACTUALLY sent on essentially every
+                # real (tool-carrying) turn, so it wins over the plain
+                # configured value there too.
+                from halo_harness.providers.profiles import effort_display_override
+                effort_sent = effort_display_override(session.provider_profile) or session.effort
                 return StreamJsonSink(
                     session_id=session_log.session_id, cwd=str(cwd), model=model_ref.raw,
                     permission_mode=resolved_mode, tools=frozen_registry.names(), mcp_servers=mcp_servers_status,
                     slash_commands=slash_names, include_partial_messages=include_partial_messages,
                     max_budget_usd=max_budget_usd, permission_denials=session.permission_denials,
-                    json_schema=json_schema,
+                    json_schema=json_schema, effort=session.effort_requested, effort_sent=effort_sent,
                 )
             return PrintModeSink(output_format=output_format, session_id=session_log.session_id, model=model_ref.raw,
                                   verbose=verbose, permission_denials=session.permission_denials, json_schema=json_schema,

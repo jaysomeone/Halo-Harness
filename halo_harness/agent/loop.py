@@ -522,10 +522,43 @@ class _BoundedChunks:
         self.chunks.append(chunk)
 
 
+class _EitherAbort:
+    """Halo 2.0.1 (GLM-brief.md item 3): a `.is_set()`-only duck-typed union
+    of two `threading.Event`s. `providers/stream.py`'s phase-1/phase-2
+    abort-polling (grep-verified) never calls anything ELSE on the `abort`
+    object it's given -- so this is a safe drop-in that lets `Session._step`
+    force-close a silently-blocked upstream call via a dedicated per-attempt
+    `steer_restart_event` WITHOUT ever touching the real `self.abort`,
+    which stays reserved for a genuine user interrupt (Esc/Ctrl+C). Keeping
+    them separate matters: if `self.abort` itself were (ab)used for this,
+    `_step`'s own "was this a real interrupt or just a steer-restart" check
+    afterward would be racy against a genuine interrupt arriving in the
+    same window."""
+    __slots__ = ("_a", "_b")
+
+    def __init__(self, a: "threading.Event", b: "threading.Event") -> None:
+        self._a = a
+        self._b = b
+
+    def is_set(self) -> bool:
+        return self._a.is_set() or self._b.is_set()
+
+
+def _steer_restart_when_silent_enabled() -> bool:
+    """GLM-brief.md item 3 / W2-plan item 2: `steer.restart_when_silent`
+    in `~/.halo/config.json`, default True. Read fresh on every `_step`
+    call (cheap; this almost never changes mid-session) rather than cached
+    on `Session`, so a test (or a user's `/config set`) flipping it takes
+    effect on the very next model call."""
+    from halo_harness.theme import get_config_value
+    return bool(get_config_value("steer.restart_when_silent", default=True))
+
+
 class _StepResult:
     def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None,
                  finish_reason=None, latency_ms=None, ttft_ms=None, retries=0, status="ok",
-                 responding_provider=None):
+                 responding_provider=None, ttfb_ms=None, first_reasoning_ms=None, first_text_ms=None,
+                 first_tool_ms=None, reasoning_streamed=False):
         self.assistant_blocks = assistant_blocks
         self.stop_reason = stop_reason
         self.usage = usage
@@ -550,6 +583,20 @@ class _StepResult:
         # Anthropic-native routes, where `_account_usage` falls back to a
         # fixed label instead (see its own docstring).
         self.responding_provider = responding_provider
+        # Halo 2.0.1 W2a telemetry (GLM-brief.md item 6 / HALO-2.0.1-
+        # liveness-tips-brief.md Part A6): `ttfb_ms` is time-to-headers
+        # (the first upstream event of ANY kind); `first_text_ms`/
+        # `first_tool_ms`/`first_reasoning_ms` are time-to-first-token BY
+        # KIND (None for a kind that never streamed this call);
+        # `reasoning_streamed` is True iff reasoning arrived over MULTIPLE
+        # separate wire chunks (vs. one lump, early or -- Databricks GLM,
+        # per the brief's own open question -- at the very end) so rolo's
+        # real session logs can answer which gateways actually stream it.
+        self.ttfb_ms = ttfb_ms
+        self.first_reasoning_ms = first_reasoning_ms
+        self.first_text_ms = first_text_ms
+        self.first_tool_ms = first_tool_ms
+        self.reasoning_streamed = reasoning_streamed
 
 
 def _assistant_block_is_replayable(b: dict) -> bool:
@@ -632,6 +679,15 @@ class Session:
         self.state_dir = state_dir
         self.model_label = model_label
         self.effort = effort
+        # Halo 2.0.1 W2a (HALO-2.0.1-liveness-tips-brief.md Part C): the
+        # RAW value `--effort`/settings configured, BEFORE any clamping --
+        # `self.effort` itself is the SENT value from here on (every branch
+        # below, `_cmd_effort`, and `_switch_model` all overwrite it with
+        # whatever `clamp_effort` returns), so this is the only place the
+        # originally-requested string survives for `providers/effort.py::
+        # requested_vs_sent` to compare against. None (unchanged) when
+        # nothing was ever explicitly requested at all.
+        self.effort_requested: Optional[str] = effort
         self.turn_count = 0
         self.max_turns = max_turns
         # H5 scope D: per-family fallback pricing (model.CostMeter._fallback_cost)
@@ -677,9 +733,28 @@ class Session:
                 and _anthropic_model_supports_adaptive_thinking(self.model_ref.model)):
             self.effort = "high"
             self.effort_source = self.effort_source or "default"
+        elif self.effort is None and self.provider_profile.default_effort_when_unset \
+                and self.provider_profile.reasoning_default_effort:
+            # Halo 2.0.1 (GLM-brief.md item 1): Databricks GLM's own default
+            # for an omitted field is `max`, the most expensive level and the
+            # "it pauses" report itself -- so "nothing configured" sends the
+            # route default (`high`) explicitly instead of omitting the field.
+            self.effort = self.provider_profile.reasoning_default_effort
+            self.effort_source = self.effort_source or "default"
         elif self.effort is not None:
             from halo_harness.providers.profiles import clamp_effort
             clamped = clamp_effort(self.effort, self.provider_profile)
+            if (self.provider_profile.default_effort_when_unset and self.effort_source == "settings"
+                    and self.effort.lower() not in self.provider_profile.effort_values_supported
+                    and self.provider_profile.reasoning_default_effort):
+                # Same rule for an effort inherited from Claude Code's settings
+                # (`effortLevel`, written for Claude models -- typically `xhigh`):
+                # a value this route does not accept lands on the route default,
+                # not on the clamp map's most expensive mapping. An explicit
+                # `--effort`/`/effort` keeps the clamp map's answer (`xhigh -> max`).
+                self.effort_requested = self.effort
+                clamped = self.provider_profile.reasoning_default_effort
+                self.effort_source = "default"
             if clamped != self.effort:
                 self.effort = clamped
         self.openrouter_base_url = openrouter_base_url
@@ -1402,13 +1477,20 @@ class Session:
             kwargs["prebuilt_oai_body"] = body
         return CompletionRequest(**kwargs)
 
-    def _stream(self, req: CompletionRequest) -> Iterator[dict]:
+    def _stream(self, req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
         """Dispatch to the right dialect's orchestration -- the ONE place
         that decides `stream_completion` vs `stream_anthropic_completion`,
-        so every `_step`/`_run_compaction` call site stays dialect-blind."""
+        so every `_step`/`_run_compaction` call site stays dialect-blind.
+        `abort`, when given, is used INSTEAD of `self.abort` -- Halo 2.0.1's
+        steer-restart watcher (`_step`) passes a combined `_EitherAbort`
+        (this session's real abort OR a dedicated per-attempt restart
+        event) so a silently-blocked call can be force-closed without ever
+        touching `self.abort` itself (reserved for a genuine user
+        interrupt -- see `_EitherAbort`'s own docstring)."""
+        eff_abort = abort if abort is not None else self.abort
         if self.route.dialect == "anthropic-passthrough":
-            return stream_anthropic_completion(req, abort=self.abort)
-        return stream_completion(req, abort=self.abort)
+            return stream_anthropic_completion(req, abort=eff_abort)
+        return stream_completion(req, abort=eff_abort)
 
     def _abort_sleep(self, delay: float) -> bool:
         """Sleep up to `delay` seconds in short increments, checking
@@ -1483,9 +1565,51 @@ class Session:
         # the `content_block_start` branch below).
         call_t0 = time.monotonic()
         ttft_ms: Optional[float] = None
+        # Halo 2.0.1 W2a telemetry (GLM-brief.md item 6 / liveness-tips-
+        # brief Part A6): same "measured from call_t0, set on whichever
+        # attempt gets there first" contract as `ttft_ms` above.
+        ttfb_ms: Optional[float] = None
+        first_text_ms: Optional[float] = None
+        first_tool_ms: Optional[float] = None
+        first_reasoning_ms: Optional[float] = None
+        native_thinking_delta_count = 0
+        restart_when_silent = _steer_restart_when_silent_enabled()
         while True:
             attempts += 1
-            gen = self._stream(req)
+            # HALO-2.0.1-liveness-tips-brief.md Part A1 / W2-plan item 6:
+            # one `phase` event per transition the UI renders a live line
+            # from -- "request_sent" fires on every attempt (a retry or a
+            # steer-restart both genuinely send a fresh request).
+            yield events.phase(state="request_sent", turn=turn_no, model=self.model_ref.raw)
+            # GLM-brief.md item 3 / W2-plan item 2: "when a steer arrives
+            # and no chunk has been received for the in-flight call, abort
+            # that call and resend with the steer appended" -- the existing
+            # `_pending_steer()` check just below the `for ev in gen:` line
+            # already cuts a call AFTER its first chunk; this watcher covers
+            # the case nothing has arrived yet (the generator is blocked
+            # inside a real connect/socket read, so THIS thread can't poll
+            # anything until it unblocks). `chunk_started` flips True at the
+            # SAME point `ttft_ms` is set below; `steer_restart_event` is a
+            # DEDICATED event (never `self.abort` -- see `_EitherAbort`'s
+            # own docstring for why) that `providers/stream.py`'s existing
+            # abort-polling (already passed whatever `abort=` `_stream`
+            # receives) force-closes the connection for, within one ~0.2s
+            # poll tick, exactly like a real interrupt would.
+            chunk_started = [False]
+            steer_restart_event = threading.Event()
+            watcher_stop = threading.Event()
+            watcher = None
+            if restart_when_silent:
+                def _watch_for_silent_steer(_stop=watcher_stop, _started=chunk_started, _fire=steer_restart_event):
+                    while not _stop.is_set():
+                        if not _started[0] and self._pending_steer():
+                            _fire.set()
+                            return
+                        _stop.wait(0.2)
+                watcher = threading.Thread(target=_watch_for_silent_steer, daemon=True)
+                watcher.start()
+            call_abort = _EitherAbort(self.abort, steer_restart_event) if restart_when_silent else self.abort
+            gen = self._stream(req, abort=call_abort)
             assistant_blocks: list = []
             partial_json: dict = {}
             stop_reason = None
@@ -1509,11 +1633,66 @@ class Session:
                         steered_cut = True
                         break
                     kind = ev.get("type")
+                    if ttfb_ms is None:
+                        # Halo 2.0.1: the FIRST event of ANY kind -- for the
+                        # chat dialect this is the synthesized `message_start`
+                        # (yielded the instant phase 1 gets a 2xx, before any
+                        # real body byte is read -- see oai_stream.py's
+                        # `message_start_event`), for native Anthropic it's
+                        # the real wire `message_start`, sent essentially
+                        # immediately. Either way this is "headers arrived".
+                        ttfb_ms = round((time.monotonic() - call_t0) * 1000, 1)
+                        yield events.phase(state="headers", turn=turn_no, ttfb_ms=ttfb_ms)
+                    elif kind == "reasoning_started":
+                        # Halo 2.0.1: oai_stream.py's own real-time marker --
+                        # the chat dialect never emits a translated event for
+                        # reasoning deltas themselves (captured silently,
+                        # displayed as one lump once the stream ends), so
+                        # without this signal `first_token` would wrongly
+                        # fire on whatever REAL content (text/tool) streams
+                        # next instead of the reasoning that genuinely
+                        # arrived first on the wire.
+                        if first_reasoning_ms is None:
+                            first_reasoning_ms = round((time.monotonic() - call_t0) * 1000, 1)
+                        if not chunk_started[0]:
+                            chunk_started[0] = True
+                            yield events.phase(state="first_token", turn=turn_no, kind="reasoning")
+                    elif kind == "tool_started":
+                        # Halo 2.0.1: same idea as "reasoning_started" --
+                        # oai_stream.py's `content_block_start(tool_use)`
+                        # only fires at `_finalize()` (stream end) for the
+                        # chat dialect, well after the tool call's arguments
+                        # actually started streaming; this marker is the
+                        # real-time signal.
+                        if first_tool_ms is None:
+                            first_tool_ms = round((time.monotonic() - call_t0) * 1000, 1)
+                        if not chunk_started[0]:
+                            chunk_started[0] = True
+                            yield events.phase(state="first_token", turn=turn_no, kind="tool")
                     # H10 Part A: time-to-first-content-block, measured from
                     # `call_t0` (the FIRST attempt) so a call that needed a
                     # 429/5xx retry still reports the real user-visible wait.
                     if ttft_ms is None and kind == "content_block_start":
                         ttft_ms = round((time.monotonic() - call_t0) * 1000, 1)
+                        block_kind = (ev.get("content_block") or {}).get("type")
+                        token_kind = {"thinking": "reasoning", "tool_use": "tool"}.get(block_kind, "text")
+                        if token_kind == "text":
+                            first_text_ms = ttft_ms
+                        elif token_kind == "tool" and first_tool_ms is None:
+                            first_tool_ms = ttft_ms  # native-Anthropic path (no "tool_started" marker there)
+                        elif token_kind == "reasoning" and first_reasoning_ms is None:
+                            first_reasoning_ms = ttft_ms  # native Anthropic thinking -- a real wire block opened
+                        # Halo 2.0.1: `chunk_started[0]` is the SINGLE
+                        # authoritative "first_token already fired" flag,
+                        # shared with the "reasoning_started"/"tool_started"
+                        # real-time markers above -- a native thinking block
+                        # that already fired via neither marker (the chat-
+                        # dialect-only signals) still only reports
+                        # "first_token" once, for whichever kind got here
+                        # first chronologically.
+                        if not chunk_started[0]:
+                            chunk_started[0] = True
+                            yield events.phase(state="first_token", turn=turn_no, kind=token_kind)
                     if kind == "message_start":
                         yield events.message_start(turn=turn_no, model=self.model_ref.raw)
                         # finding 15 (major, h4-h5-h3c review), point 3:
@@ -1567,6 +1746,14 @@ class Session:
                             text = text if isinstance(text, str) else str(text)
                             assistant_blocks[idx]["text"] += text
                             yield events.thinking_delta(text, index=idx, turn=turn_no)
+                            # Halo 2.0.1 W2a telemetry: counts REAL
+                            # incremental native-thinking wire deltas --
+                            # ">1" feeds `reasoning_streamed` below (the
+                            # native Anthropic dialect genuinely streams
+                            # reasoning; a count of exactly 0 or 1 means an
+                            # empty/trivial "display omitted" block, not
+                            # worth calling "streamed").
+                            native_thinking_delta_count += 1
                         elif dtype == "signature_delta":
                             assistant_blocks[idx]["signature"] = assistant_blocks[idx].get("signature", "") + str(delta.get("signature", ""))
                         elif dtype == "input_json_delta":
@@ -1600,6 +1787,43 @@ class Session:
                 phase1_failure = e
             finally:
                 gen.close()  # always close the upstream generator
+                watcher_stop.set()
+                if watcher is not None:
+                    watcher.join(timeout=0.5)
+
+            if steer_restart_event.is_set() and not self.abort.is_set():
+                # GLM-brief.md item 3: the watcher above force-closed this
+                # silently-blocked call -- `gen` is therefore already fully
+                # drained (stream.py's own `_Aborted`/abort-polling returns
+                # a cleanly-exhausted generator, exactly like a real
+                # interrupt would, but `self.abort` itself was never
+                # touched -- see `_EitherAbort`). Apply the queued steer(s)
+                # NOW (the same machinery an ordinary mid-stream steer
+                # uses) and rebuild the request from the updated log before
+                # retrying -- never counted against `effort_*_retried`'s
+                # one-shot flags or any retry-ladder cap, since nothing
+                # here was a provider failure.
+                with self._steer_lock:
+                    pending_preview = list(self._steer_queue)
+                applied = yield from self._apply_pending_steers_events(turn_no)
+                if applied:
+                    yield events.steer_restart(", ".join(pending_preview), turn=turn_no)
+                _, _, _, body = self._derive_and_build(tool_choice=tool_choice, no_tools=no_tools)
+                req = self._build_request(body)
+                # Halo 2.0.1: unlike an ordinary 429/5xx retry (where
+                # `ttfb_ms` correctly keeps measuring "time since call_t0
+                # to the first attempt that got anywhere"), a steer-restart
+                # deliberately THROWS AWAY an attempt that already passed
+                # headers (that's the whole point -- it was silent AFTER
+                # them) -- reset so the retried attempt gets its own fresh
+                # "headers" phase event instead of the UI skipping straight
+                # from "sending" to "first token" with no transition in
+                # between. `first_text_ms`/`first_tool_ms`/`first_
+                # reasoning_ms` need no such reset: the restart only ever
+                # fires while `chunk_started[0]` is still False, i.e. before
+                # any of the three could have been set.
+                ttfb_ms = None
+                continue
 
             if self.abort.is_set():
                 # U2/review finding 2: an interrupt (Esc/Ctrl+C in the
@@ -1801,6 +2025,43 @@ class Session:
                 return None
 
             # A clean stream from here on.
+            if harness_meta.get("model_context_window_exceeded"):
+                # GLM-brief.md item 3 / W2-plan item 3: a chat-dialect
+                # gateway can end an otherwise-clean 200 stream with
+                # `finish_reason: "model_context_window_exceeded"` --
+                # mirrors the phase-1 `ContextOverflow` handling above
+                # exactly (same sentinel, same compaction-then-retry-once
+                # contract, same terminal wording/category on a SECOND
+                # overflow), since this is the identical failure arriving
+                # mid-stream instead of as an upfront 400.
+                if not overflow_handled:
+                    return _OVERFLOW_NEEDS_COMPACTION
+                self._log_call_failure("overflow", retries=attempts - 1)
+                yield events.error(
+                    "context window overflow (reported by the model mid-reply) -- compaction did not "
+                    "free enough room; try `/compact <instructions>` to focus the summary, or start a "
+                    "new session",
+                    turn=turn_no, err_type="context_overflow", category=CONTEXT_WINDOW_EXCEEDED,
+                )
+                return None
+            if harness_meta.get("sensitive_finish"):
+                # GLM-brief.md item 3: "sensitive becomes an error event
+                # carrying the provider's message" -- a clear, NEVER-RETRIED
+                # failure (unlike the overflow/empty-completion cases above,
+                # re-running the identical request against a content-policy
+                # refusal would just repeat it). `text_so_far` (computed
+                # just below, pulled up here too) is whatever the provider
+                # DID stream before refusing -- its own explanation, when it
+                # sends one as ordinary content, same as a real wire 4xx
+                # would have in its JSON body.
+                sensitive_text = "".join(
+                    b.get("text", "") for b in assistant_blocks if b and b.get("type") == "text") or "(no message)"
+                self._log_call_failure("sensitive", retries=attempts - 1)
+                yield events.error(
+                    f"upstream ended the reply early (finish_reason=sensitive): {sensitive_text}",
+                    turn=turn_no, err_type="sensitive",
+                )
+                return None
             if harness_meta.get("length_with_minimal_output"):
                 # finding 3: finish_reason=length with <=1 output token is
                 # indistinguishable from a genuine per-endpoint cap -- a
@@ -1892,6 +2153,25 @@ class Session:
             display_text = reasoning["text"] or _reasoning_details_display_text(harness_meta.get("reasoning_details"))
             if display_text:
                 yield events.thinking_delta(display_text, index=0, turn=turn_no)
+            # Halo 2.0.1 W2a telemetry: a belt-and-suspenders fallback for a
+            # reasoning shape that somehow never fired oai_stream.py's own
+            # real-time "reasoning_started" marker (every shape that module
+            # currently recognizes does -- see its own `_note_reasoning_
+            # chunk` call sites) -- `first_reasoning_ms`/the `first_token`
+            # phase event must still appear rather than silently missing.
+            if first_reasoning_ms is None:
+                first_reasoning_ms = round((time.monotonic() - call_t0) * 1000, 1)
+            if not chunk_started[0]:
+                chunk_started[0] = True
+                yield events.phase(state="first_token", turn=turn_no, kind="reasoning")
+        # ">1" wire chunks (oai_stream.py's own `reasoning_chunk_count`) OR
+        # multiple real native `thinking_delta` events both mean "this
+        # gateway genuinely streamed reasoning incrementally" -- see
+        # `OpenAIStreamToAnthropic._note_reasoning_chunk`'s own docstring
+        # for why rolo's real session logs need this to answer GLM-brief.md
+        # item 6's open question (does Databricks stream GLM's reasoning?).
+        reasoning_streamed = (native_thinking_delta_count > 1) or (
+            (harness_meta.get("reasoning_chunk_count") or 0) > 1)
         cleaned = []
         for b in assistant_blocks:
             if b is None:
@@ -1903,7 +2183,9 @@ class Session:
                             body=body, tool_call_flags=harness_meta.get("tool_call_flags") or {},
                             latency_ms=round((time.monotonic() - call_t0) * 1000, 1), ttft_ms=ttft_ms,
                             retries=attempts - 1, status="ok",
-                            responding_provider=harness_meta.get("responding_provider"))
+                            responding_provider=harness_meta.get("responding_provider"),
+                            ttfb_ms=ttfb_ms, first_reasoning_ms=first_reasoning_ms, first_text_ms=first_text_ms,
+                            first_tool_ms=first_tool_ms, reasoning_streamed=reasoning_streamed)
 
     # H10 Part A: "or"|"dbx"|"ant" -- the coarse routing rail
     # (`ModelRef.provider`), independent of which specific backend actually
@@ -1965,6 +2247,9 @@ class Session:
             route=self._ROUTE_LABELS.get(self.model_ref.provider, self.model_ref.provider),
             provider=self._responding_provider_label(result), finish_reason=result.finish_reason,
             latency_ms=result.latency_ms, ttft_ms=result.ttft_ms, retries=result.retries, status=result.status,
+            ttfb_ms=result.ttfb_ms, first_reasoning_ms=result.first_reasoning_ms,
+            first_text_ms=result.first_text_ms, first_tool_ms=result.first_tool_ms,
+            reasoning_streamed=result.reasoning_streamed,
         )
         output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
         if self.model_ref.provider == "databricks":
@@ -2957,6 +3242,13 @@ class Session:
                 reason = "interrupted" if self.abort.is_set() else "end_turn"
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
+            # HALO-2.0.1-liveness-tips-brief.md Part A1 / W2-plan item 6:
+            # tool results were just dispatched back; the NEXT model call
+            # (the top of this `while True:`, back in `_step`) hasn't been
+            # sent yet -- the one `phase` state `_step` itself never emits
+            # (it only ever covers ONE model call, never the gap between
+            # two of them in the same turn).
+            yield events.phase(state="waiting_for_model", turn=turn_no, model=self.model_ref.raw)
             # else: loop back for another _step() call with the new tool_results
 
     def _resolve_tool_call(self, tu: dict, outcome, tool_call_flags: dict) -> dict:
@@ -4234,6 +4526,12 @@ class Session:
             clamped = clamp_effort(self.effort, self.provider_profile)
             if clamped != self.effort:
                 self.effort_change_note = f"Effort level adjusted to '{clamped}' for {model_ref.raw} (was '{self.effort}')"
+                # Halo 2.0.1 W2a: the value carried over from the OLD route
+                # (itself already "sent" there) is what's being reinterpreted
+                # as a request on the NEW one -- record it as "requested" so
+                # `requested_vs_sent` can show the switch-triggered change,
+                # not just a same-value no-op.
+                self.effort_requested = self.effort
                 self.effort = clamped
         elif (self.provider_profile.thinking_format == "anthropic_thinking"
               and _anthropic_model_supports_adaptive_thinking(self.model_ref.model)):
@@ -4244,6 +4542,12 @@ class Session:
             # capable (see __init__'s matching comment); a non-adaptive
             # model keeps "omit -> provider default" instead.
             self.effort = "high"
+            self.effort_source = "default"
+        elif self.provider_profile.default_effort_when_unset and self.provider_profile.reasoning_default_effort:
+            # Halo 2.0.1: switching INTO Databricks GLM with no effort set at
+            # all gets the route default (`high`) explicitly, never the
+            # gateway's own `max` (see __init__'s matching comment).
+            self.effort = self.provider_profile.reasoning_default_effort
             self.effort_source = "default"
 
         for name in self.tool_registry.names():

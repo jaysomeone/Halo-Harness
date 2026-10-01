@@ -194,6 +194,14 @@ _MODEL_COLUMNS = [
     ("retries", lambda r: str(r["retries"])),
     ("overflow", lambda r: str(r["overflows"])),
     ("interrupt", lambda r: str(r["interrupts"])),
+    # Halo 2.0.1 W2a (GLM-brief.md item 6 / liveness-tips-brief Part A6):
+    # wide-only -- the FAMILY-BASELINE doc and rolo's own GLM-pause
+    # investigation read these from `--wide`/`--json`, never the compact
+    # default's first 14 columns.
+    ("ttft p50", lambda r: _ms_str(r["ttft_p50_ms"])),
+    ("ttft p95", lambda r: _ms_str(r["ttft_p95_ms"])),
+    ("waits>20s", lambda r: str(r["waits_over_20s"])),
+    ("reasoning%", lambda r: f"{r['reasoning_streamed_pct']:.0f}%" if r["reasoning_calls"] else "-"),
 ]
 _MODEL_COLUMNS_COMPACT_N = 14
 

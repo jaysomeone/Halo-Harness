@@ -740,9 +740,21 @@ def test_h5c_f05_steer_during_retry_wait_cuts_retried_call_with_no_empty_node(ct
     """H5b/H5c finding 5: "a steer typed during a retry wait always takes
     this path: the new request is cut at its first chunk" -- a 429 forces
     a retry-after wait; a steer queued WHILE that wait is sleeping must
-    still be there the moment the retried request starts, cutting it at
-    `message_start` with (per this same finding) no empty assistant node
-    logged for the cut retried attempt."""
+    still be there the moment the retried request starts, cutting it with
+    (per this same finding) no empty assistant node logged for the cut
+    retried attempt.
+
+    Halo 2.0.1 (GLM-brief.md item 3, `steer.restart_when_silent` default
+    True): the retried attempt is now a "no chunk received for the
+    in-flight call" case from the moment it's about to be sent (the steer
+    was already queued before this attempt even started) -- the
+    steer-restart watcher fires essentially immediately, so the retried
+    request's `_run_phase1` never even reaches the mock (phase 1's own
+    `if abort.is_set(): raise _Aborted()` check, now seeing the dedicated
+    restart signal). Only 2 requests reach the mock, not 3 -- a STRICTER
+    improvement on the original finding (one fewer wasted/discarded call),
+    verified by the SAME "exactly one assistant node, no empty one,
+    steer_applied fired" assertions below."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     calls = {"n": 0}
@@ -786,8 +798,9 @@ def test_h5c_f05_steer_during_retry_wait_cuts_retried_call_with_no_empty_node(ct
         done.wait(10)
         ctx.check("the turn finished", done.is_set())
 
-        ctx.check(f"3 requests reached the mock (429, steered-cut retry, steer's own reply), got {calls['n']}",
-                   calls["n"] == 3)
+        ctx.check(f"2 requests reached the mock (429, steer's own reply -- 2.0.1's steer-restart watcher "
+                  f"now catches the doomed retry BEFORE it ever reaches the mock), got {calls['n']}",
+                   calls["n"] == 2)
         assistant_nodes = [n for n in session.log.nodes() if n.get("type") == "assistant"]
         ctx.check(f"no empty-content assistant node was ever logged, got {[n.get('content') for n in assistant_nodes]}",
                    all(n.get("content") for n in assistant_nodes))

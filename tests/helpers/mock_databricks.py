@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
@@ -567,6 +568,81 @@ def _scn_reasoning_effort_tools_reject_even_with_none(handler, body):
     _scn_ok(handler, body)
 
 
+def _scn_finish_model_context_window_exceeded(handler, body):
+    """GLM-brief.md item 3 / W2-plan item 3: a chat-dialect gateway (Z.ai
+    GLM API) can end an otherwise-clean 200 stream with
+    `finish_reason: "model_context_window_exceeded"` -- must feed the
+    EXISTING overflow -> compaction -> retry path (oai_stream.py's own
+    `harness_meta["model_context_window_exceeded"]`), not be swallowed as
+    a plain "end_turn"."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "ran out of room"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "model_context_window_exceeded"}]},
+    ])
+
+
+def _scn_finish_sensitive(handler, body):
+    """GLM-brief.md item 3: `finish_reason: "sensitive"` becomes a clear,
+    never-retried error carrying whatever text DID stream (the provider's
+    own refusal explanation, here as ordinary streamed content)."""
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant",
+                                             "content": "I can't help with that request."}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "sensitive"}]},
+    ])
+
+
+# Halo 2.0.1 W2a (GLM-brief.md item 3 / HALO-2.0.1-liveness-tips-brief.md
+# Part A1's "pre-first-token wait"): how long `_scn_delay_then_ok`/
+# `_scn_phase_sequence` hold a response open before sending real content --
+# short enough to keep the suite fast, comfortably longer than the
+# steer-restart watcher's own 0.2s poll interval (agent/loop.py).
+STEER_RESTART_DELAY_S = 1.0
+STEER_RESTART_MARKER = "STEER-PILOT-MARKER"
+
+
+def _scn_delay_then_ok(handler, body):
+    """The steer-restart pilot's upstream: headers arrive immediately
+    (`_start_sse`, matching the real Databricks GLM "pause" -- a 200 that
+    then holds the connection open, silent, while the model thinks) but
+    the first SSE chunk is withheld for `STEER_RESTART_DELAY_S` so a steer
+    queued during that silent window has something real to interrupt. The
+    RESTARTED request (the queued steer, appended as a user message, now
+    present in `body["messages"]`) is recognized by `STEER_RESTART_MARKER`
+    and answered immediately -- the pinning test only needs ONE real delay,
+    not two."""
+    if STEER_RESTART_MARKER in json.dumps(body.get("messages") or []):
+        _scn_ok(handler, body)
+        return
+    _start_sse(handler)
+    time.sleep(STEER_RESTART_DELAY_S)
+    for chunk in (
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "answer after the delay"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ):
+        _sse_chunk(handler, chunk)
+    _sse_chunk(handler, "[DONE]")
+    _end_sse(handler)
+
+
+def _scn_phase_sequence(handler, body):
+    """The phase-events-in-order pilot: headers delayed, then a further
+    silent gap (thinking, no tokens yet), then reasoning content, then
+    text -- `agent/loop.py::Session._step` must emit `phase` events
+    request_sent -> headers -> first_token(kind=reasoning) in that order
+    against this one upstream."""
+    time.sleep(0.3)  # delays the response status line/headers themselves
+    _start_sse(handler)
+    time.sleep(0.2)  # headers in, no chunk yet
+    _sse_chunk(handler, {"choices": [{"index": 0, "delta": {"role": "assistant",
+                                                              "reasoning_content": "thinking it over"}}]})
+    time.sleep(0.1)
+    _sse_chunk(handler, {"choices": [{"index": 0, "delta": {"content": "the answer"}}]})
+    _sse_chunk(handler, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    _sse_chunk(handler, "[DONE]")
+    _end_sse(handler)
+
+
 SCENARIOS = {
     "reasoning-content-shape": _scn_reasoning_content_shape,
     "reasoning-blocks-shape": _scn_reasoning_blocks_shape,
@@ -590,6 +666,10 @@ SCENARIOS = {
     "cursor-404-then-ok": _scn_cursor_404_then_ok,
     "reasoning-replay-loop": _scn_reasoning_replay_loop,
     "reasoning-replay-rejected": _scn_reasoning_replay_rejected,
+    "finish-model-context-window-exceeded": _scn_finish_model_context_window_exceeded,
+    "finish-sensitive": _scn_finish_sensitive,
+    "delay-then-ok": _scn_delay_then_ok,
+    "phase-sequence": _scn_phase_sequence,
     "ok": _scn_ok,
 }
 

@@ -70,19 +70,26 @@ def test_clamp_effort_downgrades_max_on_a_plain_chat_route(ctx: Ctx):
 
 @test
 def test_data_driven_row_default_outside_the_base_set_is_still_honoured(ctx: Ctx):
-    """GLM-5.3's row documents "max" as its own REAL default (reasoning_
-    no_disable forces a disabling --effort UP to it) -- the narrower
-    default must not make clamp_effort then reject that same value as
-    unsupported and silently fall back to "medium" instead."""
+    """GLM-5.3's OpenRouter row documents "max" as its own REAL default
+    (reasoning_no_disable forces a disabling --effort UP to it) -- the
+    narrower default must not make clamp_effort then reject that same
+    value as unsupported and silently fall back to "medium" instead.
+
+    Halo 2.0.1 (GLM-brief.md item 1): Databricks GLM is DIFFERENT -- its
+    real default is "high" (not the gateway's own undocumented silent
+    "max" fallback), and an explicit `effort_clamp_map` answers a
+    disabling "none" with "low" (the cheapest accepted level) instead of
+    jumping to the route default; see `test_profiles.py::
+    test_glm_5_3_reasoning_no_disable` for that side, pinned there instead
+    of duplicated here."""
     from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
     reset_model_table_cache()
-    for host, model in (("openrouter", "z-ai/glm-5.3"), ("databricks", "databricks-glm-5-3")):
-        profile = resolve_profile(_route(host, model))
-        ctx.check(f"{host}/{model}: 'max' is in the accepted set (the row's own real default), got "
-                  f"{profile.effort_values_supported}", "max" in profile.effort_values_supported)
-        body = map_effort("none", profile)  # reasoning_no_disable forces this UP to "max"
-        got = body.get("reasoning_effort") or (body.get("reasoning") or {}).get("effort")
-        ctx.check(f"{host}/{model}: still forced to max, got {got!r}", got == "max")
+    profile = resolve_profile(_route("openrouter", "z-ai/glm-5.3"))
+    ctx.check(f"openrouter/z-ai/glm-5.3: 'max' is in the accepted set (the row's own real default), got "
+              f"{profile.effort_values_supported}", "max" in profile.effort_values_supported)
+    body = map_effort("none", profile)  # reasoning_no_disable forces this UP to "max"
+    got = body.get("reasoning_effort") or (body.get("reasoning") or {}).get("effort")
+    ctx.check(f"openrouter/z-ai/glm-5.3: still forced to max, got {got!r}", got == "max")
 
 
 # ---------------------------------------------------------------------------

@@ -230,6 +230,27 @@ class ProviderProfile:
     # dialect route); the anthropic-passthrough branch of `resolve_profile`
     # below overrides it to `ANTHROPIC_EFFORT_LEVELS` (no `xhigh`).
     effort_values_supported: tuple = EFFORT_LEVELS
+    # Halo 2.0.1 (GLM-brief.md item 1): an EXPLICIT {requested: sent} table
+    # for a route whose narrower-than-harness-vocabulary levels don't map
+    # onto `reasoning_default_effort`/the generic xhigh<->max narrowing
+    # `clamp_effort` already does -- e.g. Databricks GLM's own `medium ->
+    # high, minimal -> low, xhigh -> max, none -> low`, where "minimal"/
+    # "none" must land on the CHEAPEST accepted level, not this route's
+    # default. None (every row before this) means "no explicit table --
+    # keep using the generic fallback below", so this is a pure opt-in with
+    # zero effect on any other row's clamping.
+    effort_clamp_map: Optional[dict] = None
+    # Halo 2.0.1 (GLM-brief.md item 1, "default high"): on a route whose
+    # OWN silent default is its most expensive level (Databricks GLM:
+    # reasoning always on, omitted `reasoning_effort` == `max`), a call
+    # with no effort configured anywhere sends `reasoning_default_effort`
+    # explicitly instead of omitting the field, and an effort inherited
+    # from Claude Code's settings (`effortLevel`, a Claude-oriented knob,
+    # typically `xhigh`) that the route does not accept lands on the same
+    # default rather than on the clamp map's most expensive mapping. An
+    # explicit `--effort`/`/effort` value still goes through the clamp map
+    # exactly as written (so `xhigh` -> `max` stays a deliberate choice).
+    default_effort_when_unset: bool = False
 
 
 def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
@@ -343,6 +364,29 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             from halo_harness.providers.learned_rules import learned_reasoning_effort_with_tools
             reasoning_effort_with_tools = learned_reasoning_effort_with_tools(
                 state_dir, "databricks", route.upstream_model)
+        # GLM-brief.md 2026-10-01 (Databricks Foundation Model APIs,
+        # "supported-models"/"query reasoning models" pages): every
+        # `databricks-glm-*` endpoint -- including one with NO
+        # model_table.json row of its own yet (e.g. a future
+        # "databricks-glm-5" release) -- accepts EXACTLY low/high/max for
+        # `reasoning_effort`; "max" is the GATEWAY's own SILENT fallback for
+        # anything else (medium/minimal/xhigh/none -- never a 400), which is
+        # why a harness-level "medium" used to run as an undocumented "max"
+        # with no error at all (rolo's "it pauses" report: a thinking phase
+        # at the model's MOST expensive setting, not a harness hang). A
+        # row's own explicit `reasoning_default_effort`/
+        # `effort_values_supported`/`effort_clamp_map` still wins via
+        # `row.get(key, <this default>)`, so a future row can override any
+        # one of these three independently.
+        databricks_effort_default = row.get("reasoning_default_effort")
+        databricks_effort_values = effort_values_supported
+        databricks_effort_clamp_map = row.get("effort_clamp_map")
+        if family == "glm":
+            databricks_effort_default = row.get("reasoning_default_effort", "high")
+            databricks_effort_values = tuple(row.get("effort_values_supported") or ("low", "high", "max"))
+            databricks_effort_clamp_map = row.get("effort_clamp_map") or {
+                "medium": "high", "minimal": "low", "xhigh": "max", "none": "low",
+            }
         return ProviderProfile(
             system_vs_developer="system", max_tokens_field="max_tokens",
             reasoning_effort_supported=effort_supported, thinking_format=thinking_format,
@@ -353,12 +397,14 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             temperature=row.get("temperature"), top_p=row.get("top_p"), top_k=row.get("top_k"),
             max_tokens_default=row.get("max_tokens_default", 16384),
             max_tokens_cap=row.get("max_tokens_cap", 16384),
-            reasoning_default_effort=row.get("reasoning_default_effort"),
+            reasoning_default_effort=databricks_effort_default,
             reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
             edit_format=row.get("edit_format", "diff"),
             tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
             reasoning_effort_with_tools=reasoning_effort_with_tools,
-            effort_values_supported=effort_values_supported,
+            effort_values_supported=databricks_effort_values,
+            effort_clamp_map=databricks_effort_clamp_map,
+            default_effort_when_unset=bool(row.get("default_effort_when_unset", family == "glm")),
             **hook_fields,
         )
 
@@ -381,6 +427,12 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         max_tokens_default=row.get("max_tokens_default"), max_tokens_cap=row.get("max_tokens_cap"),
         reasoning_default_effort=row.get("reasoning_default_effort"),
         reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
+        # GLM-brief.md item 1: "Keep the Z.ai-direct set (seven values) on
+        # OpenRouter z-ai/glm-* routes where the provider forwards them" --
+        # a row's own `effort_values_supported` (added to the four GLM 5.x
+        # rows) always wins; this generic passthrough is a no-op (None) for
+        # every row that doesn't set one, same as before.
+        effort_clamp_map=row.get("effort_clamp_map"),
         openrouter_pin=row.get("openrouter_pin"), edit_format=row.get("edit_format", "diff"),
         tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
         # 1.0.1 fixpass finding 12: no substring guessing on this host at
@@ -429,6 +481,15 @@ def clamp_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[st
     supported = profile.effort_values_supported or EFFORT_LEVELS
     if effort in supported:
         return effort
+    if profile.effort_clamp_map and effort in profile.effort_clamp_map:
+        # Halo 2.0.1: an explicit per-route table wins outright over the
+        # generic xhigh/max/default narrowing below -- e.g. Databricks GLM
+        # sends "minimal"/"none" as "low" (the cheapest accepted level),
+        # which the generic rule (unknown value -> this route's own
+        # default) would get wrong (it would send "high" instead).
+        clamped = profile.effort_clamp_map[effort]
+        log.debug("clamp_effort: %r mapped to %r by this route's explicit clamp table", effort, clamped)
+        return clamped
     if effort == "xhigh" and "xhigh" not in supported:
         clamped = "max" if "max" in supported else (profile.reasoning_default_effort or "medium")
     elif effort == "max" and "max" not in supported and "xhigh" in supported:
@@ -438,6 +499,27 @@ def clamp_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[st
     log.debug("clamp_effort: %r not accepted by this route (accepts %r) -- using %r instead",
               effort, supported, clamped)
     return clamped
+
+
+# GLM-brief.md 2026-10-01 (Z.ai GLM API, docs.z.ai chat completion
+# reference): "temperature range [0, 1] default 1.0" -- every current
+# model_table.json GLM row already seeds 1.0 (in range), so this is a
+# defensive wire-safety net (a future row edit or override cannot put an
+# out-of-range value on the wire), not a fix for any value seeded today.
+GLM_TEMPERATURE_RANGE = (0.0, 1.0)
+
+
+def clamp_temperature(value: Optional[float], profile: ProviderProfile) -> Optional[float]:
+    """GLM-brief.md item 5: "temperature is clamped to [0, 1] on GLM
+    routes" -- a no-op for `value is None` or any non-GLM family. Applied
+    at the one place `providers/request.py::build_request_body` puts
+    `profile.temperature` on the wire; also used by `providers/effort.py::
+    requested_vs_sent` to report a clamp when the table value itself is
+    ever edited outside this range."""
+    if value is None or profile.family != "glm":
+        return value
+    lo, hi = GLM_TEMPERATURE_RANGE
+    return max(lo, min(hi, value))
 
 
 def effort_display_override(profile: Optional[ProviderProfile]) -> Optional[str]:
@@ -457,6 +539,35 @@ def effort_display_override(profile: Optional[ProviderProfile]) -> Optional[str]
     if profile.thinking_format == "anthropic_thinking":
         return None
     return f"{profile.reasoning_effort_with_tools} (tools)"
+
+
+def resolve_effective_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[str]:
+    """Halo 2.0.1: the `_DISABLING_EFFORTS`-vs-`effort_clamp_map`-vs-
+    `clamp_effort` decision shared by `map_effort` below (the wire-body
+    builder) and `providers/effort.py::sent_effort` (the DISPLAY helper
+    `/status`/`/context`/the stream-json init line/W2b's card and status
+    chip all read) -- extracted so the two can never drift apart. Excludes
+    the `has_tools`+`reasoning_effort_with_tools` override, which each
+    caller checks FIRST and returns early for on its own (that override
+    also skips `reasoning_effort_supported`, which only `map_effort`'s own
+    caller-side gate applies).
+
+    `profile.reasoning_no_disable` (GLM-5.3/5.3-Flash: `thinking.type:
+    disabled` -> HTTP 400 code 1210) forces an EXPLICITLY disabling
+    `--effort` to the profile's own default instead of turning reasoning
+    off, UNLESS `effort_clamp_map` already has a more specific answer for
+    this exact value (Databricks GLM's own `none -> low`, the CHEAPEST
+    accepted level, not `reasoning_default_effort` ("high")) -- checked
+    first, so the explicit table always wins. `effort is None` (no
+    `--effort` given at all) is left alone -- that means "omit the field",
+    which safely takes the server's own default, not "send a disabling
+    value"."""
+    explicit_clamp_covers_it = bool(
+        effort and profile.effort_clamp_map and effort.lower() in profile.effort_clamp_map)
+    if (effort and effort.lower() in _DISABLING_EFFORTS and profile.reasoning_no_disable
+            and profile.reasoning_default_effort and not explicit_clamp_covers_it):
+        effort = profile.reasoning_default_effort
+    return clamp_effort(effort, profile)
 
 
 def map_effort(effort: Optional[str], profile: ProviderProfile, *, has_tools: bool = False) -> dict:
@@ -486,9 +597,7 @@ def map_effort(effort: Optional[str], profile: ProviderProfile, *, has_tools: bo
     if has_tools and profile.reasoning_effort_with_tools and profile.thinking_format != "anthropic_thinking":
         override = profile.reasoning_effort_with_tools
         return {"reasoning": {"effort": override}} if profile.host_specific_fields else {"reasoning_effort": override}
-    if effort and effort.lower() in _DISABLING_EFFORTS and profile.reasoning_no_disable and profile.reasoning_default_effort:
-        effort = profile.reasoning_default_effort
-    effort = clamp_effort(effort, profile)  # 1.0.1 hotfix 19: never forward a value this route rejects
+    effort = resolve_effective_effort(effort, profile)  # 1.0.1 hotfix 19: never forward a value this route rejects
     if not effort or not profile.reasoning_effort_supported:
         return {}
     if profile.thinking_format == "anthropic_thinking":

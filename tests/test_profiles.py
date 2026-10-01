@@ -105,15 +105,31 @@ def test_no_temperature_on_thinking_endpoints(ctx: Ctx):
 
 @test
 def test_glm_5_3_reasoning_no_disable(ctx: Ctx):
+    """Halo 2.0.1 (GLM-brief.md item 1) splits this by host: OpenRouter
+    z-ai/glm-5.3* is UNCHANGED (`reasoning_no_disable` forces a disabling
+    --effort up to the row's own "max" default, since Z.ai's real default
+    stays max and there's no narrower accepted set there); Databricks
+    databricks-glm-5-3* now has its OWN effort_clamp_map, which answers
+    "none" with "low" (the cheapest accepted level) and the route's real
+    default is "high", not the gateway's undocumented silent "max"."""
     reset_model_table_cache()
-    for host, model in (("openrouter", "z-ai/glm-5.3"), ("databricks", "databricks-glm-5-3"),
-                        ("openrouter", "z-ai/glm-5.3-flash"), ("databricks", "databricks-glm-5-3-flash")):
+    for host, model in (("openrouter", "z-ai/glm-5.3"), ("openrouter", "z-ai/glm-5.3-flash")):
         profile = resolve_profile(_route(host, model))
         ctx.check(f"{host}/{model}: reasoning_no_disable is True", profile.reasoning_no_disable is True)
         ctx.check(f"{host}/{model}: reasoning_default_effort == max", profile.reasoning_default_effort == "max")
         body_extra = map_effort("none", profile)
         got = body_extra.get("reasoning_effort") or (body_extra.get("reasoning") or {}).get("effort")
         ctx.check(f"{host}/{model}: --effort none is forced to max, got {got!r}", got == "max")
+    for host, model in (("databricks", "databricks-glm-5-3"), ("databricks", "databricks-glm-5-3-flash")):
+        profile = resolve_profile(_route(host, model))
+        ctx.check(f"{host}/{model}: reasoning_default_effort == high (the route's real default, "
+                  f"not the gateway's silent max fallback)", profile.reasoning_default_effort == "high")
+        ctx.check(f"{host}/{model}: effort_values_supported is exactly low/high/max, got {profile.effort_values_supported}",
+                  profile.effort_values_supported == ("low", "high", "max"))
+        body_extra = map_effort("none", profile)
+        got = body_extra.get("reasoning_effort") or (body_extra.get("reasoning") or {}).get("effort")
+        ctx.check(f"{host}/{model}: --effort none is clamped to low (the cheapest accepted level), got {got!r}",
+                  got == "low")
 
 
 @test

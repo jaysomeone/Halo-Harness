@@ -140,6 +140,23 @@ def _cmd_context(args: str, facade: HeadlessFacade) -> str:
             f"  total:    ~{bd['total']:>7} tokens" + (f"  ({pct}% of window)" if pct is not None else ""),
             f"  compacts once usable prompt tokens reach ~{usable} (OpenCode floor) or the 80% dsh trigger, whichever is lower",
         ]
+        # Halo 2.0.1 W2a (HALO-2.0.1-liveness-tips-brief.md Part C): every
+        # request parameter THIS route changed from what was asked --
+        # effort/temperature/max_tokens clamps -- as "requested X, sent Y",
+        # the SAME comparison the stream-json init line's `effort_sent` and
+        # (W2b) the TUI card/status chip read.
+        profile = getattr(session, "provider_profile", None)
+        if profile is not None:
+            from halo_harness.providers.effort import format_requested_vs_sent, requested_vs_sent
+            changes = requested_vs_sent(
+                profile, effort_requested=getattr(session, "effort_requested", None),
+                effort_sent=getattr(session, "effort", None),
+                context_tokens=limit if isinstance(limit, int) else None, prompt_estimate=bd["total"],
+            )
+            change_lines = format_requested_vs_sent(changes)
+            if change_lines:
+                lines.append("  this route changed:")
+                lines.extend(change_lines)
         return "\n".join(lines)
     return f"Context window: {limit} tokens (model: {facade.model_ref or '?'}); nothing used yet this call."
 
@@ -349,13 +366,26 @@ def _cmd_status(args: str, facade: HeadlessFacade) -> str:
         permission_mode = getattr(engine, "mode", None) or permission_mode
     else:
         cost_line = f"Cost so far: ${facade.cost_usd:.4f} ({facade.num_turns} turn(s))"
-    return (f"halo {__version__}\n"
-            f"Model: {model_id}\n"
-            f"cwd: {facade.cwd}\n"
-            f"Permission mode: {permission_mode}\n"
-            f"MCP servers: {mcp_n}\n"
-            f"Theme: {facade.theme or '?'}\n"
-            f"{cost_line}")
+    lines = [f"halo {__version__}", f"Model: {model_id}", f"cwd: {facade.cwd}",
+             f"Permission mode: {permission_mode}", f"MCP servers: {mcp_n}",
+             f"Theme: {facade.theme or '?'}", cost_line]
+    # Halo 2.0.1 W2a (HALO-2.0.1-liveness-tips-brief.md Part C): same
+    # "requested X, sent Y" comparison `/context` shows, from the same
+    # shared helper -- /status is the quick one-shot check with no
+    # context-breakdown cost, so it skips the max_tokens entry (no prompt
+    # estimate at hand here) and reports effort/temperature only.
+    profile = getattr(session, "provider_profile", None) if session is not None else None
+    if profile is not None:
+        from halo_harness.providers.effort import format_requested_vs_sent, requested_vs_sent
+        changes = requested_vs_sent(
+            profile, effort_requested=getattr(session, "effort_requested", None),
+            effort_sent=getattr(session, "effort", None),
+        )
+        change_lines = format_requested_vs_sent(changes)
+        if change_lines:
+            lines.append("This route changed:")
+            lines.extend(change_lines)
+    return "\n".join(lines)
 
 
 def _cmd_config(args: str, facade: HeadlessFacade) -> str:
@@ -487,6 +517,11 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     profile = getattr(session, "provider_profile", None) if session is not None else None
     current = getattr(session, "effort", None) if session is not None else facade.effort
     source = getattr(session, "effort_source", None) if session is not None else None
+    # Halo 2.0.1 W2a (HALO-2.0.1-liveness-tips-brief.md Part C): the RAW
+    # value last explicitly requested, before clamping (`Session.
+    # effort_requested` -- `getattr` with a default so a bare/fake session
+    # from before this field existed just skips the "sent as" note below).
+    requested_value = getattr(session, "effort_requested", None) if session is not None else None
     supported = getattr(profile, "effort_values_supported", None) if profile is not None else None
 
     requested = (args or "").strip().lower()
@@ -504,7 +539,15 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
             return (f"Effort level: {override_display} (source: this route forces reasoning_effort="
                      f"{profile.reasoning_effort_with_tools!r} whenever a turn carries tools)\n"
                      f"Accepted for this model: {levels}")
-        return (f"Effort level: {current or 'not set (provider default)'} (source: {source or 'default'})\n"
+        # Part C: "never show a control value the gateway will silently
+        # change" -- when what was last requested differs from what's
+        # actually sent (`current`, already clamped), say so inline rather
+        # than just showing the sent value with no explanation.
+        if requested_value is not None and current is not None and requested_value != current:
+            value_line = f"{requested_value} (sent as {current} on this route)"
+        else:
+            value_line = current or "not set (provider default)"
+        return (f"Effort level: {value_line} (source: {source or 'default'})\n"
                 f"Accepted for this model: {levels}")
 
     if session is None or profile is None:
@@ -514,8 +557,9 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     from halo_harness.providers.profiles import clamp_effort
     clamped = clamp_effort(requested, profile)
     session.effort = clamped
+    session.effort_requested = requested
     session.effort_source = "session"
-    clamp_note = "" if clamped == requested else f" (clamped from '{requested}' -- not accepted by this model)"
+    clamp_note = "" if clamped == requested else f" (requested '{requested}', sent as '{clamped}' on this route)"
     return f"Effort level set to '{clamped}'{clamp_note} (source: session) -- takes effect on the next message."
 
 

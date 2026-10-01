@@ -18,7 +18,7 @@ import re
 from typing import Optional
 
 from halo_harness.providers.hooks import host_allowlist, reasoning_echo, system_normalize
-from halo_harness.providers.profiles import ProviderProfile, clamp_effort, map_effort
+from halo_harness.providers.profiles import ProviderProfile, clamp_effort, clamp_temperature, map_effort
 from halo_harness.providers.routing import anthropic_tool_to_openai, map_tool_choice
 from halo_harness.providers.translate import _flatten_messages
 
@@ -289,7 +289,12 @@ def build_request_body(
 
     if profile.use_temperature:
         if profile.temperature is not None:
-            body["temperature"] = profile.temperature
+            # GLM-brief.md item 5: "temperature is clamped to [0, 1] on GLM
+            # routes" -- a no-op for every other family (clamp_temperature's
+            # own docstring), and for every GLM row today too (all already
+            # seed 1.0), but keeps a future out-of-range table/override
+            # value off the wire.
+            body["temperature"] = clamp_temperature(profile.temperature, profile)
         if profile.top_k is not None and profile.host_specific_fields:
             body["top_k"] = profile.top_k  # OpenRouter accepts top_k; Databricks does not (allowlist drops it below)
     # H5 scope F: top_p gated independently when a row says so (DeepSeek V4

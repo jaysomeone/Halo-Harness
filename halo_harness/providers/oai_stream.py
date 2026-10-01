@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 
 from halo_harness.providers.config import jdumps
@@ -44,6 +45,21 @@ class OpenAIStreamToAnthropic:
         self.reasoning_text = ""
         self.reasoning_details: list | None = None
         self._reasoning_details_by_index: dict = {}  # finding 2: merge state, by (type,index)
+        # Halo 2.0.1 W2a telemetry (GLM-brief.md item 6 / HALO-2.0.1-
+        # liveness-tips-brief.md Part A6): `reasoning_chunk_count` counts
+        # DISTINCT `feed_chunk` calls that carried new reasoning content --
+        # ">1" is this harness's own signal for "the gateway streamed
+        # reasoning incrementally on the wire" (as opposed to one lump,
+        # early or late) feeding `reasoning_streamed` in the session log.
+        # `first_reasoning_wall`/`first_tool_wall` are absolute
+        # `time.monotonic()` reads (never a DURATION -- the caller,
+        # `agent/loop.py::Session._step`, subtracts its own `call_t0`) the
+        # first time THIS stream sees reasoning/a tool-call delta -- real
+        # wire-arrival time, independent of when `_finalize` later
+        # synthesizes the one-shot Anthropic-shaped events for them.
+        self.reasoning_chunk_count = 0
+        self.first_reasoning_wall: float | None = None
+        self.first_tool_wall: float | None = None
         self.tool_call_flags: dict = {}
         self.length_with_minimal_output = False
         self.next_index = 0
@@ -106,6 +122,27 @@ class OpenAIStreamToAnthropic:
             tc.get("index"), tc.get("id"),
             id_to_key=self._id_to_key, next_auto=self._next_auto_box, last_key=self._last_key_box,
         )
+
+    def _note_reasoning_chunk(self) -> bool:
+        """Halo 2.0.1 W2a: called once per `feed_chunk` invocation that
+        carried NEW, non-empty reasoning content (any of the three wire
+        shapes) -- `reasoning_chunk_count` counts how many SEPARATE chunks
+        contributed, and `first_reasoning_wall` stamps the first one, both
+        read back by `agent/loop.py::Session._step` after the stream ends
+        (`_finalize`'s own `harness_meta`, below). Returns True iff this is
+        the FIRST reasoning chunk this stream has ever seen -- each call
+        site uses that to append a one-time `{"type": "reasoning_started"}`
+        marker to `feed_chunk`'s own `events` list, the REAL-TIME signal
+        `agent/loop.py::Session._step` needs (this module never emits an
+        Anthropic-shaped event for the reasoning CONTENT itself -- see
+        `feed_chunk`'s own comment -- so without this marker the harness
+        would have no way to know reasoning started until the whole stream
+        finishes)."""
+        is_first = self.reasoning_chunk_count == 0
+        self.reasoning_chunk_count += 1
+        if self.first_reasoning_wall is None:
+            self.first_reasoning_wall = time.monotonic()
+        return is_first
 
     def _merge_reasoning_details_delta(self, details: list) -> None:
         """Merge one SSE chunk's `reasoning_details` fragment array into
@@ -172,7 +209,11 @@ class OpenAIStreamToAnthropic:
             content = delta.get("content")
             if isinstance(content, list):
                 if self.capture_reasoning:
-                    self.reasoning_text += _extract_reasoning_from_parts(content)
+                    parts_reasoning = _extract_reasoning_from_parts(content)
+                    if parts_reasoning:
+                        self.reasoning_text += parts_reasoning
+                        if self._note_reasoning_chunk():
+                            events.append({"type": "reasoning_started"})
                 content = flatten_content_parts(content)
             if content:
                 if not self.text_open:
@@ -194,6 +235,8 @@ class OpenAIStreamToAnthropic:
             if reasoning:
                 if self.capture_reasoning:
                     self.reasoning_text += reasoning
+                    if self._note_reasoning_chunk():
+                        events.append({"type": "reasoning_started"})
                 else:
                     log.debug("reasoning delta (not emitted), length=%d", len(reasoning))
             details = delta.get("reasoning_details")
@@ -205,9 +248,15 @@ class OpenAIStreamToAnthropic:
                 # (type, index): concatenate text/summary/data, keep the
                 # latest non-null id/format/signature.
                 self._merge_reasoning_details_delta(details)
+                if self._note_reasoning_chunk():
+                    events.append({"type": "reasoning_started"})
 
             # Tool calls
             for tc in delta.get("tool_calls") or []:
+                if self.first_tool_wall is None:
+                    self.first_tool_wall = time.monotonic()
+                    if self.strict_tool_json:
+                        events.append({"type": "tool_started"})
                 key = self._key_for(tc)
                 if key not in self.tool_buf:
                     self.tool_buf[key] = {"name": None, "args": "", "raw_id": None}
@@ -347,6 +396,18 @@ class OpenAIStreamToAnthropic:
             self.finish_reason == "length" and isinstance(final_usage.get("output_tokens"), int)
             and final_usage["output_tokens"] <= 1
         )
+        # GLM-brief.md item 3 / W2-plan item 3: two more terminal
+        # `finish_reason` values a chat-dialect gateway (Z.ai GLM API,
+        # docs.z.ai) can send on an otherwise-clean 200 stream --
+        # `model_context_window_exceeded` feeds the existing overflow ->
+        # compaction -> retry path (agent/loop.py::Session._step, the SAME
+        # way a phase-1 400 overflow does); `sensitive` becomes a clear,
+        # never-retried error carrying whatever text DID stream (a refusal
+        # explanation, when the gateway sends one as ordinary content).
+        # `decide_stop_reason` above leaves both as the ordinary Anthropic-
+        # shape "end_turn" -- these two booleans are the real signal.
+        model_context_window_exceeded = self.finish_reason == "model_context_window_exceeded"
+        sensitive_finish = self.finish_reason == "sensitive"
         harness_meta = None
         if self.capture_reasoning or self.strict_tool_json:
             harness_meta = {
@@ -355,6 +416,11 @@ class OpenAIStreamToAnthropic:
                 "tool_call_flags": self.tool_call_flags,
                 "length_with_minimal_output": self.length_with_minimal_output,
                 "responding_provider": self.responding_provider,
+                "model_context_window_exceeded": model_context_window_exceeded,
+                "sensitive_finish": sensitive_finish,
+                "reasoning_chunk_count": self.reasoning_chunk_count,
+                "first_reasoning_wall": self.first_reasoning_wall,
+                "first_tool_wall": self.first_tool_wall,
             }
         events.append(message_delta_event(stop_reason, final_usage, harness_meta=harness_meta))
         events.append({"type": "message_stop"})

@@ -251,6 +251,14 @@ class PrintModeSink:
             if self.verbose and self.output_format == "text":
                 ok = "ok" if event.data.get("ok") else "error"
                 self.stream.write(f"\x1b[2m[tool result: {ok}]\x1b[0m\n")
+        elif event.kind == "steer_restart":
+            # GLM-brief.md item 3: "headless --verbose prints one line" --
+            # the call was silently aborted and is being resent with the
+            # steer appended, so nothing was lost; A7 ("print mode is
+            # unchanged, no progress noise") is why the per-second `phase`
+            # events get no line here at all, unlike this rare, meaningful one.
+            if self.verbose and self.output_format == "text":
+                self.stream.write("\x1b[2m[steering: restarting the model call]\x1b[0m\n")
         elif event.kind == "message_end":
             self._stop_reason = event.data.get("stop_reason")
             _merge_usage(self._usage, event.data.get("usage") or {})
@@ -349,7 +357,17 @@ class StreamJsonSink:
                  tools: Optional[list] = None, mcp_servers: Optional[list] = None,
                  slash_commands: Optional[list] = None, include_partial_messages: bool = False,
                  max_budget_usd: Optional[float] = None, stream=None,
-                 permission_denials: Optional[list] = None, json_schema: Optional[str] = None):
+                 permission_denials: Optional[list] = None, json_schema: Optional[str] = None,
+                 effort: Optional[str] = None, effort_sent: Optional[str] = None):
+        # Halo 2.0.1 W2a (GLM-brief.md item 1 / HALO-2.0.1-liveness-tips-
+        # brief.md Part C): `effort` is whatever was last explicitly
+        # requested (None when nothing was); `effort_sent` is the value
+        # THIS route actually puts on the wire for it (`Session.effort`,
+        # already clamped) -- carried on `init` so a scripted stream-json
+        # caller can tell "medium (requested)" from "high (sent)" apart
+        # without re-deriving the clamp itself.
+        self.effort = effort
+        self.effort_sent = effort_sent
         self.session_id = session_id
         self.cwd = str(cwd)
         self.model = model
@@ -408,6 +426,9 @@ class StreamJsonSink:
             "model": self.model, "permissionMode": self.permission_mode, "tools": self.tools,
             "mcp_servers": self.mcp_servers, "slash_commands": self.slash_commands,
             "halo_harness_version": version, "rolo_claude_version": version,
+            # Halo 2.0.1 W2a: see __init__'s own docstring for the
+            # requested-vs-sent contract these two carry.
+            "effort": self.effort, "effort_sent": self.effort_sent,
         })
 
     def _buf(self, agent_id: Optional[str]) -> dict:

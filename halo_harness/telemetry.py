@@ -29,7 +29,17 @@ ERROR_CLASSES = (
     "timeout", "denied_by_rule", "interrupted", "loop_breaker", "mcp_error", "other",
 )
 REPAIR_KINDS = ("leak_parser", "lenient_json", "rename", "args_repair", "none")
-STATUS_VALUES = ("ok", "429", "5xx", "overflow", "aborted", "connect_error")
+# Halo 2.0.1 W2a (GLM-brief.md item 3): "sensitive" is a NEW bucket --
+# `agent/loop.py::Session._step` logs it for a chat-dialect
+# `finish_reason: "sensitive"` reply (a content-policy refusal, never
+# retried in place) -- distinct from "5xx" (an actual server error) so
+# `stats --models`' own status_counts never conflates the two.
+STATUS_VALUES = ("ok", "429", "5xx", "overflow", "aborted", "connect_error", "sensitive")
+# Halo 2.0.1 W2a: a call that waited longer than this for its first token
+# counts toward `stats --models`' "waits>20s" column (GLM-brief.md item 6 /
+# liveness-tips-brief Part A6: "a count of turns that waited more than 20s
+# for the first token").
+SLOW_TTFT_THRESHOLD_MS = 20_000
 
 # Mirrors controller.py's own `_NON_PROMPT_USER_KINDS` (agent/log.py's
 # `append_user(kind=...)` tags) -- a "user" node with one of these `kind`
@@ -51,6 +61,16 @@ def _new_model_counters() -> dict:
         "edit_calls": 0, "edit_failures": 0,
         "steers": 0, "interrupts": 0, "compactions": 0, "overflows": 0,
         "error_classes": {c: 0 for c in ERROR_CLASSES},
+        # Halo 2.0.1 W2a (GLM-brief.md item 6 / liveness-tips-brief Part
+        # A6): `ttft_values` is the full per-call distribution (needed for
+        # p50/p95 -- `ttft_sum_ms`/`ttft_n` above only ever gave an
+        # average); `waits_over_20s` counts calls whose `ttft_ms` exceeded
+        # `SLOW_TTFT_THRESHOLD_MS`; `reasoning_calls`/`reasoning_streamed_
+        # calls` are the denominator/numerator for "reasoning streamed %"
+        # (only calls that actually LOGGED a `reasoning_streamed` bool
+        # count toward the denominator, so a pre-2.0.1 log or a model that
+        # never reasons doesn't silently drag the percentage toward 0).
+        "ttft_values": [], "waits_over_20s": 0, "reasoning_calls": 0, "reasoning_streamed_calls": 0,
     }
 
 
@@ -283,6 +303,13 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                 if isinstance(node.get("ttft_ms"), (int, float)):
                     b["ttft_sum_ms"] += node["ttft_ms"]
                     b["ttft_n"] += 1
+                    b["ttft_values"].append(float(node["ttft_ms"]))
+                    if node["ttft_ms"] > SLOW_TTFT_THRESHOLD_MS:
+                        b["waits_over_20s"] += 1
+                if isinstance(node.get("reasoning_streamed"), bool):
+                    b["reasoning_calls"] += 1
+                    if node["reasoning_streamed"]:
+                        b["reasoning_streamed_calls"] += 1
                 if isinstance(node.get("latency_ms"), (int, float)):
                     b["latency_sum_ms"] += node["latency_ms"]
                     b["latency_n"] += 1
@@ -541,6 +568,26 @@ def _avg(total: float, n: int) -> Optional[float]:
     return round(total / n, 1) if n else None
 
 
+def _percentile(values: "list[float]", pct: float) -> Optional[float]:
+    """Halo 2.0.1 W2a (GLM-brief.md item 6): linear-interpolation percentile
+    (the same method numpy's default uses) over `values` -- None for an
+    empty list. `stats --models`' own TTFT p50/p95 columns; no numpy
+    dependency needed for two percentiles over a per-model list that's
+    realistically a few hundred to a few thousand entries."""
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return round(s[0], 1)
+    rank = (len(s) - 1) * (pct / 100.0)
+    lo = int(rank)
+    hi = min(lo + 1, len(s) - 1)
+    if lo == hi:
+        return round(s[lo], 1)
+    frac = rank - lo
+    return round(s[lo] * (1 - frac) + s[hi] * frac, 1)
+
+
 def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
     """Rows per (model, provider), sorted by (model, provider) for
     deterministic output: sessions, turns, model calls, tokens in/out/
@@ -559,8 +606,10 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
             for field_name in ("calls", "tokens_in", "tokens_out", "tokens_cached", "cost_usd",
                                 "ttft_sum_ms", "ttft_n", "latency_sum_ms", "latency_n", "finish_length",
                                 "retries", "tool_calls", "tool_errors", "tool_use_total",
-                                "edit_calls", "edit_failures", "steers", "interrupts", "compactions", "overflows"):
+                                "edit_calls", "edit_failures", "steers", "interrupts", "compactions", "overflows",
+                                "waits_over_20s", "reasoning_calls", "reasoning_streamed_calls"):
                 dest[field_name] += b.get(field_name, 0)
+            dest["ttft_values"].extend(b.get("ttft_values") or [])
             for status, n in (b.get("status_counts") or {}).items():
                 dest["status_counts"][status] = dest["status_counts"].get(status, 0) + n
             for kind, n in (b.get("repair_hits") or {}).items():
@@ -585,6 +634,14 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
             "edit_failure_pct": _pct(c["edit_failures"], c["edit_calls"]),
             "steers": c["steers"], "interrupts": c["interrupts"], "compactions": c["compactions"],
             "loop_breaker_trips": c["error_classes"].get("loop_breaker", 0),
+            # Halo 2.0.1 W2a (GLM-brief.md item 6 / liveness-tips-brief Part
+            # A6): TTFT p50/p95, the count of calls that waited more than
+            # `SLOW_TTFT_THRESHOLD_MS` for their first token, and "reasoning
+            # streamed" as a percentage of the calls that logged the field
+            # at all (None/0-denominator-safe via `_pct`/`_percentile`).
+            "ttft_p50_ms": _percentile(c["ttft_values"], 50), "ttft_p95_ms": _percentile(c["ttft_values"], 95),
+            "waits_over_20s": c["waits_over_20s"], "reasoning_calls": c["reasoning_calls"],
+            "reasoning_streamed_pct": _pct(c["reasoning_streamed_calls"], c["reasoning_calls"]),
         })
     # `turns` is a session-level counter (one session may talk to several
     # models); reported once per model as "sessions this model was used in"

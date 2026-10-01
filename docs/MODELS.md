@@ -206,14 +206,79 @@ reaches the wire):
 | Route family | Accepted levels |
 |---|---|
 | Anthropic Messages (`cc:`, `ant:`, Databricks Claude foundation) | `low`, `medium`, `high`, `max` (no `xhigh` -- that endpoint schema rejects it outright) |
-| OpenRouter / Databricks chat (DeepSeek, Kimi, GLM, Qwen, ...) | `low`, `medium`, `high`, `xhigh` (no `max` as of the H14c fixpass finding 13 -- that's an Anthropic-only level; a chat route 400'd on it before this) |
+| Databricks GLM (`databricks-glm-*`) | `low`, `high`, `max` ONLY -- narrower than the general chat-dialect set below; see "Databricks GLM" just under this table |
+| OpenRouter / Databricks chat, every other family (DeepSeek, Kimi, Qwen, ...) | `low`, `medium`, `high`, `xhigh` (no `max` as of the H14c fixpass finding 13 -- that's an Anthropic-only level; a chat route 400'd on it before this) |
+| OpenRouter GLM 5.x (`z-ai/glm-5`, `-5.2`, `-5.3`, `-5.3-flash`) | the full seven Z.ai-direct values: `max`, `high`, `low`, `medium`, `minimal`, `none`, `xhigh` -- OpenRouter forwards them to Z.ai as-is |
 
 A tabled row whose own `reasoning_default_effort` needs a value outside
-that chat-route default (GLM-5.3's family genuinely defaults to `max`,
-per the ingested adapter-rules report -- `reasoning_no_disable` forces a
-disabling `--effort none` UP to it) still accepts that one value too; an
-explicit `effort_values_supported` row key, when a future row sets one,
-always wins outright.
+its route family's default set (GLM's family genuinely defaults to `max`
+on OpenRouter/Z.ai directly, per the ingested adapter-rules report --
+`reasoning_no_disable` forces a disabling `--effort none` UP to it there)
+still accepts that one value too; an explicit `effort_values_supported`
+row key, when a future row sets one, always wins outright.
+
+### Databricks GLM (2.0.1, GLM-brief.md)
+
+Verified against the Databricks Foundation Model APIs "supported models"
+and "query reasoning models" pages (2026-10-01): every `databricks-glm-*`
+endpoint (`databricks-glm-5-2`, `-5-3`, `-5-3-flash`, and any future
+`databricks-glm-*` id with no `model_table.json` row of its own yet --
+this is a FAMILY-level rule, not per-model) keeps reasoning ALWAYS on and
+accepts `reasoning_effort` values `low`, `high`, `max` ONLY -- `max` is
+both the default AND the gateway's own SILENT fallback for anything else
+(`medium`, `minimal`, `xhigh`, `none`); `none` is rejected outright.
+`thinking`/`tool_stream`/`clear_thinking` (all three real Z.ai parameters)
+are not in Databricks' parameter list at all, and an unknown field there
+is a 400, so none of them can be sent on this route.
+
+**The consequence this fixes**: before 2.0.1, `/effort medium` on a
+Databricks GLM route sent `reasoning_effort: "medium"` on the wire, which
+the GATEWAY silently coerced to `max` -- the harness never saw an error,
+and the user's effort choice was quietly ignored every single turn. That
+silent "always max" is also the "GLM seems to pause" symptom
+([TROUBLESHOOTING.md](TROUBLESHOOTING.md)): `max` is the model's slowest,
+most expensive thinking setting, and a chat-dialect gateway sends nothing
+at all -- no reasoning text, no ping -- during that phase; only the
+connection stays open. Halo 2.0.1 clamps to the route's REAL default
+(`high`, not `max`) and shows the sent value everywhere (`/effort`,
+`/status`, `/context`, the stream-json init line's `effort_sent`) instead
+of ever silently disagreeing with the gateway.
+
+**The default is sent, not omitted.** Because an omitted field on this
+route means `max`, a call with no effort configured anywhere sends
+`reasoning_effort: "high"` explicitly (`ProviderProfile.default_effort_
+when_unset`, on for the Databricks GLM family only; every other
+chat-dialect family keeps "omit -> provider default"). The same rule
+applies to an effort inherited from Claude Code's settings (`effortLevel`
+or `modelSettings.<id>.effortLevel`, written for Claude models and
+typically `xhigh`): a settings value this route does not accept lands on
+`high`, not on the clamp map's `max`. An explicit `--effort xhigh` or
+`/effort xhigh` is a deliberate choice and still goes through the clamp
+map to `max`; `/status` shows the requested and sent values either way.
+
+**Clamp table** (`providers/profiles.py`'s `ProviderProfile.effort_clamp_map`,
+consulted by `clamp_effort`/`resolve_effective_effort` before the generic
+xhigh/max-narrowing rule):
+
+| Requested | Sent |
+|---|---|
+| `low` | `low` |
+| `medium` | `high` |
+| `high` | `high` |
+| `xhigh` | `max` |
+| `max` | `max` |
+| `minimal` | `low` (the cheapest accepted level, not the route default) |
+| `none` | `low` (never sent literally -- Databricks rejects it outright) |
+
+`/effort` on a Databricks GLM route therefore offers `low [high] max` (its
+real accepted set) and marks any other requested value with "sent as X on
+this route" rather than a plain, misleading echo.
+
+Temperature is clamped to `[0, 1]` on every GLM-family route (Z.ai GLM API
+docs: "temperature range [0, 1] default 1.0") -- a safety net, since every
+seeded GLM row's temperature is already 1.0; and GLM never receives
+`tool_choice: "required"` (the gateway accepts `auto` only -- the repair
+layer's text-nudge fallback is used instead, same as DeepSeek-thinking/Qwen).
 
 `xhigh` on a route that doesn't list it becomes `max` ONLY when that
 route's own accepted set includes `max` (Anthropic, or a GLM-5.3-style

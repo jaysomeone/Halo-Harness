@@ -145,6 +145,12 @@ def _fake_model_row(model="or:test/model", **overrides) -> dict:
         "status_counts": {}, "overflows": 0, "tool_calls": 8, "tool_error_pct": 12.5,
         "repair_hit_pct": {"leak_parser": 0.0, "lenient_json": 0.0, "rename": 10.0, "args_repair": 0.0, "none": 0.0},
         "edit_failure_pct": 0.0, "steers": 1, "interrupts": 0, "compactions": 1, "loop_breaker_trips": 0,
+        # Halo 2.0.1 W2a: the four wide-only columns added alongside this
+        # fixture's own `_MODEL_COLUMNS` -- kept here so this stays a
+        # COMPLETE row shape (every formatter reads its key directly; see
+        # this function's own docstring).
+        "ttft_p50_ms": 110.0, "ttft_p95_ms": 180.0, "waits_over_20s": 0, "reasoning_calls": 4,
+        "reasoning_streamed_pct": 25.0,
     }
     row.update(overrides)
     return row

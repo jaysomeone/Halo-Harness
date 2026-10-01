@@ -162,7 +162,10 @@ class SessionLog:
                       provider: Optional[str] = None, finish_reason: Optional[str] = None,
                       latency_ms: Optional[float] = None, ttft_ms: Optional[float] = None,
                       retries: Optional[int] = None, status: Optional[str] = None,
-                      estimate: Optional[bool] = None, role: Optional[str] = None) -> dict:
+                      estimate: Optional[bool] = None, role: Optional[str] = None,
+                      ttfb_ms: Optional[float] = None, first_reasoning_ms: Optional[float] = None,
+                      first_text_ms: Optional[float] = None, first_tool_ms: Optional[float] = None,
+                      reasoning_streamed: Optional[bool] = None) -> dict:
         """H9 whole-tree review finding 13: `agent_id`, when given, tags
         this usage node as a SUB-AGENT's rolled-up total (agent/subagent.py
         calls this on the PARENT's own log once a child finishes) rather
@@ -204,6 +207,21 @@ class SessionLog:
             node["latency_ms"] = latency_ms
         if ttft_ms is not None:
             node["ttft_ms"] = ttft_ms
+        # Halo 2.0.1 W2a (GLM-brief.md item 6 / HALO-2.0.1-liveness-tips-
+        # brief.md Part A6): per-call telemetry feeding `telemetry.py`'s
+        # `stats --models` TTFT p50/p95, the >20s-wait count, and the
+        # "reasoning streamed" percentage -- never read by `derive_request`
+        # (same non-wire status as every other field on this node type).
+        if ttfb_ms is not None:
+            node["ttfb_ms"] = ttfb_ms
+        if first_reasoning_ms is not None:
+            node["first_reasoning_ms"] = first_reasoning_ms
+        if first_text_ms is not None:
+            node["first_text_ms"] = first_text_ms
+        if first_tool_ms is not None:
+            node["first_tool_ms"] = first_tool_ms
+        if reasoning_streamed is not None:
+            node["reasoning_streamed"] = reasoning_streamed
         if retries is not None:
             node["retries"] = retries
         if status is not None:

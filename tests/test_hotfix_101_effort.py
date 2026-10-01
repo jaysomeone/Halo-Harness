@@ -189,7 +189,11 @@ def test_session_leaves_effort_unset_for_non_anthropic_family(ctx: Ctx):
     fh = build_fake_home()
     mock = MockDatabricks().start()
     try:
-        session = _new_dbx_session(fh, mock, model="dbx:databricks-glm-5-3", effort=None)
+        # 2.0.1: Databricks GLM is the one chat-dialect family that now gets
+        # an explicit default (tests/test_w2a_glm_default_effort.py), so the
+        # "every other chat-dialect route stays omit -> provider default"
+        # rule is pinned on a Kimi route here.
+        session = _new_dbx_session(fh, mock, model="dbx:databricks-kimi-k3", effort=None)
         ctx.check(f"no new default for a chat-dialect route, got {session.effort!r}", session.effort is None)
     finally:
         mock.stop()
@@ -208,11 +212,16 @@ def test_session_construction_clamps_an_explicit_xhigh_on_anthropic_route(ctx: C
 
 @test
 def test_model_switch_reclamps_and_sets_change_note(ctx: Ctx):
+    """Starting model is a generic chat-dialect route (Kimi), not GLM --
+    Halo 2.0.1 gives Databricks GLM its OWN narrower low/high/max set
+    (GLM-brief.md item 1), so `xhigh` would no longer pass through
+    untouched there, which isn't what this test is about (model-switch
+    reclamping in general)."""
     from halo_harness.model import ModelProfile, parse_model_ref
     fh = build_fake_home()
     mock = MockDatabricks().start()
     try:
-        session = _new_dbx_session(fh, mock, model="dbx:databricks-glm-5-3", effort="xhigh")
+        session = _new_dbx_session(fh, mock, model="dbx:databricks-kimi-k3", effort="xhigh")
         ctx.check("xhigh untouched on the starting chat route", session.effort == "xhigh")
         new_ref = parse_model_ref("dbx:databricks-claude-opus-4-6@anthropic")
         session.set_model(new_ref, ModelProfile())

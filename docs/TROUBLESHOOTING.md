@@ -208,6 +208,45 @@ the field entirely rather than giving up (the H14c fixpass, finding 10) --
 if you still see this exact message after both retries, report the
 endpoint name.
 
+## GLM seems to pause (2.0.1)
+
+GLM (`z-ai/glm-5*` on OpenRouter, `databricks-glm-*` on Databricks) can go
+quiet for a long stretch -- the status bar spinner keeps ticking, nothing
+streams, and a steer you type seems to queue up and sit there ("↳
+steering…") instead of taking effect. This is the model's own THINKING
+phase, not a hang: GLM sends response headers immediately but then holds
+the connection open, silent -- no reasoning text, no ping -- until it has
+something to say. Two things make this worse at higher effort:
+
+- **The effort level that's actually running may not be what you picked.**
+  Databricks GLM endpoints accept exactly `low`, `high`, `max` for
+  `reasoning_effort` -- anything else (`medium`, `minimal`, `xhigh`,
+  `none`) the GATEWAY itself silently coerces to `max`, its slowest,
+  priciest setting, with no error at all. Before 2.0.1 the harness didn't
+  know this and let `medium` (etc.) through unclamped, so `/effort medium`
+  silently ran as `max` every turn. `/effort` (no argument) now shows the
+  value THIS route will actually send -- e.g. `medium (sent as high on
+  this route)` -- and `/status`/`/context` list it under "this route
+  changed" whenever a shown value differs from what's sent; run `/effort
+  low` for the fastest setting. See
+  [MODELS.md](MODELS.md#databricks-glm-201-glm-briefmd) for the full clamp
+  table (OpenRouter GLM keeps the seven real Z.ai levels, unaffected).
+- **A steer sent during the silent phase now cuts in immediately** (2.0.1,
+  `steer.restart_when_silent` in `~/.halo/config.json`, default on): when
+  no content has streamed yet for the in-flight call, typing something
+  aborts that call and resends it with your text appended right away,
+  rather than waiting for GLM to finish thinking first -- the transcript
+  shows `↳ steering (restarting the model call)` so you know nothing from
+  the aborted call was lost. Set it to `false` to go back to the old
+  "cuts at the next chunk" behavior if you'd rather GLM finish its current
+  thought first.
+
+If the pause is still surprising with the above understood, `halo stats
+--models --since 1d` (`--wide` for the full column set) shows TTFT p50/p95
+and a count of calls that waited over 20s for their first token, per
+model -- useful for telling "this is just how long GLM thinks at this
+effort" from a genuinely stuck route.
+
 ## Nothing happens after I type: a permission card is waiting (1.0.1)
 
 If the TUI seems to stop accepting input -- prompts you type appear to do

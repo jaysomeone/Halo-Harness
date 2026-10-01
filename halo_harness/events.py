@@ -30,6 +30,7 @@ EVENT_KINDS = frozenset({
     "message_end", "error", "turn_done", "subagent_start", "subagent_end",
     "replay", "notification", "steer_queued", "steer_applied",
     "compaction",  # H5 scope B
+    "phase", "steer_restart",  # Halo 2.0.1 W2a (liveness-tips-brief Part A6/GLM-brief item 3)
 })
 
 COMMAND_KINDS = frozenset({
@@ -211,3 +212,58 @@ def steer_applied(text: str, *, turn: int = 0) -> Event:
     """data: {text} -- the queued steer text was just appended as a
     user-role message and the loop is continuing with it."""
     return Event("steer_applied", {"text": text}, turn=turn)
+
+
+# ---- Halo 2.0.1 W2a: phase events + steer_restart ---------------------
+# HALO-2.0.1-liveness-tips-brief.md Part A1 names the live transcript line
+# W2b renders from these; this module only defines the CONTRACT (when each
+# fires, what it carries) -- agent/loop.py emits them, the UI (W2b) is the
+# only thing that renders them. "Stall notices are computed in the UI from
+# timestamps; no loop timer needed" (W2-plan item 6) -- this module and
+# agent/loop.py never run a timer of their own for this.
+
+PHASE_STATES = frozenset({"request_sent", "headers", "first_token", "waiting_for_model"})
+PHASE_TOKEN_KINDS = frozenset({"reasoning", "text", "tool"})
+
+
+def phase(*, state: str, turn: int = 0, model: Optional[str] = None, ttfb_ms: Optional[float] = None,
+          kind: Optional[str] = None) -> Event:
+    """data: {state, model, ttfb_ms, kind}. One per model-call transition,
+    emitted by `agent/loop.py::Session._step` (and `_turn_body` for the
+    last one), in this order per call:
+
+      * `state="request_sent"` -- the request is about to go out; `model`
+        is the model label the UI shows ("sending request to <model>...").
+      * `state="headers"` -- the FIRST event of ANY kind arrived from the
+        upstream generator (`message_start`, for both dialects -- see
+        `_step`'s own comment on why that's effectively "response headers
+        arrived" for the chat-dialect synthesized `message_start` too);
+        `ttfb_ms` is the elapsed time since the request was sent.
+      * `state="first_token", kind=...` -- the FIRST streamed content of
+        ANY kind arrived: "reasoning" (a native `thinking` block opened, or
+        -- for a chat-dialect route that never streams reasoning
+        incrementally, e.g. Databricks GLM -- reasoning was found only once
+        the stream finished), "text", or "tool". Fires exactly once per
+        call, naming whichever kind got there first.
+      * `state="waiting_for_model"` -- tool results were just dispatched
+        back and the NEXT model call hasn't been sent yet (emitted by
+        `_turn_body`, between steps of a multi-step tool-calling turn).
+
+    A call with no streamed content at all (an immediate empty/error reply)
+    may emit `request_sent`/`headers` with no `first_token` -- a UI must not
+    assume all four always appear for every call."""
+    return Event("phase", {"state": state, "model": model, "ttfb_ms": ttfb_ms, "kind": kind}, turn=turn)
+
+
+def steer_restart(text: str, *, turn: int = 0) -> Event:
+    """data: {text} -- GLM-brief.md item 3 / W2-plan item 2: a steer
+    arrived while the in-flight model call had not produced any content
+    yet (no chunk since the request was sent, config `steer.
+    restart_when_silent`, default True) -- the call was aborted and is
+    being resent with `text` appended, so no content is lost. W2b renders
+    `↳ steering (restarting the model call)`; headless `--verbose` prints
+    one line. Emitted once per restarted call, after the queued steer(s)
+    were applied as a user-role message (the standard `steer_queued`/
+    `steer_applied` pair fires too, exactly as an ordinary mid-stream
+    steer's does) and before the retried request is built."""
+    return Event("steer_restart", {"text": text}, turn=turn)
