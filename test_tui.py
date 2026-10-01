@@ -412,6 +412,472 @@ def test_permission_card_deny_with_feedback_message(ctx: Ctx):
 
 
 # ============================================================================
+# 1.0.1 hotfix 17: a pending card intercepts free text instead of it becoming
+# a silent steer, and a mode switch re-evaluates an already-pending card --
+# the real mechanism behind the reported "freeze" (a permission card
+# scrolled out of view by the item-16 auto-scroll bug, typed text kept
+# steering instead of ever answering it).
+# ============================================================================
+
+@test
+def test_free_text_while_permission_card_pending_answers_it_directly(ctx: Ctx):
+    """Before this fix, typing feedback WITHOUT first pressing "4" was a
+    silent steer on the turn underneath -- the pending ask itself was never
+    answered, matching rolo's report ("I am unable to type anything and get
+    a response") once the card had scrolled out of view."""
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            await pilot.click("#prompt-input")  # the user types into the ORDINARY prompt, never pressing 4 first
+            await _type(pilot, "use a safer command")
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            ctx.check(f"answered as deny+feedback, got {fake.permission_replies}",
+                      fake.permission_replies == [("tu1", {"action": "deny", "reason": "", "rule": None,
+                                                             "message": "use a safer command"})])
+            ctx.check("never became a steer", fake.submitted == ["do something"])
+            ctx.check("pending card cleared", app.pending_card is None)
+            ctx.check("focus returns to the prompt", app.focused is app.prompt_input)
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 fixpass finding 14: a `/`-prefixed submission while a card is
+# pending is ALWAYS routed to slash handling, never deny feedback; pasted
+# placeholders are expanded before becoming a card's answer; the /effort
+# card never intercepts typed text at all.
+# ============================================================================
+
+@test
+def test_slash_command_while_permission_card_pending_runs_the_command_not_deny_feedback(ctx: Ctx):
+    """Typing "/permissions" while a PermissionCard is pending used to DENY
+    the tool with "The user said: /permissions" instead of ever running
+    the command -- the card itself is left completely untouched."""
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/permissions")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            from rolo_claude.tui.dialogs.permissions import PermissionsDialog
+            ctx.check(f"the command actually ran (PermissionsDialog opened), got {type(app.screen).__name__}",
+                      isinstance(app.screen, PermissionsDialog))
+            ctx.check("the tool was NOT denied", fake.permission_replies == [])
+            ctx.check("the card is still pending, untouched",
+                      isinstance(app.pending_card, PermissionCard) and not app.pending_card.done)
+    asyncio.run(body())
+
+
+@test
+def test_deny_feedback_expands_pasted_placeholder_to_real_content(ctx: Ctx):
+    """Deny feedback (the borrowed-input path after pressing "4") must
+    carry the REAL pasted content, never the literal
+    "[Pasted text #n ...]" placeholder PromptInput shows/logs."""
+    from textual import events as tevents
+
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            await pilot.press("4")
+            await pilot.pause(0.05)
+            ctx.check("now borrowing the prompt input for feedback", app._borrowing_card is not None)
+            pasted_feedback = "\n".join(f"reason line {i}" for i in range(6))
+            app.prompt_input.post_message(tevents.Paste(pasted_feedback))
+            await pilot.pause(0.1)
+            ctx.check(f"the paste became a placeholder in the input, got {app.prompt_input.text!r}",
+                      app.prompt_input.text.startswith("[Pasted text #1"))
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            reply = fake.permission_replies[-1]
+            ctx.check(f"the REAL pasted content reached the deny message, not the placeholder, got {reply}",
+                      reply == ("tu1", {"action": "deny", "reason": "", "rule": None, "message": pasted_feedback}))
+    asyncio.run(body())
+
+
+@test
+def test_effort_card_does_not_intercept_typed_text(ctx: Ctx):
+    """The /effort selector does not intercept typed text at all -- a plain
+    prompt typed while it's open must reach the ordinary submit path
+    (recorded by the controller), never silently vanish into a steer with
+    no running turn to steer, nor get swallowed outright."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/effort")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            from rolo_claude.tui.widgets.cards import EffortCard
+            ctx.check(f"an EffortCard is pending, got {type(app.pending_card).__name__}",
+                      isinstance(app.pending_card, EffortCard))
+            await pilot.click("#prompt-input")
+            await _type(pilot, "just a normal prompt")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"the ordinary prompt reached the controller, not swallowed by the card, got "
+                      f"{fake.submitted}", "just a normal prompt" in fake.submitted)
+    asyncio.run(body())
+
+
+@test
+def test_shift_tab_to_auto_resolves_a_pending_permission_card(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            # default -> plan -> acceptEdits -> auto (next_mode's own cycle order).
+            for _ in range(3):
+                await pilot.press("shift+tab")
+                await pilot.pause(0.02)
+                if fake.permission_mode == "auto":
+                    break
+            ctx.check(f"mode reached auto, got {fake.permission_mode!r}", fake.permission_mode == "auto")
+            ctx.check(f"the pending ask was auto-allowed, got {fake.permission_replies}",
+                      fake.permission_replies == [("tu1", {"action": "allow", "reason": "", "rule": None,
+                                                             "message": ""})])
+            ctx.check("pending card cleared once resolved", app.pending_card is None)
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_and_placeholder_while_permission_card_pending(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            rendered = str(app.status_bar.render())
+            ctx.check(f"status bar shows the permission-needed tag, got {rendered!r}",
+                      "permission needed" in rendered)
+            ctx.check(f"placeholder invites 1-4 or free text, got {app.prompt_input.placeholder!r}",
+                      "1-4" in app.prompt_input.placeholder)
+            await pilot.press("1")
+            await pilot.pause(0.05)
+            ctx.check("tag clears once answered", "permission needed" not in str(app.status_bar.render()))
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 fixpass finding 3: focus self-heal (_on_key) must never reach across
+# screens to a pending card underneath a modal that has nothing focusable of
+# its own (PagerScreen) -- the hidden card's own keys used to fire instead
+# of the modal's.
+# ============================================================================
+
+@test
+def test_pager_screen_focus_heal_does_not_leak_to_a_hidden_pending_card(ctx: Ctx):
+    """Reproduces the most dangerous example verbatim: "1" (PermissionCard's
+    own "allow once") must never silently approve a pending ask the user
+    never even looked at, just because they opened a pager to check a
+    PRIOR tool's output. PagerScreen has nothing focusable at all, so
+    `screen.focused` really is None once it opens -- exactly the case the
+    old self-heal mishandled."""
+    async def body():
+        turn = [[
+            ev.user_message("do two things", turn=1),
+            ev.Event("tool_use_ready", {"id": "tu0", "name": "Bash", "input": {"command": "echo hi"},
+                                         "repaired": False}, turn=1),
+            ev.Event("tool_result", {"id": "tu0", "ok": True, "summary": "hi", "content": "hi"}, turn=1),
+            ev.Event("tool_use_ready", {"id": "tu1", "name": "Bash", "input": {"command": "rm -rf /tmp/x"},
+                                         "repaired": False}, turn=1),
+            ev.Event("permission_request", {"id": "tu1", "name": "Bash", "input": {"command": "rm -rf /tmp/x"},
+                                             "reason": "not covered by an existing rule",
+                                             "suggested_rule": "Bash(rm:*)"}, turn=1),
+        ]]
+        fake = FakeController(turns=turn)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do two things")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=8)
+            ctx.check("a PermissionCard is pending for tu1", isinstance(app.pending_card, PermissionCard))
+            tool_card = app.transcript.tool_cards.get("tu0")
+            ctx.check("tu0's ToolCard exists", tool_card is not None)
+            tool_card.focus()
+            await pilot.pause(0.02)
+            await pilot.press("o")
+            await pilot.pause(0.05)
+            from rolo_claude.tui.widgets.cards import PagerScreen
+            ctx.check(f"PagerScreen is now the active screen, got {type(app.screen).__name__}",
+                      isinstance(app.screen, PagerScreen))
+            ctx.check("PagerScreen has nothing focusable of its own -- focused is None",
+                      app.screen.focused is None)
+            await pilot.press("1")
+            await pilot.pause(0.05)
+            ctx.check(f"the pending permission ask was NOT silently approved, got {fake.permission_replies}",
+                      fake.permission_replies == [])
+            ctx.check("the permission card is still pending, unanswered",
+                      isinstance(app.pending_card, PermissionCard) and not app.pending_card.done)
+            await pilot.press("q")
+            await pilot.pause(0.05)
+            ctx.check(f"'q' correctly reached the pager's OWN binding and closed it, got "
+                      f"{type(app.screen).__name__}", not isinstance(app.screen, PagerScreen))
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 fixpass finding 4: Shift+Tab re-evaluates a pending permission card
+# through the REAL permission engine instead of blindly allowing/denying --
+# an explicit ask: rule still asks under auto, and a card the user is
+# already answering (awaiting_feedback) is left completely alone.
+# ============================================================================
+
+@test
+def test_shift_tab_to_auto_leaves_an_explicit_ask_rule_card_pending(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        fake.still_ask_request_ids.add("tu1")
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            for _ in range(3):
+                await pilot.press("shift+tab")
+                await pilot.pause(0.02)
+                if fake.permission_mode == "auto":
+                    break
+            ctx.check(f"mode reached auto, got {fake.permission_mode!r}", fake.permission_mode == "auto")
+            ctx.check("the card is STILL pending -- an explicit ask rule is not skipped by auto",
+                      isinstance(app.pending_card, PermissionCard) and not app.pending_card.done)
+            ctx.check("nothing was answered", fake.permission_replies == [])
+    asyncio.run(body())
+
+
+@test
+def test_shift_tab_while_awaiting_feedback_does_not_hijack_the_borrowed_input(ctx: Ctx):
+    """The user pressed 4 and is typing why not -- a mode change mid-typing
+    must leave the card and the borrowed input alone; the NEXT Enter must
+    still deliver their feedback, never a stale "no longer waiting" toast
+    from a re-finished card `_borrowing_card` was left pointing at."""
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            card = app.pending_card
+            await pilot.press("4")
+            await pilot.pause(0.05)
+            ctx.check("now awaiting feedback", card.awaiting_feedback is True)
+            ctx.check("borrowing the input", app._borrowing_card is card)
+            for _ in range(3):
+                await pilot.press("shift+tab")
+                await pilot.pause(0.02)
+            ctx.check(f"mode still changed underneath (status bar updated), got {fake.permission_mode!r}",
+                      fake.permission_mode == "auto")
+            ctx.check("the card was left alone -- still pending, still awaiting feedback, not done",
+                      app.pending_card is card and card.awaiting_feedback and not card.done)
+            ctx.check("still borrowing the SAME card's input, untouched", app._borrowing_card is card)
+            await _type(pilot, "use a safer command")
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            ctx.check(f"the feedback was delivered normally, got {fake.permission_replies}",
+                      fake.permission_replies == [("tu1", {"action": "deny", "reason": "", "rule": None,
+                                                             "message": "use a safer command"})])
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 hotfix 16: the transcript follows new streamed output instead of
+# staying wherever the user's own prompt was -- Textual's anchor() primitive
+# (widget.py:800, confirmed to cover mid-stream growth, not just fresh
+# mounts) pinned to the bottom via Transcript.on_mount, released/reacquired
+# automatically by Textual's own scroll_y watcher on any manual scroll.
+# ============================================================================
+
+@test
+def test_transcript_follows_streamed_deltas_past_the_viewport(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 30)) as pilot:
+            # `\n\n` (not a single `\n`) is what actually overflows the
+            # viewport here -- AssistantText is a Markdown widget, and a
+            # single "\n" is a soft line break that Markdown rendering
+            # reflows into the SAME paragraph (verified live: 60 single-
+            # "\n" deltas rendered as one ~7-row wrapped paragraph, never
+            # overflowing a 27-row viewport at all); `\n\n` forces each
+            # into its own paragraph, which is what genuinely multi-line
+            # streamed text (the spec's own "200 streamed deltas of multi-
+            # line text") actually looks like.
+            for i in range(200):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.pause(0.1)
+            ctx.check(f"scrolled to the true bottom, got scroll_y={app.transcript.scroll_y} "
+                      f"max={app.transcript.max_scroll_y}", app.transcript.scroll_y >= app.transcript.max_scroll_y - 1)
+            texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
+            ctx.check(f"the last delta's text landed, got {texts}", texts and "line 199" in texts[-1])
+    asyncio.run(body())
+
+
+@test
+def test_transcript_pageup_releases_following_and_end_reanchors(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for i in range(120):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.pause(0.1)
+            ctx.check("following before any manual scroll", app.transcript.is_following())
+            app.transcript.scroll_page_up(animate=False)
+            await pilot.pause(0.05)
+            ctx.check("PageUp released following", not app.transcript.is_following())
+            y_after_pageup = app.transcript.scroll_y
+            for i in range(120, 140):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.pause(0.1)
+            ctx.check(f"the view stayed put while released, got {app.transcript.scroll_y} vs {y_after_pageup}",
+                      app.transcript.scroll_y == y_after_pageup)
+            ctx.check(f"the N-new counter grew, got {app.transcript.new_since_scroll}",
+                      app.transcript.new_since_scroll > 0)
+            await pilot.press("ctrl+end")
+            await pilot.pause(0.05)
+            ctx.check("Ctrl+End re-anchored to the bottom", app.transcript.is_following())
+            ctx.check(f"the N-new counter reset, got {app.transcript.new_since_scroll}",
+                      app.transcript.new_since_scroll == 0)
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 fixpass finding 15: a card too tall to fit releases the transcript's
+# bottom anchor when Textual scrolls it into view on focus (Screen.set_focus's
+# own can_view_entire() check) -- clear_pending_card must re-anchor once the
+# card resolves, but ONLY when the transcript was actually following right
+# before the card interrupted it.
+# ============================================================================
+
+@test
+def test_clear_pending_card_reanchors_if_the_transcript_was_following_before(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for i in range(80):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.pause(0.05)
+            ctx.check("following before the card ever appears", app.transcript.is_following())
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            ctx.check("set_pending_card recorded that the transcript WAS following",
+                      app._card_interrupted_following is True)
+            # Simulate the anchor actually being released while the card was
+            # pending -- exactly what a card too tall to fit does via
+            # Textual's own scroll-to-center on focus; same observable
+            # state either way, and this is deterministic across pilot
+            # terminal sizes.
+            app.transcript.scroll_page_up(animate=False)
+            await pilot.pause(0.05)
+            ctx.check("anchor released (not following any more)", not app.transcript.is_following())
+            await pilot.press("1")
+            await pilot.pause(0.1)
+            ctx.check("pending card cleared", app.pending_card is None)
+            ctx.check("re-anchored to the bottom -- output after this follows again",
+                      app.transcript.is_following())
+    asyncio.run(body())
+
+
+@test
+def test_clear_pending_card_does_not_force_scroll_when_not_previously_following(ctx: Ctx):
+    """Conditional, not unconditional -- a user who had scrolled up to
+    re-read something BEFORE the card ever appeared must not be yanked
+    back down just for answering it."""
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for i in range(80):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check("a PermissionCard is pending", isinstance(app.pending_card, PermissionCard))
+            # Force the "was NOT following right before this card" state
+            # directly -- deterministic, independent of exactly where a
+            # real user's own manual scroll would land relative to THIS
+            # prompt's own submit-time re-anchor (hotfix 16).
+            app._card_interrupted_following = False
+            app.transcript.scroll_page_up(animate=False)
+            await pilot.pause(0.05)
+            y_before = app.transcript.scroll_y
+            await pilot.press("1")
+            await pilot.pause(0.1)
+            ctx.check("pending card cleared", app.pending_card is None)
+            ctx.check(f"scroll position UNCHANGED -- never forced back down, got {app.transcript.scroll_y} "
+                      f"vs {y_before}", app.transcript.scroll_y == y_before)
+    asyncio.run(body())
+
+
+@test
+def test_new_prompt_reanchors_the_transcript(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for i in range(120):
+                await app.transcript.append_text(1, 0, f"line {i}\n\n")
+                if i % 20 == 0:
+                    await pilot.pause(0)
+            await pilot.pause(0.1)
+            app.transcript.scroll_page_up(animate=False)
+            await pilot.pause(0.05)
+            ctx.check("released after a manual scroll", not app.transcript.is_following())
+            await pilot.click("#prompt-input")
+            await _type(pilot, "hello")
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            ctx.check("submitting a new prompt re-anchored", app.transcript.is_following())
+    asyncio.run(body())
+
+
+# ============================================================================
 # /model, Shift+Tab mode cycle, Esc interrupt, Ctrl+C x2 quit, paste, history
 # ============================================================================
 
@@ -447,6 +913,349 @@ def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
             await pilot.press("escape")
             await pilot.pause(0.1)
             ctx.check("Esc dismisses the picker", not isinstance(app.screen, ModelPicker))
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 hotfix 1: the `/`/`@` completion popup's own Up/Down/Tab/Enter/Esc --
+# the TextArea must never swallow Up/Down while it's open (before this fix,
+# Down/Up on row 0 of a single-line prompt always fired history-nav instead,
+# since the popup's own open/closed state was never consulted at all).
+# ============================================================================
+
+def _real_registry():
+    from rolo_claude.commands.builtins import register_builtins
+    from rolo_claude.commands.registry import Registry
+    reg = Registry()
+    register_builtins(reg)
+    return reg
+
+
+@test
+def test_completion_popup_down_down_enter_inserts_third_command(ctx: Ctx):
+    from rolo_claude.tui.completion import complete_slash
+    from rolo_claude.tui.widgets.input import CompletionPopup
+
+    async def body():
+        fake = FakeController()
+        reg = _real_registry()
+        expected = [inv for inv, _desc in complete_slash("", reg)]
+        ctx.check(f"at least 3 builtin commands to pick from, got {len(expected)}", len(expected) >= 3)
+        app = await _mounted(fake, registry=reg)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/")
+            await pilot.pause(0.1)
+            popup = app.query_one(CompletionPopup)
+            ctx.check(f"popup is open after typing '/', got display={popup.display}", popup.display)
+            ctx.check(f"prompt_input's own open flag is set too, got {app.prompt_input._completion_open}",
+                      app.prompt_input._completion_open is True)
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            ctx.check(f"highlight moved to index 2 (two Downs from 0), got {popup.highlighted}",
+                      popup.highlighted == 2)
+
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            ctx.check(f"Tab inserted the THIRD command without running it, "
+                      f"got prompt text={app.prompt_input.text!r}, expected prefix={expected[2]!r}",
+                      app.prompt_input.text == expected[2] + " ")
+            ctx.check("the popup is closed after accepting", not popup.display)
+            ctx.check("no turn was submitted to the controller (Tab only inserts)",
+                      fake.submitted == [])
+    asyncio.run(body())
+
+
+@test
+def test_completion_popup_enter_runs_the_highlighted_slash_command(ctx: Ctx):
+    """Claude Code parity: one Enter on a `/` completion inserts it AND runs
+    it (Tab only inserts; `@` completions are only ever inserted). Before
+    this, `/models` + Enter merely re-inserted `/models` and a second Enter
+    was needed -- which the owner reported as "/models does nothing"."""
+    from rolo_claude.tui.widgets.input import CompletionPopup
+
+    async def body():
+        fake = FakeController()
+        reg = _real_registry()
+        app = await _mounted(fake, registry=reg)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/hel")
+            await pilot.pause(0.1)
+            popup = app.query_one(CompletionPopup)
+            ctx.check(f"popup lists /help first for '/hel', got {app._completion_items[:3]}",
+                      app._completion_items[:1] == ["/help"])
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            ctx.check("the popup is closed", not popup.display)
+            ctx.check(f"one Enter ran the command: the prompt is cleared, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "")
+            ctx.check("a built-in slash command never reaches the controller as a prompt",
+                      fake.submitted == [])
+            await pilot.press("escape")
+    asyncio.run(body())
+
+
+@test
+def test_completion_popup_esc_closes_it_without_submitting_or_clearing_text(ctx: Ctx):
+    from rolo_claude.tui.widgets.input import CompletionPopup
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake, registry=_real_registry())
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/mo")
+            await pilot.pause(0.1)
+            popup = app.query_one(CompletionPopup)
+            ctx.check(f"popup open after typing '/mo', got display={popup.display}", popup.display)
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check("Esc closes the popup", not popup.display)
+            ctx.check(f"the typed text is untouched by Esc, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "/mo")
+            ctx.check(f"prompt_input's own open flag cleared too, got {app.prompt_input._completion_open}",
+                      app.prompt_input._completion_open is False)
+            ctx.check("Esc did not also interrupt/quit (no turn was ever running)", not fake.quit_called)
+    asyncio.run(body())
+
+
+@test
+def test_completion_popup_typing_keeps_filtering_the_list(ctx: Ctx):
+    from rolo_claude.tui.completion import complete_slash
+    from rolo_claude.tui.widgets.input import CompletionPopup
+
+    async def body():
+        fake = FakeController()
+        reg = _real_registry()
+        expected = [inv for inv, _desc in complete_slash("mo", reg)]
+        ctx.check(f"at least one command starts with 'mo' (model/models), got {expected}", len(expected) >= 1)
+        app = await _mounted(fake, registry=reg)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/mo")
+            await pilot.pause(0.1)
+            popup = app.query_one(CompletionPopup)
+            ctx.check(f"filtered popup shows exactly the 'mo' matches, got {popup.option_count} "
+                      f"(expected {len(expected)})", popup.option_count == len(expected))
+    asyncio.run(body())
+
+
+@test
+def test_completion_popup_tab_still_accepts_the_highlighted_entry(ctx: Ctx):
+    """Regression check: Tab's own accept path (already correct before this
+    fix) must keep working unchanged now that Enter/Up/Down also react to
+    popup state."""
+    from rolo_claude.tui.completion import complete_slash
+
+    async def body():
+        fake = FakeController()
+        reg = _real_registry()
+        expected = [inv for inv, _desc in complete_slash("", reg)]
+        app = await _mounted(fake, registry=reg)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/")
+            await pilot.pause(0.1)
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            ctx.check(f"Tab accepted the FIRST (highlighted) command, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == expected[0] + " ")
+    asyncio.run(body())
+
+
+@test
+def test_at_path_completion_down_down_enter_inserts_third_entry(ctx: Ctx):
+    from rolo_claude.tui.widgets.input import CompletionPopup
+
+    async def body():
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            for name in ("aaa.txt", "bbb.txt", "ccc.txt"):
+                (cwd / name).write_text("x", encoding="utf-8")
+            fake = FakeController()
+            app = await _mounted(fake, cwd=str(cwd))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "@")
+                await pilot.pause(0.1)
+                popup = app.query_one(CompletionPopup)
+                ctx.check(f"@ path popup open with 3 entries, got display={popup.display} "
+                          f"count={popup.option_count}", popup.display and popup.option_count == 3)
+
+                await pilot.press("down")
+                await pilot.press("down")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"Enter accepted the third path entry, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "@ccc.txt ")
+                ctx.check("no turn was submitted", fake.submitted == [])
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 hotfix addendum 7: in every list dialog with a filter Input +
+# OptionList, the Input keeps keyboard focus for typing, but Up/Down/Enter
+# move/select the OptionList highlight (NavInput, tui/dialogs/listnav.py) --
+# "open, type a filter, press Down twice, Enter -> the third VISIBLE entry
+# is selected", per dialog.
+# ============================================================================
+
+@test
+def test_model_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
+    from rolo_claude.tui.dialogs.model_picker import ModelPicker
+    from textual.widgets import Input
+
+    models = [
+        {"ref": "or:aaa/one", "provider": "openrouter"},
+        {"ref": "or:bbb/two", "provider": "openrouter"},
+        {"ref": "or:ccc/three", "provider": "openrouter"},
+        {"ref": "or:ddd/four", "provider": "openrouter"},
+    ]
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            result = {}
+            app.push_screen(ModelPicker(models, current=""), lambda ref: result.__setitem__("ref", ref))
+            await pilot.pause(0.1)
+            filter_box = app.screen.query_one(Input)
+            ctx.check(f"the filter Input has focus, got {app.focused}", app.focused is filter_box)
+            expected = app.screen._filtered[2]["ref"]
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            ctx.check(f"the Input STILL has focus after Down/Down (never stolen by the list), got {app.focused}",
+                      app.focused is filter_box)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"the third visible entry was selected, got {result.get('ref')!r}, expected {expected!r}",
+                      result.get("ref") == expected)
+    asyncio.run(body())
+
+
+@test
+def test_resume_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
+    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from textual.widgets import Input
+
+    async def body():
+        fake = FakeController()
+        fake.list_sessions = lambda: list(_H13_SESSIONS)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/resume")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            from rolo_claude.tui.dialogs.session_picker import SessionPicker as SP
+            ctx.check(f"SessionPicker opened, got {type(app.screen).__name__}", isinstance(app.screen, SP))
+            filter_box = app.screen.query_one(Input)
+            expected = app.screen._filtered[2].get("id")
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            ctx.check(f"filter Input keeps focus, got {app.focused}", app.focused is filter_box)
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            # `_open_resume_picker`'s own callback calls `controller.resume(id)`
+            # on a real pick -- FakeController.resume() records it verbatim.
+            ctx.check(f"third session was picked and resumed, got {fake.submitted!r}, expected id {expected!r}",
+                      fake.submitted == [f"__resume__:{expected}"])
+    asyncio.run(body())
+
+
+@test
+def test_command_palette_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
+    from rolo_claude.tui.dialogs.palette import CommandPalette
+    from textual.widgets import Input
+
+    items = [
+        {"kind": "command", "label": "alpha", "detail": "", "value": "alpha"},
+        {"kind": "command", "label": "bravo", "detail": "", "value": "bravo"},
+        {"kind": "command", "label": "charlie", "detail": "", "value": "charlie"},
+        {"kind": "command", "label": "delta", "detail": "", "value": "delta"},
+    ]
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            result = {}
+            app.push_screen(CommandPalette(items), lambda item: result.__setitem__("item", item))
+            await pilot.pause(0.1)
+            filter_box = app.screen.query_one(Input)
+            expected = app.screen._filtered[2]["value"]
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            ctx.check(f"filter Input keeps focus, got {app.focused}", app.focused is filter_box)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            got = (result.get("item") or {}).get("value")
+            ctx.check(f"third entry selected, got {got!r}, expected {expected!r}", got == expected)
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 hotfix 5: `init`'s own interactive model picker (a standalone
+# Textual App, since a plain CLI command has no host BridgeApp screen stack
+# to push onto) -- same NavInput keys, tested the same way (`run_test()`
+# works for any Textual App, not just BridgeApp).
+# ============================================================================
+
+_INIT_PICKER_ENTRIES = [
+    {"ref": "dbx:databricks-glm-5-3", "label": "databricks-glm-5-3  path=mlflow", "group": "glm"},
+    {"ref": "dbx:databricks-kimi-k3", "label": "databricks-kimi-k3  path=mlflow", "group": "kimi"},
+    {"ref": "dbx:databricks-deepseek-v4-1-flash", "label": "databricks-deepseek-v4-1-flash  path=mlflow",
+     "group": "deepseek"},
+    {"ref": "dbx:databricks-claude-opus-4-6", "label": "databricks-claude-opus-4-6  path=anthropic",
+     "group": "claude_foundation"},
+]
+
+
+@test
+def test_init_picker_down_down_enter_selects_third_entry(ctx: Ctx):
+    from rolo_claude.tui.dialogs.init_picker import InitPickerApp
+
+    async def body():
+        app = InitPickerApp(_INIT_PICKER_ENTRIES)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.1)
+            expected = app._filtered[2]["ref"]
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"third entry chosen, got {app.chosen!r}, expected {expected!r}", app.chosen == expected)
+    asyncio.run(body())
+
+
+@test
+def test_init_picker_typing_filters_and_esc_cancels(ctx: Ctx):
+    from rolo_claude.tui.dialogs.init_picker import InitPickerApp
+
+    async def body():
+        app = InitPickerApp(_INIT_PICKER_ENTRIES)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.1)
+            await _type(pilot, "kimi")
+            await pilot.pause(0.1)
+            ctx.check(f"filtered to just the kimi entry, got {[e['ref'] for e in app._filtered]}",
+                      [e["ref"] for e in app._filtered] == ["dbx:databricks-kimi-k3"])
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check(f"Esc cancels with no pick, got {app.chosen!r}", app.chosen is None)
     asyncio.run(body())
 
 
@@ -708,6 +1517,92 @@ def test_ctrl_c_twice_quits_cleanly(ctx: Ctx):
         ctx.check("controller.quit() was called", fake.quit_called is True)
         ctx.check(f"app exited with return_code 0, got {app.return_code}", app.return_code == 0)
     asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 fixpass finding 5: Ctrl+Q (action_force_quit) uses its OWN
+# `_force_quitting` flag, never the shared `_quitting` double-Ctrl+C/`/quit`
+# already set -- the old shared flag made Ctrl+Q a no-op in exactly the
+# moment it exists for (double-Ctrl+C already stuck in a hung
+# `_quit_worker`). The belt-and-suspenders `os._exit()` timer is pinned
+# directly against `_force_quit_worker` (never through a real running app --
+# letting the REAL os._exit ever fire would kill this whole test process).
+# ============================================================================
+
+@test
+def test_force_quit_uses_its_own_flag_independent_of_quitting(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            worker_calls = []
+            app.run_worker = lambda fn, **kw: worker_calls.append(kw.get("name"))
+            # Simulate double-Ctrl+C already having started (and being
+            # stuck in) the ordinary quit path -- exactly the moment Ctrl+Q
+            # exists to rescue.
+            app._quitting = True
+            ctx.check("_force_quitting starts False", app._force_quitting is False)
+            app.action_force_quit()
+            ctx.check(f"a SEPARATE force-quit worker was scheduled despite _quitting already being True "
+                      f"(the old shared flag made this a no-op), got {worker_calls}",
+                      worker_calls == ["force-quit"])
+            ctx.check("its own flag is now set", app._force_quitting is True)
+            worker_calls.clear()
+            app.action_force_quit()
+            ctx.check("a SECOND Ctrl+Q while already force-quitting is a no-op (its OWN flag guards it)",
+                      worker_calls == [])
+    asyncio.run(body())
+
+
+@test
+def test_force_quit_worker_arms_an_os_exit_timer_after_calling_self_exit(ctx: Ctx):
+    """`self.exit()` alone is not a guarantee -- it goes through Textual's
+    own asyncio shutdown, which can join a still-hung `thread=True` worker
+    forever (3.10/3.11) or up to 300s (3.12+). A daemon `os._exit()` timer
+    is armed 2.5s later regardless. Exercised directly against
+    `_force_quit_worker` (never a real running app) so the timer's target
+    can be observed without ever letting the real `os._exit` fire here."""
+    import threading as threading_mod
+    import rolo_claude.tui.app as app_mod
+
+    class _StubApp:
+        def __init__(self):
+            self.controller = FakeController()
+            self.return_code = None
+
+        def _build_scrollback_message(self):
+            return None
+
+        def call_from_thread(self, fn, **kw):
+            fn(**kw)
+
+        def exit(self, return_code=0, message=None):
+            self.return_code = return_code
+
+    timers: list = []
+    real_timer_cls = threading_mod.Timer
+
+    class _CapturingTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append((interval, function, args or ()))
+            self.daemon = False
+
+        def start(self) -> None:
+            pass  # captured, deliberately never actually scheduled
+
+    threading_mod.Timer = _CapturingTimer
+    try:
+        stub = _StubApp()
+        app_mod.BridgeApp._force_quit_worker(stub)
+        ctx.check(f"self.exit() was called with the controller's own return code, got {stub.return_code}",
+                  stub.return_code == 0)
+        ctx.check(f"exactly one os._exit timer armed, got {timers}", len(timers) == 1)
+        interval, function, args = timers[0]
+        ctx.check(f"armed for 2.5s, got {interval}", interval == 2.5)
+        ctx.check(f"targets os._exit with the same return code, got function={function}, args={args}",
+                  function is app_mod.os._exit and args == (0,))
+    finally:
+        threading_mod.Timer = real_timer_cls
 
 
 @test
@@ -1182,6 +2077,110 @@ def test_slash_model_switches_the_real_session_and_next_reply_uses_it(ctx: Ctx):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+    asyncio.run(body())
+
+
+# ============================================================================
+# 1.0.1 hotfix 14: status bar ctx/cost fields, Databricks included -- never
+# the literal "ctx ?"/"$?" the pre-1.0.1 bar showed permanently for a
+# Databricks model (no context limit, no per-turn cost on the wire). Drives
+# a real mounted StatusBar through the actual dispatch.py message_end
+# handler + StatusBar.apply_status, feeding the EXACT event shape
+# agent/loop.py now produces (context_tokens/context_limit/total_input_
+# tokens/total_output_tokens alongside cost_usd) via FakeController, rather
+# than standing up a live Databricks/models.dev mock -- this is the
+# consumption side (dispatch -> apply_status -> _refresh_display); the
+# production side (resolve_model_profile -> CostMeter pricing) is covered
+# by test_model.py/test_hotfix_101_row_format.py.
+# ============================================================================
+
+def _one_turn_status_script(*, model: str, usage: dict, cost_usd, context_tokens, context_limit,
+                             total_input_tokens, total_output_tokens) -> list:
+    return [[
+        ev.user_message("hello", turn=1),
+        ev.Event("message_start", {"model": model}, turn=1),
+        ev.text_delta("a scripted reply", turn=1),
+        ev.message_end(turn=1, stop_reason="end_turn", usage=usage, cost_usd=cost_usd,
+                        context_tokens=context_tokens, context_limit=context_limit,
+                        total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens),
+        ev.turn_done(turn=1, reason="end_turn"),
+    ]]
+
+
+@test
+def test_status_bar_databricks_model_with_vendored_models_dev_pricing(ctx: Ctx):
+    """A Databricks endpoint models.dev prices (hotfix 12's row-format
+    source (a)) -- CostMeter (hotfix 14) computes a real running cost from
+    it, so the bar shows a real "$" figure and a real "ctx a/b n%", never
+    "ctx ?"/"$?"."""
+    async def body():
+        fake = FakeController(model="dbx:databricks-mock-priced", turns=_one_turn_status_script(
+            model="dbx:databricks-mock-priced", usage={"input_tokens": 12000, "output_tokens": 500},
+            cost_usd=0.0123, context_tokens=12000, context_limit=1_000_000,
+            total_input_tokens=12000, total_output_tokens=500,
+        ))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "hello")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=30)
+            rendered = str(app.status_bar.render())
+            ctx.check(f"ctx shows real tokens/limit/pct, got {rendered!r}", "ctx 12k/1M 1%" in rendered)
+            ctx.check(f"cost shows a real dollar figure, got {rendered!r}", "$0.0123" in rendered)
+            ctx.check("never the bare ctx ? placeholder", "ctx ? " not in rendered)
+            ctx.check("never the bare $? placeholder", "$? " not in rendered)
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_model_table_only_endpoint_shows_ctx_and_token_totals(ctx: Ctx):
+    """An endpoint with a context limit from model_table.json but no
+    models.dev price (hotfix 12 source (b)): ctx renders normally, cost
+    falls back to raw token totals rather than a dollar figure."""
+    async def body():
+        fake = FakeController(model="dbx:databricks-mock-table-only", turns=_one_turn_status_script(
+            model="dbx:databricks-mock-table-only", usage={"input_tokens": 5000, "output_tokens": 2000},
+            cost_usd=None, context_tokens=5000, context_limit=128_000,
+            total_input_tokens=5000, total_output_tokens=2000,
+        ))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "hello")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=30)
+            rendered = str(app.status_bar.render())
+            ctx.check(f"ctx is present (model_table limit), got {rendered!r}", "ctx 5k/128k 4%" in rendered)
+            ctx.check(f"cost falls back to token totals, not a dollar figure, got {rendered!r}",
+                      "in 5k out 2k" in rendered and "$" not in rendered.split("│")[2])
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_nothing_known_shows_used_tokens_and_totals(ctx: Ctx):
+    """No context limit and no price at all (hotfix 12 source (c), e.g. an
+    external Bedrock endpoint): ctx shows the used-tokens count alone (no
+    bar, no "/limit", no percent), cost falls back to token totals -- still
+    never the bare "ctx ?"/"$?"."""
+    async def body():
+        fake = FakeController(model="dbx:us-anthropic-claude-mock", turns=_one_turn_status_script(
+            model="dbx:us-anthropic-claude-mock", usage={"input_tokens": 9000, "output_tokens": 3000},
+            cost_usd=None, context_tokens=12000, context_limit=None,
+            total_input_tokens=9000, total_output_tokens=3000,
+        ))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "hello")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=30)
+            rendered = str(app.status_bar.render())
+            ctx.check(f"ctx shows used tokens alone, got {rendered!r}", "ctx 12k " in rendered)
+            ctx.check(f"no limit means no bar/percent, got {rendered!r}", "/1" not in rendered and "%" not in rendered)
+            ctx.check(f"cost falls back to token totals, got {rendered!r}", "in 9k out 3k" in rendered)
+            ctx.check("never the bare ctx ? placeholder", "ctx ? " not in rendered)
+            ctx.check("never the bare $? placeholder", "$? " not in rendered)
     asyncio.run(body())
 
 

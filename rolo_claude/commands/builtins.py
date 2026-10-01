@@ -154,7 +154,12 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     refreshes) -- headless surface for the same catalog refresh `rolo-claude
     models --refresh`/the TUI's own off-UI-thread `/models refresh` use.
     Bare `/models` reports the cached catalog's size/age without touching
-    the network."""
+    the network. 1.0.1 hotfix 3: bare now ALSO renders the cached table
+    (family/path/chat -- same `catalog_cli.format_dbx_table_lines` the CLI
+    and the TUI's own `/models` use, so all three never drift apart); a
+    failed refresh shows that same (unchanged) table plus the one-line
+    error, never just the error alone."""
+    from rolo_claude.catalog_cli import _dbx_rows, format_dbx_table_lines
     from rolo_claude.config.paths import bridge_home
     from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
     from rolo_claude.providers.databricks import (
@@ -164,16 +169,31 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     dbx = resolve_databricks()
     if dbx is None:
         return "Databricks is not configured -- nothing to refresh (see `rolo-claude doctor --work`)."
+    root = derive_workspace_root(dbx.host)
+
+    def _table_text(endpoints: dict) -> str:
+        if not endpoints:
+            return ""
+        rows = _dbx_rows(endpoints, root, state_dir, urls=False)
+        return "\n".join(format_dbx_table_lines(rows)) + "\n\n"
+
     if args.strip().lower() in ("refresh", "--refresh"):
-        ok, diff, note = refresh_dbx_catalog(state_dir, derive_workspace_root(dbx.host), dbx.token)
+        ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         endpoints = load_dbx_endpoints_json(state_dir)
         if not ok:
-            return f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached)."
-        return f"Refreshed: {len(endpoints)} endpoint(s) cached. Diff: {format_dbx_diff(diff)}"
+            return f"{_table_text(endpoints)}Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached)."
+        # 1.0.1 hotfix 12: see tui/slash.py's matching comment -- keeps the
+        # headless and TUI /models refresh surfaces from disagreeing on
+        # whether ctx/price data gets refreshed too.
+        from rolo_claude.providers.models_dev import refresh_models_dev_cache
+        md_ok, md_note = refresh_models_dev_cache(state_dir)
+        suffix = "" if md_ok else f" (models.dev refresh failed: {md_note} -- cached price data stays in use.)"
+        return (f"{_table_text(endpoints)}Refreshed: {len(endpoints)} endpoint(s) cached. "
+                f"Diff: {format_dbx_diff(diff)}{suffix}")
     endpoints = load_dbx_endpoints_json(state_dir)
     age = dbx_endpoints_age_seconds(state_dir)
     age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
-    return (f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}). "
+    return (f"{_table_text(endpoints)}{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}). "
             f"Use `/models refresh` (or `/dbx`) to update.")
 
 
@@ -340,7 +360,48 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
-    return f"Effort level: {facade.effort or 'not set (provider default)'}"
+    """1.0.1 hotfix 19/20. Bare `/effort`: the effective level, its source,
+    and this route's own accepted levels (print mode's whole answer; the
+    TUI additionally offers the inline selector card for this same bare
+    case -- see `tui/slash.py::_handle_effort`, which checks `args` itself
+    before ever reaching here). `/effort <level>`: sets `facade.session.
+    effort` directly (a live reference, not a snapshot -- see the class
+    docstring above; the SAME plain-attribute-write pattern `Controller.
+    set_permission_mode` already uses for `permission_engine.mode`) so the
+    NEXT model call picks it up with no other wiring -- clamped through the
+    same `clamp_effort` the request builders use, so `/effort` can never
+    set a value this route will 400 on.
+
+    Before this fix, `/effort <anything>` was pure decoration: the
+    registration was `kind=None` (show-only) and this function ignored
+    `args` completely, so typing `/effort medium` printed whatever
+    `facade.effort` was snapshotted as at session start (rolo's own report:
+    "every time I change the effort level it only selects xhigh") --
+    `facade.effort` is a one-time snapshot (see the class docstring), never
+    updated, which is exactly why the live `facade.session` reference is
+    used here instead."""
+    session = facade.session
+    profile = getattr(session, "provider_profile", None) if session is not None else None
+    current = getattr(session, "effort", None) if session is not None else facade.effort
+    source = getattr(session, "effort_source", None) if session is not None else None
+    supported = getattr(profile, "effort_values_supported", None) if profile is not None else None
+
+    requested = (args or "").strip().lower()
+    if not requested:
+        levels = ", ".join(supported) if supported else "(this model has no adjustable effort)"
+        return (f"Effort level: {current or 'not set (provider default)'} (source: {source or 'default'})\n"
+                f"Accepted for this model: {levels}")
+
+    if session is None or profile is None:
+        return "Effort can only be changed once a session is running."
+    if not profile.reasoning_effort_supported:
+        return f"{session.model_ref.raw} has no adjustable effort level -- nothing to set."
+    from rolo_claude.providers.profiles import clamp_effort
+    clamped = clamp_effort(requested, profile)
+    session.effort = clamped
+    session.effort_source = "session"
+    clamp_note = "" if clamped == requested else f" (clamped from '{requested}' -- not accepted by this model)"
+    return f"Effort level set to '{clamped}'{clamp_note} (source: session) -- takes effect on the next message."
 
 
 def _cmd_init(args: str, facade: HeadlessFacade) -> str:
@@ -491,7 +552,7 @@ _BUILTIN_SPECS = {
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
     "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
-    "effort": ("core", "Show the active reasoning effort level", None, _cmd_effort),
+    "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this rolo-claude installation", None, _cmd_doctor),
     "export": ("ui", "Export the conversation", None, _cmd_export),

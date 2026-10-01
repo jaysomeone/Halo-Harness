@@ -254,6 +254,15 @@ class Controller:
                                  message=decision.get("message", ""))
         return self.session.resolve_permission(request_id, decision)
 
+    def reevaluate_pending_permission(self, request_id: str) -> Optional[str]:
+        """1.0.1 fixpass finding 4: Shift+Tab/`/permissions` mode-change
+        re-evaluation for a still-parked ask -- see `Session.
+        reevaluate_pending_permission`'s own docstring for the full
+        contract. Returns "allow"/"deny" when it actually resolved the
+        waiter, else None (still "ask" under the new mode, or nothing
+        waiting for `request_id` any more)."""
+        return self.session.reevaluate_pending_permission(request_id)
+
     def answer_question(self, request_id: str, answer) -> bool:
         return self.session.resolve_question(request_id, answer)
 
@@ -388,10 +397,31 @@ class Controller:
     # ---- read-only queries (UI thread, synchronous, cheap) ----------------
 
     def list_models(self) -> list:
-        """`[{ref, context, output, price_in, price_out, provider}, ...]`
-        for the ModelPicker -- from the same models.json + routes.json
-        aliases the resolver uses, so a pick is guaranteed to resolve."""
+        """`[{ref, context_tokens, max_output_tokens, price_in_per_m,
+        price_out_per_m, provider, group, detail, dbu}, ...]` for the
+        ModelPicker/init picker -- from the same models.json/dbx-endpoints.
+        json + routes.json aliases the resolver uses, so a pick is
+        guaranteed to resolve. 1.0.1 hotfix 12: prices are ALWAYS USD per
+        MILLION tokens now (`model_display.format_price_per_m`'s own unit),
+        normalized at the source here regardless of which raw unit the
+        underlying catalog used, so every row -- OpenRouter, cc:, Databricks
+        alike -- renders through the exact same `model_display.
+        format_model_row` with no per-provider special-casing left at
+        render time."""
         from rolo_claude.providers.databricks import load_models_json
+
+        def _per_m(price_per_token) -> "float | None":
+            # 1.0.1 fixpass finding 7: models.json stores EVERY OpenRouter
+            # price as a STRING (e.g. "0.0000008", confirmed across all 464
+            # cached entries) -- float(v) in a try/except, same as the
+            # pre-1.0.1 code, so a numeric string is never treated as
+            # unknown and every row's price columns go blank.
+            if isinstance(price_per_token, bool):
+                return None
+            try:
+                return float(price_per_token) * 1_000_000
+            except (TypeError, ValueError):
+                return None
 
         out: list = []
         seen = set()
@@ -403,33 +433,59 @@ class Controller:
             entry = models.get(name) or {}
             ref = f"or:{name}"
             seen.add(ref)
+            pricing = entry.get("pricing") or {}
             out.append({
-                "ref": ref, "context": entry.get("context_length") or 128000,
-                "output": entry.get("max_output_tokens") or 16384,
-                "price_in": (entry.get("pricing") or {}).get("prompt"),
-                "price_out": (entry.get("pricing") or {}).get("completion"),
+                "ref": ref, "context_tokens": entry.get("context_length") or 128000,
+                "max_output_tokens": entry.get("max_output_tokens") or 16384,
+                "price_in_per_m": _per_m(pricing.get("prompt")), "price_out_per_m": _per_m(pricing.get("completion")),
                 "provider": "openrouter",
             })
         for alias, target in sorted((self.routes.get("aliases") or {}).items()):
             if alias not in seen:
-                out.append({"ref": alias, "context": None, "output": None, "price_in": None,
-                            "price_out": None, "provider": "alias", "target": target})
-        # H11 Part A: the "Claude subscription (via Claude Code)" group --
-        # the nine cc: aliases, with real profile data when known
-        # (providers.cc_models.CC_MODEL_TABLE / a --refresh cache), so
-        # they filter/sort/price alongside every OpenRouter row above
-        # instead of needing a separate picker.
-        from rolo_claude.providers.cc_models import CC_ALIASES, profile_fields_for_cc_model
-        for alias, cc_target in CC_ALIASES.items():
-            ref = f"cc:{alias}"
-            if ref in seen:
-                continue
-            fields = profile_fields_for_cc_model(cc_target) or {}
-            out.append({
-                "ref": ref, "context": fields.get("context_tokens"), "output": fields.get("max_output_tokens"),
-                "price_in": fields.get("price_in"), "price_out": fields.get("price_out"),
-                "provider": "cc", "group": "Claude subscription (via Claude Code)",
-            })
+                out.append({"ref": alias, "provider": "alias", "target": target})
+        # H11 Part A: the "claude.ai subscription" group -- the nine cc:
+        # aliases, with real profile data when known (providers.cc_models.
+        # CC_MODEL_TABLE / a --refresh cache), so they filter/sort/price
+        # alongside every OpenRouter row above instead of needing a
+        # separate picker. 1.0.1 hotfix addendum 12: group label shortened
+        # from "Claude subscription (via Claude Code)" so a full row still
+        # fits in 110 columns.
+        #
+        # 1.0.1 hotfix addendum 9: shown ONLY when the subscription route is
+        # actually available -- `claude auth status` reports a real
+        # claude.ai login (`SUBSCRIPTION_AUTH_METHODS`, the SAME check
+        # `init_cli.py::_claude_login_available`/`model.py`'s bare-alias
+        # resolver already use). Verified live: a Databricks WORK box had
+        # `claude` logged in via its OWN work settings (authMethod !=
+        # "claude.ai") -- the old, unconditional version listed nine cc:
+        # models here that a `cc:<name>` call would then refuse at request
+        # time, with no hint from the picker that they'd never work.
+        # 1.0.1 fixpass finding 1: `cached_claude_auth_status()`, never the
+        # real `claude_auth_status()` -- this method is rebuilt on every
+        # `/model` open; calling the real one here meant spawning a
+        # `claude auth status` subprocess (up to a 10s timeout) synchronously
+        # every single time, measured as the single largest piece of a
+        # 2-5s TUI freeze on a real work box. Only a startup worker
+        # (tui/app.py's on_mount) ever populates that cache now.
+        from rolo_claude.providers.cc_models import CC_ALIASES, SUBSCRIPTION_AUTH_METHODS, cached_claude_auth_status, \
+            profile_fields_for_cc_model
+        try:
+            status = cached_claude_auth_status()
+        except Exception:
+            status = None
+        cc_available = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
+        if cc_available:
+            for alias, cc_target in CC_ALIASES.items():
+                ref = f"cc:{alias}"
+                if ref in seen:
+                    continue
+                fields = profile_fields_for_cc_model(cc_target) or {}
+                out.append({
+                    "ref": ref, "context_tokens": fields.get("context_tokens"),
+                    "max_output_tokens": fields.get("max_output_tokens"),
+                    "price_in_per_m": _per_m(fields.get("price_in")), "price_out_per_m": _per_m(fields.get("price_out")),
+                    "provider": "cc", "group": "claude.ai subscription",
+                })
         # H14 scope I: the discovered Databricks endpoint catalog
         # (~/.rolo-claude/dbx-endpoints.json, from `init --preset work`/
         # `models --refresh` -- never a vendored list), grouped by family,
@@ -437,13 +493,35 @@ class Controller:
         # a known non-chat endpoint (embeddings/whisper) is hidden here
         # (`rolo-claude models` itself still lists it, for diagnostics).
         try:
-            from rolo_claude.providers.databricks import load_dbx_endpoints_json
+            from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
             from rolo_claude.providers.dbx_routing import (
-                chat_route_candidates, classify_family, format_dbu_cost, resolve_databricks_dialect,
+                PATH_TYPE_DISPLAY, classify_family, default_path_type, format_dbu_cost,
             )
             endpoints = load_dbx_endpoints_json(self.state_dir)
         except Exception:
             endpoints = {}
+        # 1.0.1 hotfix 4/addendum 10: an old-shape cache (no `api_types` ever
+        # recorded) makes `default_path_type` silently degrade to
+        # "invocations" for every openai-chat family -- checked ONCE here,
+        # same migration signal `catalog_cli.py`'s own table uses, so this
+        # picker never shows that wrong answer as if it were real data.
+        old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
+        from rolo_claude.model_display import databricks_row_fields
+        from rolo_claude.providers.profiles import load_model_table
+        model_table = load_model_table()
+        # 1.0.1 fixpass finding 1: loaded ONCE for the whole loop below, not
+        # once per endpoint (databricks_row_fields's own `live_models_dev`/
+        # `vendored_fallback` params) -- models-dev.json can be several MB;
+        # 30 Databricks rows on a real catalog re-read and re-parsed the
+        # same file 30 times (1.37s measured on a fast host) before this.
+        try:
+            from rolo_claude.providers.models_dev import (
+                databricks_entries_from_full_models_dev, load_models_dev_json, load_vendored_databricks_fallback,
+            )
+            live_models_dev = databricks_entries_from_full_models_dev(load_models_dev_json(self.state_dir))
+            vendored_fallback = load_vendored_databricks_fallback()
+        except Exception:
+            live_models_dev, vendored_fallback = {}, {}
         for name in sorted(endpoints):
             ref = f"dbx:{name}"
             if ref in seen:
@@ -453,26 +531,34 @@ class Controller:
                                       model_class=e.get("model_class") or "")
             if family == "non_chat":
                 continue
-            try:
-                _clean, dialect = resolve_databricks_dialect(name, self.state_dir)
-                if dialect == "anthropic-passthrough":
-                    path_type = "anthropic"
-                else:
-                    cands = chat_route_candidates(name, self.state_dir)
-                    path_type = cands[0].key if cands else "?"
-            except Exception:
-                path_type = "?"
+            if old_shape:
+                path_type = "unknown"
+            else:
+                try:
+                    path_type = default_path_type(name, self.state_dir)
+                except Exception:
+                    path_type = "?"
             usage_policy = e.get("usage_policy") if isinstance(e.get("usage_policy"), dict) else {}
             dbu = format_dbu_cost(usage_policy.get("output_dbu_per_1k_tokens"))
+            try:
+                fields = databricks_row_fields(name, state_dir=self.state_dir, model_table=model_table,
+                                                live_models_dev=live_models_dev, vendored_fallback=vendored_fallback)
+            except Exception:
+                fields = {}
+            path_display = PATH_TYPE_DISPLAY.get(path_type, path_type)
             out.append({
-                "ref": ref, "context": None, "output": None, "price_in": None, "price_out": None,
-                "provider": "databricks", "group": f"Databricks ({family})", "path_type": path_type, "dbu": dbu,
+                "ref": ref, "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": fields.get("max_output_tokens"),
+                "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
+                "provider": "databricks", "group": f"Databricks ({family})", "path_type": path_type,
+                "detail": f"{family} · {path_display}", "dbu": dbu if dbu != "?" else None,
+                "task": e.get("task"),
             })
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
-            out.insert(0, {"ref": current, "context": self.session.model_profile.context_tokens,
-                           "output": self.session.model_profile.max_output_tokens,
-                           "price_in": None, "price_out": None, "provider": self.session.model_ref.provider})
+            out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,
+                           "max_output_tokens": self.session.model_profile.max_output_tokens,
+                           "provider": self.session.model_ref.provider})
         return out
 
     def list_sessions(self) -> list:

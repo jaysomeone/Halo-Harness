@@ -57,8 +57,10 @@ from rolo_claude.hooks import HookRunner
 from rolo_claude.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
 from rolo_claude.permissions import Decision, PermissionEngine
 from rolo_claude.providers.errors import (
-    CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
+    CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_effort_rejected_message, is_effort_with_tools_rejected_message,
+    is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
 )
+from rolo_claude.providers.http import is_connect_failure_message
 from rolo_claude.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
     max_tokens_budget, overflow_classifier, record_databricks_output_tokens,
@@ -572,6 +574,21 @@ def _assistant_block_is_replayable(b: dict) -> bool:
     return True
 
 
+
+def generated_tokens_for_otpm(usage) -> "int | None":
+    """Tokens the Databricks output-tokens-per-minute limit counts for one
+    reply: output PLUS reasoning. `map_usage` reports reasoning separately
+    from output since the 1.0.1 fix pass (so cost is never double-billed),
+    but the OTPM budget is charged for every generated token, so the
+    tracker must see their sum or it under-counts and the 429s it exists
+    to prevent come back. None when the provider reported neither."""
+    if not isinstance(usage, dict):
+        return None
+    out, reasoning = usage.get("output_tokens"), usage.get("reasoning_tokens")
+    if out is None and reasoning is None:
+        return None
+    return int(out or 0) + int(reasoning or 0)
+
 class Session:
     """One conversation against one model. `session_context.system_prompt`
     is computed ONCE by the caller and logged as the session's single
@@ -583,6 +600,7 @@ class Session:
         small_model_ref: Optional[ModelRef] = None, session_log: Optional[SessionLog] = None,
         max_turns: int = 50, openrouter_base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
+        effort_source: Optional[str] = None,
         permission_engine: Optional[PermissionEngine] = None,
         session_catalog: Optional[object] = None, mcp_manager: Optional[object] = None,
         hook_runner: Optional[HookRunner] = None,
@@ -623,6 +641,41 @@ class Session:
         self.tool_registry: ToolRegistry = session_context.tool_registry
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         self.provider_profile: ProviderProfile = resolve_profile(self.route)
+        # 1.0.1 hotfix 19: "high" is the Anthropic-family default when
+        # NOTHING more specific was set anywhere upstream (`--effort`,
+        # `/effort`, settings `effortLevel`/`modelSettings.<id>.effortLevel`
+        # -- `headless.py::build_session` already resolved all of those into
+        # `effort` before this constructor ever runs, so `effort is None`
+        # here genuinely means "nothing configured"). Every OTHER family
+        # keeps its existing "omit -> provider default" behaviour
+        # (`self.effort` stays None) -- this is scoped to
+        # `thinking_format == "anthropic_thinking"` alone, which is exactly
+        # cc:/ant:/every Databricks Claude foundation/Bedrock-Claude route
+        # (`resolve_profile`'s own anthropic-passthrough branch), never a
+        # chat-dialect route. `_build_body_for_messages`'s `no_thinking`
+        # call (the summariser) still explicitly forces `effort=None` for
+        # THAT one call regardless of this default -- it reads `self.effort`
+        # only in its OWN `else` branch, so it's unaffected.
+        self.effort_source = effort_source
+        # 1.0.1 fixpass finding 11: the "high" default is scoped to
+        # ADAPTIVE-capable models only (Opus/Fable/Mythos always, Sonnet
+        # 4.6+) -- a non-adaptive model (Haiku 4.5, Sonnet 4.5 or older)
+        # has no `{type: "adaptive"}` mode at all, so "high" became a
+        # budget_tokens value close to max_tokens (see map_effort_anthropic),
+        # letting thinking crowd out the answer on every turn where 1.0.0
+        # sent no thinking at all. A non-adaptive model keeps the old
+        # "omit -> provider default" behaviour (`self.effort` stays None)
+        # unless the user/settings explicitly set one (still clamped below).
+        from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+        if (self.effort is None and self.provider_profile.thinking_format == "anthropic_thinking"
+                and _anthropic_model_supports_adaptive_thinking(self.model_ref.model)):
+            self.effort = "high"
+            self.effort_source = self.effort_source or "default"
+        elif self.effort is not None:
+            from rolo_claude.providers.profiles import clamp_effort
+            clamped = clamp_effort(self.effort, self.provider_profile)
+            if clamped != self.effort:
+                self.effort = clamped
         self.openrouter_base_url = openrouter_base_url
         self.extra_headers = extra_headers or {}
         self._loop_breaker: dict = {}  # canonical (name,args) -> consecutive count, reset every turn
@@ -1402,6 +1455,17 @@ class Session:
 
         attempts = 0
         empty_retried = False
+        # 1.0.1 fixpass finding 10: TWO independent one-shot flags, not one
+        # shared `effort_retried` -- the gpt-6-with-tools repair
+        # (reasoning_effort:"none") and the general strip-the-field repair
+        # are DIFFERENT fixes for different messages; sharing one flag meant
+        # a "none" retry that itself still failed (still invalid on that
+        # route) permanently blocked the strip retry from ever running,
+        # failing the turn outright when stripping the field would have
+        # worked. Each may now fire once, in order, on separate failures of
+        # the SAME step.
+        effort_none_retried = False
+        effort_stripped_retried = False
         # H10 Part A: `call_t0` starts once, before the FIRST attempt --
         # `latency_ms` on a call that only succeeded after a retry ladder
         # (429/5xx backoff) reports the user-visible wall-clock time for
@@ -1600,6 +1664,38 @@ class Session:
                     # ALWAYS means OUR OWN reasoning-replay logic has a bug.
                     yield events.error(f"reasoning-replay bug (never retried): {e.message}", turn=turn_no, err_type="reasoning_replay_bug")
                     return None
+                # 1.0.1 hotfix 19.3: an effort-field 400 is a phase-1
+                # failure too, not a phase-2 (mid-stream) wire_error -- a
+                # non-2xx HTTP response is rejected before any SSE ever
+                # starts, so it's ALWAYS raised as this UpstreamError, never
+                # reaches the `wire_error is not None` branch below (which
+                # still carries its own COPY of this same check, as a
+                # backstop for any dialect that somehow surfaces it
+                # mid-stream instead). See that branch's own comment for
+                # the full rationale.
+                if is_effort_with_tools_rejected_message(e.message) and not effort_none_retried:
+                    # 1.0.1 hotfix 22: the gpt-6-family-specific wording --
+                    # dropping the field is not enough (the endpoint's own
+                    # default is not none either), so this sets it
+                    # explicitly instead of stripping it.
+                    effort_none_retried = True
+                    log.warning("reasoning_effort+tools rejected by upstream (%s) -- retrying once with "
+                                "reasoning_effort='none'", e.message)
+                    body = {**body, "reasoning_effort": "none"}
+                    body.pop("reasoning", None)  # host_specific_fields shape -- never both at once
+                    req = self._build_request(body)
+                    continue
+                if is_effort_rejected_message(e.message) and not effort_stripped_retried:
+                    # 1.0.1 fixpass finding 10: reachable even after a failed
+                    # "none" retry just above (independent flag) -- e.g. this
+                    # message matched BOTH checks and "none" itself 400'd
+                    # again; stripping the field entirely is the fallback.
+                    effort_stripped_retried = True
+                    log.warning("effort field rejected by upstream (%s) -- retrying once with it removed", e.message)
+                    body = {k: v for k, v in body.items()
+                             if k not in ("thinking", "output_config", "reasoning", "reasoning_effort")}
+                    req = self._build_request(body)
+                    continue
                 # H5 scope F item 2: OpenCode's message-pattern classifier
                 # (Appendix B) is OR'd onto the existing status-table
                 # decision -- either one saying "retry" is enough; only
@@ -1607,6 +1703,28 @@ class Session:
                 # (Appendix B's jittered 2s*2^n / retry-after-ms / retry-
                 # after formula) drives the actual wait, still capped by
                 # `_MAX_RETRY_WAIT_S` the same way the old ladder was.
+                #
+                # 1.0.1 hotfix 2: a connect-phase failure (DNS/refused/
+                # unreachable/our own bounded-connect timeout --
+                # recognized by `providers.http.is_connect_failure_message`,
+                # the canonical "cannot resolve/reach <host> ..." lead-in
+                # EVERY connect failure's message carries, whichever wire
+                # mapper (`databricks_unreachable_response`/
+                # `map_upstream_error`) re-wrapped it -- NEVER rides this
+                # ladder, full stop. Checked BEFORE `is_retryable_message`,
+                # which would otherwise blanket-retry it anyway (status is
+                # always 502, and that function retries any status>=500
+                # regardless of message). Phase 1
+                # (`_run_phase1_attempts`/`_run_phase1_anthropic`) already
+                # made its own ONE immediate retry before this `UpstreamError`
+                # was ever raised, so this is correctly terminal here --
+                # retrying a DNS failure on a 1-16s timer just repeats the
+                # identical failure, slower.
+                if is_connect_failure_message(e.message):
+                    self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
+                    yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=False,
+                                        category=overflow_classifier(e.status, e.message))
+                    return None
                 merged_retryable = e.retryable or is_retryable_message(
                     e.status, e.message, host=self.model_ref.provider,
                 )
@@ -1631,6 +1749,34 @@ class Session:
                 if is_reasoning_replay_bug(message):
                     yield events.error(f"reasoning-replay bug (never retried): {message}", turn=turn_no, err_type="reasoning_replay_bug")
                     return None
+                # 1.0.1 hotfix 19.3: a 400 naming the effort field itself
+                # (verified wording: `output_config.effort: Input should be
+                # 'low', 'medium', 'high' or 'max'`) retries ONCE with every
+                # effort-related field stripped from the body -- omitting it
+                # always falls back to the provider's own default on every
+                # dialect, so this can only turn a hard failure into a
+                # successful turn at a slightly lower effort, never the
+                # reverse. `clamp_effort` (providers/profiles.py) already
+                # prevents the KNOWN case (`xhigh` on an Anthropic route)
+                # from ever reaching here; this is the backstop for a route
+                # whose accepted set isn't modeled correctly yet.
+                if is_effort_with_tools_rejected_message(message) and not effort_none_retried:
+                    effort_none_retried = True
+                    log.warning("reasoning_effort+tools rejected by upstream (%s) -- retrying once with "
+                                "reasoning_effort='none'", message)
+                    body = {**body, "reasoning_effort": "none"}
+                    body.pop("reasoning", None)
+                    req = self._build_request(body)
+                    continue
+                if is_effort_rejected_message(message) and not effort_stripped_retried:
+                    # 1.0.1 fixpass finding 10: independent flag -- see the
+                    # matching UpstreamError branch's own comment above.
+                    effort_stripped_retried = True
+                    log.warning("effort field rejected by upstream (%s) -- retrying once with it removed", message)
+                    body = {k: v for k, v in body.items()
+                             if k not in ("thinking", "output_config", "reasoning", "reasoning_effort")}
+                    req = self._build_request(body)
+                    continue
                 retryable = wire_error.get("type") in ("overloaded_error", "rate_limit_error", "api_error")
                 merged_retryable = retryable or is_retryable_message(
                     wire_error.get("status"), message, host=self.model_ref.provider,
@@ -1673,6 +1819,18 @@ class Session:
                     turn=turn_no, err_type="provider_failure",
                 )
                 return None
+            if effort_stripped_retried and self.effort is not None:
+                # 1.0.1 fixpass finding 10: a successful strip-the-field
+                # retry proves THIS session's `self.effort` value is
+                # rejected outright on this route -- reset it (rather than
+                # leaving it set to the value that just failed) so every
+                # LATER step's own first attempt builds its request with no
+                # effort field at all, instead of repeating the SAME
+                # rejected value first and paying for two requests per step
+                # for the rest of the session.
+                log.info("effort '%s' rejected on this route -- cleared for the rest of the session "
+                         "after a successful strip retry", self.effort)
+                self.effort = None
             break  # a clean, non-empty stream -- proceed to build the result
 
         reasoning = None
@@ -1773,7 +1931,7 @@ class Session:
         )
         output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
         if self.model_ref.provider == "databricks":
-            record_databricks_output_tokens(self.model_ref.raw, output_tokens)
+            record_databricks_output_tokens(self.model_ref.raw, generated_tokens_for_otpm(result.usage))
         # H5 scope B: the provider's own reported prompt size drives the
         # compaction trigger (`_maybe_auto_compact`) -- "the provider's last
         # prompt_tokens (else estimate)" per the brief. H5b finding 4: on a
@@ -2089,6 +2247,12 @@ class Session:
                 if isinstance(phase1_failure, ProviderNotConfigured):
                     return "", None, "failed"
                 e = phase1_failure  # UpstreamError
+                # 1.0.1 hotfix 2: same connect-failure short-circuit as
+                # `_step` above -- never ladder-retry a DNS/refused/
+                # unreachable failure just because a compaction summarisation
+                # call happened to hit it.
+                if is_connect_failure_message(e.message):
+                    return "", None, "failed"
                 merged_retryable = e.retryable or is_retryable_message(
                     e.status, e.message, host=self.model_ref.provider,
                 )
@@ -2536,7 +2700,10 @@ class Session:
                     yield events.message_end(
                         turn=turn_no, stop_reason=final_result.stop_reason, usage=final_result.usage,
                         cost_usd=(self.cost_meter.total_usd if self.cost_meter.has_cost_data else None),
-                        context_pct=context_pct,
+                        context_pct=context_pct, context_tokens=prompt_tokens,
+                        context_limit=self.model_profile.context_tokens,
+                        total_input_tokens=self.cost_meter.total_input_tokens,
+                        total_output_tokens=self.cost_meter.total_output_tokens,
                     )
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -2679,7 +2846,10 @@ class Session:
             yield events.message_end(
                 turn=turn_no, stop_reason=result.stop_reason, usage=result.usage,
                 cost_usd=(self.cost_meter.total_usd if self.cost_meter.has_cost_data else None),
-                context_pct=context_pct,
+                context_pct=context_pct, context_tokens=prompt_tokens,
+                context_limit=self.model_profile.context_tokens,
+                total_input_tokens=self.cost_meter.total_input_tokens,
+                total_output_tokens=self.cost_meter.total_output_tokens,
             )
 
             if not tool_use_blocks:
@@ -3072,7 +3242,17 @@ class Session:
                         suffix += 1
                     request_id = f"{request_id}#{suffix}"
                 item["ask_request_id"] = request_id
-                self._permission_waiters[request_id] = {"event": threading.Event(), "decision": None}
+                # 1.0.1 fixpass finding 4: `tool_name`/`tool_input`/`tool`
+                # carried on the slot itself (not just the local `item`,
+                # which lives only in this worker-thread frame) so the UI
+                # thread's `reevaluate_pending_permission` below can re-run
+                # `permission_engine.decide()` for this SAME parked request
+                # under a newly-changed mode without reaching into the
+                # worker's own stack.
+                self._permission_waiters[request_id] = {
+                    "event": threading.Event(), "decision": None,
+                    "tool_name": name, "tool_input": tool_input, "tool": tool,
+                }
                 return item
             # decision.action == "allow" (the PermissionRequest hook just
             # answered it) -- fall through to item["ready"]=True below.
@@ -3301,6 +3481,37 @@ class Session:
         slot["decision"] = decision
         slot["event"].set()
         return True
+
+    def reevaluate_pending_permission(self, request_id: str) -> Optional[str]:
+        """1.0.1 fixpass finding 4: called from the UI THREAD on a mode
+        change (Shift+Tab/`/permissions`) while `request_id` is still
+        parked in `_await_permission_decision` -- re-runs `permission_
+        engine.decide()` for the SAME `tool_name`/`tool_input`/`tool` the
+        ask was originally raised with (stashed on the waiter slot itself
+        at creation time, see `_resolve_tool_call`'s own ask branch), now
+        against `permission_engine.mode`'s NEW value.
+
+        Resolves the waiter (exactly like `resolve_permission` above) and
+        returns the resulting action ("allow"/"deny") ONLY when `decide()`
+        no longer says "ask" -- e.g. `auto` allows most things but an
+        explicit `ask:` rule still asks in every mode but
+        `bypassPermissions`, so cycling to `auto` must not blindly approve
+        that. Returns None (the waiter is left untouched, still parked)
+        when nothing is waiting for `request_id`, or `decide()` still says
+        "ask" under the new mode -- the caller must leave the card up
+        either way, never guess at a UI-level shortcut."""
+        slot = self._permission_waiters.get(request_id)
+        if slot is None:
+            return None
+        tool_name = slot.get("tool_name")
+        if tool_name is None:
+            return None
+        decision = self.permission_engine.decide(tool_name, slot.get("tool_input"), slot.get("tool"))
+        if decision.action not in ("allow", "deny"):
+            return None
+        slot["decision"] = decision
+        slot["event"].set()
+        return decision.action
 
     def resolve_question(self, request_id: str, answer) -> bool:
         """Called from the UI THREAD: answer a pending `question` (the
@@ -3954,6 +4165,46 @@ class Session:
         self.model_label = model_ref.raw
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         self.provider_profile = resolve_profile(self.route)
+        # 1.0.1 fixpass finding 6: `self.cost_meter` was built ONCE, at
+        # Session construction time, from the STARTING model's own prices
+        # (see __init__ above) and never touched again here -- every turn
+        # after a `/model` switch kept billing (and the status bar kept
+        # showing) the OLD model's per-token rates against the NEW model's
+        # real usage. `total_usd`/`turns` accumulated so far are correctly
+        # left alone (spend already recorded is real spend, priced at
+        # whatever was true when it happened) -- only the METER's rates
+        # move to match what NEW usage will actually cost from here on.
+        self.cost_meter.price_in = model_profile.price_in
+        self.cost_meter.price_out = model_profile.price_out
+        self.cost_meter.price_cache_read = model_profile.price_cache_read
+        self.cost_meter.price_cache_write = model_profile.price_cache_write
+
+        # 1.0.1 hotfix 20.4: `/model` re-clamps the CARRIED-OVER effort for
+        # the NEW route -- an effort value valid on the old model (say
+        # `xhigh` on a DeepSeek chat route) can be exactly the value the
+        # NEW route's own `output_config.effort` schema rejects (item 19's
+        # bug, but triggered by a model switch instead of session start).
+        # `effort_change_note` is read by both callers of this method
+        # (agent/loop.py's own command pump and controller.py's `set_model`)
+        # to tell the user their effort level just changed under them.
+        self.effort_change_note: Optional[str] = None
+        from rolo_claude.providers.profiles import clamp_effort
+        from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+        if self.effort is not None:
+            clamped = clamp_effort(self.effort, self.provider_profile)
+            if clamped != self.effort:
+                self.effort_change_note = f"Effort level adjusted to '{clamped}' for {model_ref.raw} (was '{self.effort}')"
+                self.effort = clamped
+        elif (self.provider_profile.thinking_format == "anthropic_thinking"
+              and _anthropic_model_supports_adaptive_thinking(self.model_ref.model)):
+            # Switching INTO an Anthropic-family route with no effort set at
+            # all yet (e.g. this session started on a chat-dialect model)
+            # gets the same "high" default a session starting there would --
+            # 1.0.1 fixpass finding 11: only when the NEW model is adaptive-
+            # capable (see __init__'s matching comment); a non-adaptive
+            # model keeps "omit -> provider default" instead.
+            self.effort = "high"
+            self.effort_source = "default"
 
         for name in self.tool_registry.names():
             tool = self.tool_registry.get(name)
@@ -3976,13 +4227,25 @@ class Session:
         permission_mode/session_id/context_limit filled from live state, so
         a UI never has to guess them. `mcp` comes from `self.mcp_status_fn`
         when the caller installed one (the Controller does; a bare Session
-        reports 0/0)."""
+        reports 0/0).
+
+        1.0.1 hotfix 14: `context_tokens` defaults to `self._last_prompt_
+        tokens` (0 before the first reply of the session/since the last
+        `/clear`) rather than None when the caller doesn't pass one
+        explicitly -- session-start/`/clear`/mode-change/model-switch all
+        call this with no `context_tokens=` override, and the status bar
+        needs a real number (0, not "unknown") to show "ctx 0/1M 0%"
+        before the first turn rather than blanking the field."""
         mcp = self.mcp_status_fn() if self.mcp_status_fn else {"connected": 0, "total": 0}
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
-            context_tokens=context_tokens, context_limit=self.model_profile.context_tokens,
+            context_tokens=context_tokens if context_tokens is not None else (self._last_prompt_tokens or 0),
+            context_limit=self.model_profile.context_tokens,
             cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None,
             permission_mode=self.permission_engine.mode, session_id=self.log.session_id, mcp=mcp,
+            total_input_tokens=self.cost_meter.total_input_tokens,
+            total_output_tokens=self.cost_meter.total_output_tokens,
+            effort=self.effort,
         )
 
     @property
@@ -4298,6 +4561,8 @@ class Session:
                 out(self.status_event())
             elif kind == "set_model":
                 self.set_model(data["model_ref"], data["model_profile"], data.get("creds"))
+                if self.effort_change_note:
+                    out(events.notification(self.effort_change_note, level="info"))
                 out(self.status_event())
             elif kind == "permission_reply":
                 # safety net only: the UI answers a pending request by

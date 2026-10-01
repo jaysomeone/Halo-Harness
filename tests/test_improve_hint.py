@@ -135,7 +135,12 @@ class _FakeApp:
     def notify(self, text, **kwargs):
         self.notifications.append((text, kwargs))
 
-    def run_worker(self, fn, thread=True, name=None):
+    def run_worker(self, fn, thread=True, name=None, group=None):
+        # 1.0.1 hotfix 15.4: real callers now pass group= too (every
+        # slash.py worker gets one, so no future exclusive=True worker
+        # elsewhere can cancel it by sharing the default group) -- accepted
+        # and ignored here, same as `thread`/`name` already were, since
+        # this fake just runs `fn()` synchronously regardless.
         self.worker_calls.append(name)
         fn()
 

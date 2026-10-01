@@ -43,7 +43,9 @@ def team_config_path(cwd: Path, *, team_flag: Optional[str] = None) -> Optional[
 
 def _read_source(source: str) -> str:
     if source.startswith("http://") or source.startswith("https://"):
-        with urllib.request.urlopen(source, timeout=10) as resp:  # noqa: S310 -- explicit, user-initiated
+        # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
+        from rolo_claude.providers.http import urlopen_tls
+        with urlopen_tls(source, timeout=10) as resp:  # noqa: S310 -- explicit, user-initiated
             return resp.read().decode("utf-8", "replace")
     return Path(source).read_text(encoding="utf-8")
 

@@ -55,7 +55,10 @@ cache file, or printed by `doctor` -- `doctor --work` shows header **names**
 only, never values, and the workspace root itself is the only thing echoed
 back.
 
-## `rolo-claude init --preset work`
+## `rolo-claude init --provider databricks`
+
+(the deprecated `init --preset work` still works, as a one-line-noticed
+alias)
 
 With a host already known (from Claude Code's own settings env, or a
 team.json -- see below), asks **only** for the personal Databricks token
@@ -90,12 +93,34 @@ guard against someone accidentally checking in a real token. See
 
 ## Discovery and cache: `dbx-endpoints.json`
 
-`rolo-claude models --refresh` (or `init --preset work`) lists the
-workspace's own serving endpoints (`GET /api/2.0/serving-endpoints`) and
-caches them, per user, to `~/.rolo-claude/dbx-endpoints.json`: name,
-`api_types`, `foundation_model.name`, `model_class`, `task` -- **the only
-source of truth for what a workspace serves.** Nothing about routing is
-ever hand-maintained per model name.
+`rolo-claude models --refresh` (or `init --provider databricks`, the
+deprecated `init --preset work` alias) lists the workspace's own serving
+endpoints (`GET /api/2.0/serving-endpoints`) and caches them, per user, to
+`~/.rolo-claude/dbx-endpoints.json`: name, `api_types`, `endpoint_type`,
+`task`, `foundation_model.name`, `model_class`, and any `usage_policy` DBU
+rate -- **the only source of truth for what a workspace serves.** Nothing
+about routing is ever hand-maintained per model name. "Chat-capable" (the
+`/models`/`/model` table's own `chat` column, and `init`'s own "N
+chat-capable" catalog summary) always means `task == "llm/v1/chat"` --
+never a name-based family guess, which can legitimately disagree with the
+endpoint's own advertised task.
+
+**Old-cache migration**: a `dbx-endpoints.json` written before this
+milestone never recorded `api_types` at all -- read against today's route
+logic, that empty field looks identical to "the platform reports zero
+api_types for this endpoint" and silently degrades every openai-chat-
+dialect family's route to `invocations` (never the real `mlflow`/`cursor`
+path), while `init`'s own "chat-capable" count (which used to check
+`bool(api_types)` instead of `task`) read that same empty field as "0
+chat-capable" -- the table and the summary visibly disagreeing on the
+exact same rows. Detected on the cache's own shape (no `api_types` key
+present on ANY entry, not merely an empty list -- a real endpoint can
+legitimately have no api_types) and refreshed automatically the next time
+the existing background refresh triggers (session start, opening
+`/model`); a bare `/models`/`rolo-claude models` (which never touches the
+network on its own) shows `path unknown (refresh needed)` for every row
+until that happens, rather than the old silently-wrong `invocations`
+guess.
 
 ## Gateway paths per endpoint type and family
 
@@ -142,15 +167,46 @@ Every candidate always falls back, last, to plain
 `/serving-endpoints/<name>/invocations`. `rolo-claude models --refresh
 --urls` (and `doctor --work --probe-all`) print the exact URL and path-type
 label (`mlflow`/`cursor`/`anthropic`/`invocations`) each configured model
-actually resolves to right now.
+actually resolves to right now; the SAME default path (this table's own
+"Order" column, first entry) is what `rolo-claude models`'s bare table and
+the `/model`/init pickers show WITHOUT `--urls` and without any network
+call -- it's derived purely from the cached `api_types` + this family
+table, never a live probe.
+
+## Context, output and pricing columns
+
+`/model`, `/models`, `rolo-claude models`, and `init`'s own per-provider
+picker all show the same three columns for a Databricks row -- context
+window, max output, and USD-per-million-token input/output prices -- from
+one ordered rule (`model_display.databricks_row_fields`):
+
+1. The [models.dev](https://models.dev) `databricks` provider's own entry
+   whose id EQUALS the endpoint name (`~/.rolo-claude/models-dev.json` if
+   cached, else the package-vendored fallback) -- `limit.context`/
+   `limit.output` for context/output, `cost.input`/`cost.output` (already
+   USD per million tokens, models.dev's own unit) for the prices.
+2. Missing that: `model_table.json`'s own `context_tokens` for this
+   endpoint (request-shaping data, not economics) -- output and prices stay
+   blank.
+3. Neither: every field blank -- **never a bare `?`** (a blank field just
+   keeps its column's width, so the row never wraps or misaligns).
+
+A Bedrock EXTERNAL Claude endpoint (`us-anthropic-claude-*`) follows this
+exact same rule -- today that means context blank and no price, since
+models.dev's `databricks` provider doesn't list it under its own endpoint
+name.
 
 ## Keeping the catalog fresh
 
 `/models refresh` (alias `/dbx`, off the UI thread) and `rolo-claude models
---refresh` re-list the workspace and report a one-line added/removed/
-changed diff. The cache auto-refreshes (silently, for an already-cached
-catalog only -- never a first discovery) on session start, and opening
-`/model` refreshes it in the background whenever it's older than
+--refresh` re-list the workspace endpoints AND re-fetch models.dev's own
+pricing/context data, reporting a one-line added/removed/changed diff for
+the endpoint list (a models.dev fetch failure is reported separately, on
+its own line, and never rolls back the endpoint list refresh that already
+succeeded). The cache auto-refreshes (silently, for an already-cached
+catalog only -- never a first discovery, and always for an OLD-SHAPE cache
+regardless of age, see above) on session start, and opening `/model`
+refreshes it in the background whenever it's older than
 `databricks.catalog_max_age_hours` (default 24h). A refresh that fails
 (offline, or 403 from the IP access list) just keeps the existing cache and
 says so -- an offline/stale-cache work box is never treated as "broken."
@@ -258,7 +314,7 @@ above into one ordered walkthrough:
    price, and optionally a shared `roles` table (see
    [ROLES.md](ROLES.md)) -- and commits it to the project as
    `.rolo-claude/team.json`, or shares it as a URL for `--team`.
-2. **Each teammate runs `rolo-claude init --preset work`.** With the host
+2. **Each teammate runs `rolo-claude init --provider databricks`.** With the host
    already known from `team.json` (or from Claude Code's own settings,
    zero-setup), it asks ONLY for a personal Databricks token, seeds
    `gateway_preference`/`roles` into `~/.rolo-claude/config.json` (never
@@ -287,7 +343,7 @@ is a one-time setup step.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `doctor --work` reachability check fails outright | off the VPN, or a DNS/firewall issue | connect to the VPN, re-run `doctor --work` |
-| Token validity: `401` | the token itself is wrong/expired | get a fresh personal access token, `rolo-claude init --preset work` again |
+| Token validity: `401` | the token itself is wrong/expired | get a fresh personal access token, `rolo-claude init --provider databricks` again |
 | Token validity: `403` with VPN wording | off the VPN (Databricks' IP access list) | connect to the VPN |
 | Token validity: `403` without VPN wording | token lacks the "list serving endpoints" permission | ask a workspace admin for a token with that scope; inference may still work even so |
 | Token validity: `404` | the derived workspace root is wrong (an unusual gateway path shape) | check `doctor --work`'s own printed "Workspace root" line against what you expect |

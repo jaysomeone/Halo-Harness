@@ -16,6 +16,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from rolo_claude.tui.dialogs.listnav import NavInput
+
 _KIND_GLYPH = {"command": "/", "skill": "✦", "file": "\U0001f4c4", "session": "\U0001f552"}
 
 
@@ -68,7 +70,7 @@ class CommandPalette(ModalScreen):
     def compose(self):
         with Vertical():
             yield Static("Command palette (slash commands, skills, files, sessions)", classes="dialog-title")
-            yield Input(placeholder="Type to filter...", id="palette-filter")
+            yield NavInput(placeholder="Type to filter...", id="palette-filter", option_list_id="palette-list")
             yield OptionList(id="palette-list")
 
     def on_mount(self) -> None:
@@ -84,6 +86,9 @@ class CommandPalette(ModalScreen):
             detail = item.get("detail", "")
             label = f"{glyph} {item.get('label', '')}" + (f"  — {detail}" if detail else "")
             option_list.add_option(Option(label, id=str(i)))
+        # 1.0.1 hotfix addendum 7: see model_picker.py's matching comment.
+        if self._filtered:
+            option_list.action_first()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._refresh(event.value)

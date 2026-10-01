@@ -325,6 +325,43 @@ def test_pre_h10_shape_tool_and_model_attribution(ctx: Ctx):
                   for r in model_rows))
 
 
+@test
+def test_tokens_out_counts_reasoning_tokens_reported_separately(ctx: Ctx):
+    """Since the 1.0.1 fix pass `map_usage` reports reasoning tokens in
+    their own field (so cost is never double-billed); `stats` must still
+    count them as generated output, or reasoning-heavy models under-report
+    their output volume."""
+    tmp = Path(tempfile.mkdtemp(prefix="telemetry-reasoning-"))
+    sessions_dir = tmp / "sessions"
+    proj = sessions_dir / "-home-user-reasoning-proj"
+    proj.mkdir(parents=True)
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(tmp / "home")
+    try:
+        lines = [
+            {"type": "meta", "model": "dbx:databricks-deepseek-v4-1-flash", "tools": [], "ts": 0, "seq": 0},
+            {"type": "user", "content": [{"type": "text", "text": "think hard"}], "ts": 0, "seq": 1},
+            {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 40, "reasoning_tokens": 60},
+             "cost_usd": 0.0, "model": "dbx:databricks-deepseek-v4-1-flash", "route": "databricks",
+             "provider": "databricks", "ts": 0, "seq": 2},
+            {"type": "assistant", "content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn",
+             "ts": 0, "seq": 3},
+        ]
+        path = proj / "reasoningA000000000000000000000001.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+        summaries = telemetry.scan(sessions_dir, since="all", all_projects=True, use_cache=False)
+        rows = telemetry.aggregate_by_model(summaries)
+        total_out = sum(int(r.get("tokens_out") or 0) for r in rows)
+        ctx.check(f"tokens_out = output + reasoning (100 expected), got {total_out} from {rows}", total_out == 100)
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

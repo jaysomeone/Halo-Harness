@@ -110,6 +110,65 @@ either, since retrying wouldn't fix it.
 | `PROVIDER_FAILURE` | 5xx, or a 404/other | the upstream itself failed, or (Databricks) a wrong path/endpoint name | retried automatically for 5xx; a 404 usually means a stale/incorrect endpoint name -- `rolo-claude models --refresh` |
 | `EMPTY_RESPONSE` | 200 with no usable content | the model returned nothing usable | retried once automatically; persistent emptiness usually means the model/route itself is having an outage |
 
+## DNS / connection failures (fail fast, 1.0.1)
+
+A failure during the CONNECT phase itself -- unresolvable hostname
+(DNS/`getaddrinfo`), connection refused, no route to host, or a hung/
+black-holed resolver -- is a DIFFERENT class from the status-code table
+above: it never rides the 1-2-4-8-16s retry ladder (phase 1 makes ONE
+immediate retry with no delay, then surfaces it as terminal), and the
+error message always names the host: `cannot resolve/reach <host> --
+check the machine's network, DNS or VPN`. Bounded at 8 seconds
+(`providers.http.open_upstream`'s own connect timeout, which now covers
+DNS resolution too, not just the TCP handshake) -- before 1.0.1, an
+unresolvable Databricks host could take upwards of 60 seconds to fail
+(the OS resolver's own retry policy, completely unbounded from this
+harness's side) on `-p`, a TUI turn, `init`'s own live pong, `models
+--refresh`, `/models refresh`, and `doctor` alike. If you see this
+message: check the VPN/network the host actually needs, not the model or
+route -- retrying the same command won't help until connectivity itself is
+fixed.
+
+This fail-fast behavior is scoped to the CONNECT phase itself (H14c
+fixpass finding 2) -- a failure AFTER the connection was already open (a
+load balancer dropping a keep-alive, a mid-response reset while Databricks
+queued the request) is a different, usually transient problem and rides
+the ordinary 1-2-4-8-16s retry ladder instead, exactly like a 502 from the
+upstream itself; it never shows the "cannot resolve/reach" wording above.
+
+## `CERTIFICATE_VERIFY_FAILED` / TLS errors (1.0.1)
+
+**"basic constraints of CA cert not marked critical"** -- seen fetching
+models.dev or OpenRouter's catalog (`models --refresh`/`/models refresh`/
+`init`), never Databricks (see why below): Python 3.13 turned on stricter
+certificate verification (`ssl.VERIFY_X509_STRICT`) by default; a
+network's TLS-inspecting proxy (common on a corporate VPN) re-signs
+outside traffic with its own CA certificate, and some of those CA
+certificates carry a technically-non-conformant (but universally accepted
+by curl, browsers, Node, and Python before 3.13) certificate extension
+that ONLY `X509_STRICT` rejects. Databricks itself is typically exempted
+from that same inspection (which is why a live pong through it still
+works when this fails) -- models.dev/OpenRouter are not. Fixed in 1.0.1:
+every TLS context this harness builds (`providers.http.
+default_tls_context`) clears `VERIFY_X509_STRICT` when the running
+Python's `ssl` module has it at all, matching what every other HTTP client
+on the same network already does -- nothing about certificate-chain or
+hostname verification itself is weakened. A refresh that still fails this
+way (an older, un-upgraded build) reports it as one line and keeps using
+the vendored/cached catalog -- it's never fatal on its own. "Every TLS
+context" genuinely means every one as of the H14c fixpass (finding 8):
+WebFetch (its own `urllib.request.build_opener`) and MCP `http`/`sse`
+servers (via `httpx`) were still on their own, unpatched default before
+that -- the same error on a WebFetch call or an http/sse MCP server behind
+the same inspecting proxy is fixed by the same build, no separate action
+needed.
+
+**"unable to get local issuer certificate"** -- a DIFFERENT problem: the
+corporate CA itself isn't in this machine's trust store at all (not a
+strictness issue). Export `BRIDGE_CA_BUNDLE` (or `NODE_EXTRA_CA_CERTS`/
+`REQUESTS_CA_BUNDLE`, read in that order, first one present that loads
+wins) pointing at the corporate CA's PEM file.
+
 ## The subscription route (`cc:`)
 
 - **`doctor` says "claude not found"** -- install Claude Code
@@ -127,6 +186,84 @@ either, since retrying wouldn't fix it.
   expected: switching into/out of `cc:` primes/drains a capped plain-text
   summary of prior turns rather than true native history; `/clear`/`/fork`
   each start a genuinely new Claude Code conversation instead.
+
+## `Function tools with reasoning_effort are not supported for gpt-6-sol` (1.0.1)
+
+The gpt-6 family's own chat-completions route 400s when `reasoning_effort`
+(any value but `none`) is sent alongside `tools` -- fixed in 1.0.1:
+Databricks endpoints named `databricks-gpt-6-{sol,luna,terra}` OR
+`databricks-gpt-5-6-{sol,luna,terra}` (models.dev's real catalog naming --
+the H14c fixpass, finding 12, added explicit `model_table.json` rows for
+both shapes; the original hotfix's bare "gpt-6" substring check matched
+neither an OpenRouter model that happens to have "gpt-6" in its name, nor,
+accidentally, the real `-5-6-` Databricks shape) force
+`reasoning_effort: "none"` whenever the request carries tools (tool-less
+requests are unaffected; `/effort`/the status bar still show whatever
+level you picked). An untabled Databricks OpenAI-family endpoint that hits
+the IDENTICAL wording ("Function tool..." + "reasoning_effort") on a
+different model name retries once with `reasoning_effort` set explicitly
+to `none`; if that retry ALSO fails, a second, independent retry strips
+the field entirely rather than giving up (the H14c fixpass, finding 10) --
+if you still see this exact message after both retries, report the
+endpoint name.
+
+## Nothing happens after I type: a permission card is waiting (1.0.1)
+
+If the TUI seems to stop accepting input -- prompts you type appear to do
+nothing, or only ever show up as a "↳ steering…" note -- check the status
+bar first: a **"permission needed: 1 yes · 2 session · 3 always · 4 no"**
+tag in the warning color means a `PermissionCard` is pending somewhere in
+the transcript (possibly scrolled out of view before 1.0.1's auto-scroll
+fix landed on your version). Press `1`-`4` to answer it, or just type why
+not and press Enter -- 1.0.1 makes free text answer a pending permission/
+plan/question card directly (deny-with-feedback for a permission ask, keep-
+planning for a plan card, "Other" for a question), rather than silently
+steering the turn underneath it. A `/`-prefixed submission (typed, or a
+`/` completion accepted with Enter) always runs that command instead,
+whatever card is pending (the H14c fixpass, finding 14 -- it used to deny
+the tool with "The user said: /whatever"); the card itself is untouched
+either way, still waiting for a later plain-text answer. Switching to
+`auto`/`bypassPermissions`/`dontAsk` (`Shift+Tab`) re-decides an already-
+pending card through the real permission engine right away (finding 4) --
+an explicit `ask:` rule still asks even under `auto`, and a card you're
+already answering (pressed `4`, mid-feedback) is left alone, never auto-
+resolved out from under you. If the bottom bar's own spinner/elapsed time
+is still ticking, the turn itself is not frozen -- something is just
+waiting on you specifically. `Ctrl+End` re-anchors the transcript to the
+bottom if it stopped following new output, and answering a card that
+scrolled the view away from the bottom (a tall card, on a short terminal)
+now re-anchors it automatically too, as long as you were following before
+the card appeared (finding 15). If `Ctrl+C` twice doesn't exit (or gets
+stuck itself), `Ctrl+Q` force-quits on its OWN timer -- a 2s head start for
+a clean shutdown, then the process exits unconditionally 2.5s after that
+regardless of what's still hung (finding 5; it no longer shares a flag
+with `Ctrl+C`'s own quit path, so it still works even when THAT is the
+thing that's stuck). Run with `--debug` and send `bridge.log` if none of
+this explains what you're seeing.
+
+## The starting permission mode isn't what I expected (1.0.1)
+
+`rolo-claude doctor` prints the effective starting permission mode and
+which layer decided it (`Permission mode: ... (source: ...)`). Precedence,
+highest first: `--dangerously-skip-permissions` > `--permission-mode` (this
+run's own flag) > `~/.rolo-claude/config.json`'s `permission_mode` (set
+once via `rolo-claude init`'s own "Default permission mode" step, or
+`rolo-claude config set permission_mode auto`) > `settings.json`'s
+`permissions.defaultMode` > the hardcoded `default`. If you want every
+session on this box to start in `auto` (never Claude Code's own `default`,
+which asks before touching anything outside the working directory), either
+re-run `rolo-claude init` or `rolo-claude config set permission_mode auto`
+directly -- this never touches `~/.claude/settings.json`.
+
+As of the H14c fixpass (finding 9), re-running `init` with `--yes` or
+cancelling (Esc) out of its own permission-mode/default-model pickers
+never overwrites a value already set -- it used to force `permission_mode`
+to `auto` on every `--yes`/non-interactive run, and Esc at either picker
+could write the literal `"default"`/an arbitrary other-provider's model
+over whatever was actually configured. A fresh box with nothing chosen now
+writes nothing for `permission_mode` (so `settings.json`'s own
+`permissions.defaultMode` keeps working); `model` only ever falls back to
+a guess when there is truly no existing value yet.
 
 ## Windows specifics
 

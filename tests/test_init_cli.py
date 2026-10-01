@@ -36,7 +36,12 @@ def _fresh_home() -> Path:
 
 
 def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, timeout: int = 40):
-    env = dict(os.environ)
+    # Hermetic child env: drop every harness/provider variable the parent
+    # process (or an earlier test module) may carry, so an `init` under
+    # test only ever sees what THIS test passes in.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_",
+                                "ROLO_CLAUDE_", "TYPESAFE_"))}
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
                 "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
     env.update(extra_env or {})
@@ -144,7 +149,7 @@ def test_preset_claude_accepted_with_a_faked_login(ctx: Ctx):
     result = _run(["init", "--preset", "claude", "--yes", "--no-live"], home,
                    extra_env={"BRIDGE_TEST_CC_AUTH_STATUS": _LOGGED_IN_CLAUDE_AI})
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
-    ctx.check("preset accepted", "Preset: claude" in result.stdout)
+    ctx.check("the claude provider path ran", "Claude subscription" in result.stdout)
     ctx.check("credentials step stores nothing", "nothing stored" in result.stdout)
     cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"default model is cc:sonnet, got {cfg}", cfg.get("model") == "cc:sonnet")
@@ -365,7 +370,7 @@ def test_live_pong_success_against_mock_upstream(ctx: Ctx):
                        extra_env={"BRIDGE_OPENROUTER_BASE_URL": mock.base_url})
         ctx.check(f"exit 0, got {result.returncode}, stdout={result.stdout!r} stderr={result.stderr!r}",
                   result.returncode == 0)
-        ctx.check("step 5 header printed", "5. Live pong" in result.stdout)
+        ctx.check("live pong header printed", "Live pong (" in result.stdout)
         ctx.check("reports the reply/model/provider/cost line",
                   "reply='pong'" in result.stdout and "provider=openrouter" in result.stdout)
         ctx.check("no key ever printed", "sk-or-x" not in result.stdout)
@@ -416,6 +421,295 @@ def test_init_help_runs_standalone(ctx: Ctx):
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
     ctx.check("mentions every flag", all(f in result.stdout for f in
               ("--preset", "--model", "--yes", "--no-live", "--no-fixes")))
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 5: the interactive model picker -- --yes/--model skip it;
+# a non-tty run (every subprocess test here -- stdin/stdout both piped)
+# falls back to the numbered list, one stdin line for the choice.
+# ---------------------------------------------------------------------------
+
+_ONE_ENDPOINT_PER_FAMILY_PARSED = [
+    {"name": "databricks-glm-5-3", "task": "llm/v1/chat", "ready": True, "permission_level": None,
+     "endpoint_type": None, "ai_gateway_v2_supported": None,
+     "api_types": ["mlflow/v1/chat/completions"], "foundation_model_name": "glm-5-3", "model_class": None},
+    {"name": "databricks-kimi-k3", "task": "llm/v1/chat", "ready": True, "permission_level": None,
+     "endpoint_type": None, "ai_gateway_v2_supported": None,
+     "api_types": ["mlflow/v1/chat/completions"], "foundation_model_name": "kimi-k3", "model_class": None},
+    {"name": "databricks-deepseek-v4-1-flash", "task": "llm/v1/chat", "ready": True, "permission_level": None,
+     "endpoint_type": None, "ai_gateway_v2_supported": None,
+     "api_types": ["mlflow/v1/chat/completions"], "foundation_model_name": "deepseek-v4-1-flash",
+     "model_class": None},
+]
+
+
+def _seed_dbx_cache(home: Path) -> None:
+    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    write_dbx_endpoints_json(home / ".rolo-claude", _ONE_ENDPOINT_PER_FAMILY_PARSED)
+
+
+@test
+def test_picker_skipped_with_yes_even_with_a_cached_catalog(ctx: Ctx):
+    home = _fresh_home()
+    _seed_dbx_cache(home)
+    result = _run(["init", "--preset", "work", "--yes", "--no-live"], home,
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("no picker prompt printed", "Pick a default model" not in result.stdout)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"still the plain preset default, got {cfg}",
+              cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
+
+
+@test
+def test_picker_skipped_when_model_flag_given(ctx: Ctx):
+    home = _fresh_home()
+    _seed_dbx_cache(home)
+    result = _run(["init", "--preset", "work", "--model", "dbx:databricks-kimi-k3", "--no-live"], home,
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("no picker prompt printed", "Pick a default model" not in result.stdout)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"the explicit --model wins, got {cfg}", cfg.get("model") == "dbx:databricks-kimi-k3")
+
+
+@test
+def test_numbered_fallback_picks_the_chosen_entry_non_tty(ctx: Ctx):
+    """Every `_run` invocation here has stdin/stdout both piped (never a
+    real tty), so this exercises the numbered-list fallback exactly as a
+    piped/non-interactive box would see it."""
+    home = _fresh_home()
+    _seed_dbx_cache(home)
+    # No --yes: the picker step runs; the numbered list is alphabetical by
+    # endpoint name (deepseek, glm, kimi) -- "2" is databricks-glm-5-3.
+    result = _run(["init", "--preset", "work", "--no-live"], home,
+                   stdin="2\n",
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("the numbered picker was actually offered", "Pick a default model" in result.stdout)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"the chosen (2nd) endpoint was written, got {cfg}",
+              cfg.get("model") == "dbx:databricks-glm-5-3")
+
+
+@test
+def test_numbered_fallback_empty_input_keeps_the_preset_default(ctx: Ctx):
+    home = _fresh_home()
+    _seed_dbx_cache(home)
+    result = _run(["init", "--preset", "work", "--no-live"], home, stdin="\n",
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"unchanged preset default, got {cfg}",
+              cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
+
+
+@test
+def test_picker_offers_nothing_without_a_cached_catalog(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "work", "--no-live"], home, stdin="\n",
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("no picker prompt with nothing cached", "Pick a default model" not in result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 13: provider-first init -- "select a provider to set up"
+# instead of a home/work/claude preset. `--preset` stays as a deprecated
+# `--provider` alias; `--provider` (repeatable) drives the non-interactive
+# path directly; the fully interactive picker loop + cross-provider default
+# pick are exercised in-process with the picker/confirm steps monkeypatched
+# (a real subprocess has no tty to drive a Textual app through anyway).
+# ---------------------------------------------------------------------------
+
+@test
+def test_provider_databricks_yes_non_interactive(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--provider", "databricks", "--yes", "--no-live"], home,
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("the databricks provider path ran", "Databricks" in result.stdout)
+    ctx.check("no preset/home/work wording anywhere", not any(
+        w in result.stdout for w in ("Preset:", "home preset", "work preset")))
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"model set to the databricks default, got {cfg}",
+              cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
+
+
+@test
+def test_provider_openrouter_yes_non_interactive(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--provider", "openrouter", "--yes", "--no-live"], home, stdin="sk-or-x\n")
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"model set to the openrouter default, got {cfg}",
+              cfg.get("model") == "or:deepseek/deepseek-v4.1-flash")
+
+
+@test
+def test_provider_anthropic_yes_non_interactive_writes_api_key(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--provider", "anthropic", "--yes", "--no-live"], home, stdin="sk-ant-fake-1\n")
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    ctx.check("the key is never printed", "sk-ant-fake-1" not in result.stdout)
+    content = _env_file(home).read_text(encoding="utf-8")
+    ctx.check(f"ANTHROPIC_API_KEY written, got {content!r}", "ANTHROPIC_API_KEY=sk-ant-fake-1" in content)
+    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    ctx.check(f"model set to the anthropic default, got {cfg}", cfg.get("model") == "ant:sonnet")
+
+
+@test
+def test_provider_anthropic_already_configured_not_rewritten(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--provider", "anthropic", "--yes", "--no-live"], home,
+                   extra_env={"ANTHROPIC_API_KEY": "sk-ant-ambient"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("reports already configured", "already configured" in result.stdout)
+    ctx.check("the key is never printed", "sk-ant-ambient" not in result.stdout)
+    ctx.check("no env file needed to be created", not _env_file(home).exists())
+
+
+@test
+def test_provider_requires_at_least_one_value(ctx: Ctx):
+    """`--provider` with no value at all is an argparse error (exit 2);
+    covered here mainly so a FUTURE argparse config change that silently
+    allows an empty list is caught (the guard in cmd_init is otherwise
+    unreachable via argparse's own `action="append"`)."""
+    home = _fresh_home()
+    result = _run(["init", "--provider"], home)
+    ctx.check(f"argparse usage error, got {result.returncode}", result.returncode == 2)
+
+
+@test
+def test_preset_alias_prints_a_deprecation_notice_and_behaves_like_provider(ctx: Ctx):
+    home = _fresh_home()
+    result = _run(["init", "--preset", "work", "--yes", "--no-live"], home,
+                   extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
+                              "DATABRICKS_TOKEN": "fake-token"})
+    ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+    ctx.check("prints a one-line deprecation notice naming the real provider",
+              "deprecated alias for --provider databricks" in result.stdout)
+
+
+@test
+def test_unconfigured_provider_status_tag(ctx: Ctx):
+    from rolo_claude.init_providers import provider_status
+    home = _fresh_home()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = _NOT_LOGGED_IN
+    for k in ("OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "ANTHROPIC_API_KEY",
+              "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(k, None)
+    try:
+        for p in ("databricks", "openrouter", "anthropic", "claude"):
+            ctx.check(f"{p} starts out 'not set up', got {provider_status(p)!r}",
+                      provider_status(p) == "not set up")
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-x"
+        ctx.check(f"openrouter flips to configured, got {provider_status('openrouter')!r}",
+                  provider_status("openrouter") == "configured")
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = _LOGGED_IN_CLAUDE_AI
+        ctx.check(f"claude flips to 'logged in', got {provider_status('claude')!r}",
+                  provider_status("claude") == "logged in")
+    finally:
+        for k in ("OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "ANTHROPIC_API_KEY"):
+            os.environ.pop(k, None)
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+        if old_auth is None:
+            os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        else:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = old_auth
+
+
+@test
+def test_scripted_provider_loop_sets_up_two_then_done_then_cross_provider_pick(ctx: Ctx):
+    """In-process (never a subprocess -- a real tty-driven Textual picker
+    has no piped-stdin equivalent to script): monkeypatches `_step_select_
+    provider`/`_confirm`/`_run_entry_picker` to walk databricks then
+    openrouter, say "yes" to "set up another?" once and "no" the second
+    time, then answers the final cross-provider pick explicitly."""
+    import rolo_claude.init_cli as init_cli
+
+    home = _fresh_home()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_env_file = os.environ.get("BRIDGE_ENV_FILE")
+    old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ["BRIDGE_ENV_FILE"] = str(home / ".config" / "vibes-hacker" / "env")
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = _NOT_LOGGED_IN
+    os.environ["DATABRICKS_HOST"] = "https://fake-ws.cloud.databricks.com"
+    os.environ["DATABRICKS_TOKEN"] = "fake-token"
+    os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+    # Both providers' catalogs are pre-seeded (rather than a live --refresh,
+    # which --no-live skips) so the final cross-provider pick has real
+    # entries from EACH provider to choose between.
+    from rolo_claude.providers.databricks import write_dbx_endpoints_json, write_models_json
+    write_models_json(home / ".rolo-claude", [{"id": "vendor/model-x", "context_length": 128000,
+                                                "max_output_tokens": 8192}])
+    write_dbx_endpoints_json(home / ".rolo-claude", _ONE_ENDPOINT_PER_FAMILY_PARSED)
+
+    real_select = init_cli._step_select_provider
+    real_confirm = init_cli._confirm
+    real_run_entry_picker = init_cli._run_entry_picker
+    select_calls = iter(["databricks", "openrouter"])
+    confirm_calls = iter([True, False])
+
+    def _fake_select(args, console, *, header):
+        try:
+            return next(select_calls)
+        except StopIteration:
+            return "done"
+
+    def _fake_confirm(args, console, question, *, default):
+        try:
+            return next(confirm_calls)
+        except StopIteration:
+            return False
+
+    def _fake_run_entry_picker(args, console, entries):
+        # The final cross-provider pick: explicitly choose the OpenRouter
+        # entry if present, proving the picker really did see BOTH
+        # providers' catalogs merged together.
+        for e in entries:
+            if e["ref"].startswith("or:"):
+                return e["ref"]
+        return None
+
+    init_cli._step_select_provider = _fake_select
+    init_cli._confirm = _fake_confirm
+    init_cli._run_entry_picker = _fake_run_entry_picker
+    try:
+        rc = init_cli.cmd_init(["--no-live"])
+        ctx.check(f"exit 0, got {rc}", rc == 0)
+        cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+        ctx.check(f"both providers' credentials resolve now, got databricks="
+                  f"{init_cli.provider_status('databricks')!r} openrouter={init_cli.provider_status('openrouter')!r}",
+                  init_cli.provider_status("databricks") == "configured"
+                  and init_cli.provider_status("openrouter") == "configured")
+        ctx.check(f"the cross-provider pick (an OpenRouter entry) won, got {cfg}",
+                  isinstance(cfg.get("model"), str) and cfg["model"].startswith("or:"))
+    finally:
+        init_cli._step_select_provider = real_select
+        init_cli._confirm = real_confirm
+        init_cli._run_entry_picker = real_run_entry_picker
+        for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "OPENROUTER_API_KEY"):
+            os.environ.pop(k, None)
+        for k, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_ENV_FILE", old_env_file),
+                       ("BRIDGE_TEST_CC_AUTH_STATUS", old_auth)):
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
 
 
 if __name__ == "__main__":

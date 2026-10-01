@@ -77,6 +77,12 @@ class FakeController:
         self.interrupts = 0
         self.quit_called = False
         self.permission_replies: list = []
+        # 1.0.1 fixpass finding 4: request ids `reevaluate_pending_
+        # permission` below must report as STILL "ask" regardless of mode
+        # (a test-only stand-in for "an explicit ask: rule still asks even
+        # in auto mode" -- this fake has no real PermissionEngine/category
+        # logic to derive that from itself).
+        self.still_ask_request_ids: set = set()
         self.question_replies: list = []
         self.plan_replies: list = []
         self.added_rules: list = []
@@ -115,6 +121,28 @@ class FakeController:
 
     def answer_permission(self, request_id: str, decision) -> None:
         self.permission_replies.append((request_id, decision))
+
+    def reevaluate_pending_permission(self, request_id: str) -> Optional[str]:
+        """1.0.1 fixpass finding 4: test-fixture mirror of `Controller.
+        reevaluate_pending_permission` -- mode-only (this fake has no real
+        PermissionEngine/category logic): `auto`/`bypassPermissions` allow,
+        `dontAsk` denies, every other mode still "asks" (returns None, the
+        card stays pending), UNLESS `request_id` is in `still_ask_request_
+        ids` (see that attribute's own docstring), which always stays
+        "ask" regardless of mode. Recorded into `permission_replies`
+        exactly like `answer_permission` above, so an existing assertion
+        on that list keeps working unchanged for the auto-resolved case."""
+        if request_id in self.still_ask_request_ids:
+            return None
+        if self.permission_mode in ("auto", "bypassPermissions"):
+            decision = {"action": "allow", "reason": "", "rule": None, "message": ""}
+            self.permission_replies.append((request_id, decision))
+            return "allow"
+        if self.permission_mode == "dontAsk":
+            decision = {"action": "deny", "reason": "", "rule": None, "message": ""}
+            self.permission_replies.append((request_id, decision))
+            return "deny"
+        return None
 
     def answer_question(self, request_id: str, answer) -> None:
         self.question_replies.append((request_id, answer))

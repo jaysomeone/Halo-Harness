@@ -107,25 +107,45 @@ def thinking_delta(text: str, *, index: int = 0, turn: int = 0) -> Event:
 
 
 def message_end(*, turn: int = 0, stop_reason: Optional[str] = None, usage: Optional[dict] = None,
-                 cost_usd: Optional[float] = None, context_pct: Optional[float] = None) -> Event:
-    """data: {stop_reason, usage, cost_usd, context_pct}"""
+                 cost_usd: Optional[float] = None, context_pct: Optional[float] = None,
+                 context_tokens: Optional[int] = None, context_limit: Optional[int] = None,
+                 total_input_tokens: Optional[int] = None, total_output_tokens: Optional[int] = None) -> Event:
+    """data: {stop_reason, usage, cost_usd, context_pct, context_tokens,
+    context_limit, total_input_tokens, total_output_tokens}. The last four
+    (1.0.1 hotfix 14) are the RAW numbers `context_pct` was already derived
+    from, plus the session's running token totals -- added so a consumer
+    (the TUI status bar) can render `"ctx 12k/1M 1%"`/`"in 12k out 3k"`
+    without re-deriving anything itself; `context_pct` is kept for any
+    existing consumer that only ever wanted the percentage."""
     return Event("message_end", {
         "stop_reason": stop_reason, "usage": usage or {}, "cost_usd": cost_usd, "context_pct": context_pct,
+        "context_tokens": context_tokens, "context_limit": context_limit,
+        "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens,
     }, turn=turn)
 
 
 def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[int] = None,
             context_limit: Optional[int] = None, cost_usd: Optional[float] = None, turn: int = 0,
             permission_mode: Optional[str] = None, mcp: Optional[dict] = None,
-            session_id: Optional[str] = None) -> Event:
+            session_id: Optional[str] = None, total_input_tokens: Optional[int] = None,
+            total_output_tokens: Optional[int] = None, effort: Optional[str] = None) -> Event:
     """data: {phase, model, context_tokens, context_limit, cost_usd, turn,
-    permission_mode, mcp: {connected, total}, session_id}. Emitted at
-    session start, after every message_end, and on a mode/model change
-    (D-Contract)."""
+    permission_mode, mcp: {connected, total}, session_id, total_input_tokens,
+    total_output_tokens, effort}. Emitted at session start, after every
+    message_end, and on a mode/model change (D-Contract). The two token-
+    total fields (1.0.1 hotfix 14) are the session's running input/output
+    token counts, for a consumer (the status bar) to show `"in 12k out 3k"`
+    when `cost_usd` is None (no price known for this model). `effort`
+    (1.0.1 hotfix 20.3) is the session's current reasoning-effort level
+    (`Session.effort`, already clamped to this route's own accepted set --
+    see providers/profiles.py's `clamp_effort`), for the status bar's own
+    short tag next to the mode glyph; None for a model with no adjustable
+    effort at all."""
     return Event("status", {
         "phase": phase, "model": model, "context_tokens": context_tokens, "context_limit": context_limit,
         "cost_usd": cost_usd, "turn": turn, "permission_mode": permission_mode,
         "mcp": mcp or {"connected": 0, "total": 0}, "session_id": session_id,
+        "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens, "effort": effort,
     }, turn=turn)
 
 

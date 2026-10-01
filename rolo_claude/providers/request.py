@@ -18,7 +18,7 @@ import re
 from typing import Optional
 
 from rolo_claude.providers.hooks import host_allowlist, reasoning_echo, system_normalize
-from rolo_claude.providers.profiles import ProviderProfile, map_effort
+from rolo_claude.providers.profiles import ProviderProfile, clamp_effort, map_effort
 from rolo_claude.providers.routing import anthropic_tool_to_openai, map_tool_choice
 from rolo_claude.providers.translate import _flatten_messages
 
@@ -300,7 +300,11 @@ def build_request_body(
     if send_top_p and profile.top_p is not None:
         body["top_p"] = profile.top_p
 
-    body.update(map_effort(effort, profile))  # map_effort itself handles reasoning_no_disable
+    # 1.0.1 hotfix 22: has_tools=bool(oai_tools) -- gpt-6's own
+    # reasoning_effort_with_tools override only ever applies to a request
+    # that actually carries tools; map_effort itself handles
+    # reasoning_no_disable and the ordinary --effort/clamp_effort path.
+    body.update(map_effort(effort, profile, has_tools=bool(oai_tools)))
 
     if profile.host_specific_fields:
         body["usage"] = {"include": True}  # always-on cost accounting (scope I "CostMeter")
@@ -403,8 +407,10 @@ def apply_anthropic_cache_control(system_text: str, messages: list) -> "tuple[li
 _ANTHROPIC_MIN_THINKING_BUDGET = 1024  # Anthropic's own documented floor for budget_tokens
 
 
-_ADAPTIVE_ALWAYS_FAMILIES = ("opus", "fable", "mythos")  # always adaptive-capable, whatever the version
-_ADAPTIVE_VERSION_GATED_FAMILIES = ("sonnet",)  # adaptive only from _ADAPTIVE_MIN_VERSION onward
+_ADAPTIVE_ALWAYS_FAMILIES = ("fable", "mythos")  # always adaptive-capable, whatever the version
+# opus joins sonnet in the version gate: Opus 4.1/4.5 (both served on Databricks) take
+# `budget_tokens`, not `thinking: adaptive`; adaptive starts at 4.6 for both families.
+_ADAPTIVE_VERSION_GATED_FAMILIES = ("opus", "sonnet")  # adaptive only from _ADAPTIVE_MIN_VERSION onward
 _ADAPTIVE_MIN_VERSION = 4.6  # sonnet: adaptive from 4.6 onward (4.5 and older stay budget_tokens)
 
 
@@ -422,10 +428,29 @@ def _anthropic_model_supports_adaptive_thinking(model_id: str) -> bool:
     ORIGINAL substring check (a dated/legacy snapshot id that still names
     "opus"/"fable" somewhere) rather than guessing wrong either way."""
     low = (model_id or "").lower()
-    m = re.search(r"(opus|sonnet|haiku|fable|mythos)[-_](\d+(?:\.\d+)?)", low)
-    if m is None:
+    # 1.0.1 fixpass finding 11: real model ids hyphenate the minor version
+    # (`claude-sonnet-4-6`, `databricks-claude-sonnet-4-6`) -- the old
+    # pattern's `(?:\.\d+)?` only ever recognised a LITERAL dot separator
+    # (`sonnet-4.6`), so a hyphenated id parsed as bare major version "4"
+    # (`float("4") == 4.0 < 4.6`), misclassifying 4.6+ Sonnet as pre-4.6 and
+    # routing it into the `budget_tokens` branch it rejects. The minor
+    # group is capped at 2 digits with a trailing `(?!\d)` so a snapshot-
+    # dated id (`claude-sonnet-4-20250514`) never misreads the date's first
+    # digits as a fake minor version -- that case correctly falls back to
+    # "no minor" (bare major "4") instead.
+    m = re.search(r"(opus|sonnet|haiku|fable|mythos)[-_](\d+)(?:[-_.](\d{1,2})(?!\d))?", low)
+    # Bedrock/external ids put the version BEFORE the family
+    # (`us-anthropic-claude-3-7-sonnet-20250219-v1-0`): read that order
+    # first, or the snapshot date after the family would parse as a huge
+    # "major" version and wrongly classify Claude 3.x as adaptive.
+    rev = re.search(r"claude[-_](\d+)(?:[-_.](\d{1,2})(?!\d))?[-_](opus|sonnet|haiku)", low)
+    if rev is not None:
+        family, major, minor = rev.group(3), rev.group(1), rev.group(2)
+    elif m is None:
         return "opus" in low or "fable" in low
-    family, version_str = m.group(1), m.group(2)
+    else:
+        family, major, minor = m.group(1), m.group(2), m.group(3)
+    version_str = f"{major}.{minor}" if minor is not None else major
     if family in _ADAPTIVE_ALWAYS_FAMILIES:
         return True
     if family not in _ADAPTIVE_VERSION_GATED_FAMILIES:
@@ -472,7 +497,16 @@ def map_effort_anthropic(effort: Optional[str], model_id: str, *, max_tokens: Op
     if isinstance(max_tokens, int) and max_tokens > 0:
         if max_tokens <= _ANTHROPIC_MIN_THINKING_BUDGET:
             return {}  # no room for even the minimum viable budget -- omit thinking outright
-        budget = min(budget, max_tokens - 1)
+        # 1.0.1 fixpass finding 11: capped at HALF of max_tokens, not
+        # max_tokens - 1 -- a non-adaptive model (Haiku 4.5, Sonnet 4.5 or
+        # older) getting "high" by default used to reserve nearly the WHOLE
+        # max_tokens budget for thinking (16383 of 16384), leaving thinking
+        # free to crowd out the actual answer where 1.0.0 sent no thinking
+        # at all. Still floored at Anthropic's documented 1,024 minimum --
+        # safe even when max_tokens // 2 undershoots it, since the early
+        # return just above already guarantees max_tokens > 1,024 here, so
+        # 1,024 is still strictly less than max_tokens.
+        budget = max(_ANTHROPIC_MIN_THINKING_BUDGET, min(budget, max_tokens // 2))
     return {"thinking": {"type": "enabled", "budget_tokens": budget}}
 
 
@@ -636,12 +670,33 @@ def build_anthropic_request_body(
     }
     if system_blocks:
         body["system"] = system_blocks
+    forced_tool_choice = False
     if tools:
         ordered = sorted(tools, key=lambda t: t.get("name", ""))
         body["tools"] = ordered
         tc = map_tool_choice_anthropic(tool_choice)
         if tc is not None:
             body["tool_choice"] = tc
+            forced_tool_choice = True
 
-    body.update(map_effort_anthropic(effort, route.upstream_model, max_tokens=max_tokens))
+    # 1.0.1 fixpass finding 11: Anthropic rejects extended thinking together
+    # with any FORCED tool_choice (`{"type": "any"}`/`{"type": "tool", ...}`/
+    # `{"type": "none"}` -- anything but the "auto" default `tc is None`
+    # already omits) -- the repair retry that forces `tool_choice="required"`
+    # (agent/loop.py's own leak_parser fallback, `{"type": "any"}` via
+    # map_tool_choice_anthropic) must never also send thinking, or the
+    # repair call itself 400s. An ordinary turn (`tool_choice` None/"auto")
+    # is completely unaffected -- thinking still applies as usual.
+    effort = None if forced_tool_choice else effort
+
+    # 1.0.1 hotfix 19: clamp BEFORE map_effort_anthropic ever sees the value
+    # -- verified live: a user's own `~/.claude/settings.json` `effortLevel:
+    # "xhigh"` (a value real Claude Code's own routes accept) reached
+    # `output_config.effort` on a Databricks Claude foundation endpoint
+    # verbatim and 400'd ("Input should be 'low', 'medium', 'high' or
+    # 'max'") on the very first prompt. `profile.effort_values_supported`
+    # is `ANTHROPIC_EFFORT_LEVELS` (no `xhigh`) for every anthropic-
+    # passthrough route (`resolve_profile`), so this reproduces on cc:/ant:/
+    # any Databricks Claude foundation model alike.
+    body.update(map_effort_anthropic(clamp_effort(effort, profile), route.upstream_model, max_tokens=max_tokens))
     return body

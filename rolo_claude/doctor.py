@@ -573,9 +573,48 @@ def _check_default_model() -> str:
     provider_ok, provider_label = _provider_configured(ref)
     if provider_ok:
         return f"{OK} Default model: {configured} ({provider_label} configured)"
-    preset = "work" if ref.provider == "databricks" else ("claude" if ref.provider in ("cc", "anthropic") else "home")
+    # 1.0.1 hotfix 13 (drive-by): this suggestion still said `--preset
+    # work`/`--preset home` -- the deprecated alias still works, but every
+    # OTHER user-facing spot already moved to `--provider` at item 13.
+    provider_flag = {"databricks": "databricks", "cc": "claude", "anthropic": "anthropic"}.get(
+        ref.provider, "openrouter")
     return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
-                 cmd=f"rolo-claude init --preset {preset}")
+                 cmd=f"rolo-claude init --provider {provider_flag}")
+
+
+def _check_permission_mode() -> str:
+    """1.0.1 hotfix 18.3: the effective STARTING permission mode a new
+    session would actually launch with, and which layer of the precedence
+    chain decided it -- `--dangerously-skip-permissions` >
+    `--permission-mode` (this doctor run has neither, being a standalone
+    command) > `~/.rolo-claude/config.json`'s own `permission_mode` (item
+    18.1's new init step) > settings.json's `permissions.defaultMode` >
+    the hardcoded `default`. Mirrors `headless.py::build_session`'s own
+    chain exactly (same config key, same settings field) so this line
+    never disagrees with what a real session would actually start in."""
+    from rolo_claude.permissions import normalize_permission_mode
+    from rolo_claude.theme import get_config_value
+    config_mode = get_config_value("permission_mode", default=None)
+    if isinstance(config_mode, str) and config_mode:
+        mode = normalize_permission_mode(config_mode)
+        return f"{OK} Permission mode: {mode} (source: rolo-claude config.json)"
+    try:
+        settings = resolve_settings(Path.cwd())
+        settings_mode = settings.permissions_default_mode
+    except Exception:
+        settings_mode = None
+    if settings_mode:
+        return f"{OK} Permission mode: {normalize_permission_mode(settings_mode)} (source: settings.json)"
+    # An OK/info line never carries the literal " -> fix:"/" -> see:" suffix
+    # (`_parse_check_line`'s own regex would then treat this as though it
+    # were a WARN/MISSING with a prescriptive fix, tripping run_checks_
+    # structured's "an ok/info entry has neither" invariant) -- the
+    # suggestion is woven into parenthetical prose instead, same as
+    # _check_default_model's own "not set -- built-in default applies"
+    # line just above.
+    return (f"{OK} Permission mode: default (source: built-in default -- no config.json permission_mode, "
+            f"no settings.json permissions.defaultMode; run `rolo-claude init` or `rolo-claude config set "
+            f"permission_mode auto` to set one)")
 
 
 def _dbx_probe_target():
@@ -625,22 +664,28 @@ def _check_ucode_settings() -> str:
 
 def _work_check_vpn_reachability(host: Optional[str]) -> str:
     """A real TCP+TLS connect attempt (no data sent) to the resolved
-    Databricks host -- the same connect path `providers.http.open_upstream`
-    uses, so a WARN here means a live request would fail the identical way."""
+    Databricks host -- 1.0.1 hotfix 2: now literally goes THROUGH
+    `providers.http.open_upstream` (rather than a hand-rolled, unbounded
+    `socket.create_connection`) so a WARN here means a live request would
+    fail the identical way, AND so a hung/black-holed DNS lookup is capped
+    at `open_upstream`'s own default connect timeout (<=8s) instead of
+    whatever the OS resolver's own retry policy would otherwise take
+    (verified: ~64s against an unresolvable `*.cloud.databricks.com` host)."""
     if not host:
         return _fix(f"{MISSING} Databricks host: not configured (see the Databricks line above) -- nothing "
                      f"to reach", cmd="rolo-claude init --preset work")
-    import socket
-    import ssl
     import urllib.parse
+    from rolo_claude.providers.http import UpstreamConnectError, open_upstream
     parsed = urllib.parse.urlparse(host if "://" in host else f"https://{host}")
     hostname = parsed.hostname or host
     port = parsed.port or 443
     try:
-        with socket.create_connection((hostname, port), timeout=6) as sock:
-            with ssl.create_default_context().wrap_socket(sock, server_hostname=hostname):
-                pass
+        conn = open_upstream(hostname, port, True)
+        conn.close()
         return f"{OK} VPN/reachability: connected to {hostname}:{port}"
+    except UpstreamConnectError as e:
+        return _fix(f"{MISSING} VPN/reachability: {e}",
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
     except Exception as e:
         return _fix(f"{MISSING} VPN/reachability: could not reach {hostname}:{port} ({type(e).__name__}: {e})",
                      cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
@@ -999,6 +1044,7 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
     entries.append(("default_model", _check_default_model()))
+    entries.append(("permission_mode", _check_permission_mode()))
     return [(cid, line) for cid, line in entries if line is not None]
 
 

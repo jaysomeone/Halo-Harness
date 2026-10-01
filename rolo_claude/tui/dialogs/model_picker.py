@@ -1,50 +1,56 @@
 """rolo_claude.tui.dialogs.model_picker -- `/model` with no argument (D-TUI:
 "ModelPicker (filter + ref/context/price)"). `models` is whatever
-`Controller.list_models()` returned: `[{ref, context, output, price_in,
-price_out, provider}, ...]`. Dismisses with the chosen `ref` string, or
-`None` if cancelled.
+`Controller.list_models()` returned: `[{ref, context_tokens,
+max_output_tokens, price_in_per_m, price_out_per_m, provider}, ...]`.
+Dismisses with the chosen `ref` string, or `None` if cancelled.
+
+1.0.1 hotfix addendum 7/8: the filter `Input` is a `NavInput` (Up/Down/
+PageUp/PageDown/Home/End move the `OptionList` highlight, Enter selects it --
+see `tui/dialogs/listnav.py`'s own docstring for why Textual's plain `Input`
+needed this at all), and rows are grouped by `Controller.list_models()`'s own
+`group` tag with one header per group instead of an inline `[group]` suffix,
+each row rendered as a single ellipsized line (never wrapped, which used to
+break the column alignment on a long ref/path).
+
+1.0.1 hotfix 12: every row -- OpenRouter, cc:, Databricks alike -- now shows
+context/output/price columns through the ONE shared `model_display.
+format_model_row` (never a per-provider "show path=/dbu= INSTEAD of prices"
+special case); a Databricks row's family/path still shows, as a bracketed
+`detail` tag after the price columns instead of replacing them.
 """
 
 from __future__ import annotations
 
 import difflib
 
+from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-
-def _fmt_price(v) -> str:
-    if v is None:
-        return "?"
-    try:
-        return f"${float(v) * 1_000_000:.2f}/M"
-    except (TypeError, ValueError):
-        return "?"
+from rolo_claude.model_display import ROW_HEADER, format_model_row
+from rolo_claude.tui.dialogs.listnav import NavInput
 
 
-def _row_text(m: dict) -> str:
-    ctx = m.get("context")
-    ctx_str = f"{ctx // 1000}k" if isinstance(ctx, int) else "?"
-    # H14 scope I: a Databricks row has no context/price yet (the discovery
-    # cache doesn't carry either) -- show its path type and DBU rate
-    # instead of the price columns, which would otherwise just be "?/?".
-    if m.get("provider") == "databricks":
-        row = f"{m['ref']:<42} path={m.get('path_type', '?'):<10} dbu={m.get('dbu', '?')}"
-    else:
-        row = (f"{m['ref']:<42} ctx={ctx_str:<6} out={m.get('output') or '?':<8} "
-               f"in={_fmt_price(m.get('price_in'))} out={_fmt_price(m.get('price_out'))}")
-    # H11 Part A: "the /model picker gets a 'Claude subscription (via
-    # Claude Code)' group" -- this dialog has no real section-header
-    # concept, so a cc:/databricks row (Controller.list_models()'s own
-    # `group` tag) is marked inline instead of restructuring the whole
-    # OptionList.
-    group = m.get("group")
-    if group:
-        row += f"  [{group}]"
-    return row
+def _grouped(models: "list[dict]") -> "list[tuple[str, list[dict]]]":
+    """Stable-groups `models` by their own `group` tag (ungrouped rows --
+    OpenRouter, aliases, the synthesized current-model row -- share one
+    untitled, header-less bucket) -- preserves each group's FIRST-SEEN
+    order rather than assuming same-group rows already sit contiguously in
+    the incoming list (`Controller.list_models()`'s own Databricks section
+    is endpoint-NAME-sorted, which does not always keep one family
+    together)."""
+    order: "list[str]" = []
+    buckets: "dict[str, list[dict]]" = {}
+    for m in models:
+        key = m.get("group") or ""
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(m)
+    return [(key, buckets[key]) for key in order]
 
 
 class ModelPicker(ModalScreen):
@@ -61,16 +67,15 @@ class ModelPicker(ModalScreen):
         # `Controller.list_models()` returns dicts; `FakeController`'s own
         # (tests/test_fake_controller.py-pinned) shape is a bare list of ref
         # strings -- normalize both to the dict shape this dialog renders.
-        self.models = [m if isinstance(m, dict) else {"ref": m, "context": None, "output": None,
-                                                        "price_in": None, "price_out": None, "provider": "?"}
-                       for m in models]
+        self.models = [m if isinstance(m, dict) else {"ref": m, "provider": "?"} for m in models]
         self.current = current
         self._filtered = models
 
     def compose(self):
         with Vertical():
             yield Static(f"Select a model (current: {self.current or '?'})", classes="dialog-title")
-            yield Input(placeholder="Filter models...", id="model-filter")
+            yield Static(ROW_HEADER, classes="dialog-subtitle")
+            yield NavInput(placeholder="Filter models...", id="model-filter", option_list_id="model-list")
             yield OptionList(id="model-list")
             yield Static("", id="model-hint")
 
@@ -88,8 +93,20 @@ class ModelPicker(ModalScreen):
         option_list.clear_options()
         hint = self.query_one("#model-hint", Static)
         if self._filtered:
-            for m in self._filtered:
-                option_list.add_option(Option(_row_text(m), id=m["ref"]))
+            for group, members in _grouped(self._filtered):
+                if group:
+                    option_list.add_option(Option(Text(f"── {group} ──", style="bold dim"),
+                                                   disabled=True))
+                for m in members:
+                    option_list.add_option(
+                        Option(Text(format_model_row(m), no_wrap=True, overflow="ellipsis"), id=m["ref"]))
+            # 1.0.1 hotfix addendum 7: highlights the first SELECTABLE row
+            # up front (`action_first` skips a disabled group-header, unlike
+            # a bare `.highlighted = 0`) -- otherwise `highlighted` starts
+            # at None and "Down twice" only reaches the SECOND row, not the
+            # third, contradicting the documented "Down, Down, Enter -> the
+            # third entry" behavior.
+            option_list.action_first()
             hint.update("")
         else:
             refs = [m["ref"] for m in self.models]

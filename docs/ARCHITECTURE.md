@@ -697,3 +697,53 @@ growing a text widget of its own. Every event carries an `agent_id`
 `turn_done` events are applied to its own transcript block but never touch
 the main status bar or the auto-title/idle bookkeeping those same event
 kinds drive for the top-level session.
+
+**The status bar** (`tui/widgets/statusbar.py`) reads `context_tokens`/
+`context_limit`/`cost_usd`/`total_input_tokens`/`total_output_tokens` off
+every `status` and `message_end` event (1.0.1 hotfix 14) -- the same raw
+numbers `Session.status_event`/`agent/loop.py`'s per-step `message_end`
+already compute for `/cost`/`stats`, never re-derived in the UI. Two pure
+formatters in `rolo_claude/model_display.py` (shared with the hotfix-12
+model-listing row format) turn those numbers into text that is NEVER the
+bare `ctx ?`/`$?` a Databricks model with no known context limit/price
+showed permanently before 1.0.1: `format_status_context(tokens, limit)`
+renders `"ctx 12k/1M 1%"` with a limit or `"ctx 12k"` (used tokens alone)
+without one; `format_status_cost(cost_usd, total_in, total_out)` renders a
+real `"$0.0123"` when a cost is known (provider-reported, or `CostMeter`'s
+fallback formula computed from a models.dev-resolved Databricks price) or
+`"in 12k out 3k"` (running token totals) when no price is known at all. On
+a narrow terminal the cwd/branch segment shrinks first (down to nothing),
+and only then is the model label itself left-truncated with a leading
+ellipsis (`truncate_label_left`) -- ctx and cost stay visible before cwd
+does.
+
+**Auto-scroll (1.0.1 hotfix 16).** `Transcript` (`tui/widgets/transcript.py`,
+a `VerticalScroll` itself) calls Textual's own `self.anchor()` once in
+`on_mount` -- the compositor then keeps `scroll_y` pinned to the live
+bottom on every layout pass for as long as the widget stays "following",
+which covers a child growing mid-stream (a `MarkdownStream.write()`
+reflow), not just a fresh mount. Textual's own `scroll_y` watcher releases
+that following on any ordinary user scroll (PageUp, mouse wheel) and
+re-acquires it automatically once the view is scrolled back to the true
+bottom -- `Transcript.is_following()` reads this indirectly (`is_at_bottom()`,
+already used for the pre-1.0.1 one-shot mount scroll) rather than reaching
+into a private Textual flag. `new_since_scroll` (the status bar's "↓ N new")
+increments on every mount AND on every delta that lands while released
+(`Transcript.note_growth()`, called from `append_text`/`append_thinking`
+for a block that already exists); `Ctrl+End`, a click on the indicator, or
+submitting a new prompt all call `scroll_end()` and reset the counter,
+which is exactly what Textual's own watcher treats as "the user returned
+to the bottom".
+
+**A pending card intercepts free text (1.0.1 hotfix 17).**
+`on_prompt_input_submitted` (`tui/app.py`) checks `self.pending_card`
+before ever reaching `Controller.submit`'s steer path: when the card
+implements `resolve_with_message` (`PermissionCard`/`PlanCard`/
+`QuestionCard` all already did, for their own borrowed-input flows), the
+typed text answers the card directly instead of becoming a "↳ steering…"
+note the pending ask never sees. `action_cycle_mode` (Shift+Tab) likewise
+re-evaluates an already-pending `PermissionCard` under the NEW mode right
+away (`auto`/`bypassPermissions` resolves it allowed, `dontAsk` denied) --
+`Controller.set_permission_mode` itself only ever affected FUTURE asks,
+a plain attribute write with no knowledge of one already parked in
+`Session._await_permission_decision`.

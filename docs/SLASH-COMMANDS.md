@@ -50,15 +50,40 @@ token counts against the model's context window, plus the token count at
 which auto-compaction will trigger.
 
 ### `/model [ref]`
-No argument: shows the current model and effort. With a model reference
-(any form `docs/MODELS.md` documents), switches the session to it --
-mid-session model changes are logged as a fresh `meta` node.
+No argument: opens the model picker -- a filterable, arrow-key list
+(`Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` move the highlight, typing
+filters, `Enter` confirms, `Esc` cancels; the filter box keeps keyboard
+focus throughout) grouped by provider/family with one header per group
+(OpenRouter, `claude.ai subscription` -- only shown when that subscription
+is actually usable, see below -- and `Databricks (<family>)` per family).
+Every row shows the SAME columns regardless of provider: context window,
+max output, and USD/1M-token prices (`ctx=200k out=64k in=$1.00/M
+out=$5.00/M`, blank -- never `?` -- for anything not published), plus,
+for a Databricks row, a `[<family> · <path>]` tag naming which gateway
+path it resolves to right now (see `docs/DATABRICKS.md`). Databricks
+pricing/context data comes from models.dev (refreshed by `/models
+refresh`) when that endpoint is listed there, else from `model_table.json`
+(context only), else blank -- never guessed. With a model reference (any
+form `docs/MODELS.md` documents, including a bare `databricks-*`/
+`system.ai.*` name or any name that matches a cached Databricks endpoint)
+given directly as `/model <ref>`, switches the session to it immediately,
+no picker -- mid-session model changes are logged as a fresh `meta` node.
+The `claude.ai subscription` group appears only when `claude auth status`
+reports an actual claude.ai login (not, e.g., a Databricks work box's own
+settings-driven login) -- otherwise a `cc:` row would just fail at request
+time with no warning from the picker.
 
 ### `/models [refresh]`
-Bare: reports how many Databricks endpoints are cached and how old the
-cache is, without touching the network. `refresh` re-lists the workspace
-catalog off the UI thread and reports a one-line added/removed/changed
-diff. See `docs/DATABRICKS.md`.
+Bare: renders the cached Databricks table INSTANTLY, without touching the
+network -- one row per endpoint (family, the family's default gateway
+path, chat-capable yes/no by the endpoint's own `task`, plus the same
+ctx/output/price columns `/model`'s picker shows) plus the catalog's age.
+An old cache from before this table tracked gateway types shows `path
+unknown (refresh needed)` rather than a silently wrong guess. `refresh`
+re-lists the workspace catalog AND re-fetches models.dev's own pricing
+data, both off the UI thread, and reports a one-line added/removed/changed
+diff; on failure, the (unchanged) cached table is still shown, plus one
+line naming the error. See `docs/DATABRICKS.md`.
 
 ### `/dbx`
 An alias that always behaves like `/models refresh`, regardless of any
@@ -119,8 +144,25 @@ pulled from the live session's own `agent_runtime.role_table`/
 actually resolves against) so it never drifts from real behavior. See
 `docs/ROLES.md`.
 
-### `/effort`
-Shows the active reasoning-effort level, or "not set (provider default)".
+### `/effort [level]`
+1.0.1 hotfix 19/20. Bare `/effort` shows the effective level, its source
+(`flag`/`settings`/`default`/`session`), and the accepted levels for the
+current route -- in the TUI it instead opens an inline selector card in
+the transcript (Claude Code style): a horizontal row of the route's own
+accepted levels (never the full vocabulary -- an Anthropic route never
+offers `xhigh`, which that endpoint schema rejects), current one
+bracketed, one-line description underneath. **Left/Right** or **h/l**
+move, **Enter** applies, **Esc** cancels and keeps the old value (either
+way, focus returns to the prompt); a model with no adjustable effort at
+all shows a one-line card that closes on any key. `/effort <level>` (in
+either mode) sets it immediately, clamped to what the route accepts
+(`xhigh` on a route without it becomes `max`) -- effective from the next
+message, remembered for the rest of the session. `--effort`/settings
+`effortLevel` still set the STARTING value; every Anthropic-family route
+(`cc:`/`ant:`/a Databricks Claude foundation endpoint) defaults to `high`
+when nothing more specific was set anywhere. See
+[MODELS.md](MODELS.md)'s "Reasoning effort" section for the accepted-level
+table per route family.
 
 ### `/init`
 A **prompt**-kind command: its body is a fixed instruction asking the
@@ -269,15 +311,24 @@ build/VCS directories like `.git`/`node_modules`/`__pycache__` are pruned).
 
 ## Key bindings
 
-Seven single keys are bound globally, always available regardless of
+These single keys are bound globally, always available regardless of
 focus: `Ctrl+C` (interrupt the turn, or quit on a second press within
 1.5s; copies a text selection instead if one exists), `Ctrl+D` (quit when
-the prompt is empty, else forward-delete), `Esc` (interrupt), `Shift+Tab`
-(cycle permission mode through `default` -> `acceptEdits` -> `plan` ->
-`auto` -> back to `default`), `Ctrl+L` (clear the transcript view), `Ctrl+O`
-(toggle verbose -- shows every intermediate message/expands tool cards),
-`Ctrl+R` (history search), `F1` (help), `Ctrl+P` (command palette), `Ctrl+E`
-(edit the current prompt draft in `$VISUAL`/`$EDITOR`).
+the prompt is empty, else forward-delete), `Ctrl+Q` (1.0.1: force quit --
+exits even if the session is wedged; waits at most 2s for a clean
+shutdown, then exits regardless), `Esc` (interrupt), `Shift+Tab` (cycle
+permission mode through `default` -> `acceptEdits` -> `plan` -> `auto` ->
+back to `default`; 1.0.1: if a permission card is still pending when the
+mode lands on `auto`/`bypassPermissions` it's resolved as allowed right
+away, `dontAsk` resolves it as denied), `Ctrl+L` (clear the transcript
+view), `Ctrl+O` (toggle verbose -- shows every intermediate message/
+expands tool cards), `Ctrl+R` (history search), `F1` (help), `Ctrl+P`
+(command palette), `Ctrl+E` (edit the current prompt draft in `$VISUAL`/
+`$EDITOR`). 1.0.1: `Ctrl+End` re-anchors the transcript to follow new
+output (and clears the "N new" indicator); bare `End` does the same
+EXCEPT while the prompt input has focus, where it means cursor-to-end-of-
+line as usual (the overwhelmingly common case -- use `Ctrl+End`, or click
+the "N new" indicator itself, to be sure it reaches the transcript).
 
 `Ctrl+X` is a **chord prefix**: press it, then a second key within 1
 second, while a small "which-key" overlay shows the live list of
@@ -308,24 +359,44 @@ inserts a newline without submitting, `Tab` accepts the completion popup,
 output; `Ctrl+O` there toggles that card's own expanded/collapsed state
 (distinct from the global verbose toggle).
 
+**Auto-scroll (1.0.1).** The transcript follows new output (a streaming
+reply, a growing tool card) automatically as long as it's scrolled to the
+bottom. Scrolling up (`PageUp`, the mouse wheel, a drag-select) releases
+that following and shows a "↓ N new" indicator in the status bar, counting
+everything that's landed since; scrolling back to the bottom, pressing
+`Ctrl+End`, clicking the indicator, or submitting a new prompt all
+re-anchor to the bottom and clear the count.
+
 ## Cards and their keys
 
 A card takes keyboard focus the instant it's mounted (so its own number/
-letter keys win over the prompt input), and typing while it's pending
-never answers it -- that's always a steer on the turn still running
-underneath, exactly like typing at any other moment.
+letter keys win over the prompt input). **1.0.1:** typing free text while
+a PermissionCard, PlanCard, or QuestionCard is pending now ANSWERS that
+card directly, exactly like pressing its own deny/keep-planning/"Other"
+key first -- a PermissionCard denies with the typed text as feedback, a
+PlanCard keeps planning with it, a QuestionCard takes it as the "Other"
+answer -- rather than becoming a steer on the turn underneath (which is
+what typing while ANY other card, e.g. the `/effort` selector or a rewind
+confirmation, still does).
 
 - **PermissionCard**: `1`/`y` allow once, `2`/`a` allow for the session,
   `3` allow always (writes a rule to `.claude/settings.local.json`), `4`/
   `n`/`Esc` deny (borrows the prompt input for one line of optional
-  feedback first).
+  feedback first, or just type the feedback directly -- see above). While
+  pending, the status bar shows "permission needed: 1 yes · 2 session ·
+  3 always · 4 no" and the prompt placeholder reads "1-4 answers the
+  request above, or type why not".
 - **QuestionCard**: an option list per question (arrow keys + `Enter`, or
   click); `Tab` moves to the next question when more than one was asked;
-  `Esc` dismisses without answering; selecting "Other..." borrows the
-  prompt input for a free-text answer.
+  `Esc` dismisses without answering; selecting "Other..." (or just typing
+  an answer directly) borrows the prompt input for a free-text answer.
 - **PlanCard**: `1`/`a` approve with auto-accept-edits mode after, `2`/`m`
   approve with manual mode after, `3`/`k`/`Esc` keep planning (borrows the
-  prompt input for optional feedback).
+  prompt input for optional feedback, or just type it directly).
+- **EffortCard** (`/effort` with no argument, 1.0.1): `Left`/`Right` or
+  `h`/`l` move between this route's own accepted effort levels, `Enter`
+  applies, `Esc` cancels and keeps the old value. A model with no
+  adjustable effort shows a one-line card that closes on any key.
 - **RewindCard** (`/rewind`/`/undo`/`/redo`): `1`/`y`/`Enter` restore,
   `2`/`n`/`Esc` cancel.
 - **ImproveCard** (one per `/improve` candidate): `a` apply, `e` edit the

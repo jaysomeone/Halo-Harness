@@ -80,6 +80,11 @@ class McpStatus(ModalScreen):
             yield option_list
             yield Static("", id="mcp-hint")
 
+    def on_mount(self) -> None:
+        # 1.0.1 hotfix addendum 7: see rewind_picker.py's matching comment.
+        if self.servers:
+            self.query_one(OptionList).action_first()
+
     def action_cancel(self) -> None:
         if self._busy_abort is not None:
             # A reconnect/approve is in flight -- Esc cancels THAT (the

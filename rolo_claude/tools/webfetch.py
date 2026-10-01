@@ -151,7 +151,22 @@ class WebFetchTool(Tool):
         ToolResult)` to tell the two apart."""
         parsed = urlparse(url)
         handler = _SameHostRedirectHandler(parsed.hostname)
-        opener = urllib.request.build_opener(handler)
+        # 1.0.1 fixpass finding 8: WebFetch used urllib's own DEFAULT TLS
+        # context (the plain build_opener(handler) below had no HTTPSHandler
+        # of its own at all) -- the ONE `urlopen(` grep this hotfix's TLS
+        # sweep relied on never caught this (it's `build_opener`, a
+        # different call shape), so this stayed on urllib's stricter
+        # default verification policy while every other HTTPS call in the
+        # harness moved to default_tls_context() (VERIFY_X509_STRICT
+        # cleared when present, the same CA-bundle env vars). Behind a
+        # TLS-inspecting proxy whose CA cert has a non-critical
+        # basicConstraints extension, WebFetch was the one thing failing on
+        # Python 3.13 while `curl`/every other request in this same harness
+        # worked. An explicit HTTPSHandler alongside the redirect handler --
+        # build_opener accepts more than one -- fixes it with no change to
+        # the redirect-following behavior above.
+        from rolo_claude.providers.http import default_tls_context
+        opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=default_tls_context()))
         req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude/0.3 (+webfetch tool)"})
         try:
             with opener.open(req, timeout=_TIMEOUT_S) as resp:

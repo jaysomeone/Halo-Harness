@@ -68,6 +68,26 @@ request builder. Fields a row can override:
   **`databricks_rate_limits`**, **`unverified`** (which fields this row's
   own data has no primary source for -- informational, never gates
   anything).
+- **`reasoning_effort_with_tools`** (1.0.1 hotfix 22, narrowed by the H14c
+  fixpass finding 12): when set, a request that carries `tools` sends this
+  value for `reasoning_effort` REGARDLESS of `--effort`/the session's own
+  effort (a tool-less request on the same model is unaffected). Databricks
+  ONLY (an OpenRouter model whose id happens to contain "gpt-6" is never
+  affected) -- driven by explicit `model_table.json` rows for both real
+  models.dev name shapes, `databricks-gpt-6-{sol,luna,terra}` AND
+  `databricks-gpt-5-6-{sol,luna,terra}` (the bare substring "gpt-6" is not
+  even a substring of the second shape), each setting `"none"`: verified
+  live, `dbx:databricks-gpt-6-sol` 400'd on every turn with "Function tools
+  with reasoning_effort are not supported for gpt-6-sol in
+  /v1/chat/completions... set reasoning_effort to 'none'", since omitting
+  the field left the endpoint's own (non-none) default in place. A live
+  400 with this exact wording ("function tool" + "reasoning_effort") on
+  any OTHER Databricks OpenAI-family endpoint retries once with
+  `reasoning_effort` set to `"none"` explicitly; if THAT retry also fails,
+  the general strip-the-field retry below gets its own independent chance
+  (a shared one-shot flag used to block it after a failed "none" retry),
+  and a successful strip resets the session's own effort so later steps
+  stop re-sending the rejected value first.
 
 **The Edit-tool context hint**: a DeepSeek/Kimi/GLM/Qwen/MiniMax-family
 session's Edit tool description gets one extra sentence asking for at least
@@ -80,16 +100,90 @@ overrides the family default for just that one model.
 
 ## Reasoning effort
 
-`--effort`/`/model`'s effort, or `settings.json`'s `effortLevel`/
-`modelSettings.<id>.effortLevel` when `--effort` is omitted, maps through
-`providers/profiles.py::map_effort` to whatever field the resolved profile
-actually needs: a `thinking.budget_tokens` value (4096/10000/24000/32000/
-32000 for low/medium/high/xhigh/max) on the native Anthropic dialect,
-`reasoning.effort` on OpenRouter, or `reasoning_effort` on a Databricks chat
-endpoint. A profile with `reasoning_no_disable: true` (GLM-5.3/5.3-Flash --
-`thinking.type: disabled` is a hard 400 on that family) forces an
-explicitly-disabling effort value back up to that row's own default instead
-of ever sending `disabled`.
+`--effort`, `/effort <level>`, or `settings.json`'s `effortLevel`/
+`modelSettings.<id>.effortLevel` when neither of those was given, maps
+through `providers/profiles.py::map_effort`/`providers/request.py::
+map_effort_anthropic` to whatever field the resolved profile actually
+needs: `output_config.effort` (adaptive-thinking Opus/Sonnet 4.6+/Fable/
+Mythos) or a `thinking.budget_tokens` value (4096/10000/24000/32000/32000
+for low/medium/high/xhigh/max, older Claude models) on the native Anthropic
+dialect, `reasoning.effort` on OpenRouter, or `reasoning_effort` on a
+Databricks chat endpoint. A profile with `reasoning_no_disable: true`
+(GLM-5.3/5.3-Flash -- `thinking.type: disabled` is a hard 400 on that
+family) forces an explicitly-disabling effort value back up to that row's
+own default instead of ever sending `disabled`.
+
+**The "high" default (1.0.1 hotfix 19, scoped by the H14c fixpass finding
+11).** When NOTHING more specific is set anywhere (no `--effort`, no
+`/effort`, no settings `effortLevel`) AND the model is ADAPTIVE-capable
+(Opus/Fable/Mythos always, Sonnet 4.6+), the route now defaults to `high`
+rather than omitting the field. A NON-adaptive Anthropic-family model
+(Haiku 4.5, Sonnet 4.5 or older) keeps the old "omit -> provider default"
+behavior instead -- that family has no `{type: "adaptive"}` mode at all,
+so "high" became a `thinking.budget_tokens` value close to `max_tokens`
+(see below), leaving thinking free to crowd out the actual answer. Every
+non-Anthropic family keeps the "omit -> provider default" behavior
+regardless. A `/model` switch re-clamps (see below) whatever effort the
+session already had for the new route, defaulting a chat-route session
+that switches INTO an adaptive-capable Anthropic route the same way.
+
+**Accepted levels per route family, and clamping.** Each
+`ProviderProfile` carries `effort_values_supported`
+(`providers/profiles.py::clamp_effort` enforces it right before a value
+reaches the wire):
+
+| Route family | Accepted levels |
+|---|---|
+| Anthropic Messages (`cc:`, `ant:`, Databricks Claude foundation) | `low`, `medium`, `high`, `max` (no `xhigh` -- that endpoint schema rejects it outright) |
+| OpenRouter / Databricks chat (DeepSeek, Kimi, GLM, Qwen, ...) | `low`, `medium`, `high`, `xhigh` (no `max` as of the H14c fixpass finding 13 -- that's an Anthropic-only level; a chat route 400'd on it before this) |
+
+A tabled row whose own `reasoning_default_effort` needs a value outside
+that chat-route default (GLM-5.3's family genuinely defaults to `max`,
+per the ingested adapter-rules report -- `reasoning_no_disable` forces a
+disabling `--effort none` UP to it) still accepts that one value too; an
+explicit `effort_values_supported` row key, when a future row sets one,
+always wins outright.
+
+`xhigh` on a route that doesn't list it becomes `max` ONLY when that
+route's own accepted set includes `max` (Anthropic, or a GLM-5.3-style
+tabled exception) -- that route's own strongest level; any other
+unrecognized value (including a now-rejected `max` on an ordinary chat
+route) falls back to the route's own default. This is what fixed a live
+400 on `dbx:databricks-claude-opus-4-6`: the user's own
+`~/.claude/settings.json` `effortLevel: "xhigh"` (valid for real Claude
+Code's own routes) reached `output_config.effort` verbatim and was
+rejected (`Input should be 'low', 'medium', 'high' or 'max'`) on the very
+first prompt. As a backstop for a route whose accepted set isn't modeled
+correctly yet, a live 400 naming the effort field retries ONCE with it
+stripped from the body before the turn is treated as failed -- recognized
+wordings now include Databricks/Anthropic's own `output_config.effort`/
+`reasoning_effort` field names, OpenRouter's nested `reasoning.effort`
+path, and a generic OpenAI-style "Invalid value: '`max`'"/"'`xhigh`'"
+enum-validation 400 that names neither field by name.
+
+**Thinking budget cap (non-adaptive models).** When effort maps to a
+`thinking.budget_tokens` value (any non-adaptive Anthropic-family model),
+the budget is capped at HALF of `max_tokens` (never below Anthropic's own
+1,024-token minimum), not `max_tokens - 1` -- the old near-`max_tokens`
+budget left thinking free to crowd out the actual answer. The version
+parser behind the adaptive-capability check reads hyphenated ids
+(`claude-sonnet-4-6`, `databricks-claude-sonnet-4-6`) as `4.6`, not a bare
+major version `4` (a literal-dot `claude-sonnet-4.6` was already read
+correctly). Thinking is dropped entirely on the one-shot
+`tool_choice: "any"` repair retry (the leak-parser fallback) -- Anthropic
+rejects extended thinking together with any forced (non-`"auto"`)
+`tool_choice`.
+
+**`/effort`** (1.0.1 hotfix 20): shows the effective level, its source
+(`flag`/`settings`/`default`/`session`), and this route's own accepted
+levels when given no argument; `/effort <level>` sets it immediately
+(clamped the same way), remembered for the rest of the session. In the
+TUI, bare `/effort` instead opens an inline selector card in the
+transcript -- a horizontal row of this route's accepted levels, current
+one bracketed, Left/Right or h/l to move, Enter to apply, Esc to cancel
+and keep the old value; a model with no adjustable effort at all shows a
+one-line card that closes on any key. The status bar shows a short effort
+tag next to the mode glyph.
 
 ## The model table, catalogs, and refresh
 
@@ -132,25 +226,55 @@ configured -- it backs the Databricks vendored-fallback tier and
 
 ## Pricing and DBUs
 
-OpenRouter reports real per-token USD pricing in `models.json`
-(`price_in`/`price_out`/`price_cache_read`/`price_cache_write`); when a
-response itself doesn't carry a `usage.cost` field, `CostMeter` derives one
-from those rates (input × price_in + (output + reasoning) × price_out +
-cache_read/cache_write at their own rates, falling back to `price_in` for
-cache tokens when no specific rate is known). **Databricks never reports
-cost** -- `stats`/`/cost` always show `n/a` for a Databricks turn; there is
-no per-turn billing field on the wire to read, by design (`CostMeter.
-add_usage` treats `provider == "databricks"` as unknown-cost
-unconditionally, whatever pricing config exists). Where
+**Live per-turn cost** (`stats`/`/cost`, and the status bar's own `$` field
+since 1.0.1 hotfix 14) still works exactly as before for OpenRouter: real
+per-token USD pricing in `models.json` (`price_in`/`price_out`/
+`price_cache_read`/`price_cache_write`); when a response itself doesn't
+carry a `usage.cost` field, `CostMeter` derives one from those rates
+(input × price_in + (output + reasoning) × price_out + cache_read/
+cache_write at their own rates, falling back to `price_in` for cache tokens
+when no specific rate is known). **Databricks** used to always report
+`n/a` regardless of pricing; since 1.0.1 hotfix 14, `resolve_model_profile`
+feeds the SAME per-endpoint price used for the listed columns below (source
+(a), the models.dev `databricks` entry) into this session's `CostMeter` at
+start-of-session, so a Databricks turn on an endpoint models.dev prices
+gets a real computed running cost through the identical fallback formula
+above -- and still shows `n/a` (falls back to token totals in the status
+bar) whenever no models.dev price exists for that endpoint, which remains
+the common case. A `cc:` row's "cost" is Claude Code's own cumulative
+`total_cost_usd`, delta'd since that subprocess's previous turn -- an
+estimate, never real per-token billing, and never counted toward
+`--max-budget-usd`.
+
+**Listed (not live) context/output/price columns** -- what `/model`,
+`/models`, `rolo-claude models`, and `init`'s own picker show per row
+(`rolo_claude.model_display.format_model_row`, one implementation shared
+by every one of those surfaces) -- are a DIFFERENT, catalog-level concept:
+a normalized (`200000` -> `200k`, `1048576`/`1050000` -> `1M`) reference
+figure for the model itself, never a live spend number, sourced per
+provider:
+  - **OpenRouter**: `models.json`'s own `context_length`/`max_output_tokens`/
+    `pricing.prompt`/`pricing.completion` (the exact same fields `CostMeter`
+    above reads, just displayed rather than multiplied against real usage).
+  - **`cc:`/`ant:`**: the nine subscription-model aliases' own static table
+    (`providers.cc_models.profile_fields_for_cc_model`).
+  - **Databricks**: (a) the [models.dev](https://models.dev) `databricks`
+    provider's entry whose id equals the endpoint name (the live
+    `~/.rolo-claude/models-dev.json` cache, refreshed by `models --refresh`/
+    `/models refresh`, else the package-vendored fallback) -- `limit.context`/
+    `limit.output` for context/output, `cost.input`/`cost.output` (already
+    USD per million tokens) for the prices, used AS-IS, never re-multiplied;
+    (b) missing that, `model_table.json`'s own `context_tokens` (output/
+    prices then stay blank); (c) neither -- every field blank. **A blank
+    field is never shown as `?`** -- it just keeps its column's width.
+
 `databricks.dbu_price_usd` (`~/.rolo-claude/config.json`, or a team.json's
-`dbu_price_usd`) actually applies is narrower: it converts an endpoint's own
-**catalog-advertised** DBU rate (`usage_policy.output_dbu_per_1k_tokens`,
-when the workspace publishes one) into a dollar figure for the `/model`
-picker's informational per-endpoint display (`Controller.list_models()`'s
-`dbu` column) -- a reference price, never a real per-turn spend. A
-`cc:` row's "cost" is Claude Code's own cumulative `total_cost_usd`,
-delta'd since that subprocess's previous turn -- an estimate, never real
-per-token billing, and never counted toward `--max-budget-usd`.
+`dbu_price_usd`) is a THIRD, separate figure, in a different unit again: it
+converts an endpoint's own **catalog-advertised** DBU rate
+(`usage_policy.output_dbu_per_1k_tokens`, when the workspace publishes one)
+into a dollar figure, appended after the ctx/output/price columns as
+`dbu=<rate>` only when actually known -- a reference price, never a real
+per-turn spend, and never conflated with the USD/1M-token prices above.
 
 ## The `/model` picker
 
@@ -158,8 +282,19 @@ Opening `/model` with no argument triggers a background refresh of the
 Databricks catalog if it's older than `databricks.catalog_max_age_hours`
 (default 24h) -- the picker itself opens immediately with whatever's
 already cached; the refresh only ever notifies afterward if something
-changed. Databricks endpoints are grouped by family in the picker, each
-showing which gateway path type it resolves to, with non-chat endpoints
-(embeddings/whisper) hidden entirely. See [DATABRICKS.md](DATABRICKS.md)
-for exactly how a Databricks model reference resolves to a URL, and
-[COMMANDS.md](COMMANDS.md) for `rolo-claude models`'s own flags.
+changed. The picker is a filterable, arrow-key list (`Up`/`Down`/
+`PageUp`/`PageDown`/`Home`/`End` move the highlight, typing filters,
+`Enter` confirms, `Esc` cancels -- the filter box itself keeps keyboard
+focus throughout) grouped by provider/family, one header per group:
+OpenRouter, `claude.ai subscription` (shown only when `claude auth status`
+reports an actual claude.ai login -- never on a box whose `claude` is only
+logged in via, say, a Databricks work box's own settings), and
+`Databricks (<family>)` per family, each row showing which gateway path
+type it resolves to (see [DATABRICKS.md](DATABRICKS.md)) alongside the
+ctx/output/price columns above; non-chat endpoints (embeddings/whisper) are
+hidden entirely. `rolo-claude init`'s own per-provider and final
+cross-provider model pickers (see [COMMANDS.md](COMMANDS.md)'s `init`
+section) use this exact same list widget and row format. See
+[DATABRICKS.md](DATABRICKS.md) for exactly how a Databricks model
+reference resolves to a URL, and [COMMANDS.md](COMMANDS.md) for
+`rolo-claude models`'s own flags.

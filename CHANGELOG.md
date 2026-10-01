@@ -5,6 +5,268 @@ project does not (yet) follow strict semver across the 0.3.x line -- each
 0.3.0 milestone below was a working checkpoint toward the single 0.3.0
 release, not a separate published version.
 
+## [1.0.1] - 2026-09-30
+
+A hotfix release from the owner's first real 1.0.0 run on the Kali work VM
+(DNS down, then fixed), a live `/model` screenshot from it, and several
+days of live use on a work VM after that. Nineteen fixes, all with pinning
+tests:
+
+1. **Completion popup keys**: with the `/`/`@` completion popup open,
+   Up/Down move the highlight, Tab/Enter accept it, Esc closes it, typing
+   still filters -- the prompt's own TextArea no longer swallows Up/Down
+   (history nav) while the popup is open.
+2. **Fail fast on DNS/connection failures**: a hung/unresolvable host used
+   to take upwards of 60s to fail (the OS resolver's own retry policy,
+   completely unbounded); every connect (DNS included, not just the TCP
+   handshake) is now capped at 8s, and a DNS/refused/unreachable failure
+   never rides the 1-2-4-8-16s retry ladder (one immediate retry, then
+   terminal) -- across `-p`, the TUI, `init`'s pong, `models --refresh`,
+   `/models refresh`, and `doctor`. The error names the host: "cannot
+   resolve/reach `<host>` -- check the machine's network, DNS or VPN".
+3. **`/models` shows the cache instantly**: bare `/models` (TUI or
+   headless) and `rolo-claude models` (CLI) never touch the network any
+   more -- a bug in the TUI's own do-refresh check made even a BARE
+   `/models` refresh over the network. Only `/models refresh`/`/dbx`/
+   `--refresh` do; a failed refresh still shows the (unchanged) cached
+   table plus one line naming the error.
+4. **Cache carries the gateway types**: every cached row now shows a real
+   `path` (family default, from `dbx_routing`) and `chat-capable` counts
+   the endpoint's own `task == "llm/v1/chat"` (never a name-based guess or
+   `bool(api_types)`, which used to disagree with the table on the same
+   rows). An old cache from before this milestone (no `api_types` at all)
+   is detected and migrated on next background refresh, else shown as
+   "path unknown (refresh needed)" rather than a silently wrong guess.
+5. **Interactive model picker in `init`**: a filterable arrow-key list of
+   chat-capable endpoints grouped by family (a numbered list with no real
+   terminal) offered right after the catalog is refreshed; `--yes`/
+   `--model` skip it. The TUI's own `/model` picker got the same grouping.
+6. **Bare endpoint names**: `--model databricks-kimi-k3`/`/model
+   databricks-kimi-k3`/`init --model databricks-kimi-k3` resolve exactly
+   like `dbx:databricks-kimi-k3` whenever the name matches a cached
+   endpoint (even a workspace-custom name with no `databricks-`/
+   `system.ai.` shape) or that generic shape; an unresolvable name
+   suggests the three closest cached endpoints instead of a bare error.
+7. **List-dialog keyboard forwarding**: every filter-`Input` + `OptionList`
+   dialog (`/model`, `/resume`, the command palette, `init`'s own picker)
+   forwards Up/Down/PageUp/PageDown/Home/End to the list and Enter to the
+   highlighted row, instead of the `Input` silently swallowing them (Down
+   in `/model` used to do nothing at all).
+8. **`/model` rows, single line**: grouped with one header per group
+   instead of an inline `[group]` tag, each row ellipsized rather than
+   wrapped (a long ref/path used to break the column alignment).
+9. **`cc:` group gating**: shown only when `claude auth status` reports an
+   actual claude.ai login -- a Databricks work box's own settings-driven
+   `claude` login used to list nine `cc:` models that would refuse at
+   request time.
+10. **Unified `ctx`/`out`/price columns**: `/model`, `/models`,
+    `rolo-claude models`, and `init`'s own picker now show the SAME
+    context/output/USD-per-1M-token columns for every provider, Databricks
+    included (previously `path=... dbu=?` only, with "?" everywhere) --
+    normalized units (`200000` -> `200k`, `1048576`/`1050000` -> `1M`),
+    blank (never `?`) for anything not published. Databricks pricing comes
+    from models.dev when that endpoint is listed there, else
+    `model_table.json`'s own context (prices blank), else blank.
+    `fetch_models_dev` now sends a real `User-Agent` (models.dev's CDN can
+    403 a header-less default urllib agent).
+11. **`VERIFY_X509_STRICT` cleared on every TLS context**: Python 3.13
+    turned this on by default; a corporate TLS-inspection proxy's
+    re-signing CA can carry a technically-non-conformant certificate
+    extension that only this stricter mode rejects (curl/browsers/Node/
+    pre-3.13 Python all accept it) -- seen live as `models --refresh`
+    failing with `CERTIFICATE_VERIFY_FAILED: ... basic constraints of CA
+    cert not marked critical` on a work VPN while a Databricks pong (a
+    different, inspection-exempt host) kept working. Fixed for every
+    HTTPS call this harness makes; certificate-chain/hostname verification
+    itself is unchanged.
+12. **`init` is provider-first**: step 1 is now "select a provider to set
+    up" (Databricks/OpenRouter/Anthropic API/Claude subscription) with a
+    status tag per row, instead of a home/work/claude "preset" naming a
+    bundle of choices ("work" WAS just Databricks, confusingly named).
+    Each provider runs its own credentials -> catalog -> model-pick ->
+    live-pong path, offers to set up another, and picks one overall
+    default when more than one ends up configured. `--provider` (repeatable)
+    drives it non-interactively; the old `--preset home|work|claude` still
+    works, as a deprecated one-line-noticed alias.
+13. **Status bar shows real context/cost for every model, Databricks
+    included**: `ctx 12k/1M 1%` (or `ctx 12k` alone with no known limit)
+    and a real `$0.0123` (or `in 12k out 3k` token totals with no known
+    price) replace the permanent `ctx ?`/`$?` a Databricks model used to
+    show. `CostMeter` no longer hard-codes Databricks cost as always
+    unknown -- it computes a real fallback cost whenever a models.dev price
+    was resolved for that endpoint, same formula every other provider
+    already used. The model label truncates from the left on a narrow
+    terminal so ctx/cost stay visible; cwd shrinks first.
+14. **The transcript follows new output**: streamed text, thinking blocks,
+    and expanding tool cards used to leave the view wherever the user's own
+    prompt was after the first line -- `Transcript` now anchors to the
+    bottom (Textual's own `anchor()`) while "following," releases on a
+    manual scroll up (showing a "↓ N new" count in the status bar), and
+    re-anchors on `Ctrl+End`, a click on that indicator, or a new prompt.
+15. **A pending permission/plan/question card intercepts free text**:
+    typing while one is pending used to always steer the turn underneath it
+    silently -- it now answers the card directly (deny-with-feedback, keep-
+    planning, or "Other", matching Claude Code's own behavior), and
+    switching to `auto`/`bypassPermissions`/`dontAsk` (`Shift+Tab`) now
+    resolves an already-pending permission card immediately instead of
+    leaving it stuck. The status bar shows a "permission needed: ..." tag
+    and the prompt placeholder changes while one is pending. This, combined
+    with fix 14, was the real mechanism behind a reported TUI "freeze."
+16. **`init` also asks for a default permission mode**: `auto` (recommended),
+    `acceptEdits`, `default`, `plan` -- written to `~/.rolo-claude/
+    config.json`'s own `permission_mode` key, now a layer in the starting-
+    mode precedence chain between `--permission-mode` and settings.json's
+    `permissions.defaultMode`. `doctor` prints the effective mode and its
+    source.
+17. **Worker-group isolation and a hard Ctrl+Q**: the git-branch and
+    statusline timers (`exclusive=True`, no `group=`) were silently
+    cancelling every other in-flight background worker (models refresh,
+    catalog refresh, session list, `/improve` drafts, ...) every 5 seconds
+    -- each now runs in its own named group, as does every `tui/slash.py`
+    worker. `Ctrl+Q` force-quits within 2 seconds even if the session is
+    wedged; a Key event with no focused widget now self-heals focus back to
+    the prompt (or the active modal's own first focusable widget).
+18. **Databricks Claude foundation endpoints reject `xhigh`**: a Databricks
+    Claude route's `output_config.effort` only accepts `low`/`medium`/
+    `high`/`max` -- a session with no more specific effort set now defaults
+    every Anthropic-family route (`cc:`/`ant:`/Databricks Claude foundation)
+    to `high` instead of leaving it unset, and `xhigh` is clamped to `max`
+    on any route that doesn't list it (a `/model` switch re-clamps too). A
+    live 400 naming the effort field retries once with it stripped before
+    the turn is treated as failed.
+19. **`/effort` actually changes the level**: it used to ignore its own
+    argument and only ever echo a value snapshotted at session start
+    (typing `/effort medium` kept showing whatever was configured before
+    launch). `/effort <level>` now sets the session's effort immediately
+    (clamped per fix 18), remembered for the rest of the session; bare
+    `/effort` in the TUI opens an inline Claude-Code-style selector card
+    (the route's own accepted levels in a row, Left/Right to move, Enter to
+    apply, Esc to keep the old value) instead of only printing text. The
+    status bar shows a short effort tag next to the mode.
+20. **gpt-6 rejects `reasoning_effort` alongside tools**: every turn on
+    `dbx:databricks-gpt-6-sol` 400'd ("Function tools with reasoning_effort
+    are not supported for gpt-6-sol... set reasoning_effort to 'none'") --
+    any endpoint whose name contains `gpt-6` now sends `reasoning_effort:
+    "none"` explicitly whenever the request carries tools (a tool-less
+    request, or `--effort`/`/effort` on any other family, is unaffected); a
+    live 400 with this wording on a different OpenAI-family endpoint
+    retries once with the same explicit override.
+21. **Enter runs a completed `/` command** (Claude Code parity): with the
+    completion popup open, one Enter both inserts the highlighted `/`
+    command and runs it (`/mo` + Enter opens the model picker; `/models` +
+    Enter runs it). A second Enter used to be required, which read as
+    "/models does nothing". Tab still only inserts, and an `@` path
+    completion is only ever inserted.
+22. **`vendor/model` needs both halves**: `/effort`, `vendor/` and refs
+    containing whitespace are refused locally with the usual no-route
+    error instead of being accepted as an OpenRouter model and failing
+    upstream with a 400 on the first request.
+
+No behavior changes beyond the fixes above; `__version__` is the only
+non-test/non-doc change outside the files each fix's own commit touched.
+
+### Review fix pass (same day)
+
+A follow-up review of the fixes above, before this hotfix shipped, found
+18 further issues. The following were fixed, each with its own pinning
+test; two low-risk minors (a second pending-card slot for concurrent
+sub-agent asks, and the connect-timeout retry/leak detail) are deferred --
+see "1.0.1 follow-ups" in `docs/harness/RECOMMENDATIONS.md`.
+
+- **`/model` no longer freezes the TUI**: it opened on the UI thread,
+  re-read and re-parsed the full `models-dev.json` cache once PER
+  Databricks endpoint, and spawned `claude auth status` synchronously --
+  2-5s measured on a real catalog. The picker now opens through a worker
+  thread; the models.dev cache loads once per `/model` open, not once per
+  row; the `claude auth status` check is a cached read, primed once by a
+  startup worker, never spawned by `/model` itself.
+- **Post-connect network failures ride the retry ladder again**: a
+  dropped keep-alive or mid-response reset (after the TCP connection was
+  already open) carried the same "cannot resolve/reach" marker a genuine
+  DNS/connect failure uses, so it skipped the retry ladder entirely
+  instead of riding it like the pre-hotfix 502 behavior. Only a real
+  connect-phase failure carries that marker now.
+- **Focus self-heal stays on the active screen**: a modal with nothing
+  focusable of its own (the pager `o` opens) no longer heals focus to a
+  pending card on the screen underneath it, which used to let the modal's
+  own keys (`q`/`o`) vanish in favor of the hidden card's (`1`/`y` could
+  silently approve a permission the user never saw).
+- **`Shift+Tab` re-evaluates a pending permission card for real**:
+  switching mode now re-runs the permission engine for the parked
+  request instead of blindly allowing/denying it -- an explicit `ask:`
+  rule still asks under `auto` (only `bypassPermissions` skips it),
+  `acceptEdits` now resolves a pending in-workdir edit/write card, and a
+  card the user is already answering (pressed `4`, typing why) is left
+  alone instead of being silently finished out from under them.
+- **`Ctrl+Q` has its own flag**: it no longer shares `_quitting` with
+  double-`Ctrl+C`/`/quit`, so it still works when THAT path is the one
+  that's hung; a daemon timer force-kills the process 2.5s after
+  `self.exit()` regardless of what Textual/asyncio is still waiting on.
+- **Databricks cost is billed once per token, and repriced on `/model`**:
+  cached/reasoning tokens were counted at both the full rate and their own
+  discounted rate; switching to a new Databricks endpoint mid-session now
+  updates the cost meter's own rates instead of billing new usage at the
+  old model's prices.
+- **OpenRouter prices show again**: `models.json` stores them as numeric
+  strings; every price reader now accepts that (`/model`, `rolo-claude
+  models`, and `init`'s picker all went blank otherwise).
+- **WebFetch and MCP http/sse use the shared TLS policy**: both were
+  outside fix 11 above (a different code path -- urllib's own
+  `build_opener`/httpx's own client, neither going through
+  `open_upstream`).
+- **`init` never overwrites an existing `permission_mode`/`model`**:
+  `--yes` and Esc now keep whatever's already configured (writing nothing
+  at all on a fresh box) instead of forcing `auto`/a fixed-order guess
+  over what was actually there.
+- **An effort-rejection 400 no longer wastes its one retry on the wrong
+  fix**: the gpt-6 "none with tools" classifier (fix 20 above) matched too
+  broadly -- any 400 naming both "reasoning_effort" and the bare word
+  "param". The general strip-the-field retry can now run after a failed
+  "none" retry instead of being blocked by a shared one-shot flag, and a
+  successful strip resets the session's effort so later steps don't keep
+  re-sending the rejected value first.
+- **The Anthropic "high" default (fix 18 above) is scoped to
+  adaptive-capable models**: a non-adaptive route (Haiku 4.5, Sonnet 4.5
+  or older) no longer gets a thinking budget nearly as large as
+  `max_tokens` by default (capped at half of it instead); the version
+  parser reads hyphenated ids (`claude-sonnet-4-6`) correctly; the
+  `tool_choice: any` repair retry drops thinking (Anthropic rejects that
+  combination outright).
+- **The gpt-6 "none with tools" rule (fix 20 above) is Databricks-only**,
+  driven by explicit `model_table.json` rows for both real `models.dev`
+  name shapes -- it no longer also fires for an OpenRouter model that
+  happens to have "gpt-6" in its name.
+- **Chat-dialect routes no longer accept `max`** (an Anthropic-only
+  level) from `/effort`; the retry also recognizes OpenRouter's nested
+  `reasoning.effort` 400 wording and a generic "Invalid value" one.
+- **Commands typed while a card is pending run instead of denying the
+  tool**: a `/`-prefixed submission always goes to slash handling first,
+  whatever card is pending; pasted feedback carries the real content, not
+  the `[Pasted text #n]` placeholder; the `/effort` card no longer
+  intercepts typed text at all.
+- **A tall card's auto-scroll is restored once answered**: focusing a
+  card too large to fit releases the transcript's bottom anchor (fix 14
+  above; Textual's own scroll-to-center on focus); `clear_pending_card`
+  now re-anchors when the user was following before the card appeared.
+- Wording: `init`'s "default" permission mode no longer implies a risk
+  check this project doesn't have ("ask before edits and non-read-only
+  tools", not "...or otherwise risky").
+- **Rate-limit and stats token counts include reasoning again**: since
+  `map_usage` reports reasoning tokens separately (so they are never
+  billed twice), the Databricks output-tokens-per-minute tracker and
+  `stats` `tokens_out` now add them back, or a reasoning-heavy reply
+  under-counted and the 429s the tracker prevents came back.
+- **MCP over HTTP prefers the pinned `httpx2`** and falls back to classic
+  `httpx` only when `httpx2` is absent, so an environment carrying both
+  never hands the MCP SDK the wrong client type.
+- **Adaptive thinking is gated to Opus 4.6+**: Opus 4.1 and 4.5 (both
+  served on Databricks) keep `budget_tokens`, as Sonnet below 4.6 already
+  did; every `opus` id used to count as adaptive. Bedrock-style ids that
+  put the version before the family (`us-anthropic-claude-3-7-sonnet-...`)
+  now parse their real version instead of the snapshot date.
+
+`__version__` is unchanged.
+
 ## [1.0.0] - 2026-09-30
 
 rolo-claude 1.0.0: the stable general harness release. Summarises the

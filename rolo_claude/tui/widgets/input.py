@@ -59,6 +59,16 @@ class PromptInput(TextArea):
     class CompletionDismissed(Message):
         pass
 
+    class CompletionNav(Message):
+        """1.0.1 hotfix 1: Up/Down while the completion popup is open move
+        the highlighted entry instead of either moving the (single-line)
+        cursor or triggering history nav -- `direction` is -1 (up) or +1
+        (down); `app.py`'s own handler wraps the popup's `highlighted`
+        index by the current candidate count."""
+        def __init__(self, direction: int) -> None:
+            super().__init__()
+            self.direction = direction
+
     class HistoryNav(Message):
         def __init__(self, direction: int) -> None:
             super().__init__()
@@ -74,6 +84,16 @@ class PromptInput(TextArea):
                           id="prompt-input", **kwargs)
         self.pasted: dict = {}
         self._paste_counter = 0
+        # 1.0.1 hotfix 1: mirrors `app.py`'s own completion_popup.display --
+        # kept here too (rather than reaching into `self.app` on every
+        # keypress) so `action_cursor_up`/`action_cursor_down`/`_on_key`'s
+        # own Enter branch can decide, synchronously, whether Up/Down/Enter
+        # mean "navigate/accept the popup" or their ordinary meaning.
+        # `app.py`'s `set_completion_open` is the only writer.
+        self._completion_open = False
+
+    def set_completion_open(self, is_open: bool) -> None:
+        self._completion_open = bool(is_open)
 
     # ---- submit / newline --------------------------------------------
 
@@ -84,6 +104,18 @@ class PromptInput(TextArea):
         if event.key == "enter":
             event.stop()
             event.prevent_default()
+            if self._completion_open:
+                # 1.0.1 hotfix 1: Enter accepts the highlighted completion
+                # while the popup is open. Claude Code parity: for a `/`
+                # command that one Enter also RUNS it (`/mo` + Enter opens
+                # the model picker; typing `/models` and pressing Enter
+                # once runs it -- a second Enter used to be required, which
+                # read as "/models does nothing"). An `@` path completion
+                # is only inserted (the message is still being composed);
+                # Tab only ever inserts. app.py decides which, per kind.
+                self.post_message(self.CompletionQuery("accept_submit", ""))
+                self._auto_grow()
+                return
             row, col = self.cursor_location
             line = self.document.get_line(row)
             if col > 0 and line[col - 1] == "\\":
@@ -189,9 +221,18 @@ class PromptInput(TextArea):
         self.replace(f"{prefix_char}{replacement}", (row, start), (row, col))
         self._auto_grow()
 
-    # ---- history Up/Down (only at the first/last line -- see app.py) -----
+    # ---- completion popup Up/Down, else history Up/Down (only at the
+    # first/last line -- see app.py) ----------------------------------------
 
     def action_cursor_up(self, select: bool = False) -> None:
+        # 1.0.1 hotfix 1: checked BEFORE the history-nav row==0 check below
+        # -- the popup only ever opens while typing on row 0 (`_maybe_
+        # query_completion`'s own `row == 0` gate), so without this the
+        # TextArea's normal "at the top line, Up means history" behavior
+        # fired instead, and the popup's own highlight never moved.
+        if self._completion_open and not select:
+            self.post_message(self.CompletionNav(-1))
+            return
         row, _col = self.cursor_location
         if row == 0 and not select:
             self.post_message(self.HistoryNav(-1))
@@ -199,6 +240,9 @@ class PromptInput(TextArea):
         super().action_cursor_up(select)
 
     def action_cursor_down(self, select: bool = False) -> None:
+        if self._completion_open and not select:
+            self.post_message(self.CompletionNav(1))
+            return
         row, _col = self.cursor_location
         if row == self.document.line_count - 1 and not select:
             self.post_message(self.HistoryNav(1))

@@ -397,23 +397,51 @@ def decide_stop_reason(finish_reason: str | None, has_tool_calls: bool) -> str:
     return "end_turn"
 
 
+def _int_or_none(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def map_usage(u: dict) -> dict:
     """Map OpenAI usage dict to Anthropic fields, dropping None values.
     `reasoning_tokens`/`cache_creation_input_tokens`/`cost` (scope C: OpenRouter
     cost, reasoning tokens, cached tokens) are ADDITIVE keys included only
     when the source actually has them -- an existing caller reading just
-    input_tokens/output_tokens/cache_read_input_tokens sees no change."""
+    input_tokens/output_tokens/cache_read_input_tokens sees no change.
+
+    1.0.1 fixpass finding 6: OpenAI's own `prompt_tokens`/`completion_tokens`
+    are INCLUSIVE totals -- `prompt_tokens_details.cached_tokens`/
+    `completion_tokens_details.reasoning_tokens` are SUBSETS of them, never
+    additional tokens on top -- unlike Anthropic's native usage shape, where
+    `input_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`
+    are genuinely disjoint buckets that every downstream consumer (`model.py`
+    `CostMeter._fallback_cost`, `agent/loop.py`'s own `_total_prompt_tokens`)
+    sums together on exactly that assumption. `input_tokens`/`output_tokens`
+    here are therefore the UNCACHED/NON-REASONING remainder (`prompt_tokens`
+    minus cached, `completion_tokens` minus reasoning) so those downstream
+    sums land on the real total exactly once; `cache_read_input_tokens`/
+    `reasoning_tokens` themselves are unchanged -- still the real counts,
+    still reported for display/breakdown. Before this fix `input_tokens`/
+    `output_tokens` were the full (inclusive) OpenAI totals AND the cached/
+    reasoning portion was ALSO added on top by every summing consumer, so a
+    cached or reasoning-heavy reply (a Databricks gpt-5/6-family endpoint,
+    verified) was billed -- and its context-window usage displayed -- too
+    high."""
     result = {}
-    if "prompt_tokens" in u:
-        result["input_tokens"] = u["prompt_tokens"]
-    if "completion_tokens" in u:
-        result["output_tokens"] = u["completion_tokens"]
-    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
-    if cached is not None:
+    prompt_tokens = _int_or_none(u.get("prompt_tokens"))
+    cached = _int_or_none((u.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0
+    if cached:
         result["cache_read_input_tokens"] = cached
-    reasoning_tokens = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
-    if reasoning_tokens is not None:
+    if "prompt_tokens" in u:
+        result["input_tokens"] = max(0, prompt_tokens - cached) if prompt_tokens is not None else u["prompt_tokens"]
+
+    completion_tokens = _int_or_none(u.get("completion_tokens"))
+    reasoning_tokens = _int_or_none((u.get("completion_tokens_details") or {}).get("reasoning_tokens")) or 0
+    if reasoning_tokens:
         result["reasoning_tokens"] = reasoning_tokens
+    if "completion_tokens" in u:
+        result["output_tokens"] = (max(0, completion_tokens - reasoning_tokens) if completion_tokens is not None
+                                    else u["completion_tokens"])
+
     cache_write = u.get("cache_write_tokens") or u.get("cache_creation_input_tokens")
     if cache_write is not None:
         result["cache_creation_input_tokens"] = cache_write

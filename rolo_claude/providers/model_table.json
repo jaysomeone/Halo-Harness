@@ -2956,6 +2956,54 @@
         "hosts.databricks.reasoning_replay_forwarding"
       ]
     },
+    "databricks-gpt-6-sol": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-6-sol.limits_by_host.databricks",
+        "models.gpt-6-sol.sampling"
+      ]
+    },
+    "databricks-gpt-6-luna": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-6-luna.limits_by_host.databricks",
+        "models.gpt-6-luna.sampling"
+      ]
+    },
+    "databricks-gpt-6-terra": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-6-terra.limits_by_host.databricks",
+        "models.gpt-6-terra.sampling"
+      ]
+    },
+    "databricks-gpt-5-6-sol": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-5-6-sol.limits_by_host.databricks",
+        "models.gpt-5-6-sol.sampling"
+      ]
+    },
+    "databricks-gpt-5-6-luna": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-5-6-luna.limits_by_host.databricks",
+        "models.gpt-5-6-luna.sampling"
+      ]
+    },
+    "databricks-gpt-5-6-terra": {
+      "family": "gpt",
+      "reasoning_effort_with_tools": "none",
+      "unverified": [
+        "models.gpt-5-6-terra.limits_by_host.databricks",
+        "models.gpt-5-6-terra.sampling"
+      ]
+    },
     "databricks-grok-4-6": {
       "family": "grok",
       "use_temperature": false,

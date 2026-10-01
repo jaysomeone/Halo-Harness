@@ -550,7 +550,12 @@ def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict, 
 
     def _do_request() -> None:
         try:
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            # 1.0.1 hotfix 11: default_tls_context() clears VERIFY_X509_
+            # STRICT (Python 3.13+) so a corporate TLS-inspection proxy's
+            # re-signing CA is accepted the same way curl/Node/every other
+            # HTTP client on the same network already does.
+            from rolo_claude.providers.http import urlopen_tls
+            with urlopen_tls(req, timeout=timeout_s) as resp:
                 box["result"] = HookResult(0, resp.read().decode("utf-8", "replace"), "")
         except urllib.error.HTTPError as e:
             try:

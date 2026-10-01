@@ -32,6 +32,8 @@ import json
 import os
 import shlex
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -307,6 +309,87 @@ def _parse_auth_status_json(text: str) -> ClaudeAuthStatus:
         email=data.get("email"), subscription_type=data.get("subscriptionType"),
         version=data.get("claudeCodeVersion") or data.get("version"), raw=data,
     )
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 fixpass finding 1: a cached read of claude_auth_status(), so
+# Controller.list_models() (rebuilt on every `/model` open) never spawns a
+# `claude auth status` subprocess (up to a 10s timeout) itself -- measured
+# live, that subprocess start was the single largest piece of a 2-5s TUI
+# freeze on the Kali work box. Only a STARTUP WORKER (tui/app.py's
+# on_mount) ever calls `refresh_cached_claude_auth_status` (the one
+# function here that actually spawns anything); `list_models()` only ever
+# reads `cached_claude_auth_status()`, a plain dict lookup.
+# ---------------------------------------------------------------------------
+_AUTH_STATUS_CACHE_LOCK = threading.Lock()
+_auth_status_cache: Optional[ClaudeAuthStatus] = None
+_auth_status_cached_at: float = 0.0
+
+# "Short TTL" per the fix brief -- not enforced as a hard expiry (a stale
+# read is still far better than blocking `/model` on a fresh subprocess),
+# just how long `cached_claude_auth_status()` considers its own answer
+# fresh enough not to bother a caller that wants to know (`is_stale=`).
+CACHED_AUTH_STATUS_TTL_S = 30.0
+
+
+def refresh_cached_claude_auth_status(*, timeout: float = 10.0) -> Optional[ClaudeAuthStatus]:
+    """The ONLY function in this cache pair that actually spawns `claude
+    auth status` -- always call this OFF the UI thread (a startup worker,
+    same convention as `_git_branch_worker`/`_dbx_auto_refresh_worker`).
+    Stores the result (even `None`, "claude" not found at all) for
+    `cached_claude_auth_status()` to read back, and returns it directly too
+    so a caller that already IS on a worker thread can use the fresh value
+    without a second round trip."""
+    global _auth_status_cache, _auth_status_cached_at
+    status = claude_auth_status(timeout=timeout)
+    with _AUTH_STATUS_CACHE_LOCK:
+        _auth_status_cache = status
+        _auth_status_cached_at = time.monotonic()
+    return status
+
+
+def cached_claude_auth_status() -> Optional[ClaudeAuthStatus]:
+    """Read-only, NEVER spawns a subprocess -- `Controller.list_models()`'s
+    own cc: group check. `None` both before the startup worker's first
+    `refresh_cached_claude_auth_status()` call has landed AND for "claude"
+    genuinely not found -- callers already treat both as "no subscription
+    route available" identically (see `list_models()`'s own `cc_available`
+    check), so a `/model` opened in the brief window before that first
+    refresh lands just shows no cc: group that one time, rather than
+    blocking to find out.
+
+    Test seam: `BRIDGE_TEST_CC_AUTH_STATUS` bypasses the cache ENTIRELY
+    (calling `claude_auth_status()` directly, which itself reads that same
+    var -- already instant, no subprocess) so a test that sets/changes it
+    and calls `list_models()` right after always sees its OWN current
+    value, never a previous test's cached one left over in this same
+    process."""
+    if os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS") is not None:
+        return claude_auth_status()
+    with _AUTH_STATUS_CACHE_LOCK:
+        return _auth_status_cache
+
+
+def cached_auth_status_is_stale(*, max_age: float = CACHED_AUTH_STATUS_TTL_S) -> bool:
+    """True when nothing has been cached yet, or the cached answer is older
+    than `max_age` -- informational only (nothing in this module acts on
+    it automatically); a caller that wants to keep this fresh across a long
+    session can check it before deciding to kick off another background
+    `refresh_cached_claude_auth_status()`."""
+    with _AUTH_STATUS_CACHE_LOCK:
+        if _auth_status_cache is None:
+            return True
+        return (time.monotonic() - _auth_status_cached_at) >= max_age
+
+
+def reset_cached_claude_auth_status() -> None:
+    """Test seam: clear the module-level cache between tests (mirrors
+    `tools.webfetch.reset_cache`'s own convention) -- without this, one
+    test's cached status would silently leak into the next one's."""
+    global _auth_status_cache, _auth_status_cached_at
+    with _AUTH_STATUS_CACHE_LOCK:
+        _auth_status_cache = None
+        _auth_status_cached_at = 0.0
 
 
 def default_bare_alias_route(*, api_key: Optional[str] = None,

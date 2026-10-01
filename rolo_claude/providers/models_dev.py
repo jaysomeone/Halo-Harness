@@ -30,14 +30,21 @@ def fetch_models_dev(base_url: str = MODELS_DEV_BASE_URL) -> dict:
     """GET {base_url}/api.json; returns the FULL provider->models dict
     unchanged (no trimming here -- callers decide what to keep). Raises
     providers.http.UpstreamConnectError on connect/DNS failure, same
-    vocabulary as every other probe in this package."""
-    from rolo_claude.providers.http import open_upstream, UpstreamConnectError
+    vocabulary as every other probe in this package. 1.0.1 hotfix 2: bounded
+    at `open_upstream`'s own default connect timeout (<=8s). 1.0.1 hotfix
+    12: sends a real `User-Agent` -- verified live: models.dev's own CDN
+    answers 403 to Python's bare default urllib agent string; this
+    (header-less, `http.client`-based) request happened to pass today, but
+    that's the CDN's own current rule, not a guarantee -- naming ourselves
+    properly is what curl/every other client already does."""
+    from rolo_claude import __version__
+    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     tls = parsed.scheme == "https"
     path = parsed.path.rstrip("/") + "/api.json"
-    headers = {"Accept-Encoding": "identity"}
+    headers = {"Accept-Encoding": "identity", "User-Agent": f"rolo-claude/{__version__}"}
     conn = None
     try:
         conn = open_upstream(host, port, tls)
@@ -45,7 +52,7 @@ def fetch_models_dev(base_url: str = MODELS_DEV_BASE_URL) -> dict:
         resp = conn.getresponse()
         raw = resp.read()
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"models.dev connection failed: {e}") from e
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
     finally:
         # NEW (H9 post-acceptance): a one-shot GET+read-fully-then-done
         # call -- nothing ever closed `conn`, leaking one socket per call
@@ -62,6 +69,23 @@ def fetch_models_dev(base_url: str = MODELS_DEV_BASE_URL) -> dict:
     if not isinstance(data, dict):
         raise RuntimeError("models.dev /api.json did not return a JSON object")
     return data
+
+
+def refresh_models_dev_cache(state_dir) -> "tuple[bool, str]":
+    """1.0.1 hotfix 12: `fetch_models_dev` + `write_models_dev_json` in one
+    best-effort call -- used by EVERY `--refresh`/`/models refresh` surface
+    now (not just `rolo-claude models --refresh`, which already did this
+    directly), so a Databricks row's ctx/output/price columns (sourced from
+    this SAME cache -- `model_display.databricks_row_fields`) get fresh
+    data whenever the user refreshes from any of them, not only the CLI.
+    Never raises: `(False, "<reason>")` on any failure, the existing cache
+    (if any) is left completely untouched either way."""
+    try:
+        fetched = fetch_models_dev()
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    write_models_dev_json(state_dir, fetched)
+    return True, f"cached {len(fetched)} provider(s)"
 
 
 def models_dev_json_path(state_dir) -> Path:

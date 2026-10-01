@@ -422,10 +422,13 @@ def test_build_body_thinking_from_effort(ctx: Ctx):
     # max_tokens (here profile.max_tokens_default=8192, no explicit
     # requested_max_tokens) -- 24,000 would 400 on the real API
     # ("budget_tokens must be < max_tokens"), the exact verified repro.
+    # 1.0.1 fixpass finding 11: capped at HALF of max_tokens (4096), not
+    # max_tokens - 1 (8191) -- the old near-max_tokens budget left thinking
+    # free to crowd out the actual answer.
     body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                                          tools=None, route=_route("claude-sonnet-4.5"), profile=_profile(), effort="high")
-    ctx.check(f"thinking.budget_tokens from --effort=high, clamped below max_tokens, got {body.get('thinking')}",
-              body.get("thinking") == {"type": "enabled", "budget_tokens": 8191})
+    ctx.check(f"thinking.budget_tokens from --effort=high, capped at max_tokens // 2, got {body.get('thinking')}",
+              body.get("thinking") == {"type": "enabled", "budget_tokens": 4096})
     ctx.check(f"budget_tokens < max_tokens (the real Anthropic wire constraint), got "
               f"budget={body['thinking']['budget_tokens']} max_tokens={body['max_tokens']}",
               body["thinking"]["budget_tokens"] < body["max_tokens"])
@@ -569,12 +572,12 @@ def test_h5c_f05_empty_assistant_message_dropped_and_adjacent_user_turns_merged(
 
 @test
 def test_build_body_output_config_effort_for_opus(ctx: Ctx):
-    """H5c finding 16: an adaptive-capable model (Opus, unconditionally)
+    """H5c finding 16: an adaptive-capable model (Opus 4.6+)
     gets BOTH `thinking: {type: "adaptive"}` AND `output_config.effort`
     together -- never `budget_tokens` (which these models reject with a
     400)."""
     body = build_anthropic_request_body(system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-                                         tools=None, route=_route("claude-opus-4"), profile=_profile(), effort="high")
+                                         tools=None, route=_route("claude-opus-4-6"), profile=_profile(), effort="high")
     ctx.check(f"output_config.effort for an Opus-class id, got {body.get('output_config')}",
               body.get("output_config") == {"effort": "high"})
     ctx.check(f"thinking is the adaptive shape, got {body.get('thinking')}",
@@ -619,6 +622,31 @@ def test_build_body_no_effort_omits_both_fields(ctx: Ctx):
                                          tools=None, route=_route("claude-sonnet-4.5"), profile=_profile())
     ctx.check("no --effort -> no thinking field (provider default)", "thinking" not in body)
     ctx.check("no --effort -> no output_config field", "output_config" not in body)
+
+
+@test
+def test_build_body_forced_tool_choice_drops_thinking(ctx: Ctx):
+    """1.0.1 fixpass finding 11: Anthropic rejects extended thinking
+    together with a FORCED tool_choice -- the leak-parser repair retry
+    (agent/loop.py, tool_choice="required" -> {"type": "any"}) must never
+    also carry a thinking/output_config field, or the repair call itself
+    400s. An ordinary turn (tool_choice omitted/"auto") is unaffected."""
+    tools = [{"name": "Read", "input_schema": {"type": "object", "properties": {}}}]
+    forced = build_anthropic_request_body(
+        system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        tools=tools, tool_choice="required", route=_route("claude-opus-4-6"), profile=_profile(), effort="high")
+    ctx.check(f"tool_choice forced to 'any', got {forced.get('tool_choice')}",
+              forced.get("tool_choice") == {"type": "any"})
+    ctx.check(f"thinking dropped entirely despite effort='high', got {forced.get('thinking')}",
+              "thinking" not in forced)
+    ctx.check(f"output_config dropped too, got {forced.get('output_config')}", "output_config" not in forced)
+
+    # The ordinary (non-forced) turn on the SAME adaptive model is unaffected.
+    ordinary = build_anthropic_request_body(
+        system_text="SYS", messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        tools=tools, tool_choice=None, route=_route("claude-opus-4-6"), profile=_profile(), effort="high")
+    ctx.check(f"an ordinary turn still gets thinking, got {ordinary.get('thinking')}",
+              ordinary.get("thinking") == {"type": "adaptive"})
 
 
 @test

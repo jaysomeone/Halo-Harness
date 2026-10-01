@@ -83,7 +83,9 @@ class WebSearchTool(Tool):
             headers=headers, method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+            # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
+            from rolo_claude.providers.http import urlopen_tls
+            with urlopen_tls(req, timeout=_TIMEOUT_S) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             detail = ""

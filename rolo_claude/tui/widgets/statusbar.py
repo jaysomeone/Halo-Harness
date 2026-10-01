@@ -12,6 +12,7 @@ import time
 from rich.text import Text
 from textual.widgets import Static
 
+from rolo_claude.model_display import format_status_context, format_status_cost, truncate_label_left
 from rolo_claude.tui.theme import mode_glyph
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -21,8 +22,25 @@ class StatusBar(Static):
     def __init__(self, *, cwd: str = "", branch: str = "") -> None:
         super().__init__(classes="status-bar")
         self.model = "-"
+        # 1.0.1 hotfix 14: the RAW numbers, not just a derived percentage --
+        # `context_pct` is still kept (recomputed by `apply_status` below),
+        # used only for the bar-fill/colour threshold, since the "ctx
+        # 12k/1M 1%" TEXT itself is built straight from these two by
+        # `model_display.format_status_context`.
+        self.context_tokens: "int | float" = 0
+        self.context_limit: "int | float | None" = None
         self.context_pct: "float | None" = None
         self.cost_usd: "float | None" = None
+        self.total_input_tokens: "int | float" = 0
+        self.total_output_tokens: "int | float" = 0
+        # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
+        # already clamped to this model's own accepted set -- None for a
+        # model with no adjustable effort at all (renders no tag).
+        self.effort: "str | None" = None
+        # 1.0.1 hotfix 17.3: True for as long as a PermissionCard is
+        # mounted and unanswered -- the bar shows "permission needed: ..."
+        # in the warning colour so a pending ask is impossible to miss.
+        self.permission_pending: bool = False
         self.mode = "default"
         self.cwd = cwd
         self.branch = branch
@@ -41,17 +59,43 @@ class StatusBar(Static):
         self.statusline_text = text
         self._refresh_display()
 
+    def on_click(self, event) -> None:
+        # 1.0.1 hotfix 16: "a click on the 'N new' indicator" re-anchors
+        # the transcript -- the whole bar is the click target (it renders
+        # as one `rich.Text` line with no addressable sub-regions) rather
+        # than only the exact glyph, which is a no-op in practice since
+        # this only ever does anything while `new_count` is nonzero.
+        if self.new_count and hasattr(self.app, "action_scroll_transcript_end"):
+            self.app.action_scroll_transcript_end()
+
     def apply_status(self, data: dict) -> None:
         if data.get("model"):
             self.model = data["model"]
         if data.get("permission_mode"):
             self.mode = data["permission_mode"]
+        if data.get("effort") is not None:
+            self.effort = data["effort"]
         if data.get("cost_usd") is not None:
             self.cost_usd = data["cost_usd"]
-        limit = data.get("context_limit")
+        # 1.0.1 hotfix 14: keep the raw tokens/limit (not just the derived
+        # percentage) so `_refresh_display` can render "ctx 12k/1M 1%" --
+        # each only overwrites its own attribute when THIS event actually
+        # carries a real number, same "absent means unchanged" rule every
+        # other field here already follows (an idle-phase status fired with
+        # no context data must never blank out the last real reading).
         tokens = data.get("context_tokens")
-        if isinstance(limit, (int, float)) and limit and isinstance(tokens, (int, float)):
-            self.context_pct = round(100.0 * tokens / limit, 1)
+        if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
+            self.context_tokens = tokens
+        limit = data.get("context_limit")
+        if isinstance(limit, (int, float)) and not isinstance(limit, bool):
+            self.context_limit = limit
+        self.context_pct = round(100.0 * self.context_tokens / self.context_limit, 1) if self.context_limit else None
+        total_in = data.get("total_input_tokens")
+        if isinstance(total_in, (int, float)) and not isinstance(total_in, bool):
+            self.total_input_tokens = total_in
+        total_out = data.get("total_output_tokens")
+        if isinstance(total_out, (int, float)) and not isinstance(total_out, bool):
+            self.total_output_tokens = total_out
         mcp = data.get("mcp") or {}
         if isinstance(mcp, dict):
             self.mcp_connected = mcp.get("connected", self.mcp_connected)
@@ -74,6 +118,19 @@ class StatusBar(Static):
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
+        self._refresh_display()
+
+    def set_pending_permission(self, pending: bool) -> None:
+        self.permission_pending = pending
+        self._refresh_display()
+
+    def set_effort(self, effort: "str | None") -> None:
+        # 1.0.1 hotfix 20.3: `/effort`'s own immediate UI update -- unlike
+        # apply_status's fields, this DOES accept None (a switch to a model
+        # with no adjustable effort at all clears the tag), since it's
+        # always called deliberately with the session's freshly-read value,
+        # never from a status event that might just be "not touched".
+        self.effort = effort
         self._refresh_display()
 
     def set_new_count(self, n: int) -> None:
@@ -103,38 +160,97 @@ class StatusBar(Static):
         # Named to avoid shadowing `Widget._render()` (a REAL Textual
         # internal called during layout to get this widget's Visual --
         # overriding it broke `get_content_height` outright).
+        #
+        # 1.0.1 hotfix 14: `ctx_str`/`cost_str` can NEVER be the literal
+        # "ctx ?"/"$?" any more -- `format_status_context`/`format_status_
+        # cost` (model_display.py, shared with the model-listing row
+        # format from hotfix 12) always produce a real string, falling back
+        # to used-tokens-alone or raw token totals when a limit/price
+        # genuinely isn't known.
+        ctx_str = format_status_context(self.context_tokens, self.context_limit)
+        cost_str = format_status_cost(self.cost_usd, self.total_input_tokens, self.total_output_tokens)
+        mode_str = mode_glyph(self.mode)
+        mcp_style = "green" if (self.mcp_total and self.mcp_connected == self.mcp_total) else "yellow"
+        mcp_str = f"MCP {self.mcp_connected}/{self.mcp_total}"
+        spinner_str = ""
+        if self.phase in ("thinking", "running", "compacting"):
+            elapsed = time.monotonic() - self._phase_started_at
+            spinner_str = f"{SPINNER_FRAMES[self.spinner_index]} {elapsed:.0f}s"
+        new_str = f"↓ {self.new_count} new" if self.new_count else ""
+        # 1.0.1 hotfix 20.3: a short effort tag next to the mode glyph --
+        # blank (no segment at all) for a model with no adjustable effort,
+        # never a placeholder like "ctx ?"/"$?" would have been.
+        effort_str = self.effort or ""
+        # 1.0.1 hotfix 17.3: impossible to miss -- rendered in the warning
+        # style, same widths math as every other segment below.
+        permission_str = "permission needed: 1 yes · 2 session · 3 always · 4 no" \
+            if self.permission_pending else ""
+        loc_str = self.cwd if not self.branch else f"{self.cwd} ({self.branch})"
+        model_label = self.model
+
+        # point 4: order is model, ctx, cost, mode, THEN cwd/branch and MCP
+        # -- on a narrow terminal the cwd/branch is what shrinks first
+        # (down to nothing), and only once THAT alone can't make it fit
+        # does the model label itself get left-truncated (with a leading
+        # "…" -- `truncate_label_left` -- so the end of a long ref, the
+        # part that actually distinguishes it from a sibling model, stays
+        # visible). `self.size.width` is 0 before this widget's first
+        # layout pass (e.g. a bare unit test that never mounted it) --
+        # skip shrinking entirely then, same as an unbounded-width terminal.
+        width = self.size.width
+        if width and self.cwd:
+            fixed_bits = [b for b in (ctx_str, cost_str, mode_str, effort_str, permission_str, mcp_str,
+                                       spinner_str, new_str) if b]
+            # Each segment below is rendered as "<text> " with a "│ "
+            # separator before it -- 3 extra columns per segment is that
+            # separator plus its own trailing space, a close-enough
+            # approximation of the real layout to decide when to shrink
+            # (not a character-exact fit -- Rich wraps a genuine overflow
+            # instead of clipping, so erring a little wide costs nothing).
+            fixed_width = sum(len(b) + 3 for b in fixed_bits) + len(model_label) + 3
+            overflow = fixed_width + len(loc_str) + 3 - width
+            if overflow > 0:
+                if len(loc_str) > overflow:
+                    loc_str = loc_str[:len(loc_str) - overflow].rstrip()
+                else:
+                    overflow -= len(loc_str)
+                    loc_str = ""
+                    model_label = truncate_label_left(model_label, max(4, len(model_label) - overflow))
+
         text = Text()
-        text.append(f" {self.model} ", style="bold")
+        text.append(f" {model_label} ", style="bold")
         text.append("│ ", style="dim")
-        if self.context_pct is not None:
-            filled = max(0, min(10, round(self.context_pct / 10)))
+        if self.context_limit:
+            filled = max(0, min(10, round((self.context_pct or 0) / 10)))
             bar = "#" * filled + "-" * (10 - filled)
-            text.append(f"[{bar}] {self.context_pct:.0f}% ", style=self._context_style())
+            text.append(f"[{bar}] {ctx_str} ", style=self._context_style())
         else:
-            text.append("ctx ? ", style="dim")
+            text.append(f"{ctx_str} ", style="dim")
         text.append("│ ", style="dim")
-        cost_str = f"${self.cost_usd:.4f}" if self.cost_usd is not None else "$?"
         text.append(f"{cost_str} ", style="dim")
         text.append("│ ", style="dim")
-        text.append(f"{mode_glyph(self.mode)} ", style="bold cyan")
-        if self.cwd:
+        text.append(f"{mode_str} ", style="bold cyan")
+        if effort_str:
             text.append("│ ", style="dim")
-            loc = self.cwd if not self.branch else f"{self.cwd} ({self.branch})"
-            text.append(f"{loc} ", style="dim")
+            text.append(f"{effort_str} ", style="magenta")
+        if permission_str:
+            text.append("│ ", style="dim")
+            text.append(f"{permission_str} ", style="bold yellow")
+        if loc_str:
+            text.append("│ ", style="dim")
+            text.append(f"{loc_str} ", style="dim")
         text.append("│ ", style="dim")
-        mcp_style = "green" if (self.mcp_total and self.mcp_connected == self.mcp_total) else "yellow"
-        text.append(f"MCP {self.mcp_connected}/{self.mcp_total} ", style=mcp_style)
-        if self.phase in ("thinking", "running", "compacting"):
+        text.append(f"{mcp_str} ", style=mcp_style)
+        if spinner_str:
             # U5 must-do: "compacting" (Session._run_compaction's own
             # "Compacting..." indicator, via the new `compaction` event
             # handler in tui/dispatch.py) gets the SAME live spinner a
             # running turn already does.
-            elapsed = time.monotonic() - self._phase_started_at
             text.append("│ ", style="dim")
-            text.append(f"{SPINNER_FRAMES[self.spinner_index]} {elapsed:.0f}s ", style="bold yellow")
-        if self.new_count:
+            text.append(f"{spinner_str} ", style="bold yellow")
+        if new_str:
             text.append("│ ", style="dim")
-            text.append(f"↓ {self.new_count} new ", style="bold magenta")
+            text.append(f"{new_str} ", style="bold magenta")
         if self.statusline_text:
             text.append("│ ", style="dim")
             # U5 scope D: a `statusLine` script's own ANSI colour codes

@@ -146,17 +146,20 @@ def pick_ripgrep_asset(release_json: dict, *, system: str, machine: str) -> Opti
 
 
 def _default_fetch_json(url: str) -> dict:
+    # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
     import json
     import urllib.request
+    from rolo_claude.providers.http import urlopen_tls
     req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen_tls(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _default_fetch_bytes(url: str) -> bytes:
     import urllib.request
+    from rolo_claude.providers.http import urlopen_tls
     req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urlopen_tls(req, timeout=60) as resp:
         return resp.read()
 
 

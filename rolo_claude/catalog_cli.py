@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from rolo_claude.config.paths import bridge_home, home
+from rolo_claude.model_display import ROW_HEADER, format_price_per_m, format_token_count
 from rolo_claude.providers.config import load_env_file, resolve_databricks, resolve_openrouter, derive_workspace_root
 from rolo_claude.providers.databricks import (
     load_dbx_endpoints_json, load_models_json, probe_openrouter_models, write_models_json,
@@ -24,7 +25,11 @@ from rolo_claude.providers.models_dev import fetch_models_dev, models_dev_json_p
 
 def _fmt_price(v) -> str:
     """USD per token -> "$X.XX/M" (per-million-token, the unit every
-    provider's own pricing page uses); "?" for anything unparseable."""
+    provider's own pricing page uses); "?" for anything unparseable.
+    Kept (only) for `--cc`'s own table below, which predates `model_display`
+    and still wants "?" (not blank) for an unknown value in ITS OWN
+    columns -- `models --cc` is a separate, narrower table this hotfix
+    didn't touch."""
     try:
         return f"${float(v) * 1_000_000:.2f}/M"
     except (TypeError, ValueError):
@@ -71,32 +76,100 @@ def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
     return 0
 
 
-def _endpoint_url_and_path_type(root: str, name: str, state_dir) -> "tuple[str, str]":
-    """H14 scope J ("--urls"): the exact URL + path-type label
-    `chat_route_candidates`/`resolve_databricks_dialect` would actually pick
-    FIRST for `name` -- what a real request from this box would hit."""
-    from rolo_claude.providers.dbx_routing import chat_route_candidates, resolve_databricks_dialect
-    _clean, dialect = resolve_databricks_dialect(name, state_dir)
-    if dialect == "anthropic-passthrough":
-        return f"{root}/ai-gateway/anthropic/v1/messages", "anthropic"
-    cands = chat_route_candidates(name, state_dir)
-    if not cands:
-        return "(refused -- non-chat endpoint)", "none"
-    return f"{root}{cands[0].path}", cands[0].key
+def _endpoint_url_for_path_type(root: str, name: str, path_type: str) -> str:
+    """The exact URL for an already-computed `path_type` (1.0.1 hotfix 4:
+    split out of the old `_endpoint_url_and_path_type` so `_dbx_rows` can
+    compute `path_type` ONCE, always, and only additionally build the full
+    URL when `--urls` actually asked for it)."""
+    if path_type == "anthropic":
+        return f"{root}/ai-gateway/anthropic/v1/messages"
+    if path_type in ("none", "?"):
+        return "(refused -- non-chat endpoint)" if path_type == "none" else "?"
+    from rolo_claude.providers.dbx_routing import API_TYPE_INFO
+    info = API_TYPE_INFO.get(path_type)
+    if info is not None:
+        return f"{root}{info['path']}"
+    return f"{root}/serving-endpoints/{name}/invocations"
 
 
 def _dbx_rows(endpoints: dict, root: str, state_dir, *, urls: bool) -> dict:
-    from rolo_claude.providers.dbx_routing import classify_family
+    """1.0.1 hotfix 4: `path_type`/`chat` are now ALWAYS computed (never
+    gated behind `--urls`, which used to leave every bare-table row showing
+    "path ?" even when a real route existed) and sourced from data the cache
+    actually carries: `path_type` is `dbx_routing.default_path_type` (the
+    SAME family/api_types decision `chat_route_candidates` makes for a real
+    request -- no network call, it's all local), `chat` is
+    `dbx_routing.is_chat_task` (the endpoint's own `task`, not a name-based
+    family guess). An OLD-SHAPE cache (hotfix 4's own migration -- see
+    `databricks.dbx_endpoints_cache_is_old_shape`) shows `path_type="unknown"`
+    for every row instead of silently degrading to a wrong "invocations"
+    (`chat_route_candidates` can't tell a real invocations-only route from a
+    cache that simply never recorded `api_types` at all)."""
+    from rolo_claude.model_display import databricks_row_fields
+    from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape
+    from rolo_claude.providers.dbx_routing import classify_family, default_path_type, is_chat_task
+    old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
     rows = {}
     for name, e in endpoints.items():
         family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
                                   model_class=e.get("model_class") or "")
-        row = {"family": family, "task": e.get("task"), "chat": family != "non_chat",
-               "api_types": e.get("api_types") or []}
-        if urls and root:
-            row["url"], row["path_type"] = _endpoint_url_and_path_type(root, name, state_dir)
+        path_type = "unknown" if old_shape else default_path_type(name, state_dir)
+        row = {"family": family, "task": e.get("task"), "chat": is_chat_task(e.get("task")),
+               "api_types": e.get("api_types") or [], "path_type": path_type}
+        # 1.0.1 hotfix 12: ctx/output/price columns, same
+        # models.dev-then-model_table.json-then-blank rule `Controller.
+        # list_models()`'s own Databricks rows and the init picker use.
+        try:
+            row.update(databricks_row_fields(name, state_dir=state_dir))
+        except Exception:
+            pass
+        if urls:
+            row["url"] = ("(refresh needed -- cached before this version tracked gateway types)" if old_shape
+                           else _endpoint_url_for_path_type(root, name, path_type) if root else "?")
         rows[name] = row
     return rows
+
+
+def _path_display(path_type: str) -> str:
+    """The human-readable `path` column label for the TEXT table only
+    (`unknown` -- hotfix 4's old-cache migration marker -- reads as "unknown
+    (refresh needed)"; a real route key gets dbx_routing's own
+    `mlflow-chat`/`cursor-chat` spelling). `--json`/`--urls`' machine-
+    readable `path_type` field is untouched by this -- see `_dbx_rows`."""
+    from rolo_claude.providers.dbx_routing import PATH_TYPE_DISPLAY
+    if path_type == "unknown":
+        return "unknown (refresh needed)"
+    return PATH_TYPE_DISPLAY.get(path_type, path_type)
+
+
+def format_dbx_table_lines(rows: dict, *, urls: bool = False) -> "list[str]":
+    """The Databricks endpoint table's exact text rendering (name/family/
+    path/chat/ctx/out/price[/url] columns) -- ONE implementation shared by
+    `rolo-claude models`, the headless `/models` (`commands/builtins.py::
+    _cmd_models`), and the TUI's own `/models` bare rendering (`tui/
+    slash.py`), so the three surfaces can never drift apart on column
+    widths or wording. `rows` is `_dbx_rows`'s own per-endpoint dict.
+
+    1.0.1 hotfix 12: ctx/out/price columns (`model_display.
+    format_token_count`/`format_price_per_m` -- blank, never "?", when
+    unknown) alongside the existing family/path/chat/url diagnostic
+    columns this CLI table already had (this command's whole purpose is
+    diagnostic depth, so nothing here was REMOVED -- only the `/model`/
+    `/models`/init picker surfaces, which show a compact single ref+price
+    line per row via `format_model_row`, stay narrower)."""
+    header = (f"{'name':<42} {'family':<16} {'path':<18} {'chat':>5} "
+              f"{'ctx':>6} {'out':>6} {'in/M':>9} {'out/M':>9}")
+    lines = [header + ("  url" if urls else ""), f"  ({ROW_HEADER})"]
+    for name in sorted(rows):
+        r = rows[name]
+        line = (f"{name:<42} {r['family']:<16} {_path_display(r.get('path_type', '?')):<18} "
+                f"{('yes' if r['chat'] else 'no'):>5} "
+                f"{format_token_count(r.get('context_tokens')):>6} {format_token_count(r.get('max_output_tokens')):>6} "
+                f"{format_price_per_m(r.get('price_in_per_m')):>9} {format_price_per_m(r.get('price_out_per_m')):>9}")
+        if urls:
+            line += f"  {r.get('url', '?')}"
+        lines.append(line)
+    return lines
 
 
 def cmd_models(argv) -> int:
@@ -117,8 +190,14 @@ def cmd_models(argv) -> int:
     state_dir = bridge_home()
     if args.cc:
         return _cmd_models_cc(state_dir, refresh=args.refresh)
+    # 1.0.1 hotfix 3: bare `rolo-claude models` (no --refresh) NEVER touches
+    # the network, full stop -- not even "the first time the cache is
+    # empty" (the old behavior here, and still `--cc`'s own documented
+    # first-use exception, which this leaves alone). A DNS/VPN-down box
+    # must be able to run this to see "nothing cached yet" instantly rather
+    # than hanging on an unreachable host it never asked to probe.
     models = load_models_json(state_dir)
-    if args.refresh or not models:
+    if args.refresh:
         orc = resolve_openrouter()
         if orc is not None:
             try:
@@ -131,14 +210,13 @@ def cmd_models(argv) -> int:
     dbx = resolve_databricks()
     endpoints = load_dbx_endpoints_json(state_dir)
     dbx_diff = None
-    if dbx is not None and (args.refresh or not endpoints):
+    if dbx is not None and args.refresh:
         from rolo_claude.providers.databricks import refresh_dbx_catalog
         root = derive_workspace_root(dbx.host)
         ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         if ok:
             endpoints = load_dbx_endpoints_json(state_dir)
-            if args.refresh:
-                dbx_diff = diff
+            dbx_diff = diff
         else:
             print(f"rolo-claude models: could not refresh from Databricks: {note}", file=sys.stderr)
 
@@ -152,39 +230,55 @@ def cmd_models(argv) -> int:
         return 0
 
     print("OpenRouter models (models.json):")
-    print(f"{'id':<48} {'context':>10} {'max_out':>10} {'in/M':>10} {'out/M':>10}")
+    print(f"{'id':<48} {'ctx':>8} {'out':>8} {'in/M':>10} {'out/M':>10}    ({ROW_HEADER})")
     for mid in sorted(models):
         entry = models[mid]
         pricing = entry.get("pricing") or {}
-        print(f"{mid:<48} {str(entry.get('context_length', '?')):>10} {str(entry.get('max_output_tokens', '?')):>10} "
-              f"{_fmt_price(pricing.get('prompt')):>10} {_fmt_price(pricing.get('completion')):>10}")
+        # 1.0.1 fixpass finding 7: models.json stores EVERY OpenRouter price
+        # as a STRING (e.g. "0.0000008") -- float(v) in a try/except, same
+        # as the pre-1.0.1 code, so a numeric string is never treated as
+        # unknown and this column goes blank.
+        def _price_per_m(v) -> "float | None":
+            if isinstance(v, bool):
+                return None
+            try:
+                return float(v) * 1_000_000
+            except (TypeError, ValueError):
+                return None
+        print(f"{mid:<48} {format_token_count(entry.get('context_length')):>8} "
+              f"{format_token_count(entry.get('max_output_tokens')):>8} "
+              f"{format_price_per_m(_price_per_m(pricing.get('prompt'))):>10} "
+              f"{format_price_per_m(_price_per_m(pricing.get('completion'))):>10}")
 
     if dbx is not None and endpoints:
         root = derive_workspace_root(dbx.host)
         rows = _dbx_rows(endpoints, root, state_dir, urls=args.urls)
         print("\nDatabricks endpoints (dbx-endpoints.json):")
-        header = f"{'name':<42} {'family':<16} {'path':<12} {'chat':>5}"
-        print(header + ("  url" if args.urls else ""))
-        for name in sorted(rows):
-            r = rows[name]
-            line = f"{name:<42} {r['family']:<16} {r.get('path_type', '?'):<12} {('yes' if r['chat'] else 'no'):>5}"
-            if args.urls:
-                line += f"  {r.get('url', '?')}"
+        for line in format_dbx_table_lines(rows, urls=args.urls):
             print(line)
         if dbx_diff is not None:
             from rolo_claude.providers.databricks import format_dbx_diff
             print(f"\nDatabricks catalog diff (this refresh): {format_dbx_diff(dbx_diff)}")
 
-    # H8 scope C: models.dev's api.json is public/unauthenticated -- fetched
-    # regardless of whether OpenRouter/Databricks are configured, cached to
-    # models-dev.json for doctor's own freshness check and for future
-    # model_table.json cross-checking (see providers/models_dev.py).
+    # H8 scope C: models.dev's api.json is public/unauthenticated -- cached
+    # to models-dev.json for doctor's own freshness check and for future
+    # model_table.json cross-checking (see providers/models_dev.py). 1.0.1
+    # hotfix 3: only ever fetched with --refresh now (see the OpenRouter/
+    # Databricks sections above for why "the first time it's empty" no
+    # longer triggers a network call on its own).
     models_dev_path = models_dev_json_path(state_dir)
-    if args.refresh or not models_dev_path.exists():
+    if args.refresh:
         try:
             fetched = fetch_models_dev()
             write_models_dev_json(state_dir, fetched)
             print(f"\nmodels.dev: cached {len(fetched)} provider(s) to {models_dev_path}")
         except Exception as e:
-            print(f"rolo-claude models: could not refresh from models.dev: {e}", file=sys.stderr)
+            # 1.0.1 hotfix 11: names the real failure (often a
+            # CERTIFICATE_VERIFY_FAILED at a TLS-inspecting work network --
+            # see docs/TROUBLESHOOTING.md) AND says plainly that the
+            # vendored/cached catalog stays in use either way -- this was
+            # previously just the bare exception, with no indication that
+            # nothing else was actually broken by it.
+            print(f"rolo-claude models: could not refresh from models.dev: {e} "
+                  f"-- the vendored/cached models.dev catalog stays in use.", file=sys.stderr)
     return 0

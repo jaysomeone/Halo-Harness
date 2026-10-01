@@ -25,13 +25,44 @@ it, so the 97 proxy tests are unaffected regardless of what's seeded here.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger("bridge")
+
 _LOCK = threading.Lock()
 _MODEL_TABLE_CACHE: Optional[dict] = None
+
+# The harness's own general `--effort`/`/effort` vocabulary (cli.py's own
+# `choices=`, profiles.py's `map_effort` for chat-dialect routes below) --
+# moved above `ProviderProfile` (1.0.1 hotfix 19) so the dataclass's own
+# `effort_values_supported` field can default to it directly.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# 1.0.1 fixpass finding 13: every OpenAI-shaped chat-dialect route
+# (Databricks openai-chat, OpenRouter) -- "max" is an ANTHROPIC-only level
+# (`output_config.effort`'s own enum); a chat route that inherited the
+# unrestricted `EFFORT_LEVELS` default let `/effort` offer (and send) "max"
+# on every such route, 400ing every turn until the user picked a different
+# level. `xhigh` stays -- it's the harness's own strongest OpenAI-dialect-
+# style level, genuinely meaningful there (`clamp_effort`'s own docstring).
+OPENAI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+
+# 1.0.1 hotfix 19: the Anthropic MESSAGES API's `output_config.effort` field
+# (adaptive-thinking Opus/Sonnet 4.6+/Fable/Mythos, `providers/request.py`'s
+# `map_effort_anthropic`) rejects `xhigh` outright -- "Input should be
+# 'low', 'medium', 'high' or 'max'", verified live on a Databricks Claude
+# foundation endpoint (`dbx:databricks-claude-opus-4-6`, first prompt, no
+# `--effort` given at all -- the value came from the user's OWN
+# `~/.claude/settings.json` `effortLevel: "xhigh"`, a value real Claude
+# Code's own settings schema allows for ITS routes but this harness's
+# Anthropic-passthrough routes must not forward as-is). Every
+# `thinking_format == "anthropic_thinking"` profile uses this narrower set
+# instead of the general `EFFORT_LEVELS` above.
+ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "max")
 
 
 def _model_table_path() -> Path:
@@ -185,6 +216,20 @@ class ProviderProfile:
     # load-bearing the moment any of those surfaces (a hook rewrite, a
     # future settings knob) starts populating one.
     sampling_unsupported_params: tuple = ()
+    # 1.0.1 hotfix 22: when set, a REQUEST THAT CARRIES TOOLS on a chat-
+    # completions route forces its effort to exactly this value instead of
+    # whatever --effort/session effort chose -- the gpt-6 family 400s
+    # otherwise ("Function tools with reasoning_effort are not supported
+    # for gpt-6-sol in /v1/chat/completions... set reasoning_effort to
+    # 'none'"). A tool-less request on the same profile is unaffected.
+    reasoning_effort_with_tools: Optional[str] = None
+    # 1.0.1 hotfix 19: the effort VALUES this route's wire format actually
+    # accepts -- `request.py`'s effort-clamping helper (`clamp_effort`)
+    # reads this before putting anything on the wire. Defaults to the full
+    # harness vocabulary (today's behaviour, unchanged, for every chat-
+    # dialect route); the anthropic-passthrough branch of `resolve_profile`
+    # below overrides it to `ANTHROPIC_EFFORT_LEVELS` (no `xhigh`).
+    effort_values_supported: tuple = EFFORT_LEVELS
 
 
 def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
@@ -223,6 +268,7 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             system_vs_developer="system", thinking_format="anthropic_thinking",
             reasoning_replay="thinking", reasoning_effort_supported=True,
             family=family, edit_format=row.get("edit_format", "diff"),
+            effort_values_supported=ANTHROPIC_EFFORT_LEVELS,
         )
 
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
@@ -234,6 +280,21 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
     # explicitly from its own tool_choice_modes, so this default is never
     # consulted for a DeepSeek/Kimi/GLM/Qwen/MiniMax model.
     tc_required_default = family not in ("qwen", "qwen-coder", "qwen-qwq", "glm")
+    # 1.0.1 fixpass finding 13: the narrowed chat-dialect default (no "max",
+    # an Anthropic-only level) -- but a TABLED row's own `reasoning_default_
+    # effort` (data-driven, from the ingested adapter-rules report) must
+    # always be one of this profile's OWN accepted values, even when it
+    # falls outside the generic default set (verified: GLM-5.3's row
+    # documents "max" as its real default -- `reasoning_no_disable` forces
+    # a disabling `--effort none` UP to it, so clamp_effort must never then
+    # reject that same value as unsupported and silently fall back to
+    # "medium" instead). An explicit `effort_values_supported` row key (none
+    # today) still wins outright over both.
+    effort_values_supported = OPENAI_EFFORT_LEVELS
+    row_default_effort = row.get("reasoning_default_effort")
+    if row_default_effort and row_default_effort not in effort_values_supported:
+        effort_values_supported = effort_values_supported + (row_default_effort,)
+    effort_values_supported = row.get("effort_values_supported", effort_values_supported)
     hook_fields = dict(
         tool_id_format=row.get("tool_id_format", "preserve"),
         reasoning_dual_field=bool(row.get("reasoning_dual_field", False)),
@@ -247,6 +308,25 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
 
     if route.provider == "databricks":
         default_use_temp = family not in ("deepseek", "kimi", "glm", "qwen", "qwen-coder")
+        # 1.0.1 fixpass finding 12: this rule is Databricks-only (the
+        # ORIGINAL hotfix 22 put it in the shared `hook_fields` dict above,
+        # splatted into BOTH branches, so it also fired for OpenRouter's own
+        # "openai/gpt-6" id -- silently disabling reasoning and making
+        # `/effort` a no-op there, never verified/intended for that host).
+        # Driven by an explicit model_table.json row now (added alongside
+        # this fix for both real models.dev name shapes,
+        # `databricks-gpt-6-*` and `databricks-gpt-5-6-*`, `sol`/`luna`/
+        # `terra`); the substring check is only a LAST-RESORT net for a
+        # variant not yet tabled -- corrected to actually match the real
+        # catalog naming: `databricks-gpt-5-6-sol` does NOT contain the
+        # bare substring "gpt-6" the old code checked for (there's a "-5-"
+        # in between), so this also checks for "gpt-5-6" explicitly. A
+        # tabled row's own `reasoning_effort_with_tools` (including an
+        # explicit `null` to opt back OUT) always wins via `row.get`.
+        reasoning_effort_with_tools = row.get(
+            "reasoning_effort_with_tools",
+            "none" if ("gpt-6" in route.upstream_model.lower() or "gpt-5-6" in route.upstream_model.lower())
+            else None)
         return ProviderProfile(
             system_vs_developer="system", max_tokens_field="max_tokens",
             reasoning_effort_supported=effort_supported, thinking_format=thinking_format,
@@ -261,6 +341,8 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
             reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
             edit_format=row.get("edit_format", "diff"),
             tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+            reasoning_effort_with_tools=reasoning_effort_with_tools,
+            effort_values_supported=effort_values_supported,
             **hook_fields,
         )
 
@@ -285,17 +367,53 @@ def resolve_profile(route, model_table: Optional[dict] = None) -> ProviderProfil
         reasoning_no_disable=bool(row.get("reasoning_no_disable", False)),
         openrouter_pin=row.get("openrouter_pin"), edit_format=row.get("edit_format", "diff"),
         tool_choice_required_supported=row.get("tool_choice_required_supported", tc_required_default),
+        # 1.0.1 fixpass finding 12: no substring guessing on this host at
+        # all -- only an explicit model_table.json row (e.g. a future
+        # "openrouter"."openai/gpt-6" row) ever sets this here.
+        reasoning_effort_with_tools=row.get("reasoning_effort_with_tools"),
+        effort_values_supported=effort_values_supported,
         **hook_fields,
     )
-
-
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 _DISABLING_EFFORTS = frozenset({"none", "disabled", "off", "minimal"})
 
 
-def map_effort(effort: Optional[str], profile: ProviderProfile) -> dict:
+def clamp_effort(effort: Optional[str], profile: ProviderProfile) -> Optional[str]:
+    """1.0.1 hotfix 19: the LAST step before `effort` reaches any body-
+    building function (`map_effort`/`map_effort_anthropic`) -- makes it
+    impossible for a value outside `profile.effort_values_supported` to
+    reach the wire, regardless of where it came from (`--effort`, `/effort`,
+    settings `effortLevel`/`modelSettings.<id>.effortLevel`, or this
+    session's own Anthropic-family "high" default). `None` (nothing
+    configured at all) passes through unchanged -- clamping only ever
+    narrows a REAL value, it never invents one.
+
+    `xhigh` (the harness's own strongest OpenAI-dialect-style level) on a
+    route that doesn't list it becomes `max` specifically -- not the
+    generic "unknown -> route default" rule below -- since `max` is every
+    such route's own equivalent strongest level, not an arbitrary fallback.
+    Any OTHER value the route's own set doesn't recognize (a typo, a stale
+    config from a level this harness has since renamed) becomes the
+    route's OWN default (`reasoning_default_effort` when the profile has
+    one, else the harness-wide default `"medium"`) rather than silently
+    passing through and risking the exact 400 this function exists to
+    prevent."""
+    if effort is None:
+        return None
+    supported = profile.effort_values_supported or EFFORT_LEVELS
+    if effort in supported:
+        return effort
+    if effort == "xhigh" and "xhigh" not in supported:
+        clamped = "max" if "max" in supported else (profile.reasoning_default_effort or "medium")
+    else:
+        clamped = profile.reasoning_default_effort if profile.reasoning_default_effort in supported else "medium"
+    log.debug("clamp_effort: %r not accepted by this route (accepts %r) -- using %r instead",
+              effort, supported, clamped)
+    return clamped
+
+
+def map_effort(effort: Optional[str], profile: ProviderProfile, *, has_tools: bool = False) -> dict:
     """--effort -> the field(s) a request body actually needs for this
     profile (scope J): `reasoning.effort` on OpenRouter, `reasoning_effort`
     on Databricks/DeepSeek-shaped chat completions, a thinking budget on
@@ -307,9 +425,24 @@ def map_effort(effort: Optional[str], profile: ProviderProfile) -> dict:
     `--effort` to the profile's own default instead of turning reasoning
     off; `effort is None` (no `--effort` given at all) is left alone --
     that means "omit the field", which safely takes the server's own
-    default, not "send a disabling value"."""
+    default, not "send a disabling value".
+
+    1.0.1 hotfix 22: `has_tools` + `profile.reasoning_effort_with_tools`
+    (gpt-6: verified live 400 -- "Function tools with reasoning_effort are
+    not supported for gpt-6-sol... set reasoning_effort to 'none'") forces
+    the EXPLICIT override value regardless of what `effort` would otherwise
+    have been, INCLUDING None -- omitting the field is not enough on this
+    family, since the endpoint's own default is not `none` either. A
+    tool-less request on the same profile is unaffected -- checked and
+    returned before the ordinary `not effort` early-out below, and only for
+    the two chat-dialect field shapes (`reasoning.effort`/`reasoning_effort`)
+    this concept applies to, never the Anthropic thinking-budget shape."""
+    if has_tools and profile.reasoning_effort_with_tools and profile.thinking_format != "anthropic_thinking":
+        override = profile.reasoning_effort_with_tools
+        return {"reasoning": {"effort": override}} if profile.host_specific_fields else {"reasoning_effort": override}
     if effort and effort.lower() in _DISABLING_EFFORTS and profile.reasoning_no_disable and profile.reasoning_default_effort:
         effort = profile.reasoning_default_effort
+    effort = clamp_effort(effort, profile)  # 1.0.1 hotfix 19: never forward a value this route rejects
     if not effort or not profile.reasoning_effort_supported:
         return {}
     if profile.thinking_format == "anthropic_thinking":

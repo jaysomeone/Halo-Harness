@@ -25,6 +25,7 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from rolo_claude.agent.sessions import filter_sessions
+from rolo_claude.tui.dialogs.listnav import NavInput
 
 
 def _age(mtime: float) -> str:
@@ -67,8 +68,8 @@ class SessionPicker(ModalScreen):
     def compose(self):
         with Vertical():
             yield Static("Resume a previous session (Esc to cancel)", classes="dialog-title")
-            yield Input(value=self._initial_query, placeholder="Type to filter by title, prompt, cwd or model...",
-                        id="resume-filter")
+            yield NavInput(value=self._initial_query, placeholder="Type to filter by title, prompt, cwd or model...",
+                           id="resume-filter", option_list_id="resume-list")
             yield OptionList(id="resume-list")
 
     def on_mount(self) -> None:
@@ -86,6 +87,10 @@ class SessionPicker(ModalScreen):
             return
         for s in self._filtered:
             option_list.add_option(Option(_row(s), id=s.get("id")))
+        # 1.0.1 hotfix addendum 7: see model_picker.py's matching comment --
+        # highlights the first row up front so "Down twice" lands on the
+        # third, not the second.
+        option_list.action_first()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._refresh(event.value)

@@ -40,6 +40,13 @@ class RewindPicker(ModalScreen):
                 option_list.add_option(Option(label, id=s.get("id")))
             yield option_list
 
+    def on_mount(self) -> None:
+        # 1.0.1 hotfix addendum 7: highlights the first (newest) step up
+        # front, same convention model_picker.py/session_picker.py/
+        # palette.py now use -- `highlighted` otherwise starts at None.
+        if self.steps:
+            self.query_one(OptionList).action_first()
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_id:
             self.dismiss(event.option_id)

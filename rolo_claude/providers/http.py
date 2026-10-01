@@ -22,6 +22,7 @@ import logging
 import os
 import socket
 import ssl
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -32,9 +33,171 @@ from rolo_claude.providers.errors import upstream_error_text
 
 log = logging.getLogger("bridge")
 
+# 1.0.1 hotfix 2: the connect timeout `open_upstream` uses whenever a caller
+# doesn't pass its own -- ALSO the wall-clock cap `_bounded_connect` enforces
+# around the whole connect phase (DNS + TCP handshake), so a black-holed/
+# unresponsive resolver can never again take the ~64s the owner measured
+# against an unresolvable `*.cloud.databricks.com` host regardless of what
+# the OS resolver's own retry/timeout policy would otherwise do. Applies
+# uniformly to every caller (ordinary turns, `-p`, the TUI, `init`'s pong,
+# `models --refresh`, `doctor`) since they all funnel through `open_upstream`.
+DEFAULT_CONNECT_TIMEOUT_S = 8
+
 
 class UpstreamConnectError(Exception):
-    pass
+    """Any failure during the CONNECT phase (DNS/name resolution, connection
+    refused, no route to host, a TLS handshake failure, or our own bounded-
+    connect timeout) -- never a failure after bytes were actually
+    exchanged. `host` (1.0.1 hotfix 2), when known, is the real upstream
+    hostname this attempt was for, so a caller can build a message that
+    NAMES it without re-parsing a URL itself."""
+
+    def __init__(self, message: str, host: "str | None" = None):
+        super().__init__(message)
+        self.host = host
+
+
+# The fixed lead-in `format_connect_error` (below) always uses -- checked
+# for verbatim (`is_connect_failure_message`) by `agent/loop.py`'s own retry
+# ladder so it can tell "we never even connected" apart from a genuine
+# upstream 5xx WITHOUT changing either wire mapper's own status/err_type/
+# message shape (`providers.databricks.databricks_unreachable_response`/
+# `providers.errors.map_upstream_error` both stay byte-for-byte unchanged --
+# `bridge.py`'s legacy proxy path, and its own pinned test_bridge.py
+# assertion ending in "(are you on the VPN? Databricks is whitelisted)",
+# both keep relying on that). Whichever wire mapper re-wraps this
+# exception's message, the marker survives as a substring either way.
+CONNECT_FAILURE_MARKER = "cannot resolve/reach"
+
+
+def is_connect_failure_message(message: "str | None") -> bool:
+    return CONNECT_FAILURE_MARKER in (message or "")
+
+
+def default_tls_context() -> ssl.SSLContext:
+    """1.0.1 hotfix 11: the ONE TLS context every HTTPS connection this
+    harness makes is built through -- `open_upstream` and `urlopen_tls`
+    (below) both call this, so neither has its own, possibly-diverging
+    verification policy.
+
+    Starts from `ssl.create_default_context()` (real CA verification, no
+    behavior change there), then clears `VERIFY_X509_STRICT` when the
+    running Python's `ssl` module has it at all (added in 3.13, where
+    `create_default_context()` turns it ON by default -- 3.11/3.12 never
+    had it, so this is a no-op there). Verified live: a real corporate
+    TLS-inspection proxy's re-signing CA certificate carries a non-critical
+    `basicConstraints` extension, which every major HTTP client (curl,
+    browsers, Node, and Python itself before 3.13) accepts -- only
+    `X509_STRICT` rejects it (`CERTIFICATE_VERIFY_FAILED: basic constraints
+    of CA cert not marked critical`), so a 3.13 rolo-claude was the ONLY
+    thing failing at a work box every other tool on the same network
+    already worked from (the Databricks endpoint itself is exempted from
+    that same proxy's inspection, which is why a live pong there kept
+    working while `models.dev`/OpenRouter did not). This does not weaken
+    certificate-chain or hostname verification -- both stay fully on.
+
+    Then applies the SAME `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`/
+    `BRIDGE_CA_BUNDLE` custom-CA-bundle loading `open_upstream` already had
+    (first one present that loads successfully wins; a load failure is
+    logged and the next candidate is tried, never a hard failure -- the
+    context still has the system trust store either way)."""
+    ctx = ssl.create_default_context()
+    strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict_flag:
+        ctx.verify_flags &= ~strict_flag
+    for env_var in ("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "BRIDGE_CA_BUNDLE"):
+        ca_path = os.environ.get(env_var)
+        if ca_path:
+            try:
+                ctx.load_verify_locations(ca_path)
+                break
+            except Exception:
+                log.warning(f"Failed to load CA bundle from {ca_path}", exc_info=True)
+    return ctx
+
+
+def urlopen_tls(req, timeout=None):
+    """`urllib.request.urlopen`, but through `default_tls_context()` instead
+    of `urllib`'s own bare default context -- every one-shot HTTPS GET this
+    harness makes outside `open_upstream`'s own http.client-based path
+    (currently: hooks.py's webhook helpers, linux_fixes.py's rg-release
+    lookup/download, team_config.py's `--team <url>` fetch, tools/
+    websearch.py) goes through this so all of them share the SAME
+    VERIFY_X509_STRICT/custom-CA-bundle policy `open_upstream` uses,
+    instead of quietly using a stricter/different one of urllib's own."""
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=default_tls_context()))
+    return opener.open(req, timeout=timeout)
+
+
+def format_connect_error(host: "str | None", detail) -> str:
+    """The ONE canonical wording for a connect-phase failure (hotfix 2's
+    rule: "the error message names the host and says 'cannot resolve/reach
+    <host> -- check the machine's network, DNS or VPN'") -- used for every
+    provider (Databricks, OpenRouter, a direct Anthropic call, models.dev)
+    so none of them invent their own variant. `detail` is the low-level
+    exception (or any str-able detail) that actually triggered it, kept in
+    parentheses for anyone debugging the underlying OS error; never part of
+    the required phrase itself so `is_connect_failure_message` is never at
+    the mercy of one platform's own errno text."""
+    named = host or "the upstream host"
+    return f"{CONNECT_FAILURE_MARKER} {named} -- check the machine's network, DNS or VPN ({detail})"
+
+
+def format_post_connect_error(host: "str | None", detail) -> str:
+    """1.0.1 fixpass finding 2: wording for a failure AFTER open_upstream()
+    already handed back a connected socket -- i.e. `conn.request()`/
+    `conn.getresponse()` raised (a dropped keep-alive, a server-side RST
+    mid-response, the 300s idle-timeout waiting for headers), never
+    `open_upstream()`/`_bounded_connect` itself. Deliberately WITHOUT
+    CONNECT_FAILURE_MARKER: this is not a DNS/routing/VPN problem (the
+    connection WAS established), so `is_connect_failure_message` must not
+    mistake it for one and make `agent/loop.py` skip its normal retry
+    ladder -- a load balancer dropping one keep-alive while the upstream
+    queues the request should retry like any other transient 5xx, not die
+    after phase 1's own single immediate reconnect attempt. Still wrapped
+    in `UpstreamConnectError` (same type a real connect failure raises) so
+    `_run_phase1_attempts`/`_run_phase1_anthropic`'s existing "retry once
+    immediately, then map to a plain 502" handling is unchanged -- only the
+    wording (and therefore `is_connect_failure_message`'s verdict) differs."""
+    named = host or "the upstream host"
+    return f"upstream connection to {named} was interrupted ({detail})"
+
+
+def _bounded_connect(conn, timeout_s: float, host: str) -> None:
+    """Runs `conn.connect()` (which performs `getaddrinfo` THEN the TCP/TLS
+    handshake) on a background thread and waits at most `timeout_s`
+    wall-clock seconds for it. A per-socket `timeout=` (what `conn` was
+    already constructed with) only ever bounds the handshake -- `getaddrinfo`
+    itself takes no timeout argument at the stdlib level, so a slow/
+    unresponsive/black-holed DNS resolver can otherwise block for far longer
+    than any `connect_timeout` implies (verified: ~64s against an
+    unresolvable `*.cloud.databricks.com` host). On expiry, the background
+    thread is ABANDONED, never killed (Python cannot forcibly cancel a
+    blocking C call) -- same "abandoned, not stopped" caveat as every other
+    abort-aware wait in this codebase (see tui/dialogs/mcp_status.py) -- and
+    this call raises UpstreamConnectError immediately either way, so the
+    caller never actually waits on it past `timeout_s`."""
+    outcome: list = []
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            conn.connect()
+        except BaseException as e:  # noqa: BLE001 -- relayed to the waiter, never swallowed
+            outcome.append(e)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_target, daemon=True, name="rolo-connect")
+    t.start()
+    if not done.wait(timeout_s):
+        raise UpstreamConnectError(
+            format_connect_error(host, f"timed out after {timeout_s:.0f}s connecting -- "
+                                        f"likely a DNS lookup that never returned"),
+            host=host)
+    if outcome:
+        e = outcome[0]
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
 
 
 def pick_proxy(host: str) -> str | None:
@@ -51,7 +214,7 @@ def pick_proxy(host: str) -> str | None:
     return None
 
 
-def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10,
+def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = DEFAULT_CONNECT_TIMEOUT_S,
                    on_connect=None) -> http.client.HTTPConnection | http.client.HTTPSConnection:
     """Open HTTP(S) connection to upstream, respecting proxy and TLS
     settings. `on_connect` (must-do 5), when given, is called with the
@@ -61,23 +224,21 @@ def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10,
     blocking operation with no other hook point) can hand the socket to an
     abort watcher immediately, rather than only after the whole call
     returns. Exceptions from `on_connect` are swallowed (never let a
-    watcher-registration bug break a real upstream call)."""
+    watcher-registration bug break a real upstream call).
+
+    1.0.1 hotfix 2: `connect_timeout` now bounds the WHOLE connect phase
+    (DNS + TCP/TLS handshake), via `_bounded_connect`, not just the
+    handshake -- and raises `UpstreamConnectError` (naming `host`) directly
+    on either a timeout or an immediate failure (gaierror/refused/
+    unreachable/...), rather than leaving a raw socket exception for every
+    caller to catch and reformat itself."""
     proxy_url = pick_proxy(host)
-    
-    # Create TLS context if needed
-    ssl_context = None
-    if tls:
-        ssl_context = ssl.create_default_context()
-        # Load custom CA bundle if specified
-        for env_var in ("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "BRIDGE_CA_BUNDLE"):
-            ca_path = os.environ.get(env_var)
-            if ca_path:
-                try:
-                    ssl_context.load_verify_locations(ca_path)
-                    break
-                except Exception:
-                    log.warning(f"Failed to load CA bundle from {ca_path}", exc_info=True)
-    
+
+    # 1.0.1 hotfix 11: built through default_tls_context() (VERIFY_X509_
+    # STRICT cleared when present, same custom-CA-bundle env loading) --
+    # never ssl.create_default_context() directly here anymore.
+    ssl_context = default_tls_context() if tls else None
+
     # Determine connection parameters
     if proxy_url:
         proxy_parts = urllib.parse.urlparse(proxy_url)
@@ -102,8 +263,10 @@ def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = 10,
         else:
             conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
     
-    # Connect with timeout, then set idle timeout
-    conn.connect()
+    # Connect with timeout, then set idle timeout. Bounded (hotfix 2): a
+    # hung/black-holed DNS resolution is capped at connect_timeout wall-clock
+    # seconds, never the OS resolver's own (much longer) retry policy.
+    _bounded_connect(conn, connect_timeout, host)
     if conn.sock:
         conn.sock.settimeout(300)  # 5 minutes idle timeout
     if on_connect is not None:
@@ -162,9 +325,19 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
     # Merge extra_headers on top (overriding defaults)
     headers.update(extra_headers)
     
+    # 1.0.1 fixpass finding 2: two SEPARATE try/excepts, not one wrapping
+    # both phases -- a failure opening the connection is still a genuine
+    # connect failure (format_connect_error, the marker kept) even when
+    # open_upstream itself raises a raw OSError (a test double, or any
+    # future caller that doesn't go through _bounded_connect's own
+    # UpstreamConnectError); only a failure from conn.request()/
+    # getresponse() -- AFTER the connection is already open -- gets the
+    # marker-free wording (format_post_connect_error).
     try:
-        # Open connection and send request
         conn = open_upstream(host, port, tls, on_connect=on_connect)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
+    try:
         conn.request("POST", path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
 
@@ -178,8 +351,7 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
             conn=conn,
         )
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        # Wrap connection-level errors
-        raise UpstreamConnectError(f"Upstream connection failed: {e}") from e
+        raise UpstreamConnectError(format_post_connect_error(host, e), host=host) from e
 
 
 
@@ -201,13 +373,19 @@ def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_head
         "Content-Length": str(len(body_bytes)),
     }
     headers.update(extra_headers)
+    # 1.0.1 fixpass finding 2: see call_openai_chat's matching comment --
+    # open_upstream's own failure keeps the marker; only a post-connect
+    # conn.request()/getresponse() failure gets the marker-free wording.
     try:
         conn = open_upstream(host, port, tls, on_connect=on_connect)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
+    try:
         conn.request("POST", path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
         return resp, conn
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"Databricks connection failed: {e}") from e
+        raise UpstreamConnectError(format_post_connect_error(host, e), host=host) from e
 
 
 def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir, model: str,
@@ -319,14 +497,20 @@ def proxy_anthropic(base_url: str, api_key: str, body: dict, extra_headers: dict
         "Content-Length": str(len(body_bytes)),
     }
     headers.update(extra_headers)
+    # 1.0.1 fixpass finding 2: see call_openai_chat's matching comment --
+    # open_upstream's own failure keeps the marker; only a post-connect
+    # conn.request()/getresponse() failure gets the marker-free wording.
     try:
         conn = open_upstream(host, port, tls, on_connect=on_connect)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
+    try:
         conn.request("POST", request_path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
         return UpstreamResult(status=resp.status, headers=resp_headers, resp=resp, conn=conn, body_bytes=None)
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"Anthropic-dialect connection failed: {e}") from e
+        raise UpstreamConnectError(format_post_connect_error(host, e), host=host) from e
 
 
 def call_anthropic_native(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir,

@@ -2,6 +2,7 @@
 (`/dbx` alias) surface and `Controller.list_models()`'s Databricks section
 (grouped by family, path type shown, non-chat endpoints hidden).
 """
+import json
 import os
 import sys
 import tempfile
@@ -20,11 +21,20 @@ class _Env:
         self._saved = {k: os.environ.get(k) for k in
                        ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE",
                         "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
-                        "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS")}
+                        "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
+                        "BRIDGE_TEST_CC_AUTH_STATUS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-tui-surface-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
         os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
+        # 1.0.1 hotfix addendum 9: Controller.list_models() now calls
+        # claude_auth_status() to decide whether to show the cc: group --
+        # pinned to a deterministic "not logged in" here (same convention
+        # test_init_cli.py/test_doctor_prescriptive_fixes.py already use) so
+        # these tests never depend on whether THIS machine happens to have
+        # a real `claude` binary/login, and never pay a real subprocess's
+        # worth of latency.
+        os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         self.state_dir = d / ".rolo-claude"
         return self
 
@@ -176,6 +186,62 @@ def test_list_models_empty_catalog_does_not_crash(ctx: Ctx):
         ctrl = _controller(env.state_dir)
         models = ctrl.list_models()
         ctx.check("still returns the OpenRouter/current-model rows without crashing", isinstance(models, list))
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix addendum 9: the cc: group appears only when the subscription
+# route is actually available.
+# ---------------------------------------------------------------------------
+
+@test
+def test_list_models_hides_cc_group_when_not_logged_in(ctx: Ctx):
+    with _Env() as env:  # _Env already pins BRIDGE_TEST_CC_AUTH_STATUS to "not logged in"
+        ctrl = _controller(env.state_dir)
+        models = ctrl.list_models()
+        ctx.check(f"no cc: rows at all, got {[m['ref'] for m in models if m.get('provider') == 'cc']}",
+                  not any(m.get("provider") == "cc" for m in models))
+
+
+@test
+def test_list_models_shows_cc_group_when_logged_in_via_claude_ai(ctx: Ctx):
+    old = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+    try:
+        with _Env() as env:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+            ctrl = _controller(env.state_dir)
+            models = ctrl.list_models()
+            cc_rows = [m for m in models if m.get("provider") == "cc"]
+            ctx.check(f"cc: rows present, got {len(cc_rows)}", len(cc_rows) > 0)
+            ctx.check(f"grouped under the subscription label, got {cc_rows[0].get('group')}",
+                      cc_rows[0].get("group") == "claude.ai subscription")
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        else:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = old
+
+
+@test
+def test_list_models_hides_cc_group_when_logged_in_via_work_env_not_subscription(ctx: Ctx):
+    """The exact owner-reported bug: a Databricks WORK box's `claude` is
+    logged in via ITS OWN work settings (authMethod != "claude.ai"), not a
+    personal subscription -- the picker must not offer nine cc: models a
+    real `cc:<name>` call would never be able to use there."""
+    old = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "api_key"})
+    try:
+        with _Env() as env:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "api_key"})
+            ctrl = _controller(env.state_dir)
+            models = ctrl.list_models()
+            ctx.check("no cc: rows when logged in via a non-subscription authMethod",
+                      not any(m.get("provider") == "cc" for m in models))
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        else:
+            os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = old
 
 
 if __name__ == "__main__":

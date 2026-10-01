@@ -23,14 +23,18 @@ subcommand -- see **Proxy mode** near the end.
 ```sh
 cd /path/to/rolo-claude
 uv tool install --editable .        # or: pipx install --editable .
-rolo-claude init                    # one command: preset, credentials, default model, doctor, live pong
+rolo-claude init                    # one command: pick a provider, credentials, default model, doctor, live pong
 rolo-claude                         # full-screen TUI
 ```
 
-`rolo-claude init` picks a sensible preset automatically (an existing OpenRouter key -> `home`;
-Databricks host/`ucode-settings.json` -> `work`; a claude.ai login and nothing else -> `claude`) and
-asks before changing anything; `rolo-claude init --preset home --yes` runs it fully non-interactively.
-Re-running is always safe -- it shows the current state and changes nothing already configured. See
+`rolo-claude init` shows an arrow-key list of the four providers it can set up (Databricks, OpenRouter,
+the Anthropic API, your Claude subscription), cursor already on whichever one auto-detection would pick
+(an existing OpenRouter key, a Databricks host/`ucode-settings.json`, an `ANTHROPIC_API_KEY`, or a
+claude.ai login, in that order) -- pick one, or a different one, and it asks only for that provider's
+missing credential; `rolo-claude init --provider openrouter --yes` runs it fully non-interactively for
+one provider (repeat `--provider` for more than one; the deprecated `--preset home|work|claude` still
+works too). Re-running is always safe -- it shows the current state and changes nothing already
+configured. See
 `docs/harness/INSTALL.md` for the full walkthrough (offline/work-box install, PEP 668 workarounds,
 terminal notes) and `rolo-claude doctor` for a read-only environment check with a fix for every WARN.
 
@@ -75,14 +79,16 @@ new dependency).
 ## A 10-minute walkthrough
 
 ```sh
-rolo-claude init                    # pick a preset, set credentials, doctor, live pong
+rolo-claude init                    # pick a provider, set credentials, doctor, live pong
 rolo-claude                         # full-screen TUI
 ```
 
-1. **`rolo-claude init`** picks `home` (OpenRouter), `work` (Databricks), or
-   `claude` (your subscription) automatically from what it finds already
-   configured, asks for the one credential it's missing, sets a default
-   model, and ends with a real "pong" from that model -- see
+1. **`rolo-claude init`** lets you pick which provider to set up -- Databricks,
+   OpenRouter, the Anthropic API, or your Claude subscription -- asks for the
+   one credential it's missing, picks a default model from that provider's
+   own catalog, and ends with a real "pong" from it; it then offers to set up
+   another provider, looping until you're done (with more than one
+   configured, one last pick chooses the overall default) -- see
    `docs/COMMANDS.md`'s `init` section for exactly what each step reads and
    writes.
 2. **The first session** opens with an empty prompt line and a status bar
@@ -316,7 +322,7 @@ leaves the box**: the hostname and token live only in the local env file
 written into a session log, a cache file, or printed by `doctor`.
 
 **Discovery, not a vendored list.** `rolo-claude models --refresh` (or
-`init --preset work`) lists the workspace's own serving endpoints and caches
+`init --provider databricks`) lists the workspace's own serving endpoints and caches
 them, per user, to `~/.rolo-claude/dbx-endpoints.json` (name, `api_types`,
 `foundation_model.name`, task) -- the ONLY source of truth for what a
 workspace serves. A generic family x api_type table (detected from the
@@ -340,7 +346,7 @@ holds the workspace host, a default model, a per-family gateway preference,
 and a DBU price -- **never a token, never an endpoint list** -- discovered
 at `.rolo-claude/team.json` in the project, `~/.rolo-claude/team.json`, or
 `--team <path|url>`. With a host already known (from `team.json` or Claude
-Code's own settings), `rolo-claude init --preset work` asks ONLY for the
+Code's own settings), `rolo-claude init --provider databricks` asks ONLY for the
 personal Databricks token (hidden input, written to the env file at 0600),
 refreshes the catalog, and prints how many endpoints are available and the
 default model.

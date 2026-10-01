@@ -134,14 +134,31 @@ def test_version_bumped_to_1_0_0_and_changelog_has_an_entry(ctx: Ctx):
     NOT a rename and NOT a new console-script alias (a separate
     `databricks-claude` repository was spun off instead; see the
     CHANGELOG's own [1.0.0] entry for why the version jumped straight past
-    `2.0.0`)."""
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 1.0.0, got {__version__!r}", __version__ == "1.0.0")
+    `2.0.0`). H14's own pinning shape, kept exact (checked against the
+    CHANGELOG's own still-present [1.0.0] entry, not the CURRENT version)
+    now that the 1.0.1 hotfix has bumped past it; see
+    `test_version_bumped_to_1_0_1_and_changelog_has_an_entry` below for
+    THIS release's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
     ctx.check("CHANGELOG.md has a [1.0.0] entry", "[1.0.0]" in changelog)
     entry = changelog.split("[1.0.0]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("stable", "databricks-claude", "roles"):
         ctx.check(f"the [1.0.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_1_0_1_and_changelog_has_an_entry(ctx: Ctx):
+    """rolo-claude 1.0.1: the hotfix release from the owner's first real
+    1.0.0 run on the Kali work VM (DNS down, then a live `/model`
+    screenshot from it once fixed) -- thirteen fixes, no behavior changes
+    beyond them; see the CHANGELOG's own [1.0.1] entry for the full list."""
+    from rolo_claude import __version__
+    ctx.check(f"__version__ is 1.0.1, got {__version__!r}", __version__ == "1.0.1")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [1.0.1] entry", "[1.0.1]" in changelog)
+    entry = changelog.split("[1.0.1]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("fail fast", "provider", "x509_strict"):
+        ctx.check(f"the [1.0.1] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 if __name__ == "__main__":

@@ -326,6 +326,17 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
                 raise _Aborted() from e
             if attempt == 0:
                 continue
+            # 1.0.1 hotfix 2: the wire mapping here is DELIBERATELY left
+            # byte-for-byte unchanged (`bridge.py`'s legacy proxy path calls
+            # this SAME shared phase1 for its own Databricks/OpenRouter
+            # openai-chat requests, and its own pinned test_bridge.py
+            # asserts this exact "(are you on the VPN? ...)" wording) --
+            # `agent/loop.py`'s own `_step` instead recognizes a connect
+            # failure by `providers.http.is_connect_failure_message(e.message)`
+            # (the canonical "cannot resolve/reach <host> ..." lead-in
+            # `format_connect_error` always bakes in, which survives as a
+            # substring through EITHER branch below) to skip its backoff
+            # ladder, rather than this function changing status/err_type.
             if req.route.provider == "databricks":
                 status, jbody, hdrs = databricks_unreachable_response(str(e))
             else:
@@ -584,6 +595,9 @@ def _run_phase1_anthropic(req: CompletionRequest, abort: "threading.Event | None
                     raise _Aborted() from e
                 if attempt == 0:
                     continue
+                # 1.0.1 hotfix 2: see _run_phase1_attempts's matching comment
+                # -- wire mapping here stays exactly as it was (bridge.py's
+                # Databricks Claude passthrough also calls this).
                 status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
                 raise _upstream_error_from_mapping(status, jbody, hdrs) from e
             if 200 <= result.status < 300:

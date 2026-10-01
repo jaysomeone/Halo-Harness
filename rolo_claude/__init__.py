@@ -7,4 +7,4 @@ today's launcher+server, unchanged behavior) and imports this package as a
 library. See wip/SIGNATURES.md and docs/ for the cross-section contract.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

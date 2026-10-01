@@ -1,16 +1,31 @@
 """rolo_claude.init_cli -- `rolo-claude init` (H12 brief Part A /
 RECOMMENDATIONS.md P0 #1): the whole first run in one command. Interactive
-by default (plain prompts via `rich`, no Textual); `--yes` accepts every
-default without prompting; `--preset ... --yes` is fully non-interactive
-whenever the needed value (a key/token) is already discoverable, and never
-BLOCKS even when it isn't (a piped/non-tty stdin is read for one line
-instead of hanging on a real terminal prompt -- see `_prompt_secret`).
+by default (plain prompts via `rich`, or a small Textual list picker on a
+real terminal -- see `rolo_claude.init_providers`/`tui/dialogs/init_picker.py`);
+`--yes` accepts every default without prompting; `--provider ... --yes` is
+fully non-interactive whenever the needed value (a key/token) is already
+discoverable, and never BLOCKS even when it isn't (a piped/non-tty stdin is
+read for one line instead of hanging on a real terminal prompt -- see
+`_prompt_secret`).
 
-Seven steps, each printed as it runs and each idempotent: re-running shows
-the current state and changes nothing already correctly configured (must-do
-for the Kali VM, which already has its key/rg/PATH set up). Never writes
-`~/.claude.json` or `~/.claude/settings.json` (this harness only ever READS
-those); never prints a key or token anywhere, success or failure.
+1.0.1 hotfix 13: step 1 is now "select a provider to set up" (Databricks,
+OpenRouter, Anthropic API, or your Claude subscription), never a home/work/
+claude PRESET naming a bundle of choices the owner found confusing ("work is
+actually setting up databricks... the init should scroll thru all possible
+providers and the user go thru that path of setup") -- each provider runs
+its own credentials -> catalog/discovery -> default-model-pick -> live-pong
+path, and `init` offers to set up another when one finishes, looping until
+the user is done; when more than one provider ends up configured, one last
+cross-provider pick chooses the actual default. `--preset home|work|claude`
+still parses, as a deprecated one-line-noticed alias for `--provider
+openrouter|databricks|claude` (`docs/COMMANDS.md`'s own examples keep
+working verbatim).
+
+Idempotent throughout: re-running shows the current state and changes
+nothing already correctly configured (must-do for the Kali VM, which
+already has its key/rg/PATH set up). Never writes `~/.claude.json` or
+`~/.claude/settings.json` (this harness only ever READS those); never
+prints a key or token anywhere, success or failure.
 """
 
 from __future__ import annotations
@@ -26,12 +41,11 @@ from typing import Optional
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-_PRESET_DEFAULT_MODEL = {
-    "home": "or:deepseek/deepseek-v4.1-flash",
-    "work": "dbx:databricks-deepseek-v4-1-flash",
-    "claude": "cc:sonnet",
-}
-_WORK_ALTERNATIVES = "dbx:databricks-kimi-k3, dbx:databricks-glm-5-3"
+from rolo_claude.init_providers import (
+    PRESET_TO_PROVIDER, PROVIDER_DEFAULT_MODEL, PROVIDER_LABEL, PROVIDERS,
+    claude_login_available, configured_providers, detect_default_provider, model_entries_for_provider,
+    provider_status,
+)
 
 
 def _non_interactive(args) -> bool:
@@ -115,65 +129,62 @@ def _write_env_var(path: Path, key: str, value: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: preset
+# Step 1: provider selection (1.0.1 hotfix 13)
 # ---------------------------------------------------------------------------
 
-def _detect_default_preset(claude_available: bool) -> str:
-    from rolo_claude.providers.config import resolve_databricks, resolve_openrouter
-    if resolve_openrouter() is not None:
-        return "home"
-    if resolve_databricks() is not None:
-        return "work"
-    if claude_available:
-        return "claude"
-    return "home"
+def _requested_providers(args, console: Console) -> "Optional[list[str]]":
+    """`None` means "run the fully interactive picker loop"; otherwise the
+    exact, ordered list of providers to walk through non-interactively (no
+    "set up another?" prompt between them, no picker shown at all) --
+    either `--provider` (repeatable, first-listed first) or the deprecated
+    `--preset` alias (one line, exactly once, per the hotfix 13 spec:
+    "docs/COMMANDS.md's own examples keep working verbatim")."""
+    if args.provider:
+        return list(dict.fromkeys(args.provider))  # de-dup, keep first-seen order
+    if args.preset:
+        provider = PRESET_TO_PROVIDER[args.preset]
+        console.print(f"[dim](--preset {args.preset} is a deprecated alias for --provider {provider})[/dim]")
+        return [provider]
+    return None
 
 
-def _claude_login_available() -> bool:
-    from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
-    status = claude_auth_status()
-    return bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
+def _provider_row_label(name: str, *, mark_default: bool) -> str:
+    status = provider_status(name)
+    marker = "  (detected)" if mark_default else ""
+    return f"{name:<11} {status:<11} {PROVIDER_LABEL[name].split(' -- ', 1)[1]}{marker}"
 
 
-def _step_preset(args, console: Console) -> Optional[str]:
-    """Returns the chosen preset name, or None when `--preset claude` was
-    requested without an actual claude.ai login (a usage/config error --
-    the caller exits 2). `claude_auth_status()` (a real `claude auth
-    status` subprocess when no test seam is set) is only ever invoked when
-    it's actually relevant: no `--preset` at all (to decide whether to
-    offer/auto-detect it), or `--preset claude` explicitly -- never for an
-    explicit `--preset home`/`--preset work`."""
-    if args.preset in ("home", "work"):
-        console.print(f"1. Preset: {args.preset} (from --preset)")
-        return args.preset
-
-    claude_available = _claude_login_available()
-    if args.preset == "claude":
-        if not claude_available:
-            console.print("[red]--preset claude needs a claude.ai login -- run `claude` once to log in, "
-                           "or pick --preset home/work instead.[/red]")
-            return None
-        console.print("1. Preset: claude (from --preset)")
-        return "claude"
-
-    default_preset = _detect_default_preset(claude_available)
+def _step_select_provider(args, console: Console, *, header: str) -> Optional[str]:
+    """Returns the chosen provider name, `"done"` (stop the loop -- only
+    reachable interactively, via the picker/prompt's own "Done" row), or
+    `None` on cancel. `provider_status`/`detect_default_provider` are
+    re-read fresh on every call, so a second lap through the loop (after
+    "set up another provider?") shows updated tags."""
+    default_provider = detect_default_provider()
+    rows = [(p, _provider_row_label(p, mark_default=(p == default_provider))) for p in PROVIDERS]
+    rows.append(("done", "Done -- finish init"))
+    if sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
+        from rolo_claude.tui.dialogs.init_picker import run_simple_picker
+        try:
+            return run_simple_picker(header, rows, initial_ref=default_provider)
+        except Exception as e:
+            console.print(f"   [WARN] interactive picker failed ({type(e).__name__}: {e}) -- falling back to a numbered list.")
     if _non_interactive(args):
-        console.print(f"1. Preset: {default_preset} (detected; pass --preset to choose explicitly)")
-        return default_preset
-
-    console.print("1. Preset:")
-    console.print("   home   -- OpenRouter, or:deepseek/deepseek-v4.1-flash")
-    console.print(f"   work   -- Databricks, {_PRESET_DEFAULT_MODEL['work']} "
-                   f"(alternatives: {_WORK_ALTERNATIVES})")
-    options = ["home", "work"]
-    if claude_available:
-        console.print("   claude -- your Claude subscription (claude.ai login), cc:sonnet")
-        options.append("claude")
+        console.print(f"{header} {default_provider} (detected; pass --provider to choose explicitly)")
+        return default_provider
+    console.print(header)
+    for i, (ref, label) in enumerate(rows, 1):
+        console.print(f"   {i}. {label}")
+    default_idx = [r for r, _l in rows].index(default_provider) + 1
+    raw = _prompt_plain(f"   choose [1-{len(rows)}], default {default_idx}")
+    raw = (raw or "").strip()
+    if not raw:
+        return default_provider
     try:
-        choice = Prompt.ask("   choose", choices=options, default=default_preset)
-    except (EOFError, KeyboardInterrupt):
-        choice = default_preset
-    return choice
+        idx = int(raw)
+    except ValueError:
+        return default_provider
+    return rows[idx - 1][0] if 1 <= idx <= len(rows) else default_provider
 
 
 # ---------------------------------------------------------------------------
@@ -306,12 +317,39 @@ def _ensure_databricks_creds(args, console: Console) -> Optional[Path]:
     return path
 
 
-def _step_credentials(preset: str, args, console: Console) -> list:
-    console.print("2. Credentials:")
-    if preset == "home":
+def _ensure_anthropic_key(args, console: Console) -> Optional[Path]:
+    """1.0.1 hotfix 13: the fourth provider -- a direct `ANTHROPIC_API_KEY`
+    against api.anthropic.com (`ant:` models), previously not offered by
+    `init` at all (the old home/work/claude presets had no slot for it)."""
+    from rolo_claude.providers.config import redact, resolve_anthropic
+    existing = resolve_anthropic()
+    if existing is not None:
+        console.print(f"   [OK] Anthropic API key: already configured ({redact(existing.api_key)}) -- not changed.")
+        return None
+    if args.yes and sys.stdin.isatty():
+        console.print("   [WARN] ANTHROPIC_API_KEY not found, and --yes skips the prompt -- "
+                       "set ANTHROPIC_API_KEY (or re-run `rolo-claude init` without --yes).")
+        return None
+    console.print("   ANTHROPIC_API_KEY not found (get one at https://console.anthropic.com/settings/keys).")
+    value = _prompt_secret("   ANTHROPIC_API_KEY")
+    if not value:
+        console.print("   [WARN] no key entered -- the Anthropic API will not be configured yet.")
+        return None
+    path = _env_file_path()
+    _write_env_var(path, "ANTHROPIC_API_KEY", value)
+    os.environ["ANTHROPIC_API_KEY"] = value
+    console.print(f"   [OK] wrote ANTHROPIC_API_KEY to {path}")
+    return path
+
+
+def _step_credentials(provider: str, args, console: Console) -> list:
+    console.print("Credentials:")
+    if provider == "openrouter":
         path = _ensure_openrouter_key(args, console)
-    elif preset == "work":
+    elif provider == "databricks":
         path = _ensure_databricks_creds(args, console)
+    elif provider == "anthropic":
+        path = _ensure_anthropic_key(args, console)
     else:
         console.print("   claude: nothing stored -- your existing `claude` login is used as-is.")
         path = None
@@ -322,22 +360,28 @@ def _step_credentials(preset: str, args, console: Console) -> list:
 # Step 3: default model
 # ---------------------------------------------------------------------------
 
-def _step_default_model(preset: str, args, console: Console) -> "tuple[str, Optional[Path]]":
+def _step_default_model(provider: str, args, console: Console, *, write: bool = True) -> "tuple[str, Optional[Path]]":
+    """The provider's own STARTING default -- `write=False` (used when this
+    provider isn't the only one in play, see `_step_finalize_default_model`
+    below) computes it without touching config.json at all, so a later
+    cross-provider pick is never fighting an intermediate write."""
     from rolo_claude.config.paths import bridge_home
     from rolo_claude.theme import get_config_value, set_config_value
     team_default = None
-    if preset == "work" and not args.model:
+    if provider == "databricks" and not args.model:
         from rolo_claude.team_config import load_team_config
         team_cfg, _warnings = load_team_config(Path.cwd(), team_flag=getattr(args, "team", None))
         team_default = (team_cfg or {}).get("default_model")
-    chosen = args.model or team_default or _PRESET_DEFAULT_MODEL[preset]
+    chosen = args.model or team_default or PROVIDER_DEFAULT_MODEL[provider]
+    if not write:
+        return chosen, None
     current = get_config_value("model", default=None)
     if current == chosen:
-        console.print(f"3. Default model: {chosen} (unchanged)")
+        console.print(f"   Default model: {chosen} (unchanged)")
         return chosen, None
     set_config_value("model", chosen)
     path = bridge_home() / "config.json"
-    console.print(f"3. Default model: {chosen} -- wrote {path}")
+    console.print(f"   Default model: {chosen} -- wrote {path}")
     return chosen, path
 
 
@@ -349,16 +393,23 @@ def _print_work_catalog_summary(console: Console, model_raw: str) -> None:
     """H14 scope I: "prints the count of models available and the default"
     -- read straight back from the JUST-refreshed dbx-endpoints.json, so
     the number always matches what `/model`/`models --refresh` would show,
-    never a separately-maintained count."""
+    never a separately-maintained count. 1.0.1 hotfix 4: "chat-capable" now
+    counts by the endpoint's own `task` (`dbx_routing.is_chat_task`), not
+    `bool(api_types)` -- verified live: a workspace whose cache predates
+    this milestone's own `api_types` field showed "0 chat-capable" here
+    while `rolo-claude models`' own table said "chat yes" for the SAME
+    rows (that table used a different, name-based heuristic) -- the two
+    must never disagree again."""
     from rolo_claude.config.paths import bridge_home
     from rolo_claude.providers.databricks import load_dbx_endpoints_json
+    from rolo_claude.providers.dbx_routing import is_chat_task
     endpoints = load_dbx_endpoints_json(bridge_home())
-    chat = sum(1 for e in endpoints.values() if isinstance(e, dict) and e.get("api_types"))
+    chat = sum(1 for e in endpoints.values() if isinstance(e, dict) and is_chat_task(e.get("task")))
     console.print(f"   {len(endpoints)} Databricks endpoint(s) cached ({chat} chat-capable) -- default: {model_raw}")
 
 
-def _step_checks(args, console: Console, cwd: Path, *, preset: str = "", model_raw: str = "") -> "tuple[list, bool]":
-    console.print("4. Checks:")
+def _step_checks(args, console: Console, cwd: Path, *, provider: str = "", model_raw: str = "") -> "tuple[list, bool]":
+    console.print("Checks:")
     from rolo_claude.doctor import run_checks
     lines, ok = run_checks(cwd=cwd)
     for line in lines:
@@ -370,11 +421,254 @@ def _step_checks(args, console: Console, cwd: Path, *, preset: str = "", model_r
         from rolo_claude.catalog_cli import cmd_models
         try:
             cmd_models(["--refresh"])
-            if preset == "work":
+            if provider == "databricks":
                 _print_work_catalog_summary(console, model_raw)
         except Exception as e:
             console.print(f"   [WARN] catalog refresh failed: {type(e).__name__}: {e}")
     return lines, ok
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 5: an interactive model picker, offered right after the
+# catalog is refreshed (step 4) -- `--yes`/`--model` skip it outright (the
+# user already made a choice); with no real terminal, a numbered list is
+# printed and read off one stdin line instead of the full-screen picker.
+# ---------------------------------------------------------------------------
+
+def _run_entry_picker(args, console: Console, entries: "list[dict]") -> "Optional[str]":
+    """The shared TTY-check/full-screen-picker/numbered-fallback dance for
+    ANY `model_display`-shaped entries list -- used by both the per-provider
+    default-model pick and the final cross-provider one (1.0.1 hotfix 13)."""
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from rolo_claude.tui.dialogs.init_picker import run_init_picker
+            return run_init_picker(entries)
+        except Exception as e:
+            console.print(f"   [WARN] interactive picker failed ({type(e).__name__}: {e}) -- falling back to a numbered list.")
+    # `--yes` is always checked by the CALLER before this is ever reached --
+    # a non-tty run still gets the numbered fallback (a piped stdin, e.g. a
+    # script/CI driving init non-interactively on purpose, can still answer
+    # it); `_prompt_plain` itself degrades an EOF/empty line to "keep the
+    # default" rather than blocking, so this never hangs a truly unattended
+    # run.
+    return _numbered_model_pick(entries, console)
+
+
+def _chat_capable_dbx_entries(state_dir) -> "list[dict]":
+    """`[{"ref": "dbx:<name>", "group": "<family>", "context_tokens",
+    "max_output_tokens", "price_in_per_m", "price_out_per_m", "detail"},
+    ...]`, chat-capable only (`dbx_routing.is_chat_task`) -- the SAME
+    "family x api_types" data `rolo-claude models`/the `/model` picker
+    already show (1.0.1 hotfix 12: including ctx/output/price, via
+    `model_display.databricks_row_fields`), never a separately-maintained
+    list. Rendered through `model_display.format_model_row`, same as every
+    other model-listing surface."""
+    from rolo_claude.model_display import databricks_row_fields
+    from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
+    from rolo_claude.providers.dbx_routing import PATH_TYPE_DISPLAY, classify_family, default_path_type, is_chat_task
+    endpoints = load_dbx_endpoints_json(state_dir)
+    old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
+    out = []
+    for name in sorted(endpoints):
+        e = endpoints[name] if isinstance(endpoints[name], dict) else {}
+        if not is_chat_task(e.get("task")):
+            continue
+        family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
+                                  model_class=e.get("model_class") or "")
+        path_type = "unknown" if old_shape else default_path_type(name, state_dir)
+        path_display = PATH_TYPE_DISPLAY.get(path_type, path_type)
+        try:
+            fields = databricks_row_fields(name, state_dir=state_dir)
+        except Exception:
+            fields = {}
+        out.append({"ref": f"dbx:{name}", "group": family, "detail": f"{family} · {path_display}",
+                    "context_tokens": fields.get("context_tokens"), "max_output_tokens": fields.get("max_output_tokens"),
+                    "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m")})
+    return out
+
+
+def _numbered_model_pick(entries: "list[dict]", console: Console) -> "Optional[str]":
+    """The no-TTY fallback: a plain numbered list, one stdin line read for
+    the choice -- `None` (keep whatever default is already chosen) on
+    empty/invalid input or EOF, never blocks, never raises."""
+    from rolo_claude.model_display import ROW_HEADER, format_model_row
+    console.print("   Pick a default model (or press Enter to keep the current default):")
+    console.print(f"   {ROW_HEADER}")
+    for i, e in enumerate(entries, 1):
+        console.print(f"     {i}. {format_model_row(e)}")
+    raw = _prompt_plain("   choice")
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        return None
+    return entries[idx - 1]["ref"] if 1 <= idx <= len(entries) else None
+
+
+def _step_pick_model(args, console: Console, provider: str, model_ref_raw: str, *, write: bool = True) -> str:
+    """Returns the (possibly user-picked) model ref -- unchanged from
+    `model_ref_raw` whenever the picker is skipped, cancelled, offers
+    nothing (no chat-capable endpoint cached), or picks nothing. `write`
+    (default True) persists the pick to config.json the SAME way step 3
+    does; `_step_finalize_default_model` passes `write=False` when more
+    than one provider is in play for THIS call (its own single final pick,
+    across every configured provider, is what actually gets written)."""
+    if args.yes or args.model:
+        return model_ref_raw
+    from rolo_claude.config.paths import bridge_home
+    state_dir = bridge_home()
+    entries = model_entries_for_provider(provider, state_dir)
+    if not entries:
+        return model_ref_raw
+    chosen = _run_entry_picker(args, console, entries)
+    if not chosen or chosen == model_ref_raw:
+        return model_ref_raw
+    if write:
+        from rolo_claude.theme import set_config_value
+        set_config_value("model", chosen)
+        console.print(f"   Default model: {chosen} (picked interactively) -- wrote {state_dir / 'config.json'}")
+    return chosen
+
+
+def _step_finalize_default_model(args, console: Console, configured_this_run: "list[str]",
+                                  picked_per_provider: "dict[str, str]") -> str:
+    """1.0.1 hotfix 13: "when more than one provider ends up configured,
+    one last arrow-key pick 'Default model' across all configured
+    providers". `configured_providers()` re-checks ALL FOUR providers'
+    real credential state (not just what this run itself touched), so a
+    box that already had e.g. OpenRouter configured from before still
+    offers it alongside whatever `init` just set up this time. With
+    exactly one provider configured (now or already), that provider's own
+    per-provider pick (already written) stands as-is -- no second prompt."""
+    all_configured = configured_providers()
+    if len(all_configured) <= 1:
+        only = all_configured[0] if all_configured else (configured_this_run[-1] if configured_this_run else None)
+        return picked_per_provider.get(only, "") if only else ""
+    from rolo_claude.config.paths import bridge_home
+    state_dir = bridge_home()
+    entries = []
+    for provider in all_configured:
+        for e in model_entries_for_provider(provider, state_dir):
+            entries.append({**e, "group": e.get("group") or provider})
+    if not entries:
+        # Nothing to pick from (e.g. every configured provider's own catalog
+        # is still empty/unrefreshed) -- keep whichever provider was set up
+        # LAST this run, same as the single-provider case above.
+        last = configured_this_run[-1] if configured_this_run else all_configured[-1]
+        return picked_per_provider.get(last, PROVIDER_DEFAULT_MODEL.get(last, ""))
+    console.print(f"Default model ({len(all_configured)} providers configured: {', '.join(all_configured)}):")
+    if args.yes:
+        chosen = None
+    else:
+        chosen = _run_entry_picker(args, console, entries)
+    if not chosen:
+        # 1.0.1 fixpass finding 9: --yes / Esc'd out of the picker is NOT
+        # "the user chose a value" -- keep the model each provider's own
+        # setup step already wrote to config.json (the REAL current
+        # default) instead of overwriting it with an arbitrary guess keyed
+        # off all_configured's fixed definition order (which provider ends
+        # up "last" there has nothing to do with what the user actually
+        # just set up or already had -- verified: a box with Databricks AND
+        # OpenRouter configured got `or:deepseek/...` written in place of
+        # its real `dbx:` default on a plain double-Esc).
+        from rolo_claude.theme import get_config_value
+        existing = get_config_value("model", default=None)
+        if isinstance(existing, str) and existing:
+            console.print(f"   Default model: {existing} (kept -- nothing chosen this run)")
+            return existing
+        # A genuinely fresh box with no model at all yet still needs ONE
+        # written so init leaves it in a working state -- same fallback the
+        # pre-fix code always used.
+        last = configured_this_run[-1] if configured_this_run else all_configured[-1]
+        chosen = picked_per_provider.get(last, PROVIDER_DEFAULT_MODEL.get(last, ""))
+    from rolo_claude.theme import set_config_value
+    set_config_value("model", chosen)
+    console.print(f"   Default model: {chosen} -- wrote {state_dir / 'config.json'}")
+    return chosen
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 18.1: default permission mode, after the provider(s)/default
+# model are all settled.
+# ---------------------------------------------------------------------------
+
+_PERMISSION_MODE_ROWS = [
+    ("auto", "auto (recommended) -- allow everything except explicit deny/ask rules"),
+    ("acceptEdits", "acceptEdits -- file edits apply automatically, other tools still ask"),
+    ("default", "default -- ask before edits and non-read-only tools"),
+    ("plan", "plan -- research and propose a plan before making any change"),
+]
+
+
+def _step_pick_permission_mode(args, console: Console) -> str:
+    """1.0.1 hotfix 18.1: "Default permission mode" -- an arrow-key list
+    (same `run_simple_picker` widget the provider/model steps already use;
+    numbered fallback with no TTY), `auto` first and recommended since
+    that's what `rolo-claude` itself runs in day to day and `default`
+    (Claude Code's own factory setting) is the one new users most often
+    find confusing on their FIRST run. Writes the flat `permission_mode`
+    key straight to `~/.rolo-claude/config.json` -- `headless.py::
+    build_session`'s own precedence chain (hotfix 18.2) reads it back as
+    the layer between an explicit `--permission-mode` and settings.json's
+    `permissions.defaultMode`. Never touches `~/.claude/settings.json`."""
+    from rolo_claude.config.paths import bridge_home
+    from rolo_claude.theme import get_config_value, set_config_value
+
+    def _existing() -> "Optional[str]":
+        v = get_config_value("permission_mode", default=None)
+        return v if isinstance(v, str) and v else None
+
+    console.print("Default permission mode:")
+    if sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
+        from rolo_claude.tui.dialogs.init_picker import run_simple_picker
+        try:
+            chosen = run_simple_picker("Default permission mode", _PERMISSION_MODE_ROWS, initial_ref="auto")
+        except Exception as e:
+            console.print(f"   [WARN] interactive picker failed ({type(e).__name__}: {e}) -- falling back to a numbered list.")
+            chosen = None
+        if chosen is None:
+            # 1.0.1 fixpass finding 9: Esc'd out of the picker (or it
+            # failed) -- nothing was actually CHOSEN this run. Keep
+            # whatever's already in config.json, and write NOTHING at all
+            # when there's nothing there yet, rather than forcing the
+            # literal string "default" -- config.json's permission_mode
+            # outranks settings.json's own defaultMode, so writing one here
+            # unasked silently shadowed it forever.
+            existing = _existing()
+            if existing:
+                console.print(f"   Default permission mode: {existing} (kept -- nothing chosen this run)")
+            else:
+                console.print("   not set (nothing chosen -- settings.json's own permissions.defaultMode, "
+                               "or the app's built-in default, applies)")
+            return existing or ""
+    elif _non_interactive(args):
+        # 1.0.1 fixpass finding 9: --yes / no tty is NOT "the user chose a
+        # value" either -- same rule as the Esc case just above.
+        existing = _existing()
+        if existing:
+            console.print(f"   {existing} (non-interactive; kept the existing config.json value)")
+            return existing
+        console.print("   not set (non-interactive; pass `rolo-claude config set permission_mode ...` "
+                       "or settings.json's own permissions.defaultMode to choose one)")
+        return ""
+    else:
+        for i, (ref, label) in enumerate(_PERMISSION_MODE_ROWS, 1):
+            console.print(f"   {i}. {label}")
+        raw = _prompt_plain(f"   choose [1-{len(_PERMISSION_MODE_ROWS)}], default 1 (auto)")
+        raw = (raw or "").strip()
+        idx = 1
+        if raw:
+            try:
+                idx = int(raw)
+            except ValueError:
+                idx = 1
+        idx = idx if 1 <= idx <= len(_PERMISSION_MODE_ROWS) else 1
+        chosen = _PERMISSION_MODE_ROWS[idx - 1][0]
+    set_config_value("permission_mode", chosen)
+    console.print(f"   Default permission mode: {chosen} -- wrote {bridge_home() / 'config.json'}")
+    return chosen
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +728,7 @@ def _run_live_pong(model_raw: str, cwd: Path) -> "tuple[bool, str]":
 
 
 def _step_live_pong(model_raw: str, cwd: Path, console: Console) -> bool:
-    console.print(f"5. Live pong ({model_raw}):")
+    console.print(f"Live pong ({model_raw}):")
     ok, line = _run_live_pong(model_raw, cwd)
     console.print(f"   {'[OK]' if ok else '[WARN]'} {line}")
     if not ok:
@@ -492,7 +786,7 @@ def _check_windows_launcher(console: Console) -> None:
 
 
 def _step_linux_fixes(args, console: Console) -> list:
-    console.print("6. Windows PATH:" if sys.platform == "win32" else "6. Linux fixes:")
+    console.print("Windows PATH:" if sys.platform == "win32" else "Linux fixes:")
     if args.no_fixes:
         console.print("   skipped (--no-fixes)")
         return []
@@ -529,8 +823,13 @@ def _first_fix_hint(lines: list) -> Optional[str]:
     return None
 
 
-def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: list, *, no_live: bool) -> None:
-    console.print("7. Summary:")
+def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: list, *, no_live: bool,
+                   configured_this_run: "list[str]", final_model: str) -> None:
+    console.print("Summary:")
+    if configured_this_run:
+        console.print(f"   provider(s) set up this run: {', '.join(configured_this_run)}")
+    if final_model:
+        console.print(f"   default model: {final_model}")
     if written:
         for w in written:
             console.print(f"   wrote {w}")
@@ -550,12 +849,18 @@ def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rolo-claude init", add_help=True,
-        description="Set up rolo-claude in one command: pick a preset, configure credentials, set a "
-                     "default model, run doctor, send a live pong, and offer the Linux setup fixes.",
+        description="Set up rolo-claude in one command: pick a provider to set up, configure its "
+                     "credentials, set a default model, run doctor, send a live pong, and offer the "
+                     "Linux setup fixes. Repeat for another provider, then pick the overall default.",
     )
+    parser.add_argument("--provider", action="append", choices=list(PROVIDERS), default=None,
+                         metavar="{databricks,openrouter,anthropic,claude}",
+                         help="set up this provider non-interactively (repeatable, first-listed first); "
+                              "omit for the interactive provider picker")
     parser.add_argument("--preset", choices=["home", "work", "claude"], default=None,
-                         help="home=OpenRouter, work=Databricks, claude=your Claude subscription")
-    parser.add_argument("--model", default=None, metavar="REF", help="override the preset's own default model")
+                         help="deprecated alias for --provider: home=openrouter, work=databricks, "
+                              "claude=claude")
+    parser.add_argument("--model", default=None, metavar="REF", help="override the provider's own default model")
     parser.add_argument("--yes", action="store_true", help="accept every default without prompting")
     parser.add_argument("--no-live", action="store_true", help="skip the catalog refresh and the live pong")
     parser.add_argument("--no-fixes", action="store_true", help="skip the Linux rg/PATH fixes step")
@@ -563,6 +868,33 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="a team.json preset (host/default model/gateway preference/DBU price -- "
                               "never a token); overrides .rolo-claude/team.json / ~/.rolo-claude/team.json")
     return parser
+
+
+def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
+                         *, write_model: bool) -> "Optional[tuple]":
+    """Runs ONE provider's whole path: credentials -> checks/catalog
+    refresh -> default-model pick -> live pong. Returns `(model_ref_raw,
+    written_paths, doctor_lines, pong_ok)`, or `None` when the provider
+    flatly can't be set up right now (today: only `--provider claude`/
+    `--preset claude` with no actual claude.ai login -- a usage/config
+    error the old single-preset flow also rejected outright)."""
+    console.print(f"[bold]{PROVIDER_LABEL[provider].split(' -- ', 1)[0]}[/bold]")
+    if provider == "claude" and not claude_login_available():
+        console.print("[red]Claude subscription needs a claude.ai login -- run `claude` once to log in, "
+                       "or pick a different provider.[/red]")
+        return None
+    written = _step_credentials(provider, args, console)
+    model_ref_raw, model_path = _step_default_model(provider, args, console, write=write_model)
+    if model_path:
+        written.append(str(model_path))
+    doctor_lines, _doctor_ok = _step_checks(args, console, cwd, provider=provider, model_raw=model_ref_raw)
+    model_ref_raw = _step_pick_model(args, console, provider, model_ref_raw, write=write_model)
+    pong_ok = True
+    if args.no_live:
+        console.print("Live pong: skipped (--no-live)")
+    else:
+        pong_ok = _step_live_pong(model_ref_raw, cwd, console)
+    return model_ref_raw, written, doctor_lines, pong_ok
 
 
 def cmd_init(argv: list) -> int:
@@ -575,28 +907,61 @@ def cmd_init(argv: list) -> int:
     console.print("[bold]rolo-claude init[/bold]")
     cwd = Path.cwd()
     written: list = []
+    doctor_lines: list = []
+    pong_ok = True
+    configured_this_run: "list[str]" = []
+    picked_per_provider: "dict[str, str]" = {}
 
-    preset = _step_preset(args, console)
-    if preset is None:
+    requested = _requested_providers(args, console)
+    interactive_loop = requested is None
+    if not interactive_loop and not requested:
+        console.print("[red]--provider needs at least one value.[/red]")
         return 2
 
-    written.extend(_step_credentials(preset, args, console))
-
-    model_ref_raw, model_path = _step_default_model(preset, args, console)
-    if model_path:
-        written.append(str(model_path))
-
-    doctor_lines, _doctor_ok = _step_checks(args, console, cwd, preset=preset, model_raw=model_ref_raw)
-
-    pong_ok = True
-    if args.no_live:
-        console.print("5. Live pong: skipped (--no-live)")
+    if interactive_loop:
+        while True:
+            header = ("Select a provider to set up:" if not configured_this_run
+                      else "Select another provider to set up (or Done):")
+            choice = _step_select_provider(args, console, header=header)
+            if choice is None or choice == "done":
+                break
+            # `write_model` is always True here -- with only one provider
+            # configured so far this IS the real default; if a second one
+            # gets configured later, `_step_finalize_default_model` below
+            # overwrites config.json with its own single cross-provider pick.
+            result = _run_provider_setup(choice, args, console, cwd, write_model=True)
+            if result is None:
+                continue  # error already printed -- back to the picker
+            model_ref_raw, prov_written, prov_doctor, prov_pong_ok = result
+            written.extend(prov_written)
+            doctor_lines = prov_doctor
+            pong_ok = prov_pong_ok
+            configured_this_run.append(choice)
+            picked_per_provider[choice] = model_ref_raw
+            if args.yes or not sys.stdin.isatty():
+                break  # never loop in a non-interactive run
+            if not _confirm(args, console, "Set up another provider?", default=False):
+                break
     else:
-        pong_ok = _step_live_pong(model_ref_raw, cwd, console)
+        for choice in requested:
+            result = _run_provider_setup(choice, args, console, cwd, write_model=True)
+            if result is None:
+                return 2
+            model_ref_raw, prov_written, prov_doctor, prov_pong_ok = result
+            written.extend(prov_written)
+            doctor_lines = prov_doctor
+            pong_ok = prov_pong_ok
+            configured_this_run.append(choice)
+            picked_per_provider[choice] = model_ref_raw
+
+    final_model = _step_finalize_default_model(args, console, configured_this_run, picked_per_provider)
+
+    _step_pick_permission_mode(args, console)  # 1.0.1 hotfix 18.1
 
     written.extend(_step_linux_fixes(args, console))
 
-    _step_summary(console, written, pong_ok, doctor_lines, no_live=args.no_live)
+    _step_summary(console, written, pong_ok, doctor_lines, no_live=args.no_live,
+                  configured_this_run=configured_this_run, final_model=final_model)
 
     if not args.no_live and not pong_ok:
         return 1

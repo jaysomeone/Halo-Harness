@@ -308,8 +308,13 @@ def test_default_model_check_unset_configured_and_misconfigured(ctx: Ctx):
         return doctor._check_default_model()
 
     line3 = _isolated(_unconfigured_provider)
-    ctx.check(f"set but Databricks not configured -> WARN with a work-preset fix, got {line3!r}",
-              line3.startswith(doctor.WARN) and "rolo-claude init --preset work" in line3)
+    # 1.0.1 hotfix 13 (drive-by): this fix suggestion moved from the
+    # deprecated `--preset work` to `--provider databricks` along with
+    # every other user-facing spot init's own provider-first rewrite
+    # touched -- `--preset work` still works (as a deprecated alias), but
+    # nothing prescribes it any more.
+    ctx.check(f"set but Databricks not configured -> WARN with a --provider fix, got {line3!r}",
+              line3.startswith(doctor.WARN) and "rolo-claude init --provider databricks" in line3)
 
     def _garbage(home):
         set_config_value("model", 12345)

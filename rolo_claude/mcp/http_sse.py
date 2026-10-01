@@ -75,6 +75,48 @@ def looks_like_auth_required(exc: BaseException) -> bool:
     return "401" in text or "unauthorized" in text or "oauth" in text
 
 
+def _mcp_http_client_factory(headers: Optional[dict] = None, timeout=None, auth=None):
+    """`create_mcp_http_client`-compatible factory (same call shape
+    `sse_client`'s own `httpx_client_factory=` parameter expects) -- but
+    with `default_tls_context()` as `verify=` (1.0.1 fixpass finding 8):
+    MCP http/sse connections go through httpx entirely OUTSIDE http.py's
+    own open_upstream/urlopen_tls, so they never picked up this hotfix's
+    VERIFY_X509_STRICT-clearing/custom-CA-bundle TLS policy -- the same
+    TLS-inspecting-proxy failure WebFetch had (see that tool's own fix)
+    could equally hit an http/sse MCP server. Best-effort ("when httpx is
+    present"): falls straight back to the SDK's own unmodified
+    `create_mcp_http_client` (whatever this installed httpx build's default
+    verification policy is) if no importable httpx build is found, or if
+    building the context / passing `verify=` fails for any reason -- this
+    must never turn a connection that would otherwise have worked into a
+    failure."""
+    from mcp.shared._httpx_utils import create_mcp_http_client
+    try:
+        from rolo_claude.providers.http import default_tls_context
+        ctx = default_tls_context()
+    except Exception:
+        return create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    try:
+        import httpx2 as _httpx  # the MCP SDK and requirements.lock are built on httpx2
+    except ImportError:
+        try:
+            import httpx as _httpx  # classic httpx, only when httpx2 is absent
+        except ImportError:
+            return create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    try:
+        from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT
+        if timeout is None:
+            timeout = _httpx.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT)
+        kwargs: dict = {"timeout": timeout, "verify": ctx}
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        return _httpx.AsyncClient(**kwargs)
+    except Exception:
+        return create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+
+
 async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     """Streamable-HTTP connect. Returns `(stack, session)`, stack OPEN --
     same contract as `stdio.connect`. Headers are carried on a pre-built
@@ -85,10 +127,9 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     `asyncio.wait_for` -- see `stdio.connect`'s own docstring for why."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
-    from mcp.shared._httpx_utils import create_mcp_http_client
     from rolo_claude.mcp.client import task_timeout
 
-    http_client = create_mcp_http_client(headers=headers or {})
+    http_client = _mcp_http_client_factory(headers=headers or {})
     stack = AsyncExitStack()
     try:
         stack.push_async_callback(http_client.aclose)
@@ -127,7 +168,8 @@ async def connect_sse(*, url: str, headers: dict, connect_timeout: float):
     try:
         async with task_timeout(connect_timeout + 1):
             read, write = await stack.enter_async_context(
-                sse_client(url, headers=headers or {}, timeout=connect_timeout))
+                sse_client(url, headers=headers or {}, timeout=connect_timeout,
+                           httpx_client_factory=_mcp_http_client_factory))
         session = await stack.enter_async_context(ClientSession(read, write))
         return stack, session
     except BaseException:

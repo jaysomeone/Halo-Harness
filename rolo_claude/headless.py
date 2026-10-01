@@ -474,8 +474,16 @@ def build_session(
     # settings.json become the session's default effort -- only when
     # nothing more specific (`--effort`) was already given; a settings
     # value can never override an explicit flag.
+    #
+    # 1.0.1 hotfix 19/20: `effort_source` rides alongside for `/effort`'s
+    # own "effective value and its source" line -- "flag"/"settings" here;
+    # Session itself labels its own Anthropic-family "high" default (see
+    # `agent/loop.py::__init__`) as "default" when NEITHER of these fired.
+    effort_source = "flag" if effort is not None else None
     if effort is None:
         effort = settings.resolved_effort_level()
+        if effort is not None:
+            effort_source = "settings"
 
     cli_allow = split_tool_rule_list(allowed_tools) if allowed_tools else []
     cli_disallow = split_tool_rule_list(disallowed_tools) if disallowed_tools else []
@@ -484,10 +492,23 @@ def build_session(
         cli_allow=cli_allow, cli_disallow=cli_disallow,
     )
 
+    # 1.0.1 hotfix 18.2: `~/.rolo-claude/config.json`'s own `permission_mode`
+    # (item 18.1's new init step) is a NEW layer, spliced in between the CLI
+    # flag and settings.json's `permissions.defaultMode` -- an explicit
+    # `--permission-mode` this run still wins outright, but a user's own
+    # standing default (set once at `init` time) now beats whatever a
+    # project's settings.json happens to declare, which is what "I always
+    # want auto on MY boxes" actually means. `doctor` (doctor.py) prints
+    # this exact chain's own winning source so it's never a mystery which
+    # layer decided.
+    from rolo_claude.theme import get_config_value
+    config_permission_mode = get_config_value("permission_mode", default=None)
     if dangerously_skip_permissions:
         resolved_mode = "bypassPermissions"
     elif permission_mode:
         resolved_mode = normalize_permission_mode(permission_mode)
+    elif isinstance(config_permission_mode, str) and config_permission_mode:
+        resolved_mode = normalize_permission_mode(config_permission_mode)
     elif settings.permissions_default_mode:
         resolved_mode = normalize_permission_mode(settings.permissions_default_mode)
     else:
@@ -764,6 +785,7 @@ def build_session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
         model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
+        effort_source=effort_source,
         extra_headers=extra_headers, permission_engine=permission_engine,
         session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
         agents=discovered_agents, routes=routes, agent_type_restriction=agent_type_restriction,

@@ -27,7 +27,7 @@ export PYTHONPATH=/path/to/rolo-claude   # a dev checkout; skip if installed
 rolo-claude --version
 ```
 ```
-rolo-claude 1.0.0
+rolo-claude 1.0.1
 ```
 
 There is no `sessions` subcommand in this build -- session resume/fork/
@@ -441,10 +441,22 @@ release date. The canonical, always-current list is
 
 ## `rolo-claude init`
 
-One command that sets up a fresh box: picks a preset, configures
-credentials, sets the default model, runs `doctor`, refreshes the model
-catalogs, sends one live "pong", and (Linux only) offers the `rg`/PATH
-fixes. Every step is idempotent -- re-running only reports what's already
+One command that sets up a fresh box: **select a provider to set up**
+(Databricks, OpenRouter, Anthropic API, or your Claude subscription --
+1.0.1 hotfix 13 replaced the old home/work/claude "preset" naming a bundle
+of choices with a direct provider picker, since "work" was really just
+"Databricks" wearing a confusing label), configure its credentials, pick
+its default model, run `doctor`, refresh the model catalogs, send one live
+"pong", and (Linux only) offer the `rg`/PATH fixes -- then offer to set up
+another provider, looping until you're done; with more than one provider
+configured, one last pick chooses the overall default model across all of
+them. Then (1.0.1 hotfix 18) **select a default permission mode** -- `auto`
+(recommended, listed first), `acceptEdits`, `default`, `plan` -- written to
+`~/.rolo-claude/config.json`'s own `permission_mode` key, which every
+future session (`-p` and the TUI alike) starts in unless `--permission-mode`
+or `--dangerously-skip-permissions` is given that run (see
+[CONFIG.md](CONFIG.md)'s "Providers" section for the full precedence
+chain). Every step is idempotent -- re-running only reports what's already
 correct. Never writes `~/.claude.json`/`~/.claude/settings.json`, never
 prints a key or token.
 
@@ -452,18 +464,25 @@ prints a key or token.
 rolo-claude init --help
 ```
 ```
-usage: rolo-claude init [-h] [--preset {home,work,claude}] [--model REF]
-                        [--yes] [--no-live] [--no-fixes] [--team PATH|URL]
+usage: rolo-claude init [-h]
+                        [--provider {databricks,openrouter,anthropic,claude}]
+                        [--preset {home,work,claude}] [--model REF] [--yes]
+                        [--no-live] [--no-fixes] [--team PATH|URL]
 
-Set up rolo-claude in one command: pick a preset, configure credentials, set a
-default model, run doctor, send a live pong, and offer the Linux setup fixes.
+Set up rolo-claude in one command: pick a provider to set up, configure its
+credentials, set a default model, run doctor, send a live pong, and offer the
+Linux setup fixes. Repeat for another provider, then pick the overall default.
 
 options:
   -h, --help            show this help message and exit
+  --provider {databricks,openrouter,anthropic,claude}
+                        set up this provider non-interactively (repeatable,
+                        first-listed first); omit for the interactive provider
+                        picker
   --preset {home,work,claude}
-                        home=OpenRouter, work=Databricks, claude=your Claude
-                        subscription
-  --model REF           override the preset's own default model
+                        deprecated alias for --provider: home=openrouter,
+                        work=databricks, claude=claude
+  --model REF           override the provider's own default model
   --yes                 accept every default without prompting
   --no-live             skip the catalog refresh and the live pong
   --no-fixes            skip the Linux rg/PATH fixes step
@@ -474,37 +493,54 @@ options:
 
 | Flag | Reads/writes | Default |
 |---|---|---|
-| `--preset {home,work,claude}` | auto-detected (existing `OPENROUTER_API_KEY` -> `home`; a Databricks host/`ucode-settings.json` -> `work`; a `claude.ai` login and nothing else -> `claude`) when omitted | auto-detect |
-| `--model REF` | writes `~/.rolo-claude/config.json`'s `model` key | the preset's own default (`or:deepseek/deepseek-v4.1-flash` / `dbx:databricks-deepseek-v4-1-flash` / `cc:sonnet`) |
-| `--yes` | -- | off (interactive prompts) |
+| `--provider {databricks,openrouter,anthropic,claude}` | repeatable; each runs its own credentials -> catalog/discovery -> default-model-pick -> live-pong path, in the order given, with no "set up another?" prompt between them | omitted -> the interactive provider picker (arrow keys on a real terminal, a numbered list otherwise), looping until you pick "Done" |
+| `--preset {home,work,claude}` | **deprecated**: a one-line-noticed alias for `--provider openrouter\|databricks\|claude` respectively -- kept so existing scripts/docs using it verbatim keep working | -- |
+| `--model REF` | writes `~/.rolo-claude/config.json`'s `model` key, skipping that provider's own model picker entirely | the provider's own default (`or:deepseek/deepseek-v4.1-flash` / `dbx:databricks-deepseek-v4-1-flash` / `ant:sonnet` / `cc:sonnet`) |
+| `--yes` | -- | off (interactive prompts; also skips every provider's own model picker) |
 | `--no-live` | skips `models --refresh` and the live pong | off |
 | `--no-fixes` | skips the `rg`/PATH steps (Linux) | off |
-| `--team PATH\|URL` | reads a `team.json`-shaped file/URL (see `docs/DATABRICKS.md`) | `.rolo-claude/team.json`, then `~/.rolo-claude/team.json` |
+| `--team PATH\|URL` | reads a `team.json`-shaped file/URL (see `docs/DATABRICKS.md`); Databricks only | `.rolo-claude/team.json`, then `~/.rolo-claude/team.json` |
 
-`--preset ... --yes` is fully non-interactive whenever the needed value is
-already discoverable; when it isn't (e.g. no OpenRouter key found and
-`--yes` was passed), it prints a `[WARN]` naming the env var to set instead
-of blocking on a prompt. Credentials go to the same env file every other
-part of the harness reads (`BRIDGE_ENV_FILE`, else
-`~/.config/vibes-hacker/env`, mode 0600 on POSIX).
+`--provider ... --yes` (or the deprecated `--preset ... --yes`) is fully
+non-interactive whenever the needed value is already discoverable; when it
+isn't (e.g. no OpenRouter key found and `--yes` was passed), it prints a
+`[WARN]` naming the env var to set instead of blocking on a prompt.
+Credentials go to the same env file every other part of the harness reads
+(`BRIDGE_ENV_FILE`, else `~/.config/vibes-hacker/env`, mode 0600 on POSIX).
+The interactive provider list shows each provider's own status tag
+(`configured`/`logged in`/`not set up`) and starts the cursor on whichever
+one auto-detection would have picked (an existing `OPENROUTER_API_KEY` ->
+OpenRouter; else a Databricks host/`ucode-settings.json` -> Databricks; else
+an `ANTHROPIC_API_KEY` -> the Anthropic API; else a `claude.ai` login ->
+Claude subscription) -- detection only positions the cursor, it never
+decides for you. Each provider's own default-model pick (arrow keys, type
+to filter, same `ctx`/`out`/price columns documented under
+[`/model`](SLASH-COMMANDS.md#model-ref)) is skipped by `--yes`/`--model`;
+the interactive picker itself falls back to a numbered list with no real
+terminal to draw into.
 
 Worked example (a scratch home, so nothing real is touched):
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude init --preset home --yes --no-live
+BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude init --provider openrouter --yes --no-live
 ```
 ```
 rolo-claude init
-1. Preset: home (from --preset)
-2. Credentials:
+OpenRouter
+Credentials:
    [WARN] OpenRouter key not found, and --yes skips the prompt -- set OPENROUTER_API_KEY (or re-run `rolo-claude init` without --yes).
-3. Default model: or:deepseek/deepseek-v4.1-flash -- wrote /tmp/demo-home/.rolo-claude/config.json
-4. Checks:
+   Default model: or:deepseek/deepseek-v4.1-flash -- wrote /tmp/demo-home/.rolo-claude/config.json
+Checks:
    ...doctor lines...
    (catalog refresh skipped: --no-live)
-5. Live pong: skipped (--no-live)
-6. Linux fixes:
+Live pong: skipped (--no-live)
+Default permission mode:
+   auto (non-interactive default; pass through settings.json or `rolo-claude config set permission_mode ...` to change it)
+   Default permission mode: auto -- wrote /tmp/demo-home/.rolo-claude/config.json
+Linux fixes:
    ...
-7. Summary:
+Summary:
+   provider(s) set up this run: openrouter
+   default model: or:deepseek/deepseek-v4.1-flash
    wrote /tmp/demo-home/.rolo-claude/config.json
    Run `rolo-claude` to start.
 ```

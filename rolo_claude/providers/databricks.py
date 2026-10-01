@@ -166,9 +166,13 @@ def probe_databricks_status(root: str, token: str) -> "tuple[int, bytes]":
     reachability probe still runs without a token, a 401 proves
     reachability" -- in which case no Authorization header is sent at all
     (an empty Bearer value would just be a different kind of bad token,
-    not "no token"). Raises UpstreamConnectError on connect/DNS failure."""
+    not "no token"). Raises UpstreamConnectError on connect/DNS failure --
+    1.0.1 hotfix 2: bounded at `open_upstream`'s own default connect
+    timeout (<=8s), so a `doctor --work`/catalog-refresh probe against an
+    unreachable/unresolvable host fails fast instead of hanging on a
+    black-holed DNS lookup."""
     import urllib.parse
-    from rolo_claude.providers.http import open_upstream, UpstreamConnectError
+    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(root)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -184,7 +188,7 @@ def probe_databricks_status(root: str, token: str) -> "tuple[int, bytes]":
         resp = conn.getresponse()
         raw = resp.read()
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"Databricks connection failed: {e}") from e
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
     finally:
         # NEW (H9 post-acceptance): a one-shot GET+read-fully-then-done
         # call (unlike stream_completion/stream_anthropic_completion,
@@ -326,6 +330,25 @@ def format_dbx_diff(diff: dict) -> str:
     return "; ".join(parts) if parts else "no changes"
 
 
+def dbx_endpoints_cache_is_old_shape(endpoints: dict) -> bool:
+    """1.0.1 hotfix 4: True when this `dbx-endpoints.json` was written by a
+    version before H14 scope D ever cached `api_types` at all -- checked on
+    the KEY being present (`"api_types" in entry`), never on whether the
+    list happens to be empty (a workspace can legitimately have an endpoint
+    the platform itself reports zero api_types for; that's real data, not a
+    migration signal). An old-shape cache silently degrades `chat_route_
+    candidates` to invocations-only for EVERY openai-chat-dialect family
+    (its own `listed = set(entry.get("api_types") or [])` filters every
+    real candidate out when the key is simply missing) -- this is what made
+    a stale post-upgrade cache show `path=invocations` for every family and
+    "0 chat-capable" in `init`'s own summary even though the endpoints
+    genuinely are chat-capable. `{}` (nothing cached yet) is NOT old-shape
+    (nothing to migrate)."""
+    if not endpoints:
+        return False
+    return not any(isinstance(e, dict) and "api_types" in e for e in endpoints.values())
+
+
 def dbx_endpoints_age_seconds(state_dir) -> Optional[float]:
     """Age of dbx-endpoints.json in seconds, or None if never cached."""
     path = dbx_endpoints_path(state_dir)
@@ -363,11 +386,22 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
     triple `refresh_dbx_catalog` returns. `max_age_hours` defaults to
     `databricks.catalog_max_age_hours` (~/.rolo-claude/config.json, itself
     defaulting to 24). Never raises -- an auto-refresh must not be able to
-    break session start or opening `/model`."""
+    break session start or opening `/model`.
+
+    1.0.1 hotfix 4 migration: an OLD-SHAPE cache (written before `api_types`
+    was ever cached) is always treated as stale here, REGARDLESS of
+    `max_age_hours`/`force` -- "an old cache without api_types is refreshed
+    on next use when the network is up" (the "next use" being one of THIS
+    function's own existing callers: session start, opening `/model` --
+    never a bare `/models`/`rolo-claude models`, which must stay
+    network-free; see catalog_cli.py's own old-shape handling for what a
+    bare, no-network read shows in the meantime)."""
     try:
         if max_age_hours is None:
             from rolo_claude.theme import get_config_value
             max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
+        if dbx_endpoints_cache_is_old_shape(load_dbx_endpoints_json(state_dir)):
+            force = True
         age = dbx_endpoints_age_seconds(state_dir)
         # A max age of 0 (or less) means "always refresh". Clamp the measured
         # age at 0: on Windows a just-written file's mtime can land a few
@@ -393,9 +427,11 @@ def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:
     reads only these two, unchanged), plus -- when OpenRouter's response
     includes them -- 'input_modalities' (from architecture.input_modalities),
     'supported_parameters', and 'pricing' (H0: rolo_claude.model's
-    ModelProfile reads these three for vision/reasoning/price)."""
+    ModelProfile reads these three for vision/reasoning/price). Raises
+    UpstreamConnectError on connect/DNS failure -- 1.0.1 hotfix 2: bounded
+    at `open_upstream`'s own default connect timeout (<=8s)."""
     import urllib.parse
-    from rolo_claude.providers.http import open_upstream, UpstreamConnectError
+    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -409,7 +445,7 @@ def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:
         resp = conn.getresponse()
         raw = resp.read()
     except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
-        raise UpstreamConnectError(f"OpenRouter connection failed: {e}") from e
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
     finally:
         # NEW (H9 post-acceptance): see _probe_databricks_endpoints_raw's
         # own comment -- same one-shot leak, same fix.

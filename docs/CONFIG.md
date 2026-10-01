@@ -181,7 +181,7 @@ directly by the features that own them:
 | `images` | `"inline"` | `--no-inline-images` overrides per-run |
 | `mcpPreload` | unset | hand-edited: a list of wire tool names to preload regardless of the catalog's own `alwaysLoad` rule |
 | `compactionModel` | unset (uses the session model) | hand-edited |
-| `databricks.gateway.<endpoint>` | unset | `rolo-claude init --preset work` (from a team.json `gateway_preference`), or hand-edited |
+| `databricks.gateway.<endpoint>` | unset | `rolo-claude init --provider databricks` (from a team.json `gateway_preference`), or hand-edited |
 | `databricks.dbu_price_usd` | unset (costs show as raw DBUs) | team.json, or hand-edited |
 | `databricks.catalog_max_age_hours` | `24` | hand-edited |
 | `improve.enabled` | `true` | hand-edited |
@@ -225,13 +225,46 @@ directly by the features that own them:
 | `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | override the `SessionEnd` hook time budget outright |
 | `TMUX` | presence gates `doctor`'s tmux-mouse-mode check |
 
-## Presets (`rolo-claude init --preset ...`)
+## Providers (`rolo-claude init --provider ...`)
 
-| Preset | Default model | Credential asked for |
+1.0.1 hotfix 13: `init` selects a PROVIDER to set up, not a "preset" naming
+a bundle of choices; the old `--preset home|work|claude` still works, as a
+deprecated alias for `--provider openrouter|databricks|claude` respectively
+(one-line notice printed, no behavior change).
+
+| Provider | Default model | Credential asked for |
 |---|---|---|
-| `home` | `or:deepseek/deepseek-v4.1-flash` | `OPENROUTER_API_KEY` |
-| `work` | `dbx:databricks-deepseek-v4-1-flash` | `DATABRICKS_HOST` + `DATABRICKS_TOKEN` (host often already known -- see `docs/DATABRICKS.md`) |
+| `openrouter` | `or:deepseek/deepseek-v4.1-flash` | `OPENROUTER_API_KEY` |
+| `databricks` | `dbx:databricks-deepseek-v4-1-flash` | `DATABRICKS_HOST` + `DATABRICKS_TOKEN` (host often already known -- see `docs/DATABRICKS.md`) |
+| `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
+
+### Default permission mode (1.0.1 hotfix 18)
+
+After the provider(s)/default model are settled, `init` also asks for a
+**default permission mode** -- `auto` (recommended, listed first),
+`acceptEdits`, `default`, `plan` -- written to `~/.rolo-claude/config.json`'s
+own flat `permission_mode` key. Precedence for a session's actual starting
+mode, highest first:
+
+1. `--dangerously-skip-permissions`
+2. `--permission-mode` (this run's own flag)
+3. `~/.rolo-claude/config.json`'s `permission_mode` (this section)
+4. `settings.json`'s `permissions.defaultMode` (user layer, or
+   project/local for the manual modes, as before)
+5. the hardcoded `default`
+
+`rolo-claude doctor` prints the effective mode and which layer decided it.
+Never touches `~/.claude/settings.json` -- `rolo-claude config set
+permission_mode auto` (or any of the four modes) sets the same key directly
+without re-running `init`.
+
+As of the H14c fixpass (finding 9), this step (and the default-model pick
+just before it) only ever writes a value you actually chose THIS run --
+`--yes`/non-interactive and Esc both keep whatever is already in
+`config.json` unchanged (writing nothing at all for `permission_mode` on a
+fresh box, so layer 4 above still applies) instead of forcing `auto`/an
+arbitrary other-provider's model over it.
 
 ## What is never written
 

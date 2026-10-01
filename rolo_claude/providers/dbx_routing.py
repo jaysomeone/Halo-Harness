@@ -235,6 +235,54 @@ def chat_route_candidates(name: str, state_dir=None) -> "list[RouteCandidate]":
     return candidates
 
 
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 4: "chat-capable" and the display `path` column both come
+# from data the cache ALREADY carries (task, and the family/api_types
+# routing decision above) -- never a separate, easily-disagreeing heuristic
+# like "family != non_chat" (which says "yes" for a family classified as
+# chat-shaped by NAME even when the endpoint's own `task` says otherwise).
+# ---------------------------------------------------------------------------
+
+CHAT_TASK = "llm/v1/chat"
+
+# Display labels for a route candidate's raw `key` (also `resolve_databricks_
+# dialect`'s "anthropic-passthrough" case) -- used ONLY for the human-
+# readable text table; machine-readable `--json`/`--urls` output keeps the
+# raw key ("mlflow"/"cursor"/"invocations"/"anthropic") unchanged, since
+# that shape is already pinned by test_cmd_models_refresh_urls_json_shape.
+PATH_TYPE_DISPLAY = {"mlflow": "mlflow-chat", "cursor": "cursor-chat",
+                      "anthropic": "anthropic", "invocations": "invocations"}
+
+
+def is_chat_task(task: Optional[str]) -> bool:
+    """`rolo-claude models`/`/models`/`init`'s own "chat-capable" count all
+    key off this ONE check now (task == "llm/v1/chat") instead of two
+    different, disagreeing heuristics (`family != "non_chat"` in the table,
+    `bool(api_types)` in init's summary -- verified live: a workspace whose
+    cache predates hotfix 4's own `api_types` migration showed "chat yes"
+    from the first and "0 chat-capable" from the second for the SAME rows)."""
+    return task == CHAT_TASK
+
+
+def default_path_type(name: str, state_dir=None) -> str:
+    """The raw route-candidate key (`anthropic`/`mlflow`/`cursor`/
+    `invocations`) a request for `name` would try FIRST, right now, with NO
+    network call -- everything `resolve_databricks_dialect`/
+    `chat_route_candidates` need is already local (the discovery cache +
+    config.json), so this is always cheap and offline-safe. `"none"` for a
+    known non-chat endpoint (nothing to route); `"?"` only if `name` isn't
+    even in the cache AND the today's-static-order fallback somehow still
+    produced nothing (defensive -- `chat_route_candidates` always returns at
+    least the invocations candidate otherwise)."""
+    _clean, dialect = resolve_databricks_dialect(name, state_dir)
+    if dialect == "anthropic-passthrough":
+        return "anthropic"
+    cands = chat_route_candidates(name, state_dir)
+    if not cands:
+        return "none"
+    return cands[0].key
+
+
 def dbu_price_usd() -> Optional[float]:
     """`databricks.dbu_price_usd` (`~/.rolo-claude/config.json`) -- a
     workspace's own $/DBU conversion rate; unset -> cost is shown in raw

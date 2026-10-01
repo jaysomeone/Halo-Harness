@@ -247,7 +247,32 @@ class PermissionCard(Static, can_focus=True):
         self.app.borrow_input(self, placeholder="Tell Claude what to do differently (Enter to skip)")
 
     def resolve_with_message(self, message: str) -> None:
+        # 1.0.1 fixpass finding 4: a `done` guard -- without it, a STALE
+        # `_borrowing_card` pointing at an already-finished card (the old
+        # mode-switch-while-awaiting-feedback bug; see app.py's own
+        # `_reevaluate_pending_permission_for_mode`) made the user's NEXT
+        # Enter re-finish it, firing `on_decide` a second time (a "no
+        # longer waiting" toast) and calling `clear_pending_card()` again
+        # -- clearing whatever DIFFERENT card was actually pending by then.
+        if self.done:
+            return
         self._finish({"action": "deny", "scope": None, "rule": None, "message": message})
+
+    def resolve_externally(self, action: str) -> None:
+        """1.0.1 fixpass finding 4: the request has ALREADY been resolved
+        directly against the permission engine (`Controller.
+        reevaluate_pending_permission`, a mode change re-deciding a parked
+        ask) -- this only updates the card's own display to match, WITHOUT
+        calling `on_decide` again (that would re-resolve the SAME waiter a
+        second time; see `Session.reevaluate_pending_permission`'s own
+        docstring for why that's unsafe). `action` is "allow" or "deny"."""
+        if self.done:
+            return
+        self.done = True
+        self.awaiting_feedback = False
+        outcome = "allowed" if action == "allow" else "denied"
+        self.summary = f"{self.summary} -- {outcome} (mode changed)"
+        self._refresh()
 
 
 def _option_texts(options) -> list:
@@ -410,6 +435,89 @@ class PlanCard(Static, can_focus=True):
 
     def resolve_with_message(self, message: str) -> None:
         self._finish({"approved": False, "mode_after": None, "feedback": message})
+
+
+class EffortCard(Static, can_focus=True):
+    """1.0.1 hotfix 20.2: the inline `/effort` selector, Claude-Code-style
+    -- one horizontal row of THIS route's own accepted effort levels
+    (`levels`, ordered -- e.g. `["low","medium","high","max"]` for an
+    Anthropic route, never the harness-wide vocabulary including `xhigh`
+    that route would reject outright per hotfix 19), the cursor bracketed,
+    a one-line description underneath. Left/Right/h/l move, Enter applies
+    (`on_select(level)`), Esc cancels (`on_select(None)`, the caller keeps
+    the old value) -- either way `on_select` fires exactly once. A model
+    with no adjustable effort at all (`levels` empty) shows one line saying
+    so and closes on any key (`on_select(None)`)."""
+
+    BINDINGS = [
+        Binding("left,h", "move_left", "Previous", show=False),
+        Binding("right,l", "move_right", "Next", show=False),
+        Binding("enter", "apply", "Apply", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    _DESCRIPTIONS = {
+        "low": "fastest, least thorough reasoning",
+        "medium": "balanced speed and thoroughness",
+        "high": "slower, more thorough (recommended for hard problems)",
+        "xhigh": "extra thorough, higher latency",
+        "max": "maximum reasoning effort this model supports",
+    }
+
+    def __init__(self, *, levels: list, current: "str | None", model_id: str, on_select: Callable,
+                 descriptions: "Optional[dict]" = None) -> None:
+        super().__init__("", markup=False, classes="effort-card")
+        self.levels = list(levels)
+        self.model_id = model_id
+        self._descriptions = descriptions or self._DESCRIPTIONS
+        self.index = self.levels.index(current) if current in self.levels else 0
+        self._on_select = on_select
+        self.done = False
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if not self.levels:
+            self.update(f"Effort level: {self.model_id} has no adjustable effort level. (any key closes)")
+            return
+        row = "   ".join(f"[{lvl}]" if i == self.index else lvl for i, lvl in enumerate(self.levels))
+        desc = self._descriptions.get(self.levels[self.index], "")
+        lines = [f"Effort level for {self.model_id}:", f"  {row}"]
+        if desc:
+            lines.append(f"  {desc}")
+        if not self.done:
+            lines.append("  ←/→ (or h/l) move   Enter apply   Esc cancel")
+        self.update("\n".join(lines))
+
+    def _finish(self, level) -> None:
+        self.done = True
+        self._refresh()
+        self._on_select(level)
+
+    def action_move_left(self) -> None:
+        if not self.done and self.levels:
+            self.index = (self.index - 1) % len(self.levels)
+            self._refresh()
+
+    def action_move_right(self) -> None:
+        if not self.done and self.levels:
+            self.index = (self.index + 1) % len(self.levels)
+            self._refresh()
+
+    def action_apply(self) -> None:
+        if self.done:
+            return
+        self._finish(self.levels[self.index] if self.levels else None)
+
+    def action_cancel(self) -> None:
+        if not self.done:
+            self._finish(None)
+
+    def on_key(self, event) -> None:
+        # A model with no adjustable effort at all: "closes on any key",
+        # not only the two bound keys above.
+        if not self.levels and not self.done:
+            self._finish(None)
+            event.stop()
 
 
 class RewindCard(Static, can_focus=True):

@@ -293,6 +293,70 @@ def is_reasoning_replay_bug(message: str) -> bool:
     return bool(_REASONING_REPLAY_BUG_RE.search(message or ""))
 
 
+def is_effort_with_tools_rejected_message(message: str) -> bool:
+    """1.0.1 hotfix 22: the gpt-6 family's own live wording -- "Function
+    tools with reasoning_effort are not supported for gpt-6-sol in
+    /v1/chat/completions... set reasoning_effort to 'none'" -- a MORE
+    SPECIFIC case than `is_effort_rejected_message` below: dropping the
+    field entirely (that function's own retry) is not enough here, since
+    the endpoint's own default is not `none` either; the retry for THIS
+    message sets `reasoning_effort: "none"` explicitly instead. Checked
+    before the more general function, which still owns every other effort-
+    rejection wording (e.g. `output_config.effort`)."""
+    text = message or ""
+    # 1.0.1 fixpass finding 10: operator precedence made the old check
+    # (`"reasoning_effort" in text and ("function tool" in text.lower() or
+    # "param" in text and "reasoning_effort" in text)`) collapse to
+    # `"reasoning_effort" in text and ("function tool" in text.lower() or
+    # "param" in text)` -- ANY 400 naming both "reasoning_effort" and the
+    # bare substring "param" (OpenAI's own generic "Unsupported parameter:
+    # 'reasoning_effort'..." or "Invalid value for parameter reasoning_
+    # effort: 'max'") matched this gpt-6-only check. The retry it triggers
+    # (`reasoning_effort: "none"`) is invalid on those routes too, and
+    # shared the SAME one-shot flag as the general strip-the-field retry
+    # that would have worked -- so the turn failed outright instead of ever
+    # trying that. Narrowed to require the real gpt-6 wording ("function
+    # tool") -- never a bare "param".
+    return "reasoning_effort" in text and "function tool" in text.lower()
+
+
+def is_effort_rejected_message(message: str) -> bool:
+    """1.0.1 hotfix 19.3: the upstream 400'd specifically on the effort
+    field this harness put in the body -- verified wording on a Databricks
+    Claude foundation endpoint: `output_config.effort: Input should be
+    'low', 'medium', 'high' or 'max'` (an `xhigh` that reached the wire
+    despite `clamp_effort`, e.g. a route whose accepted set this harness
+    hasn't modeled correctly yet) -- a chat-dialect route's own
+    `reasoning_effort` field can 400 the same way on a value it doesn't
+    recognize. `agent/loop.py::_step`'s wire_error branch retries ONCE with
+    every effort-related field stripped from the body when this matches,
+    rather than failing the turn outright over a field that's genuinely
+    optional on every dialect (omitting it always falls back to the
+    provider's own default).
+
+    1.0.1 fixpass finding 13: two more shapes, neither naming the field the
+    same way the wordings above do -- (a) OpenRouter routes the value
+    through a nested `reasoning.effort` path (a dot, not the flat
+    `reasoning_effort` this check already looks for -- "reasoning.effort"
+    is NOT a substring of "reasoning_effort" or vice versa); (b) a plain
+    OpenAI-style enum-validation 400 for a value this harness's own
+    `effort_values_supported` let through anyway (finding 13's own root
+    cause: a chat-dialect profile used to accept "max", which is an
+    Anthropic-only level) commonly reads "Invalid value: 'max'. Supported
+    values are: 'low', 'medium', and 'high'." with no field name in the
+    message text at all (`upstream_error_text` only ever keeps "message",
+    dropping the response's separate "param" field) -- matched here by
+    "invalid value" together with one of the two out-of-range values this
+    harness itself could have sent ('max'/'xhigh'), never a bare "invalid
+    value" alone (which would misfire on an unrelated 400, e.g. a bad
+    max_tokens or model name)."""
+    text = message or ""
+    low = text.lower()
+    if "output_config.effort" in text or "reasoning_effort" in text or "reasoning.effort" in low:
+        return True
+    return "invalid value" in low and ("'max'" in low or "'xhigh'" in low)
+
+
 def classify_error_category(status: int, message: str) -> str:
     """Map a wire failure to the dsh-style taxonomy (scope D). Pure
     classification -- never raises, never mutates the message; distinct

@@ -115,6 +115,19 @@ class BridgeApp(App):
         Binding("ctrl+p", "command_palette", "Palette", show=False),
         Binding("ctrl+e", "open_editor", "Editor", show=False),
         Binding("ctrl+x", "chord_prefix", "Chord", priority=True, show=False),
+        # 1.0.1 hotfix 16: re-anchor the transcript to follow new output.
+        # `ctrl+end` is `priority=True` since nothing else binds it (always
+        # reliable, whatever has focus); plain `end` is deliberately NOT
+        # priority -- the focused PromptInput (a TextArea) already binds
+        # bare `end` to cursor-to-end-of-line, which must keep winning
+        # while the prompt has focus (the overwhelmingly common case) --
+        # this one only ever fires when something else (a card) is
+        # focused instead and doesn't claim the key itself.
+        Binding("ctrl+end", "scroll_transcript_end", "Follow output", priority=True, show=False),
+        Binding("end", "scroll_transcript_end", "Follow output", show=False),
+        # 1.0.1 hotfix 15.6: a hard exit that can't get stuck, unlike
+        # double-Ctrl+C's own quit path (see action_force_quit's docstring).
+        Binding("ctrl+q", "force_quit", "Force quit", priority=True, show=False),
     ]
 
     def __init__(self, controller, *, registry=None, facade=None, tool_registry=None,
@@ -162,6 +175,13 @@ class BridgeApp(App):
         self._borrowing_card = None
         self._ctrl_c_deadline: Optional[float] = None
         self._quitting = False
+        # 1.0.1 fixpass finding 5: Ctrl+Q's OWN flag, never shared with
+        # `_quitting` -- see action_force_quit's own docstring.
+        self._force_quitting = False
+        # 1.0.1 fixpass finding 15: whether the transcript was following
+        # (anchored to the bottom) right before the CURRENTLY pending card
+        # took focus -- see set_pending_card/clear_pending_card.
+        self._card_interrupted_following = False
         self._history_cache: "list[str]" = []
         self._history_index = 0
         self._history_draft = ""
@@ -214,6 +234,12 @@ class BridgeApp(App):
         # is now the same worker path, so startup never blocks on a
         # slow/hung `git` either.
         self._refresh_cwd_branch()
+        # 1.0.1 fixpass finding 1: primes `cc_models.cached_claude_auth_
+        # status()` off the UI thread, once, at startup -- `Controller.
+        # list_models()` (every `/model` open) only ever READS that cache
+        # now, never spawns the `claude auth status` subprocess itself.
+        self.run_worker(self._prime_auth_status_worker, thread=True, name="auth-status-startup",
+                         group="auth-status-startup")
         starter = getattr(self.controller, "start", None)
         if callable(starter):
             starter()
@@ -258,11 +284,35 @@ class BridgeApp(App):
         # review finding 5/"UX" must-do: `git` runs on a worker thread --
         # this used to block the UI thread (every 5s, plus once at
         # startup) for however long the subprocess took.
-        self.run_worker(self._git_branch_worker, thread=True, exclusive=True, name="git-branch")
+        # 1.0.1 hotfix 15.4: `group=` -- without it, `exclusive=True`'s
+        # default group is "default", the SAME group EVERY OTHER worker in
+        # this app (models-refresh, dbx-auto-refresh, list-sessions,
+        # improve-draft, autoname-title, ...) also lands in with no group=
+        # of their own -- Textual's WorkerManager cancels every other
+        # worker in an exclusive worker's group each time it (re)starts, so
+        # this 5s-interval timer was silently killing unrelated in-flight
+        # work network-wide, every 5 seconds, for the whole app's life.
+        # Confirmed against the installed Textual (8.2.8): `exclusive`
+        # scopes to `group`, and cancellation runs on every NEW start of an
+        # exclusive worker, not just the first.
+        self.run_worker(self._git_branch_worker, thread=True, exclusive=True, name="git-branch", group="git-branch")
 
     def _git_branch_worker(self) -> None:
         branch = self._git_branch()
         self.call_from_thread(self.status_bar.set_cwd_branch, str(self.cwd), branch)
+
+    def _prime_auth_status_worker(self) -> None:
+        """1.0.1 fixpass finding 1: the ONE place that ever spawns `claude
+        auth status` for the model picker's own cc: group -- everywhere
+        else (`Controller.list_models()`) only ever reads the cache this
+        populates. Best-effort: a failure here just leaves the cache empty
+        (list_models()'s own try/except already treats that the same as
+        "not logged in" -- no cc: group shown, never a crash)."""
+        try:
+            from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
+            refresh_cached_claude_auth_status()
+        except Exception:
+            pass
 
     def _tick_spinner(self) -> None:
         self.status_bar.tick_spinner()
@@ -318,7 +368,11 @@ class BridgeApp(App):
         cfg = self._statusline_config()
         if cfg is None:
             return
-        self.run_worker(lambda: self._statusline_worker(cfg), thread=True, exclusive=True, name="statusline")
+        # 1.0.1 hotfix 15.4: own group= -- see _refresh_cwd_branch's own
+        # comment just above for why (the identical bug, the same 5s timer
+        # shape, sharing the default group with it too before this fix).
+        self.run_worker(lambda: self._statusline_worker(cfg), thread=True, exclusive=True, name="statusline",
+                         group="statusline")
 
     def _statusline_worker(self, cfg: dict) -> None:
         from rolo_claude import __version__
@@ -342,24 +396,84 @@ class BridgeApp(App):
 
     async def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.text
+        stripped = text.strip()
+        # 1.0.1 fixpass finding 14: a `/`-prefixed submission is ALWAYS an
+        # attempted slash command, whatever card/borrow state is active --
+        # typing "/permissions" (or Tab-completing a `/` command then Enter,
+        # which re-enters here the identical way, see _accept_completion)
+        # while a PermissionCard was still pending used to DENY the tool
+        # with "The user said: /permissions" instead of ever running the
+        # command. Checked BEFORE either branch below -- the card/borrow
+        # itself is left completely untouched (neither answered nor
+        # cancelled) so the user can still answer it afterward; only PLAIN
+        # text (no leading "/") ever answers a card.
+        is_slash_command = stripped.startswith("/") and "\n" not in stripped
+
         if self._borrowing_card is not None:
+            if is_slash_command:
+                self.prompt_input.clear_submitted()
+                from rolo_claude.tui.slash import handle_slash
+                name, _, args = stripped[1:].partition(" ")
+                await handle_slash(self, name, args)
+                return
             card = self._borrowing_card
             self._borrowing_card = None
             self.prompt_input.clear_submitted()
             self.prompt_input.placeholder = DEFAULT_PLACEHOLDER
-            card.resolve_with_message(text)
+            # finding 14: expanded, never the raw "[Pasted text #n ...]"
+            # placeholder -- same reasoning as review finding 4's own fix
+            # for the ordinary prompt path just below.
+            card.resolve_with_message(_expand_pasted(text, event.pasted))
             return
         if not text.strip():
             return
         self.prompt_input.clear_submitted()
         self.completion_popup.hide()
-        if self.pending_card is not None:
-            # scope 0(c)/review finding 7: a card pending does NOT answer
-            # it (only the card's own keys/borrowed-input do that) -- text
-            # typed here is a steer on the turn that's still running
-            # underneath the card, same as any other mid-turn input.
+        from rolo_claude.tui.widgets.cards import EffortCard
+        if self.pending_card is not None and not isinstance(self.pending_card, EffortCard):
+            # finding 14: the /effort selector does not intercept typed
+            # text at all -- it falls straight through to the ordinary
+            # path below (slash handling, history, a fresh prompt), same
+            # as if nothing were pending; every OTHER card still gates
+            # here exactly as before.
+            if is_slash_command:
+                from rolo_claude.tui.slash import handle_slash
+                name, _, args = stripped[1:].partition(" ")
+                await handle_slash(self, name, args)
+                return
+            if hasattr(self.pending_card, "resolve_with_message"):
+                # 1.0.1 hotfix 17.1: free text typed while a permission/
+                # plan/question card is pending ANSWERS the card -- exactly
+                # Claude Code's own behavior (a permission card denies with
+                # the text as feedback, a plan card keeps planning with it,
+                # a question card takes it as "Other") -- never a silent
+                # steer the user has no way to see resolve anything. This
+                # was the real mechanism behind the reported "freeze": the
+                # auto-scroll bug (item 16) left the card below the fold,
+                # so the user kept typing into what looked like the normal
+                # prompt, each one only ever logged as "↳ steering…" while
+                # the pending ask underneath was never actually answered.
+                card = self.pending_card
+                card.resolve_with_message(_expand_pasted(text, event.pasted))
+                return
+            # A card with no free-text answer (a rewind confirmation) --
+            # unchanged: a steer on the turn running underneath it, same as
+            # before this fix.
             self.controller.submit(_expand_pasted(text, event.pasted), pasted=event.pasted or None)
             return
+        # 1.0.1 hotfix 16: a fresh prompt always re-anchors the transcript
+        # to follow the coming reply, even if the user had scrolled up to
+        # re-read something earlier -- scroll_end() moving scroll_y back to
+        # the true bottom is exactly what Textual's own anchor-reacquire
+        # watcher treats as "the user returned to the bottom" (the same
+        # mechanism a manual scroll-back-down already triggers), so this
+        # needs no anchor-specific API at all. The counter reset is
+        # UNCONDITIONAL (see action_scroll_transcript_end's own docstring
+        # for why `mark_seen()`'s is_at_bottom()-gated version isn't used
+        # here either).
+        self.transcript.scroll_end(animate=False)
+        self.transcript.new_since_scroll = 0
+        self.status_bar.set_new_count(0)
         await self._submit_prompt(text, event.pasted)
 
     async def _submit_prompt(self, text: str, pasted: dict) -> None:
@@ -597,7 +711,37 @@ class BridgeApp(App):
         twice/back-to-off, Tab advanced the question strip twice, ...). It
         only ever CONSUMES a key here (the live continuation of a pending
         chord) -- everything else is left for that automatic base
-        dispatch to handle on its own, completely untouched."""
+        dispatch to handle on its own, completely untouched.
+
+        1.0.1 hotfix 15.3: self-heal -- run BEFORE the chord check, on
+        EVERY key, never stopping/consuming the event itself: if the
+        active screen has somehow ended up with no focused widget at all
+        (this hotfix's own item 16/17 fixes address the known causes --
+        the auto-scroll bug leaving a card's own focus in a bad state, a
+        pending permission card getting lost -- but this is a net for
+        whatever's not yet found), refocus before letting the key proceed,
+        so a key never silently goes nowhere."""
+        # 1.0.1 fixpass finding 3: healing to the pending card must be
+        # scoped to the BASE screen (`self.screen is self.screen_stack[0]`)
+        # -- a modal with nothing focusable of its own (PagerScreen, opened
+        # with `o` from a ToolCard or from the pending ImproveCard) used to
+        # get healed to the CARD instead, which lives on the screen
+        # UNDERNEATH it: the binding chain for the next key then built from
+        # that hidden card, not the modal actually on top, so the pager's
+        # own `q`/`o` bindings vanished and the hidden card's keys fired
+        # instead (`q` ended `/improve`, `a` applied a candidate unseen,
+        # `1`/`y` approved a permission unseen). A modal screen now always
+        # goes through `focus_next()` instead -- a no-op when it has
+        # nothing focusable (exactly PagerScreen's case), the correct
+        # first-focusable pick when it does (an ordinary picker dialog).
+        if self.screen.focused is None:
+            if self.screen is self.screen_stack[0]:
+                if self.pending_card is not None and self.pending_card.is_mounted:
+                    self.set_focus(self.pending_card)
+                else:
+                    self.set_focus(self.prompt_input)
+            else:
+                self.screen.focus_next()
         if self._pending_chord is not None:
             prefix = self._pending_chord
             full = f"{prefix} {tui_keys.normalize_keystroke(event.key)}"
@@ -629,8 +773,8 @@ class BridgeApp(App):
     async def on_prompt_input_completion_query(self, event: PromptInput.CompletionQuery) -> None:
         from rolo_claude.tui.completion import complete_at_path, complete_slash
 
-        if event.kind == "accept":
-            await self._accept_completion()
+        if event.kind in ("accept", "accept_submit"):
+            await self._accept_completion(submit=(event.kind == "accept_submit"))
             return
         self._completion_kind = event.kind
         if event.kind == "slash":
@@ -638,20 +782,46 @@ class BridgeApp(App):
         else:
             self._completion_items = complete_at_path(event.token, str(self.cwd))
         self.completion_popup.show(self._completion_items)
+        # 1.0.1 hotfix 1: keeps PromptInput's own `_completion_open` flag in
+        # sync with the popup's real (post-`show()`) display state -- `show`
+        # itself sets `display = bool(items)`, so an empty result (nothing
+        # matches the filter) correctly falls back to ordinary Up/Down.
+        self.prompt_input.set_completion_open(bool(self._completion_items))
 
     def on_prompt_input_completion_dismissed(self, _event: PromptInput.CompletionDismissed) -> None:
         self.completion_popup.hide()
         self._completion_items = []
+        self.prompt_input.set_completion_open(False)
 
-    async def _accept_completion(self) -> None:
+    def on_prompt_input_completion_nav(self, event: PromptInput.CompletionNav) -> None:
+        """1.0.1 hotfix 1: Up/Down while the popup is open move its
+        highlighted entry (wrapping around both ends) instead of moving the
+        prompt cursor or walking history."""
+        if not self.completion_popup.display or not self._completion_items:
+            return
+        count = len(self._completion_items)
+        current = self.completion_popup.highlighted or 0
+        self.completion_popup.highlighted = (current + event.direction) % count
+
+    async def _accept_completion(self, submit: bool = False) -> None:
+        """Insert the highlighted completion. `submit=True` (Enter, not
+        Tab) additionally runs a `/` command right away -- Claude Code
+        parity, see PromptInput._on_key -- through the ordinary submit path
+        so pending cards, history and the input reset all behave exactly as
+        for a typed-out command. `@` path completions are never submitted."""
         if not self.completion_popup.display or not self._completion_items:
             return
         idx = self.completion_popup.highlighted or 0
         chosen = self._completion_items[idx % len(self._completion_items)]
-        text = (chosen[1:] if self._completion_kind == "slash" else chosen).rstrip("/")
-        self.prompt_input.replace_current_token(self._completion_kind, text + " ")
+        kind = self._completion_kind
+        text = (chosen[1:] if kind == "slash" else chosen).rstrip("/")
+        self.prompt_input.replace_current_token(kind, text + " ")
         self.completion_popup.hide()
         self._completion_items = []
+        self.prompt_input.set_completion_open(False)
+        if submit and kind == "slash":
+            await self.on_prompt_input_submitted(
+                PromptInput.Submitted(self.prompt_input.text, self.prompt_input.pasted))
 
     # ---- history Up/Down (D-TUI: "history Up/Down with prefix filter") ---
 
@@ -685,9 +855,28 @@ class BridgeApp(App):
         # defaults to the card so digit/Esc keys keep working normally;
         # a user who wants to type instead just clicks/tabs to the prompt.
         self.pending_card = card
+        # 1.0.1 fixpass finding 15: recorded BEFORE set_focus -- a card too
+        # tall to already be fully visible makes Textual's own
+        # Screen.set_focus(scroll_visible=True) scroll it into view (a
+        # plain `not self.can_view_entire(widget)` check upstream, so a
+        # card that DOES already fit never triggers this at all, unchanged
+        # from Textual's own default), which releases the transcript's
+        # bottom anchor same as any ordinary scroll -- clear_pending_card
+        # below uses this to re-anchor, but only when it's actually needed.
+        self._card_interrupted_following = self.transcript.is_following()
         self.set_focus(card)
         self.bell()
         self._maybe_notify_input_needed()
+        # 1.0.1 hotfix 17.3: a PermissionCard specifically (not the plan/
+        # question cards, nor the /effort selector) gets its own status bar
+        # tag and prompt placeholder the MOMENT it mounts, not only once the
+        # user presses "4" and borrows the input for deny feedback -- a
+        # pending permission ask must be impossible to miss even if the
+        # auto-scroll fix (item 16) still somehow leaves it out of view.
+        from rolo_claude.tui.widgets.cards import PermissionCard
+        if isinstance(card, PermissionCard):
+            self.prompt_input.placeholder = "1-4 answers the request above, or type why not"
+            self.status_bar.set_pending_permission(True)
 
     def _maybe_notify_input_needed(self) -> None:
         """U5 scope D: "terminal bell + notify-send/toast when input is
@@ -714,7 +903,21 @@ class BridgeApp(App):
     def clear_pending_card(self) -> None:
         self.pending_card = None
         self.prompt_input.placeholder = DEFAULT_PLACEHOLDER
+        self.status_bar.set_pending_permission(False)
         self.set_focus(self.prompt_input)
+        # 1.0.1 fixpass finding 15: re-anchor if the transcript was
+        # following right before this card interrupted it -- scroll_end()
+        # is exactly what Textual's own anchor-reacquire watcher treats as
+        # "back at the bottom" (the same mechanism on_prompt_input_
+        # submitted/action_scroll_transcript_end already use), so output
+        # after this point (e.g. right after "approve plan") follows again
+        # instead of staying wherever a tall card's own scroll-to-center
+        # left it. Conditional, never unconditional -- a user who had
+        # scrolled UP to re-read something before the card ever appeared
+        # must not be yanked back down just for answering it.
+        if self._card_interrupted_following:
+            self.transcript.scroll_end(animate=False)
+        self._card_interrupted_following = False
 
     def borrow_input(self, card, *, placeholder: str) -> None:
         """A card needs one line of free text (deny feedback, "Other...",
@@ -764,6 +967,63 @@ class BridgeApp(App):
         new_mode = next_mode(self.status_bar.mode)
         self.controller.set_permission_mode(new_mode)
         self.status_bar.set_mode(new_mode)
+        self._reevaluate_pending_permission_for_mode(new_mode)
+
+    def _reevaluate_pending_permission_for_mode(self, mode: str) -> None:
+        """1.0.1 hotfix 17.2: switching mode (Shift+Tab here, `/permissions`
+        in slash.py) WHILE a permission card is still pending must resolve
+        THAT card under the new mode right away -- `Controller.
+        set_permission_mode` only changes `permission_engine.mode` for
+        FUTURE asks (a plain, thread-safe attribute write); an ask already
+        blocked in `Session._await_permission_decision` is untouched by it,
+        so without this it sits there forever even once `auto`/
+        `bypassPermissions` would have allowed it. Root-cause match for
+        rolo's report: he pressed Shift+Tab to `auto`, the status bar
+        updated, but the turn never continued -- the pending ask underneath
+        was never re-decided.
+
+        1.0.1 fixpass finding 4: the old unconditional `action_choose_once()`
+        blindly ALLOWED regardless of an explicit `ask:` rule (which still
+        asks in every mode but `bypassPermissions` -- `auto` does not skip
+        it); `Controller.reevaluate_pending_permission` re-runs the real
+        `permission_engine.decide()` for the parked request instead, and
+        only resolves on an actual "allow"/"deny" verdict -- a card still
+        "ask" under the new mode is left alone, exactly like any other
+        unresolved ask. A card the user is already answering (pressed "4",
+        typing why not) is skipped entirely -- a mode change must never
+        turn that in-progress rejection into "allow once" out from under
+        them (the old bug: `_borrowing_card` was then left pointing at the
+        now-finished card, so the NEXT Enter answered nothing and cleared
+        whatever card was ACTUALLY pending by then instead)."""
+        from rolo_claude.tui.widgets.cards import PermissionCard
+        card = self.pending_card
+        if not isinstance(card, PermissionCard) or card.done or card.awaiting_feedback:
+            return
+        action = self.controller.reevaluate_pending_permission(card.request_id)
+        if action not in ("allow", "deny"):
+            return  # still "ask" under the new mode (or nothing pending any more) -- leave it up
+        card.resolve_externally(action)
+        if self._borrowing_card is card:
+            self._borrowing_card = None
+        self.clear_pending_card()
+
+    def action_scroll_transcript_end(self) -> None:
+        """1.0.1 hotfix 16: End/Ctrl+End (bound above) and a click on the
+        status bar's own "N new" indicator (StatusBar.on_click) all land
+        here -- jump to the bottom and re-anchor (scroll_end() moving
+        scroll_y to the true max is exactly what Textual's own anchor-
+        reacquire watcher treats as "back at the bottom", so nothing
+        anchor-specific needs calling here beyond the plain scroll).
+
+        The counter reset is UNCONDITIONAL (never `mark_seen()`'s own
+        `is_at_bottom()`-gated version) -- `scroll_y` from a just-issued
+        `scroll_end()` is not guaranteed to have already propagated through
+        Textual's reactive watcher by the time this next line runs, so
+        gating on it here read stale state and left "N new" showing a
+        nonzero count right after the very key that's supposed to clear it."""
+        self.transcript.scroll_end(animate=False)
+        self.transcript.new_since_scroll = 0
+        self.status_bar.set_new_count(0)
 
     async def action_clear_view(self) -> None:
         # review finding 7: `clear_view` used to remove a pending card
@@ -795,6 +1055,15 @@ class BridgeApp(App):
         # up to CHORD_TIMEOUT_S.
         if self._pending_chord is not None:
             self._clear_pending_chord()
+        # 1.0.1 hotfix 1: Esc closes an open `/`/`@` completion popup first
+        # (never also interrupts a running turn in the same keypress) --
+        # checked before the borrowing-card/pending-card/interrupt branches
+        # below, which is what Esc did unconditionally before this fix.
+        if self.completion_popup.display:
+            self.completion_popup.hide()
+            self._completion_items = []
+            self.prompt_input.set_completion_open(False)
+            return
         if self._borrowing_card is not None:
             card = self._borrowing_card
             self._borrowing_card = None
@@ -862,6 +1131,56 @@ class BridgeApp(App):
         code = quit_fn() if callable(quit_fn) else 0
         message = self._build_scrollback_message()
         self.call_from_thread(self.exit, return_code=code, message=message)
+
+    def action_force_quit(self) -> None:
+        """1.0.1 hotfix 15.6: Ctrl+Q exits even when the session/transcript
+        is wedged (a hang neither Ctrl+C nor a card can recover from) --
+        `_quit_worker` above calls `controller.quit()` and waits on it with
+        NO bound, so a genuinely hung controller (a stuck permission wait, a
+        subprocess that won't die) means even double-Ctrl+C's own quit path
+        never actually exits. This gives `controller.quit()` a 2s head
+        start on its own daemon thread, then calls `self.exit()` regardless
+        of whether it finished.
+
+        1.0.1 fixpass finding 5: gated on its OWN `_force_quitting` flag,
+        never `_quitting` -- the exact case this exists for is double-
+        Ctrl+C/`/quit` having ALREADY set `_quitting` and started the
+        unbounded `_quit_worker` (now hung); the old shared flag made THIS
+        action a no-op in exactly that moment, the one time it's needed."""
+        if self._force_quitting:
+            return
+        self._force_quitting = True
+        self.run_worker(self._force_quit_worker, thread=True, exclusive=True, name="force-quit",
+                         group="force-quit")
+
+    def _force_quit_worker(self) -> None:
+        import threading
+        result = {"code": 0}
+
+        def _run_quit() -> None:
+            quit_fn = getattr(self.controller, "quit", None)
+            try:
+                result["code"] = quit_fn() if callable(quit_fn) else 0
+            except Exception:
+                import logging
+                logging.getLogger("bridge").exception("controller.quit() raised during force-quit")
+
+        t = threading.Thread(target=_run_quit, daemon=True)
+        t.start()
+        t.join(timeout=2.0)  # deliberately never longer -- see action_force_quit's docstring
+        message = self._build_scrollback_message()
+        self.call_from_thread(self.exit, return_code=result["code"], message=message)
+        # 1.0.1 fixpass finding 5: self.exit() alone is not a guarantee --
+        # it goes through Textual's own asyncio.run(...), whose
+        # shutdown_default_executor() joins every thread=True worker still
+        # alive (a hung _quit_worker from an EARLIER double-Ctrl+C/`/quit`,
+        # or an unrelated `/models refresh`/`/improve` worker mid-request)
+        # before the process can actually exit -- forever on 3.10/3.11, up
+        # to 300s on 3.12+. A daemon timer force-kills the whole process
+        # 2.5s later regardless of what Textual/asyncio is still waiting on.
+        timer = threading.Timer(2.5, os._exit, args=(result["code"],))
+        timer.daemon = True
+        timer.start()
 
     def _build_scrollback_message(self) -> Optional[str]:
         if self.tui_setting is not None and self.tui_setting != "fullscreen":

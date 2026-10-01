@@ -118,3 +118,30 @@ sessions were removed:
 - **P3 (declined for now, revisit with data)**: settings proposals (L2) and a prompt-optimisation
   pilot (L4) only once an evaluation suite of a few hundred tasks exists; code self-edits stay a
   no-go, as the research report argued.
+
+## 1.0.1 follow-ups
+
+Two minor findings from the H14c fixpass review (`review-findings-101.md`, findings 16 and 18)
+were deliberately left out of that pass -- noted here for the next round, code untouched:
+
+- **Finding 16 -- one pending-card slot, up to 4 concurrent sub-agent asks.** `tui/app.py`'s
+  `self.pending_card` is a single slot; when a second foreground sub-agent raises a
+  `permission_request` while the first is still showing, the second mount overwrites
+  `pending_card` outright. Answering the now-displayed (second) card then calls
+  `clear_pending_card()`, which clears the "permission needed" status-bar tag and prompt
+  placeholder even though the FIRST sub-agent's own ask is still blocked and unanswered
+  underneath -- the UI goes quiet while a child is still waiting. Needs a small queue/stack of
+  pending cards (keyed by `request_id`, same as `_permission_waiters` already is) instead of one
+  bare attribute, with the status tag/placeholder staying up as long as any entry remains.
+- **Finding 18 -- the 8s connect cap is not one connect attempt.** `providers/http.py:146-180`
+  (`_bounded_connect`/`open_upstream`): the 8s wall-clock cap covers DNS + TCP + proxy CONNECT +
+  TLS combined (tighter than the pre-1.0.1 10s-per-step budget, which this hotfix's own
+  changelog entry undersells), and `_run_phase1_attempts`/`_run_phase1_anthropic` retry the whole
+  connect once on failure -- so a genuinely unresolvable host takes roughly 16s end to end, not
+  8s. Separately, `_bounded_connect`'s own docstring already flags that a connect thread abandoned
+  on timeout is never killed (Python cannot cancel a blocking C call); if that abandoned attempt
+  later succeeds in the background, the socket it opened is never closed, a real (small, per
+  unresolvable-host retry) leak. Worth either halving the phase-1 retry for connect-phase failures
+  specifically (the retry has no chance of helping a DNS/routing problem the way it can help a
+  dropped keep-alive) or just documenting the real 16s figure; the socket leak needs a weak
+  reference or an explicit close callback threaded through `_bounded_connect`'s abandoned thread.

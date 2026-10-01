@@ -28,6 +28,9 @@ async def handle_slash(app, name: str, args: str) -> None:
         "keybindings": _handle_keybindings,
         # H10 Part B: human-gated /improve.
         "improve": _handle_improve,
+        # 1.0.1 hotfix 20: bare /effort opens the inline selector card;
+        # /effort <level> still goes through the plain text path below.
+        "effort": _handle_effort,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -38,8 +41,6 @@ async def handle_slash(app, name: str, args: str) -> None:
 
 
 async def _handle_model(app, args: str) -> None:
-    from rolo_claude.tui.dialogs.model_picker import ModelPicker
-
     args = args.strip()
     if args:
         _apply_model(app, args)
@@ -48,8 +49,29 @@ async def _handle_model(app, args: str) -> None:
     # (databricks.catalog_max_age_hours, default 24), off the UI thread --
     # the picker opens immediately with whatever's cached; a background
     # refresh just notifies once it lands, it never blocks /model itself.
-    app.run_worker(lambda: _dbx_auto_refresh_worker(app), thread=True, name="dbx-auto-refresh")
+    # 1.0.1 hotfix 15.4: own group= (every slash.py worker below gets one
+    # named after its job) so no future exclusive=True worker anywhere in
+    # the app can cancel one of these mid-flight by sharing the default
+    # group -- see tui/app.py's git-branch/statusline fix for the bug this
+    # class of omission caused.
+    app.run_worker(lambda: _dbx_auto_refresh_worker(app), thread=True, name="dbx-auto-refresh",
+                    group="dbx-auto-refresh")
+    # 1.0.1 fixpass finding 1: `list_models()` -- builds ctx/price columns
+    # per Databricks endpoint and (pre-fix) span the `claude auth status`
+    # subprocess -- runs off the UI thread now, the exact same `thread=True`
+    # worker + `call_from_thread` pattern `_handle_resume`'s own file-I/O-
+    # bound `list_sessions()` already uses just below. Measured 2-5s TUI
+    # freezes on a real Kali work box before this fix.
+    app.run_worker(lambda: _list_models_worker(app), thread=True, name="list-models", group="list-models")
+
+
+def _list_models_worker(app) -> None:
     models = app.controller.list_models()
+    app.call_from_thread(_open_model_picker, app, models)
+
+
+def _open_model_picker(app, models) -> None:
+    from rolo_claude.tui.dialogs.model_picker import ModelPicker
     app.push_screen(ModelPicker(models, current=app.status_bar.model), lambda ref: _apply_model(app, ref))
 
 
@@ -80,16 +102,69 @@ def _apply_model(app, ref) -> None:
 
 
 # ============================================================================
+# 1.0.1 hotfix 20: /effort -- bare opens the inline selector card (Claude
+# Code style), /effort <level> is left to the plain-text path (commands.
+# builtins._cmd_effort, via Controller.run_slash) exactly like every other
+# argument-taking builtin.
+# ============================================================================
+
+async def _handle_effort(app, args: str) -> None:
+    session = getattr(app.controller, "session", None)
+    args = args.strip()
+    if args:
+        result = app.controller.run_slash("effort", args)
+        if result:
+            await app.transcript.add_note(result, kind="command")
+        # commands.builtins._cmd_effort mutates the live session's own
+        # `effort` directly (no event round-trip) -- push the status bar's
+        # tag right away rather than waiting for the next turn's status
+        # event to happen to carry it.
+        app.status_bar.set_effort(getattr(session, "effort", None))
+        return
+
+    from rolo_claude.tui.widgets.cards import EffortCard
+
+    profile = getattr(session, "provider_profile", None) if session is not None else None
+    if session is None or profile is None or not profile.reasoning_effort_supported:
+        levels, current = [], None
+        model_id = app.status_bar.model
+    else:
+        levels = list(profile.effort_values_supported or ())
+        current = getattr(session, "effort", None)
+        model_id = session.model_ref.raw
+
+    def on_select(level) -> None:
+        app.clear_pending_card()
+        if level is None:
+            return  # Esc -- keep the old value, nothing to announce
+        result = app.controller.run_slash("effort", level)
+        app.notify(result or f"Effort level set to '{level}'", title="/effort")
+        app.status_bar.set_effort(getattr(session, "effort", None))
+
+    card = EffortCard(levels=levels, current=current, model_id=model_id, on_select=on_select)
+    await app.transcript.mount_widget(card)
+    app.set_pending_card(card)
+
+
+# ============================================================================
 # H14 scope J: /models refresh (alias /dbx), off the UI thread.
 # ============================================================================
 
 async def _handle_models(app, args: str) -> None:
-    do_refresh = (args or "").strip().lower() in ("refresh", "--refresh", "")
-    app.run_worker(lambda: _models_refresh_worker(app, do_refresh), thread=True, name="models-refresh")
+    # 1.0.1 hotfix 3: bare `/models` (empty args) used to ALSO set
+    # do_refresh=True here (`"" in (..., "")` is trivially true) -- the
+    # exact opposite of the documented/intended contract ("bare reports the
+    # cache without touching the network"), and the reason a DNS/VPN-down
+    # box saw `/models` itself hang. Only an explicit "refresh"/"--refresh"
+    # (or the /dbx alias below) ever goes to the network now.
+    do_refresh = (args or "").strip().lower() in ("refresh", "--refresh")
+    app.run_worker(lambda: _models_refresh_worker(app, do_refresh), thread=True, name="models-refresh",
+                    group="models-refresh")
 
 
 async def _handle_dbx(app, _args: str) -> None:
-    app.run_worker(lambda: _models_refresh_worker(app, True), thread=True, name="models-refresh")
+    app.run_worker(lambda: _models_refresh_worker(app, True), thread=True, name="models-refresh",
+                    group="models-refresh")
 
 
 def _models_refresh_worker(app, do_refresh: bool) -> None:
@@ -97,25 +172,51 @@ def _models_refresh_worker(app, do_refresh: bool) -> None:
     from rolo_claude.providers.databricks import (
         dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, refresh_dbx_catalog,
     )
+    from rolo_claude.catalog_cli import format_dbx_table_lines, _dbx_rows
     state_dir = getattr(app.controller, "state_dir", None)
     dbx = resolve_databricks()
     if dbx is None:
         app.call_from_thread(app.notify, "Databricks is not configured.", severity="warning", title="/models")
         return
+    root = derive_workspace_root(dbx.host)
+
+    def _table_text(endpoints: dict) -> str:
+        if not endpoints:
+            return ""
+        rows = _dbx_rows(endpoints, root, state_dir, urls=False)
+        return "\n".join(format_dbx_table_lines(rows)) + "\n\n"
+
     if not do_refresh:
+        # 1.0.1 hotfix 3: renders the CACHED table immediately -- no
+        # network call at all (family/path/chat, same columns/wording
+        # `rolo-claude models` prints) -- plus the catalog age.
         endpoints = load_dbx_endpoints_json(state_dir)
         age = dbx_endpoints_age_seconds(state_dir)
         age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
-        app.call_from_thread(app.transcript.add_note,
-                              f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}).",
-                              kind="command")
+        text = (f"{_table_text(endpoints)}{len(endpoints)} Databricks endpoint(s) cached "
+                f"(last refreshed {age_str}).")
+        app.call_from_thread(app.transcript.add_note, text, kind="command")
         return
-    ok, diff, note = refresh_dbx_catalog(state_dir, derive_workspace_root(dbx.host), dbx.token)
+    ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
     endpoints = load_dbx_endpoints_json(state_dir)
     if not ok:
+        # 1.0.1 hotfix 3: a failed refresh still shows the (unchanged)
+        # cached table, plus exactly ONE line naming the error -- never
+        # just a bare toast with no context for what's still usable.
+        text = f"{_table_text(endpoints)}Databricks refresh failed: {note}"
+        app.call_from_thread(app.transcript.add_note, text, kind="command")
         app.call_from_thread(app.notify, f"Databricks refresh failed: {note}", severity="warning", title="/models")
         return
-    text = f"Refreshed {len(endpoints)} Databricks endpoint(s). {format_dbx_diff(diff)}"
+    # 1.0.1 hotfix 12: also refreshes models.dev (best-effort -- a failure
+    # here never fails the whole /models refresh, it just leaves the
+    # existing ctx/price data, if any, in place) so a Databricks row's own
+    # context/output/price columns (model_display.databricks_row_fields)
+    # pick up anything models.dev added since the last refresh.
+    from rolo_claude.providers.models_dev import refresh_models_dev_cache
+    md_ok, md_note = refresh_models_dev_cache(state_dir)
+    text = f"{_table_text(endpoints)}Refreshed {len(endpoints)} Databricks endpoint(s). {format_dbx_diff(diff)}"
+    if not md_ok:
+        text += f"\n(models.dev refresh failed: {md_note} -- the vendored/cached price data stays in use.)"
     app.call_from_thread(app.transcript.add_note, text, kind="command")
     app.call_from_thread(app.notify, format_dbx_diff(diff), title="/models refresh")
 
@@ -154,7 +255,8 @@ async def _handle_resume(app, args: str) -> None:
     # `<text>` (the SAME fuzzy filter -- title/first prompt/cwd/model -- the
     # picker's own live Input box uses) instead of ignoring it.
     query = (args or "").strip()
-    app.run_worker(lambda: _resume_list_worker(app, query), thread=True, name="list-sessions")
+    app.run_worker(lambda: _resume_list_worker(app, query), thread=True, name="list-sessions",
+                    group="list-sessions")
 
 
 def _resume_list_worker(app, query: str) -> None:
@@ -257,7 +359,7 @@ async def _handle_stats(app, args: str) -> None:
     if "--models" in tokens or "--tools" in tokens:
         show_models, show_tools = "--models" in tokens, "--tools" in tokens
         app.run_worker(lambda: _stats_models_worker(app, show_models, show_tools), thread=True,
-                        name="stats-models")
+                        name="stats-models", group="stats-models")
         return
     stats_fn = getattr(app.controller, "session_stats", None)
     if not callable(stats_fn):
@@ -312,7 +414,7 @@ async def _handle_rewind(app, args: str) -> None:
             return
         await _show_rewind_confirmation(app, step, "rewind")
         return
-    app.run_worker(lambda: _rewind_picker_worker(app), thread=True, name="rewind-list")
+    app.run_worker(lambda: _rewind_picker_worker(app), thread=True, name="rewind-list", group="rewind-list")
 
 
 def _rewind_picker_worker(app) -> None:
@@ -339,7 +441,8 @@ async def _show_rewind_confirmation(app, step: dict, verb: str) -> None:
     def on_decide(confirmed: bool) -> None:
         app.clear_pending_card()
         if confirmed:
-            app.run_worker(lambda: _apply_rewind_worker(app, step["id"], verb), thread=True, name="rewind-apply")
+            app.run_worker(lambda: _apply_rewind_worker(app, step["id"], verb), thread=True, name="rewind-apply",
+                            group="rewind-apply")
 
     card = RewindCard(step=step, verb=verb, on_decide=on_decide)
     await app.transcript.mount_widget(card)
@@ -412,7 +515,8 @@ async def _handle_improve(app, _args: str) -> None:
         app.notify("/improve is disabled (improve.enabled=false).", title="/improve")
         return
     app.notify("Scanning recent sessions and drafting candidates…", title="/improve")
-    app.run_worker(lambda: _improve_draft_worker(app, session, cfg), thread=True, name="improve-draft")
+    app.run_worker(lambda: _improve_draft_worker(app, session, cfg), thread=True, name="improve-draft",
+                    group="improve-draft")
 
 
 def _improve_draft_worker(app, session, cfg) -> None:
@@ -487,7 +591,8 @@ async def _show_next_improve_card(app) -> None:
         app.clear_pending_card()
         state["index"] += 1
         if action == "apply":
-            app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")
+            app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply",
+                            group="improve-apply")
         elif action == "edit":
             _edit_candidate_then_apply(app, session, candidate)
         elif action == "dismiss":
@@ -532,7 +637,8 @@ def _edit_candidate_then_apply(app, session, candidate) -> None:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
         app.notify("No $VISUAL/$EDITOR set -- applying as drafted.", severity="warning", title="/improve")
-        app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")
+        app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply",
+                        group="improve-apply")
         return
     fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="rolo-claude-improve-")
     tmp_path = Path(tmp_path_str)
@@ -551,4 +657,5 @@ def _edit_candidate_then_apply(app, session, candidate) -> None:
             tmp_path.unlink()
         except OSError:
             pass
-    app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply")
+    app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply",
+                    group="improve-apply")

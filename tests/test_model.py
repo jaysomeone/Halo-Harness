@@ -262,13 +262,20 @@ def test_cost_meter_fallback_requires_both_token_counts(ctx: Ctx):
 
 
 @test
-def test_cost_meter_databricks_still_na_even_with_pricing(ctx: Ctx):
-    """Databricks stays "n/a" even when the meter has pricing configured --
-    per the brief, Databricks cost is always unknown, never estimated."""
+def test_cost_meter_databricks_computes_fallback_when_pricing_known(ctx: Ctx):
+    """1.0.1 hotfix 14 supersedes the old "Databricks is always n/a, even
+    with pricing" rule: once hotfix 12 gave `resolve_model_profile` a real
+    per-endpoint Databricks price (from a models.dev `databricks` catalog
+    entry), a Databricks CostMeter constructed with that price must compute
+    a real running cost, same fallback formula as every other provider --
+    `add_usage` no longer branches on `provider` at all. See
+    test_cost_meter_databricks_is_na above for the (still valid, unchanged)
+    no-pricing-configured case."""
     meter = CostMeter(price_in=0.000001, price_out=0.000002)
     cost = meter.add_usage("databricks", {"input_tokens": 1000, "output_tokens": 500})
-    ctx.check("Databricks never computes a fallback cost", cost is None)
-    ctx.check("has_cost_data flips False", meter.has_cost_data is False)
+    expected = 1000 * 0.000001 + 500 * 0.000002
+    ctx.check(f"Databricks now computes a fallback cost, got {cost!r}", cost == expected)
+    ctx.check("has_cost_data stays True (a real figure)", meter.has_cost_data is True)
 
 
 @test
@@ -501,6 +508,24 @@ def test_h9b_f22_refreshed_cache_wins_over_the_committed_vendored_fallback(ctx: 
     profile = resolve_model_profile(ref, state_dir, routes={})
     ctx.check(f"the refreshed cache's value wins over the committed vendored file, got {profile.context_tokens}",
               profile.context_tokens == 424242)
+
+
+
+@test
+def test_parse_bare_vendor_model_needs_both_halves(ctx: Ctx):
+    """1.0.1: `/effort`, `vendor/` and `a b/c` are typos, not OpenRouter
+    models -- refused locally (the generic no-route error) instead of being
+    accepted as `vendor/model` and failing upstream with a 400 later."""
+    for bad in ("/effort", "vendor/", "a b/c"):
+        refused = False
+        try:
+            parse_model_ref(bad)
+        except InvalidModelError:
+            refused = True
+        ctx.check(f"{bad!r} is refused as a model ref", refused)
+    ref = parse_model_ref("qwen/qwen3-coder")
+    ctx.check("a real vendor/model still parses as OpenRouter",
+              ref.provider == "openrouter" and ref.model == "qwen/qwen3-coder")
 
 
 if __name__ == "__main__":

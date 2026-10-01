@@ -264,9 +264,18 @@ async def _apply_event_inner(app, event) -> None:
             app.status_bar.apply_status(data)
     elif kind == "message_end":
         if agent_id is None:
-            app.status_bar.apply_status({"phase": "idle", "cost_usd": data.get("cost_usd")})
-            if data.get("context_pct") is not None:
-                app.status_bar.apply_context_pct(data["context_pct"])
+            # 1.0.1 hotfix 14: pass the raw context_tokens/context_limit and
+            # token totals straight through (message_end already carries
+            # them -- see events.message_end) instead of only cost_usd plus
+            # the derived context_pct -- apply_status needs the raw numbers
+            # itself now, to show "ctx 12k/1M 1%" or fall back to "in 12k
+            # out 3k" when cost_usd is None.
+            app.status_bar.apply_status({
+                "phase": "idle", "cost_usd": data.get("cost_usd"),
+                "context_tokens": data.get("context_tokens"), "context_limit": data.get("context_limit"),
+                "total_input_tokens": data.get("total_input_tokens"),
+                "total_output_tokens": data.get("total_output_tokens"),
+            })
         await app.transcript.finish_open_streams(agent_id=agent_id)
     elif kind == "error":
         message = data.get("message", "")

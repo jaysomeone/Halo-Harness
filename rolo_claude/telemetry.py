@@ -274,7 +274,7 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                 usage = node.get("usage") or {}
                 b["calls"] += 1
                 b["tokens_in"] += int(usage.get("input_tokens") or 0)
-                b["tokens_out"] += int(usage.get("output_tokens") or 0)
+                b["tokens_out"] += int(usage.get("output_tokens") or 0) + int(usage.get("reasoning_tokens") or 0)
                 b["tokens_cached"] += (int(usage.get("cache_read_input_tokens") or 0)
                                         + int(usage.get("cache_creation_input_tokens") or 0))
                 cost = node.get("cost_usd")
@@ -300,7 +300,7 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                     rb = s.roles.setdefault(role, _new_role_counters())
                     rb["calls"] += 1
                     rb["tokens_in"] += int(usage.get("input_tokens") or 0)
-                    rb["tokens_out"] += int(usage.get("output_tokens") or 0)
+                    rb["tokens_out"] += int(usage.get("output_tokens") or 0) + int(usage.get("reasoning_tokens") or 0)
                     rb["tokens_cached"] += (int(usage.get("cache_read_input_tokens") or 0)
                                              + int(usage.get("cache_creation_input_tokens") or 0))
                     if isinstance(cost, (int, float)):

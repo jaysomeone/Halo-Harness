@@ -14,12 +14,13 @@ capabilities.
 
 from __future__ import annotations
 
+import difflib
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.providers.databricks import load_models_json
+from rolo_claude.providers.databricks import load_dbx_endpoints_json, load_models_json
 from rolo_claude.providers.routing import InvalidModelError
 
 _ANT_PREFIX = "ant:"
@@ -72,6 +73,26 @@ def resolve_default_model_raw(routes: Optional[dict] = None, env: Optional[dict]
         if anthropic_model:
             return f"{_DBX_PREFIX}{anthropic_model}"
     return DEFAULT_MODEL_REF
+
+
+def _cached_dbx_endpoint_names() -> "list[str]":
+    """Every endpoint name in `~/.rolo-claude/dbx-endpoints.json` (best
+    effort -- `[]` on any error, e.g. no cache yet, so a name-resolution
+    check is always a cheap, offline, never-raising local read, exactly
+    like `_cache_entry`/`refuse_if_non_chat` already are). 1.0.1 hotfix 6:
+    backs BOTH `_is_cached_databricks_endpoint` (a bare name that matches a
+    real cached endpoint resolves as Databricks even without the
+    `databricks-`/`system.ai.` shape -- a workspace-custom endpoint name
+    never has to) and the near-miss suggestion on an unresolvable ref."""
+    try:
+        from rolo_claude.config.paths import bridge_home
+        return list(load_dbx_endpoints_json(bridge_home()))
+    except Exception:
+        return []
+
+
+def _is_cached_databricks_endpoint(name: str) -> bool:
+    return name in _cached_dbx_endpoint_names()
 
 
 def _databricks_model_ref(raw: str, bare: str) -> "ModelRef":
@@ -146,8 +167,22 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         bare = resolved[len(_ANT_PREFIX):]
         return ModelRef(raw=raw, provider="anthropic", model=resolve_ant_alias(bare), dialect="anthropic-passthrough")
     if "/" in resolved and resolved.count("/") == 1:
-        return ModelRef(raw=raw, provider="openrouter", model=resolved, dialect="openai-chat")
-    if resolved.startswith("databricks-") or resolved.startswith("system.ai."):
+        # The bare `vendor/model` OpenRouter form needs BOTH halves: a
+        # leading or trailing slash (`/effort`, `vendor/`) or embedded
+        # whitespace is a typo, not a model, and used to be accepted here
+        # only to fail at request time with an upstream 400.
+        vendor, _, model_part = resolved.partition("/")
+        if vendor and model_part and not any(ch.isspace() for ch in resolved):
+            return ModelRef(raw=raw, provider="openrouter", model=resolved, dialect="openai-chat")
+    # 1.0.1 hotfix 6: a bare name resolves to the Databricks route whenever
+    # it EITHER matches the generic `databricks-*`/`system.ai.*` shape OR is
+    # literally a name in the cached endpoint catalog -- a workspace-custom
+    # endpoint (no platform-standard prefix at all, e.g. "my-team-kimi")
+    # used to fall straight through to the generic "no route" error below
+    # even though `rolo-claude models` already knows it's real and chat-
+    # capable.
+    if (resolved.startswith("databricks-") or resolved.startswith("system.ai.")
+            or _is_cached_databricks_endpoint(resolved)):
         return _databricks_model_ref(raw, resolved)
 
     from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES, default_bare_alias_route
@@ -172,9 +207,20 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
             f"use cc:{resolved}) or ANTHROPIC_API_KEY set (then use ant:{resolved}) -- neither is available"
         )
 
+    # 1.0.1 hotfix 6: "unknown names give a one-line error listing the three
+    # closest cached endpoints" -- a bare name that looked like it might be
+    # a Databricks endpoint (didn't resolve as anything else, and isn't a
+    # vendor/model slash-form meant for OpenRouter) gets a near-miss
+    # suggestion sourced from whatever's actually cached, same difflib
+    # cutoff `catalog_cli.near_miss_slug` uses elsewhere. Silent (no hint
+    # appended) when nothing is cached yet or nothing is close -- never
+    # changes the base message's own wording/exit behavior.
+    cached_names = _cached_dbx_endpoint_names()
+    near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
+    hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
         f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, vendor/model, "
-        f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)"
+        f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 
 
@@ -396,7 +442,14 @@ class CostMeter:
     the resulting `usage.cost` field; until then every OpenRouter turn is
     also `None`/unknown, exactly like Databricks, so `has_cost_data` starts
     True and simply never flips to a real number in H0 -- that's expected,
-    not a bug). Databricks never reports cost at all ("n/a").
+    not a bug). Databricks never reports a raw `usage.cost` field on the
+    wire at all, on any gateway dialect -- but since 1.0.1 hotfix 14, when
+    this session's `ModelProfile` resolved a real per-token price for the
+    Databricks endpoint (a models.dev `databricks` catalog entry; see
+    `resolve_model_profile`'s three-tier chain above), `_fallback_cost`
+    below computes a real running cost for it exactly like any other
+    provider. Still "n/a" whenever no such price was resolved, which
+    remains the common case for most endpoints.
 
     H5 scope D: when a response has no `usage.cost` (an OpenRouter reply
     that genuinely omitted it, or ANY other host/route -- `ant:`, Databricks
@@ -426,6 +479,23 @@ class CostMeter:
         self.price_out = price_out
         self.price_cache_read = price_cache_read
         self.price_cache_write = price_cache_write
+        # 1.0.1 hotfix 14: cumulative raw token totals, tracked regardless of
+        # whether a dollar cost could be computed at all -- the status bar's
+        # own "in 12k out 3k" fallback (`model_display.format_status_cost`)
+        # when NO price is known for this session's model (the status bar
+        # must show something other than a bare "$?").
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+
+    def _accumulate_tokens(self, usage) -> None:
+        if not isinstance(usage, dict):
+            return
+        input_tokens = usage.get("input_tokens")
+        if isinstance(input_tokens, int):
+            self.total_input_tokens += input_tokens
+        output_tokens = usage.get("output_tokens")
+        if isinstance(output_tokens, int):
+            self.total_output_tokens += output_tokens
 
     def _fallback_cost(self, usage) -> Optional[float]:
         if not isinstance(usage, dict) or self.price_in is None or self.price_out is None:
@@ -454,11 +524,23 @@ class CostMeter:
 
     def add_usage(self, provider: str, usage: Optional[dict]) -> Optional[float]:
         """Record one turn's usage; returns this turn's cost in USD, or None
-        if unknown/unavailable for this provider or response."""
+        if unknown/unavailable for this provider or response.
+
+        1.0.1 hotfix 14: Databricks used to hard-exit here before ever
+        reaching `_fallback_cost` -- "gateway-type-blind, never reports
+        cost" -- which made sense back when no per-endpoint Databricks
+        price existed anywhere in the harness. Hotfix 12 gave
+        `resolve_model_profile` a real per-endpoint price for a Databricks
+        model whose name matches a models.dev `databricks` entry (used to
+        build THIS meter's own `price_in`/`price_out` at session start), so
+        Databricks now flows through the exact same
+        `usage["cost"] -> _fallback_cost -> has_cost_data=False` pipeline as
+        every other provider: still "n/a" whenever no price was resolved
+        (the common case, unchanged), but a real running total whenever one
+        was. `provider` is kept as a parameter (some callers still log it)
+        but no longer branches here."""
         self.turns += 1
-        if provider == "databricks":
-            self.has_cost_data = False
-            return None
+        self._accumulate_tokens(usage)
         cost = usage.get("cost") if isinstance(usage, dict) else None
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             cost = float(cost)

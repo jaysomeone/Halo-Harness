@@ -154,22 +154,59 @@ class Transcript(VerticalScroll):
 
     # ---- generic mount/fold plumbing --------------------------------------
 
+    def on_mount(self) -> None:
+        # 1.0.1 hotfix 16: `anchor()` (Textual 8.2.8, widget.py:800) keeps
+        # this container pinned to the bottom as ANY child grows -- a
+        # streamed AssistantText's own `append_delta`/`MarkdownStream.write`
+        # reflow included, not just a fresh mount -- until the user scrolls
+        # up, which Textual's own `scroll_y` watcher auto-releases (any
+        # ordinary scroll call defaults `release_anchor=True`); scrolling
+        # back to the bottom auto-reacquires it, both with zero code here.
+        # Before this fix, `_mount_tracked` below only ever called a
+        # one-shot `scroll_end()` at MOUNT time -- a long streamed answer
+        # mounts once, one line tall, then grows for hundreds of deltas
+        # with nothing re-scrolling after, so the view stayed wherever the
+        # user's own prompt was (rolo's report: "auto scroll does not
+        # work... I have to scroll down to see the new answers").
+        self.anchor()
+
     def is_at_bottom(self) -> bool:
         return self.scroll_y >= self.max_scroll_y - 1
 
+    def is_following(self) -> bool:
+        """Whether new content is currently expected to auto-scroll into
+        view. There is no public accessor for Textual's own internal
+        "anchor released" flag, so this is inferred instead: with `anchor()`
+        engaged (see `on_mount`), the compositor recomputes `scroll_y` to
+        the live bottom on every layout pass for as long as we're actually
+        following -- so "at the bottom right now" and "currently following"
+        are the same fact, without reaching into a private attribute."""
+        return self.is_at_bottom()
+
     async def _mount_tracked(self, widget, *, before=None) -> None:
-        was_at_bottom = self.is_at_bottom()
+        was_following = self.is_following()
         if before is not None:
             await self.mount(widget, before=before)
         else:
             await self.mount(widget)
         self._history.append(widget)
-        if was_at_bottom:
-            self.scroll_end(animate=False)
+        if was_following:
+            # No explicit scroll_end() needed any more -- the anchor from
+            # on_mount keeps this pinned to the new bottom automatically.
             self.new_since_scroll = 0
         else:
             self.new_since_scroll += 1
         await self._fold_if_needed()
+
+    def note_growth(self) -> None:
+        """1.0.1 hotfix 16: called after content grows on an ALREADY-
+        mounted block (a streamed delta, a tool card expanding) -- the
+        anchor keeps the view scrolled correctly either way, but the "N
+        new" counter (`_mount_tracked`'s own bump) previously only ever
+        fired on a block's FIRST mount, never on the dozens/hundreds of
+        deltas that follow while the user has scrolled away."""
+        if not self.is_following():
+            self.new_since_scroll += 1
 
     def mark_seen(self) -> None:
         if self.is_at_bottom():
@@ -263,6 +300,8 @@ class Transcript(VerticalScroll):
             await self._mount_tracked(widget)
             widget.start_stream()
             self._blocks[key] = widget
+        else:
+            self.note_growth()
         await widget.append_delta(text)
 
     async def append_thinking(self, turn: int, index: int, text: str, agent_id: "str | None" = None) -> None:
@@ -284,6 +323,8 @@ class Transcript(VerticalScroll):
             # exactly the old behaviour.
             await self._mount_tracked(widget, before=self._first_text_widget_for(agent_id, turn, seq))
             self._blocks[key] = widget
+        else:
+            self.note_growth()
         widget.append(text)
 
     def _first_text_widget_for(self, agent_id: "str | None", turn: int, seq: int):

@@ -293,6 +293,22 @@ def _ascn_500(handler, body):
     _send_json(handler, 500, {"type": "error", "error": {"type": "api_error", "message": "internal error"}})
 
 
+def _ascn_effort_reject_unless_stripped(handler, body):
+    """1.0.1 hotfix 19.3: reproduces the live "Input should be 'low',
+    'medium', 'high' or 'max'" 400 for ANY body still carrying `thinking`/
+    `output_config` -- stateless (driven by the RETRIED body's own shape,
+    not a counter) so this doubles as the ground truth for "the retry
+    actually stripped the field": `agent/loop.py::_step`'s effort-retry
+    branch removes both keys before rebuilding the request, so a body that
+    reaches here a second time with neither key succeeds."""
+    if "output_config" in body or "thinking" in body:
+        _send_json(handler, 400, {"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "output_config.effort: Input should be 'low', 'medium', 'high' or 'max'"}})
+        return
+    _finish_anthropic(handler, body)
+
+
 ANTHROPIC_SCENARIOS = {
     "thinking-and-signature": _ascn_thinking_and_signature,
     "tool-use": _ascn_tool_use,
@@ -304,6 +320,7 @@ ANTHROPIC_SCENARIOS = {
     "overflow-400": _ascn_overflow_400,
     "rate-limit-429": _ascn_rate_limit_429,
     "500-error": _ascn_500,
+    "effort-reject-unless-stripped": _ascn_effort_reject_unless_stripped,
     "ok": _finish_anthropic,
 }
 
@@ -493,9 +510,69 @@ def _scn_reasoning_replay_loop(handler, body):
     ])
 
 
+def _scn_reasoning_effort_tools_reject_unless_none(handler, body):
+    """1.0.1 hotfix 22: reproduces the live gpt-6 400 ("Function tools with
+    reasoning_effort are not supported for gpt-6-sol in /v1/chat/
+    completions... set reasoning_effort to 'none'") for ANY body that
+    carries `tools` AND a `reasoning_effort` other than `"none"` --
+    stateless (driven by the RETRIED body's own shape), so this doubles as
+    the ground truth that the retry actually set it to none rather than
+    merely dropping it."""
+    if body.get("tools") and body.get("reasoning_effort") not in (None, "none"):
+        _send_json(handler, 400, {"error": {
+            "message": "Function tools with reasoning_effort are not supported for gpt-6-sol in "
+                       "/v1/chat/completions. To use function tools, use /v1/responses or set "
+                       "reasoning_effort to 'none'.",
+            "type": "invalid_request_error", "param": "reasoning_effort", "code": None}})
+        return
+    _scn_ok(handler, body)
+
+
+def _scn_reasoning_effort_param_reject_unless_stripped(handler, body):
+    """1.0.1 fixpass finding 10: a wire 400 naming BOTH "reasoning_effort"
+    and the bare substring "param" (finding 10's own worked example --
+    "Invalid value for parameter reasoning_effort: 'max'") WITHOUT the
+    gpt-6-specific "function tool" wording. The pre-fix, too-broad
+    `is_effort_with_tools_rejected_message` wrongly matched this and
+    retried with `reasoning_effort: "none"` -- still rejected here (ANY
+    non-None value 400s, "none" included) -- and shared its one-shot flag
+    with the general strip retry that would have worked, failing the turn
+    outright. Stateless, driven by the retried body's own shape: only a
+    body with the key gone entirely (stripped, not merely set to "none")
+    succeeds."""
+    if body.get("reasoning_effort") is not None:
+        _send_json(handler, 400, {"error": {
+            "message": "Invalid value for parameter reasoning_effort: 'max'",
+            "type": "invalid_request_error", "param": "reasoning_effort", "code": None}})
+        return
+    _scn_ok(handler, body)
+
+
+def _scn_reasoning_effort_tools_reject_even_with_none(handler, body):
+    """1.0.1 fixpass finding 10: the gpt-6 "function tool" wording is
+    matched correctly (is_effort_with_tools_rejected_message's own narrow
+    check) and its "none" retry fires as designed -- but THIS route
+    rejects `reasoning_effort` in ANY form, "none" included, so that retry
+    fails too. Proves the general strip retry can still fire as an
+    INDEPENDENT second fallback (its own one-shot flag, separate from the
+    none-retry's) rather than being permanently blocked because the
+    none-retry already used up a single shared flag."""
+    if body.get("tools") and body.get("reasoning_effort") is not None:
+        _send_json(handler, 400, {"error": {
+            "message": "Function tools with reasoning_effort are not supported for gpt-6-sol in "
+                       "/v1/chat/completions. To use function tools, use /v1/responses or set "
+                       "reasoning_effort to 'none'.",
+            "type": "invalid_request_error", "param": "reasoning_effort", "code": None}})
+        return
+    _scn_ok(handler, body)
+
+
 SCENARIOS = {
     "reasoning-content-shape": _scn_reasoning_content_shape,
     "reasoning-blocks-shape": _scn_reasoning_blocks_shape,
+    "reasoning-effort-tools-reject-unless-none": _scn_reasoning_effort_tools_reject_unless_none,
+    "reasoning-effort-param-reject-unless-stripped": _scn_reasoning_effort_param_reject_unless_stripped,
+    "reasoning-effort-tools-reject-even-with-none": _scn_reasoning_effort_tools_reject_even_with_none,
     "rate-limit-429": _scn_rate_limit_429,
     "echo": _scn_echo,
     "tool-call-ok": _scn_tool_call_ok,

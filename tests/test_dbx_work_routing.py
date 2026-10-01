@@ -397,6 +397,108 @@ def test_at_anthropic_suffix_and_gateway_config_override_glm(ctx: Ctx):
                 os.environ[k] = v
 
 
+# ---------------------------------------------------------------------------
+# 1.0.1 hotfix 6: bare endpoint names resolve like dbx:<name> whenever they
+# match a cached endpoint OR the databricks-*/system.ai.* shapes; an
+# unresolvable bare name gets a near-miss suggestion from the cache.
+# ---------------------------------------------------------------------------
+
+@test
+def test_bare_databricks_prefixed_name_resolves_exactly_like_dbx_prefixed(ctx: Ctx):
+    from rolo_claude.model import parse_model_ref
+    state_dir = _state_dir_with_catalog()
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        bare = parse_model_ref("databricks-kimi-k3")
+        prefixed = parse_model_ref("dbx:databricks-kimi-k3")
+        ctx.check(f"same provider, got {bare.provider!r}", bare.provider == "databricks")
+        ctx.check(f"same bare model name, got {bare.model!r} vs {prefixed.model!r}", bare.model == prefixed.model)
+        ctx.check(f"same dialect, got {bare.dialect!r} vs {prefixed.dialect!r}", bare.dialect == prefixed.dialect)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
+@test
+def test_bare_name_with_no_databricks_prefix_resolves_when_it_matches_a_cached_endpoint(ctx: Ctx):
+    """A workspace-custom endpoint name (no `databricks-`/`system.ai.`
+    shape at all) still resolves as Databricks once it's actually cached --
+    only a name that matches NEITHER the cache NOR the generic shape is
+    unresolvable."""
+    from rolo_claude.model import parse_model_ref
+    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-custom-"))
+    write_dbx_endpoints_json(state_dir, _CATALOG + [
+        {"name": "my-team-kimi", "foundation_model_name": "kimi-k3", "task": "llm/v1/chat",
+         "api_types": ["mlflow/v1/chat/completions"]},
+    ])
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        ref = parse_model_ref("my-team-kimi")
+        ctx.check(f"resolves as databricks, got provider={ref.provider!r}", ref.provider == "databricks")
+        ctx.check(f"keeps the exact cached name, got {ref.model!r}", ref.model == "my-team-kimi")
+        ctx.check(f"family-derived dialect (kimi -> openai-chat), got {ref.dialect!r}",
+                  ref.dialect == "openai-chat")
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
+@test
+def test_unresolvable_bare_name_suggests_the_three_closest_cached_endpoints(ctx: Ctx):
+    from rolo_claude.model import parse_model_ref
+    from rolo_claude.providers.routing import InvalidModelError
+    state_dir = _state_dir_with_catalog()
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        try:
+            # No "databricks-"/"system.ai." shape at all (that shape alone
+            # is ALWAYS accepted, cached or not -- "an unknown endpoint is
+            # never refused" is existing, deliberate behavior) -- this is a
+            # genuinely unrecognizable bare word, close enough to the
+            # cached "databricks-kimi-k3" for a near-miss suggestion.
+            parse_model_ref("kimi-k3")
+            ctx.check("must raise InvalidModelError for an unresolvable near-miss", False)
+        except InvalidModelError as e:
+            msg = str(e)
+            ctx.check(f"still a clean 'no route' error, got {msg!r}", "no route:" in msg)
+            ctx.check(f"suggests the near-miss cached endpoint, got {msg!r}", "databricks-kimi-k3" in msg)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
+@test
+def test_unresolvable_name_with_no_cache_gives_the_plain_message_no_hint_crash(ctx: Ctx):
+    """No dbx-endpoints.json at all (a fresh box) -- the near-miss lookup
+    must degrade to "no hint appended", never raise itself."""
+    from rolo_claude.model import parse_model_ref
+    from rolo_claude.providers.routing import InvalidModelError
+    state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-empty-"))
+    old = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        try:
+            parse_model_ref("totally-bogus-model-xyz")
+            ctx.check("must raise InvalidModelError", False)
+        except InvalidModelError as e:
+            ctx.check(f"plain 'no route' message, no crash, got {e}", "no route:" in str(e))
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)
