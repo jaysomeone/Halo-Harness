@@ -121,7 +121,7 @@ class _FakeHookRunner:
         return out
 
     def run(self, event: str, payload, matched: str = "", **kw):
-        from rolo_claude.hooks import HookOutcome
+        from halo_harness.hooks import HookOutcome
         self.calls.append({"event": event, "payload": payload, "matched": matched})
         return HookOutcome()
 
@@ -130,11 +130,11 @@ class _FakeHookRunner:
 
 
 def _new_session(fh, mock, *, model, hook_runner=None, max_turns=10, model_profile=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
@@ -167,7 +167,7 @@ def test_run_compaction_end_to_end_shrinks_the_log_and_logs_a_compacted_node(ctx
 
         # Build up some fake history directly on the log (cheaper/more
         # deterministic than driving several real turns through the mock).
-        from rolo_claude.agent.derive import derive_request
+        from halo_harness.agent.derive import derive_request
         filler = "x" * 400
         for i in range(60):
             session.log.append_user([{"type": "text", "text": f"question number {i}, please look at file_{i}.py -- {filler}"}])
@@ -234,7 +234,7 @@ def test_h5c_f16_compaction_strips_thinking_blocks_from_the_reappended_tail(ctx:
         events_seen = list(session._run_compaction(1, trigger="auto"))
         ctx.check("compaction completed", any(e.kind == "compaction" and e.data["phase"] == "done" for e in events_seen))
 
-        from rolo_claude.agent.derive import derive_request
+        from halo_harness.agent.derive import derive_request
         _system, messages, _tools = derive_request(session.log, tools=None)
         assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
         ctx.check(f"the final answer's assistant message survived in the tail, got {assistant_msgs}",
@@ -294,7 +294,7 @@ def test_run_compaction_fires_precompact_and_postcompact_hooks_with_correct_payl
 
 @test
 def test_compact_command_runs_a_real_compaction_through_the_facade(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_compact
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_compact
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -366,7 +366,7 @@ def test_h5c_f22_serialize_transcript_for_summary_bounds_total_size_keeping_the_
     overflowing a SECOND time with no further retry left. `max_chars`
     bounds the TOTAL string, keeping the HEAD (never splitting a message's
     own group of lines) and marking the cut."""
-    from rolo_claude.agent.loop import _SUMMARY_FALLBACK_TRUNCATED_MARKER, _serialize_transcript_for_summary
+    from halo_harness.agent.loop import _SUMMARY_FALLBACK_TRUNCATED_MARKER, _serialize_transcript_for_summary
 
     messages = []
     for i in range(500):
@@ -472,7 +472,7 @@ def test_h5b_f04_prune_is_wired_into_every_ordinary_step(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        from rolo_claude.agent.prune import OLD_TOOL_RESULT_CLEARED
+        from halo_harness.agent.prune import OLD_TOOL_RESULT_CLEARED
         session = _new_session(fh, mock, model="or:mock/model")
         session.log.append_user([{"type": "text", "text": "run the old command"}])
         session.log.append_assistant(
@@ -623,7 +623,7 @@ def test_h5b_f18_environment_and_deferred_tools_and_plan_reinjected_after_compac
         _fill_history(session)
         list(session._run_compaction(1, trigger="auto"))
 
-        from rolo_claude.agent.derive import derive_request
+        from halo_harness.agent.derive import derive_request
         _system, messages, _tools = derive_request(session.log, tools=None)
         all_text = " ".join(b.get("text", "") for m in messages for b in (m.get("content") or [])
                              if isinstance(b, dict) and b.get("type") == "text")
@@ -647,8 +647,8 @@ def test_h5c_f03_no_back_to_back_auto_compaction_driven_through_real_gate(ctx: C
     drives an ACTUAL compaction first, then proves the very next call is
     skipped (non-failure phase), and a fresh one is allowed again once the
     prompt genuinely drops below trigger."""
-    from rolo_claude.agent.compact import compaction_trigger_tokens
-    from rolo_claude.model import ModelProfile
+    from halo_harness.agent.compact import compaction_trigger_tokens
+    from halo_harness.model import ModelProfile
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -711,9 +711,9 @@ def test_h5c_f03_ineffective_compaction_backs_off_instead_of_retrying_every_othe
     compaction that runs but achieves nothing useful now backs off for
     `_COMPACTION_FAILURE_BACKOFF_STEPS` steps, the same as an outright
     failure, instead of retrying next-available-step forever."""
-    from rolo_claude.agent.compact import compaction_trigger_tokens
-    from rolo_claude.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
-    from rolo_claude.model import ModelProfile
+    from halo_harness.agent.compact import compaction_trigger_tokens
+    from halo_harness.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
+    from halo_harness.model import ModelProfile
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -781,9 +781,9 @@ def test_h5c_f22_failed_auto_compaction_backs_off_instead_of_retrying_every_step
     the very next steps must NOT immediately retry the whole (potentially
     slow) attempt again -- back off for `_COMPACTION_FAILURE_BACKOFF_STEPS`
     steps first."""
-    from rolo_claude.agent.compact import compaction_trigger_tokens
-    from rolo_claude.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
-    from rolo_claude.model import ModelProfile
+    from halo_harness.agent.compact import compaction_trigger_tokens
+    from halo_harness.agent.loop import _COMPACTION_FAILURE_BACKOFF_STEPS
+    from halo_harness.model import ModelProfile
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -845,7 +845,7 @@ def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
         session.log.append_user([{"type": "text", "text": "hello"}])
         session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
 
-        from rolo_claude.agent.compact import CompactionKnobs
+        from halo_harness.agent.compact import CompactionKnobs
         session._compaction_knobs = CompactionKnobs(compaction_model="or:mock/compaction-good-summary")
 
         list(session._run_compaction(1, trigger="manual"))

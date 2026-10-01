@@ -1,4 +1,4 @@
-"""rolo_claude.providers.http -- low-level upstream HTTP plumbing: proxy
+"""halo_harness.providers.http -- low-level upstream HTTP plumbing: proxy
 selection, connection opening (TLS/CA bundle/proxy tunnel), the OpenAI-chat
 and Databricks-chat POST calls, and the raw Databricks Claude passthrough
 relay (proxy_anthropic/count_tokens/reader thread). Moved out of bridge.py
@@ -28,8 +28,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from rolo_claude.providers.config import dump_debug, jdumps
-from rolo_claude.providers.errors import upstream_error_text
+from halo_harness.providers.config import dump_debug, jdumps
+from halo_harness.providers.errors import upstream_error_text
 
 log = logging.getLogger("bridge")
 
@@ -89,7 +89,7 @@ def default_tls_context() -> ssl.SSLContext:
     `basicConstraints` extension, which every major HTTP client (curl,
     browsers, Node, and Python itself before 3.13) accepts -- only
     `X509_STRICT` rejects it (`CERTIFICATE_VERIFY_FAILED: basic constraints
-    of CA cert not marked critical`), so a 3.13 rolo-claude was the ONLY
+    of CA cert not marked critical`), so a 3.13 halo was the ONLY
     thing failing at a work box every other tool on the same network
     already worked from (the Databricks endpoint itself is exempted from
     that same proxy's inspection, which is why a live pong there kept
@@ -97,16 +97,19 @@ def default_tls_context() -> ssl.SSLContext:
     certificate-chain or hostname verification -- both stay fully on.
 
     Then applies the SAME `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`/
-    `BRIDGE_CA_BUNDLE` custom-CA-bundle loading `open_upstream` already had
-    (first one present that loads successfully wins; a load failure is
-    logged and the next candidate is tried, never a hard failure -- the
-    context still has the system trust store either way)."""
+    `HALO_CA_BUNDLE` (legacy `BRIDGE_CA_BUNDLE`, still honoured) custom-CA-
+    bundle loading `open_upstream` already had (first one present that
+    loads successfully wins; a load failure is logged and the next
+    candidate is tried, never a hard failure -- the context still has the
+    system trust store either way)."""
+    from halo_harness.config.paths import env_compat
     ctx = ssl.create_default_context()
     strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
     if strict_flag:
         ctx.verify_flags &= ~strict_flag
-    for env_var in ("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "BRIDGE_CA_BUNDLE"):
-        ca_path = os.environ.get(env_var)
+    ca_candidates = [os.environ.get("NODE_EXTRA_CA_CERTS"), os.environ.get("REQUESTS_CA_BUNDLE"),
+                     env_compat("CA_BUNDLE")]
+    for ca_path in ca_candidates:
         if ca_path:
             try:
                 ctx.load_verify_locations(ca_path)
@@ -394,21 +397,21 @@ def call_databricks_chat(base_url: str, api_key: str, body: dict, extra_headers:
     candidate paths with 404 fallback and a max_tokens-limit clamp-retry.
     H14 scope D: candidates (path, whether the body needs "model", and
     WHICH string to put there) come from `providers.dbx_routing.
-    chat_route_candidates` -- the discovered `~/.rolo-claude/dbx-endpoints.
+    chat_route_candidates` -- the discovered `~/.halo/dbx-endpoints.
     json` cache's family/api_types RULES-table order when `model` (the
     endpoint/model name) is in it, else today's static order unchanged."""
     # Deferred import: breaks the http.py <-> databricks.py module cycle
     # (see this module's docstring). By the time this function is actually
     # CALLED, both modules have finished initializing, so a plain `from`
     # import here behaves exactly like a top-level one.
-    from rolo_claude.providers.databricks import (
+    from halo_harness.providers.databricks import (
         build_databricks_body,
         parse_databricks_max_tokens_limit,
         dbx_cache_get_route,
         dbx_cache_set_route,
         dbx_cache_set_max_tokens_limit,
     )
-    from rolo_claude.providers.dbx_routing import RouteCandidate, chat_route_candidates
+    from halo_harness.providers.dbx_routing import RouteCandidate, chat_route_candidates
     candidates = chat_route_candidates(model, state_dir)
     if not candidates:
         # Defensive only -- callers (model.py's own ModelRef construction,

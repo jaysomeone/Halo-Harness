@@ -4,7 +4,7 @@ top-level dev-only directories (`research_notes/`, `reports/`) must never
 ship in the actual installable package. Builds a REAL wheel (setuptools'
 own `build_meta.build_wheel`, the same entry point `pip wheel`/`pip
 install` use) and inspects its file list directly -- the decisive check,
-since `[tool.setuptools.packages.find] include = ["rolo_claude*"]` is a
+since `[tool.setuptools.packages.find] include = ["halo_harness*"]` is a
 CONFIG claim; this proves what actually ends up installable.
 """
 from __future__ import annotations
@@ -72,8 +72,8 @@ def test_h9_wheel_never_ships_wip_or_other_drafting_scratch_dirs(ctx: Ctx):
     ctx.check(f"the wheel actually has real content, got {len(names)} file(s)", len(names) > 10)
     leaked = [n for n in names if any(bad in n for bad in _DISALLOWED_SUBSTRINGS)]
     ctx.check(f"no wip/research_notes/reports/scratch-script content leaked in, got {leaked}", leaked == [])
-    ctx.check("rolo_claude/__init__.py is present (the wheel isn't just empty/broken)",
-              any(n.endswith("rolo_claude/__init__.py") for n in names))
+    ctx.check("halo_harness/__init__.py is present (the wheel isn't just empty/broken)",
+              any(n.endswith("halo_harness/__init__.py") for n in names))
 
 
 @test
@@ -85,9 +85,9 @@ def test_h9_wheel_ships_the_required_runtime_data_files(ctx: Ctx):
     wheel_path = _build_wheel()
     with zipfile.ZipFile(wheel_path) as z:
         names = set(z.namelist())
-    for required_suffix in ("rolo_claude/tui/styles.tcss", "rolo_claude/providers/model_table.json",
-                             "rolo_claude/providers/catalog/models_dev_databricks_fallback.json",
-                             "rolo_claude/providers/catalog/openrouter_fallback.json"):
+    for required_suffix in ("halo_harness/tui/styles.tcss", "halo_harness/providers/model_table.json",
+                             "halo_harness/providers/catalog/models_dev_databricks_fallback.json",
+                             "halo_harness/providers/catalog/openrouter_fallback.json"):
         ctx.check(f"{required_suffix} is in the wheel", any(n.endswith(required_suffix) for n in names))
 
 

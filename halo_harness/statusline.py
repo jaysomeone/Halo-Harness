@@ -1,4 +1,4 @@
-"""rolo_claude.statusline -- runs the `statusLine` command from settings
+"""halo_harness.statusline -- runs the `statusLine` command from settings
 (U5 scope D), matching Claude Code's own contract: a `{"type": "command",
 "command": "...", "padding": N}` object (`Settings.statusline`,
 `config/settings.py`) is spawned once per refresh with a JSON payload on
@@ -68,7 +68,7 @@ def run_statusline_command(command: str, payload: dict, *, cwd: "Path | str",
     try:
         # Same child-env hygiene as hooks and tools: the user's statusLine
         # script never inherits the harness's provider secrets.
-        from rolo_claude.providers.config import tool_child_env
+        from halo_harness.providers.config import tool_child_env
         proc = subprocess.run(
             command, shell=True, cwd=str(cwd), input=json.dumps(payload), capture_output=True,
             text=True, timeout=timeout_s, env=tool_child_env(dict(os.environ)),

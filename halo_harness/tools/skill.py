@@ -1,4 +1,4 @@
-"""rolo_claude.tools.skill -- the Skill tool (H4 scope C, real). Looks a
+"""halo_harness.tools.skill -- the Skill tool (H4 scope C, real). Looks a
 skill up by name via `commands/skills.py::find_skill` (the SAME discovery +
 precedence `register_skills` uses for the `/` surface, so the tool and the
 slash command can never disagree about which skill a name resolves to),
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Invoke a packaged skill (reusable instructions the user or project has set up for a "
@@ -53,7 +53,7 @@ class SkillTool(Tool):
         raw_args = input.get("args", "") if isinstance(input, dict) else ""
         args_text = raw_args if isinstance(raw_args, str) else ""
 
-        from rolo_claude.commands.skills import find_skill
+        from halo_harness.commands.skills import find_skill
 
         cmd = find_skill(skill_name, Path(ctx.cwd))
         if cmd is None:
@@ -80,7 +80,7 @@ class SkillTool(Tool):
         if cmd.run is None or cmd.path is None:
             return ToolResult(f"Skill {skill_name!r} has no runnable body.", is_error=True)
 
-        from rolo_claude.config.frontmatter import parse as parse_frontmatter
+        from halo_harness.config.frontmatter import parse as parse_frontmatter
 
         try:
             raw = cmd.path.read_text(encoding="utf-8", errors="replace")
@@ -88,7 +88,7 @@ class SkillTool(Tool):
             return ToolResult(f"Could not read skill {skill_name!r}: {e}", is_error=True)
         _fm, body = parse_frontmatter(raw)
 
-        from rolo_claude.commands.registry import expand_command_body
+        from halo_harness.commands.registry import expand_command_body
 
         # finding 12 (major, h4-h5-h3c review): the documented ${CLAUDE_...}
         # variables a skill body may reference -- CLAUDE_SESSION_ID comes

@@ -1,15 +1,15 @@
 # Commands
 
-Every CLI subcommand `rolo-claude` accepts, and every flag any of them
+Every CLI subcommand `halo` accepts, and every flag any of them
 accepts, verified against the real `--help` output and the argparse
-definitions in `rolo_claude/cli.py` and each subcommand's own module. For
+definitions in `halo_harness/cli.py` and each subcommand's own module. For
 the in-app `/slash` commands, key bindings, `@file` and `!cmd` prefixes, see
 [SLASH-COMMANDS.md](SLASH-COMMANDS.md); for the architecture behind these
 commands, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 **How this page is organised (and kept honest)**: every flag/subcommand
 heading below wraps the exact token in backticks, e.g. `#### \`--model\``
-or `## \`rolo-claude doctor\``. `tests/test_docs_commands.py` calls every
+or `## \`halo doctor\``. `tests/test_docs_commands.py` calls every
 real `--help` in-process (no subprocess, no network) and fails the suite if
 a flag/subcommand exists in the code but isn't mentioned here, or if a
 `` `-x`/`--xxx` `` token inside a heading here doesn't match a real one --
@@ -20,14 +20,14 @@ built; see [Flags parsed but not implemented yet](#flags-parsed-but-not-implemen
 Every worked example below uses `--demo` (a scripted turn needing no
 network, API key, or model) or a scratch `BRIDGE_TEST_HOME` so it is safe to
 paste into a shell verbatim; swap in your own model/prompt once you have a
-provider configured (`rolo-claude init`).
+provider configured (`halo init`).
 
 ```sh
-export PYTHONPATH=/path/to/rolo-claude   # a dev checkout; skip if installed
-rolo-claude --version
+export PYTHONPATH=/path/to/halo-harness   # a dev checkout; skip if installed
+halo --version
 ```
 ```
-rolo-claude 1.0.1
+halo 1.0.1
 ```
 
 There is no `sessions` subcommand in this build -- session resume/fork/
@@ -35,13 +35,13 @@ rename/list lives entirely under the default command's own `-c`/`-r`/
 `--fork-session`/`-n` flags and the TUI's `/resume`/`/rename`/`/fork` (see
 `docs/SLASH-COMMANDS.md`).
 
-## `rolo-claude` (the main command)
+## `halo` (the main command)
 
 ```
-rolo-claude [PROMPT] [flags...]
+halo [PROMPT] [flags...]
 ```
 
-With no `-p`/`--print`, `rolo-claude` opens the full-screen TUI (see
+With no `-p`/`--print`, `halo` opens the full-screen TUI (see
 `docs/SLASH-COMMANDS.md`); a `PROMPT` positional argument pre-fills it as the
 first turn. `-p`/`--print` runs one headless turn instead and exits -- this
 is what every worked example on this page uses. Outside a real terminal
@@ -50,10 +50,10 @@ prints one line and exits 2 rather than hanging, since nothing could ever
 drive a full-screen UI there:
 
 ```sh
-echo | rolo-claude
+echo | halo
 ```
 ```
-rolo-claude: a full-screen session requires an interactive terminal (stdin is not a tty) -- use -p/--print for a non-interactive run
+halo: a full-screen session requires an interactive terminal (stdin is not a tty) -- use -p/--print for a non-interactive run
 ```
 (exit code 2)
 
@@ -61,28 +61,28 @@ A bare `-p` positional prompt, or stdin (UTF-8, 10 MB cap) when no positional
 is given, is the text of the first turn:
 
 ```sh
-rolo-claude --demo -p
+halo --demo -p
 ```
 ```
 All done -- that's a scripted demo turn.
 ```
 
 ```sh
-rolo-claude --demo -p --output-format json
+halo --demo -p --output-format json
 ```
 ```json
 {"type": "result", "subtype": "success", "is_error": false, "result": "All done -- that's a scripted demo turn.", "session_id": "demo-session", "num_turns": 1, "stop_reason": "end_turn", "usage": {"input_tokens": 270, "output_tokens": 100}, "total_cost_usd": 0.0, "structured_output": null, "model": "or:deepseek/deepseek-v4.1-flash", "permission_denials": [], "background_notices": []}
 ```
 
 An unresolvable `--model` is a clean, scriptable usage error (exit 2), with a
-near-miss suggestion when the OpenRouter catalog is cached (`rolo-claude
+near-miss suggestion when the OpenRouter catalog is cached (`halo
 models --refresh`) and something close matches:
 
 ```sh
-rolo-claude -p --model not-a-real-model-ref "hi"
+halo -p --model not-a-real-model-ref "hi"
 ```
 ```
-rolo-claude: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
+halo: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
 ```
 
 Exit codes across every route: `0` success, `1` the turn ran and ended in an
@@ -95,13 +95,13 @@ turn (POSIX `128+SIGINT`).
 #### `--model MODEL`, `--small-model MODEL`
 What: the main model for this session, and the model used for
 background/small tasks (title generation, `/improve` drafting when
-`improve.model` isn't set) respectively. Reads: `~/.rolo-claude/config.json`
-(`model` key), `routes.json`'s `aliases`/`default` and `small`, `BRIDGE_MODEL`
-env, only when neither flag is given -- see `docs/MODELS.md` for the full
+`improve.model` isn't set) respectively. Reads: `~/.halo/config.json`
+(`model` key), `routes.json`'s `aliases`/`default` and `small`, `HALO_MODEL`
+(legacy `BRIDGE_MODEL`) env, only when neither flag is given -- see `docs/MODELS.md` for the full
 resolution order. Default: `or:deepseek/deepseek-v4.1-flash` (see
 `model.DEFAULT_MODEL_REF`) when nothing else resolves.
 ```sh
-rolo-claude -p --model or:deepseek/deepseek-v3.2 --small-model or:deepseek/deepseek-v3.2 "hi"
+halo -p --model or:deepseek/deepseek-v3.2 --small-model or:deepseek/deepseek-v3.2 "hi"
 ```
 
 #### `--effort {low,medium,high,xhigh,max}`
@@ -115,9 +115,9 @@ session's *default* effort when `--effort` is omitted (`docs/CONFIG.md`).
 #### `-c`, `--continue`
 What: resumes the most recently modified session for the current directory
 (by the session `.jsonl` file's own mtime). Reads:
-`~/.rolo-claude/sessions/<slug>/*.jsonl`.
+`~/.halo/sessions/<slug>/*.jsonl`.
 ```sh
-rolo-claude -p -c "keep going"
+halo -p -c "keep going"
 ```
 
 #### `-r`, `--resume [ID_OR_TEXT]`
@@ -127,7 +127,7 @@ prompt/cwd/model, or -- in print mode -- lists the ambiguous candidates
 instead of guessing; with nothing at all, opens the TUI's session picker
 (pre-filtered if this flag's own value made the CLI resume ambiguous).
 ```sh
-rolo-claude -p -r a1b2c3d4 "one more thing"
+halo -p -r a1b2c3d4 "one more thing"
 ```
 
 #### `--fork-session`
@@ -142,7 +142,7 @@ callers that want a known id up front.
 
 #### `-n`, `--name NAME`
 What: sets this session's title (same effect as `/rename` after the fact).
-Writes: `~/.rolo-claude/sessions/<slug>/index.json`.
+Writes: `~/.halo/sessions/<slug>/index.json`.
 
 #### `--agent AGENT`, `--agents JSON_OR_FILE`
 What: `--agent` pins this top-level session to run as if it were the named
@@ -157,7 +157,7 @@ sit on top of.
 
 What: overrides one of the five roles (`orchestrator`, `coder`, `reviewer`,
 `researcher`, `small`) for this run only -- a built-in/custom sub-agent whose
-own role resolves to `NAME` uses `MODEL` instead of whatever `~/.rolo-claude/
+own role resolves to `NAME` uses `MODEL` instead of whatever `~/.halo/
 config.json`/`team.json`'s own `roles` table (or the cost-aware default) says,
 even beating that agent's own file `model:` (a freshly-typed, run-only
 override the user gets to trump a shared/managed agent file with). Repeatable
@@ -166,7 +166,7 @@ wins. A bad `NAME=MODEL` (missing `=`, an unrecognized role name, an empty
 model) is a clean exit-2 usage error before any Session is built. See
 `docs/ROLES.md` for the full precedence chain, `/roles`, and `stats --roles`.
 ```sh
-rolo-claude -p --role researcher=or:deepseek/deepseek-v4.1-flash "use the Researcher agent to summarize this repo"
+halo -p --role researcher=or:deepseek/deepseek-v4.1-flash "use the Researcher agent to summarize this repo"
 ```
 
 #### `--file SPEC [SPEC ...]`
@@ -178,7 +178,7 @@ model's own Read tool call would use. **Argparse quirk**: this flag is
 SPEC -- put the prompt *before* `--file`, or use a `--` separator, or the
 prompt itself disappears into the file-spec list:
 ```sh
-rolo-claude -p "summarize the attached file" --file ./notes.txt
+halo -p "summarize the attached file" --file ./notes.txt
 ```
 Claude Code's own `file_id:relative_path` cloud-resource form (a
 claude.ai-hosted file) has no backing store in this standalone harness and
@@ -206,7 +206,7 @@ result object at the end (`session_id`, `num_turns`, `usage`,
 emits one JSON line per event (`init`, `assistant`/`user` messages, a final
 `result`) -- Claude Code's own SDK wire shape.
 ```sh
-rolo-claude --demo -p --output-format stream-json
+halo --demo -p --output-format stream-json
 ```
 
 #### `--input-format {text,stream-json}`
@@ -221,22 +221,22 @@ per text/thinking delta (not just the final assembled message).
 
 #### `-d`, `--debug [FILTER]`
 What: turns on DEBUG file logging for the whole run, TUI or print mode. The
-log goes to `~/.rolo-claude/bridge.log` (rotating, secrets redacted) and the
-path is printed once on stderr as `rolo-claude: debug log -> <path>`. The
+log goes to `~/.halo/bridge.log` (rotating, secrets redacted) and the
+path is printed once on stderr as `halo: debug log -> <path>`. The
 optional FILTER value is accepted for Claude Code parity and ignored:
 everything is logged. Use it when the TUI misbehaves or a route fails, then
 send the last lines of the log.
-Reads: nothing new. Writes: `~/.rolo-claude/bridge.log`.
+Reads: nothing new. Writes: `~/.halo/bridge.log`.
 ```sh
-rolo-claude --debug
-tail -60 ~/.rolo-claude/bridge.log
+halo --debug
+tail -60 ~/.halo/bridge.log
 ```
 
 #### `--debug-file PATH`
 What: same as `--debug`, but the log is written to `PATH` (parent
 directories are created) instead of the state directory.
 ```sh
-rolo-claude --debug-file /tmp/rolo-claude-debug.log -p "reply with the single word pong"
+halo --debug-file /tmp/halo-debug.log -p "reply with the single word pong"
 ```
 
 #### `--verbose`
@@ -281,7 +281,7 @@ shape as `.claude/settings.json`. See `docs/CONFIG.md`'s precedence table.
 What: a comma list restricting which of `user,project,local` settings layers
 are read at all (managed/policy and `--settings` itself are never affected).
 ```sh
-rolo-claude -p --setting-sources user "hi"
+halo -p --setting-sources user "hi"
 ```
 
 #### `--permission-mode {default,acceptEdits,plan,auto,dontAsk,bypassPermissions,manual}`
@@ -290,7 +290,7 @@ for `default`). See `docs/ARCHITECTURE.md`'s permissions section for exactly
 what each mode allows/asks/denies -- there is no classifier or heuristic
 layered on top of any of them.
 ```sh
-rolo-claude -p --permission-mode auto "hi"
+halo -p --permission-mode auto "hi"
 ```
 
 #### `--dangerously-skip-permissions`
@@ -336,7 +336,7 @@ pricing (Databricks, a `cc:` subscription turn) never counts toward it.
 What: `--chrome` starts the claude-in-chrome extension's native-messaging
 bridge as a dynamic MCP server for this session (screenshots, page
 reading/interaction tools); `--no-chrome` forces it off even if a settings
-file would otherwise enable it by default. `rolo-claude doctor` reports
+file would otherwise enable it by default. `halo doctor` reports
 whether the native host is registered at all.
 
 #### `--playwright`, `--playwright-cdp ENDPOINT`, `--playwright-headless`
@@ -344,7 +344,7 @@ What: `--playwright` drives a real local Chromium/Chrome/Brave via
 Playwright as a dynamic MCP server instead; `--playwright-cdp` attaches to
 an already-running browser's DevTools Protocol endpoint instead of
 launching a new one; `--playwright-headless` runs without a visible window.
-Needs `node`/`npx` on PATH (`rolo-claude doctor` checks for both).
+Needs `node`/`npx` on PATH (`halo doctor` checks for both).
 
 ### MCP flags
 
@@ -359,14 +359,14 @@ What: use *only* `--mcp-config` (plus `--chrome`/`--playwright` if also
 given) -- every other source (`.mcp.json`, `~/.claude.json`, plugins) is
 skipped for this run.
 ```sh
-rolo-claude -p --strict-mcp-config --mcp-config '{"mcpServers":{}}' "hi"
+halo -p --strict-mcp-config --mcp-config '{"mcpServers":{}}' "hi"
 ```
 
 ### Image flags
 
 #### `--no-inline-images`
 What: forces the plain type/size/dimensions caption for every image tool
-result this run, same as `images: "caption"` in `~/.rolo-claude/config.json`
+result this run, same as `images: "caption"` in `~/.halo/config.json`
 but scoped to one invocation (TUI only -- print mode has no inline-image
 concept to disable).
 
@@ -375,6 +375,14 @@ concept to disable).
 #### `--theme THEME`
 What: one of `claude-dark`/`claude-light` (`-daltonized`/`-ansi` variants of
 each) for this run; `/theme` persists a choice for future sessions.
+
+#### `--no-intro`
+What: skips the one-time `I am just a copy, of a copy, of a copy... halo
+<version>` typewriter line a fresh interactive launch otherwise shows
+above the first turn -- same effect as `"intro": false` in
+`~/.halo/config.json`. Never shown in print mode, a `--demo` run, or when
+stdout isn't a real terminal, with or without this flag; `/intro` replays
+it mid-session.
 
 #### `--demo`
 What: runs (or, with `-p`, prints) a scripted walkthrough turn that needs no
@@ -386,7 +394,7 @@ What: repeats the demo script's own synthetic load N times (a throughput/UI
 smoke test, not a real benchmark).
 
 #### `-v`, `--version`
-What: prints `rolo-claude <version>` and exits 0, before any config is read.
+What: prints `halo <version>` and exits 0, before any config is read.
 
 ### Flags parsed but not implemented yet
 
@@ -396,10 +404,10 @@ at all", prints one line to stderr naming the milestone it's planned for,
 then continues the run as if the flag had not been given:
 
 ```sh
-rolo-claude --ide -p "hi"
+halo --ide -p "hi"
 ```
 ```
-rolo-claude: --ide is not supported yet (planned: H8)
+halo: --ide is not supported yet (planned: H8)
 ```
 
 | Flag | Planned |
@@ -436,10 +444,10 @@ rolo-claude: --ide is not supported yet (planned: H8)
 "Planned" names the internal milestone id this project tracks its own
 roadmap with (see `docs/harness/README.md`) -- it is not a promise of a
 release date. The canonical, always-current list is
-`rolo_claude/cli.py`'s own `_NOT_YET_FLAGS` table; this page's test
+`halo_harness/cli.py`'s own `_NOT_YET_FLAGS` table; this page's test
 (`tests/test_docs_commands.py`) fails if the two ever disagree.
 
-## `rolo-claude init`
+## `halo init`
 
 One command that sets up a fresh box: **select a provider to set up**
 (Databricks, OpenRouter, Anthropic API, or your Claude subscription --
@@ -452,7 +460,7 @@ another provider, looping until you're done; with more than one provider
 configured, one last pick chooses the overall default model across all of
 them. Then (1.0.1 hotfix 18) **select a default permission mode** -- `auto`
 (recommended, listed first), `acceptEdits`, `default`, `plan` -- written to
-`~/.rolo-claude/config.json`'s own `permission_mode` key, which every
+`~/.halo/config.json`'s own `permission_mode` key, which every
 future session (`-p` and the TUI alike) starts in unless `--permission-mode`
 or `--dangerously-skip-permissions` is given that run (see
 [CONFIG.md](CONFIG.md)'s "Providers" section for the full precedence
@@ -461,15 +469,15 @@ correct. Never writes `~/.claude.json`/`~/.claude/settings.json`, never
 prints a key or token.
 
 ```sh
-rolo-claude init --help
+halo init --help
 ```
 ```
-usage: rolo-claude init [-h]
+usage: halo init [-h]
                         [--provider {databricks,openrouter,anthropic,claude}]
                         [--preset {home,work,claude}] [--model REF] [--yes]
                         [--no-live] [--no-fixes] [--team PATH|URL]
 
-Set up rolo-claude in one command: pick a provider to set up, configure its
+Set up halo in one command: pick a provider to set up, configure its
 credentials, set a default model, run doctor, send a live pong, and offer the
 Linux setup fixes. Repeat for another provider, then pick the overall default.
 
@@ -488,25 +496,27 @@ options:
   --no-fixes            skip the Linux rg/PATH fixes step
   --team PATH|URL       a team.json preset (host/default model/gateway
                         preference/DBU price -- never a token); overrides
-                        .rolo-claude/team.json / ~/.rolo-claude/team.json
+                        .halo/team.json / ~/.halo/team.json
 ```
 
 | Flag | Reads/writes | Default |
 |---|---|---|
 | `--provider {databricks,openrouter,anthropic,claude}` | repeatable; each runs its own credentials -> catalog/discovery -> default-model-pick -> live-pong path, in the order given, with no "set up another?" prompt between them | omitted -> the interactive provider picker (arrow keys on a real terminal, a numbered list otherwise), looping until you pick "Done" |
 | `--preset {home,work,claude}` | **deprecated**: a one-line-noticed alias for `--provider openrouter\|databricks\|claude` respectively -- kept so existing scripts/docs using it verbatim keep working | -- |
-| `--model REF` | writes `~/.rolo-claude/config.json`'s `model` key, skipping that provider's own model picker entirely | the provider's own default (`or:deepseek/deepseek-v4.1-flash` / `dbx:databricks-deepseek-v4-1-flash` / `ant:sonnet` / `cc:sonnet`) |
+| `--model REF` | writes `~/.halo/config.json`'s `model` key, skipping that provider's own model picker entirely | the provider's own default (`or:deepseek/deepseek-v4.1-flash` / `dbx:databricks-deepseek-v4-1-flash` / `ant:sonnet` / `cc:sonnet`) |
 | `--yes` | -- | off (interactive prompts; also skips every provider's own model picker) |
 | `--no-live` | skips `models --refresh` and the live pong | off |
 | `--no-fixes` | skips the `rg`/PATH steps (Linux) | off |
-| `--team PATH\|URL` | reads a `team.json`-shaped file/URL (see `docs/DATABRICKS.md`); Databricks only | `.rolo-claude/team.json`, then `~/.rolo-claude/team.json` |
+| `--team PATH\|URL` | reads a `team.json`-shaped file/URL (see `docs/DATABRICKS.md`); Databricks only | `.halo/team.json`, then `~/.halo/team.json` |
 
 `--provider ... --yes` (or the deprecated `--preset ... --yes`) is fully
 non-interactive whenever the needed value is already discoverable; when it
 isn't (e.g. no OpenRouter key found and `--yes` was passed), it prints a
 `[WARN]` naming the env var to set instead of blocking on a prompt.
 Credentials go to the same env file every other part of the harness reads
-(`BRIDGE_ENV_FILE`, else `~/.config/vibes-hacker/env`, mode 0600 on POSIX).
+(`HALO_ENV_FILE`/legacy `BRIDGE_ENV_FILE`, else `~/.config/halo/env` --
+falling back to a pre-2.0.0 `~/.config/vibes-hacker/env` when that's all
+there is -- mode 0600 on POSIX).
 The interactive provider list shows each provider's own status tag
 (`configured`/`logged in`/`not set up`) and starts the cursor on whichever
 one auto-detection would have picked (an existing `OPENROUTER_API_KEY` ->
@@ -520,7 +530,7 @@ the interactive picker itself falls back to a numbered list with no real
 terminal to draw into.
 
 **Install once, run anywhere.** `init`'s own Summary step ends with the SAME
-"command on PATH" line `doctor` prints (see above) -- when `rolo-claude`
+"command on PATH" line `doctor` prints (see above) -- when `halo`
 doesn't resolve to a real installed console script, it names the exact fix
 (`uv tool install --reinstall .` when `uv` is present, else `pip install
 --user -e .`, both re-run after every `git pull`) and reminds you to run the
@@ -529,45 +539,45 @@ for `git pull`.
 
 Worked example (a scratch home, so nothing real is touched):
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude init --provider openrouter --yes --no-live
+BRIDGE_TEST_HOME=/tmp/demo-home halo init --provider openrouter --yes --no-live
 ```
 ```
-rolo-claude init
+halo init
 OpenRouter
 Credentials:
-   [WARN] OpenRouter key not found, and --yes skips the prompt -- set OPENROUTER_API_KEY (or re-run `rolo-claude init` without --yes).
-   Default model: or:deepseek/deepseek-v4.1-flash -- wrote /tmp/demo-home/.rolo-claude/config.json
+   [WARN] OpenRouter key not found, and --yes skips the prompt -- set OPENROUTER_API_KEY (or re-run `halo init` without --yes).
+   Default model: or:deepseek/deepseek-v4.1-flash -- wrote /tmp/demo-home/.halo/config.json
 Checks:
    ...doctor lines...
    (catalog refresh skipped: --no-live)
 Live pong: skipped (--no-live)
 Default permission mode:
-   auto (non-interactive default; pass through settings.json or `rolo-claude config set permission_mode ...` to change it)
-   Default permission mode: auto -- wrote /tmp/demo-home/.rolo-claude/config.json
+   auto (non-interactive default; pass through settings.json or `halo config set permission_mode ...` to change it)
+   Default permission mode: auto -- wrote /tmp/demo-home/.halo/config.json
 Linux fixes:
    ...
 Summary:
    provider(s) set up this run: openrouter
    default model: or:deepseek/deepseek-v4.1-flash
-   wrote /tmp/demo-home/.rolo-claude/config.json
-   Run `rolo-claude` to start.
-   [WARN] rolo-claude command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
+   wrote /tmp/demo-home/.halo/config.json
+   Run `halo` to start.
+   [WARN] halo command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
    Run it from any directory -- the checkout is only for `git pull`.
 ```
 
-## `rolo-claude doctor`
+## `halo doctor`
 
 A read-only environment check; every `[WARN]`/`[MISSING]` line ends with
 `-> fix: <command>` or `-> see: <reference>`. Never writes anything.
 
 ```sh
-rolo-claude doctor --help
+halo doctor --help
 ```
 ```
-usage: rolo-claude doctor [-h] [--work] [--json] [--probe-all] [--both]
+usage: halo doctor [-h] [--work] [--json] [--probe-all] [--both]
                           [--tools] [--only GLOB]
 
-Check the health of your rolo-claude installation.
+Check the health of your halo installation.
 
 options:
   -h, --help   show this help message and exit
@@ -584,7 +594,7 @@ options:
   --only GLOB  With --probe-all: only endpoints matching this glob
 ```
 
-Bare `rolo-claude doctor` checks: Python version, `~/.claude` layout, the env
+Bare `halo doctor` checks: Python version, `~/.claude` layout, the env
 file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
 `node`/`npx`/`rg`/Git Bash on PATH, the Chrome native-messaging host,
 plugin-provided MCP servers, the OS/WSL/Kali platform hint, `~/.local/bin` on
@@ -592,12 +602,12 @@ PATH (Linux), tmux mouse mode (inside tmux), the three cached-catalog ages,
 session count + `/improve` config, clipboard backend, configured MCP servers
 (eager vs. lazy), the resolved default model, how many of the five providers
 are enabled (`databricks`/`openrouter`/`anthropic`/`claude_subscription`/
-`typesafe` -- see "`rolo-claude providers`" below), and the `rolo-claude`
+`typesafe` -- see "`halo providers`" below), and the `halo`
 command itself on PATH. Exit 0 unless something is `[MISSING]` (a `[WARN]`
 alone, e.g. "no Databricks configured", never fails the command).
 
 **Install once, run anywhere.** The "command on PATH" check fails WARN when
-`rolo-claude` either isn't found at all or resolves to this checkout's own
+`halo` either isn't found at all or resolves to this checkout's own
 `bin/` wrapper (which only works from inside the checkout) -- its own
 `-> fix:` names the exact reinstall command for whichever tool is on this
 box: `uv tool install --reinstall .` (run from the checkout) when `uv` is
@@ -606,20 +616,20 @@ every `git pull` -- an editable/tool install does not auto-refresh the
 installed console script on its own.
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude doctor
+BRIDGE_TEST_HOME=/tmp/demo-home halo doctor
 ```
 ```
-rolo-claude doctor
+halo doctor
   [OK] Python 3.11.7
   [MISSING] ~/.claude directory: /tmp/demo-home/.claude -> fix: claude
-  [WARN] OpenRouter: not configured (no OPENROUTER_API_KEY found) -> fix: rolo-claude init --preset home
-  [WARN] Databricks: not configured (no host/token found) -> fix: rolo-claude init --preset work
-  [OK] Sessions: 0 logged under ~/.rolo-claude/sessions; stats cache last written never
+  [WARN] OpenRouter: not configured (no OPENROUTER_API_KEY found) -> fix: halo init --preset home
+  [WARN] Databricks: not configured (no host/token found) -> fix: halo init --preset work
+  [OK] Sessions: 0 logged under ~/.halo/sessions; stats cache last written never
   [OK] /improve: enabled=True hint=True model=(small/session model) since_days=7 max_candidates=8
   [OK] MCP servers: none configured
-  [OK] Default model: not set in config.json -- built-in default 'or:deepseek/deepseek-v4.1-flash' applies (BRIDGE_MODEL/routes.json still win when set)
+  [OK] Default model: not set in config.json -- built-in default 'or:deepseek/deepseek-v4.1-flash' applies (HALO_MODEL/routes.json still win when set)
   [OK] Providers: 0/5 enabled (none)
-  [WARN] rolo-claude command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
+  [WARN] halo command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
 ```
 (trimmed -- a real run has one line per check; see `docs/TROUBLESHOOTING.md`
 for what each WARN/MISSING line means)
@@ -627,10 +637,10 @@ for what each WARN/MISSING line means)
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
 
-## `rolo-claude providers`
+## `halo providers`
 
 ```
-Usage: rolo-claude providers [list|enable <name>|disable <name>|setup <name>]
+Usage: halo providers [list|enable <name>|disable <name>|setup <name>]
 Providers: databricks, openrouter, anthropic, claude_subscription, typesafe
 ```
 
@@ -639,23 +649,23 @@ part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe once their key
 is found (env file, shell env, or the settings env chain), Databricks once
 a host AND token are found (same sources, plus `~/.databrickscfg`), Claude
 Code subscription (`cc:`) ONLY when `claude auth status` reports
-`loggedIn` with `authMethod` exactly `claude.ai`. No `rolo-claude init` run
-is required for this. `~/.rolo-claude/config.json`'s `"providers"` block
+`loggedIn` with `authMethod` exactly `claude.ai`. No `halo init` run
+is required for this. `~/.halo/config.json`'s `"providers"` block
 stores OVERRIDES only -- `enable <name>`/`disable <name>` write an explicit
 `true`/`false` there that always wins over auto-detection (`cc`/`ant`/
 `dbx`/`or` are accepted aliases for the canonical names); `setup <name>`
-needs a real terminal and runs the same per-provider tab `rolo-claude init`
+needs a real terminal and runs the same per-provider tab `halo init`
 shows.
 
-Bare `rolo-claude providers` (or `list`) prints one row per provider --
+Bare `halo providers` (or `list`) prints one row per provider --
 status (`auto (detected from <source>)` / `disabled by you` / `enabled by
 you` / `not set up`), reachable, cached model count -- plus a trailing
 OpenRouter balance line once a background fetch has ever succeeded (see
-`rolo-claude models`/`/cost`). See `docs/MODELS.md`'s "Provider
+`halo models`/`/cost`). See `docs/MODELS.md`'s "Provider
 enablement" section for the full prefix/label table.
 
 ```sh
-rolo-claude providers
+halo providers
 ```
 ```
 provider                    status                                   reachable                                  models
@@ -666,19 +676,19 @@ Claude Code subscription    not set up                                not set up
 TypeSafe                    not set up                                not set up                                      -
 ```
 
-## `rolo-claude work-matrix`
+## `halo work-matrix`
 
-V2b: turns a `doctor --work --probe-all` JSON report (`~/.rolo-claude/
+V2b: turns a `doctor --work --probe-all` JSON report (`~/.halo/
 work-matrix-<date>.json`, or one copied off the owner's real work VM -- the
 report holds endpoint names only, never a host or a token) into a suggested
 action per failure. See `docs/DATABRICKS.md`'s own work-matrix section for
 exactly which failure classes map to which suggestion.
 
 ```sh
-rolo-claude work-matrix --help
+halo work-matrix --help
 ```
 ```
-usage: rolo-claude work-matrix [-h] {show,apply} ...
+usage: halo work-matrix [-h] {show,apply} ...
 
 Interpret a `doctor --work --probe-all` JSON report.
 
@@ -698,7 +708,7 @@ Prints one line per FAILING endpoint (a clean row across the board prints
 "nothing to fix"): the endpoint name, its HTTP status, the issue, and the
 suggested action. Never writes anything.
 ```sh
-rolo-claude work-matrix show ~/.rolo-claude/work-matrix-2026-09-29.json
+halo work-matrix show ~/.halo/work-matrix-2026-09-29.json
 ```
 
 ### `work-matrix apply <report.json> [--yes]`
@@ -713,18 +723,18 @@ knob to write at all -- `show` reports them; fixing them is a code/model-table
 change, not a config write. Never touches `~/.claude.json`/`~/.claude/
 settings.json`.
 ```sh
-rolo-claude work-matrix apply ~/.rolo-claude/work-matrix-2026-09-29.json --yes
+halo work-matrix apply ~/.halo/work-matrix-2026-09-29.json --yes
 ```
 
-## `rolo-claude models`
+## `halo models`
 
 Lists (and refreshes) the OpenRouter and Databricks model catalogs.
 
 ```sh
-rolo-claude models --help
+halo models --help
 ```
 ```
-usage: rolo-claude models [-h] [--refresh] [--cc] [--urls] [--json]
+usage: halo models [-h] [--refresh] [--cc] [--urls] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -739,14 +749,14 @@ options:
 
 | Flag | Reads/writes |
 |---|---|
-| (bare) | reads `~/.rolo-claude/models.json`/`dbx-endpoints.json`; refreshes automatically the first time either cache is empty |
+| (bare) | reads `~/.halo/models.json`/`dbx-endpoints.json`; refreshes automatically the first time either cache is empty |
 | `--refresh` | live probe: OpenRouter `GET /api/v1/models` -> `models.json`; Databricks `GET /api/2.0/serving-endpoints` -> `dbx-endpoints.json`; models.dev's public `api.json` -> `models-dev.json` |
 | `--cc` | reads `claude auth status` + the `cc-models.json` cache; `--cc --refresh` also sends nine tiny `-p --max-turns 1` pings under your subscription |
 | `--urls` | Databricks rows only: adds the exact resolved URL + path type (`mlflow`/`cursor`/`anthropic`/`invocations`) per endpoint -- see `docs/DATABRICKS.md` |
 | `--json` | same data as machine-readable JSON |
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude models --cc
+BRIDGE_TEST_HOME=/tmp/demo-home halo models --cc
 ```
 ```
 Claude subscription: claude found but not logged in -- run `claude` once to log in
@@ -758,20 +768,20 @@ opus         claude-opus-5-5          claude-opus-5-5               1000000    1
 
 An unresolvable `--model` elsewhere in the CLI prints a near-miss suggestion
 sourced from whatever this command last cached (`difflib`-style, cutoff
-0.5) -- keeping the cache fresh with `rolo-claude models --refresh` makes
+0.5) -- keeping the cache fresh with `halo models --refresh` makes
 that suggestion useful.
 
-## `rolo-claude mcp`
+## `halo mcp`
 
 Inspect and edit MCP server configuration -- reads/writes the exact same
 `~/.claude.json`/`.mcp.json` files `claude mcp add`/`claude mcp list` do, so
 a server either CLI adds is immediately visible to the other.
 
 ```sh
-rolo-claude mcp --help
+halo mcp --help
 ```
 ```
-Usage: rolo-claude mcp [options] [command]
+Usage: halo mcp [options] [command]
 
 Commands:
   list                    List configured MCP servers with live health
@@ -787,11 +797,11 @@ one line per server, same format as the real `claude` binary:
 `<name>: <command> <args> - <status>`, or `<name>: <url> (HTTP|SSE) - <status>`.
 Status labels: `✔ Connected`, `✗ Failed to connect`, `! Needs authentication`,
 `⏸ Pending approval`, `- Not configured`, `! Connected · tools fetch failed`,
-and rolo-claude's own `◐ Cached (connects on first use)` for a lazy server
+and halo's own `◐ Cached (connects on first use)` for a lazy server
 that hasn't connected yet (Claude Code has no lazy-start concept, so there is
 no binary-derived wording for this one state).
 ```sh
-rolo-claude mcp list
+halo mcp list
 ```
 ```
 Checking MCP server health...
@@ -810,7 +820,7 @@ Writes a new server entry. `-s local` (default) -> `~/.claude.json`'s
 add`. A `--` separator lets the command's own flags follow without argparse
 mistaking them for `mcp add`'s own:
 ```sh
-rolo-claude mcp add my-server -- npx -y @some/mcp-server --flag
+halo mcp add my-server -- npx -y @some/mcp-server --flag
 ```
 ```
 Added stdio MCP server 'my-server' (local scope) to ~/.claude.json: npx -y @some/mcp-server --flag
@@ -820,7 +830,7 @@ Added stdio MCP server 'my-server' (local scope) to ~/.claude.json: npx -y @some
 Same storage path as `mcp add`, but the entry is a literal JSON object
 string:
 ```sh
-rolo-claude mcp add-json my-remote '{"type":"http","url":"https://example.com/mcp"}'
+halo mcp add-json my-remote '{"type":"http","url":"https://example.com/mcp"}'
 ```
 
 ### `mcp remove [-s, --scope local|user|project] <name>`
@@ -829,59 +839,59 @@ first scope where the name is found.
 
 ### Not-yet `mcp` subcommands
 `add-from-claude-desktop`, `login`, `logout`, `reset-project-choices`,
-`serve` all parse and print `rolo-claude: mcp <sub> is not supported yet
+`serve` all parse and print `halo: mcp <sub> is not supported yet
 (planned: H8)`, exit 0.
 
-## `rolo-claude config`
+## `halo config`
 
 Reads and writes **this harness's own** small store,
-`~/.rolo-claude/config.json` -- never Claude Code's `settings.json`, which
+`~/.halo/config.json` -- never Claude Code's `settings.json`, which
 this project only ever reads. See `docs/CONFIG.md` for every key this file
 can hold.
 
 ```sh
-rolo-claude config --help
+halo config --help
 ```
 ```
-Usage: rolo-claude config [list|get <key>|set <key> <value>]
+Usage: halo config [list|get <key>|set <key> <value>]
 ```
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude config list
+BRIDGE_TEST_HOME=/tmp/demo-home halo config list
 ```
 ```
-(no config set -- ~/.rolo-claude/config.json is empty or missing)
+(no config set -- ~/.halo/config.json is empty or missing)
 ```
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude config set model or:deepseek/deepseek-v4.1-flash
+BRIDGE_TEST_HOME=/tmp/demo-home halo config set model or:deepseek/deepseek-v4.1-flash
 ```
 ```
 model="or:deepseek/deepseek-v4.1-flash"
 ```
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude config get model
+BRIDGE_TEST_HOME=/tmp/demo-home halo config get model
 ```
 ```
 "or:deepseek/deepseek-v4.1-flash"
 ```
 
 A key may be dotted (`improve.model`) to read/write a nested value without
-disturbing its siblings; `rolo-claude config key=value` (one argv token) is
+disturbing its siblings; `halo config key=value` (one argv token) is
 accepted as shorthand for `config set key value`. The value is parsed as
 JSON when possible (`true`, `123`, a quoted string), so non-string values
 round-trip too.
 
-## `rolo-claude stats`
+## `halo stats`
 
 A headless, cross-session version of the TUI's own `/stats` -- aggregates
 tokens/cost/tool-calls straight from the existing session `.jsonl` logs,
 never a new model-visible field.
 
 ```sh
-rolo-claude stats --help
+halo stats --help
 ```
 ```
-usage: rolo-claude stats [-h] [--all] [--all-projects] [--cwd DIR] [--json]
+usage: halo stats [-h] [--all] [--all-projects] [--cwd DIR] [--json]
                          [--models] [--tools] [--roles] [--wide]
                          [--since SINCE] [--session ID]
 
@@ -908,11 +918,11 @@ options:
   --session ID    Scope to one session id
 ```
 
-Bare `rolo-claude stats` (no `--models`/`--tools`/`--roles`) is the original,
+Bare `halo stats` (no `--models`/`--tools`/`--roles`) is the original,
 cheap report: turns, total cost, per-model token/cost totals, per-tool call
 counts -- works even on a session log recorded before the richer telemetry
-fields existed. `--models`/`--tools` switch to `rolo_claude.telemetry`'s
-aggregation (cached at `~/.rolo-claude/stats-cache.json`, keyed by
+fields existed. `--models`/`--tools` switch to `halo_harness.telemetry`'s
+aggregation (cached at `~/.halo/stats-cache.json`, keyed by
 path+size+mtime so an unchanged log is never re-parsed): per-(model,
 provider) sessions/calls/tokens/cost/avg-latency/tool-error%/repair-hit%/
 edit-failure%/steers/compactions/loop-breaker-trips (14 columns by default,
@@ -923,15 +933,15 @@ agent spend (sessions/calls/tokens/cost) per role name, summed from every
 Agent-tool call's own rolled-up usage node -- see `docs/ROLES.md`.
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude stats
+BRIDGE_TEST_HOME=/tmp/demo-home halo stats
 ```
 ```
-rolo-claude stats (/path/to/project, 0 session(s)):
+halo stats (/path/to/project, 0 session(s)):
   Turns: 0
   Total cost: $0.0000
 ```
 
-## `rolo-claude improve`
+## `halo improve`
 
 The headless surface for the same human-gated loop the TUI's `/improve`
 drives interactively -- clusters recent failures, drafts up to 8 candidate
@@ -939,10 +949,10 @@ memory/rule/skill files with one model call, and **never writes anything
 without `--apply`**.
 
 ```sh
-rolo-claude improve --help
+halo improve --help
 ```
 ```
-usage: rolo-claude improve [-h] [--since {7d,30d,all}] [--all-projects]
+usage: halo improve [-h] [--since {7d,30d,all}] [--all-projects]
                            [--json] [--out FILE] [--apply FILE#ID] [--cwd DIR]
                            [--bare] [--max-candidates MAX_CANDIDATES]
 
@@ -962,15 +972,15 @@ options:
   --max-candidates MAX_CANDIDATES
 ```
 
-Bare `rolo-claude improve` scans, drafts (one model call -- `improve.model`
+Bare `halo improve` scans, drafts (one model call -- `improve.model`
 config, else the small model, else the session model), prints every
-candidate, and saves them to `~/.rolo-claude/improve/<timestamp>.json`:
+candidate, and saves them to `~/.halo/improve/<timestamp>.json`:
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude improve --bare
+BRIDGE_TEST_HOME=/tmp/demo-home halo improve --bare
 ```
 ```
-rolo-claude improve: --bare disables /improve entirely.
+halo improve: --bare disables /improve entirely.
 ```
 
 `--apply <file>#<id>` (repeatable) writes exactly that saved candidate to
@@ -978,16 +988,16 @@ disk -- the only way a headless invocation ever writes a memory/rule/skill
 file. `--json`/`--out FILE` are for scripting; `--all-projects` scans every
 project's sessions instead of just the current directory's.
 
-## `rolo-claude export`
+## `halo export`
 
 A headless version of the TUI's own `/export` -- writes a session's raw
 JSONL transcript to a file or stdout, optionally sanitized.
 
 ```sh
-rolo-claude export --help
+halo export --help
 ```
 ```
-usage: rolo-claude export [-h] [--session ID] [--sanitize] [-o FILE]
+usage: halo export [-h] [--session ID] [--sanitize] [-o FILE]
                           [--cwd DIR]
 
 Export a session's transcript as JSONL (headless /export).
@@ -1005,10 +1015,10 @@ options:
 ```
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude export
+BRIDGE_TEST_HOME=/tmp/demo-home halo export
 ```
 ```
-rolo-claude export: no sessions found for this directory
+halo export: no sessions found for this directory
 ```
 
 `--sanitize` redacts (never just masks) OpenRouter/Anthropic/Databricks/
@@ -1018,7 +1028,7 @@ GitHub/AWS-shaped tokens, quoted or JSON-encoded `export KEY="value"`/
 by round-tripping each log node through JSON text -- the same sanitizer the
 TUI's own `/export --sanitize` calls, so the two can never disagree.
 
-## `rolo-claude proxy`
+## `halo proxy`
 
 The original `claude-bridge`: a single-file HTTP proxy (`bridge.py`) that
 sits in front of the **real** `claude` binary and translates its
@@ -1026,10 +1036,10 @@ Anthropic-Messages-API calls to OpenRouter/Databricks, leaving `claude`'s
 own subscription, config, hooks and permissions completely untouched. Kept
 unchanged, as its own subcommand, for anyone who wants the real `claude` CLI
 itself (its own update cadence, its own bug-for-bug behavior) driven by a
-non-Anthropic model, rather than rolo-claude's own agent loop.
+non-Anthropic model, rather than halo's own agent loop.
 
 ```sh
-rolo-claude proxy --help
+halo proxy --help
 ```
 ```
 usage: claude-bridge [-h] [--serve] [--port PORT] [--state-dir STATE_DIR]
@@ -1050,14 +1060,14 @@ options:
 
 | Form | What |
 |---|---|
-| `rolo-claude proxy launch [claude flags...] [prompt]` | starts (or reuses) the proxy server, then execs the **real** `claude` binary pointed at it -- every argument after `launch` is forwarded to `claude` verbatim, including `-h`/`--help` (so `rolo-claude proxy launch --help` prints the real Claude Code help, not this project's own) |
-| `rolo-claude proxy --serve [--port PORT] [--state-dir DIR]` | runs the proxy server in the foreground |
-| `rolo-claude proxy --probe` | outbound reachability check for both providers, caches the OpenRouter model list |
-| `rolo-claude proxy --config` | resolved configuration as JSON, secrets redacted |
-| `rolo-claude proxy --stop` | shuts down a running proxy server |
+| `halo proxy launch [claude flags...] [prompt]` | starts (or reuses) the proxy server, then execs the **real** `claude` binary pointed at it -- every argument after `launch` is forwarded to `claude` verbatim, including `-h`/`--help` (so `halo proxy launch --help` prints the real Claude Code help, not this project's own) |
+| `halo proxy --serve [--port PORT] [--state-dir DIR]` | runs the proxy server in the foreground |
+| `halo proxy --probe` | outbound reachability check for both providers, caches the OpenRouter model list |
+| `halo proxy --config` | resolved configuration as JSON, secrets redacted |
+| `halo proxy --stop` | shuts down a running proxy server |
 
 ```sh
-BRIDGE_TEST_HOME=/tmp/demo-home rolo-claude proxy --probe
+BRIDGE_TEST_HOME=/tmp/demo-home halo proxy --probe
 ```
 ```
 Databricks: not configured

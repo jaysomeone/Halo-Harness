@@ -1,10 +1,11 @@
-"""rolo_claude.tui.widgets.transcript -- the scrolling transcript and its
+"""halo_harness.tui.widgets.transcript -- the scrolling transcript and its
 plain (non-card) content widgets: `UserMessage`, `AssistantText` (streamed
 via `Markdown.get_stream()`), `ThinkingBlock` (collapsed by default),
-`SystemNote`, `FoldedHistory`, and the `Transcript(VerticalScroll)`
-container that owns mounting/streaming/folding for all of them plus the
-card widgets from `cards.py`/`diffview.py` (mounted through the same
-`_mount_tracked` so folding counts everything uniformly).
+`SystemNote`, `FoldedHistory`, `IntroLine` (the 2.0.0 launch intro's own
+typewriter line), and the `Transcript(VerticalScroll)` container that owns
+mounting/streaming/folding for all of them plus the card widgets from
+`cards.py`/`diffview.py` (mounted through the same `_mount_tracked` so
+folding counts everything uniformly).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Markdown, Static
 
-from rolo_claude.tui.keys import FOLD_AFTER_WIDGETS
+from halo_harness.tui.keys import FOLD_AFTER_WIDGETS
 
 
 class UserMessage(Static):
@@ -33,6 +34,83 @@ class SystemNote(Static):
 
     def __init__(self, text: str, *, kind: str = "note") -> None:
         super().__init__(text, markup=False, classes=f"system-note system-note-{kind}")
+
+
+class IntroLine(Static):
+    """2.0.0 Launch intro (rolo, 2026-09-30): `I am just a copy, of a copy,
+    of a copy... halo <version>` typed out character by character, like
+    someone typing it, the first time a fresh interactive session mounts
+    (see `BridgeApp.on_mount`/`tui/launch.py`'s own `show_intro` gating --
+    this widget itself has no opinion on WHEN it should appear, only how it
+    types once mounted).
+
+    A plain, self-rescheduling `Textual.Widget.set_timer` drives the reveal
+    -- no thread, no `asyncio.sleep` loop -- one more character per tick,
+    a block cursor appended while typing. The per-character delay is a
+    LOOKED-UP class attribute (not inlined into the scheduling call) so a
+    test can shrink `BASE_DELAY_S`/`PAUSE_DELAY_S`/`ELLIPSIS_PAUSE_DELAY_S`
+    before mounting instead of waiting out the real ~2s animation. `skip()`
+    (any keypress, or a submitted prompt, per the brief) reveals the rest
+    instantly and is idempotent -- safe to call after the line is already
+    done.
+
+    `_reveal_one`/`skip` each call `self.update(...)` DIRECTLY rather than
+    through a shared `_render()` helper -- empirically load-bearing on the
+    installed Textual (8.2.8): routing a self-rescheduled timer's `update()`
+    through an intermediary method reliably corrupted a LATER widget's own
+    layout cache (`visual.get_height()` on `None`) at app-shutdown time,
+    reproduced in isolation outside this whole app; inlining the two calls
+    (there are only ever two: one per tick, one on completion/skip) avoids
+    it entirely. Keep this inlined if this class is ever touched again."""
+
+    BASE_DELAY_S = 0.035     # "about 35 ms per character"
+    PAUSE_DELAY_S = 0.15     # slightly longer pause after a comma
+    ELLIPSIS_PAUSE_DELAY_S = 0.22  # slightly longer pause after "..."
+    CURSOR = "█"        # block cursor, shown only while typing
+
+    def __init__(self, full_text: str) -> None:
+        super().__init__("", markup=False, classes="intro-line")
+        self.full_text = full_text
+        self._shown = 0
+        self.done = False
+        self._timer = None
+
+    def on_mount(self) -> None:
+        self._timer = self.set_timer(self._delay_before_next_char(), self._reveal_one)
+
+    def _delay_before_next_char(self) -> float:
+        """The pause BEFORE revealing the character at `self._shown`,
+        based on what was just revealed (index `self._shown - 1`) -- a
+        comma, or the line's own ellipsis having just completed."""
+        if self._shown == 0:
+            return self.BASE_DELAY_S
+        if self.full_text[max(0, self._shown - 3): self._shown] == "...":
+            return self.ELLIPSIS_PAUSE_DELAY_S
+        if self.full_text[self._shown - 1] == ",":
+            return self.PAUSE_DELAY_S
+        return self.BASE_DELAY_S
+
+    def _reveal_one(self) -> None:
+        self._shown += 1
+        if self._shown < len(self.full_text):
+            self.update(self.full_text[: self._shown] + self.CURSOR)
+            self._timer = self.set_timer(self._delay_before_next_char(), self._reveal_one)
+        else:
+            self.done = True
+            self.update(self.full_text[: self._shown])  # cursor gone -- the line is complete
+
+    def skip(self) -> None:
+        """Any keypress, or a submitted prompt, during the intro: reveal
+        the rest instantly (the brief: "no waiting") -- a no-op once the
+        line is already done, so callers never need to check `done` first."""
+        if self.done:
+            return
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self._shown = len(self.full_text)
+        self.done = True
+        self.update(self.full_text)
 
 
 class FoldedHistory(Static):

@@ -1,4 +1,4 @@
-"""rolo_claude.tui.widgets.cards -- inline prompt cards (D-TUI scope D):
+"""halo_harness.tui.widgets.cards -- inline prompt cards (D-TUI scope D):
 `ToolCard`, `PermissionCard`, `QuestionCard`, `PlanCard`, plus the small
 `PagerScreen` modal `o` opens from a focused `ToolCard`. Every card is
 `can_focus=True` and owns its own `BINDINGS` -- `app.py` gives it focus the
@@ -103,7 +103,7 @@ class ToolCard(Static, can_focus=True):
 
     def _try_render_inline(self, image: dict, protocol: str, *, write_fn: Optional[Callable] = None) -> None:
         import base64
-        from rolo_claude.tui import images as image_mod
+        from halo_harness.tui import images as image_mod
 
         data_b64, media_type = image.get("data"), image.get("media_type") or "image/png"
         if not data_b64:
@@ -312,7 +312,7 @@ def _option_texts(options) -> list:
 
 class QuestionCard(Static, can_focus=True):
     """`AskUserQuestion`'s actual schema today is one question + a flat
-    list of string options (`rolo_claude/tools/ask_user_question.py`) --
+    list of string options (`halo_harness/tools/ask_user_question.py`) --
     rendered as one `OptionList` plus an "Other..." entry. A forward-
     compatible `input["questions"]` (a list of `{question, options}`) is
     also accepted, one OptionList per question, `tab` moving between them;
@@ -595,7 +595,7 @@ class ImproveCard(Static, can_focus=True):
     """One drafted `/improve` candidate (H10 Part B3, RewindCard's own
     confirm/cancel pattern extended to 5 actions): kind badge, target path,
     rendered body (or a unified diff when the target already carries the
-    rolo-claude provenance comment -- an UPDATE), rationale, evidence list
+    halo provenance comment -- an UPDATE), rationale, evidence list
     (`session#seq`; `o` opens the first excerpt in a pager), the
     provenance line itself. `on_action(action, data)` fires exactly once,
     `action` in `{"apply", "edit", "skip", "dismiss", "quit"}` (`data` is
@@ -629,7 +629,7 @@ class ImproveCard(Static, can_focus=True):
     def _refresh(self) -> None:
         c = self.candidate
         lines = [f"✦ Improve candidate {self.index}/{self.total}: [{c.kind}] {c.title}"]
-        target_note = " (would UPDATE an existing rolo-claude file)" if self.diff_lines else " (new file)"
+        target_note = " (would UPDATE an existing halo file)" if self.diff_lines else " (new file)"
         lines.append(f"  target: {c.scope}/{c.path}{target_note}")
         lines.append(f"  confidence: {c.confidence}")
         if c.rationale:

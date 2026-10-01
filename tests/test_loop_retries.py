@@ -29,10 +29,10 @@ test, TESTS = new_registry()
 
 
 def _new_session(fh, mock, *, model="or:mock/model"):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
@@ -93,7 +93,7 @@ def test_overflow_classifier_category_reaches_the_error_event(ctx: Ctx):
     _step (not just defined/tested in isolation) -- an unfixable context
     overflow's error event carries the dsh-taxonomy `category` alongside
     its own `context_overflow` err_type."""
-    from rolo_claude.providers.errors import CONTEXT_WINDOW_EXCEEDED
+    from halo_harness.providers.errors import CONTEXT_WINDOW_EXCEEDED
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
@@ -115,7 +115,7 @@ def test_finding_3_length_truncated_call_yields_error_result_paired_log(ctx: Ctx
     harness_mode=True/strict_tool_json=True) must get a named `is_error`
     tool_result telling the model to split the operation -- not an
     unpaired tool_use that silently ends the turn (the pre-H2 bug)."""
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
@@ -176,10 +176,10 @@ def test_finding_7_loop_honours_databricks_429_retry_after(ctx: Ctx):
     """finding 16 required test #8: the LOOP (not just stream_completion in
     isolation) must actually WAIT the retry_after a Databricks 429 body
     names before its retry, then succeed."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     calls = {"n": 0}
 
@@ -232,7 +232,7 @@ def test_h8_retry_wait_cap_raised_to_300s_and_logged(ctx: Ctx):
     legitimately ask for several minutes) is honoured up to 5 minutes
     instead of being silently clipped to one."""
     import logging
-    from rolo_claude.agent.loop import _MAX_RETRY_WAIT_S, _capped_retry_delay
+    from halo_harness.agent.loop import _MAX_RETRY_WAIT_S, _capped_retry_delay
 
     ctx.check(f"the cap constant itself is 300s, got {_MAX_RETRY_WAIT_S}", _MAX_RETRY_WAIT_S == 300.0)
 

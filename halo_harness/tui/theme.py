@@ -1,12 +1,12 @@
-"""rolo_claude.tui.theme -- Textual CSS variables for each theme name
-`rolo_claude.theme` resolves (U0's module does the NAME resolution/
+"""halo_harness.tui.theme -- Textual CSS variables for each theme name
+`halo_harness.theme` resolves (U0's module does the NAME resolution/
 persistence, pure, no textual import; this module maps a resolved name to
 actual colors, textual-only, imported solely from `tui/app.py`).
 """
 
 from __future__ import annotations
 
-from rolo_claude.theme import DEFAULT_THEME, is_valid_theme  # re-exported for tui/app.py
+from halo_harness.theme import DEFAULT_THEME, is_valid_theme  # re-exported for tui/app.py
 
 _DARK = {
     "bridge-bg": "#1e1e2e", "bridge-surface": "#282838", "bridge-panel": "#313244",
@@ -49,7 +49,7 @@ def variables_for(theme_name: str) -> dict:
     """CSS custom-property values (no leading `$`) for `theme_name` --
     always returns a complete dict, falling back to `claude-dark`'s
     palette for an unrecognized name rather than raising (a stale/typo'd
-    theme must never crash startup, matching `rolo_claude.theme`'s own
+    theme must never crash startup, matching `halo_harness.theme`'s own
     fallback philosophy)."""
     if not is_valid_theme(theme_name):
         theme_name = DEFAULT_THEME

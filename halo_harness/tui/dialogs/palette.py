@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.palette -- `Ctrl+P` command palette (U5 scope A,
+"""halo_harness.tui.dialogs.palette -- `Ctrl+P` command palette (U5 scope A,
 adapted from OpenCode's own `ctrl+p`): one fuzzy-filterable list over slash
 commands, skills (already a `source == "skill"` subset of the registry),
 recent files (top-level `cwd` listing, reusing `tui/completion.py`'s own
@@ -16,7 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from rolo_claude.tui.dialogs.listnav import NavInput
+from halo_harness.tui.dialogs.listnav import NavInput
 
 _KIND_GLYPH = {"command": "/", "skill": "✦", "file": "\U0001f4c4", "session": "\U0001f552"}
 

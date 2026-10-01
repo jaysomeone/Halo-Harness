@@ -1,9 +1,9 @@
-"""rolo_claude.mcp.tools_cache -- per-server tool cache (H13 Part A: "lazy
+"""halo_harness.mcp.tools_cache -- per-server tool cache (H13 Part A: "lazy
 MCP start by default"). A lazy server's tool NAMES and DESCRIPTIONS must be
 known before it is ever connected, so the frozen catalog/ToolSearch can find
 and preload/defer them on session start without spawning a single process.
 
-One JSON file per server, under `~/.rolo-claude/mcp/tools-cache/<server>.
+One JSON file per server, under `~/.halo/mcp/tools-cache/<server>.
 json`, keyed by a hash of the server's own config entry (command/args/env/
 url/headers -- the fields that actually determine what tools a `tools/list`
 would return; `cwd`/`timeout`/`alwaysLoad`/`mcpLazy`/scope never do). A
@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home
-from rolo_claude.mcp.manager import sanitize_name
+from halo_harness.config.paths import bridge_home
+from halo_harness.mcp.manager import sanitize_name
 
 
 def cache_dir() -> Path:

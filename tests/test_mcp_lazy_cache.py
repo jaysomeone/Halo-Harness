@@ -1,6 +1,6 @@
 """tests.test_mcp_lazy_cache -- H13 Part A ("lazy MCP start by default" +
-the per-server tools cache): `rolo_claude/mcp/tools_cache.py`, the tri-state
-`mcpLazy` resolution in `rolo_claude/mcp/manager.py`
+the per-server tools cache): `halo_harness/mcp/tools_cache.py`, the tri-state
+`mcpLazy` resolution in `halo_harness/mcp/manager.py`
 (`_apply_lazy_defaults`), `mcp_setup.bootstrap_lazy_from_cache`, the new
 `"cached"` handle state (`McpManager.mark_cached`/`all_tools`/
 `ensure_started`/`reconnect`), and the stale-cache-notice path
@@ -19,8 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.mcp import manager as M
-from rolo_claude.mcp import tools_cache as TC
+from halo_harness.mcp import manager as M
+from halo_harness.mcp import tools_cache as TC
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -43,7 +43,7 @@ class _isolated_state_dir:
     def __enter__(self):
         self._old = os.environ.get("BRIDGE_STATE_DIR")
         self._tmp = tempfile.TemporaryDirectory()
-        os.environ["BRIDGE_STATE_DIR"] = str(Path(self._tmp.name) / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(Path(self._tmp.name) / ".halo")
         return Path(os.environ["BRIDGE_STATE_DIR"])
 
     def __exit__(self, *exc):
@@ -174,7 +174,7 @@ def test_global_settings_mcplazy_false_flips_the_default_but_not_an_explicit_per
 
 @test
 def test_bootstrap_with_no_cache_connects_once_and_writes_a_fresh_cache(ctx: Ctx):
-    from rolo_claude.mcp_setup import bootstrap_lazy_from_cache
+    from halo_harness.mcp_setup import bootstrap_lazy_from_cache
     with _isolated_state_dir():
         cfg = _fake_cfg("boot1", lazy=True)
         mgr = M.McpManager({"boot1": cfg}, tool_env=dict(os.environ), cwd=REPO_DIR, lazy_names={"boot1"})
@@ -196,7 +196,7 @@ def test_bootstrap_with_no_cache_connects_once_and_writes_a_fresh_cache(ctx: Ctx
 def test_bootstrap_with_6_servers_and_a_full_matching_cache_makes_zero_connections(ctx: Ctx):
     """H13 Part A acceptance line, verbatim: "startup with 6 configured
     servers and a full cache makes zero connections until a tool is used"."""
-    from rolo_claude.mcp_setup import bootstrap_lazy_from_cache
+    from halo_harness.mcp_setup import bootstrap_lazy_from_cache
     with _isolated_state_dir():
         names = [f"srv{i}" for i in range(6)]
         configs = {n: _fake_cfg(n, lazy=True) for n in names}
@@ -233,7 +233,7 @@ def test_bootstrap_connects_multiple_uncached_lazy_servers_in_parallel_not_seria
     roughly ONE slow-start's worth of wall clock, not three (same shape as
     `test_mcp_manager.py::test_h9_ensure_lazy_started_all_starts_targets_in_parallel`)."""
     import time
-    from rolo_claude.mcp_setup import bootstrap_lazy_from_cache
+    from halo_harness.mcp_setup import bootstrap_lazy_from_cache
     with _isolated_state_dir():
         names = ["slowA", "slowB", "slowC"]
         configs = {n: _fake_cfg(n, lazy=True, extra_env={"FAKE_MCP_MODE": "slow", "FAKE_MCP_SLEEP_S": "1.5"})
@@ -253,7 +253,7 @@ def test_bootstrap_connects_multiple_uncached_lazy_servers_in_parallel_not_seria
 
 @test
 def test_cache_invalidated_by_a_config_change_reconnects_and_recaches(ctx: Ctx):
-    from rolo_claude.mcp_setup import bootstrap_lazy_from_cache
+    from halo_harness.mcp_setup import bootstrap_lazy_from_cache
     with _isolated_state_dir():
         old_cfg = _fake_cfg("changed", lazy=True)
         TC.write_cache("changed", key=TC.config_cache_key(old_cfg),
@@ -300,8 +300,8 @@ def test_tool_call_on_a_cached_server_connects_it_for_real_and_runs(ctx: Ctx):
 
 @test
 def test_lazy_server_that_fails_on_first_use_gives_an_is_error_result_naming_the_server(ctx: Ctx):
-    from rolo_claude.tools.mcp_tool import McpTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.tools.mcp_tool import McpTool
+    from halo_harness.tools.base import ToolContext
 
     with _isolated_state_dir():
         cfg = _fake_cfg("boom", mode="crash", lazy=True)
@@ -323,10 +323,10 @@ def test_lazy_server_that_fails_on_first_use_gives_an_is_error_result_naming_the
 
 @test
 def test_toolsearch_finds_a_cached_tools_definition_without_connecting(ctx: Ctx):
-    from rolo_claude.agent.catalog import SessionCatalog
-    from rolo_claude.tools.registry import ToolRegistry
-    from rolo_claude.tools.tool_search import ToolSearchTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.agent.catalog import SessionCatalog
+    from halo_harness.tools.registry import ToolRegistry
+    from halo_harness.tools.tool_search import ToolSearchTool
+    from halo_harness.tools.base import ToolContext
 
     with _isolated_state_dir():
         cfg = _fake_cfg("srchsrv", lazy=True)
@@ -352,8 +352,8 @@ def test_toolsearch_finds_a_cached_tools_definition_without_connecting(ctx: Ctx)
 
 @test
 def test_stale_cache_is_detected_on_real_connect_and_catalog_refreshed(ctx: Ctx):
-    from rolo_claude.agent.catalog import SessionCatalog
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.agent.catalog import SessionCatalog
+    from halo_harness.tools.registry import ToolRegistry
 
     with _isolated_state_dir():
         cfg = _fake_cfg("stale1", lazy=True)
@@ -382,10 +382,10 @@ def test_stale_cache_is_detected_on_real_connect_and_catalog_refreshed(ctx: Ctx)
 
 @test
 def test_mcp_tool_run_surfaces_the_stale_cache_note_alongside_the_result(ctx: Ctx):
-    from rolo_claude.agent.catalog import SessionCatalog
-    from rolo_claude.tools.registry import ToolRegistry
-    from rolo_claude.tools.mcp_tool import McpTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.agent.catalog import SessionCatalog
+    from halo_harness.tools.registry import ToolRegistry
+    from halo_harness.tools.mcp_tool import McpTool
+    from halo_harness.tools.base import ToolContext
 
     with _isolated_state_dir():
         cfg = _fake_cfg("stale2", lazy=True)
@@ -439,7 +439,7 @@ def test_build_manager_end_to_end_zero_connect_with_cache_then_one_on_tool_use(c
     """The brief's own acceptance line, through the SAME `build_manager`
     every real session (headless + TUI) and `mcp list`/`mcp get` call --
     not just the lower-level helpers the tests above exercise directly."""
-    from rolo_claude.mcp_setup import build_manager
+    from halo_harness.mcp_setup import build_manager
 
     with _isolated_state_dir():
         claude_json = {"mcpServers": {"e2e": {"type": "stdio", "command": sys.executable,

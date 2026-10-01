@@ -13,13 +13,13 @@ sections, because the H9 brief asks for one explicitly).
   harness + static pass), and (after a fresh whole-tree review landed
   mid-pass) two more working the review's independent findings clusters.
   A mid-pass coordination note from Fable (multiple agents editing the
-  same tree concurrently) consolidated all further `rolo_claude/`/`tests/`
+  same tree concurrently) consolidated all further `halo_harness/`/`tests/`
   edits onto this worker alone; every sub-agent's remaining findings came
   back as reports, reviewed and applied here.
 - **Base commit**: `d653a78` ("H5c: close the remaining 19 findings of the
   H5b review") -- working tree only, nothing committed by this pass
 - **Environment**: Windows 11 (build/test host) + WSL Ubuntu (`~/rolo-
-  claude-wt`, `~/rolo-claude-wt-venv`); the Kali VM (`192.0.2.50`) was
+  claude-wt`, `~/halo-harness-wt-venv`); the Kali VM (`192.0.2.50`) was
   unreachable on the first retry at the start of this pass (connection
   timed out) -- see "Kali VM" below for the end-of-pass retry; OpenRouter
   key configured (real DeepSeek V4.1 Flash used for every "live" row
@@ -45,11 +45,11 @@ recorded at the end of this file, in "Final suite verification".
 | Baseline | `test_tui.py` | 42/42, exit 0 | Exact match, exit 0 | PASS | WSL Ubuntu |
 | H9 rg parity | Grep tool with/without `rg` on PATH | identical output shape | Byte-identical content both ways | PASS | WSL Ubuntu |
 | H9 rg parity | `sudo -n apt-get install -y ripgrep` | installs or fails cleanly | "sudo: a password is required", no hang | PASS (documented) | WSL Ubuntu |
-| H9 install | `uv tool install --editable .` | installs, `--version` works | `rolo-claude 0.3.0` | PASS | WSL Ubuntu |
-| H9 install | `pip install -e .` in a venv | installs, `--version` works | `rolo-claude 0.3.0` | PASS | WSL Ubuntu |
+| H9 install | `uv tool install --editable .` | installs, `--version` works | `halo 0.3.0` | PASS | WSL Ubuntu |
+| H9 install | `pip install -e .` in a venv | installs, `--version` works | `halo 0.3.0` | PASS | WSL Ubuntu |
 | H9 install | `pip install --user -e .` (no venv, no flag) | PEP 668 refusal | Exact Debian refusal text incl. `--break-system-packages` hint | PASS (expected refusal) | WSL Ubuntu |
-| H9 install | `pip install --user --break-system-packages -e .` | installs | `rolo-claude 0.3.0` | PASS | WSL Ubuntu |
-| H9 fresh clone | `git clone https://github.com/roloVibes/rolo-claude` | clones, or a documented reason it can't | Repo is private; WSL has no git/gh credentials for it -- BLOCKED, documented, not attempted around (no credential exfiltration) | BLOCKED (documented, expected) | WSL Ubuntu |
+| H9 install | `pip install --user --break-system-packages -e .` | installs | `halo 0.3.0` | PASS | WSL Ubuntu |
+| H9 fresh clone | `git clone https://github.com/roloVibes/Halo-Harness` | clones, or a documented reason it can't | Repo is private; WSL has no git/gh credentials for it -- BLOCKED, documented, not attempted around (no credential exfiltration) | BLOCKED (documented, expected) | WSL Ubuntu |
 | H9 fixtures | `doctor`/`mcp list` vs real WSL `~/.claude` | honest status, no crash | Real OpenRouter key found; exit 0 | PASS | WSL Ubuntu |
 | H9 fixtures | `doctor`/`mcp list` vs copied Windows `~/.claude.json` (15 ableton-console servers pointing at Windows venvs) | all fail to connect gracefully, no crash | All 15 report "Failed to connect" individually, exit 0 | PASS | WSL Ubuntu |
 | H1 acceptance | `-p "read README.md ... number of lines"` | matches `wc -l` | README.md line count matched exactly | PASS (live) | WSL Ubuntu |
@@ -68,7 +68,7 @@ recorded at the end of this file, in "Final suite verification".
 | H9-Linux repro | `claude plugin install` V2 array-of-records manifest | drives MCP servers + hooks | Both pinning tests re-run live, pass | PASS | WSL Ubuntu |
 
 **Bugs found in Part A** (fixed centrally, see "Bugs found and fixed" below):
-`doctor.py` had no `rg`/`$EDITOR`/Bash-shell-presence checks; `rolo-claude
+`doctor.py` had no `rg`/`$EDITOR`/Bash-shell-presence checks; `halo
 proxy launch` could never find a native POSIX `claude` (CRITICAL on Linux);
 a PreToolUse hook written in the PermissionRequest `decision.behavior`
 shape was a silent no-op; `--playwright` built a server config with an
@@ -92,15 +92,15 @@ Kali VM instead, see below); `ant:`/Databricks routes (no key/VPN).
 
 | Milestone | Command | Expected | Observed | Pass/Fail | Platform |
 |---|---|---|---|---|---|
-| H9 transfer | `tar ... \| ssh kali tar -x` into `~/rolo-claude-h9` (private repo: no clone credentials on the VM) | tree present, 0.3.0 | `TRANSFER_OK`, `__version__` 0.3.0 | PASS | Kali |
+| H9 transfer | `tar ... \| ssh kali tar -x` into `~/halo-h9` (private repo: no clone credentials on the VM) | tree present, 0.3.0 | `TRANSFER_OK`, `__version__` 0.3.0 | PASS | Kali |
 | H9 install | `python3 -m pip install --user -e .` (Python 3.13.15, pip 26) | PEP 668 refusal | `error: externally-managed-environment` | PASS (expected refusal) | Kali |
-| H9 install | `python3 -m venv ~/rc-h9-venv && pip install -e .` | installs | `rolo-claude 0.3.0` | PASS | Kali |
-| H9 install | `pipx install --editable .` | installs | `rolo-claude 0.3.0` | PASS | Kali |
-| H9 install | `pipx install uv; uv tool install --editable .` | installs | `Installed 1 executable: rolo-claude`, `rolo-claude 0.3.0` | PASS | Kali |
-| H9 doctor | `rolo-claude doctor` against the VM's REAL `~/.claude` | honest, no crash | exit 0: real `~/.claude`/`.claude.json` found, `claude=~/.local/bin/claude` + Chrome native host under `~/.config/google-chrome/NativeMessagingHosts`, node/npx OK, rg WARN, `$EDITOR` WARN, bash OK, **a real `claude plugin install`ed MCP server discovered (`plugin_claude-mem_mcp-search`)**, Linux (Kali) recognised, xclip found | PASS | Kali |
-| H9 models | `rolo-claude models` | lists or an honest empty table | empty OpenRouter table (no key in the login env), models.dev cached (223 providers) | PASS (see deferred: empty-table wording) | Kali |
-| H9 mcp list | `rolo-claude mcp list` against the VM's real 4 user servers + 1 plugin server | honest per-server health, no crash | exit 0: `caido-mcp-extended` (npx tsx), `mcp-kali-server`, `plugin_claude-mem_mcp-search` Connected; `caido` (binary absent) and `vibe-hacking` (a real `type: http` server, nothing listening on :3333) honestly Failed | PASS | Kali |
-| H9 vault | grep `~/Documents/vibes/` for claude-bridge/claude_bridge/rolo-claude | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
+| H9 install | `python3 -m venv ~/rc-h9-venv && pip install -e .` | installs | `halo 0.3.0` | PASS | Kali |
+| H9 install | `pipx install --editable .` | installs | `halo 0.3.0` | PASS | Kali |
+| H9 install | `pipx install uv; uv tool install --editable .` | installs | `Installed 1 executable: halo`, `halo 0.3.0` | PASS | Kali |
+| H9 doctor | `halo doctor` against the VM's REAL `~/.claude` | honest, no crash | exit 0: real `~/.claude`/`.claude.json` found, `claude=~/.local/bin/claude` + Chrome native host under `~/.config/google-chrome/NativeMessagingHosts`, node/npx OK, rg WARN, `$EDITOR` WARN, bash OK, **a real `claude plugin install`ed MCP server discovered (`plugin_claude-mem_mcp-search`)**, Linux (Kali) recognised, xclip found | PASS | Kali |
+| H9 models | `halo models` | lists or an honest empty table | empty OpenRouter table (no key in the login env), models.dev cached (223 providers) | PASS (see deferred: empty-table wording) | Kali |
+| H9 mcp list | `halo mcp list` against the VM's real 4 user servers + 1 plugin server | honest per-server health, no crash | exit 0: `caido-mcp-extended` (npx tsx), `mcp-kali-server`, `plugin_claude-mem_mcp-search` Connected; `caido` (binary absent) and `vibe-hacking` (a real `type: http` server, nothing listening on :3333) honestly Failed | PASS | Kali |
+| H9 vault | grep `~/Documents/vibes/` for claude-bridge/claude_bridge/halo | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
 | Suites + live lines | `~/vm_suites.sh`, `~/vm_live.sh` (venv; key handed over stdin, never on a command line) | green; pong / line count / Write-Edit-Bash / proxy pong / MCP call / --chrome / --playwright / stream-json / config untouched | see "Kali VM" at the end of this file | -- | Kali |
 
 ## Part B -- MCP compatibility matrix
@@ -119,8 +119,8 @@ WSL/Kali suite runs below).
 | 3 | `projects[cwd].mcpServers`, both key forms (`C:\...` / `C:/...`) | both resolve and merge, live connect via either | PASS |
 | 4 | `--mcp-config` file path + inline JSON | both live-connect | PASS |
 | 5 | Plugin-provided server, real V2 marketplace manifest | discovered, `mcp__plugin_<p>_<s>__<tool>` naming; a REAL `claude plugin install`ed server (claude-mem) is discovered on the Kali VM too | PASS |
-| 6 | Real `claude mcp add --scope user` | picked up by the next rolo-claude session | PASS |
-| 7 | `rolo-claude mcp add` visible to real `claude mcp list` | byte-shape now identical -- `"env": {}` is written exactly like the binary does (FIXED: `mcp_cli._build_entry` omitted it) | PASS |
+| 6 | Real `claude mcp add --scope user` | picked up by the next halo session | PASS |
+| 7 | `halo mcp add` visible to real `claude mcp list` | byte-shape now identical -- `"env": {}` is written exactly like the binary does (FIXED: `mcp_cli._build_entry` omitted it) | PASS |
 | 8 | `mcp remove` | both CLIs agree | PASS |
 | 9 | Unusual schemas ($ref/$defs/anyOf/tuple-items/enums/300 tools) survive Databricks and OpenRouter | real `McpTool` + `convert_tools()` + mock-Session wire capture. FIXED (a): there was NO OpenRouter-side normaliser at all -- the default family (deepseek) sent `$ref`/`$defs`/tuple-items unresolved; `tools/mcp_tool.py::normalize_tool_schema` now inlines local `$ref`s (cycle-safe), drops the emptied `$defs`, flattens tuple-items and collapses nullable `anyOf` for every OpenAI-shaped family (claude untouched). FIXED (b): the Databricks simplifier deleted a wide `anyOf` outright, leaving the property untyped -- it keeps the first typed variant now | PASS |
 | 10 | ToolSearch finds a new tool by name and keyword | PASS |
@@ -145,12 +145,12 @@ randomised point per run -- including during hooks, compaction, permission-decis
 waits, and (added mid-pass) the native-Anthropic SSE dialect specifically. A **220-iteration sweep
 (seeds 5000-5219) ran clean: 220/220, no hangs, no leaked threads/processes** after a harness-only
 bug (an incorrect hardcoded SSE chunk-size prefix in the fuzz helper itself, not in
-`rolo_claude/`) was found and fixed. A fast, deterministic subset is wired permanently into
+`halo_harness/`) was found and fixed. A fast, deterministic subset is wired permanently into
 `tests/run_all.py` via `tests/test_fuzz_h9.py` (3 tests, incl. a seed-reproducibility check).
 
 **Static pass**:
 - `python -X dev -W error::ResourceWarning tests/run_all.py` -- clean, no warnings, exit 0.
-- `ruff 0.16.9 --select F,E9,B` over `rolo_claude/` -- 43 hits reviewed; the one real bug
+- `ruff 0.16.9 --select F,E9,B` over `halo_harness/` -- 43 hits reviewed; the one real bug
   (`providers/http.py` using `Path` without importing it, masked at runtime by `from __future__
   import annotations`) is fixed (import added); the rest are cosmetic (unused imports/vars,
   raise-without-from) and left as-is (no behavioural impact).
@@ -185,7 +185,7 @@ duplicate-result/exit-code bugs), 13 (child usage/cost never reaches the parent'
 17, 20, 26, 27, 30 (minors). A second sub-agent worked the independent major/minor cluster
 (findings 4, 14, 15, 22, 23, 24, 25, 33 -- secrets sanitizer, MCP-mentions UI-thread blocking,
 NotebookEdit cell-id gaps, Databricks vendored-fallback/models.dev cache, offline-install/cp313,
-`bin/rolo-claude` symlink resolution, `doctor.py` version-check/work-probe, README/INSTALL doc
+`bin/halo` symlink resolution, `doctor.py` version-check/work-probe, README/INSTALL doc
 claims); a **mid-pass coordination issue** (multiple agents editing the same tree concurrently,
 flagged by the coordinator) halted further edits from this worker once the two criticals and the
 core of the background-job cluster were done and tested -- see the final report for the full
@@ -195,11 +195,11 @@ account.
 
 | Item | Status | Evidence |
 |---|---|---|
-| Period-2 doom-loop detector (A,B,A,B alternating identical calls), breaker still armed in auto mode | FIXED | `rolo_claude/agent/loop.py` (`_loop_breaker_history`/`_loop_breaker_period2`); `tests/test_loop_tools.py::test_h9_loop_breaker_period2_ping_pong_detected` (denies by call 7 / ends by call 10, vs. call 9/15 for the plain per-key counter alone); armed in auto mode structurally (the breaker check runs before `permission_engine.decide()` in `_resolve_tool_call`, so no mode can skip it) |
-| Per-sub-command Bash rule matching audit (incl. trailing `" *"` wildcard, `Bash(git *)` vs bare `git`) | VERIFIED, already correct | `rolo_claude/permissions.py`'s `split_bash_segments`/`bash_allow_matches`/`bash_deny_or_ask_matches`/`_bash_wildcard_regex`; existing `tests/test_permissions.py` coverage (`test_bash_space_star_prefix_excludes_lsof`, `test_bash_inner_star_glob_includes_lsof`, compound/subshell/wrapper cases) already exercises this exact mechanism generically (command-agnostic), so it already covers `git` the same way it covers `ls` |
-| `doctor` checks for `rg`, `xclip`/`wl-copy`, `$EDITOR`, Git Bash (win32), `claude` (`--chrome`), `npx` (`--playwright`) | FIXED (rg/$EDITOR/shell were missing) | `rolo_claude/doctor.py` (`_check_ripgrep`, `_check_editor`, `_check_shell`); `tests/test_doctor_mcp_config_cli.py::test_h9_doctor_reports_ripgrep_editor_and_shell`; xclip/wl-copy (`clipboard_doctor_line`), `claude` (`_check_chrome`) and `npx` (`_check_playwright`) were already wired from H5b/H8 |
+| Period-2 doom-loop detector (A,B,A,B alternating identical calls), breaker still armed in auto mode | FIXED | `halo_harness/agent/loop.py` (`_loop_breaker_history`/`_loop_breaker_period2`); `tests/test_loop_tools.py::test_h9_loop_breaker_period2_ping_pong_detected` (denies by call 7 / ends by call 10, vs. call 9/15 for the plain per-key counter alone); armed in auto mode structurally (the breaker check runs before `permission_engine.decide()` in `_resolve_tool_call`, so no mode can skip it) |
+| Per-sub-command Bash rule matching audit (incl. trailing `" *"` wildcard, `Bash(git *)` vs bare `git`) | VERIFIED, already correct | `halo_harness/permissions.py`'s `split_bash_segments`/`bash_allow_matches`/`bash_deny_or_ask_matches`/`_bash_wildcard_regex`; existing `tests/test_permissions.py` coverage (`test_bash_space_star_prefix_excludes_lsof`, `test_bash_inner_star_glob_includes_lsof`, compound/subshell/wrapper cases) already exercises this exact mechanism generically (command-agnostic), so it already covers `git` the same way it covers `ls` |
+| `doctor` checks for `rg`, `xclip`/`wl-copy`, `$EDITOR`, Git Bash (win32), `claude` (`--chrome`), `npx` (`--playwright`) | FIXED (rg/$EDITOR/shell were missing) | `halo_harness/doctor.py` (`_check_ripgrep`, `_check_editor`, `_check_shell`); `tests/test_doctor_mcp_config_cli.py::test_h9_doctor_reports_ripgrep_editor_and_shell`; xclip/wl-copy (`clipboard_doctor_line`), `claude` (`_check_chrome`) and `npx` (`_check_playwright`) were already wired from H5b/H8 |
 | Sampling-table audit (`model_table.json` temperature/top_p/top_k vs `reports/Open weight model adapter rules.md`) | AUDITED, no phantom values, two real gaps fixed | Line-by-line comparison of all 60 OpenRouter + 22 Databricks rows against the report found no incorrect values and confirmed the phantom "Qwen 0.55" does not exist anywhere in this table; found and fixed: (1) `sampling_unsupported_params` was present in every row but had no matching `ProviderProfile` field, so it was silently dropped on load -- wired end to end and enforced in `build_request_body`; (2) four rows had explanatory prose baked into the JSON key itself (`"qwen/qwen3-max (thinking sibling ...)"` etc.), making them permanently unreachable by exact-match lookup -- keys split/corrected. See "Bugs found and fixed". |
-| Lazy MCP start inside ToolSearch (serial, unabortable, up to `MCP_TIMEOUT` per server) | FIXED | `rolo_claude/mcp/manager.py`'s `_start_targets_parallel` (shared by `start_all()` and `ensure_lazy_started_all(abort=...)`); `ctx.abort` threaded from `tools/tool_search.py` through `agent/catalog.py` to the manager; `tests/test_mcp_manager.py` |
+| Lazy MCP start inside ToolSearch (serial, unabortable, up to `MCP_TIMEOUT` per server) | FIXED | `halo_harness/mcp/manager.py`'s `_start_targets_parallel` (shared by `start_all()` and `ensure_lazy_started_all(abort=...)`); `ctx.abort` threaded from `tools/tool_search.py` through `agent/catalog.py` to the manager; `tests/test_mcp_manager.py` |
 
 ## Bugs found and fixed (with pinning tests)
 
@@ -264,9 +264,9 @@ _Consolidated list; see each Part above for discovery context._
 10. **Databricks simplifier deleted a wide `anyOf` entirely** (property left
     untyped) -- keeps the first typed variant, else `{"type": "object"}`.
     Test: `test_item9_bug_databricks_simplifier_drops_typing_for_a_wide_anyof`.
-11. **`rolo-claude mcp add` byte-shape** -- `_build_entry` omitted the
+11. **`halo mcp add` byte-shape** -- `_build_entry` omitted the
     `"env": {}` the real `claude mcp add` always writes. Test:
-    `test_item7_server_added_by_rolo_claude_mcp_add_is_listed_by_real_claude`.
+    `test_item7_server_added_by_halo_harness_mcp_add_is_listed_by_real_claude`.
 12. **`proxy launch` crashed on Linux (CRITICAL)** -- `bridge.find_claude_exe`
     only ever looked for `claude.exe`/`claude.cmd`/`~/.local/bin/claude.exe`;
     on Kali a real `~/.local/bin/claude` was never tried (and on WSL a
@@ -300,7 +300,7 @@ fixed in this pass is listed under "Deferred / not fixed" below.)_
 
 ## Deferred / not fixed (documented, not silently dropped)
 
-- `rolo-claude models` prints an empty OpenRouter table (header only) when
+- `halo models` prints an empty OpenRouter table (header only) when
   no `OPENROUTER_API_KEY` is configured, while `doctor` says the vendored
   fallback still applies -- cosmetic wording mismatch, no crash.
 - A fixture `~/.claude/settings.json` was re-serialised (pretty -> compact)
@@ -349,7 +349,7 @@ used it as the primary Linux target for the rest of the pass:
   path to place the key on the VM for the duration of the check and removed it after; this
   worker's own attempt to transfer the key was blocked by its own environment's credential-leakage
   permission classifier -- see the final report): `pong`; README line count matched `wc -l`
-  exactly (330); the Write->Edit->Bash chain produced `alpha delta gamma`; `rolo-claude proxy
+  exactly (330); the Write->Edit->Bash chain produced `alpha delta gamma`; `halo proxy
   launch ... -- -p pong` succeeded through the real `claude` binary (the `find_claude_exe` fix
   below is what made this possible on Kali at all); ToolSearch found and dispatched the real
   `claude-mem` plugin's own MCP tool; `--chrome` reached the real browser extension; `--playwright`
@@ -357,11 +357,11 @@ used it as the primary Linux target for the rest of the pass:
   disk-space constraint); `--output-format stream-json` produced the correct init/assistant/result
   line shape. `~/.claude.json` and `~/.claude/settings.json` were diffed before/after: the real
   `claude` binary itself rewrites its own session/project stats on every invocation (documented
-  behaviour, not something either harness's code does) -- rolo-claude's own write path to those
+  behaviour, not something either harness's code does) -- halo's own write path to those
   files is unchanged (`permissions.add_allow_rule`, only on an explicit "always allow" answer,
   never triggered by a `-p` run).
 - **Vault README pointer**: searched `~/Documents/vibes/` (content grep for
-  "claude-bridge"/"claude_bridge"/"rolo-claude", case-insensitive, plus a filename search),
+  "claude-bridge"/"claude_bridge"/"halo", case-insensitive, plus a filename search),
   confirmed independently by both worker sessions -- **no file describing claude-bridge exists
   anywhere in that vault**. Nothing to replace, nothing written.
 - **Cleanup**: temp clone/venv directories under the worker's own home directory were removed
@@ -404,12 +404,12 @@ folded into the existing files they extend, e.g. `tests/test_work_box.py` for fi
 tree for this pass: the working tree this file's own H9 numbers above already describe, unchanged
 except by this pass's own edits (no commit was made by either worker; still no tag).
 
-**Environment**: Windows 11 (build/test host); WSL Ubuntu (`~/rolo-claude-wt-venv`, pointed at a
+**Environment**: Windows 11 (build/test host); WSL Ubuntu (`~/halo-harness-wt-venv`, pointed at a
 live `/mnt/c/...` mount of the SAME working tree via `PYTHONPATH`, NOT the separate, stale
-`~/rolo-claude-wt` checkout that predates this pass -- that checkout's own editable pip install
+`~/halo-harness-wt` checkout that predates this pass -- that checkout's own editable pip install
 was silently shadowing the live tree and had to be `pip uninstall`-ed first, see "gotchas" below);
 the Kali VM (`192.0.2.50`, reachable this time), synced via a `tar` pipe over `ssh` into a
-fresh `~/rolo-claude-h9b/rolo-claude` (the repo is private with no stored credentials on the VM,
+fresh `~/halo-h9b/halo` (the repo is private with no stored credentials on the VM,
 same limitation the original H9 pass hit), with the SAME stale-editable-install gotcha fixed the
 same way.
 
@@ -426,7 +426,7 @@ same way.
   This specific pinning test did not exist before this pass -- the finding-12 CODE fix (restoring
   `$PATH` from a harness-private var as the wrapped script's own first line) was already in place,
   but nothing had run the brief's own `unshare -rm` verification for real until now.
-- `test_mcp_compat_matrix.py`'s `claude mcp add` <-> `rolo-claude mcp add` interop tests
+- `test_mcp_compat_matrix.py`'s `claude mcp add` <-> `halo mcp add` interop tests
   (items 6/7/8) against the REAL `claude` binary on WSL: fixed a genuine (if minor) test bug found
   by this verification -- a bare `"python"` command isn't on `$PATH` on a stock Debian/Ubuntu box
   (only `python3` is), so the real `claude mcp list`'s own health check reported `ENOENT`; switched
@@ -455,9 +455,9 @@ error::ResourceWarning tests/run_all.py` stays clean on Windows after this pass'
 (same 0-failed count as the plain run, confirming no new unclosed sockets/pipes/files).
 
 **Gotchas hit and fixed while verifying, worth recording for the next Linux pass**: (1) both the
-WSL and Kali `~-venv`s had a STALE editable `pip install` of `rolo_claude` pointing at an old,
-out-of-sync checkout (`~/rolo-claude-wt`) that silently shadowed `PYTHONPATH` -- always `pip
-uninstall rolo_claude` from those venvs before trusting a `PYTHONPATH`-based run against a freshly
+WSL and Kali `~-venv`s had a STALE editable `pip install` of `halo_harness` pointing at an old,
+out-of-sync checkout (`~/halo-harness-wt`) that silently shadowed `PYTHONPATH` -- always `pip
+uninstall halo_harness` from those venvs before trusting a `PYTHONPATH`-based run against a freshly
 synced tree, or re-`pip install -e` against the fresh path. (2) A background job's own marker text
 inside a shell COMMENT (`sleep 30 # marker`) never reaches `pgrep -f` on real Linux: a single
 simple command as a `bash -lc` script gets bash's own "one command" exec optimization, replacing

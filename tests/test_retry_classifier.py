@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers.errors import (
+from halo_harness.providers.errors import (
     RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_NO_HEADERS_MS, RETRY_MAX_RETRIES, SSE_CHUNK_IDLE_TIMEOUT_S,
     SSE_HEADER_TIMEOUT_S, is_context_overflow_message, is_retryable_message, retry_delay_ms,
 )
@@ -28,7 +28,7 @@ _OVERFLOW_WORDINGS = [
     "too many tokens in the request",                                        # OpenCode verbatim
     "token limit exceeded for this model",                                   # OpenCode verbatim
     "model_context_window_exceeded",                                        # OpenCode verbatim
-    "exceeded model token limit: 4096",                                      # Kimi (rolo-claude existing)
+    "exceeded model token limit: 4096",                                      # Kimi (halo existing)
     "input token count (500000) exceeds the maximum",                        # Gemini
     "context window exceeds limit",                                         # MiniMax 2013
     "quota_limit_reached",                                                  # DeepSeek terse

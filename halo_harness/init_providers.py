@@ -1,5 +1,5 @@
-"""rolo_claude.init_providers -- 1.0.1 hotfix 13: pure data/logic for
-`rolo-claude init`'s provider-first flow ("select a provider to set up"
+"""halo_harness.init_providers -- 1.0.1 hotfix 13: pure data/logic for
+`halo init`'s provider-first flow ("select a provider to set up"
 instead of a home/work/claude preset -- rolo: "I think work is actually
 setting up databricks... the init should scroll thru all possible
 providers and the user go thru that path of setup"). Kept separate from
@@ -50,7 +50,7 @@ PRESET_TO_PROVIDER = {"home": "openrouter", "work": "databricks", "claude": "cla
 
 
 def claude_login_available() -> bool:
-    from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
+    from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
     status = claude_auth_status()
     return bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
 
@@ -59,7 +59,7 @@ def provider_status(name: str) -> str:
     """`"configured"` / `"logged in"` (claude only) / `"not set up"` -- a
     status TAG only, never a decision: the picker's cursor position comes
     from `detect_default_provider` below, completely separately."""
-    from rolo_claude.providers.config import resolve_anthropic, resolve_databricks, resolve_openrouter
+    from halo_harness.providers.config import resolve_anthropic, resolve_databricks, resolve_openrouter
     if name == "databricks":
         return "configured" if resolve_databricks() is not None else "not set up"
     if name == "openrouter":
@@ -77,7 +77,7 @@ def detect_default_provider() -> str:
     login), with `anthropic` slotted in right after Databricks; "detection
     only positions the cursor, it never decides" (hotfix 13 spec) -- the
     user can always move off it."""
-    from rolo_claude.providers.config import resolve_anthropic, resolve_databricks, resolve_openrouter
+    from halo_harness.providers.config import resolve_anthropic, resolve_databricks, resolve_openrouter
     if resolve_openrouter() is not None:
         return "openrouter"
     if resolve_databricks() is not None:
@@ -90,7 +90,7 @@ def detect_default_provider() -> str:
 
 
 def _cc_ant_entries(prefix: str, target_table: dict) -> "list[dict]":
-    from rolo_claude.providers.cc_models import alias_display_detail, profile_fields_for_cc_model
+    from halo_harness.providers.cc_models import alias_display_detail, profile_fields_for_cc_model
     out = []
     for alias, target in target_table.items():
         fields = profile_fields_for_cc_model(target) or {}
@@ -121,7 +121,7 @@ def _price_per_m(price_per_token) -> "float | None":
 
 
 def _openrouter_entries(state_dir) -> "list[dict]":
-    from rolo_claude.providers.databricks import load_models_json
+    from halo_harness.providers.databricks import load_models_json
     models = load_models_json(state_dir) or {}
     out = []
     for mid in sorted(models):
@@ -145,15 +145,15 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
     for OpenRouter; the fixed nine subscription-model aliases for
     anthropic/claude."""
     if provider == "databricks":
-        from rolo_claude.init_cli import _chat_capable_dbx_entries
+        from halo_harness.init_cli import _chat_capable_dbx_entries
         return _chat_capable_dbx_entries(state_dir)
     if provider == "openrouter":
         return _openrouter_entries(state_dir)
     if provider == "anthropic":
-        from rolo_claude.providers.cc_models import ANT_ALIASES
+        from halo_harness.providers.cc_models import ANT_ALIASES
         return _cc_ant_entries("ant", ANT_ALIASES)
     if provider == "claude":
-        from rolo_claude.providers.cc_models import CC_ALIASES
+        from halo_harness.providers.cc_models import CC_ALIASES
         return _cc_ant_entries("cc", CC_ALIASES)
     return []
 
@@ -172,7 +172,7 @@ def configured_providers() -> "list[str]":
     with no `providers` block at all (pre-H15, or any test that never
     calls `ensure_providers_migrated`) is unaffected -- `is_enabled` fails
     open in that case, exactly like before this item existed."""
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     return [p for p in PROVIDERS if provider_status(p) in ("configured", "logged in") and is_enabled(p)]
 
 
@@ -207,15 +207,15 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None) -> d
     `providers.config.listing_effective_env()` (finding 3) so a key living
     only in a settings.json `env` block shows as configured here too,
     matching what a real session would resolve."""
-    from rolo_claude.providers.config import listing_effective_env, redact
+    from halo_harness.providers.config import listing_effective_env, redact
     env = listing_effective_env()
     if provider == "databricks":
-        from rolo_claude.providers.config import resolve_databricks, resolve_databricks_source
+        from halo_harness.providers.config import resolve_databricks, resolve_databricks_source
         dbx = resolve_databricks(env)
         if dbx is not None:
             return {"configured": True, "source": resolve_databricks_source(env) or "env file",
                     "masked": f"{dbx.host} / {redact(dbx.token)}", "known_host": None, "fields": []}
-        from rolo_claude.init_cli import _known_databricks_host
+        from halo_harness.init_cli import _known_databricks_host
         discovered_host = _known_databricks_host()
         team_host = (team_cfg or {}).get("host")
         host = discovered_host or team_host
@@ -226,7 +226,7 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None) -> d
         source = "Claude Code's settings" if discovered_host else ("the team config" if team_host else None)
         return {"configured": False, "source": source, "masked": host, "known_host": host, "fields": fields}
     if provider == "openrouter":
-        from rolo_claude.providers.config import resolve_openrouter
+        from halo_harness.providers.config import resolve_openrouter
         orc = resolve_openrouter(env)
         if orc is not None:
             return {"configured": True, "source": "env file", "masked": redact(orc.api_key),
@@ -234,7 +234,7 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None) -> d
         return {"configured": False, "source": None, "masked": None, "known_host": None,
                 "fields": [{"name": "key", "label": "OPENROUTER_API_KEY", "secret": True}]}
     if provider == "anthropic":
-        from rolo_claude.providers.config import resolve_anthropic
+        from halo_harness.providers.config import resolve_anthropic
         ant = resolve_anthropic(env)
         if ant is not None:
             return {"configured": True, "source": "env file", "masked": redact(ant.api_key),
@@ -278,9 +278,9 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
     a `gateway_preference`/`roles` map is applied here too, same as the
     sequential `init` flow's own `_ensure_databricks_creds`."""
     import os
-    from rolo_claude.init_cli import _env_file_path, _write_env_var
+    from halo_harness.init_cli import _env_file_path, _write_env_var
     if provider == "databricks":
-        from rolo_claude.init_cli import _known_databricks_host
+        from halo_harness.init_cli import _known_databricks_host
         host = (values.get("host") or "").strip() or _known_databricks_host() or (team_cfg or {}).get("host") or ""
         token = (values.get("token") or "").strip()
         if not host or not token:
@@ -291,10 +291,10 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
         os.environ["DATABRICKS_HOST"] = host
         os.environ["DATABRICKS_TOKEN"] = token
         if team_cfg and team_cfg.get("gateway_preference"):
-            from rolo_claude.team_config import apply_gateway_preference
+            from halo_harness.team_config import apply_gateway_preference
             apply_gateway_preference(team_cfg["gateway_preference"])
         if team_cfg and team_cfg.get("roles"):
-            from rolo_claude.roles import apply_role_preference
+            from halo_harness.roles import apply_role_preference
             apply_role_preference(team_cfg["roles"])
         return True, f"wrote DATABRICKS_HOST/DATABRICKS_TOKEN to {path}"
     if provider in _TAB_KEY_ENV:
@@ -319,11 +319,11 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
     best-effort (ok, note); a no-op (`True`, `""`) for a provider with no
     catalog concept of its own (claude, typesafe) or that isn't actually
     configured yet (nothing to fetch)."""
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     state_dir = bridge_home()
     if provider == "openrouter":
-        from rolo_claude.providers.config import resolve_openrouter
-        from rolo_claude.providers.databricks import probe_openrouter_models, write_models_json
+        from halo_harness.providers.config import resolve_openrouter
+        from halo_harness.providers.databricks import probe_openrouter_models, write_models_json
         orc = resolve_openrouter()
         if orc is None:
             return False, "OpenRouter is not configured"
@@ -334,8 +334,8 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
     if provider == "databricks":
-        from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
-        from rolo_claude.providers.databricks import refresh_dbx_catalog
+        from halo_harness.providers.config import derive_workspace_root, resolve_databricks
+        from halo_harness.providers.databricks import refresh_dbx_catalog
         dbx = resolve_databricks()
         if dbx is None:
             return False, "Databricks is not configured"

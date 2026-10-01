@@ -26,8 +26,8 @@ test, TESTS = new_registry()
 
 @test
 def test_resolve_role_ref_session_model_when_nothing_set(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.roles import resolve_role_ref
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import resolve_role_ref
     parent_ref = parse_model_ref("or:vendor/parent")
     parent_profile = ModelProfile()
     ref, profile, source = resolve_role_ref("orchestrator", role_table={}, cli_overrides={},
@@ -40,8 +40,8 @@ def test_resolve_role_ref_session_model_when_nothing_set(ctx: Ctx):
 
 @test
 def test_resolve_role_ref_role_table_and_cli_precedence(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.roles import resolve_role_ref
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import resolve_role_ref
     parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
     state_dir = Path(tempfile.mkdtemp())
 
@@ -60,8 +60,8 @@ def test_resolve_role_ref_role_table_and_cli_precedence(ctx: Ctx):
 
 @test
 def test_describe_role_ref_openrouter_price_format(ctx: Ctx):
-    from rolo_claude.model import ModelProfile
-    from rolo_claude.roles import describe_role_ref
+    from halo_harness.model import ModelProfile
+    from halo_harness.roles import describe_role_ref
 
     class _Ref:
         provider = "openrouter"
@@ -76,8 +76,8 @@ def test_describe_role_ref_openrouter_price_format(ctx: Ctx):
 
 @test
 def test_describe_role_ref_unknown_price_is_na(ctx: Ctx):
-    from rolo_claude.model import ModelProfile
-    from rolo_claude.roles import describe_role_ref
+    from halo_harness.model import ModelProfile
+    from halo_harness.roles import describe_role_ref
 
     class _Ref:
         provider = "cc"
@@ -89,8 +89,8 @@ def test_describe_role_ref_unknown_price_is_na(ctx: Ctx):
 
 @test
 def test_resolve_all_roles_covers_every_role_name(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.roles import ROLE_NAMES, resolve_all_roles
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import ROLE_NAMES, resolve_all_roles
     parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
     rows = resolve_all_roles(role_table={"coder": "or:vendor/coder-model"}, cli_overrides={},
                               parent_ref=parent_ref, parent_profile=parent_profile,
@@ -105,8 +105,8 @@ def test_resolve_all_roles_covers_every_role_name(ctx: Ctx):
 
 @test
 def test_format_roles_table_renders_every_role(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.roles import ROLE_NAMES, format_roles_table, resolve_all_roles
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import ROLE_NAMES, format_roles_table, resolve_all_roles
     parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
     rows = resolve_all_roles(role_table={}, cli_overrides={}, parent_ref=parent_ref,
                               parent_profile=parent_profile, state_dir=Path(tempfile.mkdtemp()))
@@ -119,7 +119,7 @@ def test_format_roles_table_renders_every_role(ctx: Ctx):
 
 @test
 def test_cmd_roles_no_session_is_a_clean_message(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_roles
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_roles
     facade = HeadlessFacade(cwd=Path(tempfile.mkdtemp()))
     out = _cmd_roles("", facade)
     ctx.check(f"no traceback, a plain message, got {out!r}", "session" in out.lower())
@@ -128,9 +128,9 @@ def test_cmd_roles_no_session_is_a_clean_message(ctx: Ctx):
 @test
 def test_cmd_roles_with_live_session_renders_table(ctx: Ctx):
     from types import SimpleNamespace
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_roles
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.roles import ROLE_NAMES
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_roles
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import ROLE_NAMES
 
     fake_runtime = SimpleNamespace(role_table={"researcher": "or:vendor/researcher-model"},
                                     cli_role_overrides={}, routes={})

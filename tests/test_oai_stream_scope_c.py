@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers.oai_stream import OpenAIStreamToAnthropic, map_usage, strip_display_artifacts
+from halo_harness.providers.oai_stream import OpenAIStreamToAnthropic, map_usage, strip_display_artifacts
 
 test, TESTS = new_registry()
 

@@ -23,21 +23,22 @@ _NOT_LOGGED_IN = json.dumps({"loggedIn": False})
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-team-"))
+    return Path(tempfile.mkdtemp(prefix="halo-team-"))
 
 
 def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, timeout: int = 40):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
                 "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
     env.update(extra_env or {})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            input=stdin, timeout=timeout)
 
 
 def _env_file(home: Path) -> Path:
-    return home / ".config" / "vibes-hacker" / "env"
+    """2.0.0 rename: `halo init` now writes the NEW default path."""
+    return home / ".config" / "halo" / "env"
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ def _env_file(home: Path) -> Path:
 
 @test
 def test_load_team_config_none_when_nothing_configured(ctx: Ctx):
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-none-"))
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="team-none-state-")))
@@ -63,10 +64,10 @@ def test_load_team_config_none_when_nothing_configured(ctx: Ctx):
 
 @test
 def test_load_team_config_project_scope(ctx: Ctx):
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-project-"))
-    (cwd / ".rolo-claude").mkdir()
-    (cwd / ".rolo-claude" / "team.json").write_text(json.dumps({
+    (cwd / ".halo").mkdir()
+    (cwd / ".halo" / "team.json").write_text(json.dumps({
         "host": "https://your-workspace.cloud.databricks.com", "default_model": "dbx:databricks-glm-5-3",
     }), encoding="utf-8")
     cfg, warnings = load_team_config(cwd)
@@ -76,11 +77,49 @@ def test_load_team_config_project_scope(ctx: Ctx):
 
 
 @test
-def test_load_team_config_explicit_team_flag_wins(ctx: Ctx):
-    from rolo_claude.team_config import load_team_config
-    cwd = Path(tempfile.mkdtemp(prefix="team-explicit-"))
+def test_load_team_config_falls_back_to_legacy_project_path(ctx: Ctx):
+    """2.0.0 fixpass finding 5: a project preset checked in BEFORE this
+    rename lives at `.rolo-claude/team.json` -- `init --provider
+    databricks` in such a repo must still find it (with one deprecation
+    line on stderr), not silently ignore it just because `.halo/
+    team.json` doesn't exist yet."""
+    import contextlib
+    import io
+
+    from halo_harness.team_config import load_team_config
+    cwd = Path(tempfile.mkdtemp(prefix="team-legacy-"))
     (cwd / ".rolo-claude").mkdir()
-    (cwd / ".rolo-claude" / "team.json").write_text(json.dumps({"host": "https://loser.cloud.databricks.com"}),
+    legacy_path = cwd / ".rolo-claude" / "team.json"
+    legacy_path.write_text(json.dumps({
+        "host": "https://your-workspace.cloud.databricks.com", "default_model": "dbx:databricks-glm-5-3",
+    }), encoding="utf-8")
+
+    stderr_buf = io.StringIO()
+    with contextlib.redirect_stderr(stderr_buf):
+        cfg, warnings = load_team_config(cwd)
+    ctx.check(f"legacy .rolo-claude/team.json found, got {cfg}",
+              cfg is not None and cfg.get("host") == "https://your-workspace.cloud.databricks.com")
+    ctx.check("no load WARNINGS for a clean legacy file (the deprecation notice is separate)", warnings == [])
+    msg = stderr_buf.getvalue()
+    ctx.check(f"exactly one deprecation line naming the legacy path, got {msg!r}",
+              msg.count("\n") == 1 and str(legacy_path) in msg and "deprecated" in msg)
+
+    # A NEW .halo/team.json, once it exists, wins outright -- the legacy
+    # fallback only ever fires when the new path is absent.
+    (cwd / ".halo").mkdir()
+    (cwd / ".halo" / "team.json").write_text(json.dumps({"host": "https://new-wins.cloud.databricks.com"}),
+                                              encoding="utf-8")
+    cfg2, _warnings2 = load_team_config(cwd)
+    ctx.check(f"the new path wins once it exists, got {cfg2}",
+              cfg2 is not None and cfg2.get("host") == "https://new-wins.cloud.databricks.com")
+
+
+@test
+def test_load_team_config_explicit_team_flag_wins(ctx: Ctx):
+    from halo_harness.team_config import load_team_config
+    cwd = Path(tempfile.mkdtemp(prefix="team-explicit-"))
+    (cwd / ".halo").mkdir()
+    (cwd / ".halo" / "team.json").write_text(json.dumps({"host": "https://loser.cloud.databricks.com"}),
                                                       encoding="utf-8")
     explicit = cwd / "explicit-team.json"
     explicit.write_text(json.dumps({"host": "https://your-workspace.cloud.databricks.com"}), encoding="utf-8")
@@ -91,7 +130,7 @@ def test_load_team_config_explicit_team_flag_wins(ctx: Ctx):
 
 @test
 def test_load_team_config_strips_token_shaped_keys(ctx: Ctx):
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-forbidden-"))
     p = cwd / "team.json"
     p.write_text(json.dumps({
@@ -114,7 +153,7 @@ def test_load_team_config_roles_key_roundtrip(ctx: Ctx):
     """V2c (H15): team.json's own `roles` map (never a token, never an
     endpoint list -- just like every other allowed key) survives `load_
     team_config` unchanged."""
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-roles-"))
     p = cwd / "team.json"
     roles = {"researcher": "dbx:databricks-deepseek-v4-1-flash", "small": "dbx:databricks-deepseek-v4-1-flash"}
@@ -127,7 +166,7 @@ def test_load_team_config_roles_key_roundtrip(ctx: Ctx):
 
 @test
 def test_load_team_config_bad_json_reports_a_warning_not_a_crash(ctx: Ctx):
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cwd = Path(tempfile.mkdtemp(prefix="team-badjson-"))
     p = cwd / "team.json"
     p.write_text("{not json", encoding="utf-8")
@@ -138,8 +177,8 @@ def test_load_team_config_bad_json_reports_a_warning_not_a_crash(ctx: Ctx):
 
 @test
 def test_apply_gateway_preference_seeds_config_but_never_overwrites(ctx: Ctx):
-    from rolo_claude.team_config import apply_gateway_preference
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.team_config import apply_gateway_preference
+    from halo_harness.theme import get_config_value, set_config_value
     state_dir = Path(tempfile.mkdtemp(prefix="team-gwpref-"))
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -161,8 +200,8 @@ def test_apply_gateway_preference_seeds_config_but_never_overwrites(ctx: Ctx):
 def test_apply_role_preference_seeds_config_but_never_overwrites(ctx: Ctx):
     """V2c (H15): the exact same idiom as `apply_gateway_preference` above,
     applied to team.json's own `roles` map."""
-    from rolo_claude.roles import apply_role_preference
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.roles import apply_role_preference
+    from halo_harness.theme import get_config_value, set_config_value
     state_dir = Path(tempfile.mkdtemp(prefix="team-rolepref-"))
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -190,8 +229,8 @@ def test_apply_role_preference_seeds_config_but_never_overwrites(ctx: Ctx):
 @test
 def test_init_work_host_from_team_json_asks_only_for_token(ctx: Ctx):
     home = _fresh_home()
-    (home / ".rolo-claude").mkdir(parents=True, exist_ok=True)
-    (home / ".rolo-claude" / "team.json").write_text(json.dumps({
+    (home / ".halo").mkdir(parents=True, exist_ok=True)
+    (home / ".halo" / "team.json").write_text(json.dumps({
         "host": "https://your-workspace.cloud.databricks.com",
         "default_model": "dbx:databricks-glm-5-3",
         "gateway_preference": {"databricks-kimi-k3": "anthropic"},
@@ -205,7 +244,7 @@ def test_init_work_host_from_team_json_asks_only_for_token(ctx: Ctx):
     ctx.check(f"host from team.json written, got {content!r}",
               "DATABRICKS_HOST=https://your-workspace.cloud.databricks.com" in content)
     ctx.check(f"token written, got {content!r}", "DATABRICKS_TOKEN=team-token-xyz" in content)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"team.json default_model applied, got {cfg}", cfg.get("model") == "dbx:databricks-glm-5-3")
     ctx.check("gateway preference seeded", cfg.get("databricks", {}).get("gateway", {}).get("databricks-kimi-k3")
               == "anthropic")
@@ -225,6 +264,21 @@ def test_init_work_claude_code_settings_env_skips_all_prompts(ctx: Ctx):
     ctx.check("reports configured via Claude Code's settings", "Claude Code's settings" in result.stdout)
     ctx.check("token never printed", "dapiFAKE00000000000" not in result.stdout)
     ctx.check("no env file needed", not _env_file(home).exists())
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

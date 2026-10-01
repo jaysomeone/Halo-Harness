@@ -1,8 +1,8 @@
-"""rolo_claude.work_matrix -- H14 scope H: `doctor --work --probe-all`. Sends
+"""halo_harness.work_matrix -- H14 scope H: `doctor --work --probe-all`. Sends
 one short pong through every discovered chat-shaped Databricks endpoint on
 its OWN chosen path (plus the anthropic gateway too, for Claude/GLM/Kimi,
 with `--both`), records HTTP status/first tokens/latency/token-cost/tool-call
-support, prints a table, and writes `~/.rolo-claude/work-matrix-<date>.json`
+support, prints a table, and writes `~/.halo/work-matrix-<date>.json`
 with endpoint names only -- never a host, never a token. Reuses the SAME
 `stream_completion`/`stream_anthropic_completion` machinery a real turn
 drives, so a green row here really means "a real turn on this route works".
@@ -40,7 +40,7 @@ class ProbeRow:
     tool_call_ok: Optional[bool] = None
     error: Optional[str] = None
     # V2a open question 2 ("route split per endpoint from the cache"): the
-    # candidate key `~/.rolo-claude/routes-cache.json` already named for this
+    # candidate key `~/.halo/routes-cache.json` already named for this
     # model BEFORE this probe ran, vs. `path_type` (what this run actually
     # used/re-cached) -- a mismatch is a visible route split. Always None on
     # the anthropic dialect (it has no candidate cache of its own).
@@ -73,10 +73,10 @@ def _anthropic_pong_body(model: str, with_tools: bool) -> dict:
 
 
 def _cached_candidate_key(name: str, state_dir) -> Optional[str]:
-    """The candidate key `~/.rolo-claude/routes-cache.json` names for `name`
+    """The candidate key `~/.halo/routes-cache.json` names for `name`
     RIGHT NOW (before/after a probe runs) -- None when nothing is cached yet."""
-    from rolo_claude.providers.databricks import dbx_cache_get_route
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.databricks import dbx_cache_get_route
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     cands = chat_route_candidates(name, state_dir)
     idx = dbx_cache_get_route(name, state_dir)
     return cands[idx].key if isinstance(idx, int) and 0 <= idx < len(cands) else None
@@ -172,8 +172,8 @@ def _probe_reasoning_replay_openai(name: str, route, profile, blocks: list, harn
     `hooks.reasoning_echo` applies the exact per-family replay rule a live
     session would) and send it -- True iff the upstream accepted it (a
     clean stream with no error event), False on any error/exception."""
-    from rolo_claude.providers.request import build_request_body
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+    from halo_harness.providers.request import build_request_body
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
     messages, tool_use_id = _turn2_messages(blocks, harness_meta)
     if tool_use_id is None:
         return False
@@ -191,9 +191,9 @@ def _probe_reasoning_replay_openai(name: str, route, profile, blocks: list, harn
 
 
 def _drive_openai(name: str, root: str, token: str, headers: dict, state_dir, *, with_tools: bool) -> ProbeRow:
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
 
     row = ProbeRow(name=name, family="", path_type="?")
     route = Route(provider="databricks", upstream_model=name, dialect="openai-chat")
@@ -242,8 +242,8 @@ def _probe_reasoning_replay_anthropic(name: str, route, profile, blocks: list,
     genuinely signed `thinking` block, when turn 1 produced one, is replayed
     exactly as `prepare_anthropic_messages` would for a live session) --
     True iff the upstream accepted it, False on any error/exception."""
-    from rolo_claude.providers.request import build_anthropic_request_body
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_anthropic_completion
+    from halo_harness.providers.request import build_anthropic_request_body
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_anthropic_completion
     messages, tool_use_id = _turn2_messages(blocks, {})
     if tool_use_id is None:
         return False
@@ -261,9 +261,9 @@ def _probe_reasoning_replay_anthropic(name: str, route, profile, blocks: list,
 
 
 def _drive_anthropic(name: str, root: str, token: str, headers: dict, state_dir, *, with_tools: bool) -> ProbeRow:
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_anthropic_completion
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_anthropic_completion
 
     row = ProbeRow(name=name, family="", path_type="anthropic")
     route = Route(provider="databricks", upstream_model=name, dialect="anthropic-passthrough")
@@ -311,12 +311,12 @@ def run_work_matrix(*, only: Optional[str] = None, both: bool = False, tools: bo
     unreachable box returns `([], report_path)` with the report itself
     naming the reason (still written, so a caller always has SOMETHING to
     look at)."""
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.config import (
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.config import (
         derive_workspace_root, merge_databricks_headers, resolve_databricks,
     )
-    from rolo_claude.providers.databricks import load_dbx_endpoints_json
-    from rolo_claude.providers.dbx_routing import classify_family, resolve_databricks_dialect
+    from halo_harness.providers.databricks import load_dbx_endpoints_json
+    from halo_harness.providers.dbx_routing import classify_family, resolve_databricks_dialect
 
     state_dir = state_dir if state_dir is not None else bridge_home()
     report_path = state_dir / f"work-matrix-{date.today().isoformat()}.json"
@@ -409,7 +409,7 @@ def format_table(rows: list, *, tools: bool = False) -> str:
 
 
 # =============================================================================
-# V2b -- matrix-driven fixes tooling: `rolo-claude work-matrix show/apply`.
+# V2b -- matrix-driven fixes tooling: `halo work-matrix show/apply`.
 # Reads a `doctor --work --probe-all` JSON report (see `_write_report` above
 # -- endpoint names only, never a host or a token) and turns each FAILING
 # row into a suggested action, per the V2 brief's own rules:
@@ -480,7 +480,7 @@ def classify_row(row: dict, rows_by_name: dict) -> Optional[dict]:
 
 
 def render_show_table(report: dict) -> str:
-    """`rolo-claude work-matrix show`'s own rendering -- endpoint/status/
+    """`halo work-matrix show`'s own rendering -- endpoint/status/
     issue/suggested-action, one line per FAILING row only (a report where
     every probed endpoint is clean says so plainly instead of an empty
     table)."""
@@ -508,7 +508,7 @@ def writable_overrides(report: dict) -> "list[tuple[str, str]]":
     """Every `(config_key, config_value)` pair `show` would suggest AND
     that maps onto a real config.json knob -- `apply`'s own input, in
     report order, de-duplicated (last write for a given key wins, same as
-    `rolo-claude config set` would if run twice)."""
+    `halo config set` would if run twice)."""
     rows = report.get("rows") or []
     rows_by_name = {r.get("endpoint"): r for r in rows if isinstance(r, dict)}
     out: dict = {}
@@ -520,14 +520,14 @@ def writable_overrides(report: dict) -> "list[tuple[str, str]]":
 
 
 def cmd_work_matrix(argv: list) -> int:
-    """`rolo-claude work-matrix show|apply <report.json>` -- never touches
-    Claude Code's own files; `apply` writes only to `~/.rolo-claude/
+    """`halo work-matrix show|apply <report.json>` -- never touches
+    Claude Code's own files; `apply` writes only to `~/.halo/
     config.json`, and only the `databricks.gateway.<endpoint>` overrides
     `writable_overrides` names, after printing them and asking for
     confirmation (`--yes` skips the prompt, for scripting/CI)."""
     import argparse
 
-    parser = argparse.ArgumentParser(prog="rolo-claude work-matrix", add_help=True,
+    parser = argparse.ArgumentParser(prog="halo work-matrix", add_help=True,
                                       description="Interpret a `doctor --work --probe-all` JSON report.")
     sub = parser.add_subparsers(dest="action")
     p_show = sub.add_parser("show", help="Render the report as a table with a suggested action per failure")
@@ -543,10 +543,10 @@ def cmd_work_matrix(argv: list) -> int:
     try:
         report = load_report(args.report)
     except (OSError, ValueError) as e:
-        print(f"rolo-claude work-matrix: could not read {args.report!r}: {e}", file=sys.stderr)
+        print(f"halo work-matrix: could not read {args.report!r}: {e}", file=sys.stderr)
         return 2
     if not isinstance(report, dict):
-        print(f"rolo-claude work-matrix: {args.report!r} is not a JSON object", file=sys.stderr)
+        print(f"halo work-matrix: {args.report!r} is not a JSON object", file=sys.stderr)
         return 2
 
     if args.action == "show":
@@ -555,9 +555,9 @@ def cmd_work_matrix(argv: list) -> int:
 
     overrides = writable_overrides(report)
     if not overrides:
-        print("rolo-claude work-matrix apply: nothing actionable in this report (no writable overrides).")
+        print("halo work-matrix apply: nothing actionable in this report (no writable overrides).")
         return 0
-    print("The following overrides would be written to ~/.rolo-claude/config.json:")
+    print("The following overrides would be written to ~/.halo/config.json:")
     for key, value in overrides:
         print(f"  {key} = {value!r}")
     if not args.yes:
@@ -568,8 +568,8 @@ def cmd_work_matrix(argv: list) -> int:
         if answer not in ("y", "yes"):
             print("Aborted -- nothing written.")
             return 1
-    from rolo_claude.theme import set_config_value
+    from halo_harness.theme import set_config_value
     for key, value in overrides:
         set_config_value(key, value)
-    print(f"Wrote {len(overrides)} override(s) to ~/.rolo-claude/config.json.")
+    print(f"Wrote {len(overrides)} override(s) to ~/.halo/config.json.")
     return 0

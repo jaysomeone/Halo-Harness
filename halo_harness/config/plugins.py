@@ -1,4 +1,4 @@
-"""rolo_claude.config.plugins -- discovery of plugin-provided MCP servers
+"""halo_harness.config.plugins -- discovery of plugin-provided MCP servers
 under ~/.claude/plugins/ (H3b closing requirement: "every server a user
 adds to Claude Code must work"). Installed Claude Code PLUGINS can bundle
 their own MCP servers, same as a user's own .mcp.json/~/.claude.json
@@ -84,7 +84,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import claude_config_dir
+from halo_harness.config.paths import claude_config_dir
 
 
 def plugins_dir() -> Path:
@@ -281,7 +281,7 @@ def _read_plugin_mcp_servers(plugin_root: Path) -> dict:
 def plugin_server_name(plugin: str, server: str) -> str:
     """`plugin_<plugin>_<server>`, sanitised piecewise the same way any
     other server name is."""
-    from rolo_claude.mcp.manager import sanitize_name
+    from halo_harness.mcp.manager import sanitize_name
     return f"plugin_{sanitize_name(plugin)}_{sanitize_name(server)}"
 
 
@@ -297,7 +297,7 @@ def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object 
     -- omitted, only `scope == "user"` records are ever discovered. Never
     raises -- a malformed plugin entry is skipped with a notice, not a
     crashed session."""
-    from rolo_claude.mcp.manager import expand_config, parse_server
+    from halo_harness.mcp.manager import expand_config, parse_server
 
     notices: list = []
     resolved: dict = {}

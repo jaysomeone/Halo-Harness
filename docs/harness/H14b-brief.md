@@ -9,27 +9,27 @@ changes only to fix a doc/behaviour mismatch you find (say so in the report). No
 
 ## Read first
 `README.md`, `docs/harness/INSTALL.md`, `docs/harness/RECOMMENDATIONS.md`, every `docs/harness/
-H*-brief.md` (what was built and why), `CHANGELOG.md`, `rolo_claude/cli.py` (the flag table and
-subcommand dispatch), `rolo_claude/commands/builtins.py` + `rolo_claude/tui/slash.py` + `tui/keys.py`
-(every slash command and key binding), `rolo_claude/*_cli.py`, `docs/harness/claude-help-2.1.281.txt`
-(the Claude Code flags mirrored), `rolo_claude/model.py` + `providers/{profiles,cc_models}.py`,
+H*-brief.md` (what was built and why), `CHANGELOG.md`, `halo_harness/cli.py` (the flag table and
+subcommand dispatch), `halo_harness/commands/builtins.py` + `halo_harness/tui/slash.py` + `tui/keys.py`
+(every slash command and key binding), `halo_harness/*_cli.py`, `docs/harness/claude-help-2.1.281.txt`
+(the Claude Code flags mirrored), `halo_harness/model.py` + `providers/{profiles,cc_models}.py`,
 `config/{settings,claude_json,claude_md,memory,paths}.py`, `permissions.py`, `hooks.py`, `mcp/`,
 `agent/{loop,log,derive,compact,subagent,planmode,cc_runtime}.py`, `telemetry.py`, `improve/`.
 Verify every claim against the code and the real `--help` output; do not describe from memory.
 
 ## Deliverables (all under `docs/` unless noted; Markdown, plain language, examples that run)
-1. **README.md**: keep the Kali quick start first; then a guided tour: what rolo-claude is and is
+1. **README.md**: keep the Kali quick start first; then a guided tour: what halo is and is
    not (Claude Code-compatible harness; reads Claude Code's config; four routes: OpenRouter,
    Databricks, Anthropic API, Claude subscription via the claude binary); a 10-minute walkthrough
    (init, first session, /model, a tool call with a permission card, steering, /resume, /stats,
    /improve); links to every doc below; the security posture paragraph (what is never read or
    written); licence.
-2. **docs/COMMANDS.md**: EVERY CLI subcommand (`rolo-claude`, `-p`, `init`, `doctor`, `models`,
+2. **docs/COMMANDS.md**: EVERY CLI subcommand (`halo`, `-p`, `init`, `doctor`, `models`,
    `mcp`, `config`, `stats`, `export`, `improve`, `proxy`, `sessions` if present, …) and EVERY flag
-   accepted (the full Claude Code parity list + rolo-claude's own), each with: what it does, what it
+   accepted (the full Claude Code parity list + halo's own), each with: what it does, what it
    reads and writes (paths), defaults, a worked example with expected output, related config keys,
    and "not supported yet" flags listed honestly. A test `tests/test_docs_commands.py` parses
-   `rolo-claude --help` and each subcommand's `--help` and fails if any subcommand or flag lacks a
+   `halo --help` and each subcommand's `--help` and fails if any subcommand or flag lacks a
    section in COMMANDS.md (and if COMMANDS.md documents a flag that does not exist).
 3. **docs/SLASH-COMMANDS.md**: every `/command` in the registry (built-ins, `/models refresh`,
    `/improve`, `/stats`, `/rewind`, `/resume`, `/mcp`, `/model`, `/tasks`, …), every key binding and
@@ -45,8 +45,8 @@ Verify every claim against the code and the real `--help` output; do not describ
    Diagrams as ASCII.
 5. **docs/CONFIG.md**: exactly which Claude Code files are read and how (settings precedence,
    permissions, hooks, env, CLAUDE.md/rules/imports, memory, skills, commands, agents, plans,
-   keybindings, `~/.claude.json` MCP servers, `.mcp.json` approval, plugins); rolo-claude's own
-   files (`~/.rolo-claude/config.json` keys with defaults, env file, sessions, caches, `team.json`);
+   keybindings, `~/.claude.json` MCP servers, `.mcp.json` approval, plugins); halo's own
+   files (`~/.halo/config.json` keys with defaults, env file, sessions, caches, `team.json`);
    every environment variable; presets; what is never written.
 6. **docs/MODELS.md**: model refs (`or:`, `dbx:`, `ant:`, `cc:`, bare aliases and how they
    resolve), families and their rules (ids, reasoning replay, sampling, edit format, the Edit

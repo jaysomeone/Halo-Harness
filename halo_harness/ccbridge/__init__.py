@@ -1,13 +1,13 @@
-"""rolo_claude.ccbridge -- H11 Part B: the local tool bridge between a
-`cc:`-route rolo-claude session and the `claude` subprocess it drives.
+"""halo_harness.ccbridge -- H11 Part B: the local tool bridge between a
+`cc:`-route halo session and the `claude` subprocess it drives.
 
 Two halves, two different wire protocols:
-  * `server.ToolBridgeServer` (PARENT side, runs inside the rolo-claude
+  * `server.ToolBridgeServer` (PARENT side, runs inside the halo
     process): a tiny newline-JSON RPC server over a Unix socket (POSIX,
-    `~/.rolo-claude/run/<sid>.sock`, mode 0600) or a TCP loopback socket
+    `~/.halo/run/<sid>.sock`, mode 0600) or a TCP loopback socket
     + random per-connection token (Windows) -- see `server.py`'s own
     docstring for the exact wire shape.
-  * `python -m rolo_claude.ccbridge` (CHILD side, spawned BY `claude`
+  * `python -m halo_harness.ccbridge` (CHILD side, spawned BY `claude`
     itself via `--mcp-config`, named "rolo" so Claude Code exposes every
     bridged tool as `mcp__rolo__<Name>`): a real stdio MCP server (the
     official `mcp` SDK) that forwards `tools/list`/`tools/call` to the

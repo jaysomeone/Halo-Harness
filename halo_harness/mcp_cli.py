@@ -1,6 +1,6 @@
-"""rolo_claude.mcp_cli -- `rolo-claude mcp ...` subcommand (H3 scope D).
+"""halo_harness.mcp_cli -- `halo mcp ...` subcommand (H3 scope D).
 `list`/`get` are real health checks against the SAME resolved config
-`rolo_claude.mcp_setup.build_manager` gives a real session (never crash,
+`halo_harness.mcp_setup.build_manager` gives a real session (never crash,
 always finish within MCP_TIMEOUT); `add`/`add-json`/`remove` are real
 read-modify-write edits of `~/.claude.json` (local/user scope) or
 `<cwd>/.mcp.json` (project scope) -- `~/.claude.json` is otherwise
@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import claude_json_path, normalize_cwd
-from rolo_claude.not_yet import print_not_yet
+from halo_harness.config.paths import claude_json_path, normalize_cwd
+from halo_harness.not_yet import print_not_yet
 
 _NOT_YET_SUBCOMMANDS = ("add-from-claude-desktop", "login", "logout", "reset-project-choices", "serve")
 
@@ -36,7 +36,7 @@ _STATUS_LABELS = {
     "connecting": "✗ Connection error",
     "closed": "- Not configured",
     # H13 Part A: a lazy server whose tools came from `mcp.tools_cache`
-    # without ever connecting -- rolo-claude's own addition to the status
+    # without ever connecting -- halo's own addition to the status
     # vocabulary (Claude Code has no lazy-start concept, so there is no
     # binary-facts wording to match here).
     "cached": "◐ Cached (connects on first use)",
@@ -70,8 +70,8 @@ def format_mcp_list_line(entry: dict) -> str:
 
 
 def _session_inputs(cwd: Path):
-    from rolo_claude.config.claude_json import is_trusted, load_claude_json
-    from rolo_claude.config.settings import resolve_settings
+    from halo_harness.config.claude_json import is_trusted, load_claude_json
+    from halo_harness.config.settings import resolve_settings
     claude_json = load_claude_json()
     trusted = is_trusted(cwd, claude_json)
     settings = resolve_settings(cwd, trusted=trusted)
@@ -79,7 +79,7 @@ def _session_inputs(cwd: Path):
 
 
 def _cmd_list(rest: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude mcp list", add_help=True)
+    parser = argparse.ArgumentParser(prog="halo mcp list", add_help=True)
     parser.add_argument("--cwd", default=None)
     args = parser.parse_args(rest)
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
@@ -90,7 +90,7 @@ def _cmd_list(rest: list) -> int:
     # work it's supposed to announce.
     print("Checking MCP server health...")
     try:
-        from rolo_claude.mcp_setup import build_manager
+        from halo_harness.mcp_setup import build_manager
         claude_json, settings = _session_inputs(cwd)
         # finding 7: print_mode=False -- an unapproved .mcp.json server
         # must show "⏸ Pending approval" and never actually be spawned just
@@ -100,7 +100,7 @@ def _cmd_list(rest: list) -> int:
         manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
                                           print_mode=False, start=True)
     except Exception as e:  # `mcp list` must NEVER crash -- report and degrade
-        print(f"rolo-claude mcp list: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
+        print(f"halo mcp list: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
         return 1
 
     for n in notices:
@@ -121,21 +121,21 @@ def _cmd_list(rest: list) -> int:
 
 
 def _cmd_get(rest: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude mcp get", add_help=True)
+    parser = argparse.ArgumentParser(prog="halo mcp get", add_help=True)
     parser.add_argument("name")
     parser.add_argument("--cwd", default=None)
     args = parser.parse_args(rest)
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
 
     try:
-        from rolo_claude.mcp_setup import build_manager
+        from halo_harness.mcp_setup import build_manager
         claude_json, settings = _session_inputs(cwd)
         # finding 7: same print_mode=False as `mcp list` -- a health check
         # must never auto-approve/spawn an unapproved .mcp.json server.
         manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
                                           print_mode=False, start=True)
     except Exception as e:
-        print(f"rolo-claude mcp get: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
+        print(f"halo mcp get: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
         return 1
 
     for n in notices:
@@ -362,19 +362,19 @@ def _parse_add_argv(rest: list) -> "tuple[dict, list]":
 
 def _cmd_add(rest: list) -> int:
     if rest and rest[0] in ("-h", "--help"):
-        print("Usage: rolo-claude mcp add [-t stdio|sse|http] [-s local|user|project] "
+        print("Usage: halo mcp add [-t stdio|sse|http] [-s local|user|project] "
               "[-e KEY=VALUE ...] [-H 'Key: Value' ...] [--cwd DIR] <name> <commandOrUrl> [args...]")
         return 0
     opts, positionals = _parse_add_argv(rest)
     if len(positionals) < 2:
-        print("rolo-claude mcp add: requires <name> <commandOrUrl> [args...]", file=sys.stderr)
+        print("halo mcp add: requires <name> <commandOrUrl> [args...]", file=sys.stderr)
         return 2
     name, command_or_url, *extra_args = positionals
     if opts["transport"] not in ("stdio", "sse", "http"):
-        print(f"rolo-claude mcp add: invalid --transport {opts['transport']!r}", file=sys.stderr)
+        print(f"halo mcp add: invalid --transport {opts['transport']!r}", file=sys.stderr)
         return 2
     if opts["scope"] not in ("local", "user", "project"):
-        print(f"rolo-claude mcp add: invalid --scope {opts['scope']!r}", file=sys.stderr)
+        print(f"halo mcp add: invalid --scope {opts['scope']!r}", file=sys.stderr)
         return 2
     cwd = Path(opts["cwd"]).resolve() if opts["cwd"] else Path.cwd()
 
@@ -387,7 +387,7 @@ def _cmd_add(rest: list) -> int:
     try:
         dest = _store_entry(scope=opts["scope"], name=name, entry=entry, cwd=cwd)
     except (OSError, ValueError) as e:
-        print(f"rolo-claude mcp add: {e}", file=sys.stderr)
+        print(f"halo mcp add: {e}", file=sys.stderr)
         return 1
     cmdline = f"{command_or_url} {' '.join(extra_args)}".strip()
     print(f"Added {opts['transport']} MCP server {name!r} ({opts['scope']} scope) to {dest}: {cmdline}")
@@ -395,7 +395,7 @@ def _cmd_add(rest: list) -> int:
 
 
 def _cmd_add_json(rest: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude mcp add-json", add_help=True)
+    parser = argparse.ArgumentParser(prog="halo mcp add-json", add_help=True)
     parser.add_argument("-s", "--scope", choices=["local", "user", "project"], default="local")
     parser.add_argument("--cwd", default=None)
     parser.add_argument("name")
@@ -406,22 +406,22 @@ def _cmd_add_json(rest: list) -> int:
     try:
         entry = json.loads(args.json_str)
     except ValueError as e:
-        print(f"rolo-claude mcp add-json: invalid JSON: {e}", file=sys.stderr)
+        print(f"halo mcp add-json: invalid JSON: {e}", file=sys.stderr)
         return 2
     if not isinstance(entry, dict):
-        print("rolo-claude mcp add-json: the JSON value must be an object", file=sys.stderr)
+        print("halo mcp add-json: the JSON value must be an object", file=sys.stderr)
         return 2
     try:
         dest = _store_entry(scope=args.scope, name=args.name, entry=entry, cwd=cwd)
     except (OSError, ValueError) as e:
-        print(f"rolo-claude mcp add-json: {e}", file=sys.stderr)
+        print(f"halo mcp add-json: {e}", file=sys.stderr)
         return 1
     print(f"Added MCP server {args.name!r} ({args.scope} scope) to {dest}")
     return 0
 
 
 def _cmd_remove(rest: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude mcp remove", add_help=True)
+    parser = argparse.ArgumentParser(prog="halo mcp remove", add_help=True)
     parser.add_argument("-s", "--scope", choices=["local", "user", "project"], default=None)
     parser.add_argument("--cwd", default=None)
     parser.add_argument("name")
@@ -461,7 +461,7 @@ def _cmd_remove(rest: list) -> int:
                                 print(f"Removed MCP server {args.name!r} from local scope")
                                 return 0
         except (OSError, ValueError) as e:
-            print(f"rolo-claude mcp remove: {e}", file=sys.stderr)
+            print(f"halo mcp remove: {e}", file=sys.stderr)
             return 1
     print(f"No MCP server found with name: {args.name}", file=sys.stderr)
     return 1
@@ -469,7 +469,7 @@ def _cmd_remove(rest: list) -> int:
 
 def cmd_mcp(argv: list) -> int:
     if not argv or argv[0] in ("-h", "--help"):
-        print("Usage: rolo-claude mcp [options] [command]\n\n"
+        print("Usage: halo mcp [options] [command]\n\n"
               "Commands:\n"
               "  list                    List configured MCP servers with live health\n"
               "  get <name>              Get details about an MCP server\n"
@@ -492,5 +492,5 @@ def cmd_mcp(argv: list) -> int:
     if sub in _NOT_YET_SUBCOMMANDS:
         print_not_yet(f"mcp {sub}", "H8")
         return 0
-    print(f"rolo-claude mcp: unknown subcommand {sub!r}", file=sys.stderr)
+    print(f"halo mcp: unknown subcommand {sub!r}", file=sys.stderr)
     return 2

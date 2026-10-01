@@ -14,9 +14,9 @@ from tests.helpers.provider_env_defaults import ensure_default_provider_credenti
 
 ensure_scoped_state_dir_once()
 ensure_default_provider_credentials()
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.read import ReadTool
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.read import ReadTool
+from halo_harness.tools.registry import ToolRegistry
 
 test, TESTS = new_registry()
 
@@ -228,7 +228,7 @@ def test_registry_dispatch_and_unknown_tool(ctx: Ctx):
 
 @test
 def test_registry_dispatch_never_raises_on_tool_exception(ctx: Ctx):
-    from rolo_claude.tools.base import Tool
+    from halo_harness.tools.base import Tool
 
     class BoomTool(Tool):
         name = "Boom"
@@ -311,7 +311,7 @@ def test_read_oversized_image_is_resized_or_omitted(ctx: Ctx):
     branch below was never actually reachable on a Pillow-less box after
     that fix landed (masked on Windows dev boxes that happen to have
     Pillow installed; caught for real on a fresh WSL venv without it)."""
-    from rolo_claude.tools.imageutil import MAX_IMAGE_HARD_DIM
+    from halo_harness.tools.imageutil import MAX_IMAGE_HARD_DIM
     from tests.test_imageutil import _pillow_available
     d = Path(tempfile.mkdtemp(prefix="read-img-huge-"))
     png = d / "huge.png"
@@ -346,12 +346,12 @@ def test_loop_tools_image_result_reaches_the_tool_result_event(ctx: Ctx):
     through a REAL Session dispatch, not just the Read tool in isolation."""
     import os
 
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     # H10b: never set before -- the real in-process Session below fell
-    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # through to the REAL `~/.halo/sessions`, leaking
     # `or:mock/vision-model` sessions into rolo's real session history
     # (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="read-img-e2e-home-")))

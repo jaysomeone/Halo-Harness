@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.mcp_status -- `/mcp` (D-TUI: "McpStatus (/mcp, r
+"""halo_harness.tui.dialogs.mcp_status -- `/mcp` (D-TUI: "McpStatus (/mcp, r
 reconnect)"). `servers` is `Controller.list_mcp_servers()`'s shape (one dict
 per configured server, `McpManager.status()`'s own fields: name/type/
 command/args/url/state/error/tool_count/...). `reconnect` is
@@ -35,7 +35,7 @@ _STATE_GLYPH = {
 
 
 def _row(entry: dict) -> str:
-    from rolo_claude.mcp_cli import format_mcp_list_line
+    from halo_harness.mcp_cli import format_mcp_list_line
     glyph = _STATE_GLYPH.get(entry.get("state"), "?")
     return f"{glyph} {format_mcp_list_line(entry)}"
 

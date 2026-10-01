@@ -1,6 +1,6 @@
-# H9 brief — bug hunt, Linux-first acceptance, MCP compatibility matrix, release v0.3.0 (rolo-claude)
+# H9 brief — bug hunt, Linux-first acceptance, MCP compatibility matrix, release v0.3.0 (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H8 commit on master with all suites green on Windows and WSL and
 every earlier review's findings closed. Do not commit (Fable commits and tags).
 
@@ -16,9 +16,9 @@ every earlier review's findings closed. Do not commit (Fable commits and tags).
 
 ## Part A — Linux-first acceptance (WSL Ubuntu now; the Kali VM `192.0.2.50` user `kali` if
 `ssh -i ~/.ssh/linux_vm user@192.0.2.50` answers — try it; zsh, single-line commands)
-- Fresh clone from GitHub (`git clone https://github.com/roloVibes/rolo-claude`), install via
-  `uv tool install --editable .` AND `pip install --user -e .` (PEP 668 note), `rolo-claude --version`,
-  `rolo-claude doctor`, `rolo-claude models`, `rolo-claude mcp list` with that box's real `~/.claude`
+- Fresh clone from GitHub (`git clone https://github.com/roloVibes/Halo-Harness`), install via
+  `uv tool install --editable .` AND `pip install --user -e .` (PEP 668 note), `halo --version`,
+  `halo doctor`, `halo models`, `halo mcp list` with that box's real `~/.claude`
   (if the VM has none, create a realistic one from `tests/helpers/fake_home.py` under a temp HOME and
   ALSO run against the WSL user's real `~/.claude` copy of rolo's Windows config: rsync
   `~/.claude` and `.claude.json` into a temp HOME with paths rewritten — the MCP
@@ -41,7 +41,7 @@ Build fixtures + live checks proving: user-scope servers from `~/.claude.json` w
 server from a real marketplace plugin copy (`mcp__plugin_<p>_<s>__<tool>`); a server added AFTER
 install by `claude mcp add` (run the real `claude mcp add --scope user rc-test -- python <fake
 server>` if `claude` is on PATH, else edit `~/.claude.json` in a temp HOME) is picked up by the next
-rolo-claude session; a server added by `rolo-claude mcp add` is listed by `claude mcp list` (or, without
+halo session; a server added by `halo mcp add` is listed by `claude mcp list` (or, without
 `claude`, the JSON matches Claude Code's schema byte-for-byte per `docs/harness/claude-code-2.1.281-
 binary-facts.md` §9); `mcp remove`; tool schemas of unusual shape (nested objects, `$ref`, `anyOf`,
 enums, 300 tools) survive OpenRouter and the Databricks 32-key/no-`$ref` simplifier; ToolSearch finds
@@ -55,7 +55,7 @@ Record results in the acceptance file.
   storms, overflow every N calls, tool results with control characters; ≥ 200 randomised runs must
   end with a valid log (invariants hold), no hangs (per-run timeout), no leaked threads/processes.
 - Static pass: `python -X dev -W error::ResourceWarning tests/run_all.py` clean; `pyflakes`/`ruff`
-  (install if available) on `rolo_claude/`; grep for `print(` in library code, bare `except:`,
+  (install if available) on `halo_harness/`; grep for `print(` in library code, bare `except:`,
   `eval(`, `shell=True` without need, hard-coded Windows paths, `/tmp` literals.
 - OpenCode H9 items: period-2 doom-loop detector (A/B alternating identical calls) with the breaker
   still armed in auto mode; per-sub-command Bash rule matching audit; `doctor` checks for `rg`,
@@ -78,7 +78,7 @@ safety language).
   `CLAUDE_ENV_FILE` additions must survive — test on WSL Ubuntu AND in a Debian-style profile);
   dash (`/bin/sh`) never used for `!` pre-execution (must be `/bin/bash`); a real
   `claude plugin install` manifest (array-of-records V2 shape) drives plugin MCP servers + hooks;
-  128k/256k-context models tested with the real `~/.rolo-claude/models.json` shapes (compaction
+  128k/256k-context models tested with the real `~/.halo/models.json` shapes (compaction
   trigger never 0, never back-to-back); an SDK-style `--input-format stream-json` client that
   writes one line and waits for `result` before the next (must not deadlock; a mid-turn line is a
   steer); the lazy MCP start inside ToolSearch (serial today, cannot be aborted, up to MCP_TIMEOUT

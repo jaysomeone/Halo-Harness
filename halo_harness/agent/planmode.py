@@ -1,4 +1,4 @@
-"""rolo_claude.agent.planmode -- plan mode (H6 scope C): the plan file (the
+"""halo_harness.agent.planmode -- plan mode (H6 scope C): the plan file (the
 ONLY writable path while `PermissionEngine.mode == "plan"`, enforced in
 permissions.py's `_categorize`/`_MODE_TABLE`), and the `EnterPlanMode`/
 `ExitPlanMode` tool DEFINITIONS (wire schema only -- both are special-cased
@@ -22,8 +22,8 @@ import random
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import plans_dir
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.config.paths import plans_dir
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 # A deliberately plain word bank (finding: real Claude Code plan filenames
 # look like arbitrary word triples -- "typed-tickling-squirrel",

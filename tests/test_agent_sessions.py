@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent import sessions as agent_sessions
+from halo_harness.agent import sessions as agent_sessions
 
 test, TESTS = new_registry()
 
@@ -25,7 +25,7 @@ test, TESTS = new_registry()
 def _fresh_cwd() -> Path:
     # H10b: NONE of this file's call sites ever set BRIDGE_TEST_HOME, so
     # `agent_sessions.sessions_dir(cwd)` (which resolves through
-    # `bridge_home()`) fell through to the REAL `~/.rolo-claude/sessions`
+    # `bridge_home()`) fell through to the REAL `~/.halo/sessions`
     # whenever this module happened to run before anything else in the
     # process had set the seam -- exactly how real session files leaked
     # into rolo's real session history under `agent-sessions-cwd-*`
@@ -290,7 +290,7 @@ def test_find_resume_matches_empty_directory_is_empty_not_an_error(ctx: Ctx):
 def test_print_mode_resume_text_matching_two_sessions_is_an_honest_error_not_a_silent_guess(ctx: Ctx):
     import io
     import contextlib
-    from rolo_claude.headless import run_print_mode
+    from halo_harness.headless import run_print_mode
 
     cwd = _fresh_cwd()
     sid1, sid2 = uuid.uuid4().hex, uuid.uuid4().hex

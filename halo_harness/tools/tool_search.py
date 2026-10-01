@@ -1,4 +1,4 @@
-"""rolo_claude.tools.tool_search -- the ToolSearch tool (H2 scope A, H3
+"""halo_harness.tools.tool_search -- the ToolSearch tool (H2 scope A, H3
 scope C). Two modes, picked per-call from `ctx.catalog`:
 
 - No `ctx.catalog` (every H2-era call site, and any session with zero MCP
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 # finding 13 must-do: Claude Code's own deferred-tool wording (this
 # build's actual, current help text -- the old copy's "This build has no

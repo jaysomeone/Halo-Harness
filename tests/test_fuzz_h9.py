@@ -1,6 +1,6 @@
 """tests.test_fuzz_h9 -- H9 Part C bug hunt: the fuzz harness.
 
-Drives a REAL rolo_claude.agent.loop.Session against deliberately
+Drives a REAL halo_harness.agent.loop.Session against deliberately
 adversarial mock upstreams (malformed/truncated SSE, huge outputs, unicode
 edge cases, control characters, 429/5xx storms, context overflow) with a
 steer or an abort injected at a randomly chosen point in every run, then
@@ -142,10 +142,10 @@ def test_pin_finish_ascii_safe_done_marker_has_correct_chunk_length(ctx: Ctx):
     from tests.helpers.fake_home import build_fake_home
     from tests.helpers.fuzz_h9 import _finish_ascii_safe, _role_chunk, _stop_chunk, _text_chunk
     from tests.helpers.mock_openai import SCENARIOS
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     lone_surrogate_snippet = "lone surrogate ahead: \ud800 (end)"
     scenario_name = "pin-finish-ascii-safe"

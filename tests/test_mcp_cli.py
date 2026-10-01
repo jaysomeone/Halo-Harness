@@ -1,4 +1,4 @@
-"""tests.test_mcp_cli -- rolo_claude/mcp_cli.py (H3 scope D): line format/
+"""tests.test_mcp_cli -- halo_harness/mcp_cli.py (H3 scope D): line format/
 status vocabulary unit tests, and read-modify-write helpers exercised
 in-process (faster than the subprocess round trips already covered in
 tests/test_doctor_mcp_config_cli.py) -- add-json, project scope (.mcp.json),
@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import mcp_cli as C
+from halo_harness import mcp_cli as C
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -109,7 +109,7 @@ def test_store_entry_local_scope_uses_normalized_cwd_key(ctx: Ctx):
         cwd = home / "myproj"
         C._store_entry(scope="local", name="s", entry={"type": "stdio", "command": "c"}, cwd=cwd)
         data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
-        from rolo_claude.config.paths import normalize_cwd
+        from halo_harness.config.paths import normalize_cwd
         key = normalize_cwd(cwd)
         ctx.check(f"stored under projects[{key}].mcpServers", data["projects"][key]["mcpServers"]["s"]["command"] == "c")
     _with_claude_json_path(_run)

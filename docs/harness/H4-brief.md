@@ -1,6 +1,6 @@
-# H4 brief — hooks, Skill tool, custom command execution, AskUserQuestion seam, WebSearch (rolo-claude)
+# H4 brief — hooks, Skill tool, custom command execution, AskUserQuestion seam, WebSearch (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — OS-neutral). Baseline = the H3 commit on master, both suites green on Windows and WSL. Do not
 commit.
 
@@ -17,7 +17,7 @@ commit.
    and before dispatch for EVERY call (batched read-only calls collect verdicts before the batch is
    submitted, never inside the pool); PostToolUse before `spill_and_truncate`; hooks get
    `effective_env` (minus provider secrets, like tools).
-4. Current code: `rolo_claude/agent/loop.py` (dispatch pipeline), `commands/{skills,custom}.py`
+4. Current code: `halo_harness/agent/loop.py` (dispatch pipeline), `commands/{skills,custom}.py`
    (U0's readers — reuse), `tools/{skill,ask_user_question,webfetch}.py`, `config/settings.py`
    (`hooks` accessor), `controller.py`, `permissions.py`, `tests/helpers/*`.
 
@@ -35,7 +35,7 @@ commit.
    events `steer_queued` / `steer_applied`; TUI shows "↳ steering…"; tests: steer mid-stream changes
    the next request, steer during a tool call applies after the tool result, two steers in order,
    steer during a pending card does not answer the card.
-A. **`rolo_claude/hooks.py`** per D-CFG: `HookDef`, `HookResult`, `HookOutcome`, `normalize_hooks`
+A. **`halo_harness/hooks.py`** per D-CFG: `HookDef`, `HookResult`, `HookOutcome`, `normalize_hooks`
    (settings levels — untrusted project/local dropped — plus plugin `hooks/hooks.json` with
    `${CLAUDE_PLUGIN_ROOT}`, skill/agent frontmatter `hooks:` with scope), `HookRunner.run(event,
    payload, matched, tool_name, tool_input)`: matcher semantics (omitted/``/`*` all; `[A-Za-z0-9_\-
@@ -90,11 +90,11 @@ command `!` gating; AskUser wait/reply; WebSearch mock (plugin field present onl
 ## Acceptance
 Both suites green on Windows and WSL. Live (default model): with a temp project whose
 `.claude/settings.json` has a PreToolUse hook script that rewrites a Bash command's `updatedInput`
-and a UserPromptSubmit hook that adds context, `python -m rolo_claude -p "run echo original and
+and a UserPromptSubmit hook that adds context, `python -m halo_harness -p "run echo original and
 reply with the output" --permission-mode auto` shows the rewritten command in `--verbose` and the
 added context in the session log; a Stop hook that exits 2 once makes the model continue exactly
-one more step; `python -m rolo_claude -p "/anthropic-skills:docx" ...` invocation expands the synced
-skill body (visible in the log); `python -m rolo_claude -p "search the web for the current DeepSeek
+one more step; `python -m halo_harness -p "/anthropic-skills:docx" ...` invocation expands the synced
+skill body (visible in the log); `python -m halo_harness -p "search the web for the current DeepSeek
 V4 pricing and cite a URL"` → answer with a citation (WebSearch on OpenRouter); Read line count and
 memory question unchanged; proxy pong; settings.json unchanged; `~/.claude.json` checksum unchanged.
 Report ≤ 60 lines. Rules as in the other briefs.

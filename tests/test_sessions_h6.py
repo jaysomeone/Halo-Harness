@@ -16,7 +16,7 @@ from tests.helpers.provider_env_defaults import ensure_default_provider_credenti
 
 ensure_scoped_state_dir_once()
 ensure_default_provider_credentials()
-from rolo_claude.agent import sessions as agent_sessions
+from halo_harness.agent import sessions as agent_sessions
 
 test, TESTS = new_registry()
 
@@ -303,12 +303,12 @@ def test_h5b_b_resume_twice_loads_existing_nodes_both_times(ctx: Ctx):
     the FULL prior history, not just what the most recent process wrote."""
     import tempfile
     from pathlib import Path
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.derive import derive_request
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.derive import derive_request
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     cwd = Path(tempfile.mkdtemp(prefix="resume-twice-"))
     os.environ["BRIDGE_TEST_HOME"] = str(cwd / "home")

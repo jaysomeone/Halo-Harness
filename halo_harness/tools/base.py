@@ -1,11 +1,11 @@
-"""rolo_claude.tools.base -- the Tool protocol. H1 had only `Read`; H2 adds
+"""halo_harness.tools.base -- the Tool protocol. H1 had only `Read`; H2 adds
 Write/Edit/Bash/PowerShell/Glob/Grep/WebFetch/TodoWrite/ToolSearch/
 AskUserQuestion/Skill on top of this same small shape.
 
 `is_read_only`/`is_destructive` are INFORMATIONAL ONLY (used for the
 read-only concurrency pool in tools/registry.py and for a tool card's
 display) -- rolo's "no cyber blocks" decision means neither one is ever
-consulted by the permission engine (rolo_claude/permissions.py) to gate or
+consulted by the permission engine (halo_harness/permissions.py) to gate or
 auto-deny anything; only the user's own rules and modes do that.
 """
 
@@ -186,7 +186,7 @@ class Tool:
 
     def permission_content(self, input: dict) -> str:
         """The string a permission `Rule` is matched against for this call
-        (rolo_claude/permissions.py never inspects `input` itself -- every
+        (halo_harness/permissions.py never inspects `input` itself -- every
         tool decides what its own "content" means: a file path, a shell
         command, a URL, ...). Defaults to "" (a tool with no natural
         content position, e.g. TodoWrite) so an unrecognized/param-only

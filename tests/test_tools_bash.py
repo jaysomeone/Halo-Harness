@@ -11,8 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.bash import BashTool
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.bash import BashTool
 
 test, TESTS = new_registry()
 
@@ -77,7 +77,7 @@ def test_bash_timeout_kills_the_process(ctx: Ctx):
 
 @test
 def test_bash_timeout_clamped_to_600000ms_max(ctx: Ctx):
-    from rolo_claude.tools.bash import MAX_TIMEOUT_MS
+    from halo_harness.tools.bash import MAX_TIMEOUT_MS
     ctx.check("MAX_TIMEOUT_MS is 600000", MAX_TIMEOUT_MS == 600_000)
 
 

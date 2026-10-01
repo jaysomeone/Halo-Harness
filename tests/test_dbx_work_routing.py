@@ -41,7 +41,7 @@ class _EnvSandbox:
         (self.home / ".claude" / "settings.json").write_text(json.dumps(_FIXTURE), encoding="utf-8")
         os.environ["BRIDGE_TEST_HOME"] = str(self.home)
         os.environ["BRIDGE_ENV_FILE"] = str(self.home / "no-such-env-file")
-        os.environ["BRIDGE_STATE_DIR"] = str(self.home / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(self.home / ".halo")
         for key in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                     "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
                     "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -50,7 +50,7 @@ class _EnvSandbox:
         return self
 
     def settings(self):
-        from rolo_claude.config.settings import resolve_settings
+        from halo_harness.config.settings import resolve_settings
         return resolve_settings(self.home, trusted=True)
 
     def __exit__(self, *exc):
@@ -68,7 +68,7 @@ class _EnvSandbox:
 @test
 def test_resolve_databricks_splits_root_from_gateway_path_via_settings_env(ctx: Ctx):
     with _EnvSandbox() as sb:
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         # No `env` arg -> defaults to the real os.environ, which triggers
         # step 3's settings-chain re-derivation (the `env is os.environ`
         # gate) and picks up the fixture's ~/.claude/settings.json.
@@ -82,7 +82,7 @@ def test_resolve_databricks_splits_root_from_gateway_path_via_settings_env(ctx: 
 
 @test
 def test_resolve_databricks_databricks_host_with_a_path_also_splits(ctx: Ctx):
-    from rolo_claude.providers.config import resolve_databricks
+    from halo_harness.providers.config import resolve_databricks
     dbx = resolve_databricks(env={
         "DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic/v1/messages",
         "DATABRICKS_TOKEN": "tok",
@@ -94,7 +94,7 @@ def test_resolve_databricks_databricks_host_with_a_path_also_splits(ctx: Ctx):
 
 @test
 def test_resolve_databricks_bare_host_has_no_gateway(ctx: Ctx):
-    from rolo_claude.providers.config import resolve_databricks
+    from halo_harness.providers.config import resolve_databricks
     dbx = resolve_databricks(env={"DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com",
                                    "DATABRICKS_TOKEN": "tok"})
     ctx.check("no path to strip -> anthropic_gateway is None", dbx.anthropic_gateway is None)
@@ -129,23 +129,23 @@ def test_resolve_databricks_never_mixes_an_untrusted_project_host_with_the_users
         json.dumps({"env": {"DATABRICKS_HOST": "https://collector.example"}}), encoding="utf-8")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     os.environ["BRIDGE_ENV_FILE"] = str(home / "no-such-env-file")
-    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
     for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN",
               "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
         os.environ.pop(k, None)
     old_cwd = os.getcwd()
     try:
-        from rolo_claude.config.claude_json import is_trusted, load_claude_json
+        from halo_harness.config.claude_json import is_trusted, load_claude_json
         ctx.check("the project cwd reads as untrusted (no trust.json/claude.json entry for it)",
                   is_trusted(project, load_claude_json()) is False)
-        from rolo_claude.providers.config import load_settings_env_chain
+        from halo_harness.providers.config import load_settings_env_chain
         chain = load_settings_env_chain(project)  # trusted=None -> computed here -> False
         ctx.check(f"the untrusted project's own DATABRICKS_HOST never enters the merged chain, got {chain!r}",
                   "DATABRICKS_HOST" not in chain)
         ctx.check(f"the user's own DATABRICKS_TOKEN still does (never trust-gated), got {chain!r}",
                   chain.get("DATABRICKS_TOKEN") == "user-real-token")
         os.chdir(project)  # resolve_databricks()'s own bare-env path re-derives via Path.cwd()
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         dbx = resolve_databricks()
         ctx.check(f"never the project's host paired with the user's token, got {dbx!r}",
                   dbx is None or dbx.host != "https://collector.example")
@@ -175,13 +175,13 @@ def test_resolve_databricks_step4_pairs_a_shell_token_with_a_trusted_settings_ho
         encoding="utf-8")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     os.environ["BRIDGE_ENV_FILE"] = str(home / "no-such-env-file")
-    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
     for k in ("DATABRICKS_HOST", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "ANTHROPIC_BASE_URL",
               "ANTHROPIC_AUTH_TOKEN"):
         os.environ.pop(k, None)
     os.environ["DATABRICKS_TOKEN"] = "shell-only-token"
     try:
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         dbx = resolve_databricks()  # bare os.environ -> triggers the settings-chain re-derivation
         ctx.check(f"resolves the shell token with the trusted settings host, got {dbx!r}",
                   dbx is not None and dbx.token == "shell-only-token"
@@ -200,7 +200,7 @@ def test_resolve_databricks_step4_pairs_a_shell_token_with_a_trusted_settings_ho
 
 @test
 def test_parse_custom_headers_single_and_multi_line(ctx: Ctx):
-    from rolo_claude.providers.config import parse_custom_headers
+    from halo_harness.providers.config import parse_custom_headers
     ctx.check("single line", parse_custom_headers("x-databricks-use-coding-agent-mode: true") ==
               {"x-databricks-use-coding-agent-mode": "true"})
     multi = parse_custom_headers("x-a: 1\nx-b: 2\n\n# comment-shaped line has no colon so is skipped-ish\nx-c:3")
@@ -213,7 +213,7 @@ def test_parse_custom_headers_single_and_multi_line(ctx: Ctx):
 @test
 def test_resolve_databricks_carries_custom_headers_from_settings_env(ctx: Ctx):
     with _EnvSandbox():
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         dbx = resolve_databricks()
         ctx.check(f"custom_headers parsed, got {dbx.custom_headers!r}",
                   dbx.custom_headers == {"x-databricks-use-coding-agent-mode": "true"})
@@ -221,7 +221,7 @@ def test_resolve_databricks_carries_custom_headers_from_settings_env(ctx: Ctx):
 
 @test
 def test_merge_databricks_headers_precedence(ctx: Ctx):
-    from rolo_claude.providers.config import merge_databricks_headers
+    from halo_harness.providers.config import merge_databricks_headers
     # Default only.
     ctx.check("default alone", merge_databricks_headers(None) == {"x-databricks-use-coding-agent-mode": "true"})
     # Custom header overrides the default's own name.
@@ -240,7 +240,7 @@ def test_merge_databricks_headers_precedence(ctx: Ctx):
 @test
 def test_resolve_default_model_raw_uses_anthropic_model_at_work(ctx: Ctx):
     with _EnvSandbox() as sb:
-        from rolo_claude.model import resolve_default_model_raw
+        from halo_harness.model import resolve_default_model_raw
         env = sb.settings().effective_env
         got = resolve_default_model_raw(routes={}, env=env)
         ctx.check(f"dbx:<ANTHROPIC_MODEL>, got {got!r}", got == "dbx:databricks-claude-opus-4-6")
@@ -248,11 +248,11 @@ def test_resolve_default_model_raw_uses_anthropic_model_at_work(ctx: Ctx):
 
 @test
 def test_resolve_default_model_raw_bridge_model_still_wins(ctx: Ctx):
-    # BRIDGE_MODEL (rolo-claude's own escape hatch, not a Claude Code
+    # BRIDGE_MODEL (halo's own escape hatch, not a Claude Code
     # settings concept) is read straight off the real process environment,
     # unaffected by `env=` -- same as every other BRIDGE_MODEL call site.
     with _EnvSandbox() as sb:
-        from rolo_claude.model import resolve_default_model_raw
+        from halo_harness.model import resolve_default_model_raw
         os.environ["BRIDGE_MODEL"] = "or:some/other-model"
         try:
             got = resolve_default_model_raw(routes={}, env=sb.settings().effective_env)
@@ -263,7 +263,7 @@ def test_resolve_default_model_raw_bridge_model_still_wins(ctx: Ctx):
 
 @test
 def test_resolve_default_model_raw_no_work_env_falls_back_to_hardcoded_default(ctx: Ctx):
-    from rolo_claude.model import resolve_default_model_raw, DEFAULT_MODEL_REF
+    from halo_harness.model import resolve_default_model_raw, DEFAULT_MODEL_REF
     got = resolve_default_model_raw(routes={}, env={})
     ctx.check(f"no work env -> hardcoded default, got {got!r}", got == DEFAULT_MODEL_REF)
 
@@ -271,7 +271,7 @@ def test_resolve_default_model_raw_no_work_env_falls_back_to_hardcoded_default(c
 @test
 def test_bare_opus_sonnet_haiku_resolve_through_work_env(ctx: Ctx):
     with _EnvSandbox():
-        from rolo_claude.model import parse_model_ref
+        from halo_harness.model import parse_model_ref
         for bare, expect in (("opus", "databricks-claude-opus-4-6"),
                              ("sonnet", "databricks-claude-opus-5"),
                              ("haiku", "databricks-claude-opus-4-8")):
@@ -284,7 +284,7 @@ def test_bare_opus_sonnet_haiku_resolve_through_work_env(ctx: Ctx):
 
 @test
 def test_bare_tier_falls_back_to_pinned_claude_endpoint_when_default_unset(ctx: Ctx):
-    from rolo_claude.providers.config import databricks_default_model_for_tier
+    from halo_harness.providers.config import databricks_default_model_for_tier
     env = {"ANTHROPIC_MODEL": "databricks-claude-opus-4-6",
            "ANTHROPIC_BASE_URL": "https://your-workspace.cloud.databricks.com/ai-gateway/anthropic",
            "ANTHROPIC_AUTH_TOKEN": "dapiFAKE"}
@@ -299,7 +299,7 @@ def test_bare_tier_falls_back_to_pinned_claude_endpoint_when_default_unset(ctx: 
 def test_bare_alias_uses_cc_ant_when_no_databricks_work_env_active(ctx: Ctx):
     """No ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_MODEL at all -- the
     cc:/ant: subscription route applies exactly as before this milestone."""
-    from rolo_claude.providers.config import databricks_work_env_active
+    from halo_harness.providers.config import databricks_work_env_active
     ctx.check("no work env -> False", databricks_work_env_active(env={}) is False)
     ctx.check("no work env (os.environ, nothing set here) -> resolve doesn't crash",
               databricks_work_env_active(env={"SOME_OTHER_VAR": "1"}) is False)
@@ -351,7 +351,7 @@ _CATALOG = [
 
 
 def _state_dir_with_catalog():
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-state-"))
     write_dbx_endpoints_json(state_dir, _CATALOG)
     return state_dir
@@ -361,7 +361,7 @@ def _state_dir_with_catalog():
 def test_chat_route_candidates_claude_foundation_excludes_anthropic(ctx: Ctx):
     """anthropic-passthrough is a SEPARATE dialect decision -- the openai-
     chat candidate list never includes it even for a family that lists it."""
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     cands = chat_route_candidates("databricks-claude-opus-4-6", state_dir)
     keys = [c.key for c in cands]
@@ -372,7 +372,7 @@ def test_chat_route_candidates_claude_foundation_excludes_anthropic(ctx: Ctx):
 
 @test
 def test_chat_route_candidates_glm_kimi_default_mlflow(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     for name, fm in (("databricks-glm-5-3", "glm-5-3"), ("databricks-kimi-k3", "kimi-k3")):
         cands = chat_route_candidates(name, state_dir)
@@ -383,7 +383,7 @@ def test_chat_route_candidates_glm_kimi_default_mlflow(ctx: Ctx):
 
 @test
 def test_chat_route_candidates_deepseek_qwen_llama_mlflow_only(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     for name, fm in (("databricks-deepseek-v4-1-flash", "deepseek-v4-1-flash"),
                      ("databricks-qwen35-122b-a10b", "system.ai.qwen35-122b-a10b"),
@@ -397,7 +397,7 @@ def test_chat_route_candidates_deepseek_qwen_llama_mlflow_only(ctx: Ctx):
 
 @test
 def test_chat_route_candidates_gpt_and_gpt_5_5_pro_exception(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     gpt = chat_route_candidates("databricks-gpt-5", state_dir)
     ctx.check(f"gpt: mlflow then cursor, got {[c.key for c in gpt]}",
@@ -409,7 +409,7 @@ def test_chat_route_candidates_gpt_and_gpt_5_5_pro_exception(ctx: Ctx):
 
 @test
 def test_chat_route_candidates_grok_and_gemini(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     grok = chat_route_candidates("databricks-grok-4-6", state_dir)
     ctx.check(f"grok: mlflow only, got {[c.key for c in grok]}", [c.key for c in grok] == ["mlflow", "invocations"])
@@ -420,8 +420,8 @@ def test_chat_route_candidates_grok_and_gemini(ctx: Ctx):
 
 @test
 def test_chat_route_candidates_bedrock_external_is_invocations_only(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
-    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    from halo_harness.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import resolve_databricks_dialect
     state_dir = _state_dir_with_catalog()
     cands = chat_route_candidates("us-anthropic-claude-3-5-sonnet-v2", state_dir)
     ctx.check(f"invocations only, got {[c.key for c in cands]}", [c.key for c in cands] == ["invocations"])
@@ -431,7 +431,7 @@ def test_chat_route_candidates_bedrock_external_is_invocations_only(ctx: Ctx):
 
 @test
 def test_unknown_endpoint_falls_back_to_todays_order(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
+    from halo_harness.providers.dbx_routing import chat_route_candidates
     state_dir = _state_dir_with_catalog()
     cands = chat_route_candidates("databricks-brand-new-family-not-in-cache", state_dir)
     ctx.check(f"today's static order (invocations first for a non-system.ai. name), got {[c.key for c in cands]}",
@@ -443,7 +443,7 @@ def test_unknown_endpoint_falls_back_to_todays_order(ctx: Ctx):
 
 @test
 def test_non_chat_endpoint_refused_and_no_candidates(ctx: Ctx):
-    from rolo_claude.providers.dbx_routing import chat_route_candidates, refuse_if_non_chat
+    from halo_harness.providers.dbx_routing import chat_route_candidates, refuse_if_non_chat
     state_dir = _state_dir_with_catalog()
     err = refuse_if_non_chat("databricks-gte-large-en", state_dir)
     ctx.check(f"refused with a clear message, got {err!r}", err is not None and "non-chat" in err)
@@ -454,8 +454,8 @@ def test_non_chat_endpoint_refused_and_no_candidates(ctx: Ctx):
 
 @test
 def test_parse_model_ref_refuses_non_chat_databricks_endpoint(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
     state_dir = _state_dir_with_catalog()
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -474,13 +474,13 @@ def test_parse_model_ref_refuses_non_chat_databricks_endpoint(ctx: Ctx):
 
 @test
 def test_at_anthropic_suffix_and_gateway_config_override_glm(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.theme import set_config_value
+    from halo_harness.model import parse_model_ref
+    from halo_harness.theme import set_config_value
     state_dir = _state_dir_with_catalog()
     old = os.environ.get("BRIDGE_STATE_DIR")
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
-    os.environ["BRIDGE_TEST_HOME"] = str(state_dir)  # config.json lives under home/.rolo-claude too
+    os.environ["BRIDGE_TEST_HOME"] = str(state_dir)  # config.json lives under home/.halo too
     try:
         ref = parse_model_ref("dbx:databricks-glm-5-3@anthropic")
         ctx.check(f"suffix strips + switches dialect, got model={ref.model!r} dialect={ref.dialect!r}",
@@ -506,7 +506,7 @@ def test_at_anthropic_suffix_and_gateway_config_override_glm(ctx: Ctx):
 
 @test
 def test_bare_databricks_prefixed_name_resolves_exactly_like_dbx_prefixed(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     state_dir = _state_dir_with_catalog()
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -529,8 +529,8 @@ def test_bare_name_with_no_databricks_prefix_resolves_when_it_matches_a_cached_e
     shape at all) still resolves as Databricks once it's actually cached --
     only a name that matches NEITHER the cache NOR the generic shape is
     unresolvable."""
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-custom-"))
     write_dbx_endpoints_json(state_dir, _CATALOG + [
         {"name": "my-team-kimi", "foundation_model_name": "kimi-k3", "task": "llm/v1/chat",
@@ -553,8 +553,8 @@ def test_bare_name_with_no_databricks_prefix_resolves_when_it_matches_a_cached_e
 
 @test
 def test_unresolvable_bare_name_suggests_the_three_closest_cached_endpoints(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
     state_dir = _state_dir_with_catalog()
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -582,8 +582,8 @@ def test_unresolvable_bare_name_suggests_the_three_closest_cached_endpoints(ctx:
 def test_unresolvable_name_with_no_cache_gives_the_plain_message_no_hint_crash(ctx: Ctx):
     """No dbx-endpoints.json at all (a fresh box) -- the near-miss lookup
     must degrade to "no hint appended", never raise itself."""
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
     state_dir = Path(tempfile.mkdtemp(prefix="dbx-work-routing-empty-"))
     old = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(state_dir)

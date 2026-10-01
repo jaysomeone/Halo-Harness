@@ -26,9 +26,9 @@ class _Env:
                         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-work-doctor-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -40,7 +40,7 @@ class _Env:
 
 
 def _token_validity_line(host, token) -> str:
-    from rolo_claude.doctor import _work_check_token_validity
+    from halo_harness.doctor import _work_check_token_validity
     return _work_check_token_validity(host, token)
 
 
@@ -114,7 +114,7 @@ def test_token_validity_200_reports_ok_with_endpoint_count(ctx: Ctx):
 
 @test
 def test_token_validity_host_only_still_probes_and_names_missing_token(ctx: Ctx):
-    """Scope E: "host configured, token missing -> fix: rolo-claude init
+    """Scope E: "host configured, token missing -> fix: halo init
     --preset work"; the reachability probe still runs without a token (a
     401 without one proves the host is reachable)."""
     mock = MockDatabricks().start()
@@ -140,7 +140,7 @@ def test_token_validity_no_host_is_missing_nothing_to_check(ctx: Ctx):
 
 @test
 def test_work_check_config_summary_prints_root_gateway_headers_model_effort_source(ctx: Ctx):
-    from rolo_claude.doctor import _work_check_config_summary
+    from halo_harness.doctor import _work_check_config_summary
     with _Env():
         os.environ["BRIDGE_DBX_BASE_URL"] = "https://your-workspace.cloud.databricks.com"
         os.environ["BRIDGE_DBX_TOKEN"] = "tok"
@@ -155,13 +155,13 @@ def test_work_check_config_summary_prints_root_gateway_headers_model_effort_sour
                   or True)  # the value "1" is a single digit unlikely to false-positive; name-only is what matters
         ctx.check("default model line present", any("Default model:" in l for l in lines))
         ctx.check("default effort line present", any("Default effort:" in l for l in lines))
-        ctx.check("token source line present", any("Token source:" in l and "BRIDGE_DBX_BASE_URL" in l
+        ctx.check("token source line present", any("Token source:" in l and "HALO_DBX_BASE_URL" in l
                                                      for l in lines))
 
 
 @test
 def test_work_check_config_summary_empty_when_databricks_not_configured(ctx: Ctx):
-    from rolo_claude.doctor import _work_check_config_summary
+    from halo_harness.doctor import _work_check_config_summary
     with _Env():
         for k in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
@@ -176,7 +176,7 @@ def test_resolve_databricks_host_only_when_token_missing(ctx: Ctx):
     box would look IDENTICAL to "nothing configured" everywhere, and the
     brief's own "host configured, token missing" line could never actually
     fire outside a direct unit-test call."""
-    from rolo_claude.providers.config import resolve_databricks_host_only
+    from halo_harness.providers.config import resolve_databricks_host_only
     host = resolve_databricks_host_only(env={"DATABRICKS_HOST": "https://your-workspace.cloud.databricks.com"})
     ctx.check(f"host-only resolves, got {host!r}", host == "https://your-workspace.cloud.databricks.com")
     ctx.check("a full pair is NOT host-only (None)",
@@ -192,7 +192,7 @@ def test_run_work_checks_end_to_end_host_only_state_reaches_the_real_report(ctx:
     (resolve_databricks() itself requires both) -- `run_work_checks()`'s
     real output looked identical to "nothing configured" and could never
     show scope E's own "host configured, token missing" line at all."""
-    from rolo_claude.doctor import run_work_checks
+    from halo_harness.doctor import run_work_checks
     with _Env():
         os.environ["DATABRICKS_HOST"] = "https://your-workspace.cloud.databricks.com"
         lines, ok = run_work_checks()

@@ -1,4 +1,4 @@
-"""rolo_claude.agent.log -- the append-only session log (H1 scope E): the
+"""halo_harness.agent.log -- the append-only session log (H1 scope E): the
 SINGLE SOURCE OF TRUTH every model request is derived from. Replaces
 agent/session_store.py's role in the loop (that module is left in the tree,
 unreferenced, rather than deleted, since nothing outside it imports it after
@@ -25,7 +25,7 @@ import time
 import uuid
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home, project_slug
+from halo_harness.config.paths import bridge_home, project_slug
 
 NODE_TYPES = frozenset({
     "meta", "system", "user", "assistant", "tool_result",
@@ -36,7 +36,7 @@ NODE_TYPES = frozenset({
 
 class SessionLog:
     """One session's append-only JSONL file at
-    ~/.rolo-claude/sessions/<slug>/<session_id>.jsonl, PLUS an in-memory
+    ~/.halo/sessions/<slug>/<session_id>.jsonl, PLUS an in-memory
     mirror (`self._nodes`) kept in lockstep so `derive_request` never has to
     re-read the file mid-session. A write failure is best-effort (matches
     session_store.py's own contract) -- the in-memory mirror is still
@@ -244,7 +244,7 @@ class SessionLog:
     def append_rewind(self, *, verb: str, step_id: str, files: Optional[list] = None) -> dict:
         """U5 scope B: a pure marker node -- `/rewind`/`/undo`/`/redo`
         touched the real working tree OUTSIDE the model conversation (a
-        git-shadow restore, `rolo_claude.shadow.ShadowStore`), so this is
+        git-shadow restore, `halo_harness.shadow.ShadowStore`), so this is
         purely an audit trail entry (never read by `derive_request`, same
         as a `snapshot` node's `kind`) recording WHAT happened for
         `/export`/`/stats` and a human skimming the raw log. `verb` is
@@ -275,7 +275,7 @@ class SessionLog:
         same as `rewind`/`prune_commit` above) recording that `/improve`'s
         `a`/`e` key (or headless `improve --apply`) actually wrote
         `path` -- `kind` is "memory"|"rule"|"skill", `sha256` is the
-        applied body's own hash (the same one `~/.rolo-claude/improve/
+        applied body's own hash (the same one `~/.halo/improve/
         dismissed.json` keys a `d` dismissal by)."""
         return self._append({"type": "improve_applied", "kind": kind, "path": path,
                               "candidate_id": candidate_id, "sha256": sha256})

@@ -42,13 +42,13 @@ _FAKE_MCP_NAMES = [
 
 
 def _every_tool_name() -> list:
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.tools.registry import ToolRegistry
     return sorted(set(ToolRegistry().names()) | set(_FAKE_MCP_NAMES))
 
 
 @test
 def test_every_registered_tool_allowed_in_auto_with_no_rules(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     with tempfile.TemporaryDirectory() as td:
         engine = PermissionEngine(mode="auto", cwd=Path(td))
@@ -62,7 +62,7 @@ def test_every_registered_tool_allowed_in_auto_with_no_rules(ctx: Ctx):
 
 @test
 def test_every_registered_tool_allowed_in_bypass_with_no_rules(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     with tempfile.TemporaryDirectory() as td:
         engine = PermissionEngine(mode="bypassPermissions", cwd=Path(td))
@@ -79,7 +79,7 @@ def test_auto_still_honours_an_explicit_deny_rule(ctx: Ctx):
     """scope 0(a): "only the user's own deny/ask rules ... apply" -- auto
     is uninterrupted by DEFAULT, not lawless; a rule the user actually
     wrote still gates the one tool it names."""
-    from rolo_claude.permissions import Decision, PermissionEngine, parse_rule
+    from halo_harness.permissions import Decision, PermissionEngine, parse_rule
 
     with tempfile.TemporaryDirectory() as td:
         deny = [parse_rule("mcp__claude-in-chrome__computer", source="test", action="deny")]
@@ -95,7 +95,7 @@ def test_auto_honours_a_user_written_ask_rule_as_a_prompt(ctx: Ctx):
     """scope 0(a): "auto honours ask rules as prompts ONLY if the user
     wrote them" -- an `ask` rule still resolves to "ask" in auto (never
     silently downgraded to allow), but ONLY because the user wrote it."""
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     with tempfile.TemporaryDirectory() as td:
         ask = [parse_rule("Bash(rm -rf:*)", source="test", action="ask")]
@@ -108,14 +108,14 @@ def test_auto_honours_a_user_written_ask_rule_as_a_prompt(ctx: Ctx):
 def test_chrome_server_config_sets_skip_all_permission_checks_in_auto(ctx: Ctx):
     """finding 9 (h4-h5-h3c review): `CLAUDE_CHROME_PERMISSION_MODE=
     skip_all_permission_checks` for the claude-in-chrome MCP server is
-    now ALWAYS set, regardless of the launch-time mode -- rolo-claude's
+    now ALWAYS set, regardless of the launch-time mode -- halo's
     OWN PermissionEngine already gates every `mcp__claude-in-chrome__*`
     call the same way it gates any other tool, so the extension's own
     separate internal prompt is pure double-gating; the old
     bypass_mode-conditional version also meant a session that switched
     to auto/bypass AFTER the server was already spawned (Shift+Tab)
     never got the flag at all for the rest of the process."""
-    from rolo_claude.mcp_setup import chrome_server_config
+    from halo_harness.mcp_setup import chrome_server_config
 
     cfg, err = chrome_server_config(bypass_mode=True)
     if cfg is None:
@@ -136,11 +136,11 @@ def test_no_permission_request_event_for_a_real_tool_call_in_auto(ctx: Ctx):
     `auto` runs straight through with no `permission_request` event at
     all -- the loop-level behaviour the direct `decide()` sweep above
     implies, verified end to end."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     target = fh["proj"] / "auto_mode_target.txt"
@@ -190,7 +190,7 @@ def test_bash_and_powershell_arbitrary_commands_allowed_in_auto(ctx: Ctx):
     through -- covered explicitly with real, varied command TEXT (not
     just an empty `{}` input), incl. a browser-automation-flavoured
     command, to prove no category of shell command is carved out."""
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     with tempfile.TemporaryDirectory() as td:
         engine = PermissionEngine(mode="auto", cwd=Path(td))
@@ -209,7 +209,7 @@ def test_bash_and_powershell_arbitrary_commands_allowed_in_auto(ctx: Ctx):
 
 @test
 def test_webfetch_and_askuserquestion_allowed_in_auto(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     with tempfile.TemporaryDirectory() as td:
         engine = PermissionEngine(mode="auto", cwd=Path(td))
@@ -237,7 +237,7 @@ def test_bypass_mode_resolution_includes_auto(ctx: Ctx):
 def test_no_auto_mode_restriction_wording_anywhere_in_the_tree(ctx: Ctx):
     """The brief's own audit instruction (scope 0a), run as a permanent
     regression test instead of a one-off grep: no prompt/tool-
-    description/error/UI string anywhere under rolo_claude/ may say an
+    description/error/UI string anywhere under halo_harness/ may say an
     action is unavailable/not allowed/restricted specifically BECAUSE of
     auto mode."""
     import re as _re
@@ -249,7 +249,7 @@ def test_no_auto_mode_restriction_wording_anywhere_in_the_tree(ctx: Ctx):
     )
     hits = []
     repo_dir = Path(__file__).resolve().parent.parent
-    for path in (repo_dir / "rolo_claude").rglob("*.py"):
+    for path in (repo_dir / "halo_harness").rglob("*.py"):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:

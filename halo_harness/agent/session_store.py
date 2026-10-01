@@ -1,5 +1,5 @@
-"""rolo_claude.agent.session_store -- the harness's OWN transcript store,
-under ~/.rolo-claude/sessions/<slug>/<session_id>.jsonl (plan D8). Never
+"""halo_harness.agent.session_store -- the harness's OWN transcript store,
+under ~/.halo/sessions/<slug>/<session_id>.jsonl (plan D8). Never
 touches Claude Code's own ~/.claude/projects/ transcripts -- read-only
 there, if ever (H0 doesn't read them at all).
 """
@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home, project_slug
+from halo_harness.config.paths import bridge_home, project_slug
 
 
 class SessionStore:

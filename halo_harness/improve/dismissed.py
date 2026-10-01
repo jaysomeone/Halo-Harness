@@ -1,5 +1,5 @@
-"""rolo_claude.improve.dismissed -- the `d` (dismiss forever) key's own
-persistence: `~/.rolo-claude/improve/dismissed.json`, a flat list of
+"""halo_harness.improve.dismissed -- the `d` (dismiss forever) key's own
+persistence: `~/.halo/improve/dismissed.json`, a flat list of
 `candidate_hash` (sha256 of kind+scope+path+body) values. A dismissed
 candidate is never re-shown by a LATER /improve run, across restarts.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def dismissed_path() -> Path:
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     return bridge_home() / "improve" / "dismissed.json"
 
 
@@ -39,6 +39,6 @@ def add_dismissed(hash_hex: str) -> Path:
 
 
 def is_dismissed(candidate, dismissed: "set[str] | None" = None) -> bool:
-    from rolo_claude.improve.apply import candidate_hash
+    from halo_harness.improve.apply import candidate_hash
     dismissed = dismissed if dismissed is not None else load_dismissed()
     return candidate_hash(candidate) in dismissed

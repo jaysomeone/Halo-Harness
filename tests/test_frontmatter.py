@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.config.frontmatter import parse
+from halo_harness.config.frontmatter import parse
 
 test, TESTS = new_registry()
 

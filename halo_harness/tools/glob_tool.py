@@ -1,4 +1,4 @@
-"""rolo_claude.tools.glob_tool -- the Glob tool (H2 scope A). Wording
+"""halo_harness.tools.glob_tool -- the Glob tool (H2 scope A). Wording
 matches Claude Code's own Glob tool exactly. Recursive glob (`**` included),
 mtime-descending sort, a 500-result cap, and `.git`/`node_modules`/`.venv`/
 `__pycache__` pruned out of every result regardless of how permissive the
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "- Fast file pattern matching tool that works with any codebase size\n"

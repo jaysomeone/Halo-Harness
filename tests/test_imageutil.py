@@ -1,4 +1,4 @@
-"""tests.test_imageutil -- rolo_claude.tools.imageutil: pure-stdlib PNG/
+"""tests.test_imageutil -- halo_harness.tools.imageutil: pure-stdlib PNG/
 JPEG/GIF/WEBP dimension sniffing and the OpenCode size/dimension gate
 (H8 scope B), with no imaging library dependency.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools import imageutil as I
+from halo_harness.tools import imageutil as I
 
 test, TESTS = new_registry()
 

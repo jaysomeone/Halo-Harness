@@ -1,4 +1,4 @@
-"""rolo_claude.model -- model reference parsing and profile resolution for
+"""halo_harness.model -- model reference parsing and profile resolution for
 the harness's own agent loop (plan D3). This sits ABOVE the proxy's own
 providers.routing.route_model/resolve_profile: `ModelRef` is a richer parse
 (keeps the `or:`/`dbx:`/`ant:` prefixes and bare vendor/model or
@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.providers.databricks import load_dbx_endpoints_json, load_models_json
-from rolo_claude.providers.routing import InvalidModelError
+from halo_harness.providers.databricks import load_dbx_endpoints_json, load_models_json
+from halo_harness.providers.routing import InvalidModelError
 
 _ANT_PREFIX = "ant:"
 _DBX_PREFIX = "dbx:"
@@ -44,9 +44,10 @@ def resolve_default_model_raw(routes: Optional[dict] = None, env: Optional[dict]
     build_session` is the single shared session builder both go through)
     and `doctor --work`'s own probe resolve "the configured default model
     when nothing more specific was passed on the command line". Precedence:
-    `BRIDGE_MODEL` env var > `routes.json`'s own "default" alias (both
-    pre-existing) > `~/.rolo-claude/config.json`'s `"model"` key (written
-    by `rolo-claude init`'s step 3 or a plain `rolo-claude config set
+    `HALO_MODEL` (legacy `BRIDGE_MODEL`/`ROLO_CLAUDE_MODEL`, still honoured)
+    env var > `routes.json`'s own "default" alias (both
+    pre-existing) > `~/.halo/config.json`'s `"model"` key (written
+    by `halo init`'s step 3 or a plain `halo config set
     model ...`) > H14 scope C: `dbx:<ANTHROPIC_MODEL>` when the environment
     carries Claude Code's own Databricks work-box shape (`ANTHROPIC_MODEL`/
     `ANTHROPIC_DEFAULT_*_MODEL` resolving a real Databricks config) > the
@@ -58,16 +59,17 @@ def resolve_default_model_raw(routes: Optional[dict] = None, env: Optional[dict]
     `os.environ`; only the new work-env step reads it (the two pre-existing
     steps keep using `os.environ`/routes.json unchanged, so every existing
     caller that passes no `env` is completely unaffected)."""
+    from halo_harness.config.paths import env_compat
     routes = routes or {}
-    env_or_routes = os.environ.get("BRIDGE_MODEL") or routes.get("default")
+    env_or_routes = env_compat("MODEL") or routes.get("default")
     if env_or_routes:
         return env_or_routes
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     configured = get_config_value("model", default=None)
     if isinstance(configured, str) and configured:
         return configured
     env = env if env is not None else os.environ
-    from rolo_claude.providers.config import databricks_work_env_active
+    from halo_harness.providers.config import databricks_work_env_active
     if databricks_work_env_active(env):
         anthropic_model = env.get("ANTHROPIC_MODEL")
         if anthropic_model:
@@ -76,7 +78,7 @@ def resolve_default_model_raw(routes: Optional[dict] = None, env: Optional[dict]
 
 
 def _cached_dbx_endpoint_names() -> "list[str]":
-    """Every endpoint name in `~/.rolo-claude/dbx-endpoints.json` (best
+    """Every endpoint name in `~/.halo/dbx-endpoints.json` (best
     effort -- `[]` on any error, e.g. no cache yet, so a name-resolution
     check is always a cheap, offline, never-raising local read, exactly
     like `_cache_entry`/`refuse_if_non_chat` already are). 1.0.1 hotfix 6:
@@ -85,7 +87,7 @@ def _cached_dbx_endpoint_names() -> "list[str]":
     `databricks-`/`system.ai.` shape -- a workspace-custom endpoint name
     never has to) and the near-miss suggestion on an unresolvable ref."""
     try:
-        from rolo_claude.config.paths import bridge_home
+        from halo_harness.config.paths import bridge_home
         return list(load_dbx_endpoints_json(bridge_home()))
     except Exception:
         return []
@@ -104,7 +106,7 @@ def _databricks_model_ref(raw: str, bare: str) -> "ModelRef":
     known non-chat endpoint (embeddings/whisper) with a clear message
     instead of quietly building a ModelRef nothing can actually drive."""
     _refuse_if_disabled("databricks")
-    from rolo_claude.providers.dbx_routing import refuse_if_non_chat, resolve_databricks_dialect
+    from halo_harness.providers.dbx_routing import refuse_if_non_chat, resolve_databricks_dialect
     clean, dialect = resolve_databricks_dialect(bare)
     err = refuse_if_non_chat(clean)
     if err:
@@ -121,7 +123,7 @@ def _refuse_if_disabled(provider_key: str) -> None:
     own). A box with no `providers` block at all (every pre-H15 install,
     and most existing tests) is unaffected -- `is_provider_disabled_
     message` fails open in that case."""
-    from rolo_claude.providers.enablement import is_provider_disabled_message
+    from halo_harness.providers.enablement import is_provider_disabled_message
     msg = is_provider_disabled_message(provider_key)
     if msg:
         raise InvalidModelError(msg)
@@ -176,12 +178,12 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         _refuse_if_disabled("openrouter")
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
     if resolved.startswith(_CC_PREFIX):
-        from rolo_claude.providers.cc_models import resolve_cc_alias
+        from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
         _refuse_if_disabled("claude_subscription")
         return ModelRef(raw=raw, provider="cc", model=resolve_cc_alias(bare), dialect="cc-subprocess")
     if resolved.startswith(_ANT_PREFIX):
-        from rolo_claude.providers.cc_models import resolve_ant_alias
+        from halo_harness.providers.cc_models import resolve_ant_alias
         bare = resolved[len(_ANT_PREFIX):]
         _refuse_if_disabled("anthropic")
         return ModelRef(raw=raw, provider="anthropic", model=resolve_ant_alias(bare), dialect="anthropic-passthrough")
@@ -199,20 +201,20 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     # literally a name in the cached endpoint catalog -- a workspace-custom
     # endpoint (no platform-standard prefix at all, e.g. "my-team-kimi")
     # used to fall straight through to the generic "no route" error below
-    # even though `rolo-claude models` already knows it's real and chat-
+    # even though `halo models` already knows it's real and chat-
     # capable.
     if (resolved.startswith("databricks-") or resolved.startswith("system.ai.")
             or _is_cached_databricks_endpoint(resolved)):
         return _databricks_model_ref(raw, resolved)
 
-    from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES, default_bare_alias_route
+    from halo_harness.providers.cc_models import BARE_ALIAS_NAMES, default_bare_alias_route
     if resolved in BARE_ALIAS_NAMES:
         # H14 scope C: at work (Claude Code's own settings env resolves a
         # real Databricks config via ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_
         # MODEL), a bare opus/sonnet/haiku maps through THAT env instead of
         # the cc:/ant: subscription route -- checked FIRST, so cc:/ant: only
         # ever apply "when no Databricks env is active" (brief wording).
-        from rolo_claude.providers.config import databricks_default_model_for_tier, databricks_work_env_active
+        from halo_harness.providers.config import databricks_default_model_for_tier, databricks_work_env_active
         if resolved in ("opus", "sonnet", "haiku") and databricks_work_env_active():
             dbx_model = databricks_default_model_for_tier(resolved)
             if dbx_model:
@@ -316,7 +318,7 @@ def _profile_from_vendored_databricks_entry(entry: dict) -> ModelProfile:
     """H8 scope C: models.dev's own `databricks` provider entry (via
     providers.models_dev.databricks_profile_fields_from_models_dev) into a
     ModelProfile, defaults filling in anything that entry didn't have."""
-    from rolo_claude.providers.models_dev import databricks_profile_fields_from_models_dev
+    from halo_harness.providers.models_dev import databricks_profile_fields_from_models_dev
     fields = databricks_profile_fields_from_models_dev(entry)
     return ModelProfile(
         context_tokens=fields.get("context_tokens", 128000),
@@ -354,7 +356,7 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
     # through to the plain 200000/8192 native-passthrough default below,
     # unchanged from before this milestone).
     if ref.provider == "cc" or (ref.provider == "anthropic" and ref.dialect == "anthropic-passthrough"):
-        from rolo_claude.providers.cc_models import profile_fields_for_cc_model
+        from halo_harness.providers.cc_models import profile_fields_for_cc_model
         fields = profile_fields_for_cc_model(ref.model)
         if fields:
             return ModelProfile(
@@ -411,10 +413,10 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
     # dataclass guess, triggering auto-compaction at ~90k tokens instead of
     # the real ~773k these models actually support.
     if ref.provider == "databricks":
-        from rolo_claude.providers.models_dev import (
+        from halo_harness.providers.models_dev import (
             databricks_entries_from_full_models_dev, load_models_dev_json, load_vendored_databricks_fallback,
         )
-        # (a) the REFRESHED cache `rolo-claude models --refresh` wrote to
+        # (a) the REFRESHED cache `halo models --refresh` wrote to
         # <state_dir>/models-dev.json -- fresher than the committed
         # vendored file, and (finding 22) never actually read by anything
         # until now (`load_models_dev_json` had no caller at all).
@@ -432,7 +434,7 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
         # work-default models (e.g. 1,048,576 for all three named above) --
         # a far better answer than the bare dataclass guess below, even
         # though it can't supply pricing/vision.
-        from rolo_claude.providers.profiles import load_model_table
+        from halo_harness.providers.profiles import load_model_table
         table_entry = (load_model_table().get("databricks") or {}).get(ref.model)
         if isinstance(table_entry, dict) and isinstance(table_entry.get("context_tokens"), int):
             reasoning = "native" if ref.dialect == "anthropic-passthrough" else (
@@ -444,7 +446,7 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
                 reasoning=reasoning,
             )
     elif ref.provider == "openrouter":
-        from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+        from halo_harness.providers.models_dev import load_vendored_openrouter_fallback
         vendored_entry = load_vendored_openrouter_fallback().get(ref.model)
         if vendored_entry:
             return _profile_from_models_json_entry(vendored_entry)

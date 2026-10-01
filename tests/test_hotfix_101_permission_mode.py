@@ -1,7 +1,7 @@
 """tests.test_hotfix_101_permission_mode -- 1.0.1 hotfix 18: the starting
 permission mode is a first-class `init` choice (rolo runs in `auto` and
 never wants Claude Code's own `default` on his own boxes), with a new
-`~/.rolo-claude/config.json` `permission_mode` layer in the precedence
+`~/.halo/config.json` `permission_mode` layer in the precedence
 chain: `--dangerously-skip-permissions` > `--permission-mode` >
 config.json's `permission_mode` (NEW) > settings.json's `permissions.
 defaultMode` > the hardcoded `default`. Also covers `doctor`'s own
@@ -30,7 +30,7 @@ class _Env:
         self._saved = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE")}
         home = Path(tempfile.mkdtemp(prefix="hotfix101-permmode-"))
         os.environ["BRIDGE_TEST_HOME"] = str(home)
-        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(home / "no-env-file")
         self.home = home
         return self
@@ -45,8 +45,8 @@ class _Env:
 
 @test
 def test_config_json_permission_mode_wins_over_hardcoded_default(ctx: Ctx):
-    from rolo_claude import headless
-    from rolo_claude.theme import set_config_value
+    from halo_harness import headless
+    from halo_harness.theme import set_config_value
     with _Env() as env:
         set_config_value("permission_mode", "auto")
         build = headless.build_session(cwd=env.home, bare=True, print_mode=True)
@@ -56,8 +56,8 @@ def test_config_json_permission_mode_wins_over_hardcoded_default(ctx: Ctx):
 
 @test
 def test_explicit_permission_mode_flag_wins_over_config_json(ctx: Ctx):
-    from rolo_claude import headless
-    from rolo_claude.theme import set_config_value
+    from halo_harness import headless
+    from halo_harness.theme import set_config_value
     with _Env() as env:
         set_config_value("permission_mode", "auto")
         build = headless.build_session(cwd=env.home, bare=True, print_mode=True, permission_mode="plan")
@@ -67,8 +67,8 @@ def test_explicit_permission_mode_flag_wins_over_config_json(ctx: Ctx):
 
 @test
 def test_dangerously_skip_permissions_wins_over_everything(ctx: Ctx):
-    from rolo_claude import headless
-    from rolo_claude.theme import set_config_value
+    from halo_harness import headless
+    from halo_harness.theme import set_config_value
     with _Env() as env:
         set_config_value("permission_mode", "plan")
         build = headless.build_session(cwd=env.home, bare=True, print_mode=True, permission_mode="default",
@@ -81,7 +81,7 @@ def test_dangerously_skip_permissions_wins_over_everything(ctx: Ctx):
 def test_no_config_json_key_falls_through_to_hardcoded_default(ctx: Ctx):
     """Unchanged pre-1.0.1 behavior when the new layer simply isn't set --
     proves the new elif doesn't accidentally shadow the existing chain."""
-    from rolo_claude import headless
+    from halo_harness import headless
     with _Env() as env:
         build = headless.build_session(cwd=env.home, bare=True, print_mode=True)
         ctx.check(f"falls through to default, got {build.session.permission_engine.mode!r}",
@@ -90,8 +90,8 @@ def test_no_config_json_key_falls_through_to_hardcoded_default(ctx: Ctx):
 
 @test
 def test_doctor_reports_the_effective_mode_and_its_source(ctx: Ctx):
-    from rolo_claude.doctor import run_checks
-    from rolo_claude.theme import set_config_value
+    from halo_harness.doctor import run_checks
+    from halo_harness.theme import set_config_value
     old_cwd = Path.cwd()
     with _Env() as env:
         try:
@@ -118,16 +118,16 @@ def test_init_yes_writes_nothing_for_permission_mode_on_a_fresh_box(ctx: Ctx):
     import subprocess
     home = Path(tempfile.mkdtemp(prefix="hotfix101-permmode-init-"))
     repo_dir = Path(__file__).resolve().parent.parent
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(repo_dir),
                 "BRIDGE_TEST_CC_AUTH_STATUS": json.dumps({"loggedIn": False})})
     result = subprocess.run(
-        [sys.executable, "-m", "rolo_claude", "init", "--provider", "openrouter", "--yes", "--no-live"],
+        [sys.executable, "-m", "halo_harness", "init", "--provider", "openrouter", "--yes", "--no-live"],
         env=env, cwd=str(repo_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
         input="sk-or-fake-key-999\n", timeout=40,
     )
     ctx.check(f"init exited 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
-    cfg_path = home / ".rolo-claude" / "config.json"
+    cfg_path = home / ".halo" / "config.json"
     ctx.check(f"config.json exists at {cfg_path}", cfg_path.exists())
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     ctx.check(f"permission_mode is NOT written on a fresh --yes run, got {cfg.get('permission_mode')!r}",
@@ -142,22 +142,37 @@ def test_init_yes_keeps_an_existing_permission_mode(ctx: Ctx):
     import json
     import subprocess
     home = Path(tempfile.mkdtemp(prefix="hotfix101-permmode-init-"))
-    (home / ".rolo-claude").mkdir(parents=True, exist_ok=True)
-    (home / ".rolo-claude" / "config.json").write_text(json.dumps({"permission_mode": "plan"}), encoding="utf-8")
+    (home / ".halo").mkdir(parents=True, exist_ok=True)
+    (home / ".halo" / "config.json").write_text(json.dumps({"permission_mode": "plan"}), encoding="utf-8")
     repo_dir = Path(__file__).resolve().parent.parent
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(repo_dir),
                 "BRIDGE_TEST_CC_AUTH_STATUS": json.dumps({"loggedIn": False})})
     result = subprocess.run(
-        [sys.executable, "-m", "rolo_claude", "init", "--provider", "openrouter", "--yes", "--no-live"],
+        [sys.executable, "-m", "halo_harness", "init", "--provider", "openrouter", "--yes", "--no-live"],
         env=env, cwd=str(repo_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
         input="sk-or-fake-key-999\n", timeout=40,
     )
     ctx.check(f"init exited 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
-    cfg_path = home / ".rolo-claude" / "config.json"
+    cfg_path = home / ".halo" / "config.json"
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     ctx.check(f"permission_mode still says 'plan', never forced to auto, got {cfg.get('permission_mode')!r}",
               cfg.get("permission_mode") == "plan")
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

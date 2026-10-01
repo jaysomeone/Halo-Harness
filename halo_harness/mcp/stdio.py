@@ -1,8 +1,8 @@
-"""rolo_claude.mcp.stdio -- stdio transport connect, built on
+"""halo_harness.mcp.stdio -- stdio transport connect, built on
 `mcp.client.stdio.stdio_client` + `mcp.ClientSession`. Imports `mcp` lazily
 (inside function bodies only) so this module stays importable without the
 SDK; `manager.py` is the only caller and only calls in after
-`rolo_claude.mcp.available()` is True.
+`halo_harness.mcp.available()` is True.
 
 Verified against the installed SDK (2.2.0) rather than assumed from the
 plan's Claude-Code-binary-derived spec: `stdio_client` ALREADY does both
@@ -25,7 +25,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home
+from halo_harness.config.paths import bridge_home
 
 _ROTATE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB, matches binary-facts sec.9's own server log rotation
 
@@ -47,7 +47,7 @@ def _rotate_if_oversized(path: Path, max_bytes: int) -> None:
 
 
 def open_errlog(server_name: str, max_bytes: int = _ROTATE_MAX_BYTES):
-    """A REAL file object at `~/.rolo-claude/mcp/<server>.log`, rotated to
+    """A REAL file object at `~/.halo/mcp/<server>.log`, rotated to
     a single `.log.1` backup first if it's already over 5 MB.
 
     `mcp.client.stdio.stdio_client`'s `errlog=` is handed straight to the
@@ -97,7 +97,7 @@ async def connect(*, command: str, args: list, env: dict, cwd: Optional[str],
     cancel scope in a different task than it was entered in"."""
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
-    from rolo_claude.mcp.client import task_timeout
+    from halo_harness.mcp.client import task_timeout
 
     params = StdioServerParameters(
         command=command, args=[str(a) for a in (args or [])],

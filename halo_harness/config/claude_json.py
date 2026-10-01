@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from rolo_claude.config.paths import (
+from halo_harness.config.paths import (
     bridge_home,
     claude_json_path,
     normalize_cwd,
@@ -11,7 +11,7 @@ from rolo_claude.config.paths import (
 
 
 def load_bridge_trust() -> dict:
-    """Load ~/.rolo-claude/trust.json (our OWN trust dialog's storage, never
+    """Load ~/.halo/trust.json (our OWN trust dialog's storage, never
     written to by anything but our own future trust-prompt code) fresh every
     call; {} if missing/invalid. Never raises."""
     path = bridge_home() / "trust.json"

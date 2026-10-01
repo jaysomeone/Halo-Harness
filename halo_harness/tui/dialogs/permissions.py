@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.permissions -- `/permissions` (D-TUI:
+"""halo_harness.tui.dialogs.permissions -- `/permissions` (D-TUI:
 "PermissionsDialog (rules by source, add rule)"). `rules` is
 `Controller.list_permission_rules()`'s shape: `[{action, source, rule},
 ...]`. Adding a rule here always teaches the SESSION (in-memory) --

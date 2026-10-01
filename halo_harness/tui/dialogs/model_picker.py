@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.model_picker -- `/model` with no argument (D-TUI:
+"""halo_harness.tui.dialogs.model_picker -- `/model` with no argument (D-TUI:
 "ModelPicker (filter + ref/context/price)"). `models` is whatever
 `Controller.list_models()` returned: `[{ref, context_tokens,
 max_output_tokens, price_in_per_m, price_out_per_m, provider}, ...]`.
@@ -30,8 +30,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from rolo_claude.model_display import ROW_HEADER, format_model_row
-from rolo_claude.tui.dialogs.listnav import NavInput
+from halo_harness.model_display import ROW_HEADER, format_model_row
+from halo_harness.tui.dialogs.listnav import NavInput
 
 
 def _grouped(models: "list[dict]") -> "list[tuple[str, list[dict]]]":

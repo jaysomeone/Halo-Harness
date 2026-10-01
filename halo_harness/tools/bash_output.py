@@ -1,4 +1,4 @@
-"""rolo_claude.tools.bash_output -- the BashOutput tool (H8 scope A): polls
+"""halo_harness.tools.bash_output -- the BashOutput tool (H8 scope A): polls
 a backgrounded Bash shell's incremental output. See agent/jobs.py's module
 docstring for why this harness registers `BashOutput` (rather than the
 newer, agent-team-flavoured `TaskOutput` name also live in Claude Code
@@ -7,7 +7,7 @@ newer, agent-team-flavoured `TaskOutput` name also live in Claude Code
 
 from __future__ import annotations
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Retrieves output from a running or completed background bash shell (one started with Bash's "

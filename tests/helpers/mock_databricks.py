@@ -18,7 +18,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
-from rolo_claude.providers.profiles import DATABRICKS_BODY_ALLOWLIST
+from halo_harness.providers.profiles import DATABRICKS_BODY_ALLOWLIST
 
 _ALLOWED_KEYS = DATABRICKS_BODY_ALLOWLIST | {"model"}
 

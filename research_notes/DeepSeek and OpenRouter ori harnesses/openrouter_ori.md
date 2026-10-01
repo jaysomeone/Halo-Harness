@@ -1,4 +1,4 @@
-# OpenRouter "Ori" harness — technical profile for replication in rolo-claude
+# OpenRouter "Ori" harness — technical profile for replication in halo
 
 Research date: 2026-09-23/24. All version numbers and dates are as of 2026-09-24 00:50 UTC (last push to the release repo). "Verified" = read from the cited primary page; "Inference" items are in their own sub-sections.
 
@@ -122,7 +122,7 @@ Documented Ori behaviours are catalog-level: model-slug validation with near-mis
 - Community workaround for Kimi K2 tool calls via OpenRouter: ignore providers Baseten and DeepInfra "which get confused calling tools" — [zed discussion #37032](https://github.com/zed-industries/zed/discussions/37032)
 
 ### Inferences
-- A rolo-claude replica should: (1) fetch `/api/v1/models` once per session and gate tools on `supported_parameters` containing `tools` (and `reasoning`/`structured_outputs` as needed); (2) send `provider: { require_parameters: true }` whenever `tools` or `response_format` are present; (3) keep a per-model `provider.ignore` list (e.g. Baseten/DeepInfra for Kimi K2) sourced from the endpoint "Tool Call Error Rate"; (4) implement its own text-embedded tool-call parser and JSON-arg repair, since OpenRouter's Response Healing does not cover tool calls.
+- A halo replica should: (1) fetch `/api/v1/models` once per session and gate tools on `supported_parameters` containing `tools` (and `reasoning`/`structured_outputs` as needed); (2) send `provider: { require_parameters: true }` whenever `tools` or `response_format` are present; (3) keep a per-model `provider.ignore` list (e.g. Baseten/DeepInfra for Kimi K2) sourced from the endpoint "Tool Call Error Rate"; (4) implement its own text-embedded tool-call parser and JSON-arg repair, since OpenRouter's Response Healing does not cover tool calls.
 
 ### Gaps
 - No evidence that Ori itself does any of (1)–(4); it may rely on the wrapped harness or on OpenRouter server-side normalisation.
@@ -196,7 +196,7 @@ Ori has: harness wrapping for 12 agents, OAuth PKCE login, org guardrails/budget
 
 ### Inferences
 - Claude Code features with no public Ori equivalent: hooks JSON, `permissions.allow/deny`, plan mode, `--dangerously-skip-permissions` (closest: `--approvals self-drive`), IDE extensions, `/init` memory files, output styles.
-- Ori-only features worth copying into rolo-claude: catalog-driven `/model` with live prices and variant resolution, `/zdr` and `/fast` routing toggles, `--reasoning-effort` as a harness-wide flag, turn-speed reporting, `/usage` spend panel with cross-process spend tracking, headless JSONL mode, eval assertions on tool calls.
+- Ori-only features worth copying into halo: catalog-driven `/model` with live prices and variant resolution, `/zdr` and `/fast` routing toggles, `--reasoning-effort` as a harness-wide flag, turn-speed reporting, `/usage` spend panel with cross-process spend tracking, headless JSONL mode, eval assertions on tool calls.
 
 ### Gaps
 - No exhaustive flag list is published; the above is the union of documented mentions.
@@ -277,7 +277,7 @@ Ori exposes exactly one documented knob for a custom endpoint — `ORI_OPENROUTE
 - `ori claude --model <databricks-endpoint>` cannot work against Databricks directly: Claude Code speaks Anthropic Messages, Databricks speaks OpenAI Chat/Responses. The existing `bridge.py` (Anthropic→Databricks translator) remains the right path; Ori adds nothing there.
 - `ORI_OPENROUTER_BASE_URL=https://<workspace>/serving-endpoints` + `OPENROUTER_API_KEY=<dapi token>` + `ORI_MODEL=<endpoint name>` *might* let `ori code` reach Databricks if (a) Ori appends OpenAI-compatible paths (`/chat/completions`) to that base, (b) Databricks ignores unknown fields (`provider`, `reasoning`, `plugins`, `usage`, `models`, `transforms`) rather than 400-ing, and (c) Ori tolerates failures of its OpenRouter-only calls (catalog `/models`, key validation, presets, usage). None of (a)–(c) is documented; the expected-path suffix (`/api/v1` vs bare) is also unknown.
 - Safest experiment (not run): put a logging OpenAI-compatible proxy (e.g. the existing bridge or LiteLLM) at `http://127.0.0.1:<port>`, set `ORI_OPENROUTER_BASE_URL` to it, run `ORI_OUTPUT=json ori code -p "ping" --model <endpoint>`, and inspect which paths and JSON fields Ori actually sends — that answers (a)–(c) in one run.
-- For rolo-claude the practical conclusion is: replicate Ori's *conventions* (catalog-gated capabilities, `reasoning_details` echo, provider preferences, cache breakpoints, `/model` `/zdr` `/fast` UX) behind a provider abstraction, and only emit OpenRouter-specific fields when the base URL is `openrouter.ai`.
+- For halo the practical conclusion is: replicate Ori's *conventions* (catalog-gated capabilities, `reasoning_details` echo, provider preferences, cache breakpoints, `/model` `/zdr` `/fast` UX) behind a provider abstraction, and only emit OpenRouter-specific fields when the base URL is `openrouter.ai`.
 
 ### Gaps
 - Whether Databricks rejects or ignores unknown top-level fields is not documented in the pages fetched; needs an empirical curl test.

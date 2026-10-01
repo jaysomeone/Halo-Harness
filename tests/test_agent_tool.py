@@ -33,11 +33,11 @@ test, TESTS = new_registry()
 
 def _make_session(fh, *, scenario: str, mock: MockUpstream, agent_depth: int = 0, max_turns: int = 50,
                    roles: "dict|None" = None, cli_roles: "dict|None" = None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.config.agents_md import discover_agents
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.config.agents_md import discover_agents
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     session_ctx = SessionContext(cwd=fh["proj"], model_label=f"mock/{scenario}")
     model_ref = parse_model_ref(f"or:mock/{scenario}")

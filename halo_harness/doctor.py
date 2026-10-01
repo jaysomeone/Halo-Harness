@@ -1,4 +1,4 @@
-"""rolo_claude.doctor -- `rolo-claude doctor` subcommand + the `/doctor`
+"""halo_harness.doctor -- `halo doctor` subcommand + the `/doctor`
 slash command's shared implementation (U0 scope A). Checks: Python version,
 `~/.claude` layout, the env file, an OpenRouter key, Databricks discovery,
 `claude.exe`/`claude` on PATH (needed for `--chrome`), node/npx on PATH
@@ -11,7 +11,7 @@ H12 Part B (RECOMMENDATIONS.md P0 #2, "prescriptive doctor"): every `[WARN]`/
 `-> see: <URL/section>` when there's no single command -- an `[OK]`/info line
 never gets one (nothing to fix). `run_checks_structured`/`doctor --json`
 exposes the SAME lines as `{id, status, message, fix}` records for
-`rolo-claude init` (and any other machine caller) to consume without
+`halo init` (and any other machine caller) to consume without
 re-parsing rendered text.
 """
 
@@ -88,7 +88,7 @@ def _check_python() -> str:
 
 
 def _check_claude_layout() -> list:
-    from rolo_claude.config.paths import claude_config_dir, claude_json_path
+    from halo_harness.config.paths import claude_config_dir, claude_json_path
     lines = []
     cfg_dir = claude_config_dir()
     if cfg_dir.is_dir():
@@ -111,50 +111,75 @@ def _check_claude_layout() -> list:
 
 
 def _check_env_file() -> str:
-    from rolo_claude.config.paths import home
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    if env_path.exists():
+    from halo_harness.config.paths import env_file_path, legacy_env_file_path
+    env_path = env_file_path()
+    # 2.0.0 fixpass finding 4: the legacy file is still read (see
+    # _load_env_file_best_effort below), so its mere existence must still
+    # count as "configured" here too -- otherwise this ONE line would WARN
+    # even though every credential in it is actually in effect.
+    if env_path.exists() or legacy_env_file_path().exists():
         return f"{OK} env file: {env_path}"
-    return _fix(f"{WARN} env file: {env_path}", cmd="rolo-claude init")
+    return _fix(f"{WARN} env file: {env_path}", cmd="halo init")
 
 
 def _load_env_file_best_effort() -> None:
-    """Same env file `run_print_mode` loads (`BRIDGE_ENV_FILE` or
-    `~/.config/vibes-hacker/env`) -- without this, doctor would report a
-    key "not configured" even when the real harness would happily find it
-    there (an env-var-only check would silently disagree with reality)."""
+    """Same env files `run_print_mode` loads (2.0.0 fixpass finding 4: the
+    new `~/.config/halo/env`/HALO_ENV_FILE path, THEN the legacy
+    `~/.config/vibes-hacker/env` one) -- without this, doctor would report
+    a key "not configured" even when the real harness would happily find
+    it there (an env-var-only check would silently disagree with
+    reality)."""
     try:
-        import os
-        from rolo_claude.config.paths import home
-        from rolo_claude.providers.config import load_env_file
-        load_env_file(Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env")))
+        from halo_harness.providers.config import load_provider_env_files
+        load_provider_env_files()
     except Exception:
         pass
+
+
+def _check_state_dir_migration() -> Optional[str]:
+    """2.0.0 fixpass finding 1: "both-exist case is silent too" -- a
+    standing WARN (never OK/MISSING; this is informational, same spirit as
+    `_check_catalog_ages`) whenever the OLD `~/.rolo-claude` and the NEW
+    `~/.halo` both exist as genuinely distinct, non-empty directories
+    (never when the old path happens to resolve to the exact same real
+    directory as the new one -- a plain migration never creates such a
+    link, item B, but this still can't be fooled if one exists anyway).
+    `None` (no line at all) in the overwhelmingly common case -- a clean
+    migration, a fresh box, or BRIDGE_STATE_DIR overriding the question
+    entirely -- shares the ONE detection `bridge_home()` itself warns
+    about once per process, so doctor can never disagree with it."""
+    from halo_harness.config.paths import state_dir_both_exist_nonempty
+    both = state_dir_both_exist_nonempty()
+    if both is None:
+        return None
+    old_dir, new_dir = both
+    return _fix(f"{WARN} state dir: both {old_dir} and {new_dir} exist",
+                see="docs/harness/INSTALL.md (Upgrading from rolo-claude 1.0.1)")
 
 
 def _check_openrouter() -> str:
     _load_env_file_best_effort()
     try:
-        from rolo_claude.providers.config import resolve_openrouter
+        from halo_harness.providers.config import resolve_openrouter
         orc = resolve_openrouter()
     except Exception as e:  # never let a doctor check crash the whole command
-        return _fix(f"{WARN} OpenRouter: could not check ({type(e).__name__}: {e})", cmd="rolo-claude init")
+        return _fix(f"{WARN} OpenRouter: could not check ({type(e).__name__}: {e})", cmd="halo init")
     if orc is None:
         return _fix(f"{WARN} OpenRouter: not configured (no OPENROUTER_API_KEY found)",
-                     cmd="rolo-claude init --preset home")
+                     cmd="halo init --preset home")
     return f"{OK} OpenRouter: key found ({orc.base_url})"
 
 
 def _check_databricks() -> str:
     _load_env_file_best_effort()
     try:
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         dbx = resolve_databricks()
     except Exception as e:
-        return _fix(f"{WARN} Databricks: could not check ({type(e).__name__}: {e})", cmd="rolo-claude init")
+        return _fix(f"{WARN} Databricks: could not check ({type(e).__name__}: {e})", cmd="halo init")
     if dbx is None:
         return _fix(f"{WARN} Databricks: not configured (no host/token found)",
-                     cmd="rolo-claude init --preset work")
+                     cmd="halo init --preset work")
     return f"{OK} Databricks: configured ({dbx.host})"
 
 
@@ -178,18 +203,18 @@ def _check_claude_subscription() -> str:
     `api_key` authMethod (an ANTHROPIC_API_KEY visible to `claude auth
     status`'s own -- now stripped -- environment) means cc: would NOT use
     the subscription even though `loggedIn` is true."""
-    from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
+    from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
     try:
         status = claude_auth_status()
     except Exception as e:  # never let a doctor check crash the whole command
         return _fix(f"{WARN} Claude subscription: could not check ({type(e).__name__}: {e})",
-                     cmd="rolo-claude doctor")
+                     cmd="halo doctor")
     if status is None:
         return _fix(f"{WARN} Claude subscription: claude not found (cc: models unavailable -- install Claude Code)",
                      see="https://claude.com/claude-code")
     if getattr(status, "timed_out", False):
         return _fix(f"{WARN} Claude subscription: `claude auth status` timed out (try again -- cc: models "
-                     f"unavailable for now)", cmd="rolo-claude doctor")
+                     f"unavailable for now)", cmd="halo doctor")
     if not status.logged_in:
         return _fix(f"{WARN} Claude subscription: claude found but not logged in (run `claude` once to log in "
                      f"for cc: models)", cmd="claude")
@@ -204,7 +229,7 @@ def _check_claude_subscription() -> str:
 
 
 def _claude_version() -> Optional[str]:
-    from rolo_claude.providers.cc_models import ClaudeCodeNotFoundError, resolve_claude_launch_argv
+    from halo_harness.providers.cc_models import ClaudeCodeNotFoundError, resolve_claude_launch_argv
     try:
         argv = resolve_claude_launch_argv()
     except ClaudeCodeNotFoundError:
@@ -267,7 +292,7 @@ def _chrome_bridge_pipe_present() -> bool:
 
 
 def _check_chrome() -> str:
-    from rolo_claude.mcp_setup import find_claude_exe
+    from halo_harness.mcp_setup import find_claude_exe
     claude_exe = find_claude_exe()
     if not claude_exe:
         return _fix(f"{WARN} claude executable not found on PATH -- --chrome cannot spawn the claude-in-chrome "
@@ -286,7 +311,7 @@ def _check_plugins() -> str:
     `claude plugin install ...`'d plugin's servers are reachable at all,
     without needing a full `-p`/TUI launch."""
     try:
-        from rolo_claude.config.plugins import discover_plugin_mcp_servers
+        from halo_harness.config.plugins import discover_plugin_mcp_servers
         servers, notices = discover_plugin_mcp_servers(env=dict(os.environ))
     except Exception as e:  # never let a doctor check crash the whole command
         return _fix(f"{WARN} Plugins: could not check ({type(e).__name__}: {e})",
@@ -309,7 +334,7 @@ def _check_playwright() -> str:
 
 
 def _check_ripgrep() -> str:
-    """H9 OpenCode item 23: `rg` is optional (the Grep tool -- rolo_claude/
+    """H9 OpenCode item 23: `rg` is optional (the Grep tool -- halo_harness/
     tools/grep_tool.py -- has a pure-Python fallback engine that's used
     transparently whenever `rg` isn't found), so its absence is a WARN,
     never a MISSING -- Grep still works either way, just slower on big
@@ -319,7 +344,7 @@ def _check_ripgrep() -> str:
         return f"{OK} rg (ripgrep) on PATH: {rg}"
     return _fix(f"{WARN} rg (ripgrep) not on PATH -- the Grep tool falls back to a slower pure-Python "
                 f"search engine; install ripgrep for full speed (Claude Code itself ships rg embedded)",
-                cmd="rolo-claude init")
+                cmd="halo init")
 
 
 def _check_editor() -> str:
@@ -336,12 +361,12 @@ def _check_editor() -> str:
 
 def _check_shell() -> str:
     """H9 OpenCode item 23 (carried-over must-do: "Git Bash (win32)"): the
-    Bash tool (rolo_claude/tools/bash.py) needs Git Bash on win32
+    Bash tool (halo_harness/tools/bash.py) needs Git Bash on win32
     (config.paths.git_bash()) or `/bin/bash` on POSIX -- without it, the
     Bash tool, `!`-pre-execution and every `command`/`shell:"bash"` hook
     handler are all unusable, so a genuinely missing shell IS a MISSING,
     not a WARN (unlike rg/$EDITOR above, which degrade gracefully)."""
-    from rolo_claude.config.paths import git_bash
+    from halo_harness.config.paths import git_bash
     bash = git_bash()
     if bash is not None and Path(bash).exists():
         label = "Git Bash" if sys.platform == "win32" else "bash"
@@ -368,7 +393,7 @@ def _check_platform() -> str:
         except OSError:
             os_release = ""
         if "kali" in os_release:
-            return f"{OK} Linux (Kali) -- rolo-claude's primary target platform"
+            return f"{OK} Linux (Kali) -- halo's primary target platform"
         return f"{OK} Linux -- {platform.release()}"
     if system == "Windows":
         wsl = shutil.which("wsl")
@@ -382,13 +407,13 @@ def _check_catalog_ages() -> list:
     dbx-endpoints.json, models-dev.json) -- a missing file is a plain WARN
     ("never refreshed yet", not a failure: `resolve_model_profile` still
     has the vendored package fallback); a very stale one (>30 days) is
-    flagged so a work-box user knows `rolo-claude models --refresh` is
+    flagged so a work-box user knows `halo models --refresh` is
     overdue, without ever being INTERNET-only (the vendored tier means
     a stale/missing cache is never actually broken, just less current)."""
     import time
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.databricks import dbx_endpoints_path, models_json_path
-    from rolo_claude.providers.models_dev import models_dev_json_path
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.databricks import dbx_endpoints_path, models_json_path
+    from halo_harness.providers.models_dev import models_dev_json_path
     state_dir = bridge_home()
     lines = []
     for label, path_fn in (("models.json (OpenRouter)", models_json_path),
@@ -397,12 +422,12 @@ def _check_catalog_ages() -> list:
         path = path_fn(state_dir)
         if not path.exists():
             lines.append(_fix(f"{WARN} {label}: never cached (vendored package fallback still applies)",
-                               cmd="rolo-claude models --refresh"))
+                               cmd="halo models --refresh"))
             continue
         age_days = (time.time() - path.stat().st_mtime) / 86400
         if age_days > 30:
             lines.append(_fix(f"{WARN} {label}: cached {age_days:.1f} day(s) ago ({path})",
-                               cmd="rolo-claude models --refresh"))
+                               cmd="halo models --refresh"))
         else:
             lines.append(f"{OK} {label}: cached {age_days:.1f} day(s) ago ({path})")
     return lines
@@ -414,13 +439,13 @@ def _check_telemetry_and_improve() -> "list[str]":
     there is nothing here that can be "missing"; every key has a built-in
     default). Read-only, same contract as every other check in this
     module."""
-    from rolo_claude import telemetry
-    from rolo_claude.improve.config import load_improve_config
+    from halo_harness import telemetry
+    from halo_harness.improve.config import load_improve_config
 
     n = telemetry.total_sessions_count()
     age = telemetry.cache_age_seconds()
     age_str = "never" if age is None else (f"{age:.0f}s ago" if age < 3600 else f"{age / 3600:.1f}h ago")
-    lines = [f"{OK} Sessions: {n} logged under ~/.rolo-claude/sessions; stats cache last written {age_str}"]
+    lines = [f"{OK} Sessions: {n} logged under ~/.halo/sessions; stats cache last written {age_str}"]
     cfg = load_improve_config()
     lines.append(
         f"{OK} /improve: enabled={cfg.enabled} hint={cfg.hint} model={cfg.model or '(small/session model)'} "
@@ -433,15 +458,15 @@ def _check_local_bin_on_path() -> Optional[str]:
     """New (RECOMMENDATIONS.md P0 #2 / H12 brief Part B): `~/.local/bin`
     (pipx/`uv tool install`/`pip install --user`'s own console-script
     location) missing from PATH for a NON-interactive shell is the single
-    most common "rolo-claude: command not found" right after install --
-    checked with `rolo_claude.linux_fixes.local_bin_on_noninteractive_path`
+    most common "halo: command not found" right after install --
+    checked with `halo_harness.linux_fixes.local_bin_on_noninteractive_path`
     (re-invokes `$SHELL -c 'echo $PATH'`, never this process's own already-
     widened inherited PATH). Linux/macOS only -- Windows has no equivalent
-    PATH-for-a-non-interactive-shell concept; `rolo-claude init`'s own
+    PATH-for-a-non-interactive-shell concept; `halo init`'s own
     Windows-launcher check covers the Windows side of this instead."""
     if sys.platform == "win32":
         return None
-    from rolo_claude.linux_fixes import PATH_LINE, local_bin_on_noninteractive_path, rc_file_for_shell
+    from halo_harness.linux_fixes import PATH_LINE, local_bin_on_noninteractive_path, rc_file_for_shell
     if local_bin_on_noninteractive_path():
         return f"{OK} ~/.local/bin on PATH for a non-interactive shell"
     rc_path = rc_file_for_shell()
@@ -453,7 +478,7 @@ def _check_tmux_mouse() -> Optional[str]:
     """New (RECOMMENDATIONS.md P0 #2): only relevant -- and only checked --
     when `$TMUX` says we're actually inside a tmux session; `tmux show -g
     mouse` reflects whether tmux itself is forwarding mouse events to
-    rolo-claude at all (Textual's own mouse capture needs tmux's
+    halo at all (Textual's own mouse capture needs tmux's
     cooperation first, see INSTALL.md's own "Mouse" terminal note)."""
     if not os.environ.get("TMUX"):
         return None
@@ -473,9 +498,9 @@ _UNSET = object()
 
 
 def _repo_bin_dir() -> Path:
-    """This checkout's own `bin/` directory -- a `rolo-claude` that
+    """This checkout's own `bin/` directory -- a `halo` that
     resolves there is the checkout's own convenience wrapper (`bin/
-    rolo-claude`/`bin/rolo-claude.cmd`), never a real installed console
+    halo`/`bin/halo.cmd`), never a real installed console
     script, and only ever works while the current directory is inside the
     checkout."""
     return Path(__file__).resolve().parent.parent / "bin"
@@ -527,7 +552,7 @@ def reinstall_command(*, uv_found: Optional[bool] = None, pipx_found: Optional[b
     """The exact command the owner's own report asked for: `uv tool
     install --reinstall .` (run from this checkout) when `uv` is present --
     both it and every other branch below reinstall the CONSOLE SCRIPT a
-    bare `rolo-claude` from any directory needs, and all need re-running
+    bare `halo` from any directory needs, and all need re-running
     after every `git pull` (an editable/tool install does not auto-update
     the installed script's own dependency pins or entry point).
 
@@ -539,11 +564,11 @@ def reinstall_command(*, uv_found: Optional[bool] = None, pipx_found: Optional[b
     box).
 
     M5 (1.0.1 final pass): the venv branch also links the venv's own
-    `.venv/bin/rolo-claude` console script into `~/.local/bin` -- a plain
+    `.venv/bin/halo` console script into `~/.local/bin` -- a plain
     `python -m venv` has no console-script-on-PATH story of its own (unlike
     `uv tool install`/`pipx install`, both of which register one), so
     without this step `check_command_on_path`'s own `shutil.which
-    ("rolo-claude")` kept failing even right after running the suggested
+    ("halo")` kept failing even right after running the suggested
     venv command; `_check_local_bin_on_path` already covers getting
     `~/.local/bin` itself onto a non-interactive shell's PATH, so linking
     into it (rather than some venv-specific location) is what makes THAT
@@ -555,16 +580,16 @@ def reinstall_command(*, uv_found: Optional[bool] = None, pipx_found: Optional[b
         return "pipx install --force -e ."
     if tool == "venv":
         return ('python3 -m venv .venv && .venv/bin/pip install -e . && mkdir -p ~/.local/bin && '
-                'ln -sf "$PWD/.venv/bin/rolo-claude" ~/.local/bin/rolo-claude')
+                'ln -sf "$PWD/.venv/bin/halo" ~/.local/bin/halo')
     return "pip install --user -e ."
 
 
 def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, pipx_found: Optional[bool] = None,
                            externally_managed: Optional[bool] = None) -> str:
     """New (owner report from the work VM, H15 addendum): a bare
-    `rolo-claude` typed OUTSIDE the checkout directory did not work --
-    only the checkout's own `bin/rolo-claude` wrapper had ever been used,
-    always run from inside it. `shutil.which("rolo-claude")` must resolve
+    `halo` typed OUTSIDE the checkout directory did not work --
+    only the checkout's own `bin/halo` wrapper had ever been used,
+    always run from inside it. `shutil.which("halo")` must resolve
     to a REAL installed console script (the `uv tool install`/`pip
     install` entry point), never this repo's own `bin/` wrapper and never
     nothing -- the OK line names the resolved path; the WARN line's own
@@ -573,38 +598,38 @@ def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, p
     `resolved`/`uv_found`/`pipx_found`/`externally_managed` are test seams;
     omitted, this does real `shutil.which`/marker-file lookups."""
     if resolved is _UNSET:
-        resolved = shutil.which("rolo-claude") or shutil.which("rolo-claude.exe")
+        resolved = shutil.which("halo") or shutil.which("halo.exe")
     fix_cmd = (f"{reinstall_command(uv_found=uv_found, pipx_found=pipx_found, externally_managed=externally_managed)}"
                f" (run from this checkout -- repeat after every `git pull`)")
     if not resolved:
-        return _fix(f"{WARN} rolo-claude command: not found on PATH", cmd=fix_cmd)
+        return _fix(f"{WARN} halo command: not found on PATH", cmd=fix_cmd)
     try:
         is_repo_wrapper = Path(resolved).resolve().parent == _repo_bin_dir().resolve()
     except OSError:
         is_repo_wrapper = False
     if is_repo_wrapper:
-        return _fix(f"{WARN} rolo-claude command: PATH resolves to this checkout's own bin/ wrapper "
+        return _fix(f"{WARN} halo command: PATH resolves to this checkout's own bin/ wrapper "
                     f"({resolved}) -- only works from inside the checkout", cmd=fix_cmd)
-    return f"{OK} rolo-claude command: {resolved}"
+    return f"{OK} halo command: {resolved}"
 
 
 def _check_mcp_servers(cwd: Optional[Path]) -> str:
     """New (RECOMMENDATIONS.md P0 #2 / section 3, "MCP startup cost is the
     biggest perceived-speed item"): configured MCP servers -- a pure config
     MERGE enumeration (`mcp.manager.resolve_server_configs`, never connects
-    to anything, unlike `rolo-claude mcp list`'s own live health check) plus
+    to anything, unlike `halo mcp list`'s own live health check) plus
     the eager-vs-`mcpLazy` breakdown. No connect-time history is recorded
     anywhere yet (a future telemetry pass, RECOMMENDATIONS.md P1), so this
     never fabricates a total-time WARN from an unmeasured guess -- it names
     the real, actionable lever (mcpLazy) as plain information instead."""
     cwd = cwd or Path.cwd()
     try:
-        from rolo_claude.config.claude_json import load_claude_json
-        from rolo_claude.mcp.manager import resolve_server_configs
+        from halo_harness.config.claude_json import load_claude_json
+        from halo_harness.mcp.manager import resolve_server_configs
         resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json())
     except Exception as e:
         return _fix(f"{WARN} MCP servers: could not enumerate ({type(e).__name__}: {e})",
-                     cmd="rolo-claude doctor")
+                     cmd="halo doctor")
     if not resolved:
         return f"{OK} MCP servers: none configured"
     eager = sorted(name for name, cfg in resolved.items() if not cfg.lazy)
@@ -619,7 +644,7 @@ def _check_mcp_servers(cwd: Optional[Path]) -> str:
     # fresh or has been stale for a while.
     ages = []
     try:
-        from rolo_claude.mcp import tools_cache
+        from halo_harness.mcp import tools_cache
         for name in lazy_names:
             age_s = tools_cache.cache_age_s(name)
             if age_s is not None:
@@ -652,16 +677,16 @@ def _provider_configured(ref) -> "tuple[bool, str]":
     _load_env_file_best_effort()
     try:
         if ref.provider == "openrouter":
-            from rolo_claude.providers.config import resolve_openrouter
+            from halo_harness.providers.config import resolve_openrouter
             return resolve_openrouter() is not None, "OpenRouter"
         if ref.provider == "databricks":
-            from rolo_claude.providers.config import resolve_databricks
+            from halo_harness.providers.config import resolve_databricks
             return resolve_databricks() is not None, "Databricks"
         if ref.provider == "anthropic":
-            from rolo_claude.providers.config import resolve_anthropic
+            from halo_harness.providers.config import resolve_anthropic
             return resolve_anthropic() is not None, "ANTHROPIC_API_KEY"
         if ref.provider == "cc":
-            from rolo_claude.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
+            from halo_harness.providers.cc_models import SUBSCRIPTION_AUTH_METHODS, claude_auth_status
             status = claude_auth_status()
             ok = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
             return ok, "Claude subscription"
@@ -676,7 +701,7 @@ def _guess_provider_for_doctor_message(configured: str) -> "Optional[str]":
     this only runs after `parse_model_ref` has ALREADY refused the ref
     (`_check_default_model`'s own `InvalidModelError` branch) and needs to
     know which provider that was ABOUT without re-parsing it."""
-    from rolo_claude.providers.enablement import PREFIXES, PROVIDER_NAMES
+    from halo_harness.providers.enablement import PREFIXES, PROVIDER_NAMES
     for name in PROVIDER_NAMES:
         prefix = PREFIXES.get(name)
         if prefix and configured.startswith(prefix):
@@ -692,20 +717,20 @@ def _guess_provider_for_doctor_message(configured: str) -> "Optional[str]":
 
 
 def _check_default_model() -> str:
-    """New (RECOMMENDATIONS.md P0 #2): `~/.rolo-claude/config.json`'s own
-    `"model"` key (written by `rolo-claude init` step 3, or a plain
-    `rolo-claude config set model ...`) and whether ITS provider actually
+    """New (RECOMMENDATIONS.md P0 #2): `~/.halo/config.json`'s own
+    `"model"` key (written by `halo init` step 3, or a plain
+    `halo config set model ...`) and whether ITS provider actually
     resolves -- via `model.parse_model_ref`, the SAME parser `headless.
     build_session` uses, so this line never disagrees with what a real
     session would actually pick. Not set at all is perfectly normal (the
     built-in default applies) and reported OK, never WARN."""
-    from rolo_claude.model import DEFAULT_MODEL_REF, parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
-    from rolo_claude.theme import get_config_value
+    from halo_harness.model import DEFAULT_MODEL_REF, parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
+    from halo_harness.theme import get_config_value
     configured = get_config_value("model", default=None)
     if not isinstance(configured, str) or not configured:
         return (f"{OK} Default model: not set in config.json -- built-in default {DEFAULT_MODEL_REF!r} "
-                f"applies (BRIDGE_MODEL/routes.json still win when set)")
+                f"applies (HALO_MODEL/routes.json still win when set)")
     try:
         ref = parse_model_ref(configured)
     except InvalidModelError as e:
@@ -719,28 +744,28 @@ def _check_default_model() -> str:
         # nothing and falls through to it unchanged).
         provider_guess = _guess_provider_for_doctor_message(configured)
         if provider_guess is not None:
-            from rolo_claude.providers.enablement import is_provider_disabled_message
+            from halo_harness.providers.enablement import is_provider_disabled_message
             disabled_msg = is_provider_disabled_message(provider_guess)
             if disabled_msg:
                 provider_flag = {"databricks": "databricks", "claude_subscription": "claude",
                                   "anthropic": "anthropic"}.get(provider_guess, "openrouter")
                 return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
-                             cmd=f"rolo-claude init --provider {provider_flag}")
+                             cmd=f"halo init --provider {provider_flag}")
         return _fix(f"{WARN} Default model: config.json's model={configured!r} does not resolve ({e})",
-                     cmd=f"rolo-claude config set model {DEFAULT_MODEL_REF}")
+                     cmd=f"halo config set model {DEFAULT_MODEL_REF}")
     except Exception as e:
         return _fix(f"{WARN} Default model: config.json's model={configured!r} does not resolve ({e})",
-                     cmd=f"rolo-claude config set model {DEFAULT_MODEL_REF}")
+                     cmd=f"halo config set model {DEFAULT_MODEL_REF}")
     provider_ok, provider_label = _provider_configured(ref)
     if provider_ok:
-        from rolo_claude.providers.enablement import is_provider_disabled_message
+        from halo_harness.providers.enablement import is_provider_disabled_message
         disabled_msg = is_provider_disabled_message(ref.provider)
         if disabled_msg:
             # H15 item 21: credentials resolve but the provider isn't
             # ENABLED -- a `/model`/`-p`/TUI call would be refused with
             # this SAME message, so doctor must not call it just "OK".
             return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
-                        cmd=f"rolo-claude providers enable {ref.provider}")
+                        cmd=f"halo providers enable {ref.provider}")
         return f"{OK} Default model: {configured} ({provider_label} configured)"
     # 1.0.1 hotfix 13 (drive-by): this suggestion still said `--preset
     # work`/`--preset home` -- the deprecated alias still works, but every
@@ -748,17 +773,17 @@ def _check_default_model() -> str:
     provider_flag = {"databricks": "databricks", "cc": "claude", "anthropic": "anthropic"}.get(
         ref.provider, "openrouter")
     return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
-                 cmd=f"rolo-claude init --provider {provider_flag}")
+                 cmd=f"halo init --provider {provider_flag}")
 
 
 def _check_providers_enabled() -> str:
     """H15 item 21: a one-line summary of the explicit provider-enablement
-    table (`rolo-claude providers` has the full detail) -- always INFO
+    table (`halo providers` has the full detail) -- always INFO
     (never WARN/MISSING: a box with nothing enabled yet is normal before
     the first `init`/`providers enable`, same as every other "not
     configured yet" line in this module)."""
-    from rolo_claude.providers.config import listing_effective_env
-    from rolo_claude.providers.enablement import PROVIDER_NAMES, credentials_present, is_enabled
+    from halo_harness.providers.config import listing_effective_env
+    from halo_harness.providers.enablement import PROVIDER_NAMES, credentials_present, is_enabled
     # 1.0.1 part 2 fixpass finding 3: the merged settings-aware env (a
     # credential living only in a settings.json `env` block is seen here
     # too), and `credentials_present` computed exactly once per provider --
@@ -770,7 +795,7 @@ def _check_providers_enabled() -> str:
     detected_not_enabled = [p for p in PROVIDER_NAMES if detected[p] and p not in enabled]
     line = f"{OK} Providers: {len(enabled)}/{len(PROVIDER_NAMES)} enabled ({', '.join(enabled) or 'none'})"
     if detected_not_enabled:
-        line += f" -- detected but not enabled: {', '.join(detected_not_enabled)} (see `rolo-claude providers`)"
+        line += f" -- detected but not enabled: {', '.join(detected_not_enabled)} (see `halo providers`)"
     return line
 
 
@@ -779,17 +804,17 @@ def _check_permission_mode() -> str:
     session would actually launch with, and which layer of the precedence
     chain decided it -- `--dangerously-skip-permissions` >
     `--permission-mode` (this doctor run has neither, being a standalone
-    command) > `~/.rolo-claude/config.json`'s own `permission_mode` (item
+    command) > `~/.halo/config.json`'s own `permission_mode` (item
     18.1's new init step) > settings.json's `permissions.defaultMode` >
     the hardcoded `default`. Mirrors `headless.py::build_session`'s own
     chain exactly (same config key, same settings field) so this line
     never disagrees with what a real session would actually start in."""
-    from rolo_claude.permissions import normalize_permission_mode
-    from rolo_claude.theme import get_config_value
+    from halo_harness.permissions import normalize_permission_mode
+    from halo_harness.theme import get_config_value
     config_mode = get_config_value("permission_mode", default=None)
     if isinstance(config_mode, str) and config_mode:
         mode = normalize_permission_mode(config_mode)
-        return f"{OK} Permission mode: {mode} (source: rolo-claude config.json)"
+        return f"{OK} Permission mode: {mode} (source: halo config.json)"
     try:
         settings = resolve_settings(Path.cwd())
         settings_mode = settings.permissions_default_mode
@@ -805,7 +830,7 @@ def _check_permission_mode() -> str:
     # _check_default_model's own "not set -- built-in default applies"
     # line just above.
     return (f"{OK} Permission mode: default (source: built-in default -- no config.json permission_mode, "
-            f"no settings.json permissions.defaultMode; run `rolo-claude init` or `rolo-claude config set "
+            f"no settings.json permissions.defaultMode; run `halo init` or `halo config set "
             f"permission_mode auto` to set one)")
 
 
@@ -823,7 +848,7 @@ def _dbx_probe_target():
     identical to "nothing configured"."""
     _load_env_file_best_effort()
     try:
-        from rolo_claude.providers.config import resolve_databricks, resolve_databricks_host_only
+        from halo_harness.providers.config import resolve_databricks, resolve_databricks_host_only
         dbx = resolve_databricks()
     except Exception:
         return None, None
@@ -841,12 +866,12 @@ def _check_ucode_settings() -> str:
     `~/.claude/ucode-settings.json` exists/parses, independent of whether it
     actually WON the discovery chain (an earlier source, e.g. DATABRICKS_
     HOST, may have already resolved first) -- purely informational."""
-    from rolo_claude.config.paths import claude_config_dir
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.config.paths import claude_config_dir
+    from halo_harness.providers.config import load_ucode_settings
     path = claude_config_dir() / "ucode-settings.json"
     if not path.exists():
         return _fix(f"{WARN} ucode-settings.json: not found at {path} (ug/unity-gateway CLI not run on this "
-                     f"box, or not installed)", cmd="rolo-claude init --preset work")
+                     f"box, or not installed)", cmd="halo init --preset work")
     parsed = load_ucode_settings(path)
     if parsed is None:
         return _fix(f"{WARN} ucode-settings.json: found at {path} but no recognizable gateway URL/token in it",
@@ -865,9 +890,9 @@ def _work_check_vpn_reachability(host: Optional[str]) -> str:
     (verified: ~64s against an unresolvable `*.cloud.databricks.com` host)."""
     if not host:
         return _fix(f"{MISSING} Databricks host: not configured (see the Databricks line above) -- nothing "
-                     f"to reach", cmd="rolo-claude init --preset work")
+                     f"to reach", cmd="halo init --preset work")
     import urllib.parse
-    from rolo_claude.providers.http import UpstreamConnectError, open_upstream
+    from halo_harness.providers.http import UpstreamConnectError, open_upstream
     parsed = urllib.parse.urlparse(host if "://" in host else f"https://{host}")
     hostname = parsed.hostname or host
     port = parsed.port or 443
@@ -877,10 +902,10 @@ def _work_check_vpn_reachability(host: Optional[str]) -> str:
         return f"{OK} VPN/reachability: connected to {hostname}:{port}"
     except UpstreamConnectError as e:
         return _fix(f"{MISSING} VPN/reachability: {e}",
-                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `halo doctor --work`")
     except Exception as e:
         return _fix(f"{MISSING} VPN/reachability: could not reach {hostname}:{port} ({type(e).__name__}: {e})",
-                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `halo doctor --work`")
 
 
 _IP_ACCESS_LIST_HINTS = (
@@ -923,24 +948,24 @@ def _work_check_token_validity(host: Optional[str], token: Optional[str]) -> str
     reachability") rather than skipping the network call outright."""
     if not host:
         return _fix(f"{MISSING} Token validity: not configured -- nothing to check",
-                     cmd="rolo-claude init --preset work")
-    from rolo_claude.providers.config import derive_workspace_root
-    from rolo_claude.providers.databricks import probe_databricks_status
+                     cmd="halo init --preset work")
+    from halo_harness.providers.config import derive_workspace_root
+    from halo_harness.providers.databricks import probe_databricks_status
     root = derive_workspace_root(host)
     if not token:
         try:
             status, raw = probe_databricks_status(root, "")
         except Exception as e:
             return _fix(f"{MISSING} Token validity: host configured, token missing, and the reachability "
-                         f"probe failed ({type(e).__name__}: {e})", cmd="rolo-claude init --preset work")
+                         f"probe failed ({type(e).__name__}: {e})", cmd="halo init --preset work")
         _kind, detail = _classify_databricks_probe(status, raw)
         return _fix(f"{MISSING} Token validity: host configured, token missing (probe reached the host: "
-                     f"{detail})", cmd="rolo-claude init --preset work")
+                     f"{detail})", cmd="halo init --preset work")
     try:
         status, raw = probe_databricks_status(root, token)
     except Exception as e:
         return _fix(f"{MISSING} Token validity: connection failed ({type(e).__name__}: {e})",
-                     cmd="connect to the VPN, then re-run `rolo-claude doctor --work`")
+                     cmd="connect to the VPN, then re-run `halo doctor --work`")
     kind, detail = _classify_databricks_probe(status, raw)
     if kind == "ok":
         try:
@@ -950,7 +975,7 @@ def _work_check_token_validity(host: Optional[str], token: Optional[str]) -> str
         return f"{OK} Token validity: valid, can list endpoints ({n} found)"
     if kind == "missing":
         return _fix(f"{MISSING} Token validity: {detail}",
-                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `rolo-claude doctor --work`")
+                     cmd="connect to the VPN (Databricks is whitelisted), then re-run `halo doctor --work`")
     return _fix(f"{WARN} Token validity: {detail}", see="your Databricks workspace admin (token scope)")
 
 
@@ -958,17 +983,17 @@ def _work_check_config_summary() -> "list[str]":
     """H14 scope E: "prints the derived root, the gateway path, the header
     NAMES (never values), the default model and effort, the token
     source" -- the exact config a real session on this box would build,
-    so a mismatch between "what's configured" and "what rolo-claude
+    so a mismatch between "what's configured" and "what halo
     resolved" is visible before ever making a live call. `[]` when
     Databricks doesn't resolve at all (the plain "Databricks config" line
     already covers that case)."""
     _load_env_file_best_effort()
-    from rolo_claude.providers.config import resolve_databricks, resolve_databricks_source
+    from halo_harness.providers.config import resolve_databricks, resolve_databricks_source
     try:
         dbx = resolve_databricks()
     except Exception as e:
         return [_fix(f"{WARN} Work config: could not resolve ({type(e).__name__}: {e})",
-                      cmd="rolo-claude doctor --work")]
+                      cmd="halo doctor --work")]
     if dbx is None:
         return []
     gateway = dbx.anthropic_gateway or f"{dbx.host}/ai-gateway/anthropic"
@@ -979,16 +1004,16 @@ def _work_check_config_summary() -> "list[str]":
         f"{OK} Headers sent (names only): {', '.join(header_names)}",
     ]
     try:
-        from rolo_claude.config.paths import bridge_home
-        from rolo_claude.model import resolve_default_model_raw
-        from rolo_claude.providers.config import load_routes
+        from halo_harness.config.paths import bridge_home
+        from halo_harness.model import resolve_default_model_raw
+        from halo_harness.providers.config import load_routes
         routes = load_routes(bridge_home() / "routes.json")
         lines.append(f"{OK} Default model: {resolve_default_model_raw(routes)}")
     except Exception as e:
         lines.append(_fix(f"{WARN} Default model: could not resolve ({type(e).__name__}: {e})",
-                           cmd="rolo-claude doctor --work"))
+                           cmd="halo doctor --work"))
     try:
-        from rolo_claude.config.settings import resolve_settings
+        from halo_harness.config.settings import resolve_settings
         effort = resolve_settings(Path.cwd()).resolved_effort_level()
     except Exception:
         effort = None
@@ -1013,7 +1038,7 @@ def _configured_databricks_thinking_model(state_dir) -> Optional[str]:
     section promises question 2 is answered "for the configured model" --
     the probe used to always pick the FIRST DeepSeek/Kimi/GLM-family
     endpoint in the live catalog instead, regardless of what the user
-    actually has configured (`routes.json`'s "default", `BRIDGE_MODEL`, or
+    actually has configured (`routes.json`'s "default", `HALO_MODEL`, or
     this harness's own built-in default). Resolves that chain the exact
     same way `headless.build_session` does; returns the bare model id only
     when it's BOTH a databricks ref AND thinking-family (the only shape
@@ -1021,8 +1046,8 @@ def _configured_databricks_thinking_model(state_dir) -> Optional[str]:
     test at all), else None (the caller falls back to the catalog's first
     match, same as before, but now honestly labelled as a fallback)."""
     try:
-        from rolo_claude.model import parse_model_ref, resolve_default_model_raw
-        from rolo_claude.providers.config import load_routes
+        from halo_harness.model import parse_model_ref, resolve_default_model_raw
+        from halo_harness.providers.config import load_routes
         routes = load_routes(Path(state_dir) / "routes.json")
         model_raw = resolve_default_model_raw(routes)
         ref = parse_model_ref(model_raw, routes)
@@ -1059,19 +1084,19 @@ def _work_check_reasoning_replay_after_tool_call(host: Optional[str], token: Opt
              "split hold for the CONFIGURED model?"]
     if not host or not token:
         lines.append("  " + _fix(f"{MISSING} cannot probe -- Databricks not configured",
-                                  cmd="rolo-claude init --preset work"))
+                                  cmd="halo init --preset work"))
         return lines
     try:
-        from rolo_claude.providers.databricks import probe_databricks_endpoints_full
-        from rolo_claude.providers.config import derive_workspace_root
+        from halo_harness.providers.databricks import probe_databricks_endpoints_full
+        from halo_harness.providers.config import derive_workspace_root
         status, entries = probe_databricks_endpoints_full(derive_workspace_root(host), token)
     except Exception as e:
         lines.append("  " + _fix(f"{MISSING} cannot probe -- connection failed ({type(e).__name__}: {e})",
-                                  cmd="connect to the VPN, then re-run `rolo-claude doctor --work`"))
+                                  cmd="connect to the VPN, then re-run `halo doctor --work`"))
         return lines
     if status != 200:
         lines.append("  " + _fix(f"{MISSING} cannot probe -- HTTP {status} listing endpoints",
-                                  cmd="rolo-claude doctor --work"))
+                                  cmd="halo doctor --work"))
         return lines
     configured = _configured_databricks_thinking_model(state_dir)
     if configured:
@@ -1089,9 +1114,9 @@ def _work_check_reasoning_replay_after_tool_call(host: Optional[str], token: Opt
         return lines
 
     try:
-        from rolo_claude.providers.config import derive_workspace_root
-        from rolo_claude.providers.databricks import dbx_cache_get_route, databricks_route_candidates
-        from rolo_claude.providers.http import call_databricks_chat
+        from halo_harness.providers.config import derive_workspace_root
+        from halo_harness.providers.databricks import dbx_cache_get_route, databricks_route_candidates
+        from halo_harness.providers.http import call_databricks_chat
         root = derive_workspace_root(host)
         body = {
             "model": candidate,
@@ -1149,16 +1174,16 @@ def _work_check_entries() -> "list[tuple[str, str]]":
     """The `--work` counterpart of `_check_entries` -- one id-tagged table
     shared by `run_work_checks` and `run_work_checks_structured`/`doctor
     --work --json`."""
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     host, token = _dbx_probe_target()
     if host and token:
         databricks_config_line = f"{OK} Databricks config: host {host}"
     elif host:
         databricks_config_line = _fix(f"{MISSING} Databricks config: host configured, token missing ({host})",
-                                       cmd="rolo-claude init --preset work")
+                                       cmd="halo init --preset work")
     else:
         databricks_config_line = _fix(f"{MISSING} Databricks config: not configured",
-                                       cmd="rolo-claude init --preset work")
+                                       cmd="halo init --preset work")
     entries = [
         ("databricks_config", databricks_config_line),
         ("ucode_settings", _check_ucode_settings()),
@@ -1173,7 +1198,7 @@ def _work_check_entries() -> "list[tuple[str, str]]":
 
 
 def run_work_checks() -> "tuple[list, bool]":
-    """H8 scope F: `rolo-claude doctor --work` -- VPN reachability, token
+    """H8 scope F: `halo doctor --work` -- VPN reachability, token
     validity, ucode-settings.json, and the plan's own two open questions as
     runnable probes. Never raises; every check degrades to a clear WARN/
     MISSING line with the VPN hint instead of crashing when the work box
@@ -1208,6 +1233,7 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries: "list[tuple[str, Optional[str]]]" = [("python", _check_python())]
     claude_ids = ("claude_dir", "claude_settings_json", "claude_dot_json")
     entries.extend(zip(claude_ids, _check_claude_layout()))
+    entries.append(("state_dir_migration", _check_state_dir_migration()))
     entries.append(("env_file", _check_env_file()))
     entries.append(("openrouter", _check_openrouter()))
     entries.append(("databricks", _check_databricks()))
@@ -1232,7 +1258,7 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     # a fresh WSL install) gets the fix suffix HERE rather than inside
     # tui/clipboard.py itself, since `_fix`/the WARN/MISSING vocabulary is
     # this module's own convention, not that one's.
-    from rolo_claude.tui.clipboard import clipboard_doctor_line
+    from halo_harness.tui.clipboard import clipboard_doctor_line
     entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
     entries.append(("default_model", _check_default_model()))
@@ -1252,7 +1278,7 @@ def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
 
 
 def run_checks_structured(cwd: Optional[Path] = None) -> "tuple[list, bool]":
-    """H12 Part B: `doctor --json`'s own payload, and what `rolo-claude
+    """H12 Part B: `doctor --json`'s own payload, and what `halo
     init` consumes to build its own Summary step -- `[{"id", "status",
     "message", "fix", "see"}, ...]`, the SAME checks/order/wording
     `run_checks` renders as plain text, just structured instead of
@@ -1268,8 +1294,8 @@ def run_checks_structured(cwd: Optional[Path] = None) -> "tuple[list, bool]":
 
 
 def cmd_doctor(argv: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude doctor", add_help=True,
-                                      description="Check the health of your rolo-claude installation.")
+    parser = argparse.ArgumentParser(prog="halo doctor", add_help=True,
+                                      description="Check the health of your halo installation.")
     parser.add_argument("--work", action="store_true",
                          help="Run the Databricks work-box preset (VPN reachability, token validity, "
                               "route-split/reasoning-replay probes) instead of the general checks")
@@ -1291,19 +1317,19 @@ def cmd_doctor(argv: list) -> int:
     # however it got there. The note is printed only OUTSIDE --json (a
     # machine reader expects stdout to be ONE parseable JSON value, never
     # a plain-text line ahead of it).
-    from rolo_claude.providers.enablement import ensure_providers_migrated
+    from halo_harness.providers.enablement import ensure_providers_migrated
     migration_note = ensure_providers_migrated()
     if migration_note and not args.json:
         print(migration_note)
     if args.work and args.probe_all:
-        from rolo_claude.work_matrix import format_table, run_work_matrix
-        print("rolo-claude doctor --work --probe-all")
+        from halo_harness.work_matrix import format_table, run_work_matrix
+        print("halo doctor --work --probe-all")
         print("  Sends one short pong (and a tool call with --tools) to each endpoint below -- "
               "this spends real tokens/DBUs against your Databricks workspace.")
         rows, report_path = run_work_matrix(only=args.only, both=args.both, tools=args.tools)
         if not rows:
             print("  No chat-shaped endpoints to probe (Databricks not configured, or the catalog is empty -- "
-                  "run `rolo-claude models --refresh` first).")
+                  "run `halo models --refresh` first).")
             return 1
         print(format_table(rows, tools=args.tools))
         print(f"\n  Report written to {report_path} (endpoint names only -- no host, no token).")
@@ -1314,7 +1340,7 @@ def cmd_doctor(argv: list) -> int:
             print(json.dumps(checks, indent=2))
             return 0 if ok else 1
         lines, ok = run_work_checks()
-        print("rolo-claude doctor --work")
+        print("halo doctor --work")
         for line in lines:
             print(f"  {line}")
         return 0 if ok else 1
@@ -1323,7 +1349,7 @@ def cmd_doctor(argv: list) -> int:
         print(json.dumps(checks, indent=2))
         return 0 if ok else 1
     lines, ok = run_checks()
-    print("rolo-claude doctor")
+    print("halo doctor")
     for line in lines:
         print(f"  {line}")
     return 0 if ok else 1

@@ -1,4 +1,4 @@
-"""rolo_claude.tools.websearch -- the WebSearch tool (H4 scope E). Only
+"""halo_harness.tools.websearch -- the WebSearch tool (H4 scope E). Only
 ever constructed/registered when the session's MAIN provider is OpenRouter
 (D-CFG: "registered only when the main provider is OpenRouter ... on other
 providers the tool is absent -- Claude Code's own WebSearch is server-side;
@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Search the web for current information (news, prices, documentation, anything the model's "
@@ -74,8 +74,8 @@ class WebSearchTool(Tool):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/rolo-claude/rolo-claude",
-            "X-Title": "rolo-claude",
+            "HTTP-Referer": "https://github.com/roloVibes/Halo-Harness",
+            "X-Title": "halo",
         }
         headers.update(self.extra_headers)
         req = urllib.request.Request(
@@ -84,7 +84,7 @@ class WebSearchTool(Tool):
         )
         try:
             # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
-            from rolo_claude.providers.http import urlopen_tls
+            from halo_harness.providers.http import urlopen_tls
             with urlopen_tls(req, timeout=_TIMEOUT_S) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:

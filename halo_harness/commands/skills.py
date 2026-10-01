@@ -1,4 +1,4 @@
-"""rolo_claude.commands.skills -- skills surfaced as slash commands (U0
+"""halo_harness.commands.skills -- skills surfaced as slash commands (U0
 scope B): three locations -- project `.claude/skills/**/SKILL.md` (found at
 cwd and every ancestor up to the filesystem root, closest wins), user
 `~/.claude/skills/**/SKILL.md` (excluding the `synced/` subtree), and synced
@@ -17,14 +17,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.commands.registry import Registry, SlashCommand, expand_command_body
-from rolo_claude.config.frontmatter import parse as parse_frontmatter
+from halo_harness.commands.registry import Registry, SlashCommand, expand_command_body
+from halo_harness.config.frontmatter import parse as parse_frontmatter
 
 
 def _allowed_tools_list(fm: dict) -> list:
     allowed = fm.get("allowed-tools") if isinstance(fm, dict) else None
     if isinstance(allowed, str):
-        from rolo_claude.permissions import split_tool_rule_list
+        from halo_harness.permissions import split_tool_rule_list
         return split_tool_rule_list(allowed)
     return allowed if isinstance(allowed, list) else []
 
@@ -61,10 +61,10 @@ def _make_run(body: str, allowed_tools: list, skill_path: "Optional[Path]" = Non
             env=getattr(session, "tool_env", None), claude_vars=claude_vars,
         )
         if result.error:
-            return f"rolo-claude: {result.error}"
+            return f"halo: {result.error}"
         text = result.text
         if skill_dir_abs is not None:
-            from rolo_claude.tools.skill import _sibling_files
+            from halo_harness.tools.skill import _sibling_files
 
             text = f"Base directory for this skill: {skill_dir_abs}\n\n" + text
             siblings = _sibling_files(skill_path)
@@ -170,7 +170,7 @@ def discover_all_skills(cwd: Path, *, home: Optional[Path] = None) -> dict:
     real Skill TOOL (a by-name lookup, never through the shared Registry
     object a Tool has no reference to) build on, so the two can never
     disagree about which skill a name resolves to."""
-    from rolo_claude.config.paths import claude_config_dir as claude_config_dir_fn, home as home_fn
+    from halo_harness.config.paths import claude_config_dir as claude_config_dir_fn, home as home_fn
 
     user_home = Path(home) if home is not None else home_fn()
     if "CLAUDE_CONFIG_DIR" in os.environ:

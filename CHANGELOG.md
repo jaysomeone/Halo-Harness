@@ -1,9 +1,103 @@
 # Changelog
 
-All notable changes to `rolo-claude` are recorded here, newest first. This
-project does not (yet) follow strict semver across the 0.3.x line -- each
-0.3.0 milestone below was a working checkpoint toward the single 0.3.0
-release, not a separate published version.
+All notable changes to Halo Harness (continuing `rolo-claude`, renamed at
+version 2.0.0) are recorded here, newest first. Every entry older than the
+rename keeps the `rolo-claude`/`rolo_claude` names it was written under --
+history, not rewritten. This project does not (yet) follow strict semver
+across the 0.3.x line -- each 0.3.0 milestone below was a working
+checkpoint toward the single 0.3.0 release, not a separate published
+version.
+
+## [2.0.0] - 2026-10-01
+
+The rename release: `rolo-claude` 1.0.1 continues unchanged, as its own
+repository; this one, Halo Harness, is where every later feature lands.
+Nothing about runtime *behavior* changes here beyond the migration and
+alias notices below -- every 1.0.1 fix ships exactly as it was.
+
+1. **Product renamed to Halo Harness**: console script `halo` (`python -m
+   halo_harness`); distribution `halo-harness` on PyPI (`halo` itself is a
+   spinner library -- never collide); Python package `halo_harness`
+   (`rolo_claude` renamed in place, every import/reference updated).
+   `rolo-claude` keeps working forever as a deprecated console-script
+   alias -- one notice line to stderr (`halo: 'rolo-claude' is deprecated,
+   use 'halo' instead`), then runs exactly like `halo`, same process, same
+   parser, including `rolo-claude proxy`. `halo proxy ...` is the renamed
+   spelling of what `rolo-claude proxy`/`claude-bridge` already did
+   (`bridge.py`, unchanged).
+2. **State directory migration**: the default state dir is now `~/.halo`
+   (was `~/.rolo-claude`). The first time anything in a fresh Halo Harness
+   process resolves it, an existing `~/.rolo-claude` is renamed (never
+   copied) to `~/.halo`, announced with one stderr line; every call after
+   that (in this or any later process) just finds `~/.halo` already there
+   and says nothing further. No link is created at the old location (`rm
+   -rf ~/.rolo-claude/` with a trailing slash follows a symlink/junction
+   and would empty `~/.halo` right along with it) -- a still-installed
+   `rolo-claude` 1.0.1 must never be run again after this, since it would
+   start from a truly empty `~/.rolo-claude`. A rename that fails (a
+   locked file on Windows, a read-only/cross-device home on Linux) prints
+   one warning and keeps using `~/.rolo-claude` for that run instead of
+   silently losing state in a `~/.halo` that was never actually populated;
+   when the rename instead loses a race to a concurrent process that
+   migrates first, the `~/.halo` it left behind is adopted silently.
+   `halo doctor` reports a standing WARN whenever both directories end up
+   holding real data. `BRIDGE_STATE_DIR` keeps overriding the state dir
+   outright, exactly as before (no migration logic runs when it's set).
+   Test seams (`BRIDGE_TEST_HOME`, `BRIDGE_TEST_NO_BACKGROUND_NET`,
+   `BRIDGE_TEST_CC_AUTH_STATUS`, and `BRIDGE_STATE_DIR` itself) keep their
+   exact names -- no `HALO_` twin for these, by design.
+3. **Env file**: `halo init` now writes `~/.config/halo/env` (was
+   `~/.config/vibes-hacker/env`), copying the old file's content forward
+   (directory 0700, file 0600) the first time it writes on a box where
+   only the old one exists yet, so nothing already configured there is
+   orphaned. The old file is never modified or renamed (other tools on
+   the same box read it); the copied-forward new file starts with an
+   import marker line, and once that marker is present the old file is
+   no longer consulted, so a key you delete from the new file stays
+   deleted. Without the marker (a hand-written new file) reading still
+   checks the new file, then the old one, so a credential that only
+   ever lived in the old file keeps working even before `halo init`
+   runs again. `HALO_ENV_FILE` is the new override
+   name; legacy `BRIDGE_ENV_FILE` keeps working (an explicit override
+   always wins outright, with no blending between the two files).
+4. **Env vars**: every harness-owned `BRIDGE_*`/`ROLO_CLAUDE_*` knob
+   (`OPENROUTER_BASE_URL`, `ANTHROPIC_BASE_URL`, `DBX_BASE_URL`/
+   `DBX_TOKEN`, `MODEL`/`MODEL_SMALL`, `ENV_FILE`, `CLAUDE_EXE`, `DUMP`,
+   `CA_BUNDLE`, `THEME`) now has a canonical `HALO_*` name, checked first;
+   the old name still works, logging one DEBUG line the first time it's
+   what actually supplied the value. See `docs/CONFIG.md`'s "Every
+   environment variable" table for the full list.
+5. **Launch intro**: a fresh interactive launch (TUI, including
+   `--continue`/`--resume`) types out `I am just a copy, of a copy, of a
+   copy... halo 2.0.0` character by character above the first turn, like
+   someone typing it, with a block cursor while typing; any keypress or a
+   submitted prompt finishes it instantly, and the prompt input keeps
+   focus throughout so nothing typed during it is ever lost. Never shown
+   in print mode, a `--demo` run, or when stdout isn't a real terminal;
+   `"intro": false` in `~/.halo/config.json`, or `--no-intro`, turns it
+   off for good; `/intro` replays it mid-session.
+6. **Compatibility odds and ends**: a project's `.rolo-claude/team.json`
+   (checked into a repo before this rename) is still found, with one
+   deprecation line, when `.halo/team.json` is absent. `/improve`'s
+   provenance marker and the `~/.local/bin`-on-PATH rc-file marker both
+   still recognize the exact text 1.0.1 wrote (a new write always uses the
+   new text) -- so a file or rc-file line 1.0.1 already produced is never
+   mistaken for user-authored, and `halo init` re-run on an upgraded box
+   never appends a second PATH block. The `stream-json` `system/init` line's
+   version field is now `halo_harness_version`; `rolo_claude_version` (same
+   value) ships alongside it for a script that already reads the old name.
+   The state directory itself (item 2) gets no compatibility link of its
+   own, unlike these -- no link is created there, on purpose, since a
+   leftover link would make `rm -rf ~/.rolo-claude/` dangerous.
+7. **Docs/tests**: README/CHANGELOG/docs/briefs/guard tests all updated to
+   the new names; this entry is the only CHANGELOG section written under
+   them -- every entry below keeps the name it was written under.
+8. **Shadow-repo long paths on Windows**: the `/rewind` git-shadow repo
+   (`~/.halo/sessions/<slug>/<session_id>/shadow/`) now sets `core.
+   longpaths true` right after `git init` on Windows -- the shadow repo's
+   own path plus a mangled absolute source path underneath it can exceed
+   Windows' 260-character limit under a long home or cwd, which git itself
+   refuses without this setting.
 
 ## [1.0.1] - 2026-09-30
 

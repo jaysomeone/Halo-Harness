@@ -1,6 +1,6 @@
-# H5c brief — fix pass for the H5b review (rolo-claude)
+# H5c brief — fix pass for the H5b review (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H8 commit on master, all three suites green on Windows and WSL.
 You are the ONLY worker on the tree. Do not commit (Fable verifies and commits).
 
@@ -59,7 +59,7 @@ You are the ONLY worker on the tree. Do not commit (Fable verifies and commits).
   `doctor` shows an Anthropic key on this box (else say so).
 - **F17** `replace_all` with overlapping fuzzy windows: keep the first non-overlapping set or
   refuse; never corrupt.
-- **F18** `compactionModel` read from `~/.rolo-claude/config.json` first, Claude settings as
+- **F18** `compactionModel` read from `~/.halo/config.json` first, Claude settings as
   fallback; test through the real config path, not injected knobs.
 - **F19** `steer_queued` emitted once (at submit); `steer_applied` covers apply time.
 - **F20** MAX_STEPS wrap-up: synthesize results for (or strip) any tool_use the provider still
@@ -78,7 +78,7 @@ You are the ONLY worker on the tree. Do not commit (Fable verifies and commits).
 
 ## Tests
 Suites: `python test_bridge.py`, `python tests/run_all.py`, `python test_tui.py` — exit 0 on
-Windows AND WSL (rsync recipe in `docs/harness/INSTALL.md`; venv `~/rolo-claude-wt-venv`). Linux
+Windows AND WSL (rsync recipe in `docs/harness/INSTALL.md`; venv `~/halo-harness-wt-venv`). Linux
 failures are fixed, never skipped. Mock-upstream tests drive a real `Session`.
 
 ## Acceptance (Fable re-runs)

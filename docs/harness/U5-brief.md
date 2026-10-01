@@ -1,6 +1,6 @@
-# U5 brief — TUI polish + OpenCode UX adoptions (rolo-claude)
+# U5 brief — TUI polish + OpenCode UX adoptions (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — the TUI must be excellent in xterm/kitty/tmux over SSH). Baseline = the H6 commit on master, all
 suites green on Windows and WSL. Do not commit.
 
@@ -17,7 +17,7 @@ suites green on Windows and WSL. Do not commit.
 4. `docs/harness/claude-code-2.1.281-binary-facts.md` §1 (`--theme` does not exist in Claude Code —
    ours is extra), Claude Code's `~/.claude/keybindings.json` format (the `keybindings-help` skill
    describes it: chords, contexts) — adopt THAT file format for remaps, not OpenCode's `tui.json`.
-5. Current `rolo_claude/tui/**`, `controller.py`, `test_tui.py`, `docs/harness/tui-snapshots/`.
+5. Current `halo_harness/tui/**`, `controller.py`, `test_tui.py`, `docs/harness/tui-snapshots/`.
 
 ## Scope
 A. **Keymap**: read `~/.claude/keybindings.json` (Claude Code's format: chords like `ctrl+x ctrl+s`,
@@ -28,7 +28,7 @@ A. **Keymap**: read `~/.claude/keybindings.json` (Claude Code's format: chords l
    as a tool card; card expand/collapse key (`o`), `Ctrl+O` verbose, `Ctrl+E` open the current file in
    `$VISUAL`/`$EDITOR` via `app.suspend()`.
 B. **Git-shadow rewind**: every Write/Edit/Bash-that-changed-files step records a snapshot in a
-   shadow git repo under `~/.rolo-claude/sessions/<slug>/<id>/shadow/` (like OpenCode's snapshots and
+   shadow git repo under `~/.halo/sessions/<slug>/<id>/shadow/` (like OpenCode's snapshots and
    Claude Code's `file-history`); `/rewind` (alias `/undo`, `/redo`) lists steps and restores the
    working tree to a step (with a confirmation card); the log gets a `rewind` node.
 C. **Sessions UX**: session titles via the small model after the first turn (`/rename` to change),

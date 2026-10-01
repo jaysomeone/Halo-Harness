@@ -1,5 +1,5 @@
-"""tests.test_chrome_playwright -- rolo_claude/mcp_setup.py +
-rolo_claude/doctor.py (H3 scope E, brought forward from H7): `--chrome`/
+"""tests.test_chrome_playwright -- halo_harness/mcp_setup.py +
+halo_harness/doctor.py (H3 scope E, brought forward from H7): `--chrome`/
 `--no-chrome`/`claudeInChromeDefaultEnabled` resolution, the dynamic
 `claude-in-chrome`/`playwright` McpServerConfig specs (spawn itself is
 never exercised here -- these are pure config-building unit tests), and
@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
-from rolo_claude import mcp_setup as S
+from halo_harness import mcp_setup as S
 
 test, TESTS = new_registry()
 
@@ -121,7 +121,7 @@ def test_chrome_server_config_shape(ctx: Ctx):
         ctx.check("args = --claude-in-chrome-mcp [verified doc]", cfg.args == ["--claude-in-chrome-mcp"])
         ctx.check("dynamic scope", cfg.scope == "dynamic")
         # finding 9: ALWAYS set now, regardless of bypass_mode -- see
-        # chrome_server_config's own docstring (rolo-claude's engine
+        # chrome_server_config's own docstring (halo's engine
         # already gates every mcp__claude-in-chrome__* call itself).
         ctx.check("bypass env set even when bypass_mode=False (the engine gates it either way)",
                   cfg.env.get("CLAUDE_CHROME_PERMISSION_MODE") == "skip_all_permission_checks")
@@ -224,7 +224,7 @@ def test_build_manager_wires_chrome_into_configs_without_connecting(ctx: Ctx):
 
 @test
 def test_build_manager_unavailable_mcp_returns_none(ctx: Ctx):
-    import rolo_claude.mcp as mcp_pkg
+    import halo_harness.mcp as mcp_pkg
     old_available = mcp_pkg.available
     mcp_pkg.available = lambda: False
     try:
@@ -239,7 +239,7 @@ def test_build_manager_unavailable_mcp_returns_none(ctx: Ctx):
 
 @test
 def test_doctor_checks_never_raise(ctx: Ctx):
-    from rolo_claude import doctor
+    from halo_harness import doctor
     lines, ok = doctor.run_checks()
     ctx.check("doctor always returns a bool ok flag", isinstance(ok, bool))
     ctx.check("a line mentions --chrome", any("--chrome" in l or "claude=" in l for l in lines))
@@ -248,7 +248,7 @@ def test_doctor_checks_never_raise(ctx: Ctx):
 
 @test
 def test_doctor_chrome_native_host_lookup_never_raises(ctx: Ctx):
-    from rolo_claude.doctor import _chrome_native_host_registered
+    from halo_harness.doctor import _chrome_native_host_registered
     registered, detail = _chrome_native_host_registered()
     ctx.check("returns a bool + a detail string, never raises", isinstance(registered, bool) and isinstance(detail, str))
 

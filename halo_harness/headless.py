@@ -1,4 +1,4 @@
-"""rolo_claude.headless -- print-mode session driver (U0 scope F rewrite).
+"""halo_harness.headless -- print-mode session driver (U0 scope F rewrite).
 Builds a Session and drives one turn (`--input-format text`, the default)
 or several (`--input-format stream-json`: one already-parsed JSON object on
 stdin per line = one user turn -- cli.py reads/parses stdin, since text-
@@ -26,33 +26,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude import events
-from rolo_claude.agent import sessions as agent_sessions
-from rolo_claude.agent.assemble import SessionContext
-from rolo_claude.agent.catalog import SessionCatalog, host_cap, select_preload
-from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.loop import Session
-from rolo_claude.agent.planmode import ensure_plan_file
-from rolo_claude.commands.builtins import HeadlessFacade
-from rolo_claude.commands.registry import Registry
-from rolo_claude.config.agents_md import discover_agents
-from rolo_claude.config.claude_json import is_trusted, load_claude_json
-from rolo_claude.config.paths import bridge_home, home, lookup_project
-from rolo_claude.config.settings import resolve_settings
-from rolo_claude.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
-from rolo_claude.output import PrintModeSink, StreamJsonSink
-from rolo_claude.providers.routing import InvalidModelError
-from rolo_claude.permissions import (
+from halo_harness import events
+from halo_harness.agent import sessions as agent_sessions
+from halo_harness.agent.assemble import SessionContext
+from halo_harness.agent.catalog import SessionCatalog, host_cap, select_preload
+from halo_harness.agent.log import SessionLog
+from halo_harness.agent.loop import Session
+from halo_harness.agent.planmode import ensure_plan_file
+from halo_harness.commands.builtins import HeadlessFacade
+from halo_harness.commands.registry import Registry
+from halo_harness.config.agents_md import discover_agents
+from halo_harness.config.claude_json import is_trusted, load_claude_json
+from halo_harness.config.paths import bridge_home, env_compat, home, lookup_project
+from halo_harness.config.settings import resolve_settings
+from halo_harness.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
+from halo_harness.output import PrintModeSink, StreamJsonSink
+from halo_harness.providers.routing import InvalidModelError
+from halo_harness.permissions import (
     PermissionEngine, bare_deny_tool_names, build_rules_from_settings, freeze_tool_registry,
     mcp_deny_tool_names, normalize_permission_mode, split_tool_rule_list,
 )
-from rolo_claude.providers.config import (
-    derive_workspace_root, load_env_file, load_routes, resolve_anthropic, resolve_databricks, resolve_openrouter,
+from halo_harness.providers.config import (
+    derive_workspace_root, load_provider_env_files, load_routes, resolve_anthropic, resolve_databricks,
+    resolve_openrouter,
 )
-from rolo_claude.providers.profiles import model_family
-from rolo_claude.providers.stream import ProviderCreds
-from rolo_claude.theme import load_config as load_rolo_config, resolve_theme
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.providers.profiles import model_family
+from halo_harness.providers.stream import ProviderCreds
+from halo_harness.theme import load_config as load_rolo_config, resolve_theme
+from halo_harness.tools.registry import ToolRegistry
 
 _SLASH_RE = re.compile(r"^/(\S+)(?:\s+(.*))?$", re.DOTALL)
 
@@ -110,8 +111,8 @@ def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: 
     simply always False. `prompt_caller` is left unbound here (the CALLER
     binds it to the just-constructed Session's own `_call_model_for_hook`,
     once one exists -- see the call site)."""
-    from rolo_claude.config.plugins import load_installed_plugins, _plugin_roots
-    from rolo_claude.hooks import HookRunner, load_plugin_hooks, merge_hook_maps, normalize_hooks
+    from halo_harness.config.plugins import load_installed_plugins, _plugin_roots
+    from halo_harness.hooks import HookRunner, load_plugin_hooks, merge_hook_maps, normalize_hooks
 
     disabled = bare or bool(settings is not None and getattr(settings, "disable_all_hooks", False))
     hooks_by_event: dict = {}
@@ -252,13 +253,13 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
     `text` is None (an ordinary, non-slash prompt was never expanded)."""
     if not text:
         return
-    from rolo_claude.commands.registry import read_at_mention_snapshots
+    from halo_harness.commands.registry import read_at_mention_snapshots
     for path_str, content in read_at_mention_snapshots(text, cwd=cwd):
         session.log.append_snapshot([{"type": "text", "text": f"@{path_str}\n{content}"}], kind="at_mention")
     # H8 scope E (deferred by H3): `@server:resource` mentions, the MCP
     # sibling of the `@path` handling just above -- same "separate context
     # block, never inlined" rule.
-    from rolo_claude.mcp.mentions import read_server_resource_snapshots
+    from halo_harness.mcp.mentions import read_server_resource_snapshots
     for label, content in read_server_resource_snapshots(text, mcp_manager=session.mcp_manager):
         session.log.append_snapshot([{"type": "text", "text": f"@{label}\n{content}"}], kind="at_mention")
 
@@ -298,8 +299,8 @@ def attach_cli_files(session, file_specs: Optional[list], *, cwd: Path) -> None:
     called exactly once per process."""
     if not file_specs:
         return
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.read import ReadTool
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.read import ReadTool
     tool = ReadTool()
     model_profile = getattr(session, "model_profile", None)
     ctx = ToolContext(cwd=cwd, vision=getattr(model_profile, "vision", False))
@@ -307,18 +308,18 @@ def attach_cli_files(session, file_specs: Optional[list], *, cwd: Path) -> None:
         resolved = _resolve_local_file_spec(raw, cwd=cwd)
         if resolved is None and ":" in raw:
             file_id, _, rel_path = raw.partition(":")
-            print(f"rolo-claude: --file: {raw!r} looks like Claude Code's "
+            print(f"halo: --file: {raw!r} looks like Claude Code's "
                   f"file_id:relative_path cloud-resource form ({file_id!r} -> {rel_path!r}) -- "
-                  f"rolo-claude has no claude.ai-hosted file store to download it from, skipped. "
+                  f"halo has no claude.ai-hosted file store to download it from, skipped. "
                   f"A local path (relative to --cwd, or absolute) attaches directly.", file=sys.stderr)
             continue
         if resolved is None:
-            print(f"rolo-claude: --file: {raw}: not a file, skipped", file=sys.stderr)
+            print(f"halo: --file: {raw}: not a file, skipped", file=sys.stderr)
             continue
         try:
             result = tool.run({"file_path": str(resolved)}, ctx)
         except Exception as e:
-            print(f"rolo-claude: --file: {raw}: {e}", file=sys.stderr)
+            print(f"halo: --file: {raw}: {e}", file=sys.stderr)
             continue
         if isinstance(result.content, list):
             blocks = [{"type": "text", "text": f"@{raw}"}] + list(result.content)
@@ -340,7 +341,7 @@ def _append_agent_mention_snapshot(session, text: Optional[str], agents: Optiona
     way every other dynamic instruction does."""
     if not text or not agents:
         return
-    from rolo_claude.config.agents_md import agent_mention_instruction, find_agent_mentions
+    from halo_harness.config.agents_md import agent_mention_instruction, find_agent_mentions
     names = find_agent_mentions(text, agents)
     if names:
         session.log.append_snapshot([{"type": "text", "text": agent_mention_instruction(names)}],
@@ -493,7 +494,7 @@ def build_session(
         cli_allow=cli_allow, cli_disallow=cli_disallow,
     )
 
-    # 1.0.1 hotfix 18.2: `~/.rolo-claude/config.json`'s own `permission_mode`
+    # 1.0.1 hotfix 18.2: `~/.halo/config.json`'s own `permission_mode`
     # (item 18.1's new init step) is a NEW layer, spliced in between the CLI
     # flag and settings.json's `permissions.defaultMode` -- an explicit
     # `--permission-mode` this run still wins outright, but a user's own
@@ -502,7 +503,7 @@ def build_session(
     # want auto on MY boxes" actually means. `doctor` (doctor.py) prints
     # this exact chain's own winning source so it's never a mystery which
     # layer decided.
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     config_permission_mode = get_config_value("permission_mode", default=None)
     if dangerously_skip_permissions:
         resolved_mode = "bypassPermissions"
@@ -532,8 +533,8 @@ def build_session(
         plan_path = ensure_plan_file(cwd, settings)
         permission_engine.set_plan_file(plan_path)
 
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    load_env_file(env_path)
+    # 2.0.0 fixpass finding 4: the new env file, then the legacy one too.
+    load_provider_env_files()
 
     state_dir = bridge_home()
     routes = load_routes(state_dir / "routes.json")
@@ -544,7 +545,7 @@ def build_session(
     # here already does.
     model_raw = model_ref_raw or resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
-    explicit_small_raw = small_model_ref_raw or os.environ.get("BRIDGE_MODEL_SMALL")
+    explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
     small_raw = explicit_small_raw or routes.get("small") or model_raw
     try:
         small_ref = parse_model_ref(small_raw, routes) if small_raw else None
@@ -558,12 +559,12 @@ def build_session(
         # to the already-resolved MAIN ref (which just parsed fine above)
         # instead of failing the session outright.
         small_ref = model_ref
-        # M4 (1.0.1 final pass): an EXPLICIT --small-model/BRIDGE_MODEL_SMALL
+        # M4 (1.0.1 final pass): an EXPLICIT --small-model/HALO_MODEL_SMALL
         # that gets refused must never fail SILENTLY -- only routes.json/
         # routes.example's own lenient "small" default (nobody typed this;
         # it's a shared file's own choice) stays quiet about falling back.
         if explicit_small_raw:
-            print(f"rolo-claude: --small-model/BRIDGE_MODEL_SMALL {small_raw!r} does not resolve -- "
+            print(f"halo: --small-model/HALO_MODEL_SMALL {small_raw!r} does not resolve -- "
                   f"using the main model {model_raw!r} for background calls instead", file=sys.stderr)
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
@@ -575,7 +576,7 @@ def build_session(
     # own `--role name=model` CLI overrides (always win, even over the
     # persisted table -- see `config.agents_md.resolve_agent_model`'s own
     # docstring for the full chain).
-    from rolo_claude.roles import parse_role_flags, resolve_role_table
+    from halo_harness.roles import parse_role_flags, resolve_role_table
     cli_roles = parse_role_flags(roles_flag)
     persisted_roles = resolve_role_table(provider=model_ref.provider)
 
@@ -588,7 +589,7 @@ def build_session(
     # session, which would bust the provider's own prompt cache prefix).
     edit_tool = frozen_registry.get("Edit")
     if edit_tool is not None:
-        from rolo_claude.providers.profiles import edit_hint_for
+        from halo_harness.providers.profiles import edit_hint_for
         edit_hint = edit_hint_for(model_ref.provider, model_ref.model)
         if edit_hint:
             edit_tool.description = f"{edit_tool.description}\n\n{edit_hint}"
@@ -632,12 +633,12 @@ def build_session(
     # `init --preset work`/`/models refresh`, so an unreachable/fake `dbx:`
     # host (common in this harness's own test suite) never spawns a live
     # background probe just from building a session.
-    from rolo_claude.config.paths import background_net_disabled
+    from halo_harness.config.paths import background_net_disabled
     if not bare and model_ref.provider == "databricks" and creds is not None and not background_net_disabled():
         import threading as _threading
         def _bg_dbx_refresh() -> None:
             try:
-                from rolo_claude.providers.databricks import dbx_endpoints_age_seconds, refresh_dbx_catalog_if_stale
+                from halo_harness.providers.databricks import dbx_endpoints_age_seconds, refresh_dbx_catalog_if_stale
                 if dbx_endpoints_age_seconds(state_dir) is not None:
                     # N2c (1.0.1 final pass): this session's own trust-
                     # filtered `settings.effective_env` (already resolved
@@ -648,11 +649,11 @@ def build_session(
                     refresh_dbx_catalog_if_stale(state_dir, env=settings.effective_env)
             except Exception:
                 pass
-        _threading.Thread(target=_bg_dbx_refresh, daemon=True, name="rolo-claude-dbx-auto-refresh").start()
+        _threading.Thread(target=_bg_dbx_refresh, daemon=True, name="halo-dbx-auto-refresh").start()
 
     if (not bare and websearch_allowed and model_ref.provider == "openrouter" and creds is not None
             and frozen_registry.get("WebSearch") is None):
-        from rolo_claude.tools.websearch import build_websearch_tool
+        from halo_harness.tools.websearch import build_websearch_tool
         ws_tool = build_websearch_tool(
             main_provider=model_ref.provider, creds=creds,
             small_model_raw=(small_ref.model if small_ref else None), main_model_raw=model_ref.model,
@@ -665,7 +666,7 @@ def build_session(
     session_catalog = None
     mcp_servers_for_prompt: list = []
     if not bare:
-        from rolo_claude.mcp_setup import build_manager, resolve_chrome_enabled
+        from halo_harness.mcp_setup import build_manager, resolve_chrome_enabled
         chrome_enabled = resolve_chrome_enabled(claude_json, chrome_flag=chrome, no_chrome_flag=no_chrome,
                                                  interactive=not print_mode)
         mcp_manager, mcp_notices = build_manager(
@@ -676,7 +677,7 @@ def build_session(
             bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True, trusted=trusted,
         )
         if mcp_manager is not None:
-            from rolo_claude.tools.mcp_tool import ListMcpResourcesTool, McpTool, ReadMcpResourceTool
+            from halo_harness.tools.mcp_tool import ListMcpResourcesTool, McpTool, ReadMcpResourceTool
             tools_subset = None
             if tools is not None and tools.strip() not in ("", "default"):
                 tools_subset = set(split_tool_rule_list(tools))
@@ -718,7 +719,7 @@ def build_session(
             # is non-empty, even when --tools/a deny rule would otherwise
             # have excluded it (was missing from the TUI's own copy).
             if deferred and frozen_registry.get("ToolSearch") is None:
-                from rolo_claude.tools.tool_search import ToolSearchTool
+                from halo_harness.tools.tool_search import ToolSearchTool
                 frozen_registry.add_tool(ToolSearchTool())
 
             session_catalog = SessionCatalog(
@@ -751,7 +752,7 @@ def build_session(
             if resolved_mode == "plan" and permission_engine.plan_file is None:
                 permission_engine.set_plan_file(ensure_plan_file(cwd, settings))
     elif agent:
-        print(f"rolo-claude: unknown --agent {agent!r} (known: {', '.join(sorted(discovered_agents)) or '(none)'})",
+        print(f"halo: unknown --agent {agent!r} (known: {', '.join(sorted(discovered_agents)) or '(none)'})",
               file=sys.stderr)
 
     ctx = SessionContext(
@@ -764,7 +765,7 @@ def build_session(
     if system_prompt:
         ctx.system_prompt = system_prompt
 
-    openrouter_base_url = os.environ.get("BRIDGE_OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
+    openrouter_base_url = env_compat("OPENROUTER_BASE_URL") if model_ref.provider == "openrouter" else None
     extra_headers = None
     if model_ref.provider == "databricks":
         # H14 scope B: ANTHROPIC_CUSTOM_HEADERS (one or more "Name: value"
@@ -772,7 +773,7 @@ def build_session(
         # native passthrough and chat alike -- merged under the default
         # x-databricks-use-coding-agent-mode (overridden by the custom
         # header of the same name when the env sets one).
-        from rolo_claude.providers.config import merge_databricks_headers
+        from halo_harness.providers.config import merge_databricks_headers
         dbx_cfg = _resolve_dbx_config_for_headers(settings)
         extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
 
@@ -840,7 +841,7 @@ def build_session(
         # H8 scope E (deferred by H3): every connected MCP server's own
         # prompts become `/mcp__<server>__<prompt>` slash commands, in both
         # -p and the TUI (bootstrap.py reuses this same builder).
-        from rolo_claude.commands.registry import register_mcp_prompts
+        from halo_harness.commands.registry import register_mcp_prompts
         register_mcp_prompts(command_registry, mcp_manager)
     facade = HeadlessFacade(
         cwd=cwd, settings=settings, claude_json=claude_json, model_ref=model_ref.raw,
@@ -920,7 +921,7 @@ def run_print_mode(
     # called. Validating up front means a bad id never starts them at all,
     # rather than starting-then-cleaning-up.
     if session_id and not agent_sessions.is_valid_session_id(session_id):
-        print(f"rolo-claude: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
+        print(f"halo: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
         return 2
     if resume is not None and resume != "" and not continue_:
         # H13 Part C ("--resume <text> picks the unique match or opens the
@@ -933,7 +934,7 @@ def run_print_mode(
         # unchanged (still `resolve_resume`'s own contract below).
         matches = agent_sessions.find_resume_matches(cwd, resume)
         if len(matches) > 1:
-            print(f"rolo-claude: --resume {resume!r} matches {len(matches)} sessions -- "
+            print(f"halo: --resume {resume!r} matches {len(matches)} sessions -- "
                   f"be more specific, or pass an exact session id (run without -p to pick interactively):",
                   file=sys.stderr)
             for m in matches[:8]:
@@ -942,7 +943,7 @@ def run_print_mode(
             return 2
         _resolved_probe, resume_err = agent_sessions.resolve_resume(cwd, resume)
         if _resolved_probe is None and resume_err:
-            print(f"rolo-claude: --resume: {resume_err}", file=sys.stderr)
+            print(f"halo: --resume: {resume_err}", file=sys.stderr)
             return 2
 
     # u2-h3b finding 9: everything through a ready-to-drive Session is now
@@ -966,13 +967,13 @@ def run_print_mode(
     attach_cli_files(session, file_specs, cwd=cwd)
 
     if mcp_manager is None and build.mcp_notices:
-        print(f"rolo-claude: {build.mcp_notices[0]}", file=sys.stderr)
+        print(f"halo: {build.mcp_notices[0]}", file=sys.stderr)
     elif verbose:
         for n in build.mcp_notices:
-            print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
+            print(f"[halo] mcp: {n}", file=sys.stderr)
 
     if verbose:
-        print(f"[rolo-claude] model={model_ref.raw} provider={model_ref.provider} "
+        print(f"[halo] model={model_ref.raw} provider={model_ref.provider} "
               f"dialect={model_ref.dialect} family={family} session={session_log.session_id}", file=sys.stderr)
 
     # H6 scope D: index.json's `first_prompt/started` are set ONCE, on the
@@ -1035,7 +1036,7 @@ def run_print_mode(
                 # would race ahead of a same-turn leftover re-queue).
                 turns = [t for t in (_extract_user_text(obj) for obj in stdin_lines) if t]
                 if not turns:
-                    print("rolo-claude: --input-format stream-json requires at least one user message on stdin",
+                    print("halo: --input-format stream-json requires at least one user message on stdin",
                           file=sys.stderr)
                     return 2
                 line_queue = _TurnLineQueue()
@@ -1058,7 +1059,7 @@ def run_print_mode(
                 line_queue = _TurnLineQueue()
                 reader = threading.Thread(
                     target=_stream_json_stdin_reader, args=(session, line_queue), daemon=True,
-                    name="rolo-claude-stdin-reader",
+                    name="halo-stdin-reader",
                 )
                 reader.start()
 
@@ -1109,7 +1110,7 @@ def run_print_mode(
                     cwd, session_log.session_id,
                     cost_usd=(session.cost_meter.total_usd if session.cost_meter.has_cost_data else None))
             if not saw_any_turn:
-                print("rolo-claude: --input-format stream-json requires at least one user message on stdin",
+                print("halo: --input-format stream-json requires at least one user message on stdin",
                       file=sys.stderr)
                 return 2
             return exit_code

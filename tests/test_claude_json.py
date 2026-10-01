@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.config.claude_json import is_trusted, load_bridge_trust, load_claude_json
+from halo_harness.config.claude_json import is_trusted, load_bridge_trust, load_claude_json
 
 test, TESTS = new_registry()
 
@@ -114,15 +114,15 @@ def test_sandboxed_env_any_nonempty_value_counts(ctx: Ctx):
 @test
 def test_bridge_trust_fallback_loaded_when_none_passed(ctx: Ctx):
     """assemble.py calls is_trusted(cwd, claude_json) with NO bridge_trust
-    arg -- must self-load from ~/.rolo-claude/trust.json rather than
+    arg -- must self-load from ~/.halo/trust.json rather than
     silently treating that as an empty/untrusted dict (finding 5)."""
     home_dir = Path(tempfile.mkdtemp(prefix="trust-bridgehome-"))
     saved = _clean_env("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "CLAUDE_CODE_SANDBOXED")
     try:
         os.environ["BRIDGE_TEST_HOME"] = str(home_dir)
         target = Path(tempfile.mkdtemp(prefix="trust-bridgehome-target-"))
-        from rolo_claude.config.paths import normalize_cwd
-        trust_path = home_dir / ".rolo-claude" / "trust.json"
+        from halo_harness.config.paths import normalize_cwd
+        trust_path = home_dir / ".halo" / "trust.json"
         trust_path.parent.mkdir(parents=True, exist_ok=True)
         trust_path.write_text(json.dumps({normalize_cwd(target): True}), encoding="utf-8")
 

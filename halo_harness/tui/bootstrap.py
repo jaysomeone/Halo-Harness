@@ -1,11 +1,11 @@
-"""rolo_claude.tui.bootstrap -- builds a real `agent.loop.Session` +
+"""halo_harness.tui.bootstrap -- builds a real `agent.loop.Session` +
 `controller.Controller` for an interactive TUI launch.
 
 u2-h3b finding 9: this used to be its own ~190-line hand-copy of
 `headless.py.run_print_mode`'s setup (kept "in spirit" only, per this
 module's old docstring) -- and it had already drifted: no server-level
 `alwaysLoad`, no "keep ToolSearch when the deferred pool is non-empty"
-rule, so `rolo-claude --tools Read,Bash` left every deferred MCP tool
+rule, so `halo --tools Read,Bash` left every deferred MCP tool
 unreachable in the TUI while the prompt still said "call ToolSearch".
 Both entry points now build through `headless.build_session` (the ONE
 shared builder) and can never drift like that again; this module's own
@@ -19,8 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from rolo_claude.controller import Controller
-from rolo_claude.headless import attach_cli_files, build_session
+from halo_harness.controller import Controller
+from halo_harness.headless import attach_cli_files, build_session
 
 
 def build_controller(args) -> "tuple[Controller, object, object]":
@@ -46,7 +46,7 @@ def build_controller(args) -> "tuple[Controller, object, object]":
     resume_arg = getattr(args, "resume", None)
     effective_resume = resume_arg
     if resume_arg and not getattr(args, "continue_", False):
-        from rolo_claude.agent.sessions import find_resume_matches
+        from halo_harness.agent.sessions import find_resume_matches
         if len(find_resume_matches(cwd, resume_arg)) != 1:
             pending_resume_filter = resume_arg
             effective_resume = None
@@ -74,7 +74,7 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         # never passed through here at all -- headless.py's own print-mode
         # call site (below, in run_print_mode) always has, but the TUI's
         # `build_session` call silently dropped every one of these three
-        # flags, so `rolo-claude --resume`/`--continue`/`--fork-session`
+        # flags, so `halo --resume`/`--continue`/`--fork-session`
         # (without `-p`) always just started a brand-new session with zero
         # feedback. `resume` uses `effective_resume` (None instead of an
         # AMBIGUOUS text -- see `pending_resume_filter` above), never the
@@ -123,5 +123,5 @@ def build_controller(args) -> "tuple[Controller, object, object]":
     # already resolved to exactly one session) means "nothing to do".
     controller.pending_resume_filter = pending_resume_filter
     for n in build.mcp_notices:
-        print(f"[rolo-claude] mcp: {n}", file=sys.stderr)
+        print(f"[halo] mcp: {n}", file=sys.stderr)
     return controller, build.command_registry, build.facade

@@ -1,4 +1,4 @@
-"""rolo_claude.providers.stream -- the request-orchestration lift (H0,
+"""halo_harness.providers.stream -- the request-orchestration lift (H0,
 plan section D2). This module is the library form of what used to live
 inline in bridge.py's Handler._handle_messages_post/_handle_upstream_stream/
 _reader_thread: given an Anthropic-shaped request body plus a resolved
@@ -36,18 +36,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rolo_claude.providers.config import dump_debug, estimate_tokens
-from rolo_claude.providers.databricks import databricks_unreachable_response, dbx_cache_get_max_tokens_limit
-from rolo_claude.providers.errors import (
+from halo_harness.providers.config import dump_debug, estimate_tokens
+from halo_harness.providers.databricks import databricks_unreachable_response, dbx_cache_get_max_tokens_limit
+from halo_harness.providers.errors import (
     map_upstream_error, parse_context_overflow,
     parse_databricks_rate_limit, upstream_error_text,
 )
-from rolo_claude.providers.http import UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat
-from rolo_claude.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.translate import anthropic_to_openai
-from rolo_claude.providers.anthropic_sse import AnthropicSSEDecoder
-from rolo_claude.providers.errors import SSE_CHUNK_IDLE_TIMEOUT_S
+from halo_harness.providers.http import UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat
+from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
+from halo_harness.providers.routing import Route
+from halo_harness.providers.translate import anthropic_to_openai
+from halo_harness.providers.anthropic_sse import AnthropicSSEDecoder
+from halo_harness.providers.errors import SSE_CHUNK_IDLE_TIMEOUT_S
 
 log = logging.getLogger("bridge")
 

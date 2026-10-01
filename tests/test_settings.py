@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
-from rolo_claude.config.settings import resolve_settings
+from halo_harness.config.settings import resolve_settings
 
 test, TESTS = new_registry()
 
@@ -298,7 +298,7 @@ def test_finding_15_permission_rule_tracks_its_own_layer_base_dir(ctx: Ctx):
     ctx.check(f"the project-sourced rule's base_dir is the project's .claude, got {proj_base}",
               proj_base is not None and Path(proj_base).resolve() == (proj / ".claude").resolve())
 
-    from rolo_claude.permissions import build_rules_from_settings
+    from halo_harness.permissions import build_rules_from_settings
     _deny, _ask, allow_rules = build_rules_from_settings(settings, cwd=proj)
     by_value = {r.value: r for r in allow_rules}
     ctx.check("both parsed Rules carry their OWN source base_dir, not always cwd",

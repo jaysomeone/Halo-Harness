@@ -1,4 +1,4 @@
-"""rolo_claude.commands.registry -- `SlashCommand` + `Registry` (U0 scope B),
+"""halo_harness.commands.registry -- `SlashCommand` + `Registry` (U0 scope B),
 plus the `$ARGUMENTS`/`$0..$9`/`` !`cmd` `` substitution shared by a custom
 command's and a skill's prompt body (plan D-TUI: "same fields as skills
 minus name/paths"; binary facts/plan: 0-based `$ARGUMENTS[N]`/`$N`, no
@@ -106,9 +106,9 @@ class Registry:
 
     @staticmethod
     def discover(cwd, home=None) -> "Registry":
-        from rolo_claude.commands.builtins import register_builtins
-        from rolo_claude.commands.custom import register_custom_commands
-        from rolo_claude.commands.skills import register_skills
+        from halo_harness.commands.builtins import register_builtins
+        from halo_harness.commands.custom import register_custom_commands
+        from halo_harness.commands.skills import register_skills
 
         reg = Registry()
         register_builtins(reg)
@@ -250,7 +250,7 @@ def _preexec_command_permitted(command: str, allow_rules: list) -> bool:
     here. A command file's `` !`cmd` `` pre-execution list is deliberately
     minimal-trust: every command it runs before the model ever sees the
     prompt must be named, in full, in its OWN frontmatter."""
-    from rolo_claude.permissions import _pattern_matches_text
+    from halo_harness.permissions import _pattern_matches_text
     stripped = command.strip()
     return any(rule.kind in ("exact", "prefix", "glob") and _pattern_matches_text(rule.kind, rule.value, stripped)
                for rule in allow_rules)
@@ -294,7 +294,7 @@ def run_preexec_commands(body: str, *, allowed_tools: Optional[list] = None, cwd
     An unpermitted/denied or nonzero-exit command ABORTS the whole
     invocation (D-TUI: "a failed command aborts the invocation") -- the
     first such span stops and this returns with `.error` set."""
-    from rolo_claude.permissions import parse_rule
+    from halo_harness.permissions import parse_rule
 
     frontmatter_bash_rules = [r.strip() for r in (allowed_tools or [])
                                if isinstance(r, str) and r.strip().startswith("Bash")]
@@ -317,7 +317,7 @@ def run_preexec_commands(body: str, *, allowed_tools: Optional[list] = None, cwd
             if decision.action != "allow":
                 return ExpansionResult(text="", error=(
                     f"pre-execution command not permitted: {command!r} ({decision.reason})"))
-            from rolo_claude.config.paths import git_bash
+            from halo_harness.config.paths import git_bash
             shell_path = git_bash()
             if shell_path is None:
                 return ExpansionResult(text="", error=(

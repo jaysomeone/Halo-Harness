@@ -1,5 +1,5 @@
 """tests.test_dbx_catalog_refresh -- H14 scope J: catalog diff, the shared
-refresh-if-stale helper, and `rolo-claude models --refresh --urls [--json]`.
+refresh-if-stale helper, and `halo models --refresh --urls [--json]`.
 Every case runs against tests/helpers/mock_databricks.py -- never a real
 Databricks call.
 """
@@ -27,9 +27,9 @@ class _Env:
                         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-catalog-refresh-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -79,7 +79,7 @@ _PARSED_V2 = [
 
 @test
 def test_diff_dbx_catalog_added_removed_changed(ctx: Ctx):
-    from rolo_claude.providers.databricks import diff_dbx_catalog, write_dbx_endpoints_json, load_dbx_endpoints_json
+    from halo_harness.providers.databricks import diff_dbx_catalog, write_dbx_endpoints_json, load_dbx_endpoints_json
     with _Env() as env:
         write_dbx_endpoints_json(env.state_dir, _PARSED_V1)
         old = load_dbx_endpoints_json(env.state_dir)
@@ -94,7 +94,7 @@ def test_diff_dbx_catalog_added_removed_changed(ctx: Ctx):
 
 @test
 def test_refresh_dbx_catalog_success_diffs_and_clears_route_cache(ctx: Ctx):
-    from rolo_claude.providers.databricks import (
+    from halo_harness.providers.databricks import (
         refresh_dbx_catalog, write_dbx_endpoints_json, dbx_cache_set_route,
         dbx_cache_get_route,
     )
@@ -116,7 +116,7 @@ def test_refresh_dbx_catalog_success_diffs_and_clears_route_cache(ctx: Ctx):
 
 @test
 def test_refresh_dbx_catalog_failure_keeps_old_cache(ctx: Ctx):
-    from rolo_claude.providers.databricks import refresh_dbx_catalog, write_dbx_endpoints_json, load_dbx_endpoints_json
+    from halo_harness.providers.databricks import refresh_dbx_catalog, write_dbx_endpoints_json, load_dbx_endpoints_json
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -135,7 +135,7 @@ def test_refresh_dbx_catalog_failure_keeps_old_cache(ctx: Ctx):
 
 @test
 def test_refresh_if_stale_skips_when_fresh_and_runs_when_missing(ctx: Ctx):
-    from rolo_claude.providers.databricks import (
+    from halo_harness.providers.databricks import (
         refresh_dbx_catalog_if_stale, write_dbx_endpoints_json,
     )
     mock = MockDatabricks().start()
@@ -162,7 +162,7 @@ def test_refresh_if_stale_skips_when_fresh_and_runs_when_missing(ctx: Ctx):
 
 @test
 def test_refresh_if_stale_no_databricks_configured_is_none(ctx: Ctx):
-    from rolo_claude.providers.databricks import refresh_dbx_catalog_if_stale
+    from halo_harness.providers.databricks import refresh_dbx_catalog_if_stale
     with _Env() as env:
         for k in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
@@ -173,7 +173,7 @@ def test_refresh_if_stale_no_databricks_configured_is_none(ctx: Ctx):
 
 @test
 def test_cmd_models_refresh_urls_json_shape(ctx: Ctx):
-    from rolo_claude.catalog_cli import cmd_models
+    from halo_harness.catalog_cli import cmd_models
     mock = MockDatabricks().start()
     mock.set_endpoints_catalog(_RAW_V1)
     try:

@@ -1,5 +1,5 @@
 """tests.test_tui_images -- H13 Part B ("inline images in the terminal"):
-`rolo_claude/tui/images.py`'s encoders (kitty APC framing, sixel DECSIXEL
+`halo_harness/tui/images.py`'s encoders (kitty APC framing, sixel DECSIXEL
 header), the detection matrix (env-based kitty family, tmux passthrough
 gate, an injectable live sixel query), and the config/flag ->
 "inline"|"caption" resolution. Pure functions throughout -- no Textual, no
@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
-from rolo_claude.tui import images as I
+from halo_harness.tui import images as I
 
 test, TESTS = new_registry()
 

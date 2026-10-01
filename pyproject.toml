@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rolo-claude"
+name = "halo-harness"
 dynamic = ["version"]
-description = "Standalone agent harness (Claude Code-compatible config) driving OpenRouter/Databricks models; includes the claude-bridge proxy."
+description = "Standalone agent harness (Claude Code-compatible config) driving OpenRouter/Databricks models; includes the claude-bridge proxy. Continues rolo-claude 1.0.1 under a new name."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -19,13 +19,13 @@ dependencies = [
 dev = [
     "textual-dev",
 ]
-# H8 scope B: rolo_claude/tools/imageutil.py works with NO imaging library
+# H8 scope B: halo_harness/tools/imageutil.py works with NO imaging library
 # at all (an over-limit image is simply omitted with a note) -- installing
 # Pillow lets it actually resize/downscale one instead. Never required.
 vision = [
     "Pillow>=10",
 ]
-# H13 Part B: rolo_claude/tui/images.py's kitty encoder needs no imaging
+# H13 Part B: halo_harness/tui/images.py's kitty encoder needs no imaging
 # library at all (kitty decodes the PNG/JPEG bytes itself, f=100); Pillow
 # is what lets the sixel encoder do real pixel/palette work and lets both
 # protocols downscale to a bounded on-screen size. `textual-image` (PyPI)
@@ -36,13 +36,17 @@ images = [
 ]
 
 [project.scripts]
-rolo-claude = "rolo_claude.cli:main"
+halo = "halo_harness.cli:main"
+# 2.0.0 rename: `rolo-claude` keeps working as a deprecated alias -- prints
+# one notice line to stderr (cli.main_deprecated_alias), then runs exactly
+# like `halo`. Never remove without a deprecation cycle of its own.
+rolo-claude = "halo_harness.cli:main_deprecated_alias"
 
 [tool.setuptools]
 py-modules = ["bridge"]
 
 [tool.setuptools.packages.find]
-include = ["rolo_claude*"]
+include = ["halo_harness*"]
 
 [tool.setuptools.package-data]
 # U2: tui/styles.tcss must ship with a non-editable install too (App's
@@ -52,7 +56,7 @@ include = ["rolo_claude*"]
 # them here a non-editable `pip install .`/wheel build would silently
 # drop every *.json under providers/, same class of bug package-data
 # already exists to prevent for styles.tcss.
-rolo_claude = ["tui/*.tcss", "providers/*.json", "providers/catalog/*.json"]
+halo_harness = ["tui/*.tcss", "providers/*.json", "providers/catalog/*.json"]
 
 [tool.setuptools.dynamic]
-version = { attr = "rolo_claude.__version__" }
+version = { attr = "halo_harness.__version__" }

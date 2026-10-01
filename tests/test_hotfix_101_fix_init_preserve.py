@@ -30,12 +30,12 @@ class _Env:
                         "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-init-preserve-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         for k in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
             os.environ.pop(k, None)
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -79,8 +79,8 @@ def _args(yes: bool = False, model=None):
 
 @test
 def test_yes_on_a_fresh_box_writes_no_permission_mode(ctx: Ctx):
-    from rolo_claude.init_cli import _step_pick_permission_mode
-    from rolo_claude.theme import get_config_value
+    from halo_harness.init_cli import _step_pick_permission_mode
+    from halo_harness.theme import get_config_value
     with _Env():
         with _fake_tty(stdin_tty=False, stdout_tty=False):
             result = _step_pick_permission_mode(_args(yes=True), _console())
@@ -91,8 +91,8 @@ def test_yes_on_a_fresh_box_writes_no_permission_mode(ctx: Ctx):
 
 @test
 def test_yes_keeps_an_existing_permission_mode(ctx: Ctx):
-    from rolo_claude.init_cli import _step_pick_permission_mode
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.init_cli import _step_pick_permission_mode
+    from halo_harness.theme import get_config_value, set_config_value
     with _Env():
         set_config_value("permission_mode", "plan")
         with _fake_tty(stdin_tty=False, stdout_tty=False):
@@ -104,9 +104,9 @@ def test_yes_keeps_an_existing_permission_mode(ctx: Ctx):
 
 @test
 def test_esc_at_the_interactive_picker_writes_nothing_on_a_fresh_box(ctx: Ctx):
-    import rolo_claude.tui.dialogs.init_picker as picker_mod
-    from rolo_claude.init_cli import _step_pick_permission_mode
-    from rolo_claude.theme import get_config_value
+    import halo_harness.tui.dialogs.init_picker as picker_mod
+    from halo_harness.init_cli import _step_pick_permission_mode
+    from halo_harness.theme import get_config_value
     real_picker = picker_mod.run_simple_picker
     picker_mod.run_simple_picker = lambda *a, **kw: None  # Esc
     try:
@@ -122,9 +122,9 @@ def test_esc_at_the_interactive_picker_writes_nothing_on_a_fresh_box(ctx: Ctx):
 
 @test
 def test_esc_at_the_interactive_picker_keeps_an_existing_value(ctx: Ctx):
-    import rolo_claude.tui.dialogs.init_picker as picker_mod
-    from rolo_claude.init_cli import _step_pick_permission_mode
-    from rolo_claude.theme import get_config_value, set_config_value
+    import halo_harness.tui.dialogs.init_picker as picker_mod
+    from halo_harness.init_cli import _step_pick_permission_mode
+    from halo_harness.theme import get_config_value, set_config_value
     real_picker = picker_mod.run_simple_picker
     picker_mod.run_simple_picker = lambda *a, **kw: None  # Esc
     try:
@@ -143,9 +143,9 @@ def test_esc_at_the_interactive_picker_keeps_an_existing_value(ctx: Ctx):
 def test_a_real_pick_still_writes_it(ctx: Ctx):
     """The fix must not disable writing altogether -- an ACTUAL choice
     still persists exactly as before this fixpass."""
-    import rolo_claude.tui.dialogs.init_picker as picker_mod
-    from rolo_claude.init_cli import _step_pick_permission_mode
-    from rolo_claude.theme import get_config_value
+    import halo_harness.tui.dialogs.init_picker as picker_mod
+    from halo_harness.init_cli import _step_pick_permission_mode
+    from halo_harness.theme import get_config_value
     real_picker = picker_mod.run_simple_picker
     picker_mod.run_simple_picker = lambda *a, **kw: "plan"
     try:
@@ -166,7 +166,7 @@ def test_a_real_pick_still_writes_it(ctx: Ctx):
 def test_default_mode_wording_has_no_risk_language(ctx: Ctx):
     """No "risky"/safety-implying wording -- this project deliberately has
     no risk classifier (feedback_no_cyber_blocks)."""
-    from rolo_claude.init_cli import _PERMISSION_MODE_ROWS
+    from halo_harness.init_cli import _PERMISSION_MODE_ROWS
     label = dict(_PERMISSION_MODE_ROWS)["default"]
     ctx.check(f"no 'risky' wording, got {label!r}", "risky" not in label.lower())
     ctx.check(f"matches the required replacement wording, got {label!r}",
@@ -185,8 +185,8 @@ def test_yes_keeps_existing_model_over_the_last_configured_providers_guess(ctx: 
     anthropic's own model_entries_for_provider is a fixed alias table (no
     catalog fixture needed), so pairing it with openrouter is enough to
     force the real (len > 1) cross-provider path."""
-    from rolo_claude.init_cli import _step_finalize_default_model
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.init_cli import _step_finalize_default_model
+    from halo_harness.theme import get_config_value, set_config_value
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "or-key"
         os.environ["ANTHROPIC_API_KEY"] = "ant-key"
@@ -203,8 +203,8 @@ def test_yes_with_no_existing_model_still_gets_a_working_fallback(ctx: Ctx):
     """A genuinely fresh box (never had a `model` at all) must still end up
     with SOMETHING usable -- the fix only stops CLOBBERING an existing
     value, it doesn't turn a real first-run into "nothing configured"."""
-    from rolo_claude.init_cli import PROVIDER_DEFAULT_MODEL, _step_finalize_default_model
-    from rolo_claude.theme import get_config_value
+    from halo_harness.init_cli import PROVIDER_DEFAULT_MODEL, _step_finalize_default_model
+    from halo_harness.theme import get_config_value
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "or-key"
         os.environ["ANTHROPIC_API_KEY"] = "ant-key"
@@ -229,8 +229,8 @@ def test_per_provider_step_keeps_a_custom_model_on_a_rerun_with_yes(ctx: Ctx):
     box that already has a DIFFERENT (deliberately chosen) model configured
     used to silently reset it back to that provider's own hardcoded
     default the moment they differed."""
-    from rolo_claude.init_cli import _step_default_model
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.init_cli import _step_default_model
+    from halo_harness.theme import get_config_value, set_config_value
     with _Env():
         set_config_value("model", "dbx:databricks-kimi-k3")  # a deliberate, non-default pick
         chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=True)
@@ -245,8 +245,8 @@ def test_per_provider_step_keeps_a_custom_model_on_a_rerun_with_yes(ctx: Ctx):
 def test_per_provider_step_still_writes_a_fresh_box_default(ctx: Ctx):
     """The fix must not disable writing altogether -- a genuinely fresh box
     (no `model` key at all yet) still gets the provider's own default."""
-    from rolo_claude.init_cli import PROVIDER_DEFAULT_MODEL, _step_default_model
-    from rolo_claude.theme import get_config_value
+    from halo_harness.init_cli import PROVIDER_DEFAULT_MODEL, _step_default_model
+    from halo_harness.theme import get_config_value
     with _Env():
         chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=True)
         ctx.check(f"the provider's own default is chosen, got {chosen!r}",
@@ -260,8 +260,8 @@ def test_per_provider_step_explicit_model_flag_still_overrides_a_custom_value(ct
     """An explicit --model THIS run is real user intent -- it must still
     win over whatever was configured before, unlike the --yes/re-run case
     above."""
-    from rolo_claude.init_cli import _step_default_model
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.init_cli import _step_default_model
+    from halo_harness.theme import get_config_value, set_config_value
     with _Env():
         set_config_value("model", "dbx:databricks-kimi-k3")
         chosen, path = _step_default_model("databricks", _args(yes=True, model="dbx:databricks-glm-5-3"),
@@ -277,8 +277,8 @@ def test_per_provider_step_write_false_never_touches_config_either_way(ctx: Ctx)
     """Regression guard: the write=False path (used when more than one
     provider is in play this run) must still never write, custom value or
     not -- unchanged by this fix."""
-    from rolo_claude.init_cli import _step_default_model
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.init_cli import _step_default_model
+    from halo_harness.theme import get_config_value, set_config_value
     with _Env():
         set_config_value("model", "dbx:databricks-kimi-k3")
         chosen, path = _step_default_model("databricks", _args(yes=True), _console(), write=False)

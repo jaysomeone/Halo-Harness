@@ -1,4 +1,4 @@
-"""rolo_claude.config.claude_md -- CLAUDE.md / AGENTS.md instruction
+"""halo_harness.config.claude_md -- CLAUDE.md / AGENTS.md instruction
 discovery, comment stripping, and @import expansion (plan D-CFG). Hand-
 written (not drafted): the fence-detection logic needs literal triple-
 backtick strings, which repeatedly confused the OpenRouter-drafting
@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rolo_claude.config.paths import claude_config_dir, home, managed_dir
+from halo_harness.config.paths import claude_config_dir, home, managed_dir
 
 _MAX_IMPORT_HOPS = 4
 _MAX_FILE_BYTES = 4 * 1024 * 1024  # 4 MiB
@@ -366,7 +366,7 @@ def _load_rules_dir(
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        from rolo_claude.config.frontmatter import parse as parse_frontmatter
+        from halo_harness.config.frontmatter import parse as parse_frontmatter
         fm, body = parse_frontmatter(raw)
         patterns = _split_paths_field(fm.get("paths")) if isinstance(fm, dict) else []
         seen.add(resolved)

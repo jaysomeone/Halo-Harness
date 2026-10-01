@@ -31,7 +31,7 @@ class _Env:
     """`Session.__init__` builds a real `SessionLog`, which opens/writes
     under `bridge_home()` the moment the Session exists -- NEVER derived
     from `fh["home"]`/`cwd` on its own. Without BRIDGE_TEST_HOME actually
-    set, that falls back to the REAL ~/.rolo-claude/sessions on whatever
+    set, that falls back to the REAL ~/.halo/sessions on whatever
     machine runs the suite."""
 
     def __init__(self, fh):
@@ -52,10 +52,10 @@ class _Env:
 
 
 def _new_dbx_session(fh, mock, *, model: str, effort=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
     model_ref = parse_model_ref(model)
     return Session(
@@ -72,7 +72,7 @@ def _new_dbx_session(fh, mock, *, model: str, effort=None):
 
 @test
 def test_classifier_no_longer_matches_generic_parameter_wording(ctx: Ctx):
-    from rolo_claude.providers.errors import is_effort_with_tools_rejected_message
+    from halo_harness.providers.errors import is_effort_with_tools_rejected_message
     # finding 10's own two examples -- both contain "reasoning_effort" and
     # the bare substring "param" but are NOT the gpt-6-specific message.
     ctx.check("does not match OpenAI's generic 'Unsupported parameter' wording",
@@ -91,7 +91,7 @@ def test_general_classifier_still_matches_both_generic_examples(ctx: Ctx):
     """The generic strip-retry classifier is UNCHANGED and broad on
     purpose -- these messages must still be recognized as effort-related SO
     THE STRIP RETRY CAN HANDLE THEM, just not through the gpt-6 branch."""
-    from rolo_claude.providers.errors import is_effort_rejected_message
+    from halo_harness.providers.errors import is_effort_rejected_message
     ctx.check("matches 'Unsupported parameter' wording",
               is_effort_rejected_message("Unsupported parameter: 'reasoning_effort' is not supported with this model."))
     ctx.check("matches 'Invalid value for parameter' wording",
@@ -175,7 +175,7 @@ def test_rule_is_not_learned_when_the_none_retry_itself_failed(ctx: Ctx):
     endpoint's permanent rule -- every later tool step on this route would
     then pay one guaranteed-to-fail "none" request before the strip retry
     rescued it, forever, and `/effort` would falsely show "none (tools)"."""
-    from rolo_claude.providers.learned_rules import learned_reasoning_effort_with_tools
+    from halo_harness.providers.learned_rules import learned_reasoning_effort_with_tools
     fh = build_fake_home()
     with _Env(fh):
         mock = MockDatabricks().start()

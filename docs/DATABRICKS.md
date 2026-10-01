@@ -13,7 +13,8 @@ URL, team onboarding, and troubleshooting by HTTP status. Verified against
 Everything else is derived. `providers/config.py::resolve_databricks` tries,
 in order, and never raises:
 
-1. `BRIDGE_DBX_BASE_URL` + `BRIDGE_DBX_TOKEN` -- an explicit override, wins
+1. `HALO_DBX_BASE_URL` + `HALO_DBX_TOKEN` (legacy `BRIDGE_DBX_BASE_URL`/
+   `BRIDGE_DBX_TOKEN` still honoured) -- an explicit override, wins
    outright, unfiltered.
 2. `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` from the process
    environment -- **only** when the host looks like a Databricks domain
@@ -22,7 +23,7 @@ in order, and never raises:
 3. The same pair, from the **settings `env` chain**
    (`~/.claude/settings.json` etc.) -- this is the "zero setup at work"
    path: a box already running Claude Code against Databricks needs no
-   separate rolo-claude configuration at all.
+   separate halo configuration at all.
 4. `DATABRICKS_HOST` + `DATABRICKS_TOKEN` -- unambiguous by name, no host
    filter, checked against both the process environment and the settings
    chain per-field.
@@ -55,7 +56,7 @@ cache file, or printed by `doctor` -- `doctor --work` shows header **names**
 only, never values, and the workspace root itself is the only thing echoed
 back.
 
-## `rolo-claude init --provider databricks`
+## `halo init --provider databricks`
 
 (the deprecated `init --preset work` still works, as a one-line-noticed
 alias)
@@ -73,7 +74,7 @@ worked example.
 A shared, checked-into-the-project (or personal) preset -- `host`,
 `default_model`, a per-family `gateway_preference` map, and `dbu_price_usd`
 -- **never a token, never an endpoint list** (`team_config.py`).
-Discovered at `<cwd>/.rolo-claude/team.json`, then `~/.rolo-claude/team.json`,
+Discovered at `<cwd>/.halo/team.json`, then `~/.halo/team.json`,
 then an explicit `--team <path|url>` (which always wins outright). Any key
 that isn't one of those four, or that merely *looks* like a credential
 (matches `token`/`secret`/`key`/`password`/`credential`/`auth` anywhere in
@@ -93,10 +94,10 @@ guard against someone accidentally checking in a real token. See
 
 ## Discovery and cache: `dbx-endpoints.json`
 
-`rolo-claude models --refresh` (or `init --provider databricks`, the
+`halo models --refresh` (or `init --provider databricks`, the
 deprecated `init --preset work` alias) lists the workspace's own serving
 endpoints (`GET /api/2.0/serving-endpoints`) and caches them, per user, to
-`~/.rolo-claude/dbx-endpoints.json`: name, `api_types`, `endpoint_type`,
+`~/.halo/dbx-endpoints.json`: name, `api_types`, `endpoint_type`,
 `task`, `foundation_model.name`, `model_class`, and any `usage_policy` DBU
 rate -- **the only source of truth for what a workspace serves.** Nothing
 about routing is ever hand-maintained per model name. "Chat-capable" (the
@@ -117,7 +118,7 @@ exact same rows. Detected on the cache's own shape (no `api_types` key
 present on ANY entry, not merely an empty list -- a real endpoint can
 legitimately have no api_types) and refreshed automatically the next time
 the existing background refresh triggers (session start, opening
-`/model`); a bare `/models`/`rolo-claude models` (which never touches the
+`/model`); a bare `/models`/`halo models` (which never touches the
 network on its own) shows `path unknown (refresh needed)` for every row
 until that happens, rather than the old silently-wrong `invocations`
 guess.
@@ -142,7 +143,7 @@ first (`resolve_databricks_dialect`):
 - Every other family -> **openai-chat** dialect by default.
 
 A `dbx:<endpoint>@anthropic` suffix (one call) or
-`databricks.gateway.<endpoint>: anthropic` in `~/.rolo-claude/config.json`
+`databricks.gateway.<endpoint>: anthropic` in `~/.halo/config.json`
 (standing, per-model) opts a GLM/Kimi endpoint into the native gateway
 instead of its openai-chat default. A known non-chat endpoint (embeddings/
 whisper, by name-hint or `model_class`) is refused with a clear message
@@ -164,24 +165,24 @@ advertise):
 | unknown family, or an endpoint not yet in the cache | the pre-discovery static order | the bare requested name |
 
 Every candidate always falls back, last, to plain
-`/serving-endpoints/<name>/invocations`. `rolo-claude models --refresh
+`/serving-endpoints/<name>/invocations`. `halo models --refresh
 --urls` (and `doctor --work --probe-all`) print the exact URL and path-type
 label (`mlflow`/`cursor`/`anthropic`/`invocations`) each configured model
 actually resolves to right now; the SAME default path (this table's own
-"Order" column, first entry) is what `rolo-claude models`'s bare table and
+"Order" column, first entry) is what `halo models`'s bare table and
 the `/model`/init pickers show WITHOUT `--urls` and without any network
 call -- it's derived purely from the cached `api_types` + this family
 table, never a live probe.
 
 ## Context, output and pricing columns
 
-`/model`, `/models`, `rolo-claude models`, and `init`'s own per-provider
+`/model`, `/models`, `halo models`, and `init`'s own per-provider
 picker all show the same three columns for a Databricks row -- context
 window, max output, and USD-per-million-token input/output prices -- from
 one ordered rule (`model_display.databricks_row_fields`):
 
 1. The [models.dev](https://models.dev) `databricks` provider's own entry
-   whose id EQUALS the endpoint name (`~/.rolo-claude/models-dev.json` if
+   whose id EQUALS the endpoint name (`~/.halo/models-dev.json` if
    cached, else the package-vendored fallback) -- `limit.context`/
    `limit.output` for context/output, `cost.input`/`cost.output` (already
    USD per million tokens, models.dev's own unit) for the prices.
@@ -198,7 +199,7 @@ name.
 
 ## Keeping the catalog fresh
 
-`/models refresh` (alias `/dbx`, off the UI thread) and `rolo-claude models
+`/models refresh` (alias `/dbx`, off the UI thread) and `halo models
 --refresh` re-list the workspace endpoints AND re-fetch models.dev's own
 pricing/context data, reporting a one-line added/removed/changed diff for
 the endpoint list (a models.dev fetch failure is reported separately, on
@@ -243,7 +244,7 @@ endpoint the cached catalog knows about, on its own chosen path
 that don't already use it by default; `--tools` adds a one-tool-call check
 per endpoint; `--only <glob>` filters by endpoint name). Prints a table of
 status/latency/output tokens/tool-call support and writes
-`~/.rolo-claude/work-matrix-<date>.json` -- **endpoint names only, never a
+`~/.halo/work-matrix-<date>.json` -- **endpoint names only, never a
 host or a token** -- safe to paste back for review. This spends real
 tokens/DBUs against the real workspace; the command says so before running.
 
@@ -251,7 +252,7 @@ V2a closes the plan's own two open questions as two extra fields in that
 same JSON report, per endpoint:
 
 - **`cached_path_type`** vs. **`path_type`**: `cached_path_type` is whatever
-  `~/.rolo-claude/routes-cache.json` already named for this endpoint
+  `~/.halo/routes-cache.json` already named for this endpoint
   *before* this run; `path_type` is what this run actually used (and just
   re-cached). The two differing is a real **route split** -- a stale cached
   candidate that no longer answers, most often right after a family's own
@@ -265,7 +266,7 @@ same JSON report, per endpoint:
   This is what answers "does reasoning replay after a tool call actually
   work for this family" from live data instead of a guess.
 
-## `rolo-claude work-matrix show` / `apply`
+## `halo work-matrix show` / `apply`
 
 V2b: matrix-driven fixes tooling over a `doctor --work --probe-all` report
 (the owner's own real work-VM run, or one of the two synthetic samples under
@@ -281,17 +282,17 @@ a token. `work_matrix.py::classify_row` turns each row into one of:
 | 200, but `reasoning_replay_ok is False` (only meaningful when `--tools` produced a tool_use to replay) | disable thinking for tool loops on that endpoint -- no existing per-endpoint knob to write | no |
 | 200, neither flag False | clean -- not a failure at all | n/a |
 
-`rolo-claude work-matrix show <report.json>` prints one line per failing row
+`halo work-matrix show <report.json>` prints one line per failing row
 (status, issue, suggested action); a report with nothing failing says so
-plainly. `rolo-claude work-matrix apply <report.json> [--yes]` lists every
+plainly. `halo work-matrix apply <report.json> [--yes]` lists every
 `databricks.gateway.<endpoint>` override the report's wrong-path rows imply,
-asks for confirmation (`--yes` skips it), then writes them to `~/.rolo-claude/
+asks for confirmation (`--yes` skips it), then writes them to `~/.halo/
 config.json` -- never `~/.claude.json`/`~/.claude/settings.json`. See
 `docs/COMMANDS.md`'s own `work-matrix` section for the exact `--help` output.
 
 ## How Claude Code's own work settings are reused
 
-At a Databricks work box already running Claude Code, `rolo-claude` needs
+At a Databricks work box already running Claude Code, `halo` needs
 zero setup beyond installing it: the same `ANTHROPIC_BASE_URL`/
 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`/
 `ANTHROPIC_CUSTOM_HEADERS` env block Claude Code itself reads from
@@ -313,24 +314,24 @@ above into one ordered walkthrough:
    workspace host, a default model, a per-family gateway preference, a DBU
    price, and optionally a shared `roles` table (see
    [ROLES.md](ROLES.md)) -- and commits it to the project as
-   `.rolo-claude/team.json`, or shares it as a URL for `--team`.
-2. **Each teammate runs `rolo-claude init --provider databricks`.** With the host
+   `.halo/team.json`, or shares it as a URL for `--team`.
+2. **Each teammate runs `halo init --provider databricks`.** With the host
    already known from `team.json` (or from Claude Code's own settings,
    zero-setup), it asks ONLY for a personal Databricks token, seeds
-   `gateway_preference`/`roles` into `~/.rolo-claude/config.json` (never
+   `gateway_preference`/`roles` into `~/.halo/config.json` (never
    overwriting a value the teammate already set locally), refreshes the
    endpoint catalog, and ends with a live pong.
-3. **`rolo-claude doctor --work --probe-all --tools`** runs the full work
+3. **`halo doctor --work --probe-all --tools`** runs the full work
    matrix against the real workspace -- one short pong (plus a tool-call
    check) per chat-shaped endpoint, on its own chosen path -- and writes
-   `~/.rolo-claude/work-matrix-<date>.json` (endpoint names only, safe to
+   `~/.halo/work-matrix-<date>.json` (endpoint names only, safe to
    hand to someone else for review).
-4. **`rolo-claude work-matrix show <that report>`** turns any failing row
+4. **`halo work-matrix show <that report>`** turns any failing row
    into a suggested action; **`work-matrix apply <report> --yes`** writes
    the one failure class that maps onto a real
    `databricks.gateway.<endpoint>` config override, after listing exactly
    what it's about to write and asking for confirmation.
-5. **`/roles` (in-session) or `rolo-claude stats --roles`** confirm the
+5. **`/roles` (in-session) or `halo stats --roles`** confirm the
    team's model-per-role choices actually took effect and show what
    sub-agent work is costing per role (see [ROLES.md](ROLES.md)).
 
@@ -343,7 +344,7 @@ is a one-time setup step.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `doctor --work` reachability check fails outright | off the VPN, or a DNS/firewall issue | connect to the VPN, re-run `doctor --work` |
-| Token validity: `401` | the token itself is wrong/expired | get a fresh personal access token, `rolo-claude init --provider databricks` again |
+| Token validity: `401` | the token itself is wrong/expired | get a fresh personal access token, `halo init --provider databricks` again |
 | Token validity: `403` with VPN wording | off the VPN (Databricks' IP access list) | connect to the VPN |
 | Token validity: `403` without VPN wording | token lacks the "list serving endpoints" permission | ask a workspace admin for a token with that scope; inference may still work even so |
 | Token validity: `404` | the derived workspace root is wrong (an unusual gateway path shape) | check `doctor --work`'s own printed "Workspace root" line against what you expect |

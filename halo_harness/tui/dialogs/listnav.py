@@ -1,7 +1,7 @@
-"""rolo_claude.tui.dialogs.listnav -- 1.0.1 hotfix addendum 7: a shared
+"""halo_harness.tui.dialogs.listnav -- 1.0.1 hotfix addendum 7: a shared
 `Input` subclass for every dialog with an `Input` (filter box) + `OptionList`
 (results) pair -- `ModelPicker`, `SessionPicker`, `CommandPalette`, and the
-new `init`/`  /model` grouped picker (`rolo_claude.tui.dialogs.init_picker`).
+new `init`/`  /model` grouped picker (`halo_harness.tui.dialogs.init_picker`).
 
 Textual's own `Input` binds no key at all for Up/Down/PageUp/PageDown (they
 silently do nothing while the Input has focus -- verified: this is exactly

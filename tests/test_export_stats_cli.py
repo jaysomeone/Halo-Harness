@@ -1,5 +1,5 @@
-"""tests.test_export_stats_cli -- H8 scope D: `rolo-claude export`
-(--sanitize) and `rolo-claude stats`, headless versions of U5's own
+"""tests.test_export_stats_cli -- H8 scope D: `halo export`
+(--sanitize) and `halo stats`, headless versions of U5's own
 `/export`/`/stats` slash commands, over real session JSONL logs.
 """
 import json
@@ -22,13 +22,13 @@ test, TESTS = new_registry()
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-exportstats-"))
+    return Path(tempfile.mkdtemp(prefix="halo-exportstats-"))
 
 
 def _run(argv, home: Path, cwd: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(cwd),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(cwd),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -38,9 +38,9 @@ def _make_session_with_secret(home: Path, cwd: Path) -> str:
     and returns its session_id."""
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     try:
-        from rolo_claude.agent.assemble import SessionContext
-        from rolo_claude.agent.loop import Session
-        from rolo_claude.model import ModelProfile, parse_model_ref
+        from halo_harness.agent.assemble import SessionContext
+        from halo_harness.agent.loop import Session
+        from halo_harness.model import ModelProfile, parse_model_ref
         session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
         model_ref = parse_model_ref("or:mock/model")
         session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
@@ -113,7 +113,7 @@ def test_export_output_file(ctx: Ctx):
 
 @test
 def test_sanitize_text_redacts_known_secret_shapes(ctx: Ctx):
-    from rolo_claude.export_cli import sanitize_text
+    from halo_harness.export_cli import sanitize_text
     cases = [
         "OPENROUTER_API_KEY=sk-or-v1-abcdef1234567890",
         "Authorization: Bearer abcdefghijklmnopqrstuvwx",
@@ -157,6 +157,21 @@ def test_stats_json_output_is_parseable(ctx: Ctx):
     obj = json.loads(result.stdout)
     ctx.check(f"real shape, got {obj!r}", obj.get("sessions") == 1 and "per_model" in obj and "tool_counts" in obj)
     ctx.check("Bash tool call counted", obj["tool_counts"].get("Bash") == 1)
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
-"""rolo_claude.tools.mcp_tool -- McpTool (H3 scope B): wraps one MCP
-server's tool as an ordinary `Tool` (`rolo_claude.tools.base`), named
+"""halo_harness.tools.mcp_tool -- McpTool (H3 scope B): wraps one MCP
+server's tool as an ordinary `Tool` (`halo_harness.tools.base`), named
 `mcp__<server>__<tool>` (sanitised per binary-facts sec.9 via
-`rolo_claude.mcp.manager.mcp_tool_name`). Content conversion (text/image/
+`halo_harness.mcp.manager.mcp_tool_name`). Content conversion (text/image/
 embedded-resource/structuredContent/isError) and the output cap + Claude
 Code's exact truncation string + spill-to-`tool-results/` are pure,
 independently-testable functions below `McpTool` itself -- `McpTool.run`
@@ -22,9 +22,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.mcp.manager import mcp_tool_name
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
-from rolo_claude.tools.imageutil import image_block_or_note
+from halo_harness.mcp.manager import mcp_tool_name
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.imageutil import image_block_or_note
 
 IMAGE_TOKEN_COST = 1_600  # binary-facts sec.9: "images count 1 600 tokens"
 
@@ -434,7 +434,7 @@ class McpTool(Tool):
         which runs AFTER the (future H4) PostToolUse hook point, so that
         hook sees the model's real, full output rather than an
         already-truncated one."""
-        from rolo_claude.mcp.client import McpAborted
+        from halo_harness.mcp.client import McpAborted
         arguments = input if isinstance(input, dict) else {}
         try:
             result = self.manager.call(self.server_name, self.tool_name, arguments, abort=getattr(ctx, "abort", None))

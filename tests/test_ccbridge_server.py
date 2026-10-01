@@ -1,5 +1,5 @@
 """tests.test_ccbridge_server -- H11 Part B/C: ToolBridgeServer (parent
-side) and the real `python -m rolo_claude.ccbridge` child, end to end
+side) and the real `python -m halo_harness.ccbridge` child, end to end
 over BOTH transports it actually uses (Unix socket on POSIX, TCP loopback
 + token on Windows) -- via a real MCP client/server round trip (the exact
 stack Claude Code itself drives), not a mock of the protocol.
@@ -18,7 +18,7 @@ from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run
 
 # H11b finding 27: this module's own scratch home -- every ToolBridgeServer
 # here writes its POSIX run/<sid>.sock under `bridge_home()`, never the
-# real ~/.rolo-claude/run. See test_cc_session.py's own comment on this
+# real ~/.halo/run. See test_cc_session.py's own comment on this
 # same line for why it's set once, at import time, per module.
 os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="ccbridge-server-scratchhome-")
 
@@ -28,7 +28,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 
 
 def _make_server(*, list_tools_fn=None, call_tool_fn=None, session_id="ccbridge-test"):
-    from rolo_claude.ccbridge.server import ToolBridgeServer
+    from halo_harness.ccbridge.server import ToolBridgeServer
 
     def _default_list():
         return [{"name": "Ping", "description": "pong tool",
@@ -51,12 +51,12 @@ def test_child_env_shape_matches_platform(ctx: Ctx):
     try:
         env = server.child_env()
         if os.name == "nt":
-            ctx.check("has host", "ROLO_CCBRIDGE_HOST" in env)
-            ctx.check("has port", "ROLO_CCBRIDGE_PORT" in env)
-            ctx.check("has token", env.get("ROLO_CCBRIDGE_TOKEN"))
+            ctx.check("has host", "HALO_CCBRIDGE_HOST" in env)
+            ctx.check("has port", "HALO_CCBRIDGE_PORT" in env)
+            ctx.check("has token", env.get("HALO_CCBRIDGE_TOKEN"))
         else:
-            ctx.check("has socket path", "ROLO_CCBRIDGE_SOCKET" in env)
-            ctx.check("socket file exists", Path(env["ROLO_CCBRIDGE_SOCKET"]).exists())
+            ctx.check("has socket path", "HALO_CCBRIDGE_SOCKET" in env)
+            ctx.check("socket file exists", Path(env["HALO_CCBRIDGE_SOCKET"]).exists())
     finally:
         server.close()
 
@@ -99,7 +99,7 @@ def test_raw_parent_link_list_and_call_tools(ctx: Ctx):
     """ParentLink (the child's OWN connection object) against a real
     ToolBridgeServer, without going through the MCP SDK layer -- isolates
     the bridge's own newline-JSON-RPC wire shape."""
-    from rolo_claude.ccbridge.client import ParentLink
+    from halo_harness.ccbridge.client import ParentLink
 
     calls = []
     server = _make_server(session_id="raw-link", call_tool_fn=lambda name, args: (
@@ -121,7 +121,7 @@ def test_raw_parent_link_list_and_call_tools(ctx: Ctx):
 
 @test
 def test_raw_parent_link_unknown_method_is_an_error(ctx: Ctx):
-    from rolo_claude.ccbridge.client import ParentLink, ParentLinkError
+    from halo_harness.ccbridge.client import ParentLink, ParentLinkError
     server = _make_server(session_id="raw-link-unknown")
     try:
         link = ParentLink(server.child_env())
@@ -137,7 +137,7 @@ def test_raw_parent_link_unknown_method_is_an_error(ctx: Ctx):
 
 @test
 def test_call_tool_fn_exception_becomes_an_error_response_not_a_crash(ctx: Ctx):
-    from rolo_claude.ccbridge.client import ParentLink
+    from halo_harness.ccbridge.client import ParentLink
 
     def _boom(name, args):
         raise RuntimeError("dispatch exploded")
@@ -161,7 +161,7 @@ def test_call_tool_fn_exception_becomes_an_error_response_not_a_crash(ctx: Ctx):
 
 @test
 def test_real_mcp_stdio_child_round_trip(ctx: Ctx):
-    """The FULL child stack: `python -m rolo_claude.ccbridge` as a real
+    """The FULL child stack: `python -m halo_harness.ccbridge` as a real
     MCP stdio server, driven by a real MCP client (mcp.ClientSession) --
     the exact shape Claude Code itself uses."""
     import asyncio
@@ -176,10 +176,10 @@ def test_real_mcp_stdio_child_round_trip(ctx: Ctx):
             {"content": [{"type": "text", "text": f"PONG:{args.get('text')}"}], "is_error": False},
         )[1])
         try:
-            env = dict(os.environ)
+            env = _hermetic_child_env()
             env.update({k: str(v) for k, v in server.child_env().items()})
             env["PYTHONPATH"] = str(REPO_DIR)
-            params = StdioServerParameters(command=sys.executable, args=["-m", "rolo_claude.ccbridge"], env=env)
+            params = StdioServerParameters(command=sys.executable, args=["-m", "halo_harness.ccbridge"], env=env)
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as mcp_session:
                     await mcp_session.initialize()
@@ -208,10 +208,10 @@ def test_real_mcp_stdio_child_error_result_is_error_flag(ctx: Ctx):
             "content": [{"type": "text", "text": "boom"}], "is_error": True,
         })
         try:
-            env = dict(os.environ)
+            env = _hermetic_child_env()
             env.update({k: str(v) for k, v in server.child_env().items()})
             env["PYTHONPATH"] = str(REPO_DIR)
-            params = StdioServerParameters(command=sys.executable, args=["-m", "rolo_claude.ccbridge"], env=env)
+            params = StdioServerParameters(command=sys.executable, args=["-m", "halo_harness.ccbridge"], env=env)
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as mcp_session:
                     await mcp_session.initialize()
@@ -229,7 +229,7 @@ def test_real_mcp_stdio_child_error_result_is_error_flag(ctx: Ctx):
 def test_multiple_sequential_connections_all_served(ctx: Ctx):
     """Belt-and-suspenders: the accept loop supports more than one
     connection over the server's lifetime (never assumes exactly one)."""
-    from rolo_claude.ccbridge.client import ParentLink
+    from halo_harness.ccbridge.client import ParentLink
     server = _make_server(session_id="multi-conn")
     try:
         for i in range(3):
@@ -250,6 +250,21 @@ def test_server_close_is_idempotent_and_cleans_up_socket_file(ctx: Ctx):
     if path is not None:
         ctx.check("socket file removed on close", not path.exists())
     ctx.check("no exception raised by double close", True)
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

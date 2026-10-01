@@ -44,7 +44,7 @@ it, see [COMMANDS.md](COMMANDS.md) and [SLASH-COMMANDS.md](SLASH-COMMANDS.md).
 ## The session log is the single source of truth
 
 `agent/log.py`'s `SessionLog` is an append-only JSONL file,
-`~/.rolo-claude/sessions/<project-slug>/<session-id>.jsonl`
+`~/.halo/sessions/<project-slug>/<session-id>.jsonl`
 (`SessionLog.latest_for_cwd` picks the most-recently-modified file under a
 project's slug directory for `-c`/`--continue`). Every node the loop ever
 appends is one of: `meta`, `system`, `user`, `assistant` (content blocks
@@ -172,7 +172,7 @@ different hosts accept different tool-call id shapes), and `leak_parser`
 a session's first model call: built-ins plus every already-connected MCP
 tool are split into **preload** (an MCP tool's own
 `_meta["anthropic/alwaysLoad"]`, or a wire name listed in
-`~/.rolo-claude/config.json`'s `mcpPreload`) versus **deferred** (everything
+`~/.halo/config.json`'s `mcpPreload`) versus **deferred** (everything
 else, reachable only through the `ToolSearch` tool), respecting the
 resolved profile's `tools_max` (32 on Databricks, 128 on OpenRouter).
 Growth from a `ToolSearch` load is **append-only** to an explicit ordered
@@ -372,7 +372,7 @@ tools is actually called, or when `/mcp` explicitly reconnects it --
 `alwaysLoad` servers and one marked `"mcpLazy": false` (per-server, or
 globally via a top-level `"mcpLazy": false` in `settings.json`) connect
 eagerly at session start instead. A per-server cache under
-`~/.rolo-claude/mcp/tools-cache/<server>.json`, keyed by a hash of the
+`~/.halo/mcp/tools-cache/<server>.json`, keyed by a hash of the
 server's own identity-relevant config fields (command/args/env/url/
 headers -- never `cwd`/`timeout`/scope, which don't change what
 `tools/list` returns), keeps a lazy server's tool names/descriptions known
@@ -584,7 +584,7 @@ claude -p --model <id> --output-format stream-json --input-format stream-json \
 
 The session id claude actually uses comes from a **logged `meta` node**
 (`cc_session_id`), read back on every later turn -- not derived
-deterministically from rolo-claude's own session id (a `uuid5` helper for
+deterministically from halo's own session id (a `uuid5` helper for
 that exists in the code but is unused dead code; the log is the real
 mechanism, consistent with "model-visible means logged" applying here too).
 A `--resume` that claude itself rejects (a stale/in-use conversation) falls
@@ -592,10 +592,10 @@ back to a fresh `--session-id`, primed with a capped, rendered tail of the
 prior log as one `<conversation-so-far>` message rather than surfacing the
 error.
 
-**Every rolo-claude tool is exposed to that subprocess through a small local
-bridge** (`rolo_claude/ccbridge/`), as one inline stdio MCP server named
+**Every halo tool is exposed to that subprocess through a small local
+bridge** (`halo_harness/ccbridge/`), as one inline stdio MCP server named
 `"rolo"` -- Claude Code sees every bridged tool as `mcp__rolo__<Name>`. The
-transport is a Unix domain socket at `~/.rolo-claude/run/<session>.sock`
+transport is a Unix domain socket at `~/.halo/run/<session>.sock`
 (directory mode 0700, socket mode 0600 -- filesystem permissions are the
 whole authentication) on POSIX, or a TCP loopback socket plus a random
 per-session `secrets.token_hex(16)` token (compared with `hmac.compare_digest`)
@@ -627,16 +627,16 @@ passes `--fork-session` through.
 
 ## Telemetry and `/improve`
 
-`rolo_claude/telemetry.py` derives **everything** it reports from
+`halo_harness/telemetry.py` derives **everything** it reports from
 non-wire metadata already sitting on existing log nodes (`usage.route`/
 `.provider`/`.finish_reason`/`.ttft_ms`/`.latency_ms`/`.retries`/`.status`,
 an assistant node's `tool_meta`, a `tool_result`'s `tool`/`error_class`/`ms`/
 `bytes`/`spilled`) -- never a new model-visible field, and a corrupt JSONL
 line is skipped and counted, never a crash. `telemetry.scan()` walks
-`~/.rolo-claude/sessions/<slug>/*.jsonl`, caching one `SessionSummary` per
-file at `~/.rolo-claude/stats-cache.json` keyed by `(path, size, mtime)` so
+`~/.halo/sessions/<slug>/*.jsonl`, caching one `SessionSummary` per
+file at `~/.halo/stats-cache.json` keyed by `(path, size, mtime)` so
 an unchanged log is never re-parsed; `aggregate_by_model`/`aggregate_by_tool`
-turn a batch of summaries into the rows `rolo-claude stats --models/--tools`
+turn a batch of summaries into the rows `halo stats --models/--tools`
 and `/stats --models` render.
 
 `/improve` is entirely human-gated and never runs on its own: `improve/
@@ -653,11 +653,11 @@ actually appeared in a cluster has that reference silently dropped, never
 invented. Nothing reaches disk until a card's `a`/`e` key (or an explicit
 headless `improve --apply FILE#ID`) approves it: `improve/apply.py` writes
 atomically, tags the file with an HTML-comment provenance marker
-(`<!-- rolo-claude improve: created=... sessions=... model=... -->`), and
+(`<!-- halo improve: created=... sessions=... model=... -->`), and
 only ever **updates** a file that already carries that exact marker --
 colliding with a user-authored file picks a new name instead of touching
 it. `d` (dismiss forever) records a content hash
-(`sha256(kind|scope|path|body)`) in `~/.rolo-claude/improve/dismissed.json`
+(`sha256(kind|scope|path|body)`) in `~/.halo/improve/dismissed.json`
 so the same candidate never resurfaces. A separate, much cheaper check
 (`improve/hint.py`) counts a session's own repair-hits/edit-failures/loop-
 breaker-trips against a configurable threshold and, if crossed, shows a
@@ -666,7 +666,7 @@ card, identical in auto mode.
 
 ## The TUI event model
 
-`rolo_claude/events.py` is pure data with no dependency on the rest of the
+`halo_harness/events.py` is pure data with no dependency on the rest of the
 package: an `Event(kind, data, turn, agent_id, ts)` / `Command(kind, data)`
 pair, each `kind` drawn from a fixed, validated vocabulary
 (`EVENT_KINDS`/`COMMAND_KINDS`), with one small factory function per kind
@@ -703,7 +703,7 @@ kinds drive for the top-level session.
 every `status` and `message_end` event (1.0.1 hotfix 14) -- the same raw
 numbers `Session.status_event`/`agent/loop.py`'s per-step `message_end`
 already compute for `/cost`/`stats`, never re-derived in the UI. Two pure
-formatters in `rolo_claude/model_display.py` (shared with the hotfix-12
+formatters in `halo_harness/model_display.py` (shared with the hotfix-12
 model-listing row format) turn those numbers into text that is NEVER the
 bare `ctx ?`/`$?` a Databricks model with no known context limit/price
 showed permanently before 1.0.1: `format_status_context(tokens, limit)`

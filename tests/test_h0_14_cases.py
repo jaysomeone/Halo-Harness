@@ -32,7 +32,7 @@ test, TESTS = new_registry()
 # ---- case 3: CLI positional/stdin ------------------------------------------
 
 def _cli_env(fh, mock):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     return env
@@ -43,7 +43,7 @@ def test_case3_flag_before_prompt_with_output_format(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        args = [sys.executable, "-m", "rolo_claude", "-p", "--output-format", "json", "pong please",
+        args = [sys.executable, "-m", "halo_harness", "-p", "--output-format", "json", "pong please",
                 "--model", "or:mock/model", "--cwd", str(fh["proj"])]
         result = subprocess.run(args, env=_cli_env(fh, mock), cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-400:]!r})", result.returncode == 0)
@@ -57,7 +57,7 @@ def test_case3_prompt_before_flag(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        args = [sys.executable, "-m", "rolo_claude", "pong please", "-p",
+        args = [sys.executable, "-m", "halo_harness", "pong please", "-p",
                 "--model", "or:mock/model", "--cwd", str(fh["proj"])]
         result = subprocess.run(args, env=_cli_env(fh, mock), cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-400:]!r})", result.returncode == 0)
@@ -71,7 +71,7 @@ def test_case3_piped_utf8_stdin(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        args = [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/model", "--cwd", str(fh["proj"])]
+        args = [sys.executable, "-m", "halo_harness", "-p", "--model", "or:mock/model", "--cwd", str(fh["proj"])]
         prompt = "pong please -- café — 日本語"  # UTF-8 multibyte content, piped as stdin
         result = subprocess.run(args, env=_cli_env(fh, mock), cwd=str(REPO_DIR), capture_output=True,
                                  input=prompt.encode("utf-8"), timeout=30)
@@ -86,8 +86,8 @@ def test_case3_piped_utf8_stdin(ctx: Ctx):
 
 @test
 def test_case4_first_delta_arrives_before_upstream_finishes(ctx: Ctx):
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
     mock = MockUpstream().start()
     try:
         model = "mock/long-abort"  # ~60 chunks, 0.1s apart, ~6s total -- see mock_openai.py
@@ -115,8 +115,8 @@ def test_case4_first_delta_arrives_before_upstream_finishes(ctx: Ctx):
 
 @test
 def test_case5_abort_makes_the_mock_see_a_disconnect(ctx: Ctx):
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
     mock = MockUpstream().start()
     try:
         model = "mock/long-abort"
@@ -154,9 +154,9 @@ def test_case6_connection_refused_then_ok_retries_transparently(ctx: Ctx):
     refusal deterministically -- real sockets can't reliably reproduce
     "refused on attempt 1, listening by attempt 2" since phase 1's two
     attempts run back to back with NO delay between them at all."""
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
 
     mock = MockUpstream().start()
     real_open_upstream = http_mod.open_upstream
@@ -187,6 +187,21 @@ def test_case6_connection_refused_then_ok_retries_transparently(ctx: Ctx):
     finally:
         http_mod.open_upstream = real_open_upstream
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

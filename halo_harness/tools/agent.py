@@ -1,4 +1,4 @@
-"""rolo_claude.tools.agent -- the Agent/Task tool wire definitions (H6
+"""halo_harness.tools.agent -- the Agent/Task tool wire definitions (H6
 scope B). The real work is agent/subagent.py's `run_agent_call`, called
 DIRECTLY by agent/loop.py's `_dispatch_tools` for the live/parallel/
 tagged-event path (never through this class's own `run()` there); `run()`
@@ -10,7 +10,7 @@ child's own events just aren't forwarded anywhere in that fallback path.
 
 from __future__ import annotations
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Launch a sub-agent to handle a complex, multi-step task autonomously. Give it a clear "
@@ -56,7 +56,7 @@ class AgentTool(Tool):
         return f"Agent({t}: {d[:60]})"
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
-        from rolo_claude.agent.subagent import run_agent_call
+        from halo_harness.agent.subagent import run_agent_call
 
         runtime = ctx.agent_runtime
         if runtime is None:

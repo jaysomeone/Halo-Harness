@@ -1,8 +1,8 @@
-"""rolo_claude.roles -- V2c (H15): the `roles` table (`orchestrator`,
+"""halo_harness.roles -- V2c (H15): the `roles` table (`orchestrator`,
 `coder`, `reviewer`, `researcher`, `small`) a built-in/custom sub-agent's own
 role (a frontmatter `role:` key, an `Agent(role=...)` call-time override, or
 a built-in's own fixed default) resolves a MODEL from, `--role name=model`
-CLI overrides, `team.json`'s own `roles` map seeded into `~/.rolo-claude/
+CLI overrides, `team.json`'s own `roles` map seeded into `~/.halo/
 config.json` (the exact idiom `team_config.apply_gateway_preference` already
 uses for `gateway_preference`), and `/roles`'s own table rendering (model,
 endpoint/path type, price per role). See `docs/ROLES.md`.
@@ -42,9 +42,9 @@ COST_AWARE_DEFAULTS = {"researcher": _COST_AWARE_DATABRICKS_MODEL, "small": _COS
 
 
 def configured_role_table() -> dict:
-    """`~/.rolo-claude/config.json`'s own `roles` map, filtered to known
+    """`~/.halo/config.json`'s own `roles` map, filtered to known
     role names holding a non-empty string value. Never raises."""
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     raw = get_config_value("roles", default={})
     if not isinstance(raw, dict):
         return {}
@@ -92,14 +92,14 @@ def parse_role_flags(values: Optional[list]) -> dict:
 
 
 def apply_role_preference(roles: dict) -> None:
-    """`team.json`'s own `roles` map seeded into `~/.rolo-claude/config.json`
+    """`team.json`'s own `roles` map seeded into `~/.halo/config.json`
     -- the SAME idiom `team_config.apply_gateway_preference` uses for
     `gateway_preference`: idempotent, never overwrites a role the user
     already configured locally (a personal config.json value always wins
     over the shared team default). An unrecognized role name is silently
     skipped (team.json is shared/committed; a typo there should not clutter
     config.json with a key nothing ever reads)."""
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.theme import get_config_value, set_config_value
     for name, model in (roles or {}).items():
         if name not in ROLE_NAMES or not isinstance(model, str) or not model.strip():
             continue
@@ -116,7 +116,7 @@ def resolve_role_ref(name: str, *, role_table: Optional[dict] = None, cli_overri
     aware-defaulted where applicable) persisted table; neither present ->
     the session's own model/profile OBJECTS, unchanged (matches `resolve_
     agent_model`'s own "nothing resolved -> reuse parent objects" contract)."""
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
+    from halo_harness.model import parse_model_ref, resolve_model_profile
     cli_overrides = cli_overrides or {}
     role_table = role_table or {}
     cli_raw = cli_overrides.get(name)
@@ -142,8 +142,8 @@ def describe_role_ref(ref, profile, state_dir) -> dict:
     type/DBU lookup, and a plain per-million-token price for every other
     provider, so `/roles` never disagrees with `/model`."""
     if ref.provider == "databricks":
-        from rolo_claude.providers.databricks import load_dbx_endpoints_json
-        from rolo_claude.providers.dbx_routing import chat_route_candidates, format_dbu_cost, resolve_databricks_dialect
+        from halo_harness.providers.databricks import load_dbx_endpoints_json
+        from halo_harness.providers.dbx_routing import chat_route_candidates, format_dbu_cost, resolve_databricks_dialect
         try:
             _clean, dialect = resolve_databricks_dialect(ref.model, state_dir)
             if dialect == "anthropic-passthrough":

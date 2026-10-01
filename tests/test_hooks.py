@@ -12,9 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers import hooks
-from rolo_claude.providers.profiles import resolve_profile
-from rolo_claude.providers.routing import Route
+from halo_harness.providers import hooks
+from halo_harness.providers.profiles import resolve_profile
+from halo_harness.providers.routing import Route
 
 test, TESTS = new_registry()
 
@@ -135,7 +135,7 @@ def test_leak_parser_glm_arg_key(ctx: Ctx):
 
 @test
 def test_think_tag_strip_matches_the_old_scope_c_function(ctx: Ctx):
-    from rolo_claude.providers.oai_stream import strip_display_artifacts
+    from halo_harness.providers.oai_stream import strip_display_artifacts
     ctx.check("re-exported under the old name, same behavior",
               hooks.think_tag_strip is strip_display_artifacts)
     ctx.check("strips a leading think block", hooks.think_tag_strip("<think>x</think>answer") == "answer")
@@ -219,7 +219,7 @@ def test_max_tokens_budget_rolling_otpm_window(ctx: Ctx):
 
 @test
 def test_overflow_classifier_matches_the_errors_module(ctx: Ctx):
-    from rolo_claude.providers.errors import CONTEXT_WINDOW_EXCEEDED, classify_error_category
+    from halo_harness.providers.errors import CONTEXT_WINDOW_EXCEEDED, classify_error_category
     msg = "This model's maximum context length is 128000 tokens. However, you requested 130000 tokens."
     ctx.check("delegates to classify_error_category, same answer",
               hooks.overflow_classifier(400, msg) == classify_error_category(400, msg) == CONTEXT_WINDOW_EXCEEDED)

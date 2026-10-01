@@ -1,4 +1,4 @@
-"""tests.test_loop_headless -- e2e: `python -m rolo_claude -p "..."` against
+"""tests.test_loop_headless -- e2e: `python -m halo_harness -p "..."` against
 the mock upstream via BRIDGE_TEST_HOME + BRIDGE_OPENROUTER_BASE_URL. Asserts
 the system prompt is byte-stable across two constructions, MEMORY.md content
 reaches the actual upstream request, and the `--output-format json` shape.
@@ -21,7 +21,7 @@ test, TESTS = new_registry()
 
 
 def _run_cli(fh, mock, prompt, extra_args=None, extra_env=None, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]),
         "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
@@ -30,7 +30,7 @@ def _run_cli(fh, mock, prompt, extra_args=None, extra_env=None, timeout=30):
     })
     if extra_env:
         env.update(extra_env)
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", "or:mock/model",
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", "or:mock/model",
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -101,7 +101,7 @@ def test_finding_14_memory_snapshot_includes_directory_path(ctx: Ctx):
     """finding 14: the memory directory's real path is included in the
     memory snapshot itself (rather than the system prompt CLAIMING a
     writing capability this build doesn't have)."""
-    from rolo_claude.agent.assemble import SessionContext
+    from halo_harness.agent.assemble import SessionContext
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     try:
@@ -121,9 +121,9 @@ def test_finding_14_no_false_capability_promises_in_prompt(ctx: Ctx):
     not claim it can write memory or run a test; the MCP sentence must
     always be honest about what this BUILD can't do, not about what the
     user has configured, regardless of registry shape."""
-    from rolo_claude.agent.prompt import build_system_prompt
-    from rolo_claude.tools.read import ReadTool
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.agent.prompt import build_system_prompt
+    from halo_harness.tools.read import ReadTool
+    from halo_harness.tools.registry import ToolRegistry
     prompt = build_system_prompt(model_label="or:mock/model", cwd="/tmp/x",
                                   tool_definitions=ToolRegistry(tools=[ReadTool()]).definitions(), family="generic")
     ctx.check('no "write it ONLY inside that memory directory" promise (no Write tool)',
@@ -146,8 +146,8 @@ def test_finding_14_capability_promises_appear_once_the_tools_exist(ctx: Ctx):
     HAS Write and Bash: the SAME registry-driven sentences must now
     promise memory-writing and mention running a test, proving prompt.py's
     logic is genuinely registry-driven (not just permanently "off")."""
-    from rolo_claude.agent.prompt import build_system_prompt
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.agent.prompt import build_system_prompt
+    from halo_harness.tools.registry import ToolRegistry
     prompt = build_system_prompt(model_label="or:mock/model", cwd="/tmp/x",
                                   tool_definitions=ToolRegistry().definitions(), family="generic")
     ctx.check('memory-write promise present now that Write exists',
@@ -189,7 +189,7 @@ def test_system_prompt_byte_stable_across_two_constructions(ctx: Ctx):
     differ."""
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
-    from rolo_claude.agent.assemble import SessionContext
+    from halo_harness.agent.assemble import SessionContext
 
     ctx1 = SessionContext(cwd=fh["proj"], model_label="or:mock/model")
     ctx2 = SessionContext(cwd=fh["proj"], model_label="or:mock/model")
@@ -235,9 +235,9 @@ def test_without_p_flag_prints_tui_notice_exit_2(ctx: Ctx):
     # does NOT work for this on Windows -- CPython's `os.isatty()` there
     # only inspects `GetFileType`, and NUL reports FILE_TYPE_CHAR just
     # like a real console, so it still reads as a tty.
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
-    result = subprocess.run([sys.executable, "-m", "rolo_claude"], env=env, cwd=str(REPO_DIR),
+    result = subprocess.run([sys.executable, "-m", "halo_harness"], env=env, cwd=str(REPO_DIR),
                              capture_output=True, text=True, timeout=15, stdin=subprocess.PIPE)
     ctx.check(f"exit code 2, got {result.returncode}", result.returncode == 2)
     ctx.check("not-a-tty notice printed", "stdin is not a tty" in result.stderr)
@@ -245,14 +245,29 @@ def test_without_p_flag_prints_tui_notice_exit_2(ctx: Ctx):
 
 @test
 def test_version_flag(ctx: Ctx):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
-    result = subprocess.run([sys.executable, "-m", "rolo_claude", "--version"], env=env, cwd=str(REPO_DIR),
+    result = subprocess.run([sys.executable, "-m", "halo_harness", "--version"], env=env, cwd=str(REPO_DIR),
                              capture_output=True, text=True, timeout=15)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    from rolo_claude import __version__
-    ctx.check(f"prints rolo-claude {__version__}, got {result.stdout!r}",
-              result.stdout.strip() == f"rolo-claude {__version__}")
+    from halo_harness import __version__
+    ctx.check(f"prints halo {__version__}, got {result.stdout!r}",
+              result.stdout.strip() == f"halo {__version__}")
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

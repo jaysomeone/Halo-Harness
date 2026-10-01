@@ -28,8 +28,8 @@ def test_webfetch_opener_uses_the_shared_tls_context(ctx: Ctx):
     """`_fetch_once` must build its opener with an HTTPSHandler carrying
     `default_tls_context()` (VERIFY_X509_STRICT cleared when present, the
     same custom-CA-bundle env loading) -- not urllib's own bare default."""
-    from rolo_claude.providers.http import default_tls_context
-    from rolo_claude.tools.webfetch import WebFetchTool
+    from halo_harness.providers.http import default_tls_context
+    from halo_harness.tools.webfetch import WebFetchTool
 
     real_build_opener = urllib.request.build_opener
     captured: list = []
@@ -45,7 +45,7 @@ def test_webfetch_opener_uses_the_shared_tls_context(ctx: Ctx):
         # The host is deliberately unresolvable -- this always fails, fast,
         # with no real network dependency; what matters is HOW the opener
         # that failure went through was built.
-        from rolo_claude.tools.base import ToolResult
+        from halo_harness.tools.base import ToolResult
         ctx.check(f"an unresolvable host is still reported as a normal tool error, got {result}",
                   isinstance(result, ToolResult) and result.is_error)
         ctx.check(f"build_opener was called exactly once, got {len(captured)}", len(captured) == 1)
@@ -71,7 +71,7 @@ def test_webfetch_redirect_handler_still_present(ctx: Ctx):
     """The TLS fix must be ADDITIVE -- the existing same-host redirect
     handler is still passed to build_opener alongside the new HTTPSHandler,
     never replaced by it."""
-    from rolo_claude.tools.webfetch import WebFetchTool, _SameHostRedirectHandler
+    from halo_harness.tools.webfetch import WebFetchTool, _SameHostRedirectHandler
 
     real_build_opener = urllib.request.build_opener
     captured: list = []
@@ -97,8 +97,8 @@ def test_webfetch_redirect_handler_still_present(ctx: Ctx):
 @test
 def test_mcp_http_client_factory_uses_the_shared_tls_context(ctx: Ctx):
     import asyncio
-    from rolo_claude.mcp.http_sse import _mcp_http_client_factory
-    from rolo_claude.providers.http import default_tls_context
+    from halo_harness.mcp.http_sse import _mcp_http_client_factory
+    from halo_harness.providers.http import default_tls_context
 
     async def _build_and_inspect():
         client = _mcp_http_client_factory(headers={"X-Test": "1"})
@@ -128,7 +128,7 @@ def test_mcp_http_client_factory_falls_back_when_tls_context_fails(ctx: Ctx):
     must still hand back a USABLE client (the SDK's own unmodified
     create_mcp_http_client), never raise and break the connection."""
     import asyncio
-    import rolo_claude.mcp.http_sse as http_sse_mod
+    import halo_harness.mcp.http_sse as http_sse_mod
 
     async def _build():
         client = http_sse_mod._mcp_http_client_factory(headers={})
@@ -137,7 +137,7 @@ def test_mcp_http_client_factory_falls_back_when_tls_context_fails(ctx: Ctx):
         finally:
             await client.aclose()
 
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.providers.http as http_mod
     real_default_tls_context = http_mod.default_tls_context
     http_mod.default_tls_context = lambda: (_ for _ in ()).throw(RuntimeError("simulated"))
     try:

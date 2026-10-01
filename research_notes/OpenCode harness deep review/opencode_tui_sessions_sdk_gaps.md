@@ -1,6 +1,6 @@
 # OpenCode harness deep review: TUI, sessions, headless/server/SDK, agents, plugins, Linux, and gap analysis vs Claude Code
 
-Researched 2026-09-24. OpenCode = github.com/anomalyco/opencode (formerly sst/opencode), latest release v1.18.32 (2026-09-21). Claude Code reference = code.claude.com docs for 2.1.x (the box has 2.1.281 per `docs/harness/claude-help-2.1.281.txt`). "Verified" = read on a primary page (opencode.ai docs, the repo, the plugin source, GitHub issues/releases API); "secondary" = DeepWiki/blog/aggregator; inferences are marked as such. The rolo-claude plan column in the final matrix comes from the local briefs (`docs/harness/U0-brief.md`, `U2-brief.md`, `H1-brief.md`, `H5-brief.md`).
+Researched 2026-09-24. OpenCode = github.com/anomalyco/opencode (formerly sst/opencode), latest release v1.18.32 (2026-09-21). Claude Code reference = code.claude.com docs for 2.1.x (the box has 2.1.281 per `docs/harness/claude-help-2.1.281.txt`). "Verified" = read on a primary page (opencode.ai docs, the repo, the plugin source, GitHub issues/releases API); "secondary" = DeepWiki/blog/aggregator; inferences are marked as such. The halo plan column in the final matrix comes from the local briefs (`docs/harness/U0-brief.md`, `U2-brief.md`, `H1-brief.md`, `H5-brief.md`).
 
 ## Key question 1: The TUI (technology, layout, keybinds, commands, undo/redo, themes, mouse, images, permissions, terminals)
 
@@ -70,9 +70,9 @@ OpenCode's TUI is no longer Go/Bubble Tea: it is a SolidJS app on OpenTUI (TypeS
 - For contrast, Claude Code's own tmux flicker issue (#37076) attributes full-viewport redraws to Ink; a differential renderer and DEC 2026 synchronized output were the fixes — [anthropics/claude-code #37076](https://github.com/anthropics/claude-code/issues/37076); [HN "Claude Chill"](https://news.ycombinator.com/item?id=46699072)
 
 ### Inferences
-- The TUI has no session tabs; concurrency is modelled as separate sessions (list dialog) plus a parent→child navigation axis (`<leader>down`, `left/right`, `up`). Tabs are a desktop-app concept (see Q2). rolo-claude's "one Textual app = one session + picker" plan is therefore already at OpenCode-TUI parity; a child-session navigation axis for sub-agents would be the cheap next step.
-- Both `packages/tui` references and the "worker process" note suggest the TUI has been split into its own process/package during 2026 while still shipping inside the single binary; for a Python harness the transferable idea is the strict TUI ↔ engine split over an event stream, which rolo-claude already has (Controller/queue in U2).
-- `permission.prompt.fullscreen` (ctrl+f) implies permission prompts are compact inline cards by default with an expand affordance; rolo-claude's `PermissionCard` matches, but should add an expand key for long diffs/commands.
+- The TUI has no session tabs; concurrency is modelled as separate sessions (list dialog) plus a parent→child navigation axis (`<leader>down`, `left/right`, `up`). Tabs are a desktop-app concept (see Q2). halo's "one Textual app = one session + picker" plan is therefore already at OpenCode-TUI parity; a child-session navigation axis for sub-agents would be the cheap next step.
+- Both `packages/tui` references and the "worker process" note suggest the TUI has been split into its own process/package during 2026 while still shipping inside the single binary; for a Python harness the transferable idea is the strict TUI ↔ engine split over an event stream, which halo already has (Controller/queue in U2).
+- `permission.prompt.fullscreen` (ctrl+f) implies permission prompts are compact inline cards by default with an expand affordance; halo's `PermissionCard` matches, but should add an expand key for long diffs/commands.
 - The "system" theme (derive greys from the terminal background, use ANSI 0–15 for syntax) is the lowest-effort way to look native in kitty/xterm/tmux on Kali; Textual's `ansi_color` mode approximates it.
 
 ### Gaps
@@ -105,9 +105,9 @@ Sessions live in one SQLite file (`~/.local/share/opencode/opencode.db`) with a 
 - Desktop app: rebuilt around tabs in July 2026 (each tab a new or reopened session from any project) — [explainx](https://www.explainx.ai/blog/opencode-desktop-tabs-sessions-worktrees-july-2026) (secondary); issues show a Projects sidebar and exact-match `session.directory` filtering hiding older sessions — [#49032](https://github.com/anomalyco/opencode/issues/49032); [#49401](https://github.com/anomalyco/opencode/issues/49401); [#49561](https://github.com/anomalyco/opencode/issues/49561)
 
 ### Inferences
-- OpenCode's project keying (git-root hash, with a `global` bucket and worktree mapping) is the same shape as Claude Code's `~/.claude/projects/<slug>` and rolo-claude's `~/.rolo-claude/sessions/<slug>/<id>.jsonl` (H1). The migration incidents argue for keeping rolo-claude's append-only JSONL as the source of truth and adding a derived SQLite index only for listing/search, never as the only copy.
+- OpenCode's project keying (git-root hash, with a `global` bucket and worktree mapping) is the same shape as Claude Code's `~/.claude/projects/<slug>` and halo's `~/.halo/sessions/<slug>/<id>.jsonl` (H1). The migration incidents argue for keeping halo's append-only JSONL as the source of truth and adding a derived SQLite index only for listing/search, never as the only copy.
 - "Descending ULIDs" is a cheap trick worth copying: newest-first ordering falls out of a plain sort of IDs.
-- The `snapshot`/`revert` fields on messages mean OpenCode's undo is message-granular (undo the last user message and its file effects), not file-granular; Claude Code's `/rewind` checkpoints are the same idea. rolo-claude can implement it with a shadow git repo (`git --git-dir=~/.rolo-claude/snapshots/<slug> --work-tree=<cwd>`) without touching the user's `.git`.
+- The `snapshot`/`revert` fields on messages mean OpenCode's undo is message-granular (undo the last user message and its file effects), not file-granular; Claude Code's `/rewind` checkpoints are the same idea. halo can implement it with a shadow git repo (`git --git-dir=~/.halo/snapshots/<slug> --work-tree=<cwd>`) without touching the user's `.git`.
 
 ### Gaps
 - Exact current table/column list of `session_v2`/`session_message` and where the schema file moved could not be read (404 on `session.sql.ts`); the version that introduced SQLite is only reported by third parties (an oh-my-openagent issue says "beta v1.1.53+"; not verified on a primary source).
@@ -158,8 +158,8 @@ OpenCode is server-first: every client (TUI, `run`, web, desktop, IDE plugins, A
 - Community alternatives to the web UI exist (OpenGUI Electron app, pk-opencode-webui prefix-aware reimplementation), implying the official web UI has been a pain point — [DEV: OpenGUI](https://dev.to/akemmanuel/i-built-a-native-desktop-gui-for-opencode-in-4-days-with-ai-p44); [pk-opencode-webui](https://github.com/prokube/pk-opencode-webui) (secondary)
 
 ### Inferences
-- The lossy `--format json` is the single most-cited pain point in OpenCode's headless story; Claude Code's `stream-json` (with `--include-partial-messages` deltas and `--input-format stream-json` for bidirectional control) is strictly ahead. rolo-claude's U0 `--output-format stream-json` design should keep deltas and echo the user prompt line, precisely because OpenCode users file bugs when those are missing.
-- OpenCode's "every client is an HTTP client of the same server" architecture is what makes `--attach`, the web UI, IDE `/tui` control and ACP nearly free. For rolo-claude, exposing the existing Controller queue over a loopback HTTP+SSE server (rolo-claude already runs a loopback bridge server) would unlock remote/attach and a future web view without a rewrite; ACP would be a separate adapter on top.
+- The lossy `--format json` is the single most-cited pain point in OpenCode's headless story; Claude Code's `stream-json` (with `--include-partial-messages` deltas and `--input-format stream-json` for bidirectional control) is strictly ahead. halo's U0 `--output-format stream-json` design should keep deltas and echo the user prompt line, precisely because OpenCode users file bugs when those are missing.
+- OpenCode's "every client is an HTTP client of the same server" architecture is what makes `--attach`, the web UI, IDE `/tui` control and ACP nearly free. For halo, exposing the existing Controller queue over a loopback HTTP+SSE server (halo already runs a loopback bridge server) would unlock remote/attach and a future web view without a rewrite; ACP would be a separate adapter on top.
 - `permission.ask` and `tool.execute.before` are the two plugin hooks that carry most of the value of Claude Code's `PreToolUse`/`PermissionRequest`; a Python harness gets the same by letting hook scripts return a JSON decision, which is what Claude Code's hook contract already specifies.
 
 ### Gaps
@@ -182,9 +182,9 @@ OpenCode's "modes" are agents: `build` (all tools) and `plan` (edit/bash default
 - Composio reports OpenCode's bash permission matching uses "shell parsing via tree-sitter" — [Composio](https://composio.dev/content/claude-code-vs-open-code) (secondary; not confirmed on a primary page)
 
 ### Inferences
-- "Plan" in OpenCode is just an agent whose permission table says ask; there is no plan file, no `ExitPlanMode`, no plan-approval card. Claude Code's plan mode (and rolo-claude's H6 `PlanCard`) is richer. The reusable part is the *Tab-to-cycle* affordance and showing the active agent in the footer.
-- `steps` (max iterations per agent) is a small, useful safety knob rolo-claude can expose per agent alongside `--max-turns`.
-- Sub-agent output returning as "summary + task_id + resumable" plus a navigable child session is a better UX than a flat text return; rolo-claude's H6 "sub-agent nesting placeholder" should carry the child's transcript so the user can dive in (`<leader>down`) and later resume by task id.
+- "Plan" in OpenCode is just an agent whose permission table says ask; there is no plan file, no `ExitPlanMode`, no plan-approval card. Claude Code's plan mode (and halo's H6 `PlanCard`) is richer. The reusable part is the *Tab-to-cycle* affordance and showing the active agent in the footer.
+- `steps` (max iterations per agent) is a small, useful safety knob halo can expose per agent alongside `--max-turns`.
+- Sub-agent output returning as "summary + task_id + resumable" plus a navigable child session is a better UX than a flat text return; halo's H6 "sub-agent nesting placeholder" should carry the child's transcript so the user can dive in (`<leader>down`) and later resume by task id.
 
 ### Gaps
 - Whether `steps` defaults exist or whether the `task` tool's background mode is still gated behind the experimental env var in 1.18.x was not verifiable on a primary page.
@@ -211,9 +211,9 @@ The plugin ecosystem is large and JS-only (notify, DCP context pruning, oh-my-op
 - Config precedence: remote `.well-known/opencode` → `~/.config/opencode/opencode.json` → `OPENCODE_CONFIG` → project `opencode.json(c)` → `.opencode/` dirs → `OPENCODE_CONFIG_CONTENT` → managed (`/etc/opencode/` on Linux) → macOS MDM; files merge; `{env:VAR}` and `{file:path}` substitution; schema at `https://opencode.ai/config.json` — [Config docs](https://opencode.ai/docs/config/)
 
 ### Inferences
-- OpenCode reads `~/.claude/skills`, `.claude/skills` and `CLAUDE.md`, i.e. it deliberately consumes Claude Code's on-disk conventions. rolo-claude, which targets `~/.claude` natively, is at parity by construction; adding `AGENTS.md` as a fallback (the inverse of OpenCode's fallback) costs almost nothing and makes rolo-claude usable in OpenCode-configured repos.
-- The DCP plugin's placeholder-pruning ("session history never modified, pruned content replaced before send") is the same design as rolo-claude's H5 "OpenCode pruning" item; the model-invoked `compress` tool is the novel bit worth copying.
-- Because Anthropic Pro/Max OAuth is now contractually off-limits for third-party harnesses, rolo-claude's existing stance (subscription untouched, bridge only for non-Claude/gateway routes; API key or Databricks passthrough for Claude) is the only defensible one; no OpenCode trick to copy here.
+- OpenCode reads `~/.claude/skills`, `.claude/skills` and `CLAUDE.md`, i.e. it deliberately consumes Claude Code's on-disk conventions. halo, which targets `~/.claude` natively, is at parity by construction; adding `AGENTS.md` as a fallback (the inverse of OpenCode's fallback) costs almost nothing and makes halo usable in OpenCode-configured repos.
+- The DCP plugin's placeholder-pruning ("session history never modified, pruned content replaced before send") is the same design as halo's H5 "OpenCode pruning" item; the model-invoked `compress` tool is the novel bit worth copying.
+- Because Anthropic Pro/Max OAuth is now contractually off-limits for third-party harnesses, halo's existing stance (subscription untouched, bridge only for non-Claude/gateway routes; API key or Databricks passthrough for Claude) is the only defensible one; no OpenCode trick to copy here.
 
 ### Gaps
 - The providers page summary also listed "Claude Pro/Max OAuth login (opens browser)" among Anthropic auth methods while stating the plugins were removed in 1.3.0; whether a browser-login path still exists for API-console accounts (not consumer subscriptions) could not be disambiguated from the fetched text.
@@ -261,7 +261,7 @@ Claude Code leads on the harness "operating system": 33+ hook events with five h
 8. Web/desktop app with tabs and a ghostty-web terminal, built from the same server.
 9. Config as merged JSONC with `{env:}`/`{file:}` substitution and a published JSON schema.
 
-**What this means for rolo-claude (Python/Textual, Kali-first)** — see the matrix and ranked list in Key question 8.
+**What this means for halo (Python/Textual, Kali-first)** — see the matrix and ranked list in Key question 8.
 
 ### Gaps
 - Morphllm's "September 2026" comparison page returned HTTP 429 and could not be read; only its search snippet ("closed-source, model-locked" vs "open-source, model-agnostic") is available.
@@ -287,26 +287,26 @@ On Kali the practical path is `curl -fsSL https://opencode.ai/install | bash` (a
 ### Inferences
 - Kali (Debian testing-based, current glibc) will not hit the glibc issue; the musl tarball is the safe choice for containers/VMs. The one Linux dependency to pre-install on the Kali VM is ripgrep (`apt install ripgrep` then symlink or copy to `~/.cache/opencode/bin/rg`) and a clipboard tool.
 - No evidence of an `fzf` dependency; fuzzy matching is in-process (the TUI's own autocomplete).
-- For rolo-claude, the XDG split (config / data / cache) is the right convention on Kali; today rolo-claude keeps everything under `~/.rolo-claude/` (H1), which is simpler but mixes secrets, logs and sessions.
+- For halo, the XDG split (config / data / cache) is the right convention on Kali; today halo keeps everything under `~/.halo/` (H1), which is simpler but mixes secrets, logs and sessions.
 
 ### Gaps
 - Install-script env vars (`OPENCODE_INSTALL_DIR`, `XDG_BIN_DIR`) were not visible in the fetched install page text; not verified.
 - No Kali-specific reports found (searches returned Ubuntu/Debian/WSL issues only).
 - Peak RSS of the TUI on Linux is not documented anywhere found.
 
-## Key question 8: Feature-parity matrix and what rolo-claude should adopt
+## Key question 8: Feature-parity matrix and what halo should adopt
 
 ### Takeaway
-Of ~40 compared capabilities, rolo-claude's briefs already target Claude Code parity on the core loop (permissions, hooks, compaction, stream-json, slash commands, skills, memory); the highest-value OpenCode ideas to fold in are the leader-key/which-key keymap with a `tui.json`-style remap file, git-shadow undo/redo, a loopback HTTP+SSE server with `--attach`, child-session navigation for sub-agents, `stats`/`export --sanitize`, a `system` theme, formatter/LSP-diagnostic post-edit feedback, and OpenCode's XDG directory split.
+Of ~40 compared capabilities, halo's briefs already target Claude Code parity on the core loop (permissions, hooks, compaction, stream-json, slash commands, skills, memory); the highest-value OpenCode ideas to fold in are the leader-key/which-key keymap with a `tui.json`-style remap file, git-shadow undo/redo, a loopback HTTP+SSE server with `--attach`, child-session navigation for sub-agents, `stats`/`export --sanitize`, a `system` theme, formatter/LSP-diagnostic post-edit feedback, and OpenCode's XDG directory split.
 
 ### Cited Findings
-- rolo-claude plan facts come from the local briefs: Textual 8.2.8 TUI with `Transcript`, `PromptInput` (1–8 lines), `StatusBar` (model, context %, cost, mode glyph, cwd + git branch, MCP n/m, spinner), `PermissionCard` (1/y once, 2/a session, 3 always), `QuestionCard`, `PlanCard` (H6), dialogs ModelPicker/SessionPicker/McpStatus/PermissionsDialog/Help/HistorySearch (Ctrl+R), keys Enter/`\`+Enter/Ctrl+J/Alt+Enter/Esc — `C:\Users\user\Documents\vibes\appDev\rolo-claude\docs\harness\U2-brief.md`; CLI flag parity with Claude Code 2.1.281 incl. `--permission-mode acceptEdits|auto|bypassPermissions|manual|dontAsk|plan`, slash registry (`/help /clear /compact /cost /context /model /mcp /memory /permissions /plan /resume /status /config /skills /agents /effort /init /doctor /export /add-dir /theme /exit`), custom `.claude/commands/**/*.md` with `$ARGUMENTS`, `` !`cmd` `` gated by `allowed-tools`, skills as `/name`, `--output-format stream-json` — `docs\harness\U0-brief.md`; append-only JSONL session log `~/.rolo-claude/sessions/<slug>/<id>.jsonl` — `docs\harness\H1-brief.md`; compaction "dsh replay + OpenCode pruning", PreCompact/PostCompact/SessionStart(compact) hooks, `CostMeter`, `/cost` and `/context` — `docs\harness\H5-brief.md`
+- halo plan facts come from the local briefs: Textual 8.2.8 TUI with `Transcript`, `PromptInput` (1–8 lines), `StatusBar` (model, context %, cost, mode glyph, cwd + git branch, MCP n/m, spinner), `PermissionCard` (1/y once, 2/a session, 3 always), `QuestionCard`, `PlanCard` (H6), dialogs ModelPicker/SessionPicker/McpStatus/PermissionsDialog/Help/HistorySearch (Ctrl+R), keys Enter/`\`+Enter/Ctrl+J/Alt+Enter/Esc — `C:\Users\user\Documents\vibes\appDev\halo\docs\harness\U2-brief.md`; CLI flag parity with Claude Code 2.1.281 incl. `--permission-mode acceptEdits|auto|bypassPermissions|manual|dontAsk|plan`, slash registry (`/help /clear /compact /cost /context /model /mcp /memory /permissions /plan /resume /status /config /skills /agents /effort /init /doctor /export /add-dir /theme /exit`), custom `.claude/commands/**/*.md` with `$ARGUMENTS`, `` !`cmd` `` gated by `allowed-tools`, skills as `/name`, `--output-format stream-json` — `docs\harness\U0-brief.md`; append-only JSONL session log `~/.halo/sessions/<slug>/<id>.jsonl` — `docs\harness\H1-brief.md`; compaction "dsh replay + OpenCode pruning", PreCompact/PostCompact/SessionStart(compact) hooks, `CostMeter`, `/cost` and `/context` — `docs\harness\H5-brief.md`
 - All OpenCode/Claude Code cells below are sourced in Key questions 1–7 above (same URLs).
 
 ### Inferences
-**Feature-parity matrix (CC = Claude Code 2.1.x; OC = OpenCode 1.18.x; RC = rolo-claude plan per briefs; Rec = recommendation)**
+**Feature-parity matrix (CC = Claude Code 2.1.x; OC = OpenCode 1.18.x; RC = halo plan per briefs; Rec = recommendation)**
 
-| # | Capability | Claude Code 2.1.x | OpenCode 1.18.x | rolo-claude plan (briefs) | Recommendation |
+| # | Capability | Claude Code 2.1.x | OpenCode 1.18.x | halo plan (briefs) | Recommendation |
 |---|---|---|---|---|---|
 | 1 | TUI framework | Ink/React + newer fullscreen renderer | OpenTUI (SolidJS + Zig) in Bun binary | Textual 8.2.8 (Python) | Keep Textual; enforce 30 Hz drain + delta coalescing (U2) to avoid Ink-style flicker |
 | 2 | Layout: transcript + prompt + status | Yes; fullscreen adds `?`, `[` scrollback dump, `v` editor | ScrollBox + prompt + split footer; sidebar `<leader>b`; status view `<leader>s` | Transcript, PromptInput, StatusBar | Add `[`-style "dump transcript to native scrollback" and `v` open-in-editor (cheap, huge for tmux users) |
@@ -333,7 +333,7 @@ Of ~40 compared capabilities, rolo-claude's briefs already target Claude Code pa
 | 23 | MCP | local/project/user scopes, elicitation | config merge, OAuth DCR, `servername_tool`, per-agent | `mcp` subcommand parity (U0) | Parity |
 | 24 | LSP diagnostics | Since 2.0.74 via plugins | 30+ bundled, auto-download, off by default | None | Cheap subset: run `ruff`/`pyright`/`tsc` after edits and append diagnostics |
 | 25 | Formatters after edit | No built-in | ~20 built-ins, `$FILE` custom | None | Add opt-in formatter map |
-| 26 | Sessions storage | JSONL under `~/.claude/projects/<slug>` | SQLite `opencode.db` (v2 event-sourced) | JSONL `~/.rolo-claude/sessions/<slug>/<id>.jsonl` | Keep JSONL; add SQLite index only for search |
+| 26 | Sessions storage | JSONL under `~/.claude/projects/<slug>` | SQLite `opencode.db` (v2 event-sourced) | JSONL `~/.halo/sessions/<slug>/<id>.jsonl` | Keep JSONL; add SQLite index only for search |
 | 27 | Resume/fork | `-c`, `-r`, `--fork-session`, `--name` | `-c`, `-s`, `--fork`, `/sessions`, `ctrl+r` rename | `--continue/--resume`, SessionPicker | Add fork + rename |
 | 28 | Session titles | Auto (small model) | `small_model` | `--small-model` exists | Wire title generation |
 | 29 | Share links | No public share | `/share` → `opncd.ai/s/<id>`, `/unshare` | No | Skip (privacy); offer `export --sanitize` |
@@ -348,14 +348,14 @@ Of ~40 compared capabilities, rolo-claude's briefs already target Claude Code pa
 | 38 | Compaction | Auto + `/compact`, Pre/PostCompact hooks | `compaction` config, prune, DCP plugin | dsh replay + pruning + hooks (H5) | Add model-invoked `compress` tool (DCP idea) |
 | 39 | Notifications | `Notification` hook, terminal bell | `attention` sounds/desktop notifications when blurred | Not in briefs | Add bell + optional `notify-send` on Linux when unfocused |
 | 40 | Config format | settings.json chain (user/project/local/managed) | JSONC merge chain incl. remote `.well-known`, `{env:}`/`{file:}` | Claude settings chain | Parity; maybe `{env:}` substitution |
-| 41 | Linux state dirs | `~/.claude` | XDG config/data/cache split | `~/.rolo-claude` | Consider XDG split on Kali |
+| 41 | Linux state dirs | `~/.claude` | XDG config/data/cache split | `~/.halo` | Consider XDG split on Kali |
 | 42 | tmux/SSH robustness | Historic flicker; sync-output fix | Regressions 1.2.21–1.2.24 | Untested | Test in tmux + kitty + xterm on Kali; use Textual's synchronized output |
 
-**Ranked: what rolo-claude should adopt from OpenCode (effort: S ≈ ≤1 day, M ≈ 2–4 days, L ≈ 1–2 weeks)**
+**Ranked: what halo should adopt from OpenCode (effort: S ≈ ≤1 day, M ≈ 2–4 days, L ≈ 1–2 weeks)**
 1. **Leader-key keymap + which-key overlay + `keybinds` remap file** (M). Mirrors OpenCode's `tui.json`; keep Claude Code's defaults where they exist (Ctrl+R, Ctrl+B, Shift+Tab) and put everything else under a leader (`ctrl+x`) so nothing collides with tmux/readline. Source: Q1 keybinds table.
-2. **Git-shadow snapshots → `/undo` `/redo`** (M). Snapshot the work tree in `~/.rolo-claude/snapshots/<slug>` before each assistant turn; `/undo` reverts files and truncates the JSONL log; expose as Controller commands so headless can call them. Source: Q1/Q2 revert findings.
+2. **Git-shadow snapshots → `/undo` `/redo`** (M). Snapshot the work tree in `~/.halo/snapshots/<slug>` before each assistant turn; `/undo` reverts files and truncates the JSONL log; expose as Controller commands so headless can call them. Source: Q1/Q2 revert findings.
 3. **Sub-agents as navigable child sessions** (M, builds on H6). Store child logs as separate JSONL with `parentID`; return `summary + task_id + resumable`; keys `<leader>down` / `left/right` / `up`. Source: Q4.
-4. **Loopback HTTP+SSE server with `--attach`** (L). Wrap the existing Controller queue in a small ASGI app (starlette/uvicorn are already in the venv); `rolo-claude serve` and `rolo-claude --attach http://…`; publish an OpenAPI doc; later a web view. Source: Q3.
+4. **Loopback HTTP+SSE server with `--attach`** (L). Wrap the existing Controller queue in a small ASGI app (starlette/uvicorn are already in the venv); `halo serve` and `halo --attach http://…`; publish an OpenAPI doc; later a web view. Source: Q3.
 5. **`stats`, `export --sanitize`, `import`** (S–M). Walk the JSONL logs: per-day/model/tool token+cost tables; sanitised export for bug reports. Source: Q2.
 6. **`system` theme** (S). Textual `ansi_color=True` plus greys derived from the terminal background; solves kitty/xterm/tmux colour mismatches on Kali. Source: Q1 themes.
 7. **Post-edit diagnostics/formatter feedback** (M). Not full LSP: after Write/Edit, run a configured linter/formatter (`ruff`, `pyright`, `tsc`, `prettier`) and append a ≤N-line diagnostics block to the tool result, matching OpenCode's `touchFile()` + formatter pattern; keep it off by default as OpenCode does. Source: Q5.
@@ -364,12 +364,12 @@ Of ~40 compared capabilities, rolo-claude's briefs already target Claude Code pa
 10. **Attention notifications** (S). Terminal bell + `notify-send` when the Textual app is unfocused, for permission/question/idle events; mirrors OpenCode's `attention` block. Source: Q1.
 11. **Session title via small model + `/rename` + fork** (S). Source: Q2.
 12. **Model-invoked `compress` tool (DCP)** (M, extends H5). Lets the model prune stale tool outputs itself instead of waiting for the compaction threshold. Source: Q5.
-13. **XDG directory split + `ripgrep` preflight on Kali** (S). `~/.config/rolo-claude`, `~/.local/share/rolo-claude`, `~/.cache/rolo-claude`; `rolo-claude doctor` checks `rg`, `xclip`/`wl-copy`, `$EDITOR`. Source: Q7.
-14. **`AGENTS.md` fallback and `.opencode/skills` discovery** (S). Makes rolo-claude drop-in for OpenCode-configured repos. Source: Q5.
+13. **XDG directory split + `ripgrep` preflight on Kali** (S). `~/.config/halo`, `~/.local/share/halo`, `~/.cache/halo`; `halo doctor` checks `rg`, `xclip`/`wl-copy`, `$EDITOR`. Source: Q7.
+14. **`AGENTS.md` fallback and `.opencode/skills` discovery** (S). Makes halo drop-in for OpenCode-configured repos. Source: Q5.
 15. **ACP adapter** (L). Only if Zed/Neovim use on the Kali box becomes real; otherwise skip.
 
-**Explicitly not worth copying**: public share links (privacy; Claude Code deliberately lacks them), the JS-only plugin model (rolo-claude's Claude-compatible shell/HTTP hooks are more portable), the lossy `--format json` shape, and a desktop/web app before the TUI is complete.
+**Explicitly not worth copying**: public share links (privacy; Claude Code deliberately lacks them), the JS-only plugin model (halo's Claude-compatible shell/HTTP hooks are more portable), the lossy `--format json` shape, and a desktop/web app before the TUI is complete.
 
 ### Gaps
-- The matrix's "rolo-claude plan" column reflects the briefs available on disk (U0, U2, H1, H5, H6 references), not the implemented code; items marked "Not in briefs" may exist in `wip/spec*.md` files that were not read.
+- The matrix's "halo plan" column reflects the briefs available on disk (U0, U2, H1, H5, H6 references), not the implemented code; items marked "Not in briefs" may exist in `wip/spec*.md` files that were not read.
 - Effort estimates are judgement calls for a Python/Textual codebase and are not sourced.

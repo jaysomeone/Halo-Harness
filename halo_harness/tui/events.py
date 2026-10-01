@@ -1,4 +1,4 @@
-"""rolo_claude.tui.events -- pure event-queue helpers for the TUI's drain
+"""halo_harness.tui.events -- pure event-queue helpers for the TUI's drain
 loop (D-TUI: "merges consecutive deltas per block"). No textual import, no
 I/O, no widget access -- unit-testable on its own, imported by both
 `tui/app.py` (real use) and `test_tui.py` (coalescing tests).
@@ -6,7 +6,7 @@ I/O, no widget access -- unit-testable on its own, imported by both
 
 from __future__ import annotations
 
-from rolo_claude.events import Event
+from halo_harness.events import Event
 
 # Kinds that may be coalesced: consecutive deltas for the SAME (kind, turn,
 # index) are merged into one Event carrying the concatenated text, so a

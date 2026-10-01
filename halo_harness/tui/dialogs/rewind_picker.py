@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.rewind_picker -- `/rewind` with no argument (U5
+"""halo_harness.tui.dialogs.rewind_picker -- `/rewind` with no argument (U5
 scope B): pick a shadow-repo step to restore to. `steps` is
 `ShadowStore.list_steps()`'s own shape (oldest first); shown newest first.
 Dismisses with the chosen step's `id`, or `None` if cancelled.

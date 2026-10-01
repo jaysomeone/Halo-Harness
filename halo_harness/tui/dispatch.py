@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dispatch -- translates one `rolo_claude.events.Event`
+"""halo_harness.tui.dispatch -- translates one `halo_harness.events.Event`
 into transcript/status-bar/card mutations on a `BridgeApp`. Split out of
 `app.py` to keep the App class itself focused on composition/keys/the drain
 loop; every function here takes `app` explicitly rather than being a method,
@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from rolo_claude.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, _summarize_call
-from rolo_claude.tui.widgets.diffview import DiffView
+from halo_harness.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, _summarize_call
+from halo_harness.tui.widgets.diffview import DiffView
 
 log = logging.getLogger("bridge")
 _SEVERITY = {"error": "error", "warning": "warning"}
@@ -28,7 +28,7 @@ def _tool_header(app, name: str, input_data: dict) -> str:
 
 
 async def _mount_tool_card(app, data: dict) -> None:
-    from rolo_claude.tui.widgets.cards import ToolCard
+    from halo_harness.tui.widgets.cards import ToolCard
 
     tool_id = data.get("id")
     name = data.get("name") or "?"
@@ -91,7 +91,7 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
     if not isinstance(file_path, str) or not file_path:
         return
     try:
-        from rolo_claude.shadow import store_for_controller
+        from halo_harness.shadow import store_for_controller
 
         store = store_for_controller(app.controller)
         if store is None:

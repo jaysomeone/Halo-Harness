@@ -1,4 +1,4 @@
-"""rolo_claude.tools.task_stop -- the TaskStop tool (H8 scope A): stops a
+"""halo_harness.tools.task_stop -- the TaskStop tool (H8 scope A): stops a
 running background Bash shell. See agent/jobs.py's module docstring for the
 binary evidence behind this name (Claude Code 2.1.282 unified the old
 `KillShell`/`KillBash` tools into one current `TaskStop`, `task_id` primary,
@@ -7,7 +7,7 @@ binary evidence behind this name (Claude Code 2.1.282 unified the old
 
 from __future__ import annotations
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Stops a running background task by its ID.\n"
@@ -60,7 +60,7 @@ class TaskStopTool(Tool):
             # H9 whole-tree review finding 27 (task-map persistence half):
             # a task_id from BEFORE a `-c` resume is only in `runtime.tasks`
             # once this runs -- see its own docstring in agent/subagent.py.
-            from rolo_claude.agent.subagent import _hydrate_tasks_from_disk
+            from halo_harness.agent.subagent import _hydrate_tasks_from_disk
             _hydrate_tasks_from_disk(runtime)
             with runtime.lock:
                 task = runtime.tasks.get(job_id)

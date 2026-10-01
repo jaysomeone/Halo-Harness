@@ -138,7 +138,7 @@ def main(argv=None) -> int:
         # it that way -- $OPENROUTER_API_KEY is genuinely unset right
         # here, nothing to leak from THIS process). The bug was one level
         # removed: the LINE this hook appends to $CLAUDE_ENV_FILE is not
-        # run by this process at all -- it's sourced LATER, by rolo-claude
+        # run by this process at all -- it's sourced LATER, by halo
         # itself (agent/loop.py's `_fire_session_start` ->
         # hooks.read_env_file_exports), and that sourcing subprocess used
         # to inherit the harness's RAW, unstripped os.environ as its own

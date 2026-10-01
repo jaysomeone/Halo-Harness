@@ -1,4 +1,4 @@
-"""rolo_claude.mcp.http_sse -- http (`streamable_http_client`) and sse
+"""halo_harness.mcp.http_sse -- http (`streamable_http_client`) and sse
 (`sse_client`, deprecated transport) connect, plus the `headersHelper`
 contract (binary-facts sec.9: shell:true, 10s timeout, maxBuffer 1e6, exit 0
 + stdout that parses as a JSON object of strings, else one of
@@ -92,7 +92,7 @@ def _mcp_http_client_factory(headers: Optional[dict] = None, timeout=None, auth=
     failure."""
     from mcp.shared._httpx_utils import create_mcp_http_client
     try:
-        from rolo_claude.providers.http import default_tls_context
+        from halo_harness.providers.http import default_tls_context
         ctx = default_tls_context()
     except Exception:
         return create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
@@ -127,7 +127,7 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     `asyncio.wait_for` -- see `stdio.connect`'s own docstring for why."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
-    from rolo_claude.mcp.client import task_timeout
+    from halo_harness.mcp.client import task_timeout
 
     http_client = _mcp_http_client_factory(headers=headers or {})
     stack = AsyncExitStack()
@@ -162,7 +162,7 @@ async def connect_sse(*, url: str, headers: dict, connect_timeout: float):
     `client.task_timeout` swap as `connect_http`/`stdio.connect`."""
     from mcp import ClientSession
     from mcp.client.sse import sse_client
-    from rolo_claude.mcp.client import task_timeout
+    from halo_harness.mcp.client import task_timeout
 
     stack = AsyncExitStack()
     try:

@@ -1,4 +1,4 @@
-"""tests.test_hooks_lifecycle -- H4 scope A: rolo_claude/hooks.py's own
+"""tests.test_hooks_lifecycle -- H4 scope A: halo_harness/hooks.py's own
 protocol implementation (HookDef/HookResult/HookOutcome, normalize_hooks,
 matcher/if/dedup/once filtering, every handler type, exit-code/JSON
 interpretation, combination rules, caps, timeouts, Stop cap, SessionEnd
@@ -20,7 +20,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import hooks as H
+from halo_harness import hooks as H
 
 test, TESTS = new_registry()
 
@@ -528,7 +528,7 @@ def test_http_hook_connection_failure_is_non_blocking(ctx: Ctx):
 @test
 def test_mcp_tool_hook_calls_a_real_fake_server(ctx: Ctx):
     from tests.helpers.fake_mcp_server import running_manager
-    from rolo_claude.mcp.manager import McpServerConfig
+    from halo_harness.mcp.manager import McpServerConfig
 
     cfg = McpServerConfig(name="fake", type="stdio", command=sys.executable,
                            args=["-m", "tests.helpers.fake_mcp_server"], env={}, scope="user")
@@ -542,7 +542,7 @@ def test_mcp_tool_hook_calls_a_real_fake_server(ctx: Ctx):
 @test
 def test_mcp_tool_hook_error_tool_is_non_blocking(ctx: Ctx):
     from tests.helpers.fake_mcp_server import running_manager
-    from rolo_claude.mcp.manager import McpServerConfig
+    from halo_harness.mcp.manager import McpServerConfig
 
     cfg = McpServerConfig(name="fake", type="stdio", command=sys.executable,
                            args=["-m", "tests.helpers.fake_mcp_server"], env={}, scope="user")

@@ -45,7 +45,7 @@ _CREDITS_BODY = {"data": {"total_credits": 50.0, "total_usage": 37.60}}
 
 
 def _reset():
-    from rolo_claude.providers.openrouter_account import reset_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import reset_cached_openrouter_balance
     reset_cached_openrouter_balance()
 
 
@@ -57,7 +57,7 @@ class _EnvKeys:
     too, which must never see a REAL ambient credential and fire a real
     network call as a side effect of one of these tests) and scopes
     BRIDGE_TEST_HOME/BRIDGE_STATE_DIR (is_enabled()'s own `providers` block
-    check reads `~/.rolo-claude/config.json` via plain bridge_home(),
+    check reads `~/.halo/config.json` via plain bridge_home(),
     unscoped by any state_dir= passed elsewhere) -- also resets the
     module-level balance cache on both enter and exit, since it is a plain
     Python global, unaffected by env scoping (would otherwise leak between
@@ -73,7 +73,7 @@ class _EnvKeys:
             os.environ.pop(k, None)
         d = Path(tempfile.mkdtemp(prefix="h15-or-balance-env-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         # 1.0.1 part 2 fixpass finding 9: every test in this file points
         # OpenRouter at a loopback mock server (never the real openrouter.ai)
         # to simulate /key and /credits -- the production fix that refuses
@@ -102,7 +102,7 @@ class _EnvKeys:
 
 @test
 def test_fetch_key_info_hits_get_key_not_auth_key(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import fetch_key_info
+    from halo_harness.providers.openrouter_account import fetch_key_info
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
     try:
         info = fetch_key_info(mock.base_url + "/api/v1", "sk-or-ordinary")
@@ -114,14 +114,14 @@ def test_fetch_key_info_hits_get_key_not_auth_key(ctx: Ctx):
         ctx.check("the (nonexistent) /auth/key path was never hit",
                   not any(r["path"] == "/api/v1/auth/key" for r in mock.requests))
         ctx.check("sends the harness User-Agent",
-                  any("rolo-claude" in r.get("headers", {}).get("User-Agent", "") for r in mock.requests))
+                  any("halo" in r.get("headers", {}).get("User-Agent", "") for r in mock.requests))
     finally:
         mock.stop()
 
 
 @test
 def test_fetch_key_info_with_a_limit_parses_limit_remaining_and_rate_limit(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import fetch_key_info
+    from halo_harness.providers.openrouter_account import fetch_key_info
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_WITH_LIMIT_BODY)}).start()
     try:
         info = fetch_key_info(mock.base_url + "/api/v1", "sk-or-ordinary")
@@ -139,7 +139,7 @@ def test_fetch_credits_requires_the_management_key(ctx: Ctx):
     this pins that `fetch_credits` sends whatever key it's GIVEN (the
     caller's job, `refresh_cached_openrouter_balance`, is what must never
     pass the ordinary key here -- covered separately below)."""
-    from rolo_claude.providers.openrouter_account import fetch_credits
+    from halo_harness.providers.openrouter_account import fetch_credits
     mock = MockGetEndpoints({"/api/v1/credits": (200, _CREDITS_BODY)}).start()
     try:
         credits = fetch_credits(mock.base_url + "/api/v1", "sk-or-management")
@@ -154,14 +154,14 @@ def test_fetch_credits_requires_the_management_key(ctx: Ctx):
 
 @test
 def test_fetch_key_info_connect_failure_returns_none_never_raises(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import fetch_key_info
+    from halo_harness.providers.openrouter_account import fetch_key_info
     result = fetch_key_info("http://127.0.0.1:1/api/v1", "sk-or-fake")
     ctx.check(f"connect failure -> None, never raises, got {result!r}", result is None)
 
 
 @test
 def test_resolve_balance_prefers_limit_remaining_when_the_key_has_a_limit(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import OrCredits, OrKeyInfo, resolve_balance
+    from halo_harness.providers.openrouter_account import OrCredits, OrKeyInfo, resolve_balance
     key_info = OrKeyInfo(label="capped", limit=20.0, usage=7.0, limit_remaining=13.0, is_free_tier=False)
     credits = OrCredits(total_credits=50.0, total_usage=37.60)
     got = resolve_balance(key_info, credits)
@@ -170,7 +170,7 @@ def test_resolve_balance_prefers_limit_remaining_when_the_key_has_a_limit(ctx: C
 
 @test
 def test_resolve_balance_falls_back_to_management_key_credits_when_no_limit(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import OrCredits, OrKeyInfo, resolve_balance
+    from halo_harness.providers.openrouter_account import OrCredits, OrKeyInfo, resolve_balance
     key_info = OrKeyInfo(label="uncapped", limit=None, usage=3.21, limit_remaining=None, is_free_tier=False)
     credits = OrCredits(total_credits=50.0, total_usage=37.60)
     got = resolve_balance(key_info, credits)
@@ -182,7 +182,7 @@ def test_resolve_balance_falls_back_to_management_key_credits_when_no_limit(ctx:
 def test_resolve_balance_falls_back_to_this_keys_own_usage_when_neither_available(ctx: Ctx):
     """The honest third fallback: an unlimited key, no management key
     configured at all (credits=None) -- shows THIS key's own spend."""
-    from rolo_claude.providers.openrouter_account import OrKeyInfo, resolve_balance
+    from halo_harness.providers.openrouter_account import OrKeyInfo, resolve_balance
     key_info = OrKeyInfo(label="uncapped", limit=None, usage=3.21, limit_remaining=None, is_free_tier=False)
     got = resolve_balance(key_info, None)
     ctx.check(f"kind=usage, amount=3.21, got {got}", got == {"amount": 3.21, "kind": "usage"})
@@ -190,7 +190,7 @@ def test_resolve_balance_falls_back_to_this_keys_own_usage_when_neither_availabl
 
 @test
 def test_resolve_balance_none_when_nothing_at_all_available(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import resolve_balance
+    from halo_harness.providers.openrouter_account import resolve_balance
     ctx.check("both None -> None", resolve_balance(None, None) is None)
 
 
@@ -201,7 +201,7 @@ def test_resolve_balance_none_when_nothing_at_all_available(ctx: Ctx):
 
 @test
 def test_refresh_variant_limit_remaining(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import (
+    from halo_harness.providers.openrouter_account import (
         cached_openrouter_balance, format_status_bar_segment, refresh_cached_openrouter_balance,
     )
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_WITH_LIMIT_BODY)}).start()
@@ -218,7 +218,7 @@ def test_refresh_variant_limit_remaining(ctx: Ctx):
 
 @test
 def test_refresh_variant_management_key_credits(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY),
                               "/api/v1/credits": (200, _CREDITS_BODY)}).start()
     try:
@@ -235,7 +235,7 @@ def test_refresh_variant_management_key_credits(ctx: Ctx):
 
 @test
 def test_refresh_variant_this_keys_usage_no_management_key(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
     try:
         _reset()
@@ -253,7 +253,7 @@ def test_refresh_variant_this_keys_usage_no_management_key(ctx: Ctx):
 def test_management_key_never_sent_to_key_endpoint(ctx: Ctx):
     """The addendum's own explicit safety ask: the management key must
     never leak onto the ordinary /key call."""
-    from rolo_claude.providers.openrouter_account import refresh_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY),
                               "/api/v1/credits": (200, _CREDITS_BODY)}).start()
     try:
@@ -274,7 +274,7 @@ def test_management_key_never_sent_to_key_endpoint(ctx: Ctx):
 
 @test
 def test_a_failed_refresh_never_clobbers_a_previously_good_reading(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import cached_openrouter_balance, refresh_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import cached_openrouter_balance, refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
     try:
         _reset()
@@ -290,7 +290,7 @@ def test_a_failed_refresh_never_clobbers_a_previously_good_reading(ctx: Ctx):
 
 @test
 def test_post_turn_debounce_blocks_a_second_immediate_refresh(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import (
+    from halo_harness.providers.openrouter_account import (
         openrouter_balance_refresh_due_after_turn, refresh_cached_openrouter_balance,
     )
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
@@ -330,7 +330,7 @@ class _FakeAppForWorker:
 
 @test
 def test_or_balance_refresh_worker_noop_when_openrouter_not_enabled(ctx: Ctx):
-    from rolo_claude.tui.slash import or_balance_refresh_worker
+    from halo_harness.tui.slash import or_balance_refresh_worker
     with _EnvKeys():
         app = _FakeAppForWorker()
         or_balance_refresh_worker(app, force=True)
@@ -339,7 +339,7 @@ def test_or_balance_refresh_worker_noop_when_openrouter_not_enabled(ctx: Ctx):
 
 @test
 def test_or_balance_refresh_worker_uses_usage_variant_with_only_the_ordinary_key(ctx: Ctx):
-    from rolo_claude.tui.slash import or_balance_refresh_worker
+    from halo_harness.tui.slash import or_balance_refresh_worker
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
     try:
         with _EnvKeys():
@@ -355,7 +355,7 @@ def test_or_balance_refresh_worker_uses_usage_variant_with_only_the_ordinary_key
 
 @test
 def test_or_balance_refresh_worker_uses_management_key_when_configured(ctx: Ctx):
-    from rolo_claude.tui.slash import or_balance_refresh_worker
+    from halo_harness.tui.slash import or_balance_refresh_worker
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY),
                               "/api/v1/credits": (200, _CREDITS_BODY)}).start()
     try:
@@ -378,8 +378,8 @@ def test_or_balance_refresh_worker_reads_the_controllers_effective_env_not_bare_
     effective_env when a real Controller/Settings is attached -- never bare
     os.environ -- so a credential scoped only to the session's own trust-
     filtered settings chain is honored exactly like a real turn would."""
-    from rolo_claude.providers.enablement import enable
-    from rolo_claude.tui.slash import or_balance_refresh_worker
+    from halo_harness.providers.enablement import enable
+    from halo_harness.tui.slash import or_balance_refresh_worker
 
     class _FakeSettingsForWorker:
         def __init__(self, env):
@@ -414,7 +414,7 @@ def test_or_balance_refresh_worker_reads_the_controllers_effective_env_not_bare_
 
 @test
 def test_or_balance_refresh_worker_failing_endpoint_never_raises_and_leaves_bar_untouched(ctx: Ctx):
-    from rolo_claude.tui.slash import or_balance_refresh_worker
+    from halo_harness.tui.slash import or_balance_refresh_worker
     with _EnvKeys():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-ordinary"
         os.environ["BRIDGE_OPENROUTER_BASE_URL"] = "http://127.0.0.1:1/api/v1"  # nothing listening
@@ -436,8 +436,8 @@ def _run_in_mounted_app(fn) -> None:
     `fn(app.status_bar)` from inside its `run_test()` context -- `fn` does
     its own ctx.check calls via closure."""
     import asyncio
-    from rolo_claude.testing.fake_controller import FakeController
-    from rolo_claude.tui.app import BridgeApp
+    from halo_harness.testing.fake_controller import FakeController
+    from halo_harness.tui.app import BridgeApp
 
     async def body():
         fake = FakeController()
@@ -518,8 +518,8 @@ def test_status_bar_segment_sits_right_after_cost(ctx: Ctx):
 @test
 def test_launch_populates_the_status_bar_segment_end_to_end(ctx: Ctx):
     import asyncio
-    from rolo_claude.testing.fake_controller import FakeController
-    from rolo_claude.tui.app import BridgeApp
+    from halo_harness.testing.fake_controller import FakeController
+    from halo_harness.tui.app import BridgeApp
 
     async def body():
         mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_WITH_LIMIT_BODY)}).start()
@@ -547,8 +547,8 @@ def test_launch_populates_the_status_bar_segment_end_to_end(ctx: Ctx):
 
 @test
 def test_cmd_cost_shows_the_limit_remaining_line(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_cost
-    from rolo_claude.providers.openrouter_account import refresh_cached_openrouter_balance
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_cost
+    from halo_harness.providers.openrouter_account import refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_WITH_LIMIT_BODY)}).start()
     try:
         _reset()
@@ -564,8 +564,8 @@ def test_cmd_cost_shows_the_limit_remaining_line(ctx: Ctx):
 
 @test
 def test_cmd_cost_shows_the_usage_line_when_no_limit_or_management_key(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_cost
-    from rolo_claude.providers.openrouter_account import refresh_cached_openrouter_balance
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_cost
+    from halo_harness.providers.openrouter_account import refresh_cached_openrouter_balance
     mock = MockGetEndpoints({"/api/v1/key": (200, _KEY_INFO_NO_LIMIT_BODY)}).start()
     try:
         _reset()
@@ -580,7 +580,7 @@ def test_cmd_cost_shows_the_usage_line_when_no_limit_or_management_key(ctx: Ctx)
 
 @test
 def test_cmd_cost_omits_the_balance_line_when_never_fetched(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_cost
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_cost
     _reset()
     out = _cmd_cost("", HeadlessFacade(cwd=Path.cwd()))
     ctx.check(f"no OpenRouter line at all, got {out!r}", "OpenRouter" not in out)

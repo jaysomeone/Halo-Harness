@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ingest_model_table.py -- H2 must-do 2: parse the single JSON block out of
 `reports/Open weight model adapter rules.md` (hosts + families + 64 model
-rows) and compile it into `rolo_claude/providers/model_table.json`: for
+rows) and compile it into `halo_harness/providers/model_table.json`: for
 every (model, host) pair where the model has a non-null alias on that host,
 compute the EFFECTIVE row as `family ⊕ model ⊕ host` (family fields, model
 overrides, then host-specific overlays from `limits_by_host`/
@@ -31,7 +31,7 @@ from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 REPORT_PATH = REPO_DIR / "reports" / "Open weight model adapter rules.md"
-OUT_PATH = REPO_DIR / "rolo_claude" / "providers" / "model_table.json"
+OUT_PATH = REPO_DIR / "halo_harness" / "providers" / "model_table.json"
 
 _STANDARD_LIMIT_KEYS = ("context", "output_cap", "output_default")
 

@@ -1,4 +1,4 @@
-"""rolo_claude.providers.config -- environment discovery, OpenRouter/
+"""halo_harness.providers.config -- environment discovery, OpenRouter/
 Databricks config resolution, the settings-env chain, logging setup, and a
 handful of small pure helpers (jdumps/estimate_tokens/dump_debug). Moved out
 of bridge.py unchanged in the H0 package split; see wip/SIGNATURES.md part1
@@ -24,7 +24,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from rolo_claude import __version__
+from halo_harness import __version__
+# 2.0.0 rename: config/paths.py has zero halo_harness-internal imports of
+# its own (stdlib only), so importing it here at module level carries no
+# circularity risk -- env_compat/env_file_path are the single shared
+# implementation every BRIDGE_*/ROLO_CLAUDE_*-reading call site below now
+# goes through, so the HALO_* precedence + one-DEBUG-line-per-legacy-use
+# behavior lives in exactly one place.
+from halo_harness.config.paths import env_compat, env_file_path as _resolve_env_file_path, legacy_env_file_path
 
 def home() -> Path:
     """Return BRIDGE_TEST_HOME if set, else user home directory."""
@@ -34,10 +41,19 @@ def home() -> Path:
 
 
 def default_state_dir() -> Path:
-    """Return BRIDGE_STATE_DIR if set, else ~/.rolo-claude (rolo-claude harness data dir; shared with the harness's own session/MCP/trust state -- see config/paths.py)."""
+    """Return BRIDGE_STATE_DIR if set, else ~/.halo (Halo Harness data dir;
+    shared with the harness's own session/MCP/trust state). Delegates to
+    `config.paths.bridge_home()` (lazy import -- `providers/config.py`
+    otherwise has no dependency on the rest of the package tree) so the
+    2.0.0 one-time `~/.rolo-claude` -> `~/.halo` migration lives in exactly
+    one place and fires identically whichever name a caller reaches it
+    through (`halo`'s own TUI/print-mode path and `halo proxy`/bridge.py
+    both resolve the SAME state dir, migrated at most once combined, not
+    once per name)."""
     if "BRIDGE_STATE_DIR" in os.environ:
         return Path(os.environ["BRIDGE_STATE_DIR"])
-    return home() / ".rolo-claude"
+    from halo_harness.config.paths import bridge_home
+    return bridge_home()
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -49,7 +65,7 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return loaded
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:  # tolerate a BOM from a Windows editor
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -84,6 +100,42 @@ def load_env_file(path: Path) -> dict[str, str]:
     return loaded
 
 
+def _legacy_env_file_to_consult() -> "Optional[Path]":
+    """The legacy env file a READER should ALSO check, or None when there
+    is none to check -- an explicit HALO_ENV_FILE/BRIDGE_ENV_FILE override
+    is total (same override `env_file_path()` itself honors) and skips the
+    legacy file entirely, same as when it happens to equal the legacy path
+    already (nothing left to add)."""
+    if env_compat("ENV_FILE"):
+        return None
+    return legacy_env_file_path()
+
+
+def load_provider_env_files() -> dict[str, str]:
+    """2.0.0 fixpass finding 4: loads `env_file_path()` (the new canonical
+    path, or the HALO_ENV_FILE/legacy-named override when one is set) THEN
+    the legacy `~/.config/vibes-hacker/env` file -- `load_env_file`'s own
+    `os.environ.setdefault` means the new file's keys always win on a
+    collision, exactly like before this fix for every key the new file
+    actually has. Every caller that used to do `load_env_file(env_file_
+    path())` to load the provider-credentials file now calls this instead,
+    so a `DATABRICKS_TOKEN` kept only in the legacy file is never silently
+    invisible again just because the new file also exists (for some OTHER
+    key). An explicit override collapses this to that one file alone."""
+    new_path = _resolve_env_file_path()
+    loaded = dict(load_env_file(new_path))
+    legacy = _legacy_env_file_to_consult()
+    # Item E: once the new file was copied forward from the legacy one it
+    # carries ENV_IMPORT_MARKER, and the legacy file (which other tools on
+    # the box still read, so it is never renamed or edited) is no longer
+    # consulted -- a key deleted from the new file stays deleted.
+    from halo_harness.config.paths import env_file_has_import_marker
+    if legacy is not None and not env_file_has_import_marker(new_path):
+        for key, value in load_env_file(legacy).items():
+            loaded.setdefault(key, value)
+    return loaded
+
+
 # finding 10: the harness's OWN provider-credential env vars -- never
 # forwarded to a Bash/PowerShell/MCP child, no matter which of the several
 # ways (the env file, a real ambient env var, BRIDGE_DBX_* overrides, ...)
@@ -92,7 +144,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 # session JSONL, or the next upstream request.
 _HARNESS_SECRET_ENV_KEYS = frozenset({
     "OPENROUTER_API_KEY", "DATABRICKS_TOKEN", "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY", "BRIDGE_DBX_TOKEN",
+    "ANTHROPIC_API_KEY", "BRIDGE_DBX_TOKEN", "HALO_DBX_TOKEN", "ROLO_CLAUDE_DBX_TOKEN",
     # N1 (1.0.1 final pass): OPENROUTER_MANAGEMENT_KEY is a SEPARATE,
     # higher-privilege OpenRouter credential (resolve_openrouter_management_
     # key, below) -- it must never reach a tool child either, same as the
@@ -110,11 +162,28 @@ def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
     minus every key the harness's own env-file loader would inject PLUS
     the fixed secret-key list above -- the environment a Bash/PowerShell/
     MCP CHILD PROCESS should actually see. `env_file_path` defaults to the
-    same `BRIDGE_ENV_FILE` (or `~/.config/vibes-hacker/env`) location
-    `resolve_config`/`load_env_file` already use, read PURELY (see
-    `_parse_env_file` -- never touches `os.environ`)."""
-    path = env_file_path or Path(os.environ.get("BRIDGE_ENV_FILE", str(home() / ".config" / "vibes-hacker" / "env")))
+    same `HALO_ENV_FILE`/legacy-`BRIDGE_ENV_FILE` (or `~/.config/halo/env`/
+    legacy `~/.config/vibes-hacker/env`) location `resolve_config`/
+    `load_env_file` already use (see `config.paths.env_file_path`), read
+    PURELY (see `_parse_env_file` -- never touches `os.environ`)."""
+    path = env_file_path or _resolve_env_file_path()
     strip_keys = set(_parse_env_file(path).keys()) | _HARNESS_SECRET_ENV_KEYS
+    # 2.0.0 fixpass finding 4: a key sitting ONLY in the legacy file (the
+    # new one exists too, for some other key, or doesn't exist at all) must
+    # still never reach a tool child -- strip from BOTH files' keys, not
+    # just whichever one `env_file_path()`/an explicit override resolved
+    # to. Skipped outright when an explicit override is active, same as
+    # `load_provider_env_files()`.
+    if env_file_path is None:
+        legacy = _legacy_env_file_to_consult()
+        # Same gate as `load_provider_env_files()`: once the new file carries
+        # the import marker the legacy file is out of the picture, so a key
+        # the user removed from the new file and exports on purpose is not
+        # stripped from tool children because the shared legacy file still
+        # lists it.
+        from halo_harness.config.paths import env_file_has_import_marker
+        if legacy is not None and not env_file_has_import_marker(path):
+            strip_keys |= set(_parse_env_file(legacy).keys())
     return {k: v for k, v in env.items() if k not in strip_keys}
 
 
@@ -126,7 +195,7 @@ def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
 # AUTH_TOKEN/BASE_URL this process happened to have (from the env file, a
 # real shell var, or a Databricks passthrough setup for `ant:`), and never
 # an OUTER Claude Code session's own identity (CLAUDE_CODE_SESSION_ID,
-# CLAUDE_CODE_MESSAGING_SOCKET/_TOKEN, CLAUDE_EFFORT, ...) this rolo-claude
+# CLAUDE_CODE_MESSAGING_SOCKET/_TOKEN, CLAUDE_EFFORT, ...) this halo
 # process itself happens to have inherited from running nested inside one.
 # Used for BOTH the `claude` subprocess's own env AND (transitively, since
 # an MCP stdio child inherits its spawning process's env -- verified live,
@@ -180,9 +249,9 @@ def load_settings_env_chain(cwd: Path, *, trusted: "bool | None" = None) -> dict
     `dbx:` ref resolved through it (doctor, `/providers`, `resolve_
     databricks()`'s own bare-env steps 2/3) read as "not configured".
     """
-    from rolo_claude.config.paths import claude_config_dir, managed_settings_files
+    from halo_harness.config.paths import claude_config_dir, managed_settings_files
     if trusted is None:
-        from rolo_claude.config.claude_json import is_trusted, load_claude_json
+        from halo_harness.config.claude_json import is_trusted, load_claude_json
         trusted = is_trusted(cwd, load_claude_json())
     merged = {}
     for managed_path in managed_settings_files():
@@ -249,8 +318,8 @@ def listing_effective_env(cwd: Optional[Path] = None) -> dict:
     malformed settings file, ...) falls back to bare `os.environ` -- the
     unchanged pre-fix behavior for whichever caller hit it, never a crash."""
     try:
-        from rolo_claude.config.claude_json import is_trusted, load_claude_json
-        from rolo_claude.config.settings import resolve_settings
+        from halo_harness.config.claude_json import is_trusted, load_claude_json
+        from halo_harness.config.settings import resolve_settings
         where = cwd or Path.cwd()
         # Trust-aware like a real session: an untrusted folder's project/local
         # settings never show up as "picked up" credentials in a listing.
@@ -278,7 +347,7 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     api_key = env.get("OPENROUTER_API_KEY")
     if not api_key:
         return None
-    base_url = env.get("BRIDGE_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    base_url = env_compat("OPENROUTER_BASE_URL", env, "https://openrouter.ai/api/v1")
     return OrConfig(api_key=api_key, base_url=base_url)
 
 
@@ -314,7 +383,7 @@ def resolve_anthropic(env: dict | None = None) -> AntConfig | None:
     api_key = env.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    base_url = env.get("BRIDGE_ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    base_url = env_compat("ANTHROPIC_BASE_URL", env, "https://api.anthropic.com")
     return AntConfig(api_key=api_key, base_url=base_url)
 
 
@@ -575,8 +644,8 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
         return DbxConfig(host=root, token=token, anthropic_gateway=gateway, custom_headers=_custom_headers())
 
     # 1. Explicit override -- always wins, unfiltered.
-    bridge_host = env.get("BRIDGE_DBX_BASE_URL")
-    bridge_token = env.get("BRIDGE_DBX_TOKEN")
+    bridge_host = env_compat("DBX_BASE_URL", env)
+    bridge_token = env_compat("DBX_TOKEN", env)
     if bridge_host and bridge_token:
         return _finalize(bridge_host, bridge_token)
 
@@ -611,7 +680,7 @@ def resolve_databricks(env: dict | None = None) -> DbxConfig | None:
     # Databricks' own `ug` (unity-gateway) CLI -- a purpose-built, harness-
     # adjacent config file, so it's tried BEFORE the generic (and possibly
     # stale/unrelated-workspace) ~/.databrickscfg below.
-    from rolo_claude.config.paths import claude_config_dir
+    from halo_harness.config.paths import claude_config_dir
     ucode = load_ucode_settings(claude_config_dir() / "ucode-settings.json")
     if ucode is not None:
         return _finalize(ucode.host, ucode.token)
@@ -630,8 +699,8 @@ def resolve_databricks_source(env: dict | None = None) -> Optional[str]:
     (same order, same settings-chain re-derivation gate) as a read-only,
     side-effect-free lookup; None when nothing resolves there either."""
     env = env if env is not None else os.environ
-    if env.get("BRIDGE_DBX_BASE_URL") and env.get("BRIDGE_DBX_TOKEN"):
-        return "BRIDGE_DBX_BASE_URL/BRIDGE_DBX_TOKEN (explicit override)"
+    if env_compat("DBX_BASE_URL", env) and env_compat("DBX_TOKEN", env):
+        return "HALO_DBX_BASE_URL/HALO_DBX_TOKEN (explicit override)"
     anth_host, anth_token = env.get("ANTHROPIC_BASE_URL"), env.get("ANTHROPIC_AUTH_TOKEN")
     if anth_host and anth_token and looks_like_databricks_host(anth_host):
         return "ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (environment)"
@@ -647,7 +716,7 @@ def resolve_databricks_source(env: dict | None = None) -> Optional[str]:
     dbx_token = env.get("DATABRICKS_TOKEN") or settings_env.get("DATABRICKS_TOKEN")
     if dbx_host and dbx_token:
         return "DATABRICKS_HOST/DATABRICKS_TOKEN"
-    from rolo_claude.config.paths import claude_config_dir
+    from halo_harness.config.paths import claude_config_dir
     if load_ucode_settings(claude_config_dir() / "ucode-settings.json") is not None:
         return "~/.claude/ucode-settings.json"
     if load_databrickscfg(home() / ".databrickscfg") is not None:
@@ -666,7 +735,7 @@ def resolve_databricks_host_only(env: dict | None = None) -> Optional[str]:
     env = env if env is not None else os.environ
     if resolve_databricks(env) is not None:
         return None
-    bridge_host = env.get("BRIDGE_DBX_BASE_URL")
+    bridge_host = env_compat("DBX_BASE_URL", env)
     if bridge_host:
         return derive_workspace_root(bridge_host)
     anth_host = env.get("ANTHROPIC_BASE_URL")
@@ -818,9 +887,9 @@ def resolve_config() -> BridgeConfig:
     Resolve all configuration without network calls.
     Secrets are redacted via redact().
     """
-    # Load env file if present
-    env_file_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    env_loaded = bool(load_env_file(env_file_path))
+    # Load env file if present (2.0.0 fixpass finding 4: new file, then the
+    # legacy one too -- see load_provider_env_files's own docstring).
+    env_loaded = bool(load_provider_env_files())
 
     state_dir = default_state_dir()
     routes_path = state_dir / "routes.json" if state_dir.exists() else None
@@ -886,7 +955,7 @@ def ensure_token(state_dir: Path) -> str:
 
 def bridge_py_sha1() -> str:
     """Tree hash: sha1 over the running proxy's bridge.py bytes, followed by
-    every rolo_claude/providers/*.py file's bytes in sorted-filename order
+    every halo_harness/providers/*.py file's bytes in sorted-filename order
     (each entry prefixed by its own name so a rename changes the digest too).
 
     bridge.py's path is resolved from sys.modules["__main__"] whenever the
@@ -895,10 +964,10 @@ def bridge_py_sha1() -> str:
     bridge.py defines, regardless of what the file is actually named) so a
     byte-mutated copy run directly for the launcher's stale-server-restart
     test hashes as ITSELF, not the installed original. Every other caller
-    (``python -m rolo_claude ...``, a direct ``import bridge``) falls back
+    (``python -m halo_harness ...``, a direct ``import bridge``) falls back
     to the real bridge.py installed as this package's sibling, which the
     packaging layout guarantees (py-modules=["bridge"] alongside the
-    rolo_claude package, in the repo root or in site-packages alike).
+    halo_harness package, in the repo root or in site-packages alike).
     """
     providers_dir = Path(__file__).resolve().parent
     main_mod = sys.modules.get("__main__")
@@ -1032,8 +1101,8 @@ def estimate_tokens(obj: Any) -> int:
 
 
 def dump_debug(state_dir: Path, kind: str, payload: Any) -> None:
-    """Write debug dump if BRIDGE_DUMP=1."""
-    if os.environ.get("BRIDGE_DUMP") != "1":
+    """Write debug dump if HALO_DUMP=1 (legacy BRIDGE_DUMP=1 still honoured)."""
+    if env_compat("DUMP") != "1":
         return
     dump_dir = state_dir / "dumps"
     dump_dir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,6 @@
-# H6 brief — sub-agents, plan mode, resume/fork, agents CLI (rolo-claude)
+# H6 brief — sub-agents, plan mode, resume/fork, agents CLI (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — OS-neutral). Baseline = the H5 commit on master, all suites (+ `test_tui.py`) green on Windows and
 WSL. Do not commit.
 
@@ -54,7 +54,7 @@ D. **Sessions**: `--continue` (latest for cwd), `--resume [id|name|transcript.js
    TUI via `list_sessions`), `--session-id <uuid>` (must be a valid UUID; new or existing),
    `--fork-session` (copy the log under a new id before appending), `replay{messages}` event so the TUI
    re-renders history; `index.json` per slug with first prompt/started/last/turns/cost; `/resume` TUI
-   picker; `rolo-claude --resume` with no id opens the picker.
+   picker; `halo --resume` with no id opens the picker.
 E. **stream-json**: sub-agent events (`subagent_start/stop` with `agent_id`, `parent_tool_use_id`) and
    nested `assistant`/`user` lines carry `parent_tool_use_id` like Claude Code's SDK output.
 
@@ -78,8 +78,8 @@ sessions (continue/resume/fork/session-id validation; index.json; replay event);
 `@agent-name`; hooks SubagentStart/Stop payloads; TUI pilot: nested cards + PlanCard approve.
 
 ## Acceptance
-All suites green on Windows and WSL. Live (default model): `python -m rolo_claude -p "use a
-sub-agent to count the python files under rolo_claude and report the number" --permission-mode auto
+All suites green on Windows and WSL. Live (default model): `python -m halo_harness -p "use a
+sub-agent to count the python files under halo_harness and report the number" --permission-mode auto
 --verbose` → nested agent events and a correct count (compare `find`); `--permission-mode plan -p
 "plan how you would add a --version flag to bridge.py"` → a plan file under `~/.claude/plans/` and
 the plan text as the result, no edits made; `-r <that session id> -p "now summarise your plan in

@@ -1,8 +1,8 @@
-"""rolo_claude.telemetry -- L0 telemetry (H10 Part A): scans session logs
-under `~/.rolo-claude/sessions/<slug>/*.jsonl` and aggregates per-model and
-per-tool counters for `rolo-claude stats --models/--tools`, `/stats
+"""halo_harness.telemetry -- L0 telemetry (H10 Part A): scans session logs
+under `~/.halo/sessions/<slug>/*.jsonl` and aggregates per-model and
+per-tool counters for `halo stats --models/--tools`, `/stats
 --models`, and `/improve`'s own evidence clustering
-(`rolo_claude/improve/evidence.py`). Derives EVERYTHING from non-wire
+(`halo_harness/improve/evidence.py`). Derives EVERYTHING from non-wire
 metadata already on the log nodes (`agent/log.py`'s `append_usage`/
 `append_tool_result`/`append_assistant(tool_meta=...)`, all wired in
 `agent/loop.py`) -- never a new model-visible field; see
@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home
+from halo_harness.config.paths import bridge_home
 
 ERROR_CLASSES = (
     "schema_invalid", "not_found", "multiple_matches", "read_before_edit",
@@ -133,7 +133,7 @@ def _route_from_model(model: Optional[str]) -> Optional[str]:
 @dataclass
 class SessionSummary:
     """One session's pre-aggregated counters -- small enough to round-trip
-    through `~/.rolo-claude/stats-cache.json` so an unchanged file never
+    through `~/.halo/stats-cache.json` so an unchanged file never
     needs re-parsing. `models` keys are `"<model>\\x1f<provider>"`."""
     session_id: str
     slug: str
@@ -390,7 +390,7 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
 
 
 # ---------------------------------------------------------------------------
-# Cache: ~/.rolo-claude/stats-cache.json keyed by (path, size, mtime).
+# Cache: ~/.halo/stats-cache.json keyed by (path, size, mtime).
 # ---------------------------------------------------------------------------
 
 def cache_path() -> Path:
@@ -433,7 +433,7 @@ def cache_age_seconds() -> Optional[float]:
 
 def _since_cutoff(since: str) -> Optional[float]:
     """"7d"/"30d"/"all" are the documented vocabulary, but any "<N>d"
-    string (`rolo_claude.improve.config.since_str` can produce one from a
+    string (`halo_harness.improve.config.since_str` can produce one from a
     custom `improve.since_days`) parses too; anything else falls back to
     7 days rather than raising on a hand-edited config value."""
     if since == "all":
@@ -463,7 +463,7 @@ def _candidate_files(sessions_dir: Path, *, slug: Optional[str], all_projects: b
 
 
 # ---------------------------------------------------------------------------
-# Public re-exports for rolo_claude.improve.evidence, which needs the same
+# Public re-exports for halo_harness.improve.evidence, which needs the same
 # candidate-file/since-window/line-reading logic but a RAW node pass (for
 # excerpt text), not the pre-aggregated SessionSummary counters above.
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 every real CLI subcommand and flag, and never document one that doesn't
 exist. Flags are gathered the same way a user would find them: by calling
 each command/subcommand's own `--help` IN-PROCESS (no subprocess, no
-network) and reading the SAME argparse-rendered text `rolo-claude --help`
+network) and reading the SAME argparse-rendered text `halo --help`
 would print -- never hand-copied into this test, so it can't silently drift
 from the real flag table the way a hardcoded list would.
 
@@ -59,31 +59,31 @@ def _gather_real_flags() -> "dict[str, set]":
     includes every `_NOT_YET_FLAGS` entry too -- they're ordinary
     argparse options on the SAME parser, just ones whose FEATURE isn't
     built yet, so they show up in `--help` exactly like a real one)."""
-    from rolo_claude import cli as cli_mod
-    from rolo_claude import mcp_cli, catalog_cli, doctor as doctor_mod, stats_cli, export_cli, improve_cli, init_cli
-    from rolo_claude import work_matrix as work_matrix_mod
-    from rolo_claude.config_cli import cmd_config
+    from halo_harness import cli as cli_mod
+    from halo_harness import mcp_cli, catalog_cli, doctor as doctor_mod, stats_cli, export_cli, improve_cli, init_cli
+    from halo_harness import work_matrix as work_matrix_mod
+    from halo_harness.config_cli import cmd_config
     import bridge
 
     out: "dict[str, set]" = {}
-    out["rolo-claude"] = _flags_in(cli_mod._build_parser().format_help())
-    out["rolo-claude mcp"] = _flags_in(_capture(mcp_cli.cmd_mcp, ["--help"]))
-    out["rolo-claude mcp list"] = _flags_in(_capture(mcp_cli._cmd_list, ["--help"]))
-    out["rolo-claude mcp get"] = _flags_in(_capture(mcp_cli._cmd_get, ["--help"]))
-    out["rolo-claude mcp add"] = _flags_in(_capture(mcp_cli._cmd_add, ["--help"]))
-    out["rolo-claude mcp add-json"] = _flags_in(_capture(mcp_cli._cmd_add_json, ["--help"]))
-    out["rolo-claude mcp remove"] = _flags_in(_capture(mcp_cli._cmd_remove, ["--help"]))
-    out["rolo-claude models"] = _flags_in(_capture(catalog_cli.cmd_models, ["--help"]))
-    out["rolo-claude config"] = _flags_in(_capture(cmd_config, ["--help"]))
-    out["rolo-claude doctor"] = _flags_in(_capture(doctor_mod.cmd_doctor, ["--help"]))
-    out["rolo-claude stats"] = _flags_in(_capture(stats_cli.cmd_stats, ["--help"]))
-    out["rolo-claude export"] = _flags_in(_capture(export_cli.cmd_export, ["--help"]))
-    out["rolo-claude improve"] = _flags_in(_capture(improve_cli.cmd_improve, ["--help"]))
-    out["rolo-claude init"] = _flags_in(_capture(init_cli.cmd_init, ["--help"]))
-    out["rolo-claude proxy"] = _flags_in(_capture(bridge.main, ["--help"]))
-    out["rolo-claude work-matrix"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["--help"]))
-    out["rolo-claude work-matrix show"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["show", "--help"]))
-    out["rolo-claude work-matrix apply"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["apply", "--help"]))
+    out["halo"] = _flags_in(cli_mod._build_parser().format_help())
+    out["halo mcp"] = _flags_in(_capture(mcp_cli.cmd_mcp, ["--help"]))
+    out["halo mcp list"] = _flags_in(_capture(mcp_cli._cmd_list, ["--help"]))
+    out["halo mcp get"] = _flags_in(_capture(mcp_cli._cmd_get, ["--help"]))
+    out["halo mcp add"] = _flags_in(_capture(mcp_cli._cmd_add, ["--help"]))
+    out["halo mcp add-json"] = _flags_in(_capture(mcp_cli._cmd_add_json, ["--help"]))
+    out["halo mcp remove"] = _flags_in(_capture(mcp_cli._cmd_remove, ["--help"]))
+    out["halo models"] = _flags_in(_capture(catalog_cli.cmd_models, ["--help"]))
+    out["halo config"] = _flags_in(_capture(cmd_config, ["--help"]))
+    out["halo doctor"] = _flags_in(_capture(doctor_mod.cmd_doctor, ["--help"]))
+    out["halo stats"] = _flags_in(_capture(stats_cli.cmd_stats, ["--help"]))
+    out["halo export"] = _flags_in(_capture(export_cli.cmd_export, ["--help"]))
+    out["halo improve"] = _flags_in(_capture(improve_cli.cmd_improve, ["--help"]))
+    out["halo init"] = _flags_in(_capture(init_cli.cmd_init, ["--help"]))
+    out["halo proxy"] = _flags_in(_capture(bridge.main, ["--help"]))
+    out["halo work-matrix"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["--help"]))
+    out["halo work-matrix show"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["show", "--help"]))
+    out["halo work-matrix apply"] = _flags_in(_capture(work_matrix_mod.cmd_work_matrix, ["apply", "--help"]))
     return out
 
 
@@ -92,7 +92,7 @@ def test_every_subcommand_is_documented(ctx: Ctx):
     text = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8")
     for name in ("init", "doctor", "models", "mcp", "config", "stats", "export", "improve", "proxy",
                  "work-matrix"):
-        label = f"rolo-claude {name}"
+        label = f"halo {name}"
         ctx.check(f"COMMANDS.md documents {label!r} (as a heading)",
                   re.search(rf"^#{{1,3}}\s+.*`?{re.escape(label)}`?", text, re.MULTILINE) is not None)
 
@@ -141,7 +141,7 @@ def test_not_yet_flags_are_listed_honestly(ctx: Ctx):
     handful of `cli._NOT_YET_FLAGS` entries (the ones a Claude Code user is
     most likely to reach for) actually appear, near language admitting
     they're unimplemented."""
-    from rolo_claude.cli import _NOT_YET_FLAGS
+    from halo_harness.cli import _NOT_YET_FLAGS
     text = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8").lower()
     not_yet_names = {flags[-1] for flags, _kw, _label, _milestone in _NOT_YET_FLAGS}
     ctx.check("cli._NOT_YET_FLAGS is non-empty (sanity)", not_yet_names)

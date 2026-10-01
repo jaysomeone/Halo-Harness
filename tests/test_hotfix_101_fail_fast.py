@@ -36,9 +36,9 @@ class _Env:
                         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "OPENROUTER_API_KEY")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-failfast-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -55,7 +55,7 @@ class _Env:
 
 @test
 def test_format_connect_error_names_host_and_says_the_required_phrase(ctx: Ctx):
-    from rolo_claude.providers.http import format_connect_error
+    from halo_harness.providers.http import format_connect_error
     msg = format_connect_error("your-workspace.cloud.databricks.com", "gaierror: Name or service not known")
     ctx.check(f"names the host, got {msg!r}", "your-workspace.cloud.databricks.com" in msg)
     ctx.check(f"says cannot resolve/reach, got {msg!r}", "cannot resolve/reach" in msg)
@@ -65,7 +65,7 @@ def test_format_connect_error_names_host_and_says_the_required_phrase(ctx: Ctx):
 
 @test
 def test_upstream_connect_error_carries_host(ctx: Ctx):
-    from rolo_claude.providers.http import UpstreamConnectError
+    from halo_harness.providers.http import UpstreamConnectError
     e = UpstreamConnectError("boom", host="example.invalid")
     ctx.check(f"host attribute set, got {e.host!r}", e.host == "example.invalid")
 
@@ -90,7 +90,7 @@ class _HangingConn:
 
 @test
 def test_bounded_connect_caps_a_hung_connect_call(ctx: Ctx):
-    from rolo_claude.providers.http import UpstreamConnectError, _bounded_connect
+    from halo_harness.providers.http import UpstreamConnectError, _bounded_connect
     conn = _HangingConn(hang_s=5.0)
     t0 = time.monotonic()
     try:
@@ -108,7 +108,7 @@ def test_bounded_connect_caps_a_hung_connect_call(ctx: Ctx):
 
 @test
 def test_bounded_connect_propagates_a_fast_exception(ctx: Ctx):
-    from rolo_claude.providers.http import UpstreamConnectError, _bounded_connect
+    from halo_harness.providers.http import UpstreamConnectError, _bounded_connect
 
     class _RefusingConn:
         def connect(self):
@@ -131,7 +131,7 @@ def test_bounded_connect_propagates_a_fast_exception(ctx: Ctx):
 
 @test
 def test_open_upstream_unresolvable_host_fails_in_under_10s(ctx: Ctx):
-    from rolo_claude.providers.http import UpstreamConnectError, open_upstream
+    from halo_harness.providers.http import UpstreamConnectError, open_upstream
     t0 = time.monotonic()
     try:
         open_upstream(_UNRESOLVABLE_HOST, 443, True, connect_timeout=8)
@@ -146,8 +146,8 @@ def test_open_upstream_unresolvable_host_fails_in_under_10s(ctx: Ctx):
 
 @test
 def test_probe_databricks_status_unresolvable_host_fails_in_under_10s(ctx: Ctx):
-    from rolo_claude.providers.databricks import probe_databricks_status
-    from rolo_claude.providers.http import UpstreamConnectError
+    from halo_harness.providers.databricks import probe_databricks_status
+    from halo_harness.providers.http import UpstreamConnectError
     t0 = time.monotonic()
     try:
         probe_databricks_status(_UNRESOLVABLE_DBX_URL, "tok")
@@ -160,7 +160,7 @@ def test_probe_databricks_status_unresolvable_host_fails_in_under_10s(ctx: Ctx):
 
 @test
 def test_doctor_work_vpn_reachability_unresolvable_host_fails_fast_and_names_host(ctx: Ctx):
-    from rolo_claude.doctor import _work_check_vpn_reachability
+    from halo_harness.doctor import _work_check_vpn_reachability
     t0 = time.monotonic()
     line = _work_check_vpn_reachability(_UNRESOLVABLE_DBX_URL)
     elapsed = time.monotonic() - t0
@@ -180,9 +180,9 @@ def test_doctor_work_vpn_reachability_unresolvable_host_fails_fast_and_names_hos
 
 @test
 def test_is_connect_failure_message_survives_both_wire_mappers(ctx: Ctx):
-    from rolo_claude.providers.databricks import databricks_unreachable_response
-    from rolo_claude.providers.errors import map_upstream_error
-    from rolo_claude.providers.http import format_connect_error, is_connect_failure_message
+    from halo_harness.providers.databricks import databricks_unreachable_response
+    from halo_harness.providers.errors import map_upstream_error
+    from halo_harness.providers.http import format_connect_error, is_connect_failure_message
 
     raw = format_connect_error("your-workspace.cloud.databricks.com", "boom")
     ctx.check(f"the raw canonical message is recognized, got {raw!r}", is_connect_failure_message(raw))
@@ -207,9 +207,9 @@ def test_is_connect_failure_message_survives_both_wire_mappers(ctx: Ctx):
 
 @test
 def test_openai_chat_dialect_connect_failure_is_terminal_after_one_retry_no_ladder(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
 
     real_open_upstream = http_mod.open_upstream
     call_count = [0]
@@ -234,7 +234,7 @@ def test_openai_chat_dialect_connect_failure_is_terminal_after_one_retry_no_ladd
             list(stream_completion(req))
             ctx.check("expected UpstreamError", False)
         except UpstreamError as e:
-            from rolo_claude.providers.http import is_connect_failure_message
+            from halo_harness.providers.http import is_connect_failure_message
             elapsed = time.monotonic() - t0
             ctx.check(f"exactly 2 connect attempts (1 immediate retry, never a ladder), got {call_count[0]}",
                       call_count[0] == 2)
@@ -252,7 +252,7 @@ def test_step_never_ladder_retries_a_connect_failure(ctx: Ctx):
     terminal result phase 1 already produced -- never re-invoke `_stream`
     (and therefore never re-attempt the connect) additional times on a
     1-2-4-8-16s timer just because the failure mapped to a 502."""
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.providers.http as http_mod
     from tests.helpers.mock_openai import MockUpstream
 
     real_open_upstream = http_mod.open_upstream
@@ -264,7 +264,7 @@ def test_step_never_ladder_retries_a_connect_failure(ctx: Ctx):
 
     http_mod.open_upstream = flaky
     try:
-        from rolo_claude import headless
+        from halo_harness import headless
         with _Env() as env, tempfile.TemporaryDirectory() as cwd:
             os.environ["OPENROUTER_API_KEY"] = "test-key-not-real"
             build = headless.build_session(cwd=Path(cwd), model_ref_raw="or:mock/model", bare=True,
@@ -311,8 +311,8 @@ def test_post_connect_failure_message_has_no_connect_marker(ctx: Ctx):
     UpstreamConnectError this raises must be marker-free (format_post_
     connect_error, never format_connect_error) so is_connect_failure_
     message is False and agent/loop.py's _step does not fail-fast it."""
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.http import UpstreamConnectError, is_connect_failure_message
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.http import UpstreamConnectError, is_connect_failure_message
 
     real_open_upstream = http_mod.open_upstream
     http_mod.open_upstream = lambda *a, **kw: _DropsOnRequest()
@@ -350,8 +350,8 @@ def test_step_retries_a_post_connect_failure_through_the_normal_ladder(ctx: Ctx)
     own single immediate retry -- the exact scenario review finding 2
     reports ("a load balancer drops a keep-alive connection while Databricks
     queues the request")."""
-    import rolo_claude.providers.stream as stream_mod
-    from rolo_claude.providers.http import UpstreamConnectError, format_post_connect_error
+    import halo_harness.providers.stream as stream_mod
+    from halo_harness.providers.http import UpstreamConnectError, format_post_connect_error
     from tests.helpers.mock_openai import MockUpstream
 
     real_call_openai_chat = stream_mod.call_openai_chat
@@ -368,7 +368,7 @@ def test_step_retries_a_post_connect_failure_through_the_normal_ladder(ctx: Ctx)
     stream_mod.call_openai_chat = flaky_then_ok
     mock = MockUpstream().start()
     try:
-        from rolo_claude import headless
+        from halo_harness import headless
         with _Env(), tempfile.TemporaryDirectory() as cwd:
             os.environ["OPENROUTER_API_KEY"] = "test-key-not-real"
             os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url

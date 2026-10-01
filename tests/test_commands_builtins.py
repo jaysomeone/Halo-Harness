@@ -1,4 +1,4 @@
-"""tests.test_commands_builtins -- rolo_claude/commands/builtins.py's
+"""tests.test_commands_builtins -- halo_harness/commands/builtins.py's
 headless-facade behaviour for each of the ~22 built-in slash commands (U0
 scope B), plus a couple of true end-to-end checks through the real CLI
 (`-p "/cost"`, `-p "/help"`) proving the full wiring in headless.py works
@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
-from rolo_claude.commands.registry import Registry
-from rolo_claude.commands.builtins import HeadlessFacade
+from halo_harness.commands.registry import Registry
+from halo_harness.commands.builtins import HeadlessFacade
 
 test, TESTS = new_registry()
 
@@ -68,8 +68,8 @@ def test_theme_show_and_set(ctx: Ctx):
     try:
         result = registry.resolve("theme").run("claude-light-ansi", facade)
         ctx.check(f"confirms the set, got {result!r}", "claude-light-ansi" in result)
-        from rolo_claude import theme as theme_mod
-        ctx.check("persisted for real to ~/.rolo-claude/config.json",
+        from halo_harness import theme as theme_mod
+        ctx.check("persisted for real to ~/.halo/config.json",
                   theme_mod.load_persisted_theme() == "claude-light-ansi")
     finally:
         if old is None:
@@ -141,9 +141,9 @@ def test_compact_is_now_core_kind_and_handles_no_session(ctx: Ctx):
 # ---- e2e through the real CLI (core kind never reaches a model) -----------
 
 def _run_cli(fh, prompt: str, extra_args=None, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "PYTHONPATH": str(REPO_DIR)})
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--cwd", str(fh["proj"])] + (extra_args or [])
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
 
@@ -178,6 +178,21 @@ def test_e2e_disable_slash_commands_sends_literal_text(ctx: Ctx):
     ctx.check("no Python traceback leaked to stderr", "Traceback" not in result.stderr)
     ctx.check("did NOT print the /cost builtin's own line format",
               "Total cost: $0.0000 across 0 turn(s)" not in result.stdout)
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

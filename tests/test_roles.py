@@ -40,7 +40,7 @@ def _clear_state_dir_env() -> None:
 
 @test
 def test_configured_role_table_empty_by_default(ctx: Ctx):
-    from rolo_claude.roles import configured_role_table
+    from halo_harness.roles import configured_role_table
     _fresh_state_dir("roles-empty-")
     try:
         ctx.check("nothing configured -> {}", configured_role_table() == {})
@@ -50,8 +50,8 @@ def test_configured_role_table_empty_by_default(ctx: Ctx):
 
 @test
 def test_configured_role_table_reads_config_json(ctx: Ctx):
-    from rolo_claude.roles import configured_role_table
-    from rolo_claude.theme import set_config_value
+    from halo_harness.roles import configured_role_table
+    from halo_harness.theme import set_config_value
     _fresh_state_dir("roles-read-")
     try:
         set_config_value("roles.coder", "dbx:databricks-claude-opus-4-6")
@@ -62,8 +62,8 @@ def test_configured_role_table_reads_config_json(ctx: Ctx):
 
 @test
 def test_configured_role_table_filters_unknown_and_non_string(ctx: Ctx):
-    from rolo_claude.roles import configured_role_table
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.roles import configured_role_table
+    from halo_harness.config.paths import bridge_home
     _fresh_state_dir("roles-filter-")
     try:
         cfg_path = bridge_home() / "config.json"
@@ -78,7 +78,7 @@ def test_configured_role_table_filters_unknown_and_non_string(ctx: Ctx):
 
 @test
 def test_resolve_role_table_empty_and_databricks_applies_cost_aware_default(ctx: Ctx):
-    from rolo_claude.roles import COST_AWARE_DEFAULTS, resolve_role_table
+    from halo_harness.roles import COST_AWARE_DEFAULTS, resolve_role_table
     _fresh_state_dir("roles-costaware-")
     try:
         table = resolve_role_table(provider="databricks")
@@ -89,7 +89,7 @@ def test_resolve_role_table_empty_and_databricks_applies_cost_aware_default(ctx:
 
 @test
 def test_resolve_role_table_empty_and_non_databricks_stays_empty(ctx: Ctx):
-    from rolo_claude.roles import resolve_role_table
+    from halo_harness.roles import resolve_role_table
     _fresh_state_dir("roles-nondbx-")
     try:
         ctx.check("openrouter provider -> {} (never automatic beyond the documented case)",
@@ -101,8 +101,8 @@ def test_resolve_role_table_empty_and_non_databricks_stays_empty(ctx: Ctx):
 
 @test
 def test_resolve_role_table_any_configured_entry_skips_the_cost_aware_default_entirely(ctx: Ctx):
-    from rolo_claude.roles import resolve_role_table
-    from rolo_claude.theme import set_config_value
+    from halo_harness.roles import resolve_role_table
+    from halo_harness.theme import set_config_value
     _fresh_state_dir("roles-partial-")
     try:
         set_config_value("roles.coder", "dbx:databricks-claude-opus-4-6")
@@ -117,14 +117,14 @@ def test_resolve_role_table_any_configured_entry_skips_the_cost_aware_default_en
 
 @test
 def test_parse_role_flag_valid(ctx: Ctx):
-    from rolo_claude.roles import parse_role_flag
+    from halo_harness.roles import parse_role_flag
     ctx.check("parses cleanly", parse_role_flag("coder=dbx:databricks-claude-opus-4-6")
               == ("coder", "dbx:databricks-claude-opus-4-6"))
 
 
 @test
 def test_parse_role_flag_bad_shape_raises(ctx: Ctx):
-    from rolo_claude.roles import parse_role_flag
+    from halo_harness.roles import parse_role_flag
     try:
         parse_role_flag("no-equals-sign")
         ctx.check("should have raised", False)
@@ -134,7 +134,7 @@ def test_parse_role_flag_bad_shape_raises(ctx: Ctx):
 
 @test
 def test_parse_role_flag_unknown_role_raises(ctx: Ctx):
-    from rolo_claude.roles import parse_role_flag
+    from halo_harness.roles import parse_role_flag
     try:
         parse_role_flag("not-a-role=or:vendor/x")
         ctx.check("should have raised", False)
@@ -144,7 +144,7 @@ def test_parse_role_flag_unknown_role_raises(ctx: Ctx):
 
 @test
 def test_parse_role_flag_empty_model_raises(ctx: Ctx):
-    from rolo_claude.roles import parse_role_flag
+    from halo_harness.roles import parse_role_flag
     try:
         parse_role_flag("coder=")
         ctx.check("should have raised", False)
@@ -154,7 +154,7 @@ def test_parse_role_flag_empty_model_raises(ctx: Ctx):
 
 @test
 def test_parse_role_flags_last_one_wins_and_none_is_empty(ctx: Ctx):
-    from rolo_claude.roles import parse_role_flags
+    from halo_harness.roles import parse_role_flags
     ctx.check("None -> {}", parse_role_flags(None) == {})
     ctx.check("[] -> {}", parse_role_flags([]) == {})
     out = parse_role_flags(["coder=or:vendor/first", "coder=or:vendor/second", "reviewer=or:vendor/r"])

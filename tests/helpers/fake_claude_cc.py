@@ -12,7 +12,7 @@ way `agent.cc_process.build_cc_argv` invokes the real one
     protocol (including `--replay-user-messages` echoes, cumulative
     `total_cost_usd`, `--resume`/`--session-id` validation) AND actually
     acts as a real MCP client: it spawns the "rolo" stdio server named in
-    `--mcp-config` (the REAL `python -m rolo_claude.ccbridge`) and
+    `--mcp-config` (the REAL `python -m halo_harness.ccbridge`) and
     performs real `tools/list`/`tools/call` over stdio, reacting to a real
     `notifications/tools/list_changed` by re-listing (H11b finding 6).
 

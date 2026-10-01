@@ -1,8 +1,8 @@
-"""rolo_claude.shadow -- git-shadow snapshots for `/rewind` (U5 scope B).
+"""halo_harness.shadow -- git-shadow snapshots for `/rewind` (U5 scope B).
 
 Every Write/Edit/Bash-that-changed-files step records the RESULTING content
 of every file it touched into a real, isolated git repository under
-`~/.rolo-claude/sessions/<slug>/<session_id>/shadow/` (mirroring OpenCode's
+`~/.halo/sessions/<slug>/<session_id>/shadow/` (mirroring OpenCode's
 own snapshot mechanism and Claude Code's `file-history`), keyed as one git
 commit per step. `/rewind <step>` (aliases `/undo` steps back, `/redo`
 steps forward) restores the REAL working tree to that step: every file ever
@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -84,8 +85,13 @@ class ShadowStore:
         if (self.dir / ".git").exists():
             return
         self._git("init", "-q")
-        self._git("config", "user.email", "shadow@rolo-claude.local")
-        self._git("config", "user.name", "rolo-claude shadow")
+        self._git("config", "user.email", "shadow@halo.local")
+        self._git("config", "user.name", "halo shadow")
+        if sys.platform == "win32":
+            # The shadow repo sits under <state>/sessions/<cwd slug>/<id>/shadow,
+            # deep enough that git objects can exceed Windows' 260-char path
+            # limit on a long home or cwd; git supports long paths when told to.
+            self._git("config", "core.longpaths", "true")
 
     # ---- index persistence -----------------------------------------------
 

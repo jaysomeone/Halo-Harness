@@ -1,4 +1,4 @@
-"""rolo_claude.tui.widgets.whichkey -- the which-key overlay (U5 scope A):
+"""halo_harness.tui.widgets.whichkey -- the which-key overlay (U5 scope A):
 shown the instant a chord prefix (e.g. Ctrl+X) is pressed, listing every
 live continuation keystroke and the action it runs, until the next
 keystroke -- or `tui.keys.CHORD_TIMEOUT_S` -- resolves or cancels it. A
@@ -17,7 +17,7 @@ class WhichKeyOverlay(Static):
         self.display = False
 
     def show_for(self, prefix: str, continuations: "dict[str, object]") -> None:
-        from rolo_claude.tui.keys import format_which_key
+        from halo_harness.tui.keys import format_which_key
 
         body = format_which_key(continuations)
         text = f"{prefix} …" if not body else f"{prefix} …\n{body}"

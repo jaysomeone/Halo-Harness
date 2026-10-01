@@ -1,6 +1,6 @@
-"""rolo_claude.improve.config -- ImproveConfig: `~/.rolo-claude/config.json`
+"""halo_harness.improve.config -- ImproveConfig: `~/.halo/config.json`
 key `"improve"`. Every field has a built-in default (nothing here can be
-"missing"); `rolo-claude config set improve.model or:...` (theme.py's own
+"missing"); `halo config set improve.model or:...` (theme.py's own
 dotted-path `set_config_value`) is the one documented way to change it.
 """
 
@@ -23,13 +23,13 @@ class ImproveConfig:
 
 
 def load_improve_config() -> ImproveConfig:
-    """Reads `~/.rolo-claude/config.json`'s `"improve"` key fresh every
+    """Reads `~/.halo/config.json`'s `"improve"` key fresh every
     call (matches `theme.load_config`'s own "read fresh" contract) --
     missing keys fall back to `ImproveConfig`'s own defaults; an
     unrecognized/malformed value for a field is ignored (falls back to the
     default) rather than raising, since a hand-edited config.json must
     never be able to crash the harness."""
-    from rolo_claude.theme import load_config
+    from halo_harness.theme import load_config
 
     raw = load_config().get("improve")
     raw = raw if isinstance(raw, dict) else {}
@@ -59,7 +59,7 @@ def load_improve_config() -> ImproveConfig:
 
 def since_str(cfg: ImproveConfig) -> str:
     """`cfg.since_days` (an int) -> the "7d"/"30d"/"all" vocabulary
-    `rolo_claude.telemetry.scan` accepts -- any OTHER day count still works
+    `halo_harness.telemetry.scan` accepts -- any OTHER day count still works
     (telemetry.scan defaults unknown strings to 7 days via its own
     `_SINCE_DAYS` table), but the two round values get their exact label
     rather than silently falling back to 7."""

@@ -1,6 +1,6 @@
-# H1 brief — provider layer, session log, invariants, dsh-shaped loop (rolo-claude 0.3.x)
+# H1 brief — provider layer, session log, invariants, dsh-shaped loop (halo 0.3.x)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows 11, `python` 3.11, Git Bash).
+Repo: `~\Documents\vibes\appDev\halo\` (Windows 11, `python` 3.11, Git Bash).
 Baseline (commit `4a4ca04`): `python test_bridge.py` → 97 green (proxy), `python tests/run_all.py`
 → 102 green (harness). Keep both green. Do not commit.
 
@@ -13,9 +13,9 @@ Baseline (commit `4a4ca04`): `python test_bridge.py` → 97 green (proxy), `pyth
    and budget defaults" (the last three are the spec for `providers/`).
 3. `docs/harness/claude-code-2.1.281-binary-facts.md` §14 (tool wording) and §1 (flags).
 4. `docs/harness/review-findings-h0.md` if present (Opus review of H0 — fix its findings first).
-5. The current package: `rolo_claude/providers/{stream,translate,oai_stream,http,databricks,
-   routing,config,errors,anthropic_sse}.py`, `rolo_claude/agent/{loop,prompt,assemble,
-   session_store}.py`, `rolo_claude/{events,model,headless,output,cli}.py`, `tests/helpers/*`.
+5. The current package: `halo_harness/providers/{stream,translate,oai_stream,http,databricks,
+   routing,config,errors,anthropic_sse}.py`, `halo_harness/agent/{loop,prompt,assemble,
+   session_store}.py`, `halo_harness/{events,model,headless,output,cli}.py`, `tests/helpers/*`.
 
 ## Scope
 A. **Provider compat profiles** (`providers/profiles.py` + data file `providers/model_table.json`):
@@ -28,7 +28,7 @@ A. **Provider compat profiles** (`providers/profiles.py` + data file `providers/
    max_tokens default/cap, reasoning defaults, openrouter_pin {order, allow_fallbacks,
    require_parameters, quantizations}, caches_by_default, notes). Seed rows for: OpenRouter
    `deepseek/deepseek-v3.2` (third-party only: pin `siliconflow, novita, gmicloud`, fp8, ≤65 536
-   out), the DeepSeek V4 ids present in `~/.rolo-claude/models.json` (look them up; first-party
+   out), the DeepSeek V4 ids present in `~/.halo/models.json` (look them up; first-party
    `deepseek` endpoint), `moonshotai/kimi-k2*`/K3, `qwen/qwen3-*`, `z-ai/glm-*`, `google/gemini-3*`,
    `anthropic/claude-*`; Databricks `databricks-deepseek-v4-1-flash`, `-v4-pro-0813`,
    `-v4-flash-0731`, `databricks-kimi-k3`, `databricks-glm-5-3`, `-5-3-flash`, `-5-2`,
@@ -60,7 +60,7 @@ D. **Errors/retries** (`providers/errors.py` + loop): taxonomy `AUTH, RATE_LIMIT
    max 5; DeepSeek 400 "reasoning_content … must be passed back" surfaces as a named error (it means
    a replay bug — never swallow).
 E. **Session log as source of truth** (`agent/log.py`, `agent/derive.py`; replaces `session_store.py`):
-   append-only JSONL `~/.rolo-claude/sessions/<slug>/<id>.jsonl` with node types `meta, system,
+   append-only JSONL `~/.halo/sessions/<slug>/<id>.jsonl` with node types `meta, system,
    user, assistant (content blocks incl. thinking/reasoning raw), tool_use, tool_result, snapshot
    (dynamic context: permission mode, CLAUDE.md chain, memory index, skills, notices), usage, error,
    interrupted, compacted (H5)`; `derive_request(log, profile) -> (system_text, messages, tools)`;
@@ -85,7 +85,7 @@ H. **System prompt** (`agent/prompt.py`): dsh-shaped ordered sections (identity 
    snapshot on first Read under that dir.
 I. **Catalog** (`model.py` + `providers/databricks.py`): `models.json` refresh stores
    `supported_parameters`, `architecture.input_modalities`, pricing, `top_provider` caps; Databricks
-   `GET /api/2.0/serving-endpoints` cached to `~/.rolo-claude/dbx-endpoints.json`; `rolo-claude
+   `GET /api/2.0/serving-endpoints` cached to `~/.halo/dbx-endpoints.json`; `halo
    models` subcommand lists both; near-miss slug correction for `--model`.
 J. **Defaults**: home default model = the DeepSeek V4 first-party id on OpenRouter (verify in
    `models.json`; fall back to `deepseek/deepseek-v3.2` with the pin); work defaults per plan point 12;
@@ -109,13 +109,13 @@ number of lines"`); profile resolution for every seeded model_table row; models.
 ## Acceptance (paste verbatim, trimmed)
 1. `python test_bridge.py 2>&1 | tail -2; echo exit=$?` → 97 green. `python tests/run_all.py 2>&1 |
    tail -2; echo exit=$?` → ≥ 162 green.
-2. Live (home): `rolo-claude -p "read ~\Documents\vibes\appDev\rolo-claude\README.md and
+2. Live (home): `halo -p "read ~\Documents\vibes\appDev\halo\README.md and
    reply with only the number of lines" --model <default V4 id>` → the correct count (compare
    `wc -l`); the same with `--model or:deepseek/deepseek-v3.2` (pinned providers) → same count; the
-   memory question from H0 still answers; `--output-format json` shape unchanged; `rolo-claude
-   models | head` lists OpenRouter models with context/out/price; `rolo-claude proxy launch --model
+   memory question from H0 still answers; `--output-format json` shape unchanged; `halo
+   models | head` lists OpenRouter models with context/out/price; `halo proxy launch --model
    or:deepseek/deepseek-v3.2 -- -p "reply with the single word pong"` → pong; `proxy --stop`.
-3. Reasoning replay live: `rolo-claude -p "read <file> then tell me its first heading" --model <a
+3. Reasoning replay live: `halo -p "read <file> then tell me its first heading" --model <a
    thinking-capable V4 id> --effort high --verbose` → two model calls, no 400, thinking shown dimmed
    in verbose output; the session JSONL contains the raw reasoning on the assistant node.
 4. `grep -o '"model": "[^"]*"' ~/.claude/settings.json` unchanged.

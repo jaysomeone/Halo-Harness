@@ -1,4 +1,4 @@
-"""rolo_claude.config.agents_md -- agent definitions (H6 scope A): discovery
+"""halo_harness.config.agents_md -- agent definitions (H6 scope A): discovery
 precedence, frontmatter parsing, built-in specs (general-purpose/Explore/
 Plan), the `tools:` string-or-list + `disallowedTools` resolution, and the
 model-resolution chain (invocation -> frontmatter -> `CLAUDE_CODE_SUBAGENT_
@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.frontmatter import parse as parse_frontmatter
-from rolo_claude.config.paths import find_git_root, home, managed_dir
+from halo_harness.config.frontmatter import parse as parse_frontmatter
+from halo_harness.config.paths import find_git_root, home, managed_dir
 
 BUILTIN_NAMES = ("general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher")
 
@@ -388,7 +388,7 @@ def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_m
     the role plumbing above when no role applies (every new parameter here
     defaults to None/{}, so an old caller that passes none of them behaves
     byte-for-byte as before)."""
-    from rolo_claude.model import ModelRef, parse_model_ref, resolve_model_profile
+    from halo_harness.model import ModelRef, parse_model_ref, resolve_model_profile
 
     env = env or {}
     role_table = role_table or {}
@@ -421,7 +421,7 @@ def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_m
     # any other parent keeps the bare word as a literal model id on the
     # parent's own provider/dialect -- the same explicit failure a
     # not-really-a-model-id string always produced pre-H11.
-    from rolo_claude.providers.cc_models import BARE_ALIAS_NAMES
+    from halo_harness.providers.cc_models import BARE_ALIAS_NAMES
     base_raw = raw[:-len("[1m]")] if raw.endswith("[1m]") else raw
     if base_raw in BARE_ALIAS_NAMES:
         if parent_ref.provider == "cc":

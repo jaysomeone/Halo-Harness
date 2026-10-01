@@ -1,4 +1,4 @@
-"""rolo_claude.agent.sessions -- `--continue`/`--resume`/`--session-id`/
+"""halo_harness.agent.sessions -- `--continue`/`--resume`/`--session-id`/
 `--fork-session` resolution (H6 scope D) for print mode (headless.py).
 The TUI's own `--resume` picker surface is `Controller.list_sessions`/
 `resume` (U5); this module is the PRINT-MODE side (no picker UI, so
@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home, project_slug
+from halo_harness.config.paths import bridge_home, project_slug
 
 
 def sessions_dir(cwd) -> Path:

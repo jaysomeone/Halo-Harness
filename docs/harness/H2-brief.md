@@ -1,11 +1,11 @@
-# H2 brief — built-in tools, repair layer, permissions (rolo-claude 0.3.x)
+# H2 brief — built-in tools, repair layer, permissions (halo 0.3.x)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux is the
 primary platform** — everything must be OS-neutral, `/bin/bash` on Linux, Git Bash only on win32).
 Baseline: H1 commit on master — `python test_bridge.py` → 97 green, `python tests/run_all.py` →
 185 green, both also green in WSL Ubuntu (`wsl -e bash -lc 'rsync -a --delete --exclude .git
---exclude __pycache__ ~/Documents/vibes/appDev/rolo-claude/ ~/rolo-claude-wt/ && cd
-~/rolo-claude-wt && python3 tests/run_all.py | tail -1 && python3 test_bridge.py | tail -1'`).
+--exclude __pycache__ ~/Documents/vibes/appDev/halo/ ~/halo-harness-wt/ && cd
+~/halo-harness-wt && python3 tests/run_all.py | tail -1 && python3 test_bridge.py | tail -1'`).
 Keep all of it green on both. Do not commit.
 
 ## Read first
@@ -23,11 +23,11 @@ Keep all of it green on both. Do not commit.
    parsers and args repair (the `leak_parser`/`args_repair` code branches) and the consolidated JSON
    block (H1 left the full 64-row ingestion + explicit 8 code-branch hooks as deferred work — do it
    in H2 if the review's must-do list confirms).
-5. Current code: `rolo_claude/tools/{base,registry,read}.py`, `agent/{loop,invariants,derive,
+5. Current code: `halo_harness/tools/{base,registry,read}.py`, `agent/{loop,invariants,derive,
    prompt}.py`, `providers/{request,profiles}.py`, `tests/helpers/{fake_home,mock_openai,runner}.py`.
 
 ## Scope
-A. **Built-in tools** (`rolo_claude/tools/`), Claude Code names/schemas/wording (binary facts §14):
+A. **Built-in tools** (`halo_harness/tools/`), Claude Code names/schemas/wording (binary facts §14):
    `Write` (must-Read-first, parents created, BOM/CRLF preserved), `Edit` (`old_string`/`new_string`/
    `replace_all`; exact match once; whitespace-tolerant fallback match; structured "not found / N
    near-matches" error; mtime check since Read), `Bash` (`command`, `description`, `timeout` ms ≤ 600 000,
@@ -55,7 +55,7 @@ B. **Repair layer** (`agent/repair.py`): text-embedded calls only behind the pro
    duplicate (name, args) in one message → "(duplicate of <id>)"; `length`-truncated call → "split the
    operation" error (never `invalid`); one retry with `tool_choice: required` ONLY where the profile
    says it is supported (never DeepSeek thinking / GLM / Qwen).
-C. **Permissions** (`rolo_claude/permissions.py`) per D-CFG grammar exactly: `Rule` kinds, `parse_rule`
+C. **Permissions** (`halo_harness/permissions.py`) per D-CFG grammar exactly: `Rule` kinds, `parse_rule`
    with `\(` `\)` `\\` unescape (Windows path exception), `:*` / trailing ` *` / inner `*` / exact,
    PowerShell alias canonicalisation + case-insensitive matching (binary facts §4), WebFetch
    `domain:` incl. `*.` semantics, `mcp__srv`/`mcp__srv__*`/`mcp__srv__tool` (parenthesised → invalid),
@@ -103,14 +103,14 @@ mock upstream with `ScriptedTurns`: Read→Edit→Bash loop, permission deny in 
 
 ## Acceptance (paste verbatim, trimmed)
 1. Both suites green on Windows and in WSL (RESULT lines + exit codes for all four runs).
-2. Live (default model `or:deepseek/deepseek-v4.1-flash`): `python -m rolo_claude -p "create a file
-   ~\Documents\vibes\appDev\rolo-claude\wip\h2_scratch.txt containing the three words
+2. Live (default model `or:deepseek/deepseek-v4.1-flash`): `python -m halo_harness -p "create a file
+   ~\Documents\vibes\appDev\halo\wip\h2_scratch.txt containing the three words
    alpha beta gamma on one line, then change beta to delta, then run a shell command that prints the
    file, and reply with only the final file content" --permission-mode auto` → `alpha delta gamma`
    (Write → Edit → Bash, three tool calls visible with `--verbose`); the same prompt with
    `--permission-mode default` in `-p` → the Write is denied with a suggested rule and
    `permission_denials` populated in `--output-format json`; `-p "grep for the string
-   stream_completion in rolo_claude and reply with the file names"` → correct files (Grep); the H1
+   stream_completion in halo_harness and reply with the file names"` → correct files (Grep); the H1
    memory question and Read line-count still answer; `proxy launch … -- -p pong` → pong; `proxy --stop`.
 3. `grep -o '"model": "[^"]*"' ~/.claude/settings.json` unchanged; delete `wip/h2_scratch.txt`.
 

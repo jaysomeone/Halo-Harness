@@ -1,4 +1,4 @@
-"""rolo_claude.tui.widgets.statusbar -- the docked-bottom `StatusBar`:
+"""halo_harness.tui.widgets.statusbar -- the docked-bottom `StatusBar`:
 model, context bar (% + warn/error colours), cost, mode glyph, cwd+branch,
 "MCP n/m", spinner+elapsed, "↓ N new". Built with `rich.Text` (never
 Rich markup strings) so a model name or cwd containing a literal `[` can
@@ -12,8 +12,8 @@ import time
 from rich.text import Text
 from textual.widgets import Static
 
-from rolo_claude.model_display import format_status_context, format_status_cost, truncate_label_left
-from rolo_claude.tui.theme import mode_glyph
+from halo_harness.model_display import format_status_context, format_status_cost, truncate_label_left
+from halo_harness.tui.theme import mode_glyph
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 

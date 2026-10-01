@@ -1,4 +1,4 @@
-"""tests.test_telemetry -- rolo_claude/telemetry.py (H10 Part A): scan +
+"""tests.test_telemetry -- halo_harness/telemetry.py (H10 Part A): scan +
 per-model/per-tool aggregation on fixtures with known counts, corrupt-line
 handling, cache invalidation on mtime, doctor's sessions-count/cache-age
 helpers. Fixtures live under tests/fixtures/telemetry/ (Linux-shaped paths,
@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import telemetry
+from halo_harness import telemetry
 
 test, TESTS = new_registry()
 
@@ -246,7 +246,7 @@ def test_pre_h10_shape_tool_and_model_attribution(ctx: Ctx):
 
     pre_h10_lines = [
         {"type": "meta", "model": "or:deepseek/deepseek-v4-flash", "tools": [], "ts": 0, "seq": 0},
-        {"type": "system", "text": "You are rolo-claude.", "ts": 0, "seq": 1},
+        {"type": "system", "text": "You are halo.", "ts": 0, "seq": 1},
         {"type": "user", "content": [{"type": "text", "text": "list files"}], "ts": 0, "seq": 2},
         # PRE-H10 usage: no model/provider/route at all.
         {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 10}, "cost_usd": 0.001, "ts": 0, "seq": 3},
@@ -276,7 +276,7 @@ def test_pre_h10_shape_tool_and_model_attribution(ctx: Ctx):
 
     h10_lines = [
         {"type": "meta", "model": "or:deepseek/deepseek-v4-flash", "tools": [], "ts": 0, "seq": 0},
-        {"type": "system", "text": "You are rolo-claude.", "ts": 0, "seq": 1},
+        {"type": "system", "text": "You are halo.", "ts": 0, "seq": 1},
         {"type": "user", "content": [{"type": "text", "text": "read file"}], "ts": 0, "seq": 2},
         {"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 1}, "cost_usd": 0.0001,
          "model": "or:deepseek/deepseek-v4-flash", "route": "or", "provider": "DeepInfra", "ts": 0, "seq": 3},

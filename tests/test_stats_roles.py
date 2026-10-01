@@ -1,7 +1,7 @@
 """tests.test_stats_roles -- V2c (H15): `stats --roles`'s per-role telemetry
 aggregation -- `telemetry.py`'s `_summarize_nodes` tagging a rolled-up
 sub-agent usage node's own `role` field, `aggregate_by_role` summing it
-across sessions, and the real `rolo-claude stats --roles` CLI end to end.
+across sessions, and the real `halo stats --roles` CLI end to end.
 Split out of tests/test_roles.py to keep each file under the brief's own
 "<= 250 lines per Write" rule; roles.py's own table resolution and `/roles`
 rendering live there instead.
@@ -26,7 +26,7 @@ test, TESTS = new_registry()
 
 @test
 def test_aggregate_by_role_sums_across_sessions(ctx: Ctx):
-    from rolo_claude.telemetry import SessionSummary, aggregate_by_role
+    from halo_harness.telemetry import SessionSummary, aggregate_by_role
     s1 = SessionSummary(session_id="s1", slug="p", path="s1.jsonl", mtime=0, size=0,
                          roles={"researcher": {"calls": 2, "tokens_in": 100, "tokens_out": 50,
                                                 "tokens_cached": 0, "cost_usd": 0.01}})
@@ -45,7 +45,7 @@ def test_aggregate_by_role_sums_across_sessions(ctx: Ctx):
 
 @test
 def test_summarize_nodes_tags_role_from_rolled_up_usage_node(ctx: Ctx):
-    from rolo_claude.telemetry import _summarize_nodes
+    from halo_harness.telemetry import _summarize_nodes
     nodes = [
         # A rolled-up sub-agent usage node carries no "model" of its own
         # (agent/subagent.py's `_rollup_child_cost_into_parent`) -- it's
@@ -63,20 +63,20 @@ def test_summarize_nodes_tags_role_from_rolled_up_usage_node(ctx: Ctx):
 
 
 def _run_cli(argv, home: Path, cwd: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(cwd),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(cwd),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 @test
 def test_stats_roles_end_to_end_json(ctx: Ctx):
-    """The real `rolo-claude stats --roles --json` CLI surface, over a
+    """The real `halo stats --roles --json` CLI surface, over a
     hand-written session log carrying one rolled-up, role-tagged usage
     node -- proves the whole pipe (log -> telemetry.scan -> aggregate_by_role
     -> stats_cli's own JSON output) end to end."""
     home = Path(tempfile.mkdtemp(prefix="stats-roles-home-"))
-    sessions_dir = home / ".rolo-claude" / "sessions" / "testproj"
+    sessions_dir = home / ".halo" / "sessions" / "testproj"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     lines = [
         {"type": "meta", "model": "or:vendor/parent"},
@@ -99,6 +99,21 @@ def test_stats_roles_end_to_end_json(ctx: Ctx):
     text_result = _run_cli(["stats", "--roles", "--since", "all", "--all-projects"], home, cwd)
     ctx.check(f"plain-text run also exits 0, got {text_result.returncode}", text_result.returncode == 0)
     ctx.check("plain text mentions the role", "coder" in text_result.stdout)
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

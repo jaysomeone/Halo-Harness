@@ -63,12 +63,12 @@ def running_manager(configs: dict, **kwargs):
     ALWAYS `close_all()`-ed on the way out -- including when the caller's
     own `with` block raises -- so a test can't accidentally skip cleanup
     and leave a live fake-server subprocess + McpLoop thread behind for
-    interpreter shutdown to trip over (see rolo_claude/mcp/client.py's
+    interpreter shutdown to trip over (see halo_harness/mcp/client.py's
     `McpLoop.stop()`/atexit safety net for the belt-and-suspenders half of
     this; this is the suspenders). One-line replacement for the
     hand-written `mgr = McpManager(...); try: mgr.start_all(); ...;
     finally: mgr.close_all()` shape most tests in this file already use."""
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager(configs, **kwargs)
     try:
         mgr.start_all()
@@ -100,7 +100,7 @@ def build_app():
     global Context
     from mcp.server.mcpserver import Context
 
-    app = MCPServer(name="fake-mcp-server", instructions="A fake MCP server for rolo-claude's own tests.")
+    app = MCPServer(name="fake-mcp-server", instructions="A fake MCP server for halo's own tests.")
 
     @app.tool(name="echo", description="Echo back the given text.")
     def echo(text: str = "") -> str:

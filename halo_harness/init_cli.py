@@ -1,7 +1,7 @@
-"""rolo_claude.init_cli -- `rolo-claude init` (H12 brief Part A /
+"""halo_harness.init_cli -- `halo init` (H12 brief Part A /
 RECOMMENDATIONS.md P0 #1): the whole first run in one command. Interactive
 by default (plain prompts via `rich`, or a small Textual list picker on a
-real terminal -- see `rolo_claude.init_providers`/`tui/dialogs/init_picker.py`);
+real terminal -- see `halo_harness.init_providers`/`tui/dialogs/init_picker.py`);
 `--yes` accepts every default without prompting; `--provider ... --yes` is
 fully non-interactive whenever the needed value (a key/token) is already
 discoverable, and never BLOCKS even when it isn't (a piped/non-tty stdin is
@@ -41,7 +41,7 @@ from typing import Optional
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from rolo_claude.init_providers import (
+from halo_harness.init_providers import (
     PRESET_TO_PROVIDER, PROVIDER_DEFAULT_MODEL, PROVIDER_LABEL, PROVIDERS,
     claude_login_available, configured_providers, detect_default_provider, model_entries_for_provider,
     provider_status,
@@ -96,11 +96,15 @@ def _confirm(args, console: Console, question: str, *, default: bool) -> bool:
 
 
 def _env_file_path() -> Path:
-    """The SAME env file every other part of the harness reads (`doctor.py`/
-    `headless.py`/`catalog_cli.py` all resolve this identically):
-    `BRIDGE_ENV_FILE`, else `~/.config/vibes-hacker/env`."""
-    from rolo_claude.config.paths import home
-    return Path(os.environ.get("BRIDGE_ENV_FILE", str(home() / ".config" / "vibes-hacker" / "env")))
+    """The env file `init` reads from and writes to (2.0.0 fixpass finding
+    4): `HALO_ENV_FILE`, else legacy `BRIDGE_ENV_FILE`, else always
+    `~/.config/halo/env` -- copying the legacy `~/.config/vibes-hacker/env`
+    file forward (content + 0700/0600 permissions) the FIRST time this is
+    called when the new one doesn't exist yet but the legacy one does, so
+    every credential already there survives into the new file instead of
+    being silently orphaned. See `config.paths.env_file_path_for_write`."""
+    from halo_harness.config.paths import env_file_path_for_write
+    return env_file_path_for_write()
 
 
 def _write_env_var(path: Path, key: str, value: str) -> None:
@@ -164,7 +168,7 @@ def _step_select_provider(args, console: Console, *, header: str) -> Optional[st
     rows = [(p, _provider_row_label(p, mark_default=(p == default_provider))) for p in PROVIDERS]
     rows.append(("done", "Done -- finish init"))
     if sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
-        from rolo_claude.tui.dialogs.init_picker import run_simple_picker
+        from halo_harness.tui.dialogs.init_picker import run_simple_picker
         try:
             return run_simple_picker(header, rows, initial_ref=default_provider)
         except Exception as e:
@@ -192,14 +196,14 @@ def _step_select_provider(args, console: Console, *, header: str) -> Optional[st
 # ---------------------------------------------------------------------------
 
 def _ensure_openrouter_key(args, console: Console) -> Optional[Path]:
-    from rolo_claude.providers.config import redact, resolve_openrouter
+    from halo_harness.providers.config import redact, resolve_openrouter
     existing = resolve_openrouter()
     if existing is not None:
         console.print(f"   [OK] OpenRouter key: already configured ({redact(existing.api_key)}) -- not changed.")
         return None
     if args.yes and sys.stdin.isatty():
         console.print("   [WARN] OpenRouter key not found, and --yes skips the prompt -- "
-                       "set OPENROUTER_API_KEY (or re-run `rolo-claude init` without --yes).")
+                       "set OPENROUTER_API_KEY (or re-run `halo init` without --yes).")
         return None
     console.print("   OpenRouter key not found (get one at https://openrouter.ai/keys).")
     value = _prompt_secret("   OPENROUTER_API_KEY")
@@ -229,7 +233,7 @@ def _known_databricks_host() -> Optional[str]:
     a fresh `init --preset work` -- verified live: this exact box's own
     ambient DATABRICKS_HOST, with no ANTHROPIC_MODEL alongside it, is NOT
     Claude Code's work settings and must never be adopted as one."""
-    from rolo_claude.providers.config import (
+    from halo_harness.providers.config import (
         databricks_work_signal_present, derive_workspace_root, load_settings_env_chain, looks_like_databricks_host,
     )
     settings_env = load_settings_env_chain(Path.cwd())
@@ -246,7 +250,7 @@ def _known_databricks_host() -> Optional[str]:
 
 
 def _load_team_config(args, console: Console) -> Optional[dict]:
-    from rolo_claude.team_config import load_team_config
+    from halo_harness.team_config import load_team_config
     cfg, warnings = load_team_config(Path.cwd(), team_flag=getattr(args, "team", None))
     for w in warnings:
         console.print(f"   [WARN] {w}")
@@ -254,7 +258,7 @@ def _load_team_config(args, console: Console) -> Optional[dict]:
 
 
 def _ensure_databricks_creds(args, console: Console) -> Optional[Path]:
-    from rolo_claude.providers.config import databricks_work_env_active, redact, resolve_databricks
+    from halo_harness.providers.config import databricks_work_env_active, redact, resolve_databricks
     existing = resolve_databricks()
     if existing is not None:
         source = "Claude Code's settings" if databricks_work_env_active() else "existing config"
@@ -284,13 +288,13 @@ def _ensure_databricks_creds(args, console: Console) -> Optional[Path]:
         os.environ["DATABRICKS_TOKEN"] = token
         console.print(f"   [OK] wrote DATABRICKS_HOST/DATABRICKS_TOKEN to {path}")
         if team_cfg and team_cfg.get("gateway_preference"):
-            from rolo_claude.team_config import apply_gateway_preference
+            from halo_harness.team_config import apply_gateway_preference
             apply_gateway_preference(team_cfg["gateway_preference"])
         if team_cfg and team_cfg.get("roles"):
             # V2c (H15): the SAME "seed config.json, never clobber a local
             # override" idiom as gateway_preference above, for team.json's
             # own shared `roles` table.
-            from rolo_claude.roles import apply_role_preference
+            from halo_harness.roles import apply_role_preference
             apply_role_preference(team_cfg["roles"])
         return path
 
@@ -321,14 +325,14 @@ def _ensure_anthropic_key(args, console: Console) -> Optional[Path]:
     """1.0.1 hotfix 13: the fourth provider -- a direct `ANTHROPIC_API_KEY`
     against api.anthropic.com (`ant:` models), previously not offered by
     `init` at all (the old home/work/claude presets had no slot for it)."""
-    from rolo_claude.providers.config import redact, resolve_anthropic
+    from halo_harness.providers.config import redact, resolve_anthropic
     existing = resolve_anthropic()
     if existing is not None:
         console.print(f"   [OK] Anthropic API key: already configured ({redact(existing.api_key)}) -- not changed.")
         return None
     if args.yes and sys.stdin.isatty():
         console.print("   [WARN] ANTHROPIC_API_KEY not found, and --yes skips the prompt -- "
-                       "set ANTHROPIC_API_KEY (or re-run `rolo-claude init` without --yes).")
+                       "set ANTHROPIC_API_KEY (or re-run `halo init` without --yes).")
         return None
     console.print("   ANTHROPIC_API_KEY not found (get one at https://console.anthropic.com/settings/keys).")
     value = _prompt_secret("   ANTHROPIC_API_KEY")
@@ -376,7 +380,7 @@ def _model_belongs_to_provider(model_ref_raw: str, provider: str) -> bool:
     if provider == "databricks":
         if model_ref_raw.startswith("databricks-") or model_ref_raw.startswith("system.ai."):
             return True
-        from rolo_claude.model import _is_cached_databricks_endpoint
+        from halo_harness.model import _is_cached_databricks_endpoint
         return _is_cached_databricks_endpoint(model_ref_raw)
     if provider == "openrouter":
         # The bare `vendor/model` OpenRouter form (no `or:` prefix).
@@ -391,11 +395,11 @@ def _step_default_model(provider: str, args, console: Console, *, write: bool = 
     provider isn't the only one in play, see `_step_finalize_default_model`
     below) computes it without touching config.json at all, so a later
     cross-provider pick is never fighting an intermediate write."""
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.theme import get_config_value, set_config_value
     team_default = None
     if provider == "databricks" and not args.model:
-        from rolo_claude.team_config import load_team_config
+        from halo_harness.team_config import load_team_config
         team_cfg, _warnings = load_team_config(Path.cwd(), team_flag=getattr(args, "team", None))
         team_default = (team_cfg or {}).get("default_model")
     chosen = args.model or team_default or PROVIDER_DEFAULT_MODEL[provider]
@@ -446,12 +450,12 @@ def _print_work_catalog_summary(console: Console, model_raw: str) -> None:
     counts by the endpoint's own `task` (`dbx_routing.is_chat_task`), not
     `bool(api_types)` -- verified live: a workspace whose cache predates
     this milestone's own `api_types` field showed "0 chat-capable" here
-    while `rolo-claude models`' own table said "chat yes" for the SAME
+    while `halo models`' own table said "chat yes" for the SAME
     rows (that table used a different, name-based heuristic) -- the two
     must never disagree again."""
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.databricks import load_dbx_endpoints_json
-    from rolo_claude.providers.dbx_routing import is_chat_task
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.databricks import load_dbx_endpoints_json
+    from halo_harness.providers.dbx_routing import is_chat_task
     endpoints = load_dbx_endpoints_json(bridge_home())
     chat = sum(1 for e in endpoints.values() if isinstance(e, dict) and is_chat_task(e.get("task")))
     console.print(f"   {len(endpoints)} Databricks endpoint(s) cached ({chat} chat-capable) -- default: {model_raw}")
@@ -459,7 +463,7 @@ def _print_work_catalog_summary(console: Console, model_raw: str) -> None:
 
 def _step_checks(args, console: Console, cwd: Path, *, provider: str = "", model_raw: str = "") -> "tuple[list, bool]":
     console.print("Checks:")
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     lines, ok = run_checks(cwd=cwd)
     for line in lines:
         console.print(f"   {line}")
@@ -467,7 +471,7 @@ def _step_checks(args, console: Console, cwd: Path, *, provider: str = "", model
         console.print("   (catalog refresh skipped: --no-live)")
     else:
         console.print("   refreshing model catalogs (models --refresh)...")
-        from rolo_claude.catalog_cli import cmd_models
+        from halo_harness.catalog_cli import cmd_models
         try:
             cmd_models(["--refresh"])
             if provider == "databricks":
@@ -490,7 +494,7 @@ def _run_entry_picker(args, console: Console, entries: "list[dict]") -> "Optiona
     default-model pick and the final cross-provider one (1.0.1 hotfix 13)."""
     if sys.stdin.isatty() and sys.stdout.isatty():
         try:
-            from rolo_claude.tui.dialogs.init_picker import run_init_picker
+            from halo_harness.tui.dialogs.init_picker import run_init_picker
             return run_init_picker(entries)
         except Exception as e:
             console.print(f"   [WARN] interactive picker failed ({type(e).__name__}: {e}) -- falling back to a numbered list.")
@@ -507,14 +511,14 @@ def _chat_capable_dbx_entries(state_dir) -> "list[dict]":
     """`[{"ref": "dbx:<name>", "group": "<family>", "context_tokens",
     "max_output_tokens", "price_in_per_m", "price_out_per_m", "detail"},
     ...]`, chat-capable only (`dbx_routing.is_chat_task`) -- the SAME
-    "family x api_types" data `rolo-claude models`/the `/model` picker
+    "family x api_types" data `halo models`/the `/model` picker
     already show (1.0.1 hotfix 12: including ctx/output/price, via
     `model_display.databricks_row_fields`), never a separately-maintained
     list. Rendered through `model_display.format_model_row`, same as every
     other model-listing surface."""
-    from rolo_claude.model_display import databricks_row_fields
-    from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
-    from rolo_claude.providers.dbx_routing import PATH_TYPE_DISPLAY, classify_family, default_path_type, is_chat_task
+    from halo_harness.model_display import databricks_row_fields
+    from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
+    from halo_harness.providers.dbx_routing import PATH_TYPE_DISPLAY, classify_family, default_path_type, is_chat_task
     endpoints = load_dbx_endpoints_json(state_dir)
     old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
     out = []
@@ -540,7 +544,7 @@ def _numbered_model_pick(entries: "list[dict]", console: Console) -> "Optional[s
     """The no-TTY fallback: a plain numbered list, one stdin line read for
     the choice -- `None` (keep whatever default is already chosen) on
     empty/invalid input or EOF, never blocks, never raises."""
-    from rolo_claude.model_display import ROW_HEADER, format_model_row
+    from halo_harness.model_display import ROW_HEADER, format_model_row
     console.print("   Pick a default model (or press Enter to keep the current default):")
     console.print(f"   {ROW_HEADER}")
     for i, e in enumerate(entries, 1):
@@ -566,7 +570,7 @@ def _step_pick_model(args, console: Console, provider: str, model_ref_raw: str, 
     across every configured provider, is what actually gets written)."""
     if args.yes or args.model:
         return model_ref_raw
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     state_dir = bridge_home()
     entries = model_entries_for_provider(provider, state_dir)
     if not entries:
@@ -575,7 +579,7 @@ def _step_pick_model(args, console: Console, provider: str, model_ref_raw: str, 
     if not chosen or chosen == model_ref_raw:
         return model_ref_raw
     if write:
-        from rolo_claude.theme import set_config_value
+        from halo_harness.theme import set_config_value
         set_config_value("model", chosen)
         console.print(f"   Default model: {chosen} (picked interactively) -- wrote {state_dir / 'config.json'}")
     return chosen
@@ -595,7 +599,7 @@ def _step_finalize_default_model(args, console: Console, configured_this_run: "l
     if len(all_configured) <= 1:
         only = all_configured[0] if all_configured else (configured_this_run[-1] if configured_this_run else None)
         return picked_per_provider.get(only, "") if only else ""
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     state_dir = bridge_home()
     entries = []
     for provider in all_configured:
@@ -622,7 +626,7 @@ def _step_finalize_default_model(args, console: Console, configured_this_run: "l
         # just set up or already had -- verified: a box with Databricks AND
         # OpenRouter configured got `or:deepseek/...` written in place of
         # its real `dbx:` default on a plain double-Esc).
-        from rolo_claude.theme import get_config_value
+        from halo_harness.theme import get_config_value
         existing = get_config_value("model", default=None)
         if isinstance(existing, str) and existing:
             console.print(f"   Default model: {existing} (kept -- nothing chosen this run)")
@@ -632,7 +636,7 @@ def _step_finalize_default_model(args, console: Console, configured_this_run: "l
         # pre-fix code always used.
         last = configured_this_run[-1] if configured_this_run else all_configured[-1]
         chosen = picked_per_provider.get(last, PROVIDER_DEFAULT_MODEL.get(last, ""))
-    from rolo_claude.theme import set_config_value
+    from halo_harness.theme import set_config_value
     set_config_value("model", chosen)
     console.print(f"   Default model: {chosen} -- wrote {state_dir / 'config.json'}")
     return chosen
@@ -655,15 +659,15 @@ def _step_pick_permission_mode(args, console: Console) -> str:
     """1.0.1 hotfix 18.1: "Default permission mode" -- an arrow-key list
     (same `run_simple_picker` widget the provider/model steps already use;
     numbered fallback with no TTY), `auto` first and recommended since
-    that's what `rolo-claude` itself runs in day to day and `default`
+    that's what `halo` itself runs in day to day and `default`
     (Claude Code's own factory setting) is the one new users most often
     find confusing on their FIRST run. Writes the flat `permission_mode`
-    key straight to `~/.rolo-claude/config.json` -- `headless.py::
+    key straight to `~/.halo/config.json` -- `headless.py::
     build_session`'s own precedence chain (hotfix 18.2) reads it back as
     the layer between an explicit `--permission-mode` and settings.json's
     `permissions.defaultMode`. Never touches `~/.claude/settings.json`."""
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.theme import get_config_value, set_config_value
 
     def _existing() -> "Optional[str]":
         v = get_config_value("permission_mode", default=None)
@@ -671,7 +675,7 @@ def _step_pick_permission_mode(args, console: Console) -> str:
 
     console.print("Default permission mode:")
     if sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
-        from rolo_claude.tui.dialogs.init_picker import run_simple_picker
+        from halo_harness.tui.dialogs.init_picker import run_simple_picker
         try:
             chosen = run_simple_picker("Default permission mode", _PERMISSION_MODE_ROWS, initial_ref="auto")
         except Exception as e:
@@ -699,7 +703,7 @@ def _step_pick_permission_mode(args, console: Console) -> str:
         if existing:
             console.print(f"   {existing} (non-interactive; kept the existing config.json value)")
             return existing
-        console.print("   not set (non-interactive; pass `rolo-claude config set permission_mode ...` "
+        console.print("   not set (non-interactive; pass `halo config set permission_mode ...` "
                        "or settings.json's own permissions.defaultMode to choose one)")
         return ""
     else:
@@ -726,15 +730,15 @@ def _step_pick_permission_mode(args, console: Console) -> str:
 
 def _run_live_pong(model_raw: str, cwd: Path) -> "tuple[bool, str]":
     """Builds a real (bare) session for `model_raw` and drives one turn
-    in-process (never shells out to `rolo-claude` itself), capturing the
+    in-process (never shells out to `halo` itself), capturing the
     JSON result into an in-memory stream rather than real stdout -- the
     printed summary line is built from THAT (model/provider/reply/cost),
     so a key/token is never anywhere near what this function prints."""
     import io
     import json as json_mod
     try:
-        from rolo_claude import headless
-        from rolo_claude.output import PrintModeSink
+        from halo_harness import headless
+        from halo_harness.output import PrintModeSink
     except Exception as e:
         return False, f"could not load the agent loop: {type(e).__name__}: {e}"
     try:
@@ -781,7 +785,7 @@ def _step_live_pong(model_raw: str, cwd: Path, console: Console) -> bool:
     ok, line = _run_live_pong(model_raw, cwd)
     console.print(f"   {'[OK]' if ok else '[WARN]'} {line}")
     if not ok:
-        console.print("   Next: `rolo-claude doctor` explains what's missing.")
+        console.print("   Next: `halo doctor` explains what's missing.")
     return ok
 
 
@@ -798,7 +802,7 @@ def _fix_ripgrep(args, console: Console) -> Optional[str]:
     if not _confirm(args, console, f"   install a static rg into {dest}?", default=True):
         console.print("   skipped rg install.")
         return None
-    from rolo_claude.linux_fixes import install_static_ripgrep
+    from halo_harness.linux_fixes import install_static_ripgrep
     ok, msg = install_static_ripgrep(dest)
     if ok:
         console.print(f"   [OK] installed rg -> {msg}")
@@ -808,7 +812,7 @@ def _fix_ripgrep(args, console: Console) -> Optional[str]:
 
 
 def _fix_local_bin_path(args, console: Console) -> Optional[str]:
-    from rolo_claude.linux_fixes import ensure_local_bin_on_rc, local_bin_on_noninteractive_path, rc_file_for_shell
+    from halo_harness.linux_fixes import ensure_local_bin_on_rc, local_bin_on_noninteractive_path, rc_file_for_shell
     if local_bin_on_noninteractive_path():
         console.print("   [OK] ~/.local/bin already on PATH for a non-interactive shell -- not changed.")
         return None
@@ -825,13 +829,13 @@ def _fix_local_bin_path(args, console: Console) -> Optional[str]:
 
 
 def _check_windows_launcher(console: Console) -> None:
-    exe = shutil.which("rolo-claude") or shutil.which("rolo-claude.exe")
+    exe = shutil.which("halo") or shutil.which("halo.exe")
     if exe:
-        console.print(f"   [OK] rolo-claude launcher on PATH: {exe}")
+        console.print(f"   [OK] halo launcher on PATH: {exe}")
         return
-    console.print("   [WARN] rolo-claude launcher not found on PATH -- add the directory `uv tool install`/"
+    console.print("   [WARN] halo launcher not found on PATH -- add the directory `uv tool install`/"
                    "`pip install --user` put it in (typically %USERPROFILE%\\.local\\bin, or a venv's own "
-                   "Scripts\\ dir), or run `python -m rolo_claude` from this checkout instead.")
+                   "Scripts\\ dir), or run `python -m halo_harness` from this checkout instead.")
 
 
 def _step_linux_fixes(args, console: Console) -> list:
@@ -885,15 +889,15 @@ def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: 
     else:
         console.print("   nothing new written (already configured).")
     if no_live or pong_ok:
-        console.print("   Run `rolo-claude` to start.")
+        console.print("   Run `halo` to start.")
     else:
         hint = _first_fix_hint(doctor_lines)
-        console.print(f"   Next: {hint}" if hint else "   Next: run `rolo-claude doctor` for details.")
-    # Addendum to H15 (owner report from the work VM): `rolo-claude` typed
+        console.print(f"   Next: {hint}" if hint else "   Next: run `halo doctor` for details.")
+    # Addendum to H15 (owner report from the work VM): `halo` typed
     # OUTSIDE the checkout did not work -- only the checkout's own bin/
     # wrapper had ever been used. The SAME doctor check/fix line ends every
     # init run, success or not, so this is never missed on a first run.
-    from rolo_claude.doctor import MISSING, WARN, check_command_on_path
+    from halo_harness.doctor import MISSING, WARN, check_command_on_path
     path_line = check_command_on_path()
     console.print(f"   {path_line}")
     if path_line.startswith(WARN) or path_line.startswith(MISSING):
@@ -906,8 +910,8 @@ def _step_summary(console: Console, written: list, pong_ok: bool, doctor_lines: 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="rolo-claude init", add_help=True,
-        description="Set up rolo-claude in one command: pick a provider to set up, configure its "
+        prog="halo init", add_help=True,
+        description="Set up halo in one command: pick a provider to set up, configure its "
                      "credentials, set a default model, run doctor, send a live pong, and offer the "
                      "Linux setup fixes. Repeat for another provider, then pick the overall default.",
     )
@@ -924,7 +928,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-fixes", action="store_true", help="skip the Linux rg/PATH fixes step")
     parser.add_argument("--team", default=None, metavar="PATH|URL",
                          help="a team.json preset (host/default model/gateway preference/DBU price -- "
-                              "never a token); overrides .rolo-claude/team.json / ~/.rolo-claude/team.json")
+                              "never a token); overrides .halo/team.json / ~/.halo/team.json")
     return parser
 
 
@@ -962,7 +966,7 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
     # explicit `enabled: false` (e.g. a previous `providers disable`) gets
     # flipped back to `true` by completing this provider's setup again.
     if provider_status(provider) in ("configured", "logged in"):
-        from rolo_claude.providers.enablement import enable_if_was_explicitly_disabled
+        from halo_harness.providers.enablement import enable_if_was_explicitly_disabled
         enable_if_was_explicitly_disabled(provider)
     model_ref_raw, model_path = _step_default_model(provider, args, console, write=write_model)
     if model_path:
@@ -993,7 +997,7 @@ def _run_init_tabs(args, console: Console, cwd: Path) -> "Optional[tuple]":
     gateway/role preferences never applied, and `--no-live` never stopped
     the tabs' own reachability probes/catalog fetches)."""
     try:
-        from rolo_claude.tui.dialogs.init_tabs import run_init_tabs
+        from halo_harness.tui.dialogs.init_tabs import run_init_tabs
         app = run_init_tabs(team=getattr(args, "team", None), no_live=args.no_live)
     except Exception as e:
         console.print(f"[WARN] tabbed provider setup failed ({type(e).__name__}: {e}) -- "
@@ -1036,19 +1040,19 @@ def cmd_init(argv: list) -> int:
     args = _build_parser().parse_args(argv)
     console = Console()
 
-    from rolo_claude.providers.config import load_env_file
+    from halo_harness.providers.config import load_env_file
     load_env_file(_env_file_path())
 
     # H15 item 21.4: one-time migration before anything else runs -- a box
     # that already had credentials in its OWN env file from before provider
     # enablement existed gets exactly those enabled; a no-op once a
     # `providers` block already exists, however it got there.
-    from rolo_claude.providers.enablement import ensure_providers_migrated
+    from halo_harness.providers.enablement import ensure_providers_migrated
     migration_note = ensure_providers_migrated()
     if migration_note:
         console.print(f"[dim]{migration_note}[/dim]")
 
-    console.print("[bold]rolo-claude init[/bold]")
+    console.print("[bold]halo init[/bold]")
     cwd = Path.cwd()
     written: list = []
     doctor_lines: list = []

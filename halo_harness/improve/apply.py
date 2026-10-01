@@ -1,9 +1,9 @@
-"""rolo_claude.improve.apply -- H10 Part B: turns one drafted `Candidate`
+"""halo_harness.improve.apply -- H10 Part B: turns one drafted `Candidate`
 into a real file on disk, ONLY on explicit approval (an `ImproveCard`'s
 `a`/`e` key, or headless `improve --apply`). Provenance is INFORMATION on
 the card/in the file's own trailing comment -- never a block, filter or
 classifier. Only NEW files are created unless the target already carries
-the rolo-claude provenance comment (a prior /improve write); a collision
+the halo provenance comment (a prior /improve write); a collision
 with a user-authored file picks a new name instead of ever touching it.
 """
 
@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-PROVENANCE_MARKER = "<!-- rolo-claude improve:"
+PROVENANCE_MARKER = "<!-- halo improve:"
+# 2.0.0 fixpass finding 6: a file `/improve` wrote under 1.0.1 carries THIS
+# marker, never the new one -- `has_provenance_marker` must still recognize
+# it as "already provenanced" (never user-authored), or every such file
+# looks user-authored to 2.0.0 and the next candidate writes `foo-2.md`
+# right alongside it instead of updating it in place. Only ever CHECKED,
+# never written -- a fresh apply_candidate() always writes PROVENANCE_
+# MARKER (the new one).
+PROVENANCE_MARKER_LEGACY = "<!-- rolo-claude improve:"
 
 
 def _iso_now() -> str:
@@ -32,12 +40,13 @@ def provenance_comment(*, sessions, evidence_count: int, model: str, from_tool_o
 
 
 def has_provenance_marker(text: str) -> bool:
-    return PROVENANCE_MARKER in (text or "")
+    text = text or ""
+    return PROVENANCE_MARKER in text or PROVENANCE_MARKER_LEGACY in text
 
 
 def candidate_hash(candidate) -> str:
     """sha256 of kind+target+body -- the ONE formula backing both the `d`
-    dismissed-forever store (`~/.rolo-claude/improve/dismissed.json`) and
+    dismissed-forever store (`~/.halo/improve/dismissed.json`) and
     the `improve_applied` log node's own `sha256` field, so "was this exact
     candidate already dismissed" and "what did apply actually write" are
     the same content-addressed identity."""
@@ -46,12 +55,12 @@ def candidate_hash(candidate) -> str:
 
 
 def _rule_dir(scope: str, cwd: Path) -> Path:
-    from rolo_claude.config.paths import claude_config_dir
+    from halo_harness.config.paths import claude_config_dir
     return (Path(cwd) / ".claude" / "rules") if scope == "project" else (claude_config_dir() / "rules")
 
 
 def _skill_dir(scope: str, cwd: Path) -> Path:
-    from rolo_claude.config.paths import claude_config_dir
+    from halo_harness.config.paths import claude_config_dir
     return (Path(cwd) / ".claude" / "skills") if scope == "project" else (claude_config_dir() / "skills")
 
 
@@ -92,7 +101,7 @@ def _next_available(base: Path, *, is_dir: bool) -> "tuple[Path, bool, Optional[
 
 def resolve_target_path(candidate, *, cwd: Path, settings=None) -> ResolvedTarget:
     if candidate.kind == "memory":
-        from rolo_claude.config.memory import MemoryStore
+        from halo_harness.config.memory import MemoryStore
         store = MemoryStore(cwd, settings)
         filename = candidate.path if candidate.path.endswith(".md") else candidate.path + ".md"
         base = store.memory_dir_path / filename
@@ -163,7 +172,7 @@ def render_preview(candidate, comment: str) -> str:
     file). Shares the SAME renderers `apply_candidate` itself calls, so a
     preview can never drift from what actually gets written."""
     if candidate.kind == "memory":
-        from rolo_claude.config.memory import render_memory_content
+        from halo_harness.config.memory import render_memory_content
         content, _ = render_memory_content(
             name=candidate.title, description=candidate.rationale or candidate.title, type="feedback",
             body=candidate.body, origin_session_id=(candidate.evidence[0].split("#")[0] if candidate.evidence else None),
@@ -216,7 +225,7 @@ def apply_candidate(candidate, *, cwd: Path, settings=None, model_label: str = "
     )
 
     if candidate.kind == "memory":
-        from rolo_claude.config.memory import MemoryStore
+        from halo_harness.config.memory import MemoryStore
         store = MemoryStore(cwd, settings)
         if target.exists:
             # An UPDATE (target.is_update was already confirmed True by

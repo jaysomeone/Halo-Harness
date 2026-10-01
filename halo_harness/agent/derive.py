@@ -1,4 +1,4 @@
-"""rolo_claude.agent.derive -- derive_request(): rebuilds the Anthropic-
+"""halo_harness.agent.derive -- derive_request(): rebuilds the Anthropic-
 shaped (system_text, messages, tools) transcript from a SessionLog (H1
 scope E). This is the "log is the single source of truth" half of dsh's
 invariant: `providers.request.build_request_body` (and, for a native Claude

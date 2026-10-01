@@ -1,4 +1,4 @@
-"""rolo_claude.providers.routing -- model-ref routing (Route/route_model),
+"""halo_harness.providers.routing -- model-ref routing (Route/route_model),
 tool selection/conversion, tool_choice mapping, profile resolution, and the
 Databricks Claude passthrough body/header builders. Moved out of bridge.py
 unchanged in the H0 package split; see wip/SIGNATURES.md parts 2 and
@@ -7,11 +7,11 @@ unchanged in the H0 package split; see wip/SIGNATURES.md parts 2 and
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
-from rolo_claude.providers.config import extract_custom_headers
-from rolo_claude.providers.databricks import load_models_json
+from halo_harness.config.paths import env_compat
+from halo_harness.providers.config import extract_custom_headers
+from halo_harness.providers.databricks import load_models_json
 
 
 class InvalidModelError(Exception):
@@ -34,7 +34,7 @@ def _dbx_dialect(stripped_model: str) -> str:
     `claude-3-5-sonnet-...`, no `databricks-claude-` prefix) down the
     native Anthropic passthrough dialect too; those are invocations-only,
     openai-chat-shaped endpoints despite "claude" being in the name."""
-    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    from halo_harness.providers.dbx_routing import resolve_databricks_dialect
     return resolve_databricks_dialect(stripped_model)[1]
 
 
@@ -43,7 +43,7 @@ def _dbx_route(stripped_model: str) -> Route:
     strips a `@anthropic` suffix (scope D's per-call gateway override) so
     the proxy never sends that suffix upstream as if it were part of the
     real endpoint/model name."""
-    from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+    from halo_harness.providers.dbx_routing import resolve_databricks_dialect
     clean, dialect = resolve_databricks_dialect(stripped_model)
     return Route("databricks", clean, dialect)
 
@@ -77,8 +77,7 @@ def route_model(name: str, headers: dict[str, str], cfg) -> Route:
         if header_key in headers:
             resolved = headers[header_key]
         else:
-            env_key = "BRIDGE_MODEL_SMALL" if is_small else "BRIDGE_MODEL"
-            resolved = os.environ.get(env_key, name)
+            resolved = env_compat("MODEL_SMALL" if is_small else "MODEL", default=name)
         # Re-run prefix logic on resolved ref
         if r := prefixed(resolved):
             return r

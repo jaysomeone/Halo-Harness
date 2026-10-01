@@ -1,4 +1,4 @@
-"""rolo_claude.commands.custom -- `.claude/commands/**/*.md` +
+"""halo_harness.commands.custom -- `.claude/commands/**/*.md` +
 `~/.claude/commands/**/*.md` (U0 scope B): each becomes a `kind="prompt"`
 SlashCommand namespaced by its subdirectory (`.claude/commands/git/commit.md`
 -> `/git:commit`), frontmatter via `config/frontmatter.py`. `@path` mentions
@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.commands.registry import Registry, SlashCommand, expand_command_body
-from rolo_claude.config.frontmatter import parse as parse_frontmatter
+from halo_harness.commands.registry import Registry, SlashCommand, expand_command_body
+from halo_harness.config.frontmatter import parse as parse_frontmatter
 
 
 def _namespaced_name(root: Path, md_path: Path) -> str:
@@ -23,7 +23,7 @@ def _namespaced_name(root: Path, md_path: Path) -> str:
 def _allowed_tools_list(fm: dict) -> list:
     allowed = fm.get("allowed-tools") if isinstance(fm, dict) else None
     if isinstance(allowed, str):
-        from rolo_claude.permissions import split_tool_rule_list
+        from halo_harness.permissions import split_tool_rule_list
         return split_tool_rule_list(allowed)
     return allowed if isinstance(allowed, list) else []
 
@@ -42,7 +42,7 @@ def _make_run(body: str, allowed_tools: list):
             env=getattr(session, "tool_env", None),
         )
         if result.error:
-            return f"rolo-claude: {result.error}"
+            return f"halo: {result.error}"
         return result.text
     return _run
 
@@ -73,7 +73,7 @@ def register_custom_commands(reg: Registry, *, cwd: Path, home: Optional[Path] =
     """Project `.claude/commands/**/*.md` registered first, so it wins a
     same-namespaced collision against the user's own copy (`Registry.add`
     never replaces an existing entry); then `~/.claude/commands/**/*.md`."""
-    from rolo_claude.config.paths import home as home_fn
+    from halo_harness.config.paths import home as home_fn
 
     project_dir = Path(cwd) / ".claude" / "commands"
     for cmd in _discover_dir(project_dir, source="project"):

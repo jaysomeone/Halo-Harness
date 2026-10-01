@@ -21,12 +21,12 @@ from tests.helpers.fake_home import build_fake_home
 from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
 ensure_default_provider_credentials()
-from rolo_claude.agent.jobs import JobRegistry, JobRecord, MAX_CONCURRENT_JOBS
-from rolo_claude.config.paths import git_bash
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.bash import BashTool
-from rolo_claude.tools.bash_output import BashOutputTool
-from rolo_claude.tools.task_stop import TaskStopTool
+from halo_harness.agent.jobs import JobRegistry, JobRecord, MAX_CONCURRENT_JOBS
+from halo_harness.config.paths import git_bash
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.bash import BashTool
+from halo_harness.tools.bash_output import BashOutputTool
+from halo_harness.tools.task_stop import TaskStopTool
 
 test, TESTS = new_registry()
 
@@ -100,8 +100,8 @@ def test_h9_completion_notice_truncates_long_output_with_a_bashoutput_hint(ctx: 
     (bypassing a real subprocess) for a fast, deterministic test of
     `_push_notice` itself."""
     import time as time_mod
-    from rolo_claude.agent.jobs import JobRecord
-    from rolo_claude.tools._proc import _CappedCollector
+    from halo_harness.agent.jobs import JobRecord
+    from halo_harness.tools._proc import _CappedCollector
 
     parent = _FakeParent()
     reg = JobRegistry(parent)
@@ -130,8 +130,8 @@ def test_h9_completion_notice_short_output_is_never_truncated(ctx: Ctx):
     add the BashOutput hint, never shorten output that was already under
     the tail cap."""
     import time as time_mod
-    from rolo_claude.agent.jobs import JobRecord
-    from rolo_claude.tools._proc import _CappedCollector
+    from halo_harness.agent.jobs import JobRecord
+    from halo_harness.tools._proc import _CappedCollector
 
     parent = _FakeParent()
     reg = JobRegistry(parent)
@@ -308,7 +308,7 @@ def test_bash_timeout_moves_to_background_when_a_registry_is_present(ctx: Ctx):
               reg.jobs[job_id].exit_code == 0)
     text, _ = reg.poll(job_id)
     ctx.check(f"its output is clean (no marker leakage), got {text!r}",
-              "finally-done" in text and "__ROLO_CLAUDE_EXIT__" not in text and "__ROLO_CLAUDE_CWD__" not in text)
+              "finally-done" in text and "__HALO_EXIT__" not in text and "__HALO_CWD__" not in text)
 
 
 @test
@@ -345,7 +345,7 @@ def test_h9b_f30_capped_collector_append_and_result_are_thread_safe(ctx: Ctx):
     `result()` being read repeatedly must never raise or corrupt
     `total_len`'s own accounting, matching the real
     run_streamed-hands-off-to-a-new-drain-thread race this fixes."""
-    from rolo_claude.tools._proc import _CappedCollector
+    from halo_harness.tools._proc import _CappedCollector
     collector = _CappedCollector()
     chunk = "x" * 100
     n_threads = 8
@@ -475,7 +475,7 @@ def test_background_bash_job_notice_applied_on_next_turn(ctx: Ctx):
     # H11b finding 27: save/restore BRIDGE_TEST_HOME -- this used to set it
     # and never restore it, so it leaked into every test that ran later in
     # the SAME `run_all.py` process, silently shielding other suites'
-    # "never touches the real ~/.rolo-claude" guards for the wrong reason.
+    # "never touches the real ~/.halo" guards for the wrong reason.
     fh = build_fake_home()
     saved_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -489,9 +489,9 @@ def test_background_bash_job_notice_applied_on_next_turn(ctx: Ctx):
 
 
 def _run_background_bash_job_notice_test(ctx: Ctx, fh: dict) -> None:
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/x")
     model_ref = parse_model_ref("or:mock/x")
@@ -533,10 +533,10 @@ def test_controller_quit_kills_background_jobs(ctx: Ctx):
 
 
 def _run_controller_quit_kills_background_jobs(ctx: Ctx, fh: dict) -> None:
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.controller import Controller
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.controller import Controller
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     session_ctx = SessionContext(cwd=fh["proj"], model_label="mock/x")
     model_ref = parse_model_ref("or:mock/x")
@@ -555,14 +555,14 @@ def _run_controller_quit_kills_background_jobs(ctx: Ctx, fh: dict) -> None:
 
 @test
 def test_tasks_command_reports_no_jobs_by_default(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_tasks
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_tasks
     result = _cmd_tasks("", HeadlessFacade(cwd=Path(".")))
     ctx.check(f"no jobs message, got {result!r}", "No background jobs" in result)
 
 
 @test
 def test_tasks_command_lists_jobs_from_a_live_session(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_tasks
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_tasks
 
     class _FakeSession:
         pass

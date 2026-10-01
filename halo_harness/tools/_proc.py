@@ -1,4 +1,4 @@
-"""rolo_claude.tools._proc -- shared subprocess execution for Bash/
+"""halo_harness.tools._proc -- shared subprocess execution for Bash/
 PowerShell (H2 scope A): merged stdout+stderr streamed to a progress
 callback roughly every 0.5s, process-GROUP kill on timeout/abort (never
 just the one visible child -- a shell that forked children of its own must
@@ -68,7 +68,7 @@ class _CappedCollector:
             self._head_len += len(text)
         else:
             if self._spill_file is None:
-                fd, name = tempfile.mkstemp(prefix="rolo-claude-proc-", suffix=".log")
+                fd, name = tempfile.mkstemp(prefix="halo-proc-", suffix=".log")
                 self._spill_file = os.fdopen(fd, "w", encoding="utf-8", errors="replace")
                 self._spill_path = Path(name)
                 self._spill_file.write("".join(self._head))
@@ -193,7 +193,7 @@ def _close_stream_async(stream) -> None:
         except Exception:
             pass
 
-    threading.Thread(target=_do_close, daemon=True, name="rolo-claude-stream-close").start()
+    threading.Thread(target=_do_close, daemon=True, name="halo-stream-close").start()
 
 
 def _kill_process_group(proc: "subprocess.Popen") -> None:

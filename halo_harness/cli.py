@@ -1,15 +1,15 @@
-"""rolo_claude.cli -- command-line entry point (`rolo-claude` console
-script / `python -m rolo_claude`). U0 scope A: the single argparse surface
+"""halo_harness.cli -- command-line entry point (`halo` console
+script / `python -m halo_harness`). U0 scope A: the single argparse surface
 mirroring `docs/harness/claude-help-2.1.281.txt` flag-for-flag (the flag-
 parity rule: every flag `claude` accepts is accepted here with the same
 name/arity/meaning; a flag whose FEATURE isn't built yet is still parsed
-and gets one `rolo_claude.not_yet` stderr line, never an argparse error --
+and gets one `halo_harness.not_yet` stderr line, never an argparse error --
 so an actually-unknown flag really is unknown and remains an argparse
 error, exit 2). Subcommands `proxy`/`models`/`mcp`/`config`/`doctor` are
 dispatched before the main parser ever sees the rest of argv (each has its
-own, separate flag surface). Bare `rolo-claude` (no `-p`) opens the U2
-full-screen TUI (`rolo_claude/tui/launch.py`, imported lazily so `-p`/
-`import rolo_claude` never pull in textual); a positional PROMPT without
+own, separate flag surface). Bare `halo` (no `-p`) opens the U2
+full-screen TUI (`halo_harness/tui/launch.py`, imported lazily so `-p`/
+`import halo_harness` never pull in textual); a positional PROMPT without
 `-p` opens the TUI and submits it as the first turn.
 """
 
@@ -22,15 +22,15 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude import __version__
-from rolo_claude.not_yet import print_not_yet
-from rolo_claude.providers.routing import InvalidModelError
+from halo_harness import __version__
+from halo_harness.not_yet import print_not_yet
+from halo_harness.providers.routing import InvalidModelError
 
 _STDIN_CAP_BYTES = 10 * 1024 * 1024  # 10 MB, matches Claude Code's own -p stdin cap
 
 
 def _cmd_proxy(rest: list) -> int:
-    """`rolo-claude proxy ...` -- import bridge.py and hand it the
+    """`halo proxy ...` -- import bridge.py and hand it the
     remaining argv verbatim, exactly as `python bridge.py ...` would."""
     import bridge
     result = bridge.main(rest)
@@ -91,9 +91,14 @@ _REAL_FLAGS = [
     (["--strict-mcp-config"], dict(dest="strict_mcp_config", action="store_true")),
     # H13 Part B: forces the plain type/size/dimensions caption for every
     # image tool result this run, same as `images: "caption"`/`"off"` in
-    # ~/.rolo-claude/config.json but for just this one invocation -- the
+    # ~/.halo/config.json but for just this one invocation -- the
     # TUI only (print mode has no inline-image concept to disable).
     (["--no-inline-images"], dict(dest="no_inline_images", action="store_true")),
+    # 2.0.0 Launch intro: skips the one-time "I am just a copy, of a copy,
+    # of a copy..." typewriter line a fresh interactive launch otherwise
+    # shows -- same effect as `"intro": false` in ~/.halo/config.json, see
+    # tui/launch.py's own show_intro resolution.
+    (["--no-intro"], dict(dest="no_intro", action="store_true")),
     # H6: real now (agent definitions + the Agent tool + plan mode +
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
@@ -167,8 +172,8 @@ def _enable_debug_logging(debug_file: Optional[str]) -> None:
     Never raises -- a logging problem must not stop the harness."""
     import logging
     try:
-        from rolo_claude.config.paths import bridge_home
-        from rolo_claude.providers.config import RedactingFormatter, setup_logging
+        from halo_harness.config.paths import bridge_home
+        from halo_harness.providers.config import RedactingFormatter, setup_logging
         if debug_file:
             log_path = Path(debug_file).expanduser()
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,16 +188,16 @@ def _enable_debug_logging(debug_file: Optional[str]) -> None:
             logger = setup_logging(bridge_home())
             log_path = bridge_home() / "bridge.log"
         logger.setLevel(logging.DEBUG)
-        for name in ("rolo_claude", "rolo_claude.tui", "rolo_claude.agent", "rolo_claude.mcp"):
+        for name in ("halo_harness", "halo_harness.tui", "halo_harness.agent", "halo_harness.mcp"):
             child = logging.getLogger(name)
             child.setLevel(logging.DEBUG)
             if not child.handlers:
                 for hdlr in logger.handlers:
                     child.addHandler(hdlr)
-        logger.debug("debug logging enabled (rolo-claude %s, argv=%s)", __version__, sys.argv[1:])
-        print(f"rolo-claude: debug log -> {log_path}", file=sys.stderr)
+        logger.debug("debug logging enabled (halo %s, argv=%s)", __version__, sys.argv[1:])
+        print(f"halo: debug log -> {log_path}", file=sys.stderr)
     except Exception as e:  # pragma: no cover - defensive
-        print(f"rolo-claude: could not enable debug logging: {e}", file=sys.stderr)
+        print(f"halo: could not enable debug logging: {e}", file=sys.stderr)
 
 
 def _flag_was_set(value) -> bool:
@@ -205,10 +210,10 @@ def _flag_was_set(value) -> bool:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="rolo-claude", add_help=True,
-        description="rolo-claude - starts an interactive session by default, use -p/--print for non-interactive output",
+        prog="halo", add_help=True,
+        description="halo - starts an interactive session by default, use -p/--print for non-interactive output",
         epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export "
-               "(run `rolo-claude <command> --help`; `rolo-claude init` sets up a fresh box in one go)",
+               "(run `halo <command> --help`; `halo init` sets up a fresh box in one go)",
     )
     try:
         parser._positionals.title = "Arguments"
@@ -296,34 +301,34 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "proxy":
         return _cmd_proxy(argv[1:])
     if argv and argv[0] == "models":
-        from rolo_claude.catalog_cli import cmd_models
+        from halo_harness.catalog_cli import cmd_models
         return cmd_models(argv[1:])
     if argv and argv[0] == "mcp":
-        from rolo_claude.mcp_cli import cmd_mcp
+        from halo_harness.mcp_cli import cmd_mcp
         return cmd_mcp(argv[1:])
     if argv and argv[0] == "config":
-        from rolo_claude.config_cli import cmd_config
+        from halo_harness.config_cli import cmd_config
         return cmd_config(argv[1:])
     if argv and argv[0] == "doctor":
-        from rolo_claude.doctor import cmd_doctor
+        from halo_harness.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
     if argv and argv[0] == "work-matrix":
-        from rolo_claude.work_matrix import cmd_work_matrix
+        from halo_harness.work_matrix import cmd_work_matrix
         return cmd_work_matrix(argv[1:])
     if argv and argv[0] == "init":
-        from rolo_claude.init_cli import cmd_init
+        from halo_harness.init_cli import cmd_init
         return cmd_init(argv[1:])
     if argv and argv[0] == "providers":
-        from rolo_claude.providers_cli import cmd_providers
+        from halo_harness.providers_cli import cmd_providers
         return cmd_providers(argv[1:])
     if argv and argv[0] == "stats":
-        from rolo_claude.stats_cli import cmd_stats
+        from halo_harness.stats_cli import cmd_stats
         return cmd_stats(argv[1:])
     if argv and argv[0] == "improve":
-        from rolo_claude.improve_cli import cmd_improve
+        from halo_harness.improve_cli import cmd_improve
         return cmd_improve(argv[1:])
     if argv and argv[0] == "export":
-        from rolo_claude.export_cli import cmd_export
+        from halo_harness.export_cli import cmd_export
         return cmd_export(argv[1:])
 
     parser = _build_parser()
@@ -338,7 +343,7 @@ def main(argv: Optional[list] = None) -> int:
         args, _ = parser.parse_known_args(argv)
 
     if args.version:
-        print(f"rolo-claude {__version__}")
+        print(f"halo {__version__}")
         return 0
 
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
@@ -352,20 +357,20 @@ def main(argv: Optional[list] = None) -> int:
         # V2c (H15): validated ONCE, here, before either run_print_mode or
         # the TUI ever starts building a Session -- a bad NAME=MODEL is a
         # clean exit-2 usage error, same treatment as a bad --session-id.
-        from rolo_claude.roles import parse_role_flags
+        from halo_harness.roles import parse_role_flags
         try:
             parse_role_flags(args.role)
         except ValueError as e:
-            print(f"rolo-claude: {e}", file=sys.stderr)
+            print(f"halo: {e}", file=sys.stderr)
             return 2
 
     if args.demo and args.print_mode:
-        from rolo_claude.testing.fake_controller import run_demo
+        from halo_harness.testing.fake_controller import run_demo
         demo_format = args.output_format if args.output_format in ("text", "json") else "text"
         return run_demo(output_format=demo_format, stress=args.stress)
 
     if not args.print_mode:
-        # U2: bare `rolo-claude [PROMPT]` and `rolo-claude --demo` (without
+        # U2: bare `halo [PROMPT]` and `halo --demo` (without
         # -p) both open the full-screen TUI; textual/rich become real
         # imports only from this lazy import down. A full-screen session
         # needs a real terminal to render into and read keys from -- stdin
@@ -375,11 +380,11 @@ def main(argv: Optional[list] = None) -> int:
         # + exit 2 rather than Textual hanging trying to set up a terminal
         # that doesn't exist.
         if not sys.stdin.isatty():
-            print("rolo-claude: a full-screen session requires an interactive terminal "
+            print("halo: a full-screen session requires an interactive terminal "
                   "(stdin is not a tty) -- use -p/--print for a non-interactive run",
                   file=sys.stderr)
             return 2
-        from rolo_claude.tui.launch import run_tui
+        from halo_harness.tui.launch import run_tui
         return run_tui(args)
 
     system_prompt_text = args.system_prompt
@@ -387,14 +392,14 @@ def main(argv: Optional[list] = None) -> int:
         try:
             system_prompt_text = Path(args.system_prompt_file).read_text(encoding="utf-8")
         except OSError as e:
-            print(f"rolo-claude: could not read --system-prompt-file: {e}", file=sys.stderr)
+            print(f"halo: could not read --system-prompt-file: {e}", file=sys.stderr)
             return 2
     append_system_prompt_text = args.append_system_prompt
     if args.append_system_prompt_file:
         try:
             file_text = Path(args.append_system_prompt_file).read_text(encoding="utf-8")
         except OSError as e:
-            print(f"rolo-claude: could not read --append-system-prompt-file: {e}", file=sys.stderr)
+            print(f"halo: could not read --append-system-prompt-file: {e}", file=sys.stderr)
             return 2
         append_system_prompt_text = f"{append_system_prompt_text}\n\n{file_text}" if append_system_prompt_text else file_text
 
@@ -413,17 +418,17 @@ def main(argv: Optional[list] = None) -> int:
         pass
     elif prompt_text is None:
         if sys.stdin.isatty():
-            print("rolo-claude: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
+            print("halo: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
             return 2
         prompt_text, err = _read_stdin_prompt()
         if err is not None:
-            print(f"rolo-claude: {err}", file=sys.stderr)
+            print(f"halo: {err}", file=sys.stderr)
             return 2
         if not prompt_text:
-            print("rolo-claude: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
+            print("halo: -p requires a prompt (inline or piped via stdin)", file=sys.stderr)
             return 2
 
-    from rolo_claude.headless import run_print_mode
+    from halo_harness.headless import run_print_mode
     try:
         return run_print_mode(
             prompt=prompt_text,
@@ -466,24 +471,35 @@ def main(argv: Optional[list] = None) -> int:
         # a bad --model/alias must be a clean config error (exit 2), not an
         # uncaught traceback (exit 1 is reserved for a request that ran and
         # failed, not a bad invocation).
-        print(f"rolo-claude: invalid --model: {e}", file=sys.stderr)
+        print(f"halo: invalid --model: {e}", file=sys.stderr)
         if args.model:
-            from rolo_claude.catalog_cli import near_miss_slug
-            from rolo_claude.config.paths import bridge_home
-            from rolo_claude.providers.databricks import load_models_json
+            from halo_harness.catalog_cli import near_miss_slug
+            from halo_harness.config.paths import bridge_home
+            from halo_harness.providers.databricks import load_models_json
             try:
                 known = load_models_json(bridge_home())
                 matches = near_miss_slug(args.model, known)
                 if matches:
-                    print(f"rolo-claude: did you mean: {', '.join('or:' + m for m in matches)}", file=sys.stderr)
+                    print(f"halo: did you mean: {', '.join('or:' + m for m in matches)}", file=sys.stderr)
             except Exception:
                 pass
         return 2
     except KeyboardInterrupt:
         # Ctrl+C during a print-mode turn: POSIX exit-code convention
         # (128 + SIGINT's 2 = 130), never an uncaught-traceback exit 1.
-        print("\nrolo-claude: interrupted", file=sys.stderr)
+        print("\nhalo: interrupted", file=sys.stderr)
         return 130
+
+
+def main_deprecated_alias(argv: Optional[list] = None) -> int:
+    """`rolo-claude` console-script entry point (2.0.0 rename): one notice
+    line to stderr, then exactly `main(argv)` -- same process, same parser,
+    same behavior, so every flag/subcommand (including `rolo-claude proxy`)
+    keeps working under the old name indefinitely, not just for one
+    deprecation window. Never prints the notice more than once per process
+    (there's only ever one entry into argv handling per invocation)."""
+    print("halo: 'rolo-claude' is deprecated, use 'halo' instead", file=sys.stderr)
+    return main(argv)
 
 
 if __name__ == "__main__":

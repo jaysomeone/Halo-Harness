@@ -1,4 +1,4 @@
-"""rolo_claude.tui.images -- H13 Part B ("inline images in the terminal").
+"""halo_harness.tui.images -- H13 Part B ("inline images in the terminal").
 
 Pure, stdlib-first (Pillow optional, same "works with no imaging library at
 all" contract as `tools/imageutil.py`) building blocks for rendering a tool
@@ -99,7 +99,7 @@ def detect_image_protocol(env: dict, *, isatty: bool = True,
 
 def effective_render_mode(config_value: Optional[str], *, no_inline_flag: bool = False) -> str:
     """"inline" | "caption" -- `--no-inline-images` and `images: "caption"`/
-    `"off"` in `~/.rolo-claude/config.json` all mean the same thing for
+    `"off"` in `~/.halo/config.json` all mean the same thing for
     RENDERING purposes (never attempt a terminal query or an escape
     sequence); `"inline"` (the default, `config_value` missing/unrecognised)
     means "try `detect_image_protocol`, fall back to the caption if it says

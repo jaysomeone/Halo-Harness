@@ -1,6 +1,6 @@
-# H3 brief — MCP client, frozen catalog + lazy load, `mcp` CLI, Claude in Chrome + Playwright (rolo-claude)
+# H3 brief — MCP client, frozen catalog + lazy load, `mcp` CLI, Claude in Chrome + Playwright (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — OS-neutral, `/bin/bash` on Linux). Baseline = the H2b commit on master with both suites green on
 Windows and WSL. Do not commit.
 
@@ -20,24 +20,24 @@ Windows and WSL. Do not commit.
    `claude.exe --claude-in-chrome-mcp` as stdio MCP server `claude-in-chrome`; preconditions; the
    `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_checks` env in auto/bypass) and the H7 row of the
    plan's milestone table (Playwright via `@playwright/mcp`).
-4. Current code: `rolo_claude/tools/{registry,base,toolsearch}.py`, `agent/{loop,prompt,derive}.py`,
+4. Current code: `halo_harness/tools/{registry,base,toolsearch}.py`, `agent/{loop,prompt,derive}.py`,
    `providers/{request,hooks,profiles}.py` (32-cap + schema simplifier), `permissions.py` (`mcp__`
    rule forms), `config/{claude_json,settings,paths}.py`, `tests/helpers/*`.
 
 ## Scope
-A. **`rolo_claude/mcp/`** on the official `mcp` SDK (`pip install "mcp>=1.26,<3"` into the dev env;
+A. **`halo_harness/mcp/`** on the official `mcp` SDK (`pip install "mcp>=1.26,<3"` into the dev env;
    import lazily; if missing → MCP disabled with one notification): `client.py` (`McpLoop` daemon
    thread owning one asyncio loop; sync facade `run(coro, timeout)`), `stdio.py`
    (`StdioServerParameters(command, args, env, cwd)`; env = `effective_env` + server env +
    `CLAUDE_PROJECT_DIR`; POSIX `start_new_session` + `killpg`, win32 `PATHEXT` resolution +
-   `CREATE_NEW_PROCESS_GROUP` + `taskkill /T /F`; stderr → `~/.rolo-claude/mcp/<server>.log` 5 MB
+   `CREATE_NEW_PROCESS_GROUP` + `taskkill /T /F`; stderr → `~/.halo/mcp/<server>.log` 5 MB
    rotate), `http_sse.py` (`streamablehttp_client`, `sse_client` with deprecation warning,
    `headersHelper` via shell when trusted, 10 s, stdout JSON object of strings; `oauth`/401 →
    `needs_auth`), `manager.py` (`McpServerHandle` protocol + `McpManager`: scope resolution
    `managed-mcp.json` exclusive → `--mcp-config` (files or JSON, repeatable; `--strict-mcp-config`) →
    local `projects[cwd].mcpServers` (both key forms) → `<cwd>/.mcp.json` (`${VAR}`/`${VAR:-d}`
    expansion, approval via `enabledMcpjsonServers`/`enableAllProjectMcpServers`/`-p`/our
-   `~/.rolo-claude/mcp-approvals.json`, `disabledMcpjsonServers` wins) → user `mcpServers`; per-project
+   `~/.halo/mcp-approvals.json`, `disabledMcpjsonServers` wins) → user `mcpServers`; per-project
    `disabledMcpServers`; parallel startup bounded by `MCP_TIMEOUT`, failures non-fatal + notification;
    `mcpLazy` option; `status()`, `reconnect()`, `close_all()` with a 5 s deadline; resources and
    prompts listing).
@@ -50,14 +50,14 @@ B. **Tools**: `tools/mcp_tool.py` → `McpTool(server, tool)` named `mcp__<serve
    the user prompt; `/mcp__server__prompt args` expansion (best-effort).
 C. **Frozen catalog + lazy load** (plan revision 4): at session start select the catalog once —
    built-ins + MCP tools marked `alwaysLoad` + the top MCP tools by config (`mcpPreload` list in
-   `~/.rolo-claude/config.json`, default: none) — respecting the host cap (128 OpenRouter, **32
+   `~/.halo/config.json`, default: none) — respecting the host cap (128 OpenRouter, **32
    Databricks**); everything else is deferred and reachable through `ToolSearch` (returns defs +
    `tool_reference` blocks; loading a deferred tool appends it to the session catalog = one accepted
    cache miss, never reorders; LRU of 100 loaded deferred tools; on Databricks the loaded set may never
    exceed 32 — evict least-recently-used deferred tools first). The system prompt lists MCP servers
    with their `instructions` one-liners + "use ToolSearch", never the tool list. Bare-name deny rules
    and `--disallowedTools`/`--tools` filter the catalog before freezing.
-D. **CLI**: `rolo-claude mcp list` (Claude Code's exact line formats/statuses incl. `⏸ Pending
+D. **CLI**: `halo mcp list` (Claude Code's exact line formats/statuses incl. `⏸ Pending
    approval`), `mcp get <name>`, `mcp add` (`-t stdio|sse|http`, `-s local|user|project`, `-e`, `-H`)
    writing to `~/.claude.json` ONLY when rolo explicitly runs `mcp add` (the harness never rewrites
    that file otherwise; preserve every other key byte-for-byte via a read-modify-write of the parsed
@@ -89,12 +89,12 @@ server's echo tool"` through the mock upstream with `ScriptedTurns`.
 
 ## Acceptance
 Both suites green on Windows and WSL (four RESULT lines). Live at home (default model):
-`python -m rolo_claude mcp list` shows rolo's real 15 servers with health; `python -m rolo_claude -p
+`python -m halo_harness mcp list` shows rolo's real 15 servers with health; `python -m halo_harness -p
 "use the expanded-models MCP server's list_available_models tool and summarise the roles in one line"`
 → a real answer through `mcp__expanded-models__list_available_models` (visible with `--verbose`);
-`python -m rolo_claude --chrome -p "list my open browser tabs"` → either the real tab list (Chrome +
+`python -m halo_harness --chrome -p "list my open browser tabs"` → either the real tab list (Chrome +
 extension running) or the documented precondition message from `doctor`, never a crash;
-`python -m rolo_claude --playwright -p "open https://example.com with playwright and tell me the page
+`python -m halo_harness --playwright -p "open https://example.com with playwright and tell me the page
 title"` → "Example Domain" (npx downloads @playwright/mcp on first use; if the download is blocked,
 report exactly what happened); Read line count and memory question still work; `proxy launch … -- -p
 "reply with the single word pong"` → pong; `proxy --stop`; settings.json unchanged; `~/.claude.json`

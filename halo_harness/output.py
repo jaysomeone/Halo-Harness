@@ -1,4 +1,4 @@
-"""rolo_claude.output -- print-mode ("headless") sinks. `PrintModeSink`
+"""halo_harness.output -- print-mode ("headless") sinks. `PrintModeSink`
 (H0/H1) covers `text`/`json`; `StreamJsonSink` (U0 scope F) adds
 `stream-json`: an `init` line, `assistant`/`user` message lines, an optional
 `stream_event` line per delta (only with `--include-partial-messages`), and
@@ -20,8 +20,8 @@ import json as json_module
 import sys
 from typing import Iterator, Optional
 
-from rolo_claude import events as ev
-from rolo_claude.providers.hooks import think_tag_strip
+from halo_harness import events as ev
+from halo_harness.providers.hooks import think_tag_strip
 
 _CUMULATIVE_USAGE_KEYS = (
     "input_tokens", "output_tokens", "cache_read_input_tokens",
@@ -398,11 +398,16 @@ class StreamJsonSink:
         if self._initted:
             return
         self._initted = True
+        # 2.0.0 fixpass finding 8: `rolo_claude_version` kept as an alias,
+        # same value, alongside the new key -- a script that already reads
+        # the OLD field name from stream-json output (never documented as
+        # renamed in the CHANGELOG) must keep working with zero changes.
+        version = __import__("halo_harness").__version__
         self._write({
             "type": "system", "subtype": "init", "session_id": self.session_id, "cwd": self.cwd,
             "model": self.model, "permissionMode": self.permission_mode, "tools": self.tools,
             "mcp_servers": self.mcp_servers, "slash_commands": self.slash_commands,
-            "rolo_claude_version": __import__("rolo_claude").__version__,
+            "halo_harness_version": version, "rolo_claude_version": version,
         })
 
     def _buf(self, agent_id: Optional[str]) -> dict:

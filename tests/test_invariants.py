@@ -3,12 +3,12 @@ detection, synthetic result writing, well-formed-text repair.
 
 H15 Part D2.1: `SessionLog.__init__` ALWAYS resolves its own storage root
 via `bridge_home()` (`BRIDGE_STATE_DIR`, else `BRIDGE_TEST_HOME`-derived,
-else the REAL `~/.rolo-claude`) -- completely independent of whatever
+else the REAL `~/.halo`) -- completely independent of whatever
 `cwd` is passed to it, and `.mkdir(parents=True, exist_ok=True)` runs
 UNCONDITIONALLY at construction time, before a single node is ever
 appended. Every `@test` here is therefore transparently wrapped in an
 isolated, per-test `BRIDGE_STATE_DIR` (found leaking real empty
-`invariants-test-*` slug directories into `~/.rolo-claude/sessions` during
+`invariants-test-*` slug directories into `~/.halo/sessions` during
 the H15 fix pass -- invisible to the OLD file-only REAL SESSIONS GUARD,
 closed by D2.2), same pattern `tests/test_log_derive.py` already uses.
 """
@@ -21,8 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.invariants import (
+from halo_harness.agent.log import SessionLog
+from halo_harness.agent.invariants import (
     ABORTED_BEFORE_DISPATCH, INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids,
     highest_kimi_functions_idx, repair_truncated_text, synthesize_missing_results, validate_tool_use,
 )

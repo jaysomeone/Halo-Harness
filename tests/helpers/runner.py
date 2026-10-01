@@ -38,7 +38,7 @@ from typing import Callable
 # NEW (post-H9 acceptance): a real Linux run of this suite left thousands
 # of /tmp/addrule-*, /tmp/rolo*, /tmp/tmp* directories behind -- the
 # overwhelmingly common `Path(tempfile.mkdtemp(prefix=...))` pattern used
-# throughout this test suite (and a few real rolo_claude/ code paths
+# throughout this test suite (and a few real halo_harness/ code paths
 # exercised BY it) has no matching cleanup anywhere. Rather than hand-edit
 # cleanup into every one of the many call sites (error-prone, and every
 # FUTURE test would need to remember it too), `tempfile.mkdtemp` itself is

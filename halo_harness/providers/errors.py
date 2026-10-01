@@ -1,4 +1,4 @@
-"""rolo_claude.providers.errors -- upstream error-body parsing, the
+"""halo_harness.providers.errors -- upstream error-body parsing, the
 context-overflow detector, and the OpenAI/Databricks -> Anthropic error
 mapping table. Moved out of bridge.py unchanged in the H0 package split; see
 wip/SIGNATURES.md's "0.2.1 fixes" section for upstream_error_text/
@@ -424,7 +424,7 @@ def backoff_delay(attempt: int, retry_after=None) -> float:
 # ---------------------------------------------------------------------------
 
 # Appendix A, verbatim (8 of OpenCode's own ~27, captured in the review)
-# unioned with rolo-claude's existing _OVERFLOW_TAXONOMY_RE patterns and the
+# unioned with halo's existing _OVERFLOW_TAXONOMY_RE patterns and the
 # adapter-rules report's per-host regexes -- every pattern that means "this
 # is a context/quota overflow", from every source, in one place.
 OVERFLOW_PATTERNS = [
@@ -432,7 +432,7 @@ OVERFLOW_PATTERNS = [
     r"prompt is too long", r"request_too_large", r"exceeds the context window",
     r"maximum context length is \d+ tokens", r"context[_ ]length[_ ]exceeded",
     r"too many tokens", r"token limit exceeded", r"model_context_window_exceeded",
-    # rolo-claude errors.py (existing _OVERFLOW_TAXONOMY_RE, unioned in)
+    # halo errors.py (existing _OVERFLOW_TAXONOMY_RE, unioned in)
     r"maximum context length is \d+", r"exceeded model token limit",
     r"input token exceed the limit", r"input token length too long",
     r"prompt tokens \+ max_tokens exceeds", r"context limit",

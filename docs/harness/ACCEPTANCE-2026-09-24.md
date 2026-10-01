@@ -12,7 +12,7 @@ mirror `docs/harness/H8-brief.md`'s own "Tests"/"Acceptance" wording.
 - **Base commit**: `1111f38` ("docs: H5c brief ... + H9 carried-over
   must-dos") -- working tree only, nothing committed by this pass
 - **Environment**: Windows 11 (build/test host) + WSL Ubuntu (`~/rolo-
-  claude-wt`, `~/rolo-claude-wt-venv`) via `docs/harness/INSTALL.md`'s
+  claude-wt`, `~/halo-harness-wt-venv`) via `docs/harness/INSTALL.md`'s
   cross-check recipe; OpenRouter key configured; Databricks NOT configured
   on this box (no VPN route from here)
 
@@ -42,7 +42,7 @@ via binary string search, not guessed), a per-session `JobRegistry`,
 incl. two real concurrency-bug regressions: a `taskkill /T /F`
 just-forked-grandchild race, and a drain-loop kill-signal race).
 
-**Live**: `rolo-claude --model or:deepseek/deepseek-v3.2 -p "start sleep 20
+**Live**: `halo --model or:deepseek/deepseek-v3.2 -p "start sleep 20
 in the background, then read README.md and tell me the line count, then
 tell me when the background job finishes" --permission-mode auto` against
 real OpenRouter --
@@ -60,7 +60,7 @@ real OpenRouter --
 
 Read/MCP-tool image blocks gated on `profile.vision`, resized/downscaled to
 OpenCode's 1568px/5MB rule (pure-stdlib dimension sniffing, optional
-Pillow-based real resize -- `pip install 'rolo-claude[vision]'`), `@path`
+Pillow-based real resize -- `pip install 'halo[vision]'`), `@path`
 image mentions (TUI and skill/command bodies) and `--file PATH [PATH ...]`
 (a local path; Claude Code's own `file_id:relative_path` cloud-resource
 form gets a clear "not available in this standalone harness" notice
@@ -72,7 +72,7 @@ any all-image tool result) reached the TUI's `ToolCard` as the bare literal
 string `"[image]"` -- genuinely un-built, not just hard to live-test (no
 `playwright` package is installed in this environment to run a real
 end-to-end screenshot check, which is what surfaced it: tracing the event
-path in `rolo_claude/tui/dispatch.py`/`widgets/cards.py` by hand instead).
+path in `halo_harness/tui/dispatch.py`/`widgets/cards.py` by hand instead).
 `ToolCard` renders with `Static(markup=False)` (deliberately, so untrusted
 tool output can't inject Rich markup) and has no raster-image widget, so
 real terminal pixel rendering was scoped OUT (would need a cross-terminal
@@ -112,11 +112,11 @@ per-cell `id` getting one assigned on touch, both `source` shapes
 
 ## Scope C -- Catalog vendoring
 
-`rolo-claude models --refresh`, vendored fallback in `rolo_claude/
-providers/catalog/`, `doctor` catalog-age lines. **Live**: `rolo-claude
+`halo models --refresh`, vendored fallback in `halo_harness/
+providers/catalog/`, `doctor` catalog-age lines. **Live**: `halo
 models --refresh` against real OpenRouter + models.dev -- succeeded,
-wrote `~/.rolo-claude/models.json` (full real catalog, hundreds of
-models) and `~/.rolo-claude/models-dev.json` (223 providers). Databricks
+wrote `~/.halo/models.json` (full real catalog, hundreds of
+models) and `~/.halo/models-dev.json` (223 providers). Databricks
 section correctly produced NO output (not configured on this box --
 `cmd_models`'s own `if dbx is not None` gate, by design, not a bug).
 
@@ -136,7 +136,7 @@ test_export_stats_cli.py`.
 
 `prompt`/`agent`/`http`/`mcp_tool` hook handlers verified (already built,
 confirmed against the fake MCP server); `@server:resource` mentions
-(`rolo_claude/mcp/mentions.py`, parallel to the existing `@path` file-
+(`halo_harness/mcp/mentions.py`, parallel to the existing `@path` file-
 mention convention) and `/mcp__server__prompt` slash commands
 (`commands/registry.register_mcp_prompts`) newly built -- both were
 genuinely unbuilt, deferred from H3. Wired into three call sites:
@@ -159,7 +159,7 @@ absent from the Linux-filtered requirement list, everything else present).
 compatibility, `doctor --work`) and a "Cross-checking on WSL" section (the
 rsync+venv recipe other briefs already referenced as living here).
 
-**Live**: `rolo-claude doctor --work` on this (unconfigured, off-VPN) box
+**Live**: `halo doctor --work` on this (unconfigured, off-VPN) box
 correctly reports `[MISSING] Databricks config: not configured` plus a
 `ucode-settings.json: not found` WARN and `[MISSING] cannot probe --
 Databricks not configured` for the reasoning-replay/route-split probes --
@@ -173,7 +173,7 @@ during this pass's own AST-based duplicate-name sweep of `doctor.py`.
 
 ## Scope G -- README
 
-Full rewrite (`README.md`, 329 lines): what rolo-claude is now (its own
+Full rewrite (`README.md`, 329 lines): what halo is now (its own
 agent loop, not a `claude` wrapper, no local server in the harness itself),
 install (Kali/Linux first, Windows second), config reuse from Claude Code,
 models/providers, permissions and auto mode (quoting `permissions.py`'s
@@ -181,7 +181,7 @@ own "no classifier, no destructive-command list, no protected paths"
 language directly), steering, hooks/skills/commands/MCP/browser,
 images/vision (incl. the image-card caption fix above), sessions, print
 mode, troubleshooting, security posture, tests, and a proxy-mode section
-for `rolo-claude proxy`/`claude-bridge`. Every concrete claim in it
+for `halo proxy`/`claude-bridge`. Every concrete claim in it
 (subcommand list, flag choices, hook event names, permission mode count,
 model-reference table) was checked against `--help` output or the
 relevant source file while writing it, not carried over from memory of the
@@ -199,7 +199,7 @@ old proxy-era draft.
   Databricks/Anthropic-passthrough routes before falling back to the
   estimator.
 - H5b's three cheap items verified landed: `compactionModel` read from
-  `~/.rolo-claude/config.json` by the summariser; `anthropic-ratelimit-*-
+  `~/.halo/config.json` by the summariser; `anthropic-ratelimit-*-
   reset` parsed as RFC 3339; `_step`'s `Retry-After` cap at 300s (logged).
 
 ## Known gaps / explicitly deferred

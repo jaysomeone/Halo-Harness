@@ -1,15 +1,15 @@
 # H13 brief — RECOMMENDATIONS P1: lazy MCP by default, inline images, /resume search, family baselines
 
 rolo (2026-09-29): "go ahead with the lazy MCP and the P1 items". Source: `docs/harness/
-RECOMMENDATIONS.md` §3, §4, §7 (P1). Repo `~\Documents\vibes\appDev\rolo-claude\`
+RECOMMENDATIONS.md` §3, §4, §7 (P1). Repo `~\Documents\vibes\appDev\halo\`
 (Windows build host; **Kali Linux is primary**). Baseline = tag `v0.4.1` (`9d1ed9d`): run_all 1629,
 test_bridge 97, test_tui 47, green on Windows, WSL and the Kali VM. Only worker on the tree; no
 commits; no sub-agents that edit files. The repo is about to become PUBLIC: no home paths, LAN
 addresses, usernames or key fragments in anything you add (docs, tests, fixtures, comments).
 
 ## Read first
-`docs/harness/RECOMMENDATIONS.md`; `rolo_claude/mcp/{manager,client,stdio,http_sse}.py`,
-`rolo_claude/agent/catalog.py`, `tools/tool_search.py`, `tui/widgets/statusbar.py`, `tui/dialogs/
+`docs/harness/RECOMMENDATIONS.md`; `halo_harness/mcp/{manager,client,stdio,http_sse}.py`,
+`halo_harness/agent/catalog.py`, `tools/tool_search.py`, `tui/widgets/statusbar.py`, `tui/dialogs/
 {mcp_status,session_picker}.py`, `agent/sessions.py`, `tui/widgets/cards.py` (image captions),
 `tools/imageutil.py`, `providers/model_table.json` + `providers/profiles.py`, `telemetry.py`,
 `docs/harness/ACCEPTANCE-2026-09-25.md` (format), `reports/Open weight model adapter rules.md`.
@@ -20,7 +20,7 @@ addresses, usernames or key fragments in anything you add (docs, tests, fixtures
   one of its tools is called or loaded by ToolSearch, or when `/mcp` asks for it; `alwaysLoad`
   servers and servers with `mcpLazy: false` (per-server or global) connect eagerly as today.
 - The frozen catalog still needs tool names and descriptions before any server is connected: add a
-  per-server tool cache under `~/.rolo-claude/mcp/tools-cache/<server>.json` keyed by a hash of the
+  per-server tool cache under `~/.halo/mcp/tools-cache/<server>.json` keyed by a hash of the
   server's config entry (command/args/env/url/headers), written after every successful
   `tools/list`, read at session start. No cache yet (first session, or config changed) → connect
   that server eagerly once so its tools enter the catalog, then cache. Stale cache + changed tools
@@ -37,16 +37,16 @@ addresses, usernames or key fragments in anything you add (docs, tests, fixtures
 - Render image tool results (Read of an image, Playwright/Chrome screenshots, MCP image content)
   inline in the TUI via the kitty graphics protocol and sixel, with the current caption as the
   fallback. Evaluate the `textual-image` package (permissive licence) as an optional dependency
-  (`pip install rolo-claude[images]`); if it does not fit, implement the kitty and sixel encoders
+  (`pip install halo[images]`); if it does not fit, implement the kitty and sixel encoders
   directly (PNG/JPEG/GIF/WebP via Pillow when present). Detection: kitty, WezTerm, Ghostty, foot
   (kitty protocol), xterm/mlterm/others with sixel via the terminal query, tmux only with
   `allow-passthrough on` — otherwise caption. Config `images: inline|caption|off` in
-  ~/.rolo-claude/config.json; `--no-inline-images`. Max rendered size bounded (downscale).
+  ~/.halo/config.json; `--no-inline-images`. Max rendered size bounded (downscale).
 - Tests: encoder output shape for a small PNG (kitty APC framing, sixel header), detection matrix
   from env, fallback to caption, config off; a TUI pilot with a fake image result.
 
 ## C. `/resume` search
-- The session picker (TUI `/resume` and `rolo-claude --resume` without an id) gets a text filter:
+- The session picker (TUI `/resume` and `halo --resume` without an id) gets a text filter:
   fuzzy over title, first prompt, cwd and model, live as you type; `--resume <text>` on the CLI
   picks the unique match or opens the picker filtered. Titles come from U5; index.json holds the
   first prompt. Tests: filter ranking, unique-match shortcut, ambiguous → picker, TUI pilot.

@@ -1,4 +1,4 @@
-"""tests.test_work_matrix_cli -- V2b: `rolo-claude work-matrix show/apply`,
+"""tests.test_work_matrix_cli -- V2b: `halo work-matrix show/apply`,
 the matrix-driven fixes tooling that turns a `doctor --work --probe-all`
 JSON report into a suggested action per failure and (`apply`) writes the
 ONE class of failure that maps onto a real config.json knob
@@ -24,15 +24,15 @@ test, TESTS = new_registry()
 
 
 def _run(argv, home: Path, *, stdin: str = "", timeout: int = 30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            input=stdin, timeout=timeout)
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-workmatrix-"))
+    return Path(tempfile.mkdtemp(prefix="halo-workmatrix-"))
 
 
 def _load(name: str) -> dict:
@@ -45,14 +45,14 @@ def _load(name: str) -> dict:
 
 @test
 def test_render_show_table_all_green_says_nothing_to_fix(ctx: Ctx):
-    from rolo_claude.work_matrix import render_show_table
+    from halo_harness.work_matrix import render_show_table
     text = render_show_table(_load("all-green.json"))
     ctx.check(f"reports nothing to fix, got {text!r}", "nothing to fix" in text)
 
 
 @test
 def test_render_show_table_all_failures_lists_every_class(ctx: Ctx):
-    from rolo_claude.work_matrix import render_show_table
+    from halo_harness.work_matrix import render_show_table
     text = render_show_table(_load("all-failures.json"))
     ctx.check("403 IP access list flagged", "databricks-gemma-3-27b" in text and "IP access list" in text)
     ctx.check("VPN action suggested for the 403", "VPN" in text)
@@ -71,7 +71,7 @@ def test_render_show_table_all_failures_lists_every_class(ctx: Ctx):
 
 @test
 def test_classify_row_wrong_path_uses_anthropic_companion(ctx: Ctx):
-    from rolo_claude.work_matrix import classify_row
+    from halo_harness.work_matrix import classify_row
     rows = _load("all-failures.json")["rows"]
     by_name = {r["endpoint"]: r for r in rows}
     row = by_name["databricks-glm-5-3"]
@@ -83,7 +83,7 @@ def test_classify_row_wrong_path_uses_anthropic_companion(ctx: Ctx):
 
 @test
 def test_classify_row_clean_200_is_not_a_failure(ctx: Ctx):
-    from rolo_claude.work_matrix import classify_row
+    from halo_harness.work_matrix import classify_row
     rows = _load("all-green.json")["rows"]
     by_name = {r["endpoint"]: r for r in rows}
     for row in rows:
@@ -92,7 +92,7 @@ def test_classify_row_clean_200_is_not_a_failure(ctx: Ctx):
 
 @test
 def test_writable_overrides_only_the_wrong_path_class(ctx: Ctx):
-    from rolo_claude.work_matrix import writable_overrides
+    from halo_harness.work_matrix import writable_overrides
     overrides = writable_overrides(_load("all-failures.json"))
     ctx.check(f"exactly one writable override, got {overrides}",
               overrides == [("databricks.gateway.databricks-glm-5-3", "anthropic")])
@@ -100,12 +100,12 @@ def test_writable_overrides_only_the_wrong_path_class(ctx: Ctx):
 
 @test
 def test_writable_overrides_empty_for_all_green(ctx: Ctx):
-    from rolo_claude.work_matrix import writable_overrides
+    from halo_harness.work_matrix import writable_overrides
     ctx.check("no overrides for a clean report", writable_overrides(_load("all-green.json")) == [])
 
 
 # ---------------------------------------------------------------------------
-# End to end: the real `rolo-claude work-matrix` CLI.
+# End to end: the real `halo work-matrix` CLI.
 # ---------------------------------------------------------------------------
 
 @test
@@ -133,7 +133,7 @@ def test_cli_apply_yes_writes_only_the_one_gateway_override(ctx: Ctx):
     result = _run(["work-matrix", "apply", str(FIXTURES / "all-failures.json"), "--yes"], home)
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("reports one override written", "Wrote 1 override" in result.stdout)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"gateway override actually written, got {cfg}",
               cfg.get("databricks", {}).get("gateway", {}).get("databricks-glm-5-3") == "anthropic")
     # Never anything for the other four failure classes.
@@ -149,7 +149,7 @@ def test_cli_apply_confirmation_prompt_shows_overrides_before_asking(ctx: Ctx):
     ctx.check("the override was listed before the prompt",
               "databricks.gateway.databricks-glm-5-3" in result.stdout)
     ctx.check("aborted, nothing written", "Aborted" in result.stdout)
-    ctx.check("no config.json written at all", not (home / ".rolo-claude" / "config.json").exists())
+    ctx.check("no config.json written at all", not (home / ".halo" / "config.json").exists())
 
 
 @test
@@ -158,7 +158,7 @@ def test_cli_apply_all_green_nothing_actionable(ctx: Ctx):
     result = _run(["work-matrix", "apply", str(FIXTURES / "all-green.json"), "--yes"], home)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
     ctx.check("says nothing actionable", "nothing actionable" in result.stdout)
-    ctx.check("no config.json written", not (home / ".rolo-claude" / "config.json").exists())
+    ctx.check("no config.json written", not (home / ".halo" / "config.json").exists())
 
 
 @test
@@ -173,6 +173,21 @@ def test_cli_apply_never_touches_claude_json_or_settings(ctx: Ctx):
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
     ctx.check("settings.json byte-for-byte unchanged", settings_path.read_text(encoding="utf-8") == '{"marker": "untouched"}')
     ctx.check("claude.json byte-for-byte unchanged", claude_json_path.read_text(encoding="utf-8") == '{"marker": "untouched"}')
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""tests.test_stats_cli_models -- H10 Part A: `rolo-claude stats --models
+"""tests.test_stats_cli_models -- H10 Part A: `halo stats --models
 --json`'s stable schema, `improve.*` config keys (dotted set/get), and the
 doctor sessions/cache-age/improve lines.
 """
@@ -20,16 +20,16 @@ test, TESTS = new_registry()
 
 
 def _run(argv, home: Path, cwd: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(cwd),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(cwd),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _home_with_fixtures() -> Path:
     import shutil
     home = Path(tempfile.mkdtemp(prefix="stats-models-home-"))
-    sessions_dir = home / ".rolo-claude" / "sessions"
+    sessions_dir = home / ".halo" / "sessions"
     shutil.copytree(FIXTURES, sessions_dir)
     now = time.time()
     for p in sessions_dir.glob("*/*.jsonl"):
@@ -90,7 +90,7 @@ def test_stats_since_1d_is_accepted_not_rejected_by_argparse(ctx: Ctx):
 
 @test
 def test_stats_bare_default_unchanged_by_new_flags(ctx: Ctx):
-    """Bare `rolo-claude stats` (no --models/--tools) keeps its OLD schema
+    """Bare `halo stats` (no --models/--tools) keeps its OLD schema
     -- adding --models/--tools support must never change the default path."""
     home = _home_with_fixtures()
     cwd = Path(tempfile.mkdtemp(prefix="stats-bare-cwd-"))
@@ -115,7 +115,7 @@ def test_improve_config_dotted_keys_roundtrip(ctx: Ctx):
     ctx.check(f"exit 0, got {r3.returncode}", r3.returncode == 0)
     r4 = _run(["config", "get", "improve.model"], home, cwd)
     ctx.check("sibling set left improve.model untouched", json.loads(r4.stdout) == "or:deepseek/deepseek-v4-flash")
-    data = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    data = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check("stored as a real nested dict, not a flat 'improve.model' key",
               isinstance(data.get("improve"), dict) and data["improve"].get("model") == "or:deepseek/deepseek-v4-flash"
               and data["improve"].get("hint") is False)
@@ -154,7 +154,7 @@ def _fake_model_row(model="or:test/model", **overrides) -> dict:
 def test_terminal_width_env_overrides(ctx: Ctx):
     """H10b defect 2: `RC_TERM_WIDTH` wins over `COLUMNS`, and neither can
     push the target below the 80-col floor the brief asks for."""
-    from rolo_claude import stats_cli
+    from halo_harness import stats_cli
     saved = {k: os.environ.get(k) for k in ("RC_TERM_WIDTH", "COLUMNS")}
     try:
         os.environ["RC_TERM_WIDTH"] = "150"
@@ -179,7 +179,7 @@ def test_terminal_width_env_overrides(ctx: Ctx):
 def test_fit_columns_drops_more_at_narrower_width(ctx: Ctx):
     """H10b defect 2: `_fit_columns` drops columns right-to-left (least
     important first) until the estimate fits, and never drops below 1."""
-    from rolo_claude import stats_cli
+    from halo_harness import stats_cli
     rows = [_fake_model_row()]
     wide = stats_cli._fit_columns(stats_cli._MODEL_COLUMNS, rows, 2000)
     narrow = stats_cli._fit_columns(stats_cli._MODEL_COLUMNS, rows, 80)
@@ -199,7 +199,7 @@ def test_print_table_tty_path_shrinks_columns_to_width(ctx: Ctx):
     simulates a real terminal without needing a pty."""
     import io
     from rich.console import Console
-    from rolo_claude import stats_cli
+    from halo_harness import stats_cli
 
     rows = [_fake_model_row()]
     saved = os.environ.get("RC_TERM_WIDTH")
@@ -280,6 +280,21 @@ def test_stats_tools_header_says_tools_not_models(ctx: Ctx):
     both_header = both.stdout.splitlines()[0]
     ctx.check(f"both flags -> header names both, got {both_header!r}",
               "--models" in both_header and "--tools" in both_header)
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

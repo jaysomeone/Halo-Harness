@@ -1,4 +1,4 @@
-"""rolo_claude.hooks -- Claude Code's hooks protocol (H4 scope A), per the
+"""halo_harness.hooks -- Claude Code's hooks protocol (H4 scope A), per the
 plan's D7/D-CFG "Hooks refinements" sections and
 `docs/harness/claude-code-2.1.281-binary-facts.md` sec.2/10: `HookDef` (one
 configured hook entry), `HookResult` (one handler invocation's raw exit
@@ -158,7 +158,7 @@ def if_rule_matches(if_rule: Optional[str], tool_name: Optional[str], tool_input
     user gated must not fire just because its own gate was malformed)."""
     if not if_rule or tool_name is None:
         return True
-    from rolo_claude.permissions import (
+    from halo_harness.permissions import (
         PermissionEngine, bash_deny_or_ask_matches, parse_rule, powershell_deny_or_ask_matches,
     )
     rule = parse_rule(if_rule, source="hook_if", base_dir=Path(cwd), action="ask")
@@ -207,10 +207,10 @@ def build_payload(event: str, *, session_id: str, transcript_path, cwd, scratchp
 
 
 def env_file_path(session_id: str) -> Path:
-    """`~/.rolo-claude/session-env/<session_id>.sh` [D-CFG] -- the
+    """`~/.halo/session-env/<session_id>.sh` [D-CFG] -- the
     `CLAUDE_ENV_FILE` a SessionStart/Setup/CwdChanged/FileChanged hook's
     own `export NAME=value` lines get appended to."""
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.config.paths import bridge_home
     return bridge_home() / "session-env" / f"{session_id}.sh"
 
 
@@ -266,7 +266,7 @@ def read_env_file_exports(path, *, base_env: Optional[dict] = None) -> dict:
             return {}
     except OSError:
         return {}
-    from rolo_claude.config.paths import git_bash, to_posix
+    from halo_harness.config.paths import git_bash, to_posix
 
     shell_path = git_bash()
     if shell_path is None:
@@ -287,8 +287,8 @@ def read_env_file_exports(path, *, base_env: Optional[dict] = None) -> dict:
     # same technique, same private var name.
     restore_path_prefix = ""
     if os.name != "nt":
-        base_env["__ROLO_CLAUDE_SESSION_PATH"] = base_env.get("PATH", "")
-        restore_path_prefix = 'export PATH="$__ROLO_CLAUDE_SESSION_PATH"\n'
+        base_env["__HALO_SESSION_PATH"] = base_env.get("PATH", "")
+        restore_path_prefix = 'export PATH="$__HALO_SESSION_PATH"\n'
     # `env -0` (NUL-separated, GNU coreutils -- present in Git Bash/MSYS and
     # every POSIX target) avoids the ambiguity a NEWLINE-separated `env`
     # would have if some exported value legitimately contains one.
@@ -438,7 +438,7 @@ def _shell_argv(hook: HookDef, command_text: str) -> list:
     if sys.platform == "win32" and hook.shell in (None, "bash"):
         # Git Bash on win32 for both the default and an explicit "bash"
         # request (there is no separate native POSIX /bin/sh on Windows).
-        from rolo_claude.config.paths import git_bash
+        from halo_harness.config.paths import git_bash
         bash = git_bash()
         if bash is not None:
             return [str(bash), "-c", command_text]
@@ -465,7 +465,7 @@ def run_command_hook(hook: HookDef, payload: dict, *, cwd, env: dict, abort=None
     Esc did nothing until the hook returned and the gated call ran
     anyway) kills the WHOLE group via `tools._proc._kill_process_group`
     (the SAME helper the Bash tool itself already uses)."""
-    from rolo_claude.tools._proc import _kill_process_group
+    from halo_harness.tools._proc import _kill_process_group
 
     timeout_s = hook.effective_timeout_s()
     stdin_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -554,7 +554,7 @@ def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict, 
             # STRICT (Python 3.13+) so a corporate TLS-inspection proxy's
             # re-signing CA is accepted the same way curl/Node/every other
             # HTTP client on the same network already does.
-            from rolo_claude.providers.http import urlopen_tls
+            from halo_harness.providers.http import urlopen_tls
             with urlopen_tls(req, timeout=timeout_s) as resp:
                 box["result"] = HookResult(0, resp.read().decode("utf-8", "replace"), "")
         except urllib.error.HTTPError as e:
@@ -917,7 +917,7 @@ class HookRunner:
         # processes already get, per the H3 must-do), never the raw
         # `self.effective_env` -- a plugin/user hook could otherwise read
         # every provider key straight out of its own environment.
-        from rolo_claude.providers.config import tool_child_env
+        from halo_harness.providers.config import tool_child_env
         env = tool_child_env(self.effective_env)
         env["CLAUDE_PROJECT_DIR"] = str(self.cwd)
         env["CLAUDE_CODE_REMOTE"] = "false"
@@ -1092,10 +1092,10 @@ def build_prompt_caller(model_ref, model_profile, creds, state_dir, *,
     hook as a silent no-op allow rather than a hard failure."""
     if creds is None:
         return None
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.request import build_request_body
-    from rolo_claude.providers.routing import Route
-    from rolo_claude.providers.stream import CompletionRequest, stream_completion
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.request import build_request_body
+    from halo_harness.providers.routing import Route
+    from halo_harness.providers.stream import CompletionRequest, stream_completion
 
     route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
     profile = resolve_profile(route)

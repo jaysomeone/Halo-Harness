@@ -1,4 +1,4 @@
-"""rolo_claude.tui.app -- `BridgeApp`, the full-screen Textual UI (D-TUI
+"""halo_harness.tui.app -- `BridgeApp`, the full-screen Textual UI (D-TUI
 scope B). Composition: `Transcript` fills, `CompletionPopup` overlays, a
 prompt row (glyph + `PromptInput`) and `StatusBar` dock the bottom. A 30 Hz
 `_drain` timer pulls events from `controller.events` (a real `Controller`'s
@@ -29,16 +29,16 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
-from rolo_claude import events as ev
-from rolo_claude.tui import keys as tui_keys
-from rolo_claude.tui import theme as tui_theme
-from rolo_claude.tui.dispatch import apply_event
-from rolo_claude.tui.events import drain_queue
-from rolo_claude.tui.keys import DOUBLE_CTRL_C_WINDOW_S, DRAIN_HZ, next_mode
-from rolo_claude.tui.widgets.input import CompletionPopup, PromptInput
-from rolo_claude.tui.widgets.statusbar import StatusBar
-from rolo_claude.tui.widgets.transcript import Transcript
-from rolo_claude.tui.widgets.whichkey import WhichKeyOverlay
+from halo_harness import events as ev
+from halo_harness.tui import keys as tui_keys
+from halo_harness.tui import theme as tui_theme
+from halo_harness.tui.dispatch import apply_event
+from halo_harness.tui.events import drain_queue
+from halo_harness.tui.keys import DOUBLE_CTRL_C_WINDOW_S, DRAIN_HZ, next_mode
+from halo_harness.tui.widgets.input import CompletionPopup, PromptInput
+from halo_harness.tui.widgets.statusbar import StatusBar
+from halo_harness.tui.widgets.transcript import IntroLine, Transcript
+from halo_harness.tui.widgets.whichkey import WhichKeyOverlay
 
 # U5 scope A: chord actions that are really just "run this slash command"
 # (session titles/fork/export/stats, git-shadow rewind) reuse the EXACT
@@ -79,7 +79,7 @@ HANG_DUMP_MIN_INTERVAL_S = 60.0
 # past process's runs (pruned once, at startup).
 MAX_HANG_DUMPS_PER_PROCESS = 5
 MAX_HANG_DUMP_FILES_KEPT = 10
-_DEBUG_LOG = logging.getLogger("rolo_claude.tui")
+_DEBUG_LOG = logging.getLogger("halo_harness.tui")
 
 # 1.0.1 part 2 fixpass finding 17: `--debug`'s own per-keystroke trace
 # (`_on_key` below) must never be able to reconstruct a typed secret from
@@ -126,7 +126,7 @@ def _expand_pasted(text: str, pasted: Optional[dict]) -> str:
 class BridgeApp(App):
     CSS_PATH = "styles.tcss"
     ENABLE_COMMAND_PALETTE = False
-    TITLE = "rolo-claude"
+    TITLE = "halo"
 
     # `priority=True` on shift+tab/ctrl+d: both would otherwise be caught
     # first by a closer, non-priority binding from the DOM ancestor chain
@@ -173,12 +173,23 @@ class BridgeApp(App):
     def __init__(self, controller, *, registry=None, facade=None, tool_registry=None,
                  cwd: Optional[Path] = None, theme_name: Optional[str] = None,
                  tui_setting: Optional[str] = None, initial_prompt: Optional[str] = None,
-                 initial_resume_filter: Optional[str] = None, no_inline_images: bool = False) -> None:
+                 initial_resume_filter: Optional[str] = None, no_inline_images: bool = False,
+                 show_intro: bool = False) -> None:
         # `App.__init__` itself calls `get_css_variables()` (to build its
         # initial stylesheet) before returning -- `theme_name` must exist
         # on `self` BEFORE `super().__init__()` runs, not after.
         self.theme_name = theme_name or tui_theme.DEFAULT_THEME
         super().__init__()
+        # 2.0.0 Launch intro: defaults OFF (never auto-detected here) so
+        # every existing/future test that constructs a BridgeApp directly
+        # without passing this is completely unaffected -- `tui/launch.py`'s
+        # `run_tui` is the only real caller that computes the actual
+        # tty/--no-intro/config-gated value and passes it explicitly; a
+        # pilot that wants to exercise the intro passes `show_intro=True`
+        # itself. `self.intro_line` is the currently-typing widget (or None
+        # once finished/never shown) -- `_on_key`/`_submit_prompt` skip it.
+        self.show_intro = show_intro
+        self.intro_line: Optional[IntroLine] = None
         self.controller = controller
         self.registry = registry
         self.facade = facade
@@ -192,7 +203,7 @@ class BridgeApp(App):
         self._initial_resume_filter = initial_resume_filter
         # H13 Part B ("inline images in the terminal"): resolved ONCE at
         # startup, never per-image -- `images_render_mode` folds the config
-        # ("~/.rolo-claude/config.json"'s "images" key) and `--no-inline-
+        # ("~/.halo/config.json"'s "images" key) and `--no-inline-
         # images` together into "inline"|"caption"; `image_protocol` is the
         # one live detection pass (env + tmux passthrough + a real DA1
         # terminal query, all best-effort/never-raising) a real interactive
@@ -201,8 +212,8 @@ class BridgeApp(App):
         # captured context, so this is "none" (never touches a real
         # terminal) throughout the whole test suite with zero special-
         # casing needed there.
-        from rolo_claude.theme import get_config_value
-        from rolo_claude.tui.images import detect_image_protocol, effective_render_mode
+        from halo_harness.theme import get_config_value
+        from halo_harness.tui.images import detect_image_protocol, effective_render_mode
         self.images_render_mode = effective_render_mode(
             get_config_value("images", None), no_inline_flag=no_inline_images)
         self.image_protocol = (
@@ -280,6 +291,16 @@ class BridgeApp(App):
         self.which_key = self.query_one(WhichKeyOverlay)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
+        # 2.0.0 Launch intro: mounted FIRST, before anything else below --
+        # including `--continue`/`--resume`'s own replayed transcript,
+        # which only ever starts arriving once `starter()`/the initial-
+        # prompt/resume-filter branches further down actually run -- so
+        # this is always the dim first entry of the session, never racing
+        # real content for that spot.
+        if self.show_intro:
+            from halo_harness import __version__ as _halo_version
+            self.intro_line = IntroLine(f"I am just a copy, of a copy, of a copy... halo {_halo_version}")
+            await self.transcript._mount_tracked(self.intro_line)
         # U5/review "must-do": git ran INLINE here even though the 5s
         # periodic refresh below was already threaded -- this first call
         # is now the same worker path, so startup never blocks on a
@@ -294,7 +315,7 @@ class BridgeApp(App):
         # H15 part 2 addendum 3.2a: the SAME staleness-gated, every-
         # enabled-provider catalog refresh `/model` triggers on open also
         # runs once at launch -- a provider set up with just a key/token
-        # (no `rolo-claude init` ever run) still gets a real catalog before
+        # (no `halo init` ever run) still gets a real catalog before
         # the FIRST time `/model` is opened, not only after.
         self.run_worker(self._catalog_startup_refresh_worker, thread=True, name="catalog-startup-refresh",
                          group="catalog-startup-refresh")
@@ -304,7 +325,7 @@ class BridgeApp(App):
         # a no-op when OpenRouter isn't enabled/configured.
         self.run_worker(self._or_balance_startup_refresh_worker, thread=True, name="or-balance-startup",
                          group="or-balance-startup")
-        from rolo_claude.providers.openrouter_account import BALANCE_REFRESH_INTERVAL_S
+        from halo_harness.providers.openrouter_account import BALANCE_REFRESH_INTERVAL_S
         self.set_interval(BALANCE_REFRESH_INTERVAL_S, self._or_balance_refresh)
         starter = getattr(self.controller, "start", None)
         if callable(starter):
@@ -337,7 +358,7 @@ class BridgeApp(App):
             # picker-opening path `/resume` itself uses (tui/slash.py) --
             # just pre-filtered by the text that made the startup
             # `--resume <text>` ambiguous (or match nothing) in the first place.
-            from rolo_claude.tui.slash import _resume_list_worker
+            from halo_harness.tui.slash import _resume_list_worker
             self.run_worker(lambda: _resume_list_worker(self, self._initial_resume_filter),
                              thread=True, name="list-sessions-startup")
 
@@ -383,7 +404,7 @@ class BridgeApp(App):
         (list_models()'s own try/except already treats that the same as
         "not logged in" -- no cc: group shown, never a crash)."""
         try:
-            from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
+            from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
             refresh_cached_claude_auth_status()
         except Exception:
             pass
@@ -394,7 +415,7 @@ class BridgeApp(App):
         SAME function `/model` triggers on open); best-effort, a failure
         here just leaves whatever was already cached (or nothing) in place."""
         try:
-            from rolo_claude.tui.slash import catalog_auto_refresh_worker
+            from halo_harness.tui.slash import catalog_auto_refresh_worker
             catalog_auto_refresh_worker(self)
         except Exception:
             pass
@@ -409,14 +430,14 @@ class BridgeApp(App):
 
     def _or_balance_startup_refresh_worker(self) -> None:
         try:
-            from rolo_claude.tui.slash import or_balance_refresh_worker
+            from halo_harness.tui.slash import or_balance_refresh_worker
             or_balance_refresh_worker(self, force=True)
         except Exception:
             pass
 
     def _or_balance_turn_refresh_worker(self) -> None:
         try:
-            from rolo_claude.tui.slash import or_balance_refresh_worker
+            from halo_harness.tui.slash import or_balance_refresh_worker
             or_balance_refresh_worker(self, force=False)
         except Exception:
             pass
@@ -459,7 +480,7 @@ class BridgeApp(App):
         filenames are `hang-<UTC %Y%m%dT%H%M%SZ>.log`, so lexical sort order
         IS chronological order; best-effort, never raises."""
         try:
-            from rolo_claude.config.paths import bridge_home
+            from halo_harness.config.paths import bridge_home
             state_dir = bridge_home()
             dumps = sorted(state_dir.glob("hang-*.log"))
             for p in dumps[:-MAX_HANG_DUMP_FILES_KEPT] if len(dumps) > MAX_HANG_DUMP_FILES_KEPT else []:
@@ -522,7 +543,7 @@ class BridgeApp(App):
 
     def _dump_hang_diagnostics(self, heartbeat_age: float, *, reason: str) -> None:
         """Writes every thread's stack (`sys._current_frames()`) plus the
-        named-worker list and the active screen name to `~/.rolo-claude/
+        named-worker list and the active screen name to `~/.halo/
         hang-<UTC>.log`, and one line to bridge.log naming that path --
         called from the watchdog thread OR a SIGUSR1 handler on the main
         thread, never from the asyncio loop itself. Best-effort throughout
@@ -540,9 +561,9 @@ class BridgeApp(App):
         import traceback as tb_mod
         from datetime import datetime, timezone
         try:
-            from rolo_claude.config.paths import bridge_home
+            from halo_harness.config.paths import bridge_home
             lines = [
-                f"rolo-claude hang diagnostics -- {reason} "
+                f"halo hang diagnostics -- {reason} "
                 f"(heartbeat stalled {heartbeat_age:.1f}s, threshold {HANG_HEARTBEAT_THRESHOLD_S:.0f}s)",
                 f"active screen: {self._active_screen_name()}",
                 "named workers:",
@@ -573,7 +594,7 @@ class BridgeApp(App):
 
     def _debug_trace(self, msg: str, *args) -> None:
         """H15 Part B: `--debug` tracing -- a no-op cost-wise when the
-        `rolo_claude.tui` logger isn't at DEBUG level (stdlib logging's own
+        `halo_harness.tui` logger isn't at DEBUG level (stdlib logging's own
         lazy %-formatting, same convention `clamp_effort`'s own `log.debug`
         already uses), real lines in bridge.log once `--debug` turns it on."""
         _DEBUG_LOG.debug(msg, *args)
@@ -682,8 +703,8 @@ class BridgeApp(App):
                          group="statusline")
 
     def _statusline_worker(self, cfg: dict) -> None:
-        from rolo_claude import __version__
-        from rolo_claude.statusline import build_payload, run_statusline_command
+        from halo_harness import __version__
+        from halo_harness.statusline import build_payload, run_statusline_command
 
         session = getattr(self.controller, "session", None)
         cost_usd = None
@@ -719,7 +740,7 @@ class BridgeApp(App):
         if self._borrowing_card is not None:
             if is_slash_command:
                 self.prompt_input.clear_submitted()
-                from rolo_claude.tui.slash import handle_slash
+                from halo_harness.tui.slash import handle_slash
                 name, _, args = stripped[1:].partition(" ")
                 await handle_slash(self, name, args)
                 return
@@ -736,7 +757,7 @@ class BridgeApp(App):
             return
         self.prompt_input.clear_submitted()
         self.completion_popup.hide()
-        from rolo_claude.tui.widgets.cards import EffortCard
+        from halo_harness.tui.widgets.cards import EffortCard
         if self.pending_card is not None and not isinstance(self.pending_card, EffortCard):
             # finding 14: the /effort selector does not intercept typed
             # text at all -- it falls straight through to the ordinary
@@ -744,7 +765,7 @@ class BridgeApp(App):
             # as if nothing were pending; every OTHER card still gates
             # here exactly as before.
             if is_slash_command:
-                from rolo_claude.tui.slash import handle_slash
+                from halo_harness.tui.slash import handle_slash
                 name, _, args = stripped[1:].partition(" ")
                 await handle_slash(self, name, args)
                 return
@@ -784,7 +805,14 @@ class BridgeApp(App):
         await self._submit_prompt(text, event.pasted)
 
     async def _submit_prompt(self, text: str, pasted: dict) -> None:
-        from rolo_claude import history as history_mod
+        # 2.0.0 Launch intro: "a submitted prompt finishes the line
+        # instantly" -- covers the one case a keypress alone wouldn't (the
+        # `--cwd`/positional PROMPT auto-submitted at startup via
+        # `_initial_prompt`, with no user keystroke at all); harmless no-op
+        # once already done/never shown.
+        if self.intro_line is not None and not self.intro_line.done:
+            self.intro_line.skip()
+        from halo_harness import history as history_mod
 
         try:
             history_mod.append_history_entry(text, str(self.cwd), pasted_contents=pasted or None)
@@ -799,7 +827,7 @@ class BridgeApp(App):
             await self._handle_bang_command(stripped[1:].strip())
             return
         if stripped.startswith("/") and "\n" not in stripped:
-            from rolo_claude.tui.slash import handle_slash
+            from halo_harness.tui.slash import handle_slash
 
             name, _, args = stripped[1:].partition(" ")
             await handle_slash(self, name, args)
@@ -849,7 +877,7 @@ class BridgeApp(App):
         # this to belong to). Reuses PermissionCard verbatim: same keys
         # (1/2/3/4), same session/always rule-writing via
         # `Controller.add_permission_rule`.
-        from rolo_claude.tui.widgets.cards import PermissionCard
+        from halo_harness.tui.widgets.cards import PermissionCard
 
         request_id = f"inline-{id(command)}"
 
@@ -923,7 +951,7 @@ class BridgeApp(App):
         self.run_worker(self._palette_worker, thread=True, name="palette-build")
 
     def _palette_worker(self) -> None:
-        from rolo_claude.tui.dialogs.palette import CommandPalette
+        from halo_harness.tui.dialogs.palette import CommandPalette
 
         items = self._build_palette_items()
         self.call_from_thread(self.push_screen, CommandPalette(items), self._on_palette_pick)
@@ -935,7 +963,7 @@ class BridgeApp(App):
                 kind = "skill" if cmd.source == "skill" else "command"
                 items.append({"kind": kind, "label": f"/{cmd.name}", "detail": cmd.description, "value": cmd.name})
         try:
-            from rolo_claude.tui.completion import complete_at_path
+            from halo_harness.tui.completion import complete_at_path
             for p in complete_at_path("", str(self.cwd))[:30]:
                 items.append({"kind": "file", "label": p, "detail": "", "value": p})
         except OSError:
@@ -966,7 +994,7 @@ class BridgeApp(App):
                 resume(item["value"])
 
     async def _run_palette_command(self, name: str) -> None:
-        from rolo_claude.tui.slash import handle_slash
+        from halo_harness.tui.slash import handle_slash
         await handle_slash(self, name, "")
 
     # ---- Ctrl+E: edit the prompt draft in $VISUAL/$EDITOR (U5 scope A) --
@@ -980,7 +1008,7 @@ class BridgeApp(App):
         if not editor:
             self.notify("No $VISUAL/$EDITOR set.", severity="warning", title="Ctrl+E")
             return
-        fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="rolo-claude-")
+        fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="halo-")
         tmp_path = Path(tmp_path_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1063,6 +1091,14 @@ class BridgeApp(App):
         pending permission card getting lost -- but this is a net for
         whatever's not yet found), refocus before letting the key proceed,
         so a key never silently goes nowhere."""
+        # 2.0.0 Launch intro: "any keypress ... completes it instantly" --
+        # a side effect only, never `event.stop()`/`prevent_default()`, so
+        # the SAME keystroke that skips the intro still reaches whatever
+        # has focus afterward (the prompt input, from the first frame) the
+        # same as it would have otherwise; `IntroLine.skip()` is a no-op
+        # once already done, so this costs nothing on every ordinary key.
+        if self.intro_line is not None and not self.intro_line.done:
+            self.intro_line.skip()
         # 1.0.1 fixpass finding 3: healing to the pending card must be
         # scoped to the BASE screen (`self.screen is self.screen_stack[0]`)
         # -- a modal with nothing focusable of its own (PagerScreen, opened
@@ -1110,7 +1146,7 @@ class BridgeApp(App):
     async def _run_keymap_action(self, name: str) -> None:
         slash_name = _SLASH_CHORD_ACTIONS.get(name)
         if slash_name is not None:
-            from rolo_claude.tui.slash import handle_slash
+            from halo_harness.tui.slash import handle_slash
             await handle_slash(self, slash_name, "")
             return
         handler_name = _METHOD_ACTIONS.get(name)
@@ -1126,7 +1162,7 @@ class BridgeApp(App):
     # ---- / and @ completion ------------------------------------------
 
     async def on_prompt_input_completion_query(self, event: PromptInput.CompletionQuery) -> None:
-        from rolo_claude.tui.completion import complete_at_path, complete_slash
+        from halo_harness.tui.completion import complete_at_path, complete_slash
 
         if event.kind in ("accept", "accept_submit"):
             await self._accept_completion(submit=(event.kind == "accept_submit"))
@@ -1181,7 +1217,7 @@ class BridgeApp(App):
     # ---- history Up/Down (D-TUI: "history Up/Down with prefix filter") ---
 
     def on_prompt_input_history_nav(self, event: PromptInput.HistoryNav) -> None:
-        from rolo_claude import history as history_mod
+        from halo_harness import history as history_mod
 
         if not self._history_cache:
             try:
@@ -1228,7 +1264,7 @@ class BridgeApp(App):
         # user presses "4" and borrows the input for deny feedback -- a
         # pending permission ask must be impossible to miss even if the
         # auto-scroll fix (item 16) still somehow leaves it out of view.
-        from rolo_claude.tui.widgets.cards import PermissionCard
+        from halo_harness.tui.widgets.cards import PermissionCard
         if isinstance(card, PermissionCard):
             self.prompt_input.placeholder = "1-4 answers the request above, or type why not"
             self.status_bar.set_pending_permission(True)
@@ -1250,7 +1286,7 @@ class BridgeApp(App):
 
     def _notify_send_worker(self) -> None:
         try:
-            subprocess.run(["notify-send", "rolo-claude", "Input needed"], timeout=3,
+            subprocess.run(["notify-send", "halo", "Input needed"], timeout=3,
                             capture_output=True)
         except (OSError, subprocess.SubprocessError):
             pass
@@ -1286,7 +1322,7 @@ class BridgeApp(App):
         self.set_focus(self.prompt_input)
 
     def resolve_permission_decision(self, request_id: str, decision: dict, *, suggested_rule) -> None:
-        from rolo_claude.permissions import SettingsWriteRefused
+        from halo_harness.permissions import SettingsWriteRefused
 
         scope = decision.get("scope")
         # review finding 3: a comma-joined multi-segment suggestion (e.g. a
@@ -1350,7 +1386,7 @@ class BridgeApp(App):
         them (the old bug: `_borrowing_card` was then left pointing at the
         now-finished card, so the NEXT Enter answered nothing and cleared
         whatever card was ACTUALLY pending by then instead)."""
-        from rolo_claude.tui.widgets.cards import PermissionCard
+        from halo_harness.tui.widgets.cards import PermissionCard
         card = self.pending_card
         if not isinstance(card, PermissionCard) or card.done or card.awaiting_feedback:
             return
@@ -1463,7 +1499,7 @@ class BridgeApp(App):
         self.notify("Press Ctrl+C again to exit", timeout=DOUBLE_CTRL_C_WINDOW_S)
 
     def _clipboard_fallback_worker(self, text: str) -> None:
-        from rolo_claude.tui.clipboard import copy_via_external_tool
+        from halo_harness.tui.clipboard import copy_via_external_tool
         copy_via_external_tool(text)
 
     def action_quit_on_empty(self) -> None:
@@ -1555,13 +1591,13 @@ class BridgeApp(App):
         return None
 
     def action_show_help(self) -> None:
-        from rolo_claude.tui.dialogs.help import HelpDialog
+        from halo_harness.tui.dialogs.help import HelpDialog
 
         self.push_screen(HelpDialog(self.registry))
 
     def action_history_search(self) -> None:
-        from rolo_claude import history as history_mod
-        from rolo_claude.tui.dialogs.history_search import HistorySearchDialog
+        from halo_harness import history as history_mod
+        from halo_harness.tui.dialogs.history_search import HistorySearchDialog
 
         try:
             entries = history_mod.load_merged_history(str(self.cwd))

@@ -103,16 +103,16 @@ Candidate order per endpoint = [family default] → other chat-shaped types it l
 Sends one short pong through EVERY chat endpoint on its chosen path (and, for GLM/Kimi/Claude, on
 the anthropic gateway too when `--both`), prints a table: endpoint, path, HTTP status, first tokens,
 latency, DBUs, tool-call support (one Read tool call when `--tools`), and writes
-`~/.rolo-claude/work-matrix-<date>.json` (no token, no host in the report — endpoint names only) so
+`~/.halo/work-matrix-<date>.json` (no token, no host in the report — endpoint names only) so
 the owner can paste it back. Costs are shown up front; `--only <glob>` narrows the set.
 
 ## I. Team preset + token-only onboarding (rolo, 2026-09-29: "the team just inserts their databricks
 token and they're off")
 - The workspace listing is the model list: `init --preset work` and `models --refresh` discover and
-  cache it (`~/.rolo-claude/dbx-endpoints.json` with api_types, ids, capabilities, DBU prices); the
+  cache it (`~/.halo/dbx-endpoints.json` with api_types, ids, capabilities, DBU prices); the
   H13 vendored snapshot is only the offline fallback and picker seed. Never a hand-maintained list.
 - A shared `team.json` preset (host, default model, per-family gateway preference, DBU price,
-  optional role table for H15) found at `.rolo-claude/team.json` in the project, `~/.rolo-claude/
+  optional role table for H15) found at `.halo/team.json` in the project, `~/.halo/
   team.json`, or `--team <path|url>`; it never holds tokens. `init --preset work` reads it (or the
   Claude Code work settings env), asks ONLY for the user's token (hidden input, 0600 env file),
   refreshes the catalog, and prints the count of models available and the default. Re-running
@@ -127,9 +127,9 @@ agents wired to roles, cost-aware defaults, `/roles` view, `--role` overrides; d
 ## J. `/models refresh` (alias `/dbx`) and `models --refresh --urls` (rolo, 2026-09-29)
 - TUI `/models refresh`: re-list the workspace with the user's token, print the table (endpoint,
   family, chosen path type, gateway model id, DBU in/out, capabilities flags), update the cached
-  catalog (`~/.rolo-claude/dbx-endpoints.json`) so `/model` reflects it immediately, and print a
+  catalog (`~/.halo/dbx-endpoints.json`) so `/model` reflects it immediately, and print a
   diff against the previous cache (added / removed / changed types or ids). Runs off the UI thread.
-- CLI `rolo-claude models --refresh --urls`: same table plus the exact URL per endpoint and path
+- CLI `halo models --refresh --urls`: same table plus the exact URL per endpoint and path
   type (what the listing script printed), `--json` for tooling.
 - Auto-refresh: catalog older than 24 h (configurable `databricks.catalog_max_age_hours`) refreshes
   in the background when `/model` opens or a session starts, with a one-line notification of the
@@ -139,7 +139,7 @@ agents wired to roles, cost-aware defaults, `/roles` view, `--role` overrides; d
 
 ## Correction (rolo, 2026-09-29): discovery only — no workspace endpoint list in the repo
 Host + token are the only inputs. `init --preset work` / `models --refresh` discover the endpoints
-and cache them per user (`~/.rolo-claude/dbx-endpoints.json`); that cache is the offline fallback.
+and cache them per user (`~/.halo/dbx-endpoints.json`); that cache is the offline fallback.
 The repo ships only the generic family/api_type RULES table (H13 correction) and synthetic test
 fixtures. Wherever this brief says "vendored snapshot" read "per-user cache". `team.json` (§I) holds
 host, defaults and preferences only — never endpoint lists, never tokens.

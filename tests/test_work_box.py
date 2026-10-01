@@ -1,5 +1,5 @@
 """tests.test_work_box -- H8 scope F: ucode-settings.json discovery,
-catalog-age reporting, and `rolo-claude doctor --work`'s output shape with
+catalog-age reporting, and `halo doctor --work`'s output shape with
 no/an unreachable Databricks host (never a real VPN call in this suite)."""
 import json
 import os
@@ -20,7 +20,7 @@ test, TESTS = new_registry()
 
 @test
 def test_load_ucode_settings_top_level_keys(ctx: Ctx):
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({"gateway_url": "https://x.cloud.databricks.com", "token": "abc123"}), encoding="utf-8")
@@ -32,7 +32,7 @@ def test_load_ucode_settings_top_level_keys(ctx: Ctx):
 
 @test
 def test_load_ucode_settings_nested_gateway_key(ctx: Ctx):
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-nested-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({"gateway": {"host": "y.cloud.databricks.com", "api_token": "tok"}}), encoding="utf-8")
@@ -44,7 +44,7 @@ def test_load_ucode_settings_nested_gateway_key(ctx: Ctx):
 
 @test
 def test_load_ucode_settings_missing_or_incomplete_is_none(ctx: Ctx):
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-missing-"))
     ctx.check("missing file -> None", load_ucode_settings(d / "nope.json") is None)
     incomplete = d / "incomplete.json"
@@ -60,7 +60,7 @@ def test_h9b_f31_load_ucode_settings_reads_claude_settings_shaped_env_block(ctx:
     """H9 whole-tree review finding 31: a ucode-settings.json shaped like a
     Claude Code `--settings` file (nested `env` block, ANTHROPIC_* names)
     must resolve, not just the gateway-config key spellings."""
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-env-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({"env": {
@@ -79,7 +79,7 @@ def test_h9b_f31_load_ucode_settings_top_level_anthropic_keys_also_resolve(ctx: 
     candidate key names now, so they resolve top-level too, not only when
     nested under "env" -- some hand-edited or non-Claude-Code writer of
     this file could plausibly put them at either level."""
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-env-top-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({
@@ -97,7 +97,7 @@ def test_h9b_f31_load_ucode_settings_runs_api_key_helper_when_token_missing(ctx:
     """H9 finding 31: an `apiKeyHelper` command (Claude Code `--settings`
     shape) is run and its stdout used as the token when no key-spelling
     candidate supplies one directly."""
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-helper-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({
@@ -115,7 +115,7 @@ def test_h9b_f31_load_ucode_settings_api_key_helper_failure_is_none(ctx: Ctx):
     """H9 finding 31: a failing (nonzero exit) apiKeyHelper must leave the
     token unset -- same "None if incomplete" contract as a missing key,
     never a raised exception from the subprocess call."""
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-helper-fail-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({
@@ -131,7 +131,7 @@ def test_h9b_f31_load_ucode_settings_does_not_run_helper_when_key_token_found(ct
     candidate already supplied a token, the helper must never run (and
     must never override that token even if it would produce a different
     value)."""
-    from rolo_claude.providers.config import load_ucode_settings
+    from halo_harness.providers.config import load_ucode_settings
     d = Path(tempfile.mkdtemp(prefix="ucode-helper-skip-"))
     p = d / "ucode-settings.json"
     p.write_text(json.dumps({
@@ -149,7 +149,7 @@ def test_resolve_databricks_falls_back_to_ucode_settings(ctx: Ctx):
     """Step 5 of the discovery chain: when nothing earlier (explicit
     BRIDGE_DBX_*, ANTHROPIC_*, DATABRICKS_*) resolves, ucode-settings.json
     under the (test) claude config dir wins before ~/.databrickscfg."""
-    from rolo_claude.providers.config import resolve_databricks
+    from halo_harness.providers.config import resolve_databricks
     d = Path(tempfile.mkdtemp(prefix="ucode-resolve-"))
     claude_dir = d / ".claude"
     claude_dir.mkdir(parents=True)
@@ -171,7 +171,7 @@ def test_resolve_databricks_falls_back_to_ucode_settings(ctx: Ctx):
 
 @test
 def test_resolve_databricks_explicit_override_beats_ucode_settings(ctx: Ctx):
-    from rolo_claude.providers.config import resolve_databricks
+    from halo_harness.providers.config import resolve_databricks
     d = Path(tempfile.mkdtemp(prefix="ucode-precedence-"))
     claude_dir = d / ".claude"
     claude_dir.mkdir(parents=True)
@@ -193,7 +193,7 @@ def test_resolve_databricks_explicit_override_beats_ucode_settings(ctx: Ctx):
 
 @test
 def test_catalog_ages_reports_missing_and_fresh(ctx: Ctx):
-    from rolo_claude.doctor import _check_catalog_ages
+    from halo_harness.doctor import _check_catalog_ages
     d = Path(tempfile.mkdtemp(prefix="catalog-ages-"))
     old_state = os.environ.get("BRIDGE_STATE_DIR")
     os.environ["BRIDGE_STATE_DIR"] = str(d)
@@ -215,7 +215,7 @@ def test_catalog_ages_reports_missing_and_fresh(ctx: Ctx):
 
 @test
 def test_doctor_work_no_databricks_configured(ctx: Ctx):
-    from rolo_claude.doctor import run_work_checks
+    from halo_harness.doctor import run_work_checks
     d = Path(tempfile.mkdtemp(prefix="work-none-"))
     _cred_keys = ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
@@ -249,10 +249,10 @@ def test_doctor_work_unreachable_host_reports_vpn_hint(ctx: Ctx):
     """A syntactically valid but non-routable Databricks-shaped host: the
     VPN hint text must appear, and nothing downstream (token check, open
     questions) should raise just because the connect failed."""
-    from rolo_claude.doctor import run_work_checks
+    from halo_harness.doctor import run_work_checks
     d = Path(tempfile.mkdtemp(prefix="work-unreachable-"))
     os.environ["BRIDGE_TEST_HOME"] = str(d)
-    os.environ["BRIDGE_DBX_BASE_URL"] = "https://this-host-does-not-exist-rolo-claude-test.databricks.com"
+    os.environ["BRIDGE_DBX_BASE_URL"] = "https://this-host-does-not-exist-halo-test.databricks.com"
     os.environ["BRIDGE_DBX_TOKEN"] = "fake-token-for-a-test"
     try:
         lines, ok = run_work_checks()
@@ -271,7 +271,7 @@ def test_doctor_work_unreachable_host_reports_vpn_hint(ctx: Ctx):
 
 @test
 def test_h9b_f33_configured_databricks_thinking_model_reads_routes_json_default(ctx: Ctx):
-    from rolo_claude.doctor import _configured_databricks_thinking_model
+    from halo_harness.doctor import _configured_databricks_thinking_model
 
     state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state-"))
     (state_dir / "routes.json").write_text(
@@ -283,7 +283,7 @@ def test_h9b_f33_configured_databricks_thinking_model_reads_routes_json_default(
 
 @test
 def test_h9b_f33_configured_model_none_when_not_databricks_or_not_thinking_family(ctx: Ctx):
-    from rolo_claude.doctor import _configured_databricks_thinking_model
+    from halo_harness.doctor import _configured_databricks_thinking_model
 
     state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state2-"))
     (state_dir / "routes.json").write_text(json.dumps({"default": "or:some-vendor/model"}), encoding="utf-8")
@@ -304,9 +304,9 @@ def test_h9b_f33_reasoning_replay_probe_uses_the_configured_model_and_production
     and headers the probe actually used -- must be the CONFIGURED model
     (routes.json's default), not the catalog's first thinking-family
     match, and must carry x-databricks-use-coding-agent-mode."""
-    import rolo_claude.doctor as doctor_mod
-    import rolo_claude.providers.databricks as dbx_mod
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.doctor as doctor_mod
+    import halo_harness.providers.databricks as dbx_mod
+    import halo_harness.providers.http as http_mod
 
     state_dir = Path(tempfile.mkdtemp(prefix="work-f33-state4-"))
     (state_dir / "routes.json").write_text(

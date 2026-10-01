@@ -10,9 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
-from rolo_claude.model import parse_model_ref, resolve_model_profile, ModelProfile, CostMeter
-from rolo_claude.providers.routing import InvalidModelError
-from rolo_claude.providers.databricks import write_models_json
+from halo_harness.model import parse_model_ref, resolve_model_profile, ModelProfile, CostMeter
+from halo_harness.providers.routing import InvalidModelError
+from halo_harness.providers.databricks import write_models_json
 
 # H15 part 2 addendum 3.1: parse_model_ref now refuses an or:/dbx:/ant:
 # ref whose provider isn't auto-detected as enabled -- this file tests
@@ -342,7 +342,7 @@ def test_vendored_openrouter_fallback_used_when_nothing_cached(ctx: Ctx):
     """No models.json entry, no routes.json profile -- a model the package's
     OWN vendored fallback (providers/catalog/openrouter_fallback.json)
     covers still resolves real context/pricing instead of bare defaults."""
-    from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+    from halo_harness.providers.models_dev import load_vendored_openrouter_fallback
     vendored = load_vendored_openrouter_fallback()
     ctx.check("the vendored file has real entries to test against", len(vendored) > 0)
     known_id = next(iter(vendored))
@@ -359,7 +359,7 @@ def test_vendored_openrouter_fallback_used_when_nothing_cached(ctx: Ctx):
 
 @test
 def test_vendored_databricks_fallback_used_when_nothing_cached(ctx: Ctx):
-    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback
     vendored = load_vendored_databricks_fallback()
     ctx.check("the vendored databricks file has real entries", len(vendored) > 0)
     known_id = next(iter(vendored))
@@ -383,7 +383,7 @@ def test_h5c_extra_vendored_databricks_fallback_parses_cache_pricing(ctx: Ctx):
     cache_write 3.75 USD per MILLION tokens) -- resolved end to end through
     `resolve_model_profile` (no models.json cache, no routes.json profile),
     exactly the path a fresh install with no network yet takes."""
-    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback
     vendored = load_vendored_databricks_fallback()
     entry = vendored.get("databricks-claude-sonnet-4-5")
     ctx.check("the vendored fixture still has this row (fixture drift guard)", entry is not None)
@@ -413,7 +413,7 @@ def test_models_json_cache_wins_over_vendored_fallback(ctx: Ctx):
     """A real (even if minimal) models.json entry must always beat the
     vendored package fallback -- the vendored tier is a LAST resort, never
     a way to ignore a live/cached probe result."""
-    from rolo_claude.providers.models_dev import load_vendored_openrouter_fallback
+    from halo_harness.providers.models_dev import load_vendored_openrouter_fallback
     vendored = load_vendored_openrouter_fallback()
     known_id = next(iter(vendored))
 
@@ -445,8 +445,8 @@ def test_h9b_f22_work_default_databricks_models_get_real_context_from_model_tabl
     file, for REQUEST shaping, not economics) already has a real,
     hand-verified `context_tokens` for all three -- now consulted as a
     fallback tier here too."""
-    from rolo_claude.providers.profiles import load_model_table
-    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback
+    from halo_harness.providers.profiles import load_model_table
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback
     table = load_model_table().get("databricks") or {}
     vendored = load_vendored_databricks_fallback()
     for model_id in ("databricks-deepseek-v4-1-flash", "databricks-kimi-k3", "databricks-glm-5-3"):
@@ -467,13 +467,13 @@ def test_h9b_f22_work_default_databricks_models_get_real_context_from_model_tabl
 
 @test
 def test_h9b_f22_refreshed_models_dev_cache_is_actually_read(ctx: Ctx):
-    """Verified bug: `rolo-claude models --refresh` writes
+    """Verified bug: `halo models --refresh` writes
     <state_dir>/models-dev.json, but `load_models_dev_json` had NO caller
     anywhere -- the refreshed data was written and then never looked at
     again by anything. Now the FIRST fallback tier tried for `databricks`,
     ahead of even the committed vendored file (a refresh the user
     explicitly ran should win over a stale committed snapshot)."""
-    from rolo_claude.providers.models_dev import write_models_dev_json, load_vendored_databricks_fallback
+    from halo_harness.providers.models_dev import write_models_dev_json, load_vendored_databricks_fallback
 
     state_dir = Path(tempfile.mkdtemp(prefix="model-h9b-f22-refresh-"))
     fake_full_fetch = {
@@ -504,7 +504,7 @@ def test_h9b_f22_refreshed_cache_wins_over_the_committed_vendored_fallback(ctx: 
     """A model present in BOTH the refreshed cache and the committed
     vendored file must resolve from the refreshed one -- it's what the
     user explicitly just pulled."""
-    from rolo_claude.providers.models_dev import load_vendored_databricks_fallback, write_models_dev_json
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback, write_models_dev_json
 
     vendored = load_vendored_databricks_fallback()
     known_id = next(iter(vendored))

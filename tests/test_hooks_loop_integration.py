@@ -33,11 +33,11 @@ _HOOK_SCRIPT_ARGV = [sys.executable, "-m", "tests.helpers.hook_scripts"]
 
 
 def _new_session(fh, mock, *, model, hook_runner=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
@@ -53,12 +53,12 @@ def _new_session(fh, mock, *, model, hook_runner=None):
 
 
 def _hook_runner(fh, *, hooks_by_event):
-    from rolo_claude.hooks import HookRunner
+    from halo_harness.hooks import HookRunner
     # the hook scripts are spawned as `python -m tests.helpers.hook_scripts`
     # -- that import only resolves with PYTHONPATH pointing at the repo
     # root (HookRunner's own `cwd`, matching a real hook's contract, is
     # the PROJECT dir, not the repo -- same as CLAUDE_PROJECT_DIR).
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
     return HookRunner(hooks_by_event, cwd=fh["proj"], session_id="test-session",
                        transcript_path=str(fh["proj"] / "transcript.jsonl"), effective_env=env)
@@ -69,7 +69,7 @@ def test_pretooluse_hook_rewrites_bash_command_and_the_rewritten_one_actually_ru
     """The brief's own live acceptance shape: a PreToolUse hook rewrites a
     Bash call's `updatedInput` -- the tool that ACTUALLY dispatches must
     run the rewritten command, not the model's original one."""
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -123,8 +123,8 @@ def test_h5b_f13_pretooluse_rewrite_is_re_decided_against_a_deny_rule(ctx: Ctx):
     command is harmless and would be allowed; the hook rewrites it into
     something a real deny rule matches -- the call must be DENIED, never
     dispatched."""
-    from rolo_claude.hooks import HookDef
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.hooks import HookDef
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -193,8 +193,8 @@ def test_h5c_f09_permission_request_updated_input_is_redecided_against_a_deny_ru
     (`test_h5b_f13_pretooluse_rewrite_is_re_decided_against_a_deny_rule`)
     -- proving `decide()` re-runs against the REWRITTEN input rather than
     trusting the ask decision computed for the original one."""
-    from rolo_claude.hooks import HookDef
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.hooks import HookDef
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -230,8 +230,8 @@ def test_h5c_f09_permission_request_updated_permissions_list_applies_setmode_and
     entries land on the session's own live `PermissionEngine`: `setMode`
     changes `self.permission_engine.mode`, and `addRules` teaches it a new
     deny rule that a LATER call in the SAME turn is denied by."""
-    from rolo_claude.hooks import HookDef
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.hooks import HookDef
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -297,8 +297,8 @@ def test_h5c_f09_permission_request_interrupt_ends_the_turn_as_interrupted(ctx: 
     end the WHOLE turn, not just refuse this one call -- `turn_done` fires
     with `reason="interrupted"`, and the model is never called again this
     turn (no follow-up "the tool was denied, let me try something else")."""
-    from rolo_claude.hooks import HookDef
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.hooks import HookDef
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -346,7 +346,7 @@ def test_userpromptsubmit_hook_context_is_visible_in_the_session_log(ctx: Ctx):
     """A UserPromptSubmit hook's `additionalContext` becomes a user-role
     snapshot in the log (never the system node) -- visible alongside the
     prompt for the model AND for anyone reading the transcript."""
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -378,7 +378,7 @@ def test_userpromptsubmit_hook_context_is_visible_in_the_session_log(ctx: Ctx):
 def test_stop_hook_exits_2_once_makes_the_model_continue_one_more_step(ctx: Ctx):
     """A Stop hook that exits 2 the FIRST time (then 0 after) must make
     the turn continue for exactly one more model call before ending."""
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -413,7 +413,7 @@ def test_h5c_f12_esc_during_a_slow_stop_hook_ends_the_turn_interrupted_within_1s
     about a second (the hook's own process group killed, not waited out)."""
     import threading
     import time
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -465,7 +465,7 @@ def test_h5c_f12_esc_during_a_slow_posttooluse_hook_also_cuts_it_short(ctx: Ctx)
     short too, not just Stop's own path."""
     import threading
     import time
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -516,7 +516,7 @@ def test_h5c_f12_esc_during_a_slow_posttooluse_hook_also_cuts_it_short(ctx: Ctx)
 
 @test
 def test_posttooluse_hook_additional_context_is_appended_to_the_result(ctx: Ctx):
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     target = fh["proj"] / "posttool_target.txt"
@@ -570,13 +570,13 @@ def test_h5b_f10_session_start_env_file_var_expansion_through_a_real_session(ctx
     example to `CLAUDE_ENV_FILE`, and `session.tool_env['PATH']` must come
     out with the marker genuinely APPENDED to the real inherited PATH, not
     as a bare literal string standing alone."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookDef, HookRunner
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookDef, HookRunner
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -592,7 +592,7 @@ def test_h5b_f10_session_start_env_file_var_expansion_through_a_real_session(ctx
         # an EXPLICIT, known session_id and a HookRunner that agrees with it.
         session_id = "h5b-f10-envfile-session"
         session_log = SessionLog(fh["proj"], session_id=session_id)
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env["PYTHONPATH"] = str(REPO_DIR)
         hook_runner = HookRunner(
             {"SessionStart": [HookDef(type="command", args=_HOOK_SCRIPT_ARGV + ["env_file_writer_var_expansion"])]},
@@ -634,13 +634,13 @@ def test_h9_sessionstart_never_refires_for_a_sub_agent(ctx: Ctx):
     agent/subagent.py's `_build_child_session` does (agent_id set,
     otherwise identical hook_runner/config) and counting real hook
     invocations via the same `once_counter` script other hook tests use."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookDef, HookRunner
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookDef, HookRunner
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -648,7 +648,7 @@ def test_h9_sessionstart_never_refires_for_a_sub_agent(ctx: Ctx):
         os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
         os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
         counter_file = Path(tempfile.mkdtemp(prefix="hooks-loop-sessionstart-")) / "counter.txt"
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env["PYTHONPATH"] = str(REPO_DIR)
         env["HOOK_ONCE_COUNTER_FILE"] = str(counter_file)
 
@@ -684,6 +684,21 @@ def test_h9_sessionstart_never_refires_for_a_sub_agent(ctx: Ctx):
                   parent.agent_id is None)
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

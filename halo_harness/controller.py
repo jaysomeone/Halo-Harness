@@ -1,4 +1,4 @@
-"""rolo_claude.controller -- the non-blocking UI-thread facade over the
+"""halo_harness.controller -- the non-blocking UI-thread facade over the
 agent loop (U2, D-Contract).
 
 The rule this module exists to enforce: **every call here is made from the
@@ -34,9 +34,9 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from rolo_claude import events
-from rolo_claude.config.paths import bridge_home, project_slug
-from rolo_claude.permissions import Decision, add_allow_rule
+from halo_harness import events
+from halo_harness.config.paths import bridge_home, project_slug
+from halo_harness.permissions import Decision, add_allow_rule
 
 QUIT_DEADLINE_S = 5.0
 
@@ -45,8 +45,8 @@ def _default_model_resolver(raw: str, *, state_dir: Path, routes: dict, settings
     """`(ModelRef, ModelProfile, creds)` for a `--model`-style string --
     the same resolution headless.py does at startup, reused here so `/model`
     and `set_model` can never drift from it."""
-    from rolo_claude.headless import _resolve_creds
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
+    from halo_harness.headless import _resolve_creds
+    from halo_harness.model import parse_model_ref, resolve_model_profile
 
     ref = parse_model_ref(raw, routes)
     profile = resolve_model_profile(ref, state_dir, routes)
@@ -114,7 +114,7 @@ class Controller:
             finally:
                 self.events.put(None)  # the sentinel the drain loop treats as "worker gone"
 
-        self._worker = threading.Thread(target=_target, name="rolo-claude-session", daemon=True)
+        self._worker = threading.Thread(target=_target, name="halo-session", daemon=True)
         self._worker.start()
         return self
 
@@ -166,7 +166,7 @@ class Controller:
             except Exception:
                 pass
             # H11 Part B: a cc: session's own claude subprocess must never
-            # outlive rolo-claude either -- a safe no-op when cc: was
+            # outlive halo either -- a safe no-op when cc: was
             # never used this session.
             try:
                 self.session.close_cc()
@@ -379,7 +379,7 @@ class Controller:
         if name == "compact" and cmd.source == "builtin":
             return self.run_compact(args)
         if cmd.kind == "prompt" and cmd.run is not None:
-            from rolo_claude.commands.registry import expand_command_body, read_at_mention_snapshots
+            from halo_harness.commands.registry import expand_command_body, read_at_mention_snapshots
 
             body = cmd.run(args, self.facade)
             # finding 9: route through the real session's permission
@@ -407,7 +407,7 @@ class Controller:
                     "snapshot", {"blocks": [{"type": "text", "text": f"@{path_str}\n{content}"}],
                                  "snapshot_kind": "at_mention"})
             # H8 scope E: `@server:resource` mentions in the expanded body.
-            from rolo_claude.mcp.mentions import read_server_resource_snapshots
+            from halo_harness.mcp.mentions import read_server_resource_snapshots
             for label, content in read_server_resource_snapshots(
                     result.text, mcp_manager=getattr(self.session, "mcp_manager", None)):
                 self.session.queue_log_write(
@@ -436,8 +436,8 @@ class Controller:
         alike -- renders through the exact same `model_display.
         format_model_row` with no per-provider special-casing left at
         render time."""
-        from rolo_claude.providers.databricks import load_models_json
-        from rolo_claude.providers.enablement import credentials_present, is_enabled, label_for
+        from halo_harness.providers.databricks import load_models_json
+        from halo_harness.providers.enablement import credentials_present, is_enabled, label_for
 
         # 1.0.1 part 2 fixpass finding 3: the session's own real `Settings.
         # effective_env` (shell < user < trusted project/local < policy) --
@@ -459,7 +459,7 @@ class Controller:
             if is_enabled(name, detected=is_detected) or not is_detected:
                 return
             hints.append({"hint": f"{label_for(name)} detected but not enabled -- "
-                                   f"run `rolo-claude providers enable {name}`"})
+                                   f"run `halo providers enable {name}`"})
 
         def _per_m(price_per_token) -> "float | None":
             # 1.0.1 fixpass finding 7: models.json stores EVERY OpenRouter
@@ -527,7 +527,7 @@ class Controller:
         # every single time, measured as the single largest piece of a
         # 2-5s TUI freeze on a real work box. Only a startup worker
         # (tui/app.py's on_mount) ever populates that cache now.
-        from rolo_claude.providers.cc_models import CC_ALIASES, SUBSCRIPTION_AUTH_METHODS, alias_display_detail, \
+        from halo_harness.providers.cc_models import CC_ALIASES, SUBSCRIPTION_AUTH_METHODS, alias_display_detail, \
             cached_claude_auth_status, profile_fields_for_cc_model
         try:
             status = cached_claude_auth_status()
@@ -563,35 +563,35 @@ class Controller:
                 })
         if cc_available and not is_enabled("claude_subscription", detected=cc_available):
             hints.append({"hint": f"{label_for('claude_subscription')} detected but not enabled -- "
-                                   f"run `rolo-claude providers enable claude_subscription`"})
+                                   f"run `halo providers enable claude_subscription`"})
         # H15 item 21: the `ant:` (direct Anthropic API key) group -- the
         # same nine subscription-model aliases as cc: above, resolved
         # against the real API instead of the installed `claude` binary.
         # Never shown before this item (no gate existed to hide it behind),
         # so this is also the group's first appearance in `/model` at all.
-        from rolo_claude.providers.config import resolve_anthropic
+        from halo_harness.providers.config import resolve_anthropic
         ant_available = resolve_anthropic(env) is not None
         if ant_available and is_enabled("anthropic", detected=ant_available):
-            from rolo_claude.init_providers import _cc_ant_entries
-            from rolo_claude.providers.cc_models import ANT_ALIASES
+            from halo_harness.init_providers import _cc_ant_entries
+            from halo_harness.providers.cc_models import ANT_ALIASES
             for entry in _cc_ant_entries("ant", ANT_ALIASES):
                 if entry["ref"] in seen:
                     continue
                 out.append({**entry, "provider": "anthropic", "group": "ant: (Anthropic API)"})
         elif ant_available:
             hints.append({"hint": f"{label_for('anthropic')} detected but not enabled -- "
-                                   f"run `rolo-claude providers enable anthropic`"})
+                                   f"run `halo providers enable anthropic`"})
         # H14 scope I: the discovered Databricks endpoint catalog
-        # (~/.rolo-claude/dbx-endpoints.json, from `init --preset work`/
+        # (~/.halo/dbx-endpoints.json, from `init --preset work`/
         # `models --refresh` -- never a vendored list), grouped by family,
         # each row showing its chosen path type and DBU rate when known;
         # a known non-chat endpoint (embeddings/whisper) is hidden here
-        # (`rolo-claude models` itself still lists it, for diagnostics).
+        # (`halo models` itself still lists it, for diagnostics).
         dbx_detected = credentials_present("databricks", env=env)
         dbx_enabled = is_enabled("databricks", detected=dbx_detected)
         try:
-            from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
-            from rolo_claude.providers.dbx_routing import (
+            from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
+            from halo_harness.providers.dbx_routing import (
                 PATH_TYPE_DISPLAY, classify_family, default_path_type, format_dbu_cost,
             )
             endpoints = load_dbx_endpoints_json(self.state_dir) if dbx_enabled else {}
@@ -604,8 +604,8 @@ class Controller:
         # same migration signal `catalog_cli.py`'s own table uses, so this
         # picker never shows that wrong answer as if it were real data.
         old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
-        from rolo_claude.model_display import databricks_row_fields
-        from rolo_claude.providers.profiles import load_model_table
+        from halo_harness.model_display import databricks_row_fields
+        from halo_harness.providers.profiles import load_model_table
         model_table = load_model_table()
         # 1.0.1 fixpass finding 1: loaded ONCE for the whole loop below, not
         # once per endpoint (databricks_row_fields's own `live_models_dev`/
@@ -613,7 +613,7 @@ class Controller:
         # 30 Databricks rows on a real catalog re-read and re-parsed the
         # same file 30 times (1.37s measured on a fast host) before this.
         try:
-            from rolo_claude.providers.models_dev import (
+            from halo_harness.providers.models_dev import (
                 databricks_entries_from_full_models_dev, load_models_dev_json, load_vendored_databricks_fallback,
             )
             live_models_dev = databricks_entries_from_full_models_dev(load_models_dev_json(self.state_dir))
@@ -674,7 +674,7 @@ class Controller:
         search... fuzzy over title, first prompt, cwd and model") is the
         LAST `meta` node's own `model` field seen, `""` if the session
         predates any `meta` node ever recording one. Reads OUR session logs
-        only (~/.rolo-claude). Synchronous file I/O -- U5 must-do: callers on
+        only (~/.halo). Synchronous file I/O -- U5 must-do: callers on
         the UI thread (the `/resume` slash handler) run this on a worker,
         never inline (matches `_git_branch`'s own fix)."""
         slug = project_slug(self.cwd)
@@ -718,8 +718,8 @@ class Controller:
         """Read a prior session's log and push ONE `replay` event carrying
         its renderable messages. The next prompt continues THAT session:
         the Session's own log is reopened on it (see
-        `rolo_claude.tui.app` for the swap)."""
-        from rolo_claude.agent.log import SessionLog
+        `halo_harness.tui.app` for the swap)."""
+        from halo_harness.agent.log import SessionLog
 
         log = SessionLog(self.cwd, session_id=session_id)
         self.replay_messages = _messages_from_nodes(log.nodes())
@@ -761,8 +761,8 @@ class Controller:
         # block the plain reconnect that already worked before this fix.
         if self.mcp_manager is not None:
             try:
-                from rolo_claude.config.claude_json import load_claude_json
-                from rolo_claude.mcp.manager import resolve_server_configs
+                from halo_harness.config.claude_json import load_claude_json
+                from halo_harness.mcp.manager import resolve_server_configs
                 fresh_configs, _notices = resolve_server_configs(
                     cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
                 self.mcp_manager.resync_from(fresh_configs)
@@ -814,13 +814,13 @@ class Controller:
             raw_entry = (raw.get("mcpServers") or {})[name]
         except (OSError, ValueError, KeyError) as e:
             return [f"could not read {name}'s .mcp.json entry to approve it: {type(e).__name__}: {e}"]
-        from rolo_claude import mcp_setup
+        from halo_harness import mcp_setup
         mcp_setup.record_mcp_approval(name, raw_entry)
         handle.config.pending_approval = False
         return self.reconnect_mcp(name, abort=abort)
 
     def memory_path(self):
-        from rolo_claude.config.paths import memory_dir
+        from halo_harness.config.paths import memory_dir
         return memory_dir(str(self.cwd))
 
     def ingest_at_mentions(self, text: str) -> None:
@@ -833,9 +833,9 @@ class Controller:
         Best-effort per mention: a path that doesn't resolve to a real
         file is silently skipped, never an error (the model still sees
         the literal `@mention` text and can ask/Read it itself)."""
-        from rolo_claude.tools.base import ToolContext
-        from rolo_claude.tools.read import ReadTool
-        from rolo_claude.tui.completion import parse_at_mentions
+        from halo_harness.tools.base import ToolContext
+        from halo_harness.tools.read import ReadTool
+        from halo_harness.tui.completion import parse_at_mentions
 
         # H9 whole-tree review finding 14: `@server:resource` mentions now
         # resolve on a background thread, never the CALLER's own (the UI
@@ -854,11 +854,11 @@ class Controller:
         # @mention here already uses -- see the `@path` loop below) is what
         # makes it safe for this to land whenever the fetch actually
         # finishes, possibly well after this method itself has returned.
-        from rolo_claude.mcp.mentions import _AT_SERVER_RESOURCE_RE
+        from halo_harness.mcp.mentions import _AT_SERVER_RESOURCE_RE
         mcp_manager = getattr(self.session, "mcp_manager", None)
         if mcp_manager is not None and _AT_SERVER_RESOURCE_RE.search(text or ""):
             threading.Thread(target=self._ingest_mcp_resource_mentions, args=(text, mcp_manager),
-                              daemon=True, name="rolo-claude-mcp-mention-fetch").start()
+                              daemon=True, name="halo-mcp-mention-fetch").start()
 
         mentions = parse_at_mentions(text)
         if not mentions:
@@ -927,7 +927,7 @@ class Controller:
         immediately to well after `ingest_at_mentions` itself already
         returned and the turn is already under way -- the snapshot lands
         in the log at the next safe point either way."""
-        from rolo_claude.mcp.mentions import read_server_resource_snapshots
+        from halo_harness.mcp.mentions import read_server_resource_snapshots
         try:
             snapshots = read_server_resource_snapshots(text, mcp_manager=mcp_manager)
         except Exception:
@@ -966,9 +966,9 @@ class Controller:
         worker thread's concurrent log writes -- verified: an inline
         `!cmd` landing between an assistant `tool_use` and its own
         `tool_result` broke pairing on every route."""
-        from rolo_claude.tools.base import ToolContext
-        from rolo_claude.tools.bash import BashTool
-        from rolo_claude.hooks import env_file_path
+        from halo_harness.tools.base import ToolContext
+        from halo_harness.tools.bash import BashTool
+        from halo_harness.hooks import env_file_path
 
         # finding 9: the session's own stripped tool_env (never a raw
         # os.environ read, which used to leak every provider API key into
@@ -1045,7 +1045,7 @@ class Controller:
         (claude's own "branch into a new conversation" flag) instead of a
         plain resume, which would just continue the SAME shared
         conversation the original session might still be using."""
-        from rolo_claude.agent.log import SessionLog
+        from halo_harness.agent.log import SessionLog
 
         new_id = uuid.uuid4().hex
         new_log = SessionLog(self.cwd, session_id=new_id)
@@ -1082,17 +1082,17 @@ class Controller:
     # ---- U5 scope B: git-shadow rewind ---------------------------------
 
     def shadow_steps(self) -> list:
-        from rolo_claude.shadow import store_for_controller
+        from halo_harness.shadow import store_for_controller
         store = store_for_controller(self)
         return store.list_steps() if store is not None else []
 
     def rewind_preview_undo(self) -> Optional[dict]:
-        from rolo_claude.shadow import store_for_controller
+        from halo_harness.shadow import store_for_controller
         store = store_for_controller(self)
         return store.preview_undo() if store is not None else None
 
     def rewind_preview_redo(self) -> Optional[dict]:
-        from rolo_claude.shadow import store_for_controller
+        from halo_harness.shadow import store_for_controller
         store = store_for_controller(self)
         return store.preview_redo() if store is not None else None
 
@@ -1101,7 +1101,7 @@ class Controller:
         `rewind` node (`agent/log.py`'s own minimal append helper).
         Returns `{"step", "files"}` (`ShadowStore.rewind_to`'s own shape),
         or None if `step_id` matches no recorded step."""
-        from rolo_claude.shadow import store_for_controller
+        from halo_harness.shadow import store_for_controller
         store = store_for_controller(self)
         if store is None:
             return None
@@ -1186,7 +1186,7 @@ def render_transcript_markdown(nodes: list, *, session_id: str) -> str:
     """`/export`'s own Markdown rendering of a session log's node list --
     user/assistant text, tool calls (as a fenced JSON block of their
     input), tool results, and rewind markers, in log order."""
-    lines = [f"# rolo-claude session {session_id}", ""]
+    lines = [f"# halo session {session_id}", ""]
     for node in nodes:
         ntype = node.get("type")
         if ntype == "user":
@@ -1219,7 +1219,7 @@ def sanitize_transcript(text: str) -> str:
 
     H9 whole-tree review finding 4: this used to be a SEPARATE regex
     (`\\b((?:api|secret|access)?[-_]?(?:key|token|password...)\\s*[:=]\\s*)`)
-    from `rolo-claude export --sanitize`'s own -- and a broken one: it
+    from `halo export --sanitize`'s own -- and a broken one: it
     requires a `\\b` word boundary immediately before the literal "key"/
     "token"/etc, but a namespaced name like `OPENROUTER_API_KEY` has NO
     such boundary there (`_` and the following letter are both `\\w`, so
@@ -1227,10 +1227,10 @@ def sanitize_transcript(text: str) -> str:
     bare `token=...`/`api_key: ...` but missed `OPENROUTER_API_KEY=...`
     entirely (5 of 6 verified leak cases; only `Bearer` was ever caught).
     Delegates to `export_cli.sanitize_text` now -- the ONE sanitizer both
-    `/export --sanitize` (this function) and `rolo-claude export
+    `/export --sanitize` (this function) and `halo export
     --sanitize` (export_cli.cmd_export) use, so a fix to one is a fix to
     both."""
-    from rolo_claude.export_cli import sanitize_text
+    from halo_harness.export_cli import sanitize_text
     return sanitize_text(text)
 
 

@@ -53,7 +53,7 @@ PROG = "claude-bridge"
 
 log = logging.getLogger("bridge")
 
-# Make `rolo_claude` importable when this file is run directly as a
+# Make `halo_harness` importable when this file is run directly as a
 # script from another cwd (plain `python bridge.py ...`, or `uv run --script
 # bridge.py ...`) -- Python normally puts a script's own directory on
 # sys.path[0] automatically, but this is cheap insurance for any runner that
@@ -63,11 +63,12 @@ _THIS_DIR = str(Path(__file__).resolve().parent)
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from rolo_claude import __version__
-from rolo_claude.providers.config import (
+from halo_harness import __version__
+from halo_harness.config.paths import env_compat
+from halo_harness.providers.config import (
     home,
     default_state_dir,
-    load_env_file,
+    load_provider_env_files,
     load_settings_env_chain,
     resolve_openrouter,
     resolve_databricks,
@@ -83,7 +84,7 @@ from rolo_claude.providers.config import (
     estimate_tokens,
     dump_debug,
 )
-from rolo_claude.providers.routing import (
+from halo_harness.providers.routing import (
     InvalidModelError,
     route_model,
     is_passthrough_ref,
@@ -91,24 +92,24 @@ from rolo_claude.providers.routing import (
     build_passthrough_body,
     build_passthrough_headers,
 )
-from rolo_claude.providers.translate import (
+from halo_harness.providers.translate import (
     WebSearchUnavailable,
     anthropic_to_openai,
 )
-from rolo_claude.providers.errors import (
+from halo_harness.providers.errors import (
     build_prompt_too_long_message,
     map_upstream_error,
 )
-from rolo_claude.providers.oai_stream import (
+from halo_harness.providers.oai_stream import (
     sse_frame,
 )
-from rolo_claude.providers.http import (
+from halo_harness.providers.http import (
     UpstreamConnectError,
     proxy_anthropic,
     call_databricks_count_tokens,
     passthrough_reader_thread,
 )
-from rolo_claude.providers.databricks import (
+from halo_harness.providers.databricks import (
     databricks_unreachable_response,
     probe_databricks_endpoints,
     probe_openrouter_models,
@@ -122,7 +123,7 @@ from rolo_claude.providers.databricks import (
 # function; the two Handler methods below are thin wrappers over it. The
 # Databricks Claude passthrough dialect is UNCHANGED (still a raw relay via
 # _handle_passthrough_stream, never touching stream_completion).
-from rolo_claude.providers.stream import (
+from halo_harness.providers.stream import (
     CompletionRequest,
     ProviderCreds,
     ContextOverflow,
@@ -143,8 +144,11 @@ class BridgeStartError(Exception):
 
 def cmd_probe(args) -> None:
     """--probe: report Databricks endpoint reachability and cache the OpenRouter model list."""
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    load_env_file(env_path)
+    # 2.0.0 fixpass item A: load_provider_env_files() (new file first, THEN
+    # the legacy ~/.config/vibes-hacker/env filling gaps) -- env_file_path()
+    # alone is a pure path resolver now (finding 4), so a box that only has
+    # the legacy file would otherwise start with no credentials at all.
+    load_provider_env_files()
     dbx = resolve_databricks()
     if dbx is None:
         print("Databricks: not configured")
@@ -356,7 +360,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         reader.daemon = True
         reader.start()
 
-        ping_interval = float(os.environ.get("BRIDGE_PING_INTERVAL", "15"))
+        ping_interval = float(env_compat("PING_INTERVAL", default="15"))
         try:
             while True:
                 if self._client_gone():
@@ -464,7 +468,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         req = CompletionRequest(
             body=body, route=route, profile=profile, creds=creds, state_dir=SERVER_STATE_DIR,
             extra_headers=extra_headers, model_label=body.get("model"),
-            ping_interval=float(os.environ.get("BRIDGE_PING_INTERVAL", "15")),
+            ping_interval=float(env_compat("PING_INTERVAL", default="15")),
             openrouter_base_url=openrouter_base_url,
         )
         abort = threading.Event()
@@ -604,8 +608,8 @@ def cmd_serve(args):
     """Start the HTTP server."""
     global SERVER_STATE_DIR, SERVER_PORT, SERVER_TOKEN, SERVER_CFG, SERVER_OPENROUTER, SERVER_MOCK_BASE_URL, SERVER_DBX
 
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    load_env_file(env_path)
+    # 2.0.0 fixpass item A: see cmd_probe's own comment -- same swap, same reason.
+    load_provider_env_files()
     SERVER_STATE_DIR = Path(args.state_dir) if getattr(args, "state_dir", None) else default_state_dir()
     SERVER_STATE_DIR.mkdir(parents=True, exist_ok=True)
     setup_logging(SERVER_STATE_DIR)
@@ -619,7 +623,7 @@ def cmd_serve(args):
     # are the redacted dicts meant only for `--config` display, never for auth.
     SERVER_OPENROUTER = resolve_openrouter()
     SERVER_DBX = resolve_databricks()
-    SERVER_MOCK_BASE_URL = os.environ.get("BRIDGE_OPENROUTER_BASE_URL")
+    SERVER_MOCK_BASE_URL = env_compat("OPENROUTER_BASE_URL")
 
     write_server_json(SERVER_STATE_DIR, os.getpid(), port)
 
@@ -640,7 +644,7 @@ def find_claude_exe(*, _which=None, _windows: "bool | None" = None) -> str:
 
     H9 Linux acceptance (Part A, bug 1 -- CRITICAL): this only ever looked
     for `claude.exe` / `claude.cmd` / `~/.local/bin/claude.exe`, i.e. the
-    Windows shims, so on Linux -- the primary platform -- `rolo-claude proxy
+    Windows shims, so on Linux -- the primary platform -- `halo proxy
     launch` never found a real `claude` on PATH or at `~/.local/bin/claude`
     (the standard native install location) and raised ClaudeNotFoundError on
     a clean Kali box, or, on WSL, picked up a Windows npm `claude.cmd` shim
@@ -651,7 +655,7 @@ def find_claude_exe(*, _which=None, _windows: "bool | None" = None) -> str:
     fallback last. `_which`/`_windows` are test seams only."""
     which = _which or shutil.which
     windows = (os.name == "nt") if _windows is None else _windows
-    env_exe = os.environ.get("BRIDGE_CLAUDE_EXE")
+    env_exe = env_compat("CLAUDE_EXE")
     if env_exe:
         return env_exe
 
@@ -852,8 +856,8 @@ def cmd_launch(args, forwarded_claude_args=None):
     the already-split argv to hand to `claude` untouched -- finding 14 moved
     that split into main()'s _parse_launch_argv (it has to scan the raw
     sys.argv token stream, not this function's already-parsed Namespace)."""
-    env_path = Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env"))
-    load_env_file(env_path)
+    # 2.0.0 fixpass item A: see cmd_probe's own comment -- same swap, same reason.
+    load_provider_env_files()
     state_dir = default_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
     port = args.port or DEFAULT_PORT
@@ -941,12 +945,12 @@ def cmd_launch(args, forwarded_claude_args=None):
 
     # finding 15: routes.json's `default`/`small` were accepted (documented
     # even) but no code path ever actually read them -- only `profiles` was
-    # wired up. Full fallback chain: --model -> BRIDGE_MODEL -> routes.json
+    # wired up. Full fallback chain: --model -> HALO_MODEL -> routes.json
     # default -> built-in; small mirrors it, falling back to the main ref.
     routes_cfg = load_routes(state_dir / "routes.json")
-    main_model = (getattr(args, "model", None) or os.environ.get("BRIDGE_MODEL")
+    main_model = (getattr(args, "model", None) or env_compat("MODEL")
                   or routes_cfg.get("default") or "or:deepseek/deepseek-v3.2")
-    small_model = (getattr(args, "small_model", None) or os.environ.get("BRIDGE_MODEL_SMALL")
+    small_model = (getattr(args, "small_model", None) or env_compat("MODEL_SMALL")
                    or routes_cfg.get("small") or main_model)
 
     settings = {"model": main_model, "env": {}}
@@ -1211,7 +1215,7 @@ def _parse_launch_argv(argv: list[str]) -> tuple[str | None, str | None, str | N
 
 def main(argv: list[str] | None = None):
     """Main CLI entry point. `argv` defaults to sys.argv[1:] (no script
-    name) so rolo_claude.cli's `proxy` subcommand can call this directly
+    name) so halo_harness.cli's `proxy` subcommand can call this directly
     with its own already-split remainder (`import bridge; bridge.main(rest)`)."""
     if argv is None:
         argv = sys.argv[1:]

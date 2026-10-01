@@ -1,5 +1,5 @@
-"""tests.test_theme -- rolo_claude/theme.py: precedence order, valid-name
-set, persistence round-trip via ~/.rolo-claude/config.json (U0 scope D).
+"""tests.test_theme -- halo_harness/theme.py: precedence order, valid-name
+set, persistence round-trip via ~/.halo/config.json (U0 scope D).
 """
 import os
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import theme as t
+from halo_harness import theme as t
 
 test, TESTS = new_registry()
 
@@ -18,7 +18,7 @@ def _with_test_home(fn):
     """Run `fn(home_path)` with BRIDGE_TEST_HOME pointed at a fresh temp
     dir, restoring the previous value afterward."""
     old = os.environ.get("BRIDGE_TEST_HOME")
-    tmp = Path(tempfile.mkdtemp(prefix="rolo-claude-theme-"))
+    tmp = Path(tempfile.mkdtemp(prefix="halo-theme-"))
     os.environ["BRIDGE_TEST_HOME"] = str(tmp)
     try:
         fn(tmp)
@@ -60,7 +60,7 @@ def test_precedence_env_beats_settings_and_persisted(ctx: Ctx):
 
 
 @test
-def test_precedence_rolo_claude_theme_env_checked_too(ctx: Ctx):
+def test_precedence_halo_harness_theme_env_checked_too(ctx: Ctx):
     resolved = t.resolve_theme(cli_theme=None, env={"ROLO_CLAUDE_THEME": "claude-light-daltonized"},
                                 settings_theme=None, persisted_theme=None)
     ctx.check(f"ROLO_CLAUDE_THEME honored, got {resolved!r}", resolved == "claude-light-daltonized")

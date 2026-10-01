@@ -21,7 +21,7 @@ test, TESTS = new_registry()
 
 @test
 def test_default_tls_context_clears_verify_x509_strict_when_present(ctx: Ctx):
-    from rolo_claude.providers.http import default_tls_context
+    from halo_harness.providers.http import default_tls_context
     strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
     if not strict_flag:
         raise SkipTest("this Python's ssl module has no VERIFY_X509_STRICT at all (< 3.13)")
@@ -32,7 +32,7 @@ def test_default_tls_context_clears_verify_x509_strict_when_present(ctx: Ctx):
 
 @test
 def test_default_tls_context_never_weakens_hostname_or_cert_verification(ctx: Ctx):
-    from rolo_claude.providers.http import default_tls_context
+    from halo_harness.providers.http import default_tls_context
     ctx_obj = default_tls_context()
     ctx.check(f"check_hostname stays on, got {ctx_obj.check_hostname}", ctx_obj.check_hostname is True)
     ctx.check(f"verify_mode stays CERT_REQUIRED, got {ctx_obj.verify_mode}",
@@ -44,7 +44,7 @@ def test_default_tls_context_loads_custom_ca_bundle_env(ctx: Ctx):
     """The three-env-var CA-bundle loading `open_upstream` already had is
     preserved verbatim -- monkeypatches `load_verify_locations` so this
     never needs a real CA file on disk."""
-    from rolo_claude.providers.http import default_tls_context
+    from halo_harness.providers.http import default_tls_context
     calls = []
     real_load = ssl.SSLContext.load_verify_locations
 
@@ -74,7 +74,7 @@ def test_default_tls_context_loads_custom_ca_bundle_env(ctx: Ctx):
 
 @test
 def test_default_tls_context_ca_bundle_load_failure_falls_through_not_raises(ctx: Ctx):
-    from rolo_claude.providers.http import default_tls_context
+    from halo_harness.providers.http import default_tls_context
     old = os.environ.get("BRIDGE_CA_BUNDLE")
     os.environ["BRIDGE_CA_BUNDLE"] = "/definitely/does/not/exist.pem"
     try:
@@ -89,7 +89,7 @@ def test_default_tls_context_ca_bundle_load_failure_falls_through_not_raises(ctx
 
 @test
 def test_open_upstream_builds_its_tls_context_through_the_helper(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.providers.http as http_mod
     calls = []
     real = http_mod.default_tls_context
 
@@ -110,7 +110,7 @@ def test_open_upstream_builds_its_tls_context_through_the_helper(ctx: Ctx):
 
 @test
 def test_open_upstream_skips_tls_context_for_plain_http(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.providers.http as http_mod
     calls = []
     real = http_mod.default_tls_context
 
@@ -135,7 +135,7 @@ def _assert_module_uses_urlopen_tls(ctx: Ctx, module_name: str, call, *, arg_che
     module's attribute is exactly what a real call sees) and asserts `call`
     reaches it, never a direct `urllib.request.urlopen`."""
     import importlib
-    http_mod = importlib.import_module("rolo_claude.providers.http")
+    http_mod = importlib.import_module("halo_harness.providers.http")
     seen = []
     real = http_mod.urlopen_tls
 
@@ -166,7 +166,7 @@ def _assert_module_uses_urlopen_tls(ctx: Ctx, module_name: str, call, *, arg_che
 
 @test
 def test_linux_fixes_fetch_json_uses_urlopen_tls(ctx: Ctx):
-    from rolo_claude import linux_fixes
+    from halo_harness import linux_fixes
     _assert_module_uses_urlopen_tls(ctx, "linux_fixes._default_fetch_json",
                                     lambda: linux_fixes._default_fetch_json("https://example.invalid/release.json"))
 
@@ -174,8 +174,8 @@ def test_linux_fixes_fetch_json_uses_urlopen_tls(ctx: Ctx):
 @test
 def test_linux_fixes_fetch_bytes_uses_urlopen_tls(ctx: Ctx):
     import importlib
-    http_mod = importlib.import_module("rolo_claude.providers.http")
-    from rolo_claude import linux_fixes
+    http_mod = importlib.import_module("halo_harness.providers.http")
+    from halo_harness import linux_fixes
     seen = []
     real = http_mod.urlopen_tls
 
@@ -204,7 +204,7 @@ def test_linux_fixes_fetch_bytes_uses_urlopen_tls(ctx: Ctx):
 
 @test
 def test_team_config_read_source_uses_urlopen_tls_for_a_url(ctx: Ctx):
-    from rolo_claude import team_config
+    from halo_harness import team_config
     _assert_module_uses_urlopen_tls(ctx, "team_config._read_source",
                                     lambda: team_config._read_source("https://example.invalid/team.json"))
 
@@ -212,8 +212,8 @@ def test_team_config_read_source_uses_urlopen_tls_for_a_url(ctx: Ctx):
 @test
 def test_team_config_read_source_local_file_never_touches_urlopen_tls(ctx: Ctx):
     import importlib
-    http_mod = importlib.import_module("rolo_claude.providers.http")
-    from rolo_claude import team_config
+    http_mod = importlib.import_module("halo_harness.providers.http")
+    from halo_harness import team_config
     calls = []
     real = http_mod.urlopen_tls
     http_mod.urlopen_tls = lambda *a, **kw: calls.append(1)
@@ -230,7 +230,7 @@ def test_team_config_read_source_local_file_never_touches_urlopen_tls(ctx: Ctx):
 
 @test
 def test_websearch_uses_urlopen_tls(ctx: Ctx):
-    from rolo_claude.tools.websearch import WebSearchTool
+    from halo_harness.tools.websearch import WebSearchTool
 
     def _call():
         tool = WebSearchTool(base_url="https://example.invalid", api_key="k", model="m")
@@ -241,7 +241,7 @@ def test_websearch_uses_urlopen_tls(ctx: Ctx):
 
 @test
 def test_hooks_http_hook_uses_urlopen_tls(ctx: Ctx):
-    from rolo_claude.hooks import HookDef, run_http_hook
+    from halo_harness.hooks import HookDef, run_http_hook
 
     def _call():
         hook = HookDef(type="http", url="https://example.invalid/hook", headers={}, allowed_env_vars=[])

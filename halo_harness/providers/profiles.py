@@ -1,4 +1,4 @@
-"""rolo_claude.providers.profiles -- per-provider/model compatibility
+"""halo_harness.providers.profiles -- per-provider/model compatibility
 profiles (H1 scope A). The report's central finding is that a gateway's
 behaviour cannot be guessed from its base URL alone ("for an endpoint it
 does not recognize the detection answers as though it were OpenAI itself,
@@ -340,7 +340,7 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             # explicit `null` there, which this `.get` default never even
             # reaches) always wins -- the learned cache only ever fills
             # the gap for an endpoint the table doesn't cover yet.
-            from rolo_claude.providers.learned_rules import learned_reasoning_effort_with_tools
+            from halo_harness.providers.learned_rules import learned_reasoning_effort_with_tools
             reasoning_effort_with_tools = learned_reasoning_effort_with_tools(
                 state_dir, "databricks", route.upstream_model)
         return ProviderProfile(

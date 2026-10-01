@@ -104,12 +104,12 @@ def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model
     # above the loop breaker's own 8-call end threshold so THIS helper
     # keeps testing the loop breaker, not --max-turns (see
     # test_max_turns_caps_model_calls_per_turn for the flag itself).
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
         "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
     })
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model,
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model,
             "--cwd", str(fh["proj"]), "--max-turns", str(max_turns)] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -227,15 +227,15 @@ def test_h5c_f20_max_steps_wrapup_strips_a_disobedient_tool_use(ctx: Ctx):
     which uses the same scenario over the CLI) -- driven here as a real
     in-process Session so the LOG ITSELF can be inspected after the turn,
     not just the CLI's stdout summary."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     # H10b: this test never set BRIDGE_TEST_HOME, so its real in-process
-    # Session fell through to the REAL `~/.rolo-claude/sessions` -- exactly
+    # Session fell through to the REAL `~/.halo/sessions` -- exactly
     # how `or:mock/page-forever` sessions leaked into rolo's real session
     # history (H10b report; see the sibling tests just below, which DO set it).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -276,10 +276,10 @@ def test_loop_breaker_unit_level_thresholds(ctx: Ctx):
     """Exercise Session._dispatch_tools directly against a fresh in-process
     Session so the exact remind/deny/end wording and thresholds (3/5/8) are
     asserted precisely, independent of subprocess/CLI plumbing."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session, _LOOP_BREAKER_DENY_AT, _LOOP_BREAKER_END_AT, _LOOP_BREAKER_REMIND_AT
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session, _LOOP_BREAKER_DENY_AT, _LOOP_BREAKER_END_AT, _LOOP_BREAKER_REMIND_AT
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     ctx.check("thresholds are 3/5/8", (_LOOP_BREAKER_REMIND_AT, _LOOP_BREAKER_DENY_AT, _LOOP_BREAKER_END_AT) == (3, 5, 8))
 
@@ -313,10 +313,10 @@ def test_h9_loop_breaker_exempts_bash_output_polling(ctx: Ctx):
     legitimately slow job (a dev server starting up, a long test run)
     could ever finish. 12 identical BashOutput calls (well past the old
     5/8 thresholds) must never trip the breaker."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -357,10 +357,10 @@ def test_h9_loop_breaker_period2_ping_pong_detected(ctx: Ctx):
     total calls) than waiting for either A's or B's own count to get
     there alone (which would need the 5th/8th occurrence of ONE of them,
     i.e. absolute call 9/15 in a clean alternation, not call 7/10)."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -401,10 +401,10 @@ def test_h9_kimi_tool_id_counter_continues_across_the_session_not_reset_per_stre
     of 6 different files, all with empty upstream ids, used to ALL become
     `functions.Read:0`)."""
     import dataclasses
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -451,11 +451,11 @@ def test_interrupt_leaves_no_unanswered_tool_use(ctx: Ctx):
     tool_use exists at all, which is vacuously true regardless of whether
     synthesis actually works) must leave a REAL synthetic error result
     behind, not just an absence of unpaired ids that was never at risk."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.invariants import INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.invariants import INTERRUPTED_MESSAGE, find_unpaired_tool_use_ids
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -501,10 +501,10 @@ def test_read_tool_end_to_end_via_cli(ctx: Ctx):
     mock = MockUpstream().start()
     try:
         SCENARIOS["read-then-answer"] = _scn_read_then_answer(str(target))
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                     "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        args = [sys.executable, "-m", "rolo_claude", "-p", f"read {target} and reply with only the number of lines",
+        args = [sys.executable, "-m", "halo_harness", "-p", f"read {target} and reply with only the number of lines",
                 "--model", "or:mock/read-then-answer", "--cwd", str(fh["proj"])]
         result = subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-500:]!r})", result.returncode == 0)
@@ -585,7 +585,7 @@ def test_mcp_blocks_for_log_preserves_a_real_image_block(ctx: Ctx):
     """finding 5: a vision image must stay a REAL image block through
     logging -- the old code flattened it to `[image: mime]` text before
     it ever reached the log/wire, so a vision-capable model never saw it."""
-    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    from halo_harness.agent.loop import _mcp_blocks_for_log
     blocks = [{"type": "text", "text": "here's a screenshot"},
               {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QQ=="}}]
     logged = _mcp_blocks_for_log(blocks, meta=None, session_dir=None, tool_use_id=None)
@@ -600,7 +600,7 @@ def test_mcp_blocks_for_log_strips_tool_reference(ctx: Ctx):
     confirmation marker) must never appear in a TOOL RESULT's logged
     content -- it's not a real answer, and the old code rendered it as
     the literal string "[tool_reference block]"."""
-    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    from halo_harness.agent.loop import _mcp_blocks_for_log
     blocks = [{"type": "text", "text": "real answer"}, {"type": "tool_reference", "tool_name": "mcp__x__y"}]
     logged = _mcp_blocks_for_log(blocks, meta=None, session_dir=None, tool_use_id=None)
     ctx.check(f"tool_reference dropped entirely, got {logged}",
@@ -614,7 +614,7 @@ def test_mcp_blocks_for_log_caps_once_with_spill_note(ctx: Ctx):
     truncation line names the spill file -- no second, independent,
     hard-coded cut on top."""
     import os
-    from rolo_claude.agent.loop import _mcp_blocks_for_log
+    from halo_harness.agent.loop import _mcp_blocks_for_log
     old = os.environ.get("MAX_MCP_OUTPUT_TOKENS")
     os.environ["MAX_MCP_OUTPUT_TOKENS"] = "50"
     try:
@@ -638,7 +638,7 @@ def test_mcp_blocks_for_log_caps_once_with_spill_note(ctx: Ctx):
 
 @test
 def test_summary_text_for_blocks_prefers_real_text(ctx: Ctx):
-    from rolo_claude.agent.loop import _summary_text_for_blocks
+    from halo_harness.agent.loop import _summary_text_for_blocks
     ctx.check("first real text block wins", _summary_text_for_blocks(
         [{"type": "image", "source": {}}, {"type": "text", "text": "hello"}]) == "hello")
     ctx.check("no text -> an honest placeholder naming the content type",
@@ -658,7 +658,7 @@ def test_summary_text_for_blocks_image_caption_names_media_type_dims_and_size(ct
     screenshot or a vision Read/MCP result actually carries) gets a
     concrete caption -- media type, sniffed dimensions, human byte size --
     shown as the tool card's body, instead of the old bare "[image]"."""
-    from rolo_claude.agent.loop import _summary_text_for_blocks
+    from halo_harness.agent.loop import _summary_text_for_blocks
     block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG_1X1_B64}}
     caption = _summary_text_for_blocks([block])
     ctx.check(f"names the media type, got {caption!r}", "image/png" in caption)
@@ -669,7 +669,7 @@ def test_summary_text_for_blocks_image_caption_names_media_type_dims_and_size(ct
 
 @test
 def test_summary_text_for_blocks_image_caption_degrades_gracefully_with_partial_info(ctx: Ctx):
-    from rolo_claude.agent.loop import _summary_text_for_blocks
+    from halo_harness.agent.loop import _summary_text_for_blocks
     # media_type but undecodable/missing data -- still names what it knows,
     # never raises.
     only_media_type = _summary_text_for_blocks([{"type": "image", "source": {"media_type": "image/png"}}])
@@ -681,7 +681,7 @@ def test_summary_text_for_blocks_image_caption_degrades_gracefully_with_partial_
 
 @test
 def test_summary_text_for_blocks_multiple_images_get_one_caption_line_each(ctx: Ctx):
-    from rolo_claude.agent.loop import _summary_text_for_blocks
+    from halo_harness.agent.loop import _summary_text_for_blocks
     blocks = [{"type": "image", "source": {"media_type": "image/png"}},
               {"type": "image", "source": {"media_type": "image/jpeg"}}]
     caption = _summary_text_for_blocks(blocks)
@@ -695,9 +695,24 @@ def test_summary_text_for_blocks_mixed_image_and_other_non_text_falls_back_to_ki
     """A MIX of an image with some other non-text kind is rarer/unusual
     enough that the old, simple "[kind1, kind2]" placeholder is kept --
     only an ALL-image result gets the richer per-image caption treatment."""
-    from rolo_claude.agent.loop import _summary_text_for_blocks
+    from halo_harness.agent.loop import _summary_text_for_blocks
     caption = _summary_text_for_blocks([{"type": "image", "source": {}}, {"type": "tool_reference"}])
     ctx.check(f"falls back to the plain kind-list form, got {caption!r}", caption == "[image, tool_reference]")
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

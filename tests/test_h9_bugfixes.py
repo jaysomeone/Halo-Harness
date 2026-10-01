@@ -3,7 +3,7 @@ found by the Linux-first acceptance pass (docs/harness/ACCEPTANCE-2026-09-25.md)
 that live outside the MCP matrix / fuzz files' own scope:
 
   1. `bridge.find_claude_exe` never resolved a native POSIX `claude`
-     (`rolo-claude proxy launch` crashed on Linux, the primary platform).
+     (`halo proxy launch` crashed on Linux, the primary platform).
   2. A PreToolUse hook written in the PermissionRequest shape
      (`hookSpecificOutput.decision.{behavior, updatedInput}`) was a silent
      no-op -- the original command ran unchanged.
@@ -86,7 +86,7 @@ def test_h9_pretooluse_hook_accepts_the_permissionrequest_decision_shape(ctx: Ct
     the rewritten input) when the documented flat `permissionDecision`/
     `updatedInput` pair is absent -- and NEVER overrides an explicit flat
     decision when both are present."""
-    from rolo_claude.hooks import HookResult, interpret_hook_result
+    from halo_harness.hooks import HookResult, interpret_hook_result
 
     nested = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                      "decision": {"behavior": "allow", "updatedInput": {"command": "echo rewritten"},
@@ -123,7 +123,7 @@ def test_h9_playwright_config_fails_fast_without_a_runnable_node(ctx: Ctx):
     side npx through PE interop was the observed case) must produce the
     same fast, honest `(None, error)` precondition `--chrome` gives --
     never a server config that then hangs for the whole session."""
-    from rolo_claude import mcp_setup
+    from halo_harness import mcp_setup
 
     real_which = shutil.which
 
@@ -168,10 +168,10 @@ def test_h9_stream_completion_closes_the_upstream_connection_socket(ctx: Ctx):
 
     from tests.helpers.fake_home import build_fake_home
     from tests.helpers.mock_openai import MockUpstream
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()

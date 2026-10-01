@@ -1,8 +1,8 @@
-"""tests.test_cli_flags -- rolo_claude/cli.py (U0 scope A): the flag-parity
+"""tests.test_cli_flags -- halo_harness/cli.py (U0 scope A): the flag-parity
 rule. Parses `docs/harness/claude-help-2.1.281.txt` (the top-level `claude
 --help` section only -- `mcp`/`mcp add` have their own, separate flag
 surface, not this one) and asserts every long option there is accepted by
-`rolo-claude`'s parser; not-yet flags print the one stderr line and the
+`halo`'s parser; not-yet flags print the one stderr line and the
 prompt still runs; `--permission-mode manual` behaves exactly like
 `default`; the positional prompt works with `-p` before OR after it;
 `proxy --version` delegates; an actually-unknown flag is still an argparse
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream
-from rolo_claude.cli import _build_parser, _NOT_YET_FLAGS
+from halo_harness.cli import _build_parser, _NOT_YET_FLAGS
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 HELP_CAPTURE = REPO_DIR / "docs" / "harness" / "claude-help-2.1.281.txt"
@@ -103,27 +103,27 @@ def test_hidden_flags_also_accepted(ctx: Ctx):
 
 @test
 def test_unknown_flag_is_an_argparse_error_exit_2(ctx: Ctx):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
-    result = subprocess.run([sys.executable, "-m", "rolo_claude", "--totally-not-a-real-flag", "-p", "hi"],
+    result = subprocess.run([sys.executable, "-m", "halo_harness", "--totally-not-a-real-flag", "-p", "hi"],
                              env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=15)
     ctx.check(f"exit code 2, got {result.returncode}", result.returncode == 2)
     ctx.check("argparse error mentions the bad flag", "totally-not-a-real-flag" in result.stderr)
 
 
 def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, extra_env=None):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     env.update(extra_env or {})
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", "or:mock/model",
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", "or:mock/model",
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
 
 @test
 def test_print_mode_never_imports_textual(ctx: Ctx):
-    """U2 scope A: `import rolo_claude` and `-p` must stay dependency-free
+    """U2 scope A: `import halo_harness` and `-p` must stay dependency-free
     of textual/rich -- only `tui/launch.py`'s lazy import (reached solely
     from the bare, no-`-p` branch) may ever touch them. Proven with a
     PYTHONPATH shim: a poisoned `textual.py` stub that raises ImportError
@@ -163,7 +163,7 @@ def test_debug_flag_writes_a_debug_log_and_is_not_a_not_yet_notice(ctx: Ctx):
         ctx.check("pong still answered", "pong" in result.stdout)
         ctx.check("no not-yet notice for --debug", "not supported yet" not in result.stderr)
         ctx.check("stderr names the debug log", "debug log ->" in result.stderr)
-        log = Path(fh["home"]) / ".rolo-claude" / "bridge.log"
+        log = Path(fh["home"]) / ".halo" / "bridge.log"
         ctx.check(f"debug log written under the state dir ({log})", log.exists() and log.stat().st_size > 0)
         ctx.check("log records the debug-enabled line", "debug logging enabled" in log.read_text(encoding="utf-8", errors="replace"))
         with tempfile.TemporaryDirectory() as d:
@@ -227,7 +227,7 @@ def test_every_not_yet_flag_prints_its_line_and_never_crashes(ctx: Ctx):
         for label in sample[:10]:
             result = _run_cli(fh, mock, "reply with the single word pong", extra_args=[label])
             ctx.check(f"{label}: exit 0, got {result.returncode}", result.returncode == 0)
-            ctx.check(f"{label}: not-yet line printed", f"rolo-claude: {label} is not supported yet" in result.stderr)
+            ctx.check(f"{label}: not-yet line printed", f"halo: {label} is not supported yet" in result.stderr)
             ctx.check(f"{label}: prompt still ran", "pong" in result.stdout)
     finally:
         mock.stop()
@@ -253,10 +253,10 @@ def test_positional_prompt_works_before_and_after_print_flag(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                     "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        base = [sys.executable, "-m", "rolo_claude", "--model", "or:mock/model", "--cwd", str(fh["proj"])]
+        base = [sys.executable, "-m", "halo_harness", "--model", "or:mock/model", "--cwd", str(fh["proj"])]
         before = subprocess.run(base + ["-p", "reply with the single word pong"],
                                  env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         after = subprocess.run(base + ["reply with the single word pong", "-p"],
@@ -271,20 +271,20 @@ def test_positional_prompt_works_before_and_after_print_flag(ctx: Ctx):
 
 @test
 def test_version_flag_short_and_long(ctx: Ctx):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
     for flag in ("-v", "--version"):
-        result = subprocess.run([sys.executable, "-m", "rolo_claude", flag], env=env, cwd=str(REPO_DIR),
+        result = subprocess.run([sys.executable, "-m", "halo_harness", flag], env=env, cwd=str(REPO_DIR),
                                  capture_output=True, text=True, timeout=15)
         ctx.check(f"{flag}: exit 0, got {result.returncode}", result.returncode == 0)
-        ctx.check(f"{flag}: prints rolo-claude version, got {result.stdout!r}", "rolo-claude" in result.stdout)
+        ctx.check(f"{flag}: prints halo version, got {result.stdout!r}", "halo" in result.stdout)
 
 
 @test
 def test_proxy_version_delegates(ctx: Ctx):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
-    result = subprocess.run([sys.executable, "-m", "rolo_claude", "proxy", "--version"], env=env,
+    result = subprocess.run([sys.executable, "-m", "halo_harness", "proxy", "--version"], env=env,
                              cwd=str(REPO_DIR), capture_output=True, text=True, timeout=15)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
     ctx.check(f"delegated to bridge.py's own --version output ('claude-bridge ...'), got {result.stdout!r}",
@@ -297,8 +297,8 @@ def test_keyboard_interrupt_maps_to_exit_130(ctx: Ctx):
     inside run_print_mode and return 130 (POSIX Ctrl+C convention), never
     let it escape as an uncaught traceback (which Python would otherwise
     exit 1 for)."""
-    import rolo_claude.cli as cli_mod
-    import rolo_claude.headless as headless_mod
+    import halo_harness.cli as cli_mod
+    import halo_harness.headless as headless_mod
 
     def _raise_keyboard_interrupt(**kwargs):
         raise KeyboardInterrupt()
@@ -324,10 +324,10 @@ def test_real_sigint_delivers_exit_130_posix(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                     "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        args = [sys.executable, "-m", "rolo_claude", "-p", "take a while", "--model", "or:mock/slow",
+        args = [sys.executable, "-m", "halo_harness", "-p", "take a while", "--model", "or:mock/slow",
                 "--cwd", str(fh["proj"])]
         proc = subprocess.Popen(args, env=env, cwd=str(REPO_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True)
@@ -358,6 +358,21 @@ def test_real_sigint_delivers_exit_130_posix(ctx: Ctx):
         ctx.check(f"exit code 130, got {proc.returncode}", proc.returncode == 130)
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

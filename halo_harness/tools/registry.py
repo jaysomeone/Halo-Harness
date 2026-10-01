@@ -1,10 +1,10 @@
-"""rolo_claude.tools.registry -- ToolRegistry (H2 scope A): name-sorted
+"""halo_harness.tools.registry -- ToolRegistry (H2 scope A): name-sorted
 tool defs for the wire (a stable prefix so provider prompt caching isn't
 invalidated turn to turn -- rule 4/D5), dispatch by name, a bounded
 thread pool for a batch of CONSECUTIVE read-only calls (results returned in
 call order, not completion order), and `.without`/`.filtered` for the
 catalog-freezing step session start applies (bare-name deny/`--disallowedTools`
-removal, `--tools`) -- rolo_claude/permissions.py decides WHICH names;
+removal, `--tools`) -- halo_harness/permissions.py decides WHICH names;
 this module only knows how to build a registry that omits/keeps them.
 """
 
@@ -17,23 +17,23 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from typing import Optional
 
-from rolo_claude.agent.planmode import EnterPlanModeTool, ExitPlanModeTool
-from rolo_claude.tools.agent import AgentTool, TaskTool
-from rolo_claude.tools.ask_user_question import AskUserQuestionTool
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
-from rolo_claude.tools.bash import BashTool
-from rolo_claude.tools.bash_output import BashOutputTool
-from rolo_claude.tools.edit import EditTool
-from rolo_claude.tools.glob_tool import GlobTool
-from rolo_claude.tools.grep_tool import GrepTool
-from rolo_claude.tools.notebook_edit import NotebookEditTool
-from rolo_claude.tools.read import ReadTool
-from rolo_claude.tools.skill import SkillTool
-from rolo_claude.tools.task_stop import TaskStopTool
-from rolo_claude.tools.todowrite import TodoWriteTool
-from rolo_claude.tools.tool_search import ToolSearchTool
-from rolo_claude.tools.webfetch import WebFetchTool
-from rolo_claude.tools.write import WriteTool
+from halo_harness.agent.planmode import EnterPlanModeTool, ExitPlanModeTool
+from halo_harness.tools.agent import AgentTool, TaskTool
+from halo_harness.tools.ask_user_question import AskUserQuestionTool
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.bash import BashTool
+from halo_harness.tools.bash_output import BashOutputTool
+from halo_harness.tools.edit import EditTool
+from halo_harness.tools.glob_tool import GlobTool
+from halo_harness.tools.grep_tool import GrepTool
+from halo_harness.tools.notebook_edit import NotebookEditTool
+from halo_harness.tools.read import ReadTool
+from halo_harness.tools.skill import SkillTool
+from halo_harness.tools.task_stop import TaskStopTool
+from halo_harness.tools.todowrite import TodoWriteTool
+from halo_harness.tools.tool_search import ToolSearchTool
+from halo_harness.tools.webfetch import WebFetchTool
+from halo_harness.tools.write import WriteTool
 
 READ_ONLY_POOL_SIZE = 4
 # H3 must-do: if an MCP `readOnlyHint` tool ever joins this pool, one hung
@@ -53,7 +53,7 @@ def default_tools() -> list:
         TaskTool(), TodoWriteTool(), ToolSearchTool(), WebFetchTool(), WriteTool(),
     ]
     if sys.platform == "win32":
-        from rolo_claude.tools.powershell import PowerShellTool
+        from halo_harness.tools.powershell import PowerShellTool
         tools.append(PowerShellTool())
     return tools
 

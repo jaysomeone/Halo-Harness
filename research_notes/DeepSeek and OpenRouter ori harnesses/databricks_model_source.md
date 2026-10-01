@@ -1,6 +1,6 @@
 # Databricks as the model source for an agentic coding harness (state as of 2026-09-23)
 
-Scope: how open models (DeepSeek, Kimi, Qwen, GLM, Llama, Gemma) and Claude/GPT/Gemini are served and called on Databricks, and the exact wire formats a Claude-Code-like harness ("rolo-claude") or third-party harness (DeepSeek's harness, OpenRouter "ori", OpenCode/Codex/Cline-style tools) must speak.
+Scope: how open models (DeepSeek, Kimi, Qwen, GLM, Llama, Gemma) and Claude/GPT/Gemini are served and called on Databricks, and the exact wire formats a Claude-Code-like harness ("halo") or third-party harness (DeepSeek's harness, OpenRouter "ori", OpenCode/Codex/Cline-style tools) must speak.
 
 Big-picture correction to the assignment's assumptions (verified 2026-09-22/23 docs):
 
@@ -196,7 +196,7 @@ Databricks publishes verbatim configs: Claude Code → `ANTHROPIC_BASE_URL=https
 - Databricks ships agent skills/plugins for Claude Code, Cursor, Codex, Copilot — [databricks/databricks-agent-skills](https://github.com/databricks/databricks-agent-skills); a labs repo runs coding agents inside Databricks Apps — [databrickslabs/coding-agents-databricks-apps](https://github.com/databrickslabs/coding-agents-databricks-apps)
 
 ### Inferences
-- For "rolo-claude" (Anthropic wire), the supported path is `https://<ws>/ai-gateway/anthropic` with model `system.ai.<claude-model>`; for a fallback without Unity Gateway entitlement, `https://<ws>/serving-endpoints/anthropic` with `databricks-claude-*` works but only for Claude. For DeepSeek/Kimi/GLM/Qwen the harness must speak OpenAI chat completions (or Open Responses via `/ai-gateway/mlflow/v1/responses` / `/ai-gateway/codex/v1`).
+- For "halo" (Anthropic wire), the supported path is `https://<ws>/ai-gateway/anthropic` with model `system.ai.<claude-model>`; for a fallback without Unity Gateway entitlement, `https://<ws>/serving-endpoints/anthropic` with `databricks-claude-*` works but only for Claude. For DeepSeek/Kimi/GLM/Qwen the harness must speak OpenAI chat completions (or Open Responses via `/ai-gateway/mlflow/v1/responses` / `/ai-gateway/codex/v1`).
 - DeepSeek's own harness and OpenRouter-style "ori" harnesses that speak OpenAI chat completions can be pointed at `base_url=https://<ws>/serving-endpoints` (model `databricks-deepseek-v4-1-flash`, etc.) or `https://<ws>/ai-gateway/mlflow/v1` (model `system.ai.<name>`), provided they (a) send a single leading system message, (b) don't send unknown parameters (400), (c) decode top-level `reasoning_content` and replay it, and (d) keep `max_tokens` inside the OTPM budget.
 - OAuth tokens from `databricks auth token` are short-lived (Codex config refreshes every 30 minutes); a harness using OAuth must refresh, whereas a PAT is static.
 

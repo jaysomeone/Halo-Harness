@@ -1,4 +1,4 @@
-"""rolo_claude.agent.compact -- H5 scope B: compaction mechanics as pure
+"""halo_harness.agent.compact -- H5 scope B: compaction mechanics as pure
 functions (trigger math, the dsh-shaped 8-section replay request, tail
 selection, knobs). The ORCHESTRATION -- actually issuing the summarisation
 model call, appending the `compacted` log node + its replacement content,
@@ -47,12 +47,12 @@ OPENCODE_RESERVED_CAP = 20_000
 # finding 1 (h4-h5-h3c review): OpenCode caps the MODEL's own advertised
 # output limit at 32,000 before it is used anywhere in `usable` --
 # `max_output_tokens(model, cap=32_000) = min(model.limit.output, cap) or
-# cap`. rolo-claude's `opencode_usable` below used to skip this cap
+# cap`. halo's `opencode_usable` below used to skip this cap
 # entirely and subtract models.json's raw, often-enormous
 # `max_output_tokens` (OpenRouter's advertised max COMPLETION, which for
 # many DeepSeek/Kimi/GLM/Qwen/MiniMax rows sits close to the whole context
 # window) straight from `context_tokens` -- verified against rolo's real
-# ~/.rolo-claude/models.json: 29 of 105 rows collapsed to a trigger of 0
+# ~/.halo/models.json: 29 of 105 rows collapsed to a trigger of 0
 # (Kimi K2.5/K2.6/K2.7-code, Qwen3-Coder-next, Qwen3.5-397B, MiniMax-M2)
 # and 21 more sat under 40k, so a two-step turn triggered TWO full
 # summarisation passes. Capping here fixes it at the source for every
@@ -114,7 +114,7 @@ def opencode_usable(context_tokens: int, max_output_tokens: int, *, input_limit:
     Kimi K2.6's 235,929-token max_output against a 262,144 context) can no
     longer crush `usable`/the trigger down to (near) zero. `input_limit` is
     this profile's own separately-reported INPUT limit when a provider
-    publishes one distinct from the combined context window (rolo-claude's
+    publishes one distinct from the combined context window (halo's
     `ModelProfile` doesn't distinguish them today, so callers normally omit
     it and get `context_tokens - capped_max_output`)."""
     capped_output = min(OPENCODE_OUTPUT_CAP, max(0, max_output_tokens)) or OPENCODE_OUTPUT_CAP
@@ -239,14 +239,14 @@ def resolve_knobs(settings, env: Optional[dict] = None) -> CompactionKnobs:
     if settings is not None:
         auto_enabled = bool(getattr(settings, "auto_compact_enabled", True))
 
-    # H5c finding 18: `~/.rolo-claude/config.json`'s own `compactionModel`
-    # key wins FIRST (brief D: "compactionModel in ~/.rolo-claude/
+    # H5c finding 18: `~/.halo/config.json`'s own `compactionModel`
+    # key wins FIRST (brief D: "compactionModel in ~/.halo/
     # config.json can point at the small one") -- Claude Code's settings
     # chain (`settings.compaction_model`/`settings.raw["compactionModel"]`)
     # is only ever the FALLBACK, for a user who set it there instead. The
     # old code read settings only, so a `compactionModel` in config.json
     # was silently ignored.
-    from rolo_claude.theme import load_config as _load_rolo_config
+    from halo_harness.theme import load_config as _load_rolo_config
 
     compaction_model = _load_rolo_config().get("compactionModel")
     if not isinstance(compaction_model, str) or not compaction_model:

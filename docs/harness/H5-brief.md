@@ -1,6 +1,6 @@
-# H5 brief — compaction + pruning, native Anthropic routes, reasoning display, cost (rolo-claude)
+# H5 brief — compaction + pruning, native Anthropic routes, reasoning display, cost (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — OS-neutral). Baseline = the H4 commit on master, both suites (+ `test_tui.py`) green on Windows
 and WSL. Do not commit.
 
@@ -21,7 +21,7 @@ and WSL. Do not commit.
 3. `reports/Open weight model adapter rules.md` → the Claude family rows (thinking blocks + signature
    replay, `output_config.effort`, cache_control breakpoints on OpenRouter) and `reasoning_echo`
    for Messages routes.
-4. Current code: `rolo_claude/providers/{stream,anthropic_sse,request,profiles,hooks}.py`,
+4. Current code: `halo_harness/providers/{stream,anthropic_sse,request,profiles,hooks}.py`,
    `agent/{loop,log,derive,prompt}.py`, `output.py`, `tui/` (thinking block, status bar context %),
    `hooks.py` (PreCompact/PostCompact/SessionStart(compact) call sites exist as no-ops from H4).
 

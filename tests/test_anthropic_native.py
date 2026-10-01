@@ -19,14 +19,14 @@ from tests.helpers.provider_env_defaults import ensure_default_provider_credenti
 
 ensure_scoped_state_dir_once()
 ensure_default_provider_credentials()
-from rolo_claude.providers.errors import parse_context_overflow
-from rolo_claude.providers.http import call_anthropic_native
-from rolo_claude.providers.profiles import ProviderProfile
-from rolo_claude.providers.request import (
+from halo_harness.providers.errors import parse_context_overflow
+from halo_harness.providers.http import call_anthropic_native
+from halo_harness.providers.profiles import ProviderProfile
+from halo_harness.providers.request import (
     apply_anthropic_cache_control, build_anthropic_request_body, map_tool_choice_anthropic,
 )
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, stream_anthropic_completion
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, stream_anthropic_completion
 
 test, TESTS = new_registry()
 
@@ -275,13 +275,13 @@ def test_h5b_f17_thinking_tool_turn_through_real_session_merges_message_start_us
     import os
 
     from tests.helpers.fake_home import build_fake_home
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     fh = build_fake_home()
     # H10b: never set before -- the real in-process Session below fell
-    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # through to the REAL `~/.halo/sessions`, leaking
     # `ant:claude-sonnet-4.5-thinking-then-tool-then-reply` sessions into
     # rolo's real session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -350,13 +350,13 @@ def test_h5c_f05_steer_mid_thinking_before_signature_delta_logs_no_empty_node(ct
     import os
 
     from tests.helpers.fake_home import build_fake_home
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     fh = build_fake_home()
     # H10b: never set before -- the real in-process Session below fell
-    # through to the REAL `~/.rolo-claude/sessions`, leaking
+    # through to the REAL `~/.halo/sessions`, leaking
     # `ant:claude-h5c-f05-thinking-and-signature` sessions into rolo's real
     # session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -476,7 +476,7 @@ def test_h5b_f15_message_level_reasoning_key_never_reaches_the_anthropic_wire(ct
     instead of being silently dropped (a mid-session /model switch from
     an OpenAI-dialect model must not lose the model's own prior
     reasoning outright)."""
-    from rolo_claude.providers.request import prepare_anthropic_messages
+    from halo_harness.providers.request import prepare_anthropic_messages
 
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
@@ -498,7 +498,7 @@ def test_h5b_f15_thinking_block_text_renamed_to_thinking_field_on_replay(ctx: Ct
     `text` (its own internal storage convention) -- Anthropic's wire
     needs the field named `thinking`. A genuine native thinking block
     (with a real signature) must be renamed, never dropped."""
-    from rolo_claude.providers.request import prepare_anthropic_messages
+    from halo_harness.providers.request import prepare_anthropic_messages
 
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
@@ -524,7 +524,7 @@ def test_h5b_f15_unsigned_thinking_and_empty_text_blocks_dropped(ctx: Ctx):
     that ANY empty-text thinking block should be dropped): a SIGNED block
     with empty text is the normal "display omitted" shape and must be kept
     and echoed back unchanged, never dropped just because `text` is empty."""
-    from rolo_claude.providers.request import prepare_anthropic_messages
+    from halo_harness.providers.request import prepare_anthropic_messages
 
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
@@ -551,7 +551,7 @@ def test_h5c_f05_empty_assistant_message_dropped_and_adjacent_user_turns_merged(
     message must be dropped too (Anthropic rejects empty assistant
     content), and the two now-adjacent user messages either side of it
     merged into one (Anthropic requires alternating roles)."""
-    from rolo_claude.providers.request import prepare_anthropic_messages
+    from halo_harness.providers.request import prepare_anthropic_messages
 
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "original prompt"}]},
@@ -715,7 +715,7 @@ def test_h8_call_databricks_count_tokens_returns_real_input_tokens(ctx: Ctx):
     milestone but never called by anything -- proves the wire mechanics
     work: a request with no stream/max_tokens fields gets back Anthropic's
     real `{"input_tokens": N}` shape."""
-    from rolo_claude.providers.http import call_databricks_count_tokens
+    from halo_harness.providers.http import call_databricks_count_tokens
     mock = MockAnthropic().start()
     try:
         body = build_anthropic_request_body(
@@ -739,9 +739,9 @@ def test_h8_compaction_gate_uses_real_count_tokens_when_no_usage_yet(ctx: Ctx):
     `_last_prompt_tokens` is still unknown (before the session's first real
     reply, or right after a compaction) on a route that has one."""
     import os
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
     from tests.helpers.fake_home import build_fake_home
 
     fh = build_fake_home()

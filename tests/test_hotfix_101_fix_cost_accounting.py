@@ -27,13 +27,13 @@ class _Env:
     from the `state_dir=` constructor kwarg (that's for other session
     state, e.g. tool-result spill files). Without this, a test that never
     sets BRIDGE_TEST_HOME/BRIDGE_STATE_DIR itself silently falls back to
-    the REAL ~/.rolo-claude/sessions on whatever machine runs the suite."""
+    the REAL ~/.halo/sessions on whatever machine runs the suite."""
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-setmodel-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         return self
 
@@ -52,7 +52,7 @@ class _Env:
 
 @test
 def test_map_usage_subtracts_cached_from_input_tokens(ctx: Ctx):
-    from rolo_claude.providers.oai_stream import map_usage
+    from halo_harness.providers.oai_stream import map_usage
     u = map_usage({"prompt_tokens": 100, "completion_tokens": 50,
                     "prompt_tokens_details": {"cached_tokens": 40}})
     ctx.check(f"input_tokens is the UNCACHED remainder, got {u}", u["input_tokens"] == 60)
@@ -63,7 +63,7 @@ def test_map_usage_subtracts_cached_from_input_tokens(ctx: Ctx):
 
 @test
 def test_map_usage_subtracts_reasoning_from_output_tokens(ctx: Ctx):
-    from rolo_claude.providers.oai_stream import map_usage
+    from halo_harness.providers.oai_stream import map_usage
     u = map_usage({"prompt_tokens": 100, "completion_tokens": 50,
                     "completion_tokens_details": {"reasoning_tokens": 20}})
     ctx.check(f"output_tokens is the NON-REASONING remainder, got {u}", u["output_tokens"] == 30)
@@ -74,7 +74,7 @@ def test_map_usage_subtracts_reasoning_from_output_tokens(ctx: Ctx):
 
 @test
 def test_map_usage_unaffected_with_no_cache_or_reasoning_fields(ctx: Ctx):
-    from rolo_claude.providers.oai_stream import map_usage
+    from halo_harness.providers.oai_stream import map_usage
     ctx.check("plain mapping is byte-for-byte the same as before this fix",
               map_usage({"prompt_tokens": 10, "completion_tokens": 5}) == {"input_tokens": 10, "output_tokens": 5})
 
@@ -87,8 +87,8 @@ def test_total_prompt_tokens_no_longer_double_counts_cached_tokens(ctx: Ctx):
     native usage shape already) -- it needs no code change of its own,
     since map_usage's fix (above) is what made that assumption true for
     OpenAI-shaped usage too."""
-    from rolo_claude.agent.loop import _total_prompt_tokens
-    from rolo_claude.providers.oai_stream import map_usage
+    from halo_harness.agent.loop import _total_prompt_tokens
+    from halo_harness.providers.oai_stream import map_usage
     usage = map_usage({"prompt_tokens": 150_000, "completion_tokens": 2_000,
                         "prompt_tokens_details": {"cached_tokens": 100_000}})
     total = _total_prompt_tokens(usage)
@@ -102,8 +102,8 @@ def test_total_prompt_tokens_no_longer_double_counts_cached_tokens(ctx: Ctx):
 
 @test
 def test_cost_meter_does_not_double_bill_cached_and_reasoning_tokens(ctx: Ctx):
-    from rolo_claude.model import CostMeter
-    from rolo_claude.providers.oai_stream import map_usage
+    from halo_harness.model import CostMeter
+    from halo_harness.providers.oai_stream import map_usage
     # $5/M input, $30/M output, $0.5/M cache-read -- finding 6's own worked
     # example shape (a databricks-gpt-5-6-sol-style reply).
     meter = CostMeter(price_in=5.0 / 1_000_000, price_out=30.0 / 1_000_000,
@@ -134,10 +134,10 @@ def test_cost_meter_does_not_double_bill_cached_and_reasoning_tokens(ctx: Ctx):
 # ---------------------------------------------------------------------------
 
 def _session_for_price_test(model="or:mock/cheap"):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     cwd = Path(tempfile.mkdtemp(prefix="hotfix101-setmodel-"))
     session_ctx = SessionContext(cwd=cwd, model_label=model)
     model_ref = parse_model_ref(model)
@@ -152,7 +152,7 @@ def _session_for_price_test(model="or:mock/cheap"):
 
 @test
 def test_set_model_refreshes_cost_meter_prices(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.model import ModelProfile, parse_model_ref
     with _Env():
         session = _session_for_price_test()
         ctx.check("starting price_in is the cheap model's", session.cost_meter.price_in == 1.0 / 1_000_000)

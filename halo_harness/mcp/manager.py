@@ -1,4 +1,4 @@
-"""rolo_claude.mcp.manager -- McpServerConfig/parse_server/scope resolution
+"""halo_harness.mcp.manager -- McpServerConfig/parse_server/scope resolution
 + McpServerHandle/McpManager (H3 scope A). The only module that decides
 WHICH servers exist and in what order; `client.py`/`stdio.py`/`http_sse.py`
 do the actual async transport work this module drives through `McpLoop`'s
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import lookup_project
+from halo_harness.config.paths import lookup_project
 
 log = logging.getLogger("bridge")
 
@@ -694,7 +694,7 @@ class McpServerHandle:
             return headers
         try:
             import asyncio
-            from rolo_claude.mcp.http_sse import merged_headers, run_headers_helper
+            from halo_harness.mcp.http_sse import merged_headers, run_headers_helper
             helper_headers = await asyncio.to_thread(
                 run_headers_helper, self.config.headers_helper, env=self._tool_env,
                 server_name=self.config.name, url=self.config.url or "",
@@ -705,8 +705,8 @@ class McpServerHandle:
         return headers
 
     async def _open_transport(self, connect_timeout: float):
-        from rolo_claude.mcp import http_sse as http_sse_mod
-        from rolo_claude.mcp import stdio as stdio_mod
+        from halo_harness.mcp import http_sse as http_sse_mod
+        from halo_harness.mcp import stdio as stdio_mod
 
         if self.config.type == "stdio":
             self._errlog = stdio_mod.open_errlog(self.config.name)
@@ -801,7 +801,7 @@ class McpServerHandle:
         (verified on Windows): nothing downstream ever waited for the old
         fire-and-forget task, so `close_all()` returned, and a caller's own
         post-close poll expired, while the spawned child was still alive."""
-        from rolo_claude.mcp.client import task_timeout
+        from halo_harness.mcp.client import task_timeout
         connect_timeout = mcp_connect_timeout_s()
         overall_timeout = mcp_timeout_s()
         # must-do: a genuine RECONNECT reuses this same handle object --
@@ -906,7 +906,7 @@ class McpServerHandle:
         for up to MCP_TIMEOUT+4s."""
         if self.state in ("disabled", "pending_approval"):
             return
-        from rolo_claude.mcp import http_sse as http_sse_mod
+        from halo_harness.mcp import http_sse as http_sse_mod
         self.state = "connecting"
         connect_future: "concurrent.futures.Future" = concurrent.futures.Future()
         self._lifecycle_future = self._loop.spawn(self._lifecycle_task(connect_future))
@@ -961,7 +961,7 @@ class McpServerHandle:
     def call_tool(self, name: str, arguments: dict, *, timeout: Optional[float] = None, abort=None):
         if self._session is None:
             raise RuntimeError(f"mcp server {self.config.name!r} is not connected (state={self.state})")
-        from rolo_claude.mcp.client import McpAborted, ProgressKeepalive
+        from halo_harness.mcp.client import McpAborted, ProgressKeepalive
         # OpenCode-H9 MCP-compatibility item: "progress notifications reset
         # the call timeout" -- `keepalive` is handed to the SDK as the
         # request's own `progress_callback` AND to `run_abortable` below,
@@ -1106,7 +1106,7 @@ class McpManager:
     def __init__(self, configs: "dict[str, McpServerConfig]", *, loop=None,
                  tool_env: Optional[dict] = None, cwd=None, lazy_names: Optional[set] = None,
                  trusted: bool = True) -> None:
-        from rolo_claude.mcp.client import McpLoop
+        from halo_harness.mcp.client import McpLoop
         self.loop = loop or McpLoop()
         self.configs = configs
         self._lazy_names = set(lazy_names or ())
@@ -1206,7 +1206,7 @@ class McpManager:
         if name not in self._lazy_names:
             return
         try:
-            from rolo_claude.mcp import tools_cache
+            from halo_harness.mcp import tools_cache
             if cached_tools_before is not None:
                 before = tools_cache.tool_signature_set(cached_tools_before)
                 after = tools_cache.tool_signature_set(h.tools)
@@ -1252,7 +1252,7 @@ class McpManager:
         SAME abortable way `McpServerHandle.start()` already waits on a
         single one -- an Esc during a lazy-discovery burst now returns
         promptly instead of blocking for up to MCP_TIMEOUT per server."""
-        from rolo_claude.mcp import http_sse as http_sse_mod
+        from halo_harness.mcp import http_sse as http_sse_mod
 
         async def _start_one(h: McpServerHandle) -> None:
             # Same lifecycle-task mechanism `McpServerHandle.start()` uses

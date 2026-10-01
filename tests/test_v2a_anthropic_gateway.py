@@ -24,11 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_databricks import MockDatabricks
-from rolo_claude.providers.config import merge_databricks_headers
-from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import build_anthropic_request_body
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_anthropic_completion
+from halo_harness.providers.config import merge_databricks_headers
+from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import build_anthropic_request_body
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_anthropic_completion
 
 test, TESTS = new_registry()
 
@@ -211,7 +211,7 @@ def test_v2a_anthropic_gateway_404_error_surfaces(ctx: Ctx):
 
 @test
 def test_v2a_anthropic_gateway_overflow_400_raises_context_overflow(ctx: Ctx):
-    from rolo_claude.providers.stream import ContextOverflow
+    from halo_harness.providers.stream import ContextOverflow
     mock = MockDatabricks().start()
     try:
         req = _ant_req(mock, "databricks-claude-opus-4-6-overflow-400")

@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -34,7 +35,10 @@ def discover_test_modules() -> list:
 # supposed to scope away (house rule: "every _Env helper must snapshot and
 # restore EVERY provider variable it or its tests touch"). Prefix-matched,
 # not a fixed list, so a future provider var is covered automatically.
-_GUARDED_ENV_PREFIXES = ("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
+# 2.0.0 rename: `HALO_` added alongside the pre-existing `BRIDGE_` -- the
+# new canonical prefix for every harness-owned knob (env_compat), guarded
+# here the same way even though nothing sets one via real os.environ yet.
+_GUARDED_ENV_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
 
 
 def _snapshot_guarded_env() -> dict:
@@ -47,7 +51,7 @@ def _restore_guarded_env(snapshot: dict) -> None:
     test modules build a real `Session`/`Controller`/`build_session` from a
     `build_fake_home()` cwd without scoping `BRIDGE_STATE_DIR` themselves,
     and only ever avoided writing session FILES into the real
-    `~/.rolo-claude` because an EARLIER module happened to leave
+    `~/.halo` because an EARLIER module happened to leave
     `BRIDGE_TEST_HOME` (or `BRIDGE_STATE_DIR`) set in `os.environ` --
     "only avoid it by accident of import order" is exactly the bug D2.1
     asks to close. Restoring this snapshot after every module -- success,
@@ -63,9 +67,81 @@ def _restore_guarded_env(snapshot: dict) -> None:
         os.environ[k] = v
 
 
+def _clear_halo_env_vars() -> None:
+    """2.0.0 fixpass finding 2: a stray `HALO_*` left set in the developer's
+    OWN shell (the new canonical prefix every harness knob now checks
+    FIRST, per env_compat) would silently out-rank whatever legacy
+    `BRIDGE_*` value an individual test deliberately injects to control a
+    real Session/Controller it builds -- cleared ONCE, for the whole run,
+    before any test module is even imported."""
+    for key in [k for k in os.environ if k.startswith("HALO_")]:
+        os.environ.pop(key, None)
+
+
+def _pop_stray_bridge_state_dir() -> None:
+    """2.0.0 fixpass item G: a stray `BRIDGE_STATE_DIR` left in the
+    developer's OWN shell would make `_ensure_whole_run_state_dir` below
+    silently no-op (it treats ANY pre-set `BRIDGE_TEST_HOME`/
+    `BRIDGE_STATE_DIR` as deliberate external scoping) while never setting
+    `BRIDGE_TEST_HOME` -- leaving every `home()`-based path (`~/.claude.
+    json`, `~/.config/halo/env`, ...) pointed at the REAL machine home even
+    though `bridge_home()` itself would still be safely scoped by the
+    stray var. Popped here, before `_ensure_whole_run_state_dir` runs and
+    before any test module is even imported, same timing as
+    `_clear_halo_env_vars`'s own HALO_* sweep just above. `BRIDGE_TEST_
+    HOME` is deliberately never touched here -- an outer caller that
+    legitimately wants a specific scratch home used for this whole run
+    sets THAT, and it must survive untouched."""
+    os.environ.pop("BRIDGE_STATE_DIR", None)
+
+
+def _ensure_whole_run_state_dir() -> None:
+    """2.0.0 fixpass finding 2: a module that builds a real Session/
+    Controller/BridgeApp without scoping BRIDGE_TEST_HOME/BRIDGE_STATE_DIR
+    ITSELF used to only ever avoid the REAL `~/.halo` by accident of import
+    order (whatever an EARLIER module happened to leave set) -- this sets
+    both, once, before the FIRST module is imported, so "never touching
+    the real state dir" no longer depends on which module happens to run
+    first. A no-op when either is already set (an external caller's own
+    explicit scoping always wins)."""
+    if "BRIDGE_TEST_HOME" in os.environ or "BRIDGE_STATE_DIR" in os.environ:
+        return
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="run-all-wholerun-home-")))
+
+
+def _real_state_dir_snapshot() -> dict:
+    """2.0.0 fixpass finding 2 / the fixpass brief's own safety rule: the
+    REAL (literal `Path.home()`, never a test-scoped one) `~/.rolo-claude`
+    and `~/.halo` directories, and the exact byte size of each one's
+    `history.jsonl` if present -- recorded before this run and compared
+    again after, so ANY leftover test that still manages to touch the real
+    machine's own state is caught even if it never writes a session file
+    under `sessions/` (what `_real_sessions_snapshot` alone would catch)."""
+    snap = {}
+    for label, d in (("rolo_claude", Path.home() / ".rolo-claude"), ("halo", Path.home() / ".halo")):
+        snap[f"{label}_dir_exists"] = d.is_dir()
+        history = d / "history.jsonl"
+        try:
+            snap[f"{label}_history_size"] = history.stat().st_size if history.exists() else None
+        except OSError:
+            snap[f"{label}_history_size"] = None
+    return snap
+
+
+def _real_state_dir_diff(before: dict, after: dict) -> "list[str]":
+    problems = []
+    for label, pretty in (("rolo_claude", "~/.rolo-claude"), ("halo", "~/.halo")):
+        if not before[f"{label}_dir_exists"] and after[f"{label}_dir_exists"]:
+            problems.append(f"{pretty} did not exist before this run and does now")
+        b_size, a_size = before[f"{label}_history_size"], after[f"{label}_history_size"]
+        if b_size != a_size:
+            problems.append(f"{pretty}/history.jsonl size changed: {b_size!r} -> {a_size!r}")
+    return problems
+
+
 def _real_sessions_snapshot() -> "set[str]":
     """H10b: the REAL sessions dir -- literal `Path.home()`, deliberately
-    NOT `rolo_claude.config.paths.bridge_home()` (which would honor
+    NOT `halo_harness.config.paths.bridge_home()` (which would honor
     whatever BRIDGE_TEST_HOME/BRIDGE_STATE_DIR a test left set in THIS
     process and so could be fooled into snapshotting a fake home instead).
     This matches `bridge_home()`'s own fallback branch exactly: a
@@ -87,16 +163,24 @@ def _real_sessions_snapshot() -> "set[str]":
     `mkdir(parents=True)` still creates the empty slug directory the
     moment the Session exists -- 1972 such directories were found on the
     Windows build host during the 1.0.1 fix pass, all invisible to the old
-    glob (which only ever looked two levels down for a `.jsonl` suffix)."""
-    d = Path.home() / ".rolo-claude" / "sessions"
-    try:
-        if not d.is_dir():
-            return set()
-        paths = {str(p) for p in d.glob("*/*.jsonl")}
-        paths |= {str(p) for p in d.iterdir() if p.is_dir()}
-        return paths
-    except OSError:
-        return set()
+    glob (which only ever looked two levels down for a `.jsonl` suffix).
+
+    2.0.0 rename: BOTH the new default (`~/.halo/sessions`) and the legacy
+    one (`~/.rolo-claude/sessions`) are unioned into one snapshot -- a box
+    that hasn't launched the new build even once yet still keeps its real
+    history under the old name (`bridge_home()`'s own one-time migration
+    only fires the first time something actually resolves it), so a test
+    leaking a session into either real directory must still be caught."""
+    paths: "set[str]" = set()
+    for d in (Path.home() / ".halo" / "sessions", Path.home() / ".rolo-claude" / "sessions"):
+        try:
+            if not d.is_dir():
+                continue
+            paths |= {str(p) for p in d.glob("*/*.jsonl")}
+            paths |= {str(p) for p in d.iterdir() if p.is_dir()}
+        except OSError:
+            continue
+    return paths
 
 
 def main() -> int:
@@ -105,6 +189,15 @@ def main() -> int:
     # test module this run imports/executes) is tracked and swept up once,
     # at the very end, instead of leaking a directory per call forever.
     install_temp_dir_tracking()
+    # 2.0.0 fixpass finding 2 / item G: hermetic from the very first import
+    # onward -- see each helper's own docstring. The BRIDGE_STATE_DIR pop
+    # runs BEFORE _ensure_whole_run_state_dir, which would otherwise treat
+    # a stray leftover value as deliberate external scoping and skip
+    # setting its own BRIDGE_TEST_HOME.
+    _clear_halo_env_vars()
+    _pop_stray_bridge_state_dir()
+    _ensure_whole_run_state_dir()
+    real_state_before = _real_state_dir_snapshot()
     real_sessions_before = _real_sessions_snapshot()
     module_names = discover_test_modules()
     total_passed = total_failed = total_skipped = 0
@@ -156,14 +249,30 @@ def main() -> int:
     if real_sessions_leaked:
         print("-" * 74)
         print(f"[REAL SESSIONS GUARD] FAIL: {len(real_sessions_leaked)} new file(s) appeared under "
-              f"the REAL ~/.rolo-claude/sessions during this run -- some test built a Session "
-              f"without scoping BRIDGE_TEST_HOME/BRIDGE_STATE_DIR away from the real machine state:")
+              f"the REAL ~/.halo/sessions or ~/.rolo-claude/sessions during this run -- some test "
+              f"built a Session without scoping BRIDGE_TEST_HOME/BRIDGE_STATE_DIR away from the "
+              f"real machine state:")
         for p in real_sessions_leaked:
             print(f"    {p}")
     else:
-        print("[REAL SESSIONS GUARD] ok -- no new files under the real ~/.rolo-claude/sessions")
+        print("[REAL SESSIONS GUARD] ok -- no new files under the real ~/.halo/sessions or ~/.rolo-claude/sessions")
 
-    return 0 if (total_failed == 0 and not any_module_import_failed and not real_sessions_leaked) else 1
+    # 2.0.0 fixpass finding 2: catches what the sessions-only guard above
+    # wouldn't -- a real ~/.rolo-claude/~/.halo springing into existence
+    # with no sessions/ underneath yet, or (the exact box this brief names)
+    # a real history.jsonl growing from a TUI test that never scoped its
+    # own state dir.
+    real_state_problems = _real_state_dir_diff(real_state_before, _real_state_dir_snapshot())
+    if real_state_problems:
+        print("-" * 74)
+        print(f"[REAL STATE DIR GUARD] FAIL: the real machine's own state changed during this run:")
+        for p in real_state_problems:
+            print(f"    {p}")
+    else:
+        print("[REAL STATE DIR GUARD] ok -- ~/.rolo-claude and ~/.halo (existence + history.jsonl size) unchanged")
+
+    return 0 if (total_failed == 0 and not any_module_import_failed
+                 and not real_sessions_leaked and not real_state_problems) else 1
 
 
 if __name__ == "__main__":

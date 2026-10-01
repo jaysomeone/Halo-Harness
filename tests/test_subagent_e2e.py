@@ -76,11 +76,11 @@ def _multi_tool_call_step(calls: list) -> list:
 
 
 def _new_session(*, mock, model, agents=None, interactive=False, permission_mode="auto", max_turns=10, cwd=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     cwd = cwd or Path(tempfile.mkdtemp(prefix="rc-agent-e2e-"))
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="rc-agent-e2e-home-")))
@@ -101,12 +101,12 @@ def _switch_model(session, model: str) -> None:
     """Mid-test model swap that ALSO updates route/provider_profile (a
     plain `session.model_ref = ...` reassignment does not -- `set_model`
     is the real entry point `/model` itself uses)."""
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.model import ModelProfile, parse_model_ref
     session.set_model(parse_model_ref(model), ModelProfile())
 
 
 def _general_purpose_spec(**overrides):
-    from rolo_claude.config.agents_md import AgentSpec
+    from halo_harness.config.agents_md import AgentSpec
     kwargs = dict(name="general-purpose", description="general purpose sub-agent",
                   tools=None, disallowed_tools=["Agent", "Task"], body="You are a helpful sub-agent.")
     kwargs.update(overrides)
@@ -474,7 +474,7 @@ def test_h5c_f08_child_permission_ask_is_live_answerable_and_tagged_with_agent_i
     top-level entry point the UI's `Controller.answer_permission` uses --
     proving the child's waiter really is parked on the PARENT's own
     `_permission_waiters`), and confirms the Write actually ran."""
-    from rolo_claude.permissions import Decision
+    from halo_harness.permissions import Decision
 
     mock = MockUpstream().start()
     try:
@@ -549,7 +549,7 @@ def test_h5c_f08_child_permission_ask_denied_live_still_tagged_and_merged(ctx: C
     other denial -- an agent-tagged `is_error` tool_result, and merged into
     the PARENT's own `permission_denials` (H6/D10: print mode's top-level
     JSON result only ever reads the PARENT's list)."""
-    from rolo_claude.permissions import Decision
+    from halo_harness.permissions import Decision
 
     mock = MockUpstream().start()
     try:
@@ -627,7 +627,7 @@ def test_h9_two_parallel_children_with_colliding_tool_ids_get_distinct_live_asks
     silently overwrote the first's live slot, so resolving one card could
     wake the WRONG child's thread (running ITS command instead) while the
     other waited forever with no way to ever be answered."""
-    from rolo_claude.permissions import Decision
+    from halo_harness.permissions import Decision
 
     mock = MockUpstream().start()
     try:
@@ -774,7 +774,7 @@ def test_task_id_resume_continues_the_same_child_session(ctx: Ctx):
         session = _new_session(mock=mock, model="or:mock/h6-parent-resume-unused",
                                 agents={"general-purpose": _general_purpose_spec()})
 
-        from rolo_claude.agent.subagent import run_agent_call
+        from halo_harness.agent.subagent import run_agent_call
         _events1, result1 = run_agent_call(
             runtime=session.agent_runtime, tool_id="toolu_1",
             tool_input={"description": "count", "prompt": "how many widgets are there? (unique marker Q1)",
@@ -818,9 +818,9 @@ def test_h9_taskstop_targets_a_background_agents_own_abort_event(ctx: Ctx):
     `agent/subagent.py`'s `run_agent_call` now stashes a BACKGROUND
     child's own (private, per finding 10) abort Event on `agent_runtime.
     tasks[task_id]["abort_event"]`; TaskStop must find and set it."""
-    from rolo_claude.agent.subagent import run_agent_call
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.task_stop import TaskStopTool
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.task_stop import TaskStopTool
 
     mock = MockUpstream().start()
     try:
@@ -862,9 +862,9 @@ def test_h9_taskstop_on_a_foreground_agent_task_is_a_clear_error_not_unknown(ctx
     the user's own Esc/Ctrl+C, not TaskStop) -- must say so plainly, never
     the generic "Unknown shell_id/task_id" (which would wrongly suggest
     the task_id itself was wrong)."""
-    from rolo_claude.agent.subagent import run_agent_call
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.task_stop import TaskStopTool
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.task_stop import TaskStopTool
 
     mock = MockUpstream().start()
     try:
@@ -893,7 +893,7 @@ def test_h9_taskstop_on_a_foreground_agent_task_is_a_clear_error_not_unknown(ctx
 
 @test
 def test_hook_runner_payload_carries_agent_id_and_type(ctx: Ctx):
-    from rolo_claude.hooks import HookRunner
+    from halo_harness.hooks import HookRunner
     runner = HookRunner({}, cwd=Path(tempfile.mkdtemp()), session_id="agent-abc123",
                          transcript_path="/tmp/x.jsonl", agent_id="abc123", agent_type="general-purpose")
     payload = runner.payload("SubagentStart")
@@ -904,7 +904,7 @@ def test_hook_runner_payload_carries_agent_id_and_type(ctx: Ctx):
 
 @test
 def test_hook_runner_without_agent_id_omits_it(ctx: Ctx):
-    from rolo_claude.hooks import HookRunner
+    from halo_harness.hooks import HookRunner
     runner = HookRunner({}, cwd=Path(tempfile.mkdtemp()), session_id="s1", transcript_path="/tmp/x.jsonl")
     payload = runner.payload("SessionStart")
     ctx.check("no agent_id key for a top-level session", "agent_id" not in payload)

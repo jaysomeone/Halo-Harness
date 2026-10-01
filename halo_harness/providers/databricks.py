@@ -1,4 +1,4 @@
-"""rolo_claude.providers.databricks -- Databricks route-candidate
+"""halo_harness.providers.databricks -- Databricks route-candidate
 selection, request body allowlisting, the on-disk route/max_tokens cache,
 endpoint/model probing, and models.json read/write. Moved out of bridge.py
 unchanged in the H0 package split; see wip/SIGNATURES.md's "M4-M6 additions"
@@ -39,7 +39,7 @@ _CATALOG_READ_TIMEOUT_S = 30
 # backs off for `_AUTO_REFRESH_BACKOFF_S` after a failure instead of
 # retrying a down/VPN-less host on every single `/model` open, each paying
 # the full connect timeout). An explicit, user-requested refresh (`force=
-# True` -- `/models refresh`, `/dbx`, `rolo-claude models --refresh`) is
+# True` -- `/models refresh`, `/dbx`, `halo models --refresh`) is
 # never subject to the backoff, only to the single-flight lock.
 _dbx_refresh_lock = threading.Lock()
 _dbx_last_failure_at: "dict[str, float]" = {}  # keyed by str(state_dir) -- see refresh_dbx_catalog
@@ -209,7 +209,7 @@ def probe_databricks_status(root: str, token: str) -> "tuple[int, bytes]":
     unreachable/unresolvable host fails fast instead of hanging on a
     black-holed DNS lookup."""
     import urllib.parse
-    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
+    from halo_harness.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(root)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -312,7 +312,7 @@ def write_dbx_endpoints_json(state_dir, endpoints: list) -> None:
 
     1.0.1 part 2 fixpass finding 11: tmp file + `os.replace` (see
     `_atomic_write_json`) -- a reader catching this file mid-write (a
-    concurrent `rolo-claude models`, `/model` open, ...) used to be able to
+    concurrent `halo models`, `/model` open, ...) used to be able to
     see a truncated JSON document (read as a spurious "every endpoint
     removed" diff) rather than either the old or the new catalog whole."""
     try:
@@ -337,7 +337,7 @@ def load_dbx_endpoints_json(state_dir) -> dict:
 
 # ---------------------------------------------------------------------------
 # H14 scope J: catalog diff, staleness, and the shared "refresh if stale"
-# helper used by `/models refresh` (TUI, off the UI thread), `rolo-claude
+# helper used by `/models refresh` (TUI, off the UI thread), `halo
 # models --refresh`, and the auto-refresh-on-session-start/on-`/model`-open
 # path (`databricks.catalog_max_age_hours`, default 24).
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
     """Scope J auto-refresh: `None` when nothing needed doing (not stale,
     or Databricks isn't configured) -- else the same `(ok, diff, note)`
     triple `refresh_dbx_catalog` returns. `max_age_hours` defaults to
-    `databricks.catalog_max_age_hours` (~/.rolo-claude/config.json, itself
+    `databricks.catalog_max_age_hours` (~/.halo/config.json, itself
     defaulting to 24). Never raises -- an auto-refresh must not be able to
     break session start or opening `/model`.
 
@@ -471,12 +471,12 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
     `max_age_hours`/`force` -- "an old cache without api_types is refreshed
     on next use when the network is up" (the "next use" being one of THIS
     function's own existing callers: session start, opening `/model` --
-    never a bare `/models`/`rolo-claude models`, which must stay
+    never a bare `/models`/`halo models`, which must stay
     network-free; see catalog_cli.py's own old-shape handling for what a
     bare, no-network read shows in the meantime)."""
     try:
         if max_age_hours is None:
-            from rolo_claude.theme import get_config_value
+            from halo_harness.theme import get_config_value
             max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
         if dbx_endpoints_cache_is_old_shape(load_dbx_endpoints_json(state_dir)):
             force = True
@@ -492,7 +492,7 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
             return None
         # finding 11: a recent FAILURE backs an AUTO-refresh off for
         # `_AUTO_REFRESH_BACKOFF_S` -- an explicit force=True (/models
-        # refresh, /dbx, `rolo-claude models --refresh`) is never subject
+        # refresh, /dbx, `halo models --refresh`) is never subject
         # to this, only to the single-flight lock inside refresh_dbx_catalog
         # itself. Without this, a down/VPN-less host got re-probed (full
         # connect timeout apiece) on every single `/model` open.
@@ -505,7 +505,7 @@ def refresh_dbx_catalog_if_stale(state_dir, *, max_age_hours: Optional[float] = 
         last_failure_at = _dbx_last_failure_at.get(str(state_dir))
         if not force and last_failure_at is not None and (time.monotonic() - last_failure_at) < _AUTO_REFRESH_BACKOFF_S:
             return None
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         dbx = resolve_databricks(env)
         if dbx is None:
             return None
@@ -519,12 +519,12 @@ def probe_openrouter_models(base_url: str, api_key: str) -> list[dict]:
     'context_length', 'max_output_tokens' (the proxy's own resolve_profile
     reads only these two, unchanged), plus -- when OpenRouter's response
     includes them -- 'input_modalities' (from architecture.input_modalities),
-    'supported_parameters', and 'pricing' (H0: rolo_claude.model's
+    'supported_parameters', and 'pricing' (H0: halo_harness.model's
     ModelProfile reads these three for vision/reasoning/price). Raises
     UpstreamConnectError on connect/DNS failure -- 1.0.1 hotfix 2: bounded
     at `open_upstream`'s own default connect timeout (<=8s)."""
     import urllib.parse
-    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
+    from halo_harness.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -646,7 +646,7 @@ def refresh_openrouter_catalog_if_stale(state_dir, *, max_age_hours: Optional[fl
     key = str(state_dir)
     try:
         if max_age_hours is None:
-            from rolo_claude.theme import get_config_value
+            from halo_harness.theme import get_config_value
             max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
         age = models_json_age_seconds(state_dir)
         always = float(max_age_hours) <= 0
@@ -659,7 +659,7 @@ def refresh_openrouter_catalog_if_stale(state_dir, *, max_age_hours: Optional[fl
         last_failure_at = _or_last_failure_at.get(key)
         if not force and last_failure_at is not None and (time.monotonic() - last_failure_at) < _AUTO_REFRESH_BACKOFF_S:
             return None
-        from rolo_claude.providers.config import resolve_openrouter
+        from halo_harness.providers.config import resolve_openrouter
         orc = resolve_openrouter(env)
         if orc is None:
             return None

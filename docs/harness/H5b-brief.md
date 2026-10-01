@@ -1,6 +1,6 @@
-# H5b brief — fix pass for the H4/H5/H3c review + H6/U5 must-dos (rolo-claude)
+# H5b brief — fix pass for the H4/H5/H3c review + H6/U5 must-dos (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux is the
 primary platform**, so every fix must be OS-neutral and tested for the Linux code paths). Baseline =
 commit `c5a62fe` ("H6 + U5") on master: `python test_bridge.py` 97/97, `python tests/run_all.py`
 1111 (1107 passed, 4 skipped), `python test_tui.py` 37/37, green on Windows and WSL Ubuntu.
@@ -29,7 +29,7 @@ A. **Findings 1–18** of `review-findings-h4-h5-h3c.md`, each with the fix the 
    Specific notes:
    - F1 compaction gate: reserve `min(requested max_tokens, 32 000)`; floor the trigger at ≈70 % of
      the window; no back-to-back compaction; test against the REAL shapes in
-     `~/.rolo-claude/models.json` (copy the 29 zero-trigger rows into a fixture).
+     `~/.halo/models.json` (copy the 29 zero-trigger rows into a fixture).
    - F2 Edit: a fuzzy stage is accepted only when it yields exactly ONE candidate (all with
      `replace_all`); ambiguous → "Found multiple matches…" error; adversarial near-duplicate tests.
    - F3/F5 steering: synthesize `is_error` results ("not run: the user sent a new message first")
@@ -85,14 +85,14 @@ C. **U5 must-dos**: render `compaction` events in the TUI; `steer_queued` shown 
    `/status` read from the live session; `doctor` reports the clipboard backend (OSC 52 / xclip /
    wl-copy / pbcopy / win32) — U5's leftover.
 D. **Cheap H8 must-dos that belong here** (they are one-liners next to code you already touch):
-   `compactionModel` from `~/.rolo-claude/config.json` actually used by the summariser; parse
+   `compactionModel` from `~/.halo/config.json` actually used by the summariser; parse
    `anthropic-ratelimit-*-reset` as RFC 3339 (`datetime.fromisoformat`, `Z` accepted); `_step` no
    longer caps a longer `Retry-After` at 60 s (cap at 300 s, log it).
 
 ## Tests
 Every fix gets a pinning test named after its finding (`test_h5b_f01_…`). Suites: `python
 test_bridge.py`, `python tests/run_all.py`, `python test_tui.py` — all exit 0 on Windows AND on
-WSL (`wsl -e bash -lc 'rsync … && source ~/rolo-claude-wt-venv/bin/activate && python3 tests/
+WSL (`wsl -e bash -lc 'rsync … && source ~/halo-harness-wt-venv/bin/activate && python3 tests/
 run_all.py'` — see `docs/harness/INSTALL.md`; the venv already exists). The mock-upstream Session
 tests must drive a real `Session` (finding 17's point), not helper functions in isolation.
 

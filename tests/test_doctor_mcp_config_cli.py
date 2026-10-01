@@ -1,7 +1,7 @@
-"""tests.test_doctor_mcp_config_cli -- rolo_claude/{doctor,mcp_cli,
+"""tests.test_doctor_mcp_config_cli -- halo_harness/{doctor,mcp_cli,
 config_cli}.py (U0 scope A): the `doctor`/`mcp`/`config` subcommands, all
 run against an isolated BRIDGE_TEST_HOME so a test run never touches the
-real machine's `~/.claude.json` or `~/.rolo-claude/config.json`.
+real machine's `~/.claude.json` or `~/.halo/config.json`.
 """
 import json
 import os
@@ -19,11 +19,11 @@ test, TESTS = new_registry()
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-subcmd-"))
+    return Path(tempfile.mkdtemp(prefix="halo-subcmd-"))
 
 
 def _run(argv, home: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
     # H3: `cli.py`'s `_make_streams_utf8_safe()` deliberately reconfigures
     # the CHILD's stdout/stderr to UTF-8 (a model's reply, or an MCP
@@ -33,7 +33,7 @@ def _run(argv, home: Path, timeout=30):
     # (the bare `text=True` default is the LOCALE's preferred encoding,
     # cp1252 on this host) turns every such character into mojibake
     # (verified: "✔" -> "âœ”").
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -51,7 +51,7 @@ def test_h8_doctor_reports_catalog_ages(ctx: Ctx):
     """H8 scope C: doctor shows the age of every cached catalog file -- a
     fresh, never-refreshed BRIDGE_TEST_HOME reports each one as never
     cached (never a crash, never silently omitted)."""
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     home = _fresh_home()
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     try:
@@ -67,7 +67,7 @@ def test_h8_doctor_reports_catalog_ages(ctx: Ctx):
 
 @test
 def test_h8_doctor_work_offline_reports_unreachable_with_vpn_hint(ctx: Ctx):
-    """H8 scope F acceptance: `rolo-claude doctor --work` with no Databricks
+    """H8 scope F acceptance: `halo doctor --work` with no Databricks
     configured (this build/test box) reports it plainly, never crashes, and
     the VPN hint is present somewhere in the output for when it IS
     configured but genuinely unreachable."""
@@ -80,7 +80,7 @@ def test_h8_doctor_work_offline_reports_unreachable_with_vpn_hint(ctx: Ctx):
               "not configured" in result.stdout.lower())
     ctx.check("mentions the open questions from the plan", "open question" in result.stdout.lower())
 
-    from rolo_claude.doctor import run_work_checks
+    from halo_harness.doctor import run_work_checks
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     try:
         lines, ok = run_work_checks()
@@ -94,7 +94,7 @@ def test_h8_doctor_work_vpn_hint_when_configured_but_unreachable(ctx: Ctx):
     """The VPN hint specifically: a Databricks host that's syntactically
     configured but not actually reachable (a bogus hostname) must mention
     the VPN in its own reachability line."""
-    from rolo_claude.doctor import _work_check_vpn_reachability
+    from halo_harness.doctor import _work_check_vpn_reachability
     line = _work_check_vpn_reachability("https://this-host-does-not-exist.invalid.example")
     ctx.check(f"reports unreachable, got {line!r}", "MISSING" in line or "[MISSING]" in line)
     ctx.check("names the VPN as the likely reason", "VPN" in line)
@@ -105,7 +105,7 @@ def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
     """U5's own leftover / H8 cheap must-do: tui/clipboard.py's
     `clipboard_doctor_line()` was written ready-to-call but never actually
     wired into a real `doctor` run -- `run_checks()` must now include it."""
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     lines, _ok = run_checks()
     ctx.check(f"a clipboard backend line is present, got {lines}",
               any("Clipboard backend" in line for line in lines))
@@ -127,7 +127,7 @@ def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
     `$EDITOR` and a usable Bash shell (Git Bash on win32, `/bin/bash` on
     POSIX) -- xclip/wl-copy (clipboard), `claude` (--chrome) and npx
     (--playwright) were already covered before this milestone."""
-    from rolo_claude.doctor import run_checks, _check_ripgrep, _check_editor, _check_shell
+    from halo_harness.doctor import run_checks, _check_ripgrep, _check_editor, _check_shell
     lines, _ok = run_checks()
     ctx.check(f"an rg/ripgrep line is present, got {lines}", any("rg" in l and "ripgrep" in l for l in lines))
     ctx.check(f"a $VISUAL/$EDITOR line is present, got {lines}", any("$VISUAL/$EDITOR" in l for l in lines))
@@ -295,7 +295,7 @@ def test_mcp_config_flag_long_inline_json_works_end_to_end(ctx: Ctx):
     # harness as a whole tolerates a long-running real session.
     import sys as _sys
     _sys.path.insert(0, str(REPO_DIR))
-    from rolo_claude.mcp.manager import resolve_server_configs
+    from halo_harness.mcp.manager import resolve_server_configs
     resolved, notices = resolve_server_configs(cwd=home, claude_json={}, mcp_config_flag=[spec])
     ctx.check(f"parses without raising, got notices={notices}", padding in resolved)
 
@@ -306,7 +306,7 @@ def test_mcp_other_subcommands_still_not_yet(ctx: Ctx):
     for sub in (["login"], ["logout"], ["serve"]):
         result = _run(["mcp"] + sub, home)
         ctx.check(f"mcp {sub[0]}: exit 0, got {result.returncode}", result.returncode == 0)
-        ctx.check(f"mcp {sub[0]}: not-yet line printed", f"rolo-claude: mcp {sub[0]} is not supported yet" in result.stderr)
+        ctx.check(f"mcp {sub[0]}: not-yet line printed", f"halo: mcp {sub[0]} is not supported yet" in result.stderr)
 
 
 @test
@@ -373,7 +373,7 @@ def test_h9b_f33_doctor_python_check_matches_pyprojects_real_minimum(ctx: Ctx):
     import collections
     import re
     import sys
-    from rolo_claude.doctor import _check_python, OK, WARN
+    from halo_harness.doctor import _check_python, OK, WARN
 
     # A plain regex, not tomllib (stdlib only since 3.11 -- pyproject.toml's
     # OWN declared minimum is 3.10, so this test must not itself need 3.11).
@@ -394,6 +394,21 @@ def test_h9b_f33_doctor_python_check_matches_pyprojects_real_minimum(ctx: Ctx):
         ctx.check(f"3.10 is OK (the real minimum), got {_check_python()!r}", _check_python().startswith(OK))
     finally:
         sys.version_info = old
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

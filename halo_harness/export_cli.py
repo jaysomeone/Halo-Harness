@@ -1,4 +1,4 @@
-"""rolo_claude.export_cli -- `rolo-claude export` subcommand (H8 scope D):
+"""halo_harness.export_cli -- `halo export` subcommand (H8 scope D):
 a headless version of the TUI's own `/export` (U5), for a script or a CI
 job with no interactive file picker to drive it through. Reads a session's
 JSONL log (the latest for the given/current directory, or an explicit
@@ -22,7 +22,7 @@ from pathlib import Path
 # block.
 #
 # H9 whole-tree review finding 4: this is now the ONE sanitizer both export
-# paths (`rolo-claude export --sanitize` below AND the TUI's own `/export
+# paths (`halo export --sanitize` below AND the TUI's own `/export
 # --sanitize`, controller.py's `sanitize_transcript`) and the deleted
 # `session_cli.py`'s functionality all resolve to -- see this module's own
 # docstring reference in `controller.py`. Fixed here (all verified missing
@@ -134,7 +134,7 @@ def sanitize_node(node: dict) -> dict:
 
 
 def cmd_export(argv: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude export", add_help=True,
+    parser = argparse.ArgumentParser(prog="halo export", add_help=True,
                                       description="Export a session's transcript as JSONL (headless /export).")
     parser.add_argument("--session", default=None, metavar="ID",
                          help="Session id or unique prefix (default: the latest session for this directory)")
@@ -145,25 +145,25 @@ def cmd_export(argv: list) -> int:
                          help="Project directory whose sessions to look in (default: the current directory)")
     args = parser.parse_args(argv)
 
-    from rolo_claude.agent import sessions as agent_sessions
-    from rolo_claude.agent.log import SessionLog
+    from halo_harness.agent import sessions as agent_sessions
+    from halo_harness.agent.log import SessionLog
 
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
     if args.session:
         session_id, err = agent_sessions.resolve_resume(cwd, args.session)
         if session_id is None:
-            print(f"rolo-claude export: {err}", file=sys.stderr)
+            print(f"halo export: {err}", file=sys.stderr)
             return 2
         log = SessionLog(cwd, session_id=session_id)
     else:
         log = SessionLog.latest_for_cwd(cwd)
         if log is None:
-            print("rolo-claude export: no sessions found for this directory", file=sys.stderr)
+            print("halo export: no sessions found for this directory", file=sys.stderr)
             return 2
 
     nodes = log.read_all()
     if not nodes:
-        print(f"rolo-claude export: session {log.session_id} has no recorded nodes", file=sys.stderr)
+        print(f"halo export: session {log.session_id} has no recorded nodes", file=sys.stderr)
         return 2
 
     if args.sanitize:
@@ -175,9 +175,9 @@ def cmd_export(argv: list) -> int:
         try:
             Path(args.output).write_text(output_text, encoding="utf-8")
         except OSError as e:
-            print(f"rolo-claude export: could not write {args.output}: {e}", file=sys.stderr)
+            print(f"halo export: could not write {args.output}: {e}", file=sys.stderr)
             return 1
-        print(f"rolo-claude export: wrote {len(nodes)} node(s) from session {log.session_id} to {args.output}",
+        print(f"halo export: wrote {len(nodes)} node(s) from session {log.session_id} to {args.output}",
               file=sys.stderr)
     else:
         sys.stdout.write(output_text)

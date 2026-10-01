@@ -48,6 +48,42 @@ REPO_DIR = Path(__file__).resolve().parent
 BRIDGE_PY = REPO_DIR / "bridge.py"
 BRIDGE_EXISTS = BRIDGE_PY.exists()
 
+def _clear_halo_env_vars() -> None:
+    """2.0.0 fixpass finding 2: a stray `HALO_*` left set in the developer's
+    own shell would silently out-rank every legacy `BRIDGE_*` name this
+    suite deliberately injects into a spawned `bridge.py` subprocess's env
+    (`full_env = dict(os.environ)` picks it up straight from THIS process)
+    -- env_compat resolves HALO_* first, so e.g. a real HALO_MODEL would
+    override the mock-pointing BRIDGE_MODEL every fixture below sets,
+    silently sending a real request instead of hitting the mock."""
+    for key in [k for k in os.environ if k.startswith("HALO_")]:
+        os.environ.pop(key, None)
+
+
+def _pop_stray_bridge_state_dir() -> None:
+    """2.0.0 fixpass item G: a stray `BRIDGE_STATE_DIR` left in the
+    developer's own shell must be gone BEFORE the `setdefault` just below
+    runs -- `setdefault` never overwrites an already-present value, so a
+    leftover pointing at some other (possibly gone) directory would
+    silently win over the fresh whole-run one this file means to install,
+    and every fixture's `full_env = dict(os.environ)` would hand every
+    spawned `bridge.py` subprocess that same stray value."""
+    os.environ.pop("BRIDGE_STATE_DIR", None)
+
+
+# Cleared ONCE, for the whole run, before any fixture is even constructed.
+_clear_halo_env_vars()
+_pop_stray_bridge_state_dir()
+# Defense in depth, matching tests/run_all.py's own whole-run scoping: this
+# file never imports halo_harness in-process (it is a pure black-box
+# subprocess/HTTP suite by design, runnable standalone), so nothing here
+# ever calls bridge_home()/home() directly -- but every individual fixture
+# below ALSO sets its own BRIDGE_TEST_HOME/BRIDGE_STATE_DIR explicitly
+# before spawning bridge.py, which is what actually keeps every subprocess
+# away from the real ~/.halo.
+os.environ.setdefault("BRIDGE_TEST_HOME", tempfile.mkdtemp(prefix="test-bridge-wholerun-home-"))
+os.environ.setdefault("BRIDGE_STATE_DIR", tempfile.mkdtemp(prefix="test-bridge-wholerun-state-"))
+
 
 def free_port() -> int:
     """Bind to port 0 to get an OS-assigned free port, then release it.
@@ -3512,7 +3548,7 @@ def test_launcher_stale_hash_restart(ctx: Ctx):
                 hasher.update(p.read_bytes())
             return hasher.hexdigest()
 
-        real_hash = _tree_sha1(real_bytes, REPO_DIR / "rolo_claude" / "providers")
+        real_hash = _tree_sha1(real_bytes, REPO_DIR / "halo_harness" / "providers")
         ctx.check(f"stale server's hash differs from the real bridge.py's own hash, stale={stale_hash!r} real={real_hash!r}",
                    stale_hash != real_hash)
 
@@ -3859,6 +3895,123 @@ def test_end_to_end_no_system_after_user_turn(ctx: Ctx):
     ctx.check(f"in-message environment text appended after it, got {sys_text!r}", "# Environment" in sys_text)
     ctx.check(f"top-level text precedes the environment text, got {sys_text!r}",
                sys_text.index("Be concise") < sys_text.index("# Environment"))
+
+
+@test
+def test_clear_halo_env_vars_removes_only_halo_prefixed_names(ctx: Ctx):
+    saved = {k: os.environ.get(k) for k in ("HALO_MODEL", "HALO_PING_INTERVAL", "BRIDGE_MODEL")}
+    try:
+        os.environ["HALO_MODEL"] = "should-be-cleared"
+        os.environ["HALO_PING_INTERVAL"] = "should-also-be-cleared"
+        os.environ["BRIDGE_MODEL"] = "left-alone"
+        _clear_halo_env_vars()
+        ctx.check("HALO_MODEL cleared", "HALO_MODEL" not in os.environ)
+        ctx.check("HALO_PING_INTERVAL cleared", "HALO_PING_INTERVAL" not in os.environ)
+        ctx.check("a legacy BRIDGE_* var this suite relies on is left alone",
+                  os.environ.get("BRIDGE_MODEL") == "left-alone")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@test
+def test_bridge_proc_env_never_carries_a_stray_halo_override(ctx: Ctx):
+    """finding 2 end-to-end: `BridgeProc.start()`'s `full_env = dict(os.
+    environ)` must never hand a spawned bridge.py subprocess a HALO_MODEL
+    that would out-rank the mock-pointing BRIDGE_MODEL this fixture
+    explicitly injects (env_compat resolves HALO_* first) -- simulates a
+    developer's shell leaking one in, and proves `_clear_halo_env_vars`
+    (run once at module import, same construction `.start()` itself uses)
+    is what actually prevents it, not some accident of test order."""
+    class _FakeMock:
+        base_url = "http://127.0.0.1:1"
+
+    os.environ["HALO_MODEL"] = "should-never-reach-the-child"
+    try:
+        full_env = dict(os.environ)
+        full_env.update(BridgeProc(_FakeMock()).env)
+        ctx.check("HALO_MODEL is present in a naive snapshot (proves this test actually set it)",
+                  full_env.get("HALO_MODEL") == "should-never-reach-the-child")
+
+        _clear_halo_env_vars()
+        full_env2 = dict(os.environ)
+        full_env2.update(BridgeProc(_FakeMock()).env)
+        ctx.check("gone once _clear_halo_env_vars runs, same construction BridgeProc.start() uses",
+                  "HALO_MODEL" not in full_env2)
+        ctx.check("the legacy BRIDGE_MODEL this fixture relies on is unaffected",
+                  full_env2.get("BRIDGE_MODEL") == "or:mock/model")
+    finally:
+        os.environ.pop("HALO_MODEL", None)
+
+
+@test
+def test_pop_stray_bridge_state_dir_removes_it(ctx: Ctx):
+    """2.0.0 fixpass item G: a stray BRIDGE_STATE_DIR left in the
+    developer's own shell must be gone before this file's own module-level
+    `os.environ.setdefault("BRIDGE_STATE_DIR", ...)` runs -- `setdefault`
+    never overwrites a value already present, so a leftover would silently
+    win over the fresh whole-run directory this file means to install for
+    every spawned bridge.py subprocess."""
+    os.environ["BRIDGE_STATE_DIR"] = "/tmp/a-stray-leftover-from-the-parent-shell"
+    try:
+        _pop_stray_bridge_state_dir()
+        ctx.check("BRIDGE_STATE_DIR is gone", "BRIDGE_STATE_DIR" not in os.environ)
+    finally:
+        os.environ.pop("BRIDGE_STATE_DIR", None)
+
+
+@test
+def test_probe_reads_openrouter_key_from_legacy_env_file_alone(ctx: Ctx):
+    """2.0.0 fixpass item A: `cmd_probe` (like `cmd_serve`/`cmd_launch`)
+    now calls `load_provider_env_files()` instead of the old `load_env_
+    file(env_file_path())` -- the latter only ever read the NEW canonical
+    path, so a box with only the legacy `~/.config/vibes-hacker/env` file
+    (no `~/.config/halo/env`, no BRIDGE_ENV_FILE override) used to start
+    with no credentials at all. Proven end-to-end here: with ONLY a legacy
+    env file on disk and BRIDGE_ENV_FILE unset, --probe still finds the
+    key and completes a real probe against the mock (not "not
+    configured")."""
+    ctx.require_bridge_file_only()
+    mock = GenericMockUpstream()
+    try:
+        mock.start()
+        def handler(h, body):
+            send_json_response(h, 200, {"data": [
+                {"id": "vendor/legacy-model", "context_length": 32000, "top_provider": {"max_completion_tokens": 4096}},
+            ]})
+        mock.handlers["/models"] = handler
+
+        home_dir = Path(tempfile.mkdtemp(prefix="h2-item-a-probe-home-"))
+        state_dir = Path(tempfile.mkdtemp(prefix="h2-item-a-probe-state-"))
+        legacy_env_file = home_dir / ".config" / "vibes-hacker" / "env"
+        legacy_env_file.parent.mkdir(parents=True)
+        legacy_env_file.write_text("OPENROUTER_API_KEY=test-key-from-legacy-file\n", encoding="utf-8")
+        # The NEW canonical file is deliberately absent: home_dir / ".config" / "halo" / "env".
+
+        env = dict(os.environ)
+        env.update({
+            "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+            "BRIDGE_TEST_HOME": str(home_dir),
+            "BRIDGE_STATE_DIR": str(state_dir),
+        })
+        env.pop("CLAUDECODE", None)
+        env.pop("OPENROUTER_API_KEY", None)
+        env.pop("BRIDGE_ENV_FILE", None)
+        env.pop("HALO_ENV_FILE", None)
+        env.pop("ROLO_CLAUDE_ENV_FILE", None)
+        proc = subprocess.run([sys.executable, str(BRIDGE_PY), "--probe"],
+                               env=env, capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+        ctx.check(f"probe exit 0, got {proc.returncode}, stderr={proc.stderr[-500:]!r}", proc.returncode == 0)
+        ctx.check(f"stdout shows the key was found and used, got {proc.stdout[-500:]!r}",
+                   "OpenRouter: cached" in proc.stdout and "OpenRouter: not configured" not in proc.stdout)
+        models_path = state_dir / "models.json"
+        ctx.check(f"models.json was actually written (the mock call succeeded with the legacy key), "
+                  f"got exists={models_path.exists()}", models_path.exists())
+    finally:
+        mock.stop()
 
 
 # TESTS_END_MARKER -- new @test functions are inserted directly above this.

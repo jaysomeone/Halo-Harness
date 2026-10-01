@@ -33,7 +33,7 @@ def test_readme_first_section_is_quick_start(ctx: Ctx):
 def test_readme_quick_start_mentions_init_and_windows(ctx: Ctx):
     text = (REPO_DIR / "README.md").read_text(encoding="utf-8")
     quick_start = text.split("## Quick start", 1)[1].split("\n## ", 1)[0]
-    ctx.check("mentions `rolo-claude init`", "rolo-claude init" in quick_start)
+    ctx.check("mentions `halo init`", "halo init" in quick_start)
     ctx.check("mentions an install command (uv tool install or pipx)",
               "uv tool install" in quick_start or "pipx install" in quick_start)
     ctx.check("covers Windows too, in the same leading section", "Windows" in quick_start)
@@ -45,8 +45,8 @@ def test_readme_quick_start_mentions_init_and_windows(ctx: Ctx):
 def test_install_md_points_to_init_near_the_top(ctx: Ctx):
     text = (REPO_DIR / "docs" / "harness" / "INSTALL.md").read_text(encoding="utf-8")
     head = text.split("## Kali / Linux", 1)[0]
-    ctx.check("INSTALL.md mentions `rolo-claude init` before the first real OS section",
-              "rolo-claude init" in head)
+    ctx.check("INSTALL.md mentions `halo init` before the first real OS section",
+              "halo init" in head)
 
 
 @test
@@ -70,6 +70,10 @@ def test_version_bumped_to_0_4_1_and_changelog_has_an_entry(ctx: Ctx):
     entry` below for H13's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
     ctx.check("CHANGELOG.md still has a [0.4.1] entry", "[0.4.1]" in changelog)
+    # 2.0.0 rename: CHANGELOG history keeps the name it was WRITTEN under
+    # (brief: "history in CHANGELOG keeps old names for old releases") --
+    # the [0.4.1] entry predates the rename, so it still says the old
+    # command name verbatim; only entries at/after [2.0.0] say `halo`.
     ctx.check("the [0.4.1] entry mentions rolo-claude init",
               "rolo-claude init" in changelog.split("[0.4.1]", 1)[1].split("[0.4.0]", 1)[0])
 
@@ -129,7 +133,9 @@ def test_version_bumped_to_0_8_0_and_changelog_has_an_entry(ctx: Ctx):
 
 @test
 def test_version_bumped_to_1_0_0_and_changelog_has_an_entry(ctx: Ctx):
-    """rolo-claude 1.0.0: the stable general harness release -- a docs pass
+    """rolo-claude 1.0.0 (the name this release actually shipped under --
+    see the [2.0.0] CHANGELOG entry for the rename itself): the stable
+    general harness release -- a docs pass
     summarising the 0.7.0/0.8.0 Databricks-correctness-and-tooling line,
     NOT a rename and NOT a new console-script alias (a separate
     `databricks-claude` repository was spun off instead; see the
@@ -148,17 +154,78 @@ def test_version_bumped_to_1_0_0_and_changelog_has_an_entry(ctx: Ctx):
 
 @test
 def test_version_bumped_to_1_0_1_and_changelog_has_an_entry(ctx: Ctx):
-    """rolo-claude 1.0.1: the hotfix release from the owner's first real
-    1.0.0 run on the Kali work VM (DNS down, then a live `/model`
-    screenshot from it once fixed) -- thirteen fixes, no behavior changes
-    beyond them; see the CHANGELOG's own [1.0.1] entry for the full list."""
-    from rolo_claude import __version__
-    ctx.check(f"__version__ is 1.0.1, got {__version__!r}", __version__ == "1.0.1")
+    """rolo-claude 1.0.1 (the name this release actually shipped under):
+    the hotfix release from the owner's first real 1.0.0 run on the Kali
+    work VM (DNS down, then a live `/model` screenshot from it once
+    fixed) -- thirteen fixes, no behavior changes beyond them; see the
+    CHANGELOG's own [1.0.1] entry for the full list. H14c's own pinning
+    shape, kept exact (checked against the CHANGELOG's own still-present
+    [1.0.1] entry, not the CURRENT version) now that the 2.0.0 rename has
+    bumped past it; see `test_version_bumped_to_2_0_0_and_changelog_has_
+    an_entry` below for THIS release's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
     ctx.check("CHANGELOG.md has a [1.0.1] entry", "[1.0.1]" in changelog)
     entry = changelog.split("[1.0.1]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("fail fast", "provider", "x509_strict"):
         ctx.check(f"the [1.0.1] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_2_0_0_and_changelog_has_an_entry(ctx: Ctx):
+    """Halo Harness 2.0.0: the rename release -- rolo-claude 1.0.1
+    continues unchanged as its own repository; this one is where every
+    later feature lands. THIS release's own version-bump pin (the single
+    `__version__ == ...` exact-match check lives in the newest-added test
+    only, per this file's own established convention -- see the 1.0.1
+    test above, which no longer carries one)."""
+    from halo_harness import __version__
+    ctx.check(f"__version__ is 2.0.0, got {__version__!r}", __version__ == "2.0.0")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [2.0.0] entry", "[2.0.0]" in changelog)
+    entry = changelog.split("[2.0.0]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("halo", "migration", "rename", "intro"):
+        ctx.check(f"the [2.0.0] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_changelog_2_0_0_mentions_the_fixpass_additions(ctx: Ctx):
+    """2.0.0 fixpass finding 3: the state-dir migration (and the deliberate
+    choice to leave no link behind -- item B), the env-file copy-forward,
+    the team.json fallback, the kept-recognizing-old markers, and the
+    stream-json version alias must all be mentioned somewhere in the
+    [2.0.0] entry -- not just fixed in code with no record of why."""
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = changelog.split("## [2.0.0]", 1)[1].split("\n## [", 1)[0].lower()
+    for phrase in ("no link is created", "content forward", "team.json", "provenance marker",
+                   "rolo_claude_version"):
+        ctx.check(f"the [2.0.0] entry mentions {phrase!r}", phrase in entry)
+
+
+@test
+def test_upgrading_section_exists_in_readme_and_install_md(ctx: Ctx):
+    """2.0.0 fixpass finding 3: an upgrader's install command breaks
+    outright against an already-installed rolo-claude 1.0.1 console
+    script (uv aborts, pipx silently refuses, pip silently overwrites) --
+    both README.md and INSTALL.md must say so plainly, with the exact
+    uninstall command for each of the three installers."""
+    readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
+    install = (REPO_DIR / "docs" / "harness" / "INSTALL.md").read_text(encoding="utf-8")
+    ctx.check("README.md names the upgrade path", "upgrading from" in readme.lower()
+              and "rolo-claude 1.0.1" in readme.lower())
+    ctx.check("INSTALL.md has a real '## Upgrading from rolo-claude 1.0.1' section",
+              "## Upgrading from rolo-claude 1.0.1" in install)
+    install_section = install.split("## Upgrading from rolo-claude 1.0.1", 1)[1].split("\n## ", 1)[0]
+    for cmd in ("uv tool uninstall rolo-claude", "pipx uninstall rolo-claude", "pip uninstall rolo-claude"):
+        ctx.check(f"INSTALL.md's upgrade section names the exact command {cmd!r}", cmd in install_section)
+    ctx.check("INSTALL.md's upgrade section also mentions the --force escape hatch", "--force" in install_section)
+    ctx.check("INSTALL.md's upgrade section says plainly that no link is left at the old location",
+              "no link is created" in install_section.lower())
+    ctx.check("...and that the separate 1.0.1 install must not be used again",
+              "1.0.1" in install_section and "must not" in install_section.lower())
+    ctx.check("INSTALL.md points an upgrader at the section before the install commands run",
+              install.index("## Upgrading from rolo-claude 1.0.1") < install.index("uv tool install --editable .\n```")
+              if "uv tool install --editable .\n```" in install
+              else install.index("## Upgrading from rolo-claude 1.0.1") < install.index("## Kali / Linux"))
 
 
 if __name__ == "__main__":

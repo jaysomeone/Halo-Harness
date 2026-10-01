@@ -32,7 +32,7 @@ test, TESTS = new_registry()
 
 @test
 def test_ask_user_question_schema_is_the_claude_code_shape(ctx: Ctx):
-    from rolo_claude.tools.ask_user_question import AskUserQuestionTool
+    from halo_harness.tools.ask_user_question import AskUserQuestionTool
 
     tool = AskUserQuestionTool()
     schema = tool.input_schema
@@ -50,8 +50,8 @@ def test_ask_user_question_schema_is_the_claude_code_shape(ctx: Ctx):
 @test
 def test_ask_user_question_new_shape_round_trip(ctx: Ctx):
     from pathlib import Path as _P
-    from rolo_claude.tools.ask_user_question import AskUserQuestionTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.tools.ask_user_question import AskUserQuestionTool
+    from halo_harness.tools.base import ToolContext
 
     tool = AskUserQuestionTool()
     input_data = {
@@ -69,8 +69,8 @@ def test_ask_user_question_new_shape_round_trip(ctx: Ctx):
 @test
 def test_ask_user_question_old_flat_shape_still_accepted(ctx: Ctx):
     from pathlib import Path as _P
-    from rolo_claude.tools.ask_user_question import AskUserQuestionTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.tools.ask_user_question import AskUserQuestionTool
+    from halo_harness.tools.base import ToolContext
 
     tool = AskUserQuestionTool()
     result = tool.run({"question": "which one?"}, ToolContext(cwd=_P(".")))
@@ -82,8 +82,8 @@ def test_ask_user_question_old_flat_shape_still_accepted(ctx: Ctx):
 @test
 def test_ask_user_question_multi_select_flag_accepted(ctx: Ctx):
     from pathlib import Path as _P
-    from rolo_claude.tools.ask_user_question import AskUserQuestionTool
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.tools.ask_user_question import AskUserQuestionTool
+    from halo_harness.tools.base import ToolContext
 
     tool = AskUserQuestionTool()
     input_data = {"questions": [
@@ -139,10 +139,10 @@ def _ask_question_scenario(h, body):
 
 
 def _new_ask_question_session(fh, mock, *, permission_engine):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     model = "or:mock/h6-ask-question"
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
@@ -166,7 +166,7 @@ def test_ask_user_question_dontask_mode_denies_without_ever_showing_a_card(ctx: 
     documented surface for this)."""
     from tests.helpers.fake_home import build_fake_home
     from tests.helpers.mock_openai import MockUpstream, SCENARIOS
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -201,7 +201,7 @@ def test_ask_user_question_default_mode_still_shows_a_card(ctx: Ctx):
     tool's own run(), print mode's error path)."""
     from tests.helpers.fake_home import build_fake_home
     from tests.helpers.mock_openai import MockUpstream, SCENARIOS
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -248,8 +248,8 @@ def test_ask_user_question_default_mode_still_shows_a_card(ctx: Ctx):
 
 @test
 def test_stream_json_sink_tags_nested_assistant_lines(ctx: Ctx):
-    from rolo_claude import events as ev
-    from rolo_claude.output import StreamJsonSink
+    from halo_harness import events as ev
+    from halo_harness.output import StreamJsonSink
 
     out = io.StringIO()
     sink = StreamJsonSink(session_id="s1", cwd="/x", model="m", permission_mode="auto", stream=out)
@@ -302,8 +302,8 @@ def test_stream_json_sink_tags_nested_assistant_lines(ctx: Ctx):
 
 @test
 def test_print_mode_sink_ignores_subagent_text_in_plain_output(ctx: Ctx):
-    from rolo_claude import events as ev
-    from rolo_claude.output import PrintModeSink
+    from halo_harness import events as ev
+    from halo_harness.output import PrintModeSink
 
     out = io.StringIO()
     sink = PrintModeSink(output_format="text", stream=out)
@@ -329,7 +329,7 @@ def test_print_mode_sink_ignores_subagent_text_in_plain_output(ctx: Ctx):
 
 @test
 def test_new_tools_registered_in_default_catalog(ctx: Ctx):
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
     names = set(reg.names())
@@ -342,8 +342,8 @@ def test_new_tools_registered_in_default_catalog(ctx: Ctx):
 @test
 def test_unknown_tool_dispatch_still_reports_cleanly(ctx: Ctx):
     from pathlib import Path as _P
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
     result = reg.dispatch("NotARealTool", {}, ToolContext(cwd=_P(".")))
@@ -354,7 +354,7 @@ def test_unknown_tool_dispatch_still_reports_cleanly(ctx: Ctx):
 
 @test
 def test_run_print_mode_rejects_invalid_session_id(ctx: Ctx):
-    from rolo_claude.headless import run_print_mode
+    from halo_harness.headless import run_print_mode
 
     exit_code = run_print_mode(prompt="hi", cwd=Path(tempfile.mkdtemp(prefix="h6-sid-")), session_id="not-a-uuid")
     ctx.check("an invalid --session-id exits 2 before touching anything else", exit_code == 2)
@@ -364,8 +364,8 @@ def test_run_print_mode_rejects_invalid_session_id(ctx: Ctx):
 
 @test
 def test_agents_md_fallback_when_no_claude_md_exists(ctx: Ctx):
-    from rolo_claude.config.claude_md import discover_instructions
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.claude_md import discover_instructions
+    from halo_harness.config.settings import Settings
 
     root = Path(tempfile.mkdtemp(prefix="h6-agentsmd-"))
     (root / "AGENTS.md").write_text("# Agents.md only, no CLAUDE.md here\n", encoding="utf-8")
@@ -387,7 +387,7 @@ def test_agents_md_fallback_when_no_claude_md_exists(ctx: Ctx):
 
 @test
 def test_hook_runner_subagent_payload_carries_agent_id_and_type(ctx: Ctx):
-    from rolo_claude.hooks import HookRunner
+    from halo_harness.hooks import HookRunner
 
     runner = HookRunner({}, cwd=Path(tempfile.mkdtemp(prefix="h6-hooks-")), session_id="sess1",
                          transcript_path="/x/sess1.jsonl", agent_id="agent-42", agent_type="Explore")
@@ -400,7 +400,7 @@ def test_hook_runner_subagent_payload_carries_agent_id_and_type(ctx: Ctx):
 
 @test
 def test_hook_runner_subagent_stop_uses_the_shared_stop_cap_machinery(ctx: Ctx):
-    from rolo_claude.hooks import HookRunner
+    from halo_harness.hooks import HookRunner
 
     # No hooks configured -- has_hooks/run_stop must be complete no-ops,
     # never raise, exactly like a bare Session's own "Stop" handling.

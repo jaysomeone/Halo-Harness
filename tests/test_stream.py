@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_openai import MockUpstream, assemble_message, events_from_stream_completion, text_of, validate_anthropic_stream
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured, UpstreamError, stream_completion
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured, UpstreamError, stream_completion
 
 test, TESTS = new_registry()
 

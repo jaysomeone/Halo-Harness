@@ -1,6 +1,6 @@
 """tests.test_v2a_work_matrix_probes -- V2a: the two open-question probes
 `doctor --work --probe-all --tools` now runs, end to end, through
-`rolo_claude.work_matrix.run_work_matrix` against the extended
+`halo_harness.work_matrix.run_work_matrix` against the extended
 tests/helpers/mock_databricks.py:
 
   1. "reasoning replay after a tool call per family" -- `ProbeRow.
@@ -33,9 +33,9 @@ class _Env:
                         "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN")}
         d = Path(tempfile.mkdtemp(prefix="v2a-work-matrix-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -65,8 +65,8 @@ def test_v2a_cached_path_type_none_on_first_discovery(ctx: Ctx):
     wrote to disk. A name unique to this test file sidesteps that shared
     global entirely, matching how every other test in this file already
     avoids collisions."""
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -91,9 +91,9 @@ def test_v2a_cached_path_type_shows_a_route_split(ctx: Ctx):
     cache said going in) now visibly differs from `path_type` (what this
     run actually used and re-cached), exactly the "route split" open
     question a human reviewing the live report needs to see."""
-    from rolo_claude.providers.databricks import dbx_cache_set_route, write_dbx_endpoints_json
-    from rolo_claude.providers.dbx_routing import chat_route_candidates
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import dbx_cache_set_route, write_dbx_endpoints_json
+    from halo_harness.providers.dbx_routing import chat_route_candidates
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -118,8 +118,8 @@ def test_v2a_cached_path_type_shows_a_route_split(ctx: Ctx):
 
 @test
 def test_v2a_reasoning_replay_ok_true_openai_dialect(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -139,8 +139,8 @@ def test_v2a_reasoning_replay_ok_true_openai_dialect(ctx: Ctx):
 
 @test
 def test_v2a_reasoning_replay_ok_true_anthropic_dialect(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -162,8 +162,8 @@ def test_v2a_reasoning_replay_ok_true_anthropic_dialect(ctx: Ctx):
 
 @test
 def test_v2a_reasoning_replay_ok_false_when_upstream_rejects_it(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -184,8 +184,8 @@ def test_v2a_reasoning_replay_ok_false_when_upstream_rejects_it(ctx: Ctx):
 
 @test
 def test_v2a_reasoning_replay_ok_none_without_tools(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:
@@ -209,8 +209,8 @@ def test_v2a_reasoning_replay_ok_none_without_tools(ctx: Ctx):
 
 @test
 def test_v2a_report_json_carries_both_open_question_fields_no_secrets(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
     mock = MockDatabricks().start()
     try:
         with _Env() as env:

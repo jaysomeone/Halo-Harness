@@ -1,8 +1,8 @@
-"""rolo_claude.providers.models_dev -- models.dev `api.json` fetch + cache
+"""halo_harness.providers.models_dev -- models.dev `api.json` fetch + cache
 (H8 scope C). A public, unauthenticated, unversioned metadata catalog
 (https://models.dev/api.json, ~5 MB, 200+ providers) that the plan uses "for
 Databricks rows and to cross-check model_table.json" -- fetched and cached
-to `<state_dir>/models-dev.json` by `rolo-claude models --refresh`
+to `<state_dir>/models-dev.json` by `halo models --refresh`
 (catalog_cli.py), same lifecycle as `models.json`/`dbx-endpoints.json`.
 
 The vendored PACKAGE fallback (`providers/catalog/models_dev_databricks_
@@ -37,14 +37,14 @@ def fetch_models_dev(base_url: str = MODELS_DEV_BASE_URL) -> dict:
     (header-less, `http.client`-based) request happened to pass today, but
     that's the CDN's own current rule, not a guarantee -- naming ourselves
     properly is what curl/every other client already does."""
-    from rolo_claude import __version__
-    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
+    from halo_harness import __version__
+    from halo_harness.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     tls = parsed.scheme == "https"
     path = parsed.path.rstrip("/") + "/api.json"
-    headers = {"Accept-Encoding": "identity", "User-Agent": f"rolo-claude/{__version__}"}
+    headers = {"Accept-Encoding": "identity", "User-Agent": f"halo/{__version__}"}
     conn = None
     try:
         conn = open_upstream(host, port, tls)
@@ -74,7 +74,7 @@ def fetch_models_dev(base_url: str = MODELS_DEV_BASE_URL) -> dict:
 def refresh_models_dev_cache(state_dir) -> "tuple[bool, str]":
     """1.0.1 hotfix 12: `fetch_models_dev` + `write_models_dev_json` in one
     best-effort call -- used by EVERY `--refresh`/`/models refresh` surface
-    now (not just `rolo-claude models --refresh`, which already did this
+    now (not just `halo models --refresh`, which already did this
     directly), so a Databricks row's ctx/output/price columns (sourced from
     this SAME cache -- `model_display.databricks_row_fields`) get fresh
     data whenever the user refreshes from any of them, not only the CLI.

@@ -5,7 +5,7 @@ refresh_openrouter_catalog_if_stale`, `providers.anthropic_catalog`'s new
 live `/v1/models` cache, the combined `providers.catalog_refresh.
 refresh_all_enabled_catalogs`, `Controller.list_models()` building a
 provider's group from its cache regardless of the CURRENT model, and
-`rolo-claude models --refresh`/`/models refresh` hitting every enabled
+`halo models --refresh`/`/models refresh` hitting every enabled
 provider.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ _PROVIDER_ENV_VARS = (
 
 class _Env:
     """Snapshots/restores every provider variable this module touches, plus
-    BRIDGE_TEST_HOME/BRIDGE_STATE_DIR -- the real `~/.rolo-claude` is never
+    BRIDGE_TEST_HOME/BRIDGE_STATE_DIR -- the real `~/.halo` is never
     written. `BRIDGE_TEST_CC_AUTH_STATUS` defaults to a deterministic
     not-logged-in shape (see test_h15_provider_enablement.py's own `_Env`
     for why merely popping it is not enough on a box with a real claude.ai
@@ -42,12 +42,12 @@ class _Env:
         self._saved = {k: os.environ.get(k) for k in (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR") + _PROVIDER_ENV_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15-catalog-refresh-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         for k in _PROVIDER_ENV_VARS:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         self.home = d
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -94,7 +94,7 @@ class _FakeSession:
 
 @test
 def test_refresh_openrouter_catalog_if_stale_populates_an_empty_cache(ctx: Ctx):
-    from rolo_claude.providers.databricks import load_models_json, refresh_openrouter_catalog_if_stale
+    from halo_harness.providers.databricks import load_models_json, refresh_openrouter_catalog_if_stale
     mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     try:
         with _Env() as env:
@@ -114,7 +114,7 @@ def test_refresh_openrouter_catalog_if_stale_populates_an_empty_cache(ctx: Ctx):
 
 @test
 def test_refresh_openrouter_catalog_if_stale_skips_a_fresh_cache(ctx: Ctx):
-    from rolo_claude.providers.databricks import refresh_openrouter_catalog_if_stale, write_models_json
+    from halo_harness.providers.databricks import refresh_openrouter_catalog_if_stale, write_models_json
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         write_models_json(env.state_dir, [{"id": "already/cached", "context_length": 1000}])
@@ -124,7 +124,7 @@ def test_refresh_openrouter_catalog_if_stale_skips_a_fresh_cache(ctx: Ctx):
 
 @test
 def test_refresh_openrouter_catalog_if_stale_none_when_not_configured(ctx: Ctx):
-    from rolo_claude.providers.databricks import refresh_openrouter_catalog_if_stale
+    from halo_harness.providers.databricks import refresh_openrouter_catalog_if_stale
     with _Env() as env:
         ctx.check("no key -> None (nothing to refresh)",
                   refresh_openrouter_catalog_if_stale(env.state_dir) is None)
@@ -132,7 +132,7 @@ def test_refresh_openrouter_catalog_if_stale_none_when_not_configured(ctx: Ctx):
 
 @test
 def test_fetch_anthropic_models_and_cache_round_trip(ctx: Ctx):
-    from rolo_claude.providers.anthropic_catalog import (
+    from halo_harness.providers.anthropic_catalog import (
         fetch_anthropic_models, load_ant_models_json, refresh_anthropic_catalog_if_stale,
     )
     mock = MockGetEndpoints({"/v1/models": (200, _ANT_MODELS_BODY)}).start()
@@ -153,7 +153,7 @@ def test_fetch_anthropic_models_and_cache_round_trip(ctx: Ctx):
 
 @test
 def test_refresh_anthropic_catalog_if_stale_none_when_not_configured(ctx: Ctx):
-    from rolo_claude.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale
+    from halo_harness.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale
     with _Env() as env:
         ctx.check("no key -> None", refresh_anthropic_catalog_if_stale(env.state_dir) is None)
 
@@ -163,7 +163,7 @@ def test_refresh_anthropic_catalog_if_stale_boot_time_monotonic_is_never_a_false
     """M1 (1.0.1 final pass): same boot-time monotonic() fix as
     providers.databricks's own refresh pair -- a state_dir with NO recorded
     failure must never be treated as having just failed at t=0."""
-    import rolo_claude.providers.anthropic_catalog as ant_mod
+    import halo_harness.providers.anthropic_catalog as ant_mod
     mock = MockGetEndpoints({"/v1/models": (200, _ANT_MODELS_BODY)}).start()
     try:
         with _Env() as env:
@@ -192,8 +192,8 @@ def test_list_models_openrouter_group_populated_after_catalog_refresh(ctx: Ctx):
     """rolo's own Mac report: "/model showed one OpenRouter row" because
     models.json had never been fetched -- after a refresh, the real
     catalog populates the group, not just a synthesized current-model row."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.databricks import refresh_openrouter_catalog_if_stale
+    from halo_harness.controller import Controller
+    from halo_harness.providers.databricks import refresh_openrouter_catalog_if_stale
     mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     try:
         with _Env() as env:
@@ -215,10 +215,10 @@ def test_list_models_openrouter_group_unchanged_after_switching_to_cc_opus(ctx: 
     current model to a DIFFERENT provider (cc:opus) must never make an
     already-cached OpenRouter group disappear."""
     import json as json_mod
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
-    from rolo_claude.providers.databricks import refresh_openrouter_catalog_if_stale
-    from rolo_claude.providers.enablement import enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.providers.databricks import refresh_openrouter_catalog_if_stale
+    from halo_harness.providers.enablement import enable
     mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     try:
         with _Env() as env:
@@ -245,14 +245,14 @@ def test_list_models_openrouter_group_unchanged_after_switching_to_cc_opus(ctx: 
 
 
 # ---------------------------------------------------------------------------
-# rolo-claude models --refresh / /models refresh hit every enabled provider.
+# halo models --refresh / /models refresh hit every enabled provider.
 # ---------------------------------------------------------------------------
 
 @test
 def test_cli_models_refresh_hits_both_openrouter_and_databricks_mocks(ctx: Ctx):
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.catalog_cli import cmd_models
+    from halo_harness.catalog_cli import cmd_models
     from tests.helpers.mock_databricks import MockDatabricks
     or_mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     dbx_mock = MockDatabricks().start()
@@ -276,7 +276,7 @@ def test_cli_models_refresh_hits_both_openrouter_and_databricks_mocks(ctx: Ctx):
 
 @test
 def test_slash_models_refresh_hits_both_openrouter_and_databricks_mocks(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_models
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_models
     from tests.helpers.mock_databricks import MockDatabricks
     or_mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     dbx_mock = MockDatabricks().start()
@@ -329,9 +329,9 @@ class _FakeAppForCatalogWorker:
 
 @test
 def test_catalog_auto_refresh_worker_reads_the_controllers_effective_env_not_bare_os_environ(ctx: Ctx):
-    from rolo_claude.providers.enablement import enable
-    from rolo_claude.providers.databricks import load_models_json
-    from rolo_claude.tui.slash import catalog_auto_refresh_worker
+    from halo_harness.providers.enablement import enable
+    from halo_harness.providers.databricks import load_models_json
+    from halo_harness.tui.slash import catalog_auto_refresh_worker
     mock = MockGetEndpoints({"/api/v1/models": (200, _OR_MODELS_BODY)}).start()
     try:
         with _Env() as env:
@@ -361,9 +361,9 @@ def test_catalog_auto_refresh_worker_never_resolves_from_bare_os_environ_when_ef
     NOT be picked up once a controller/settings is attached -- only its own
     effective_env counts (monkeypatch-free: proven by a real, otherwise-
     valid ambient key being ignored)."""
-    from rolo_claude.providers.enablement import enable
-    from rolo_claude.providers.databricks import load_models_json
-    from rolo_claude.tui.slash import catalog_auto_refresh_worker
+    from halo_harness.providers.enablement import enable
+    from halo_harness.providers.databricks import load_models_json
+    from halo_harness.tui.slash import catalog_auto_refresh_worker
     with _Env() as env:
         enable("openrouter")
         os.environ["OPENROUTER_API_KEY"] = "sk-or-should-be-ignored"

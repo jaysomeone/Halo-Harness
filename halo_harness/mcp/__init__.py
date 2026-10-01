@@ -1,8 +1,8 @@
-"""rolo_claude.mcp -- the MCP client (H3 scope A), built on the official
+"""halo_harness.mcp -- the MCP client (H3 scope A), built on the official
 `mcp` SDK (`pip install "mcp>=2.2,<3"`). This package is IMPORTABLE even
 when `mcp` isn't installed: every module here that actually touches the SDK
 imports it lazily, inside function bodies, never at module import time --
-`rolo_claude.mcp.available()` is the one place that checks, so every caller
+`halo_harness.mcp.available()` is the one place that checks, so every caller
 (manager.py's own resolution path, headless.py, doctor.py) asks it instead
 of poking at `sys.modules` itself.
 

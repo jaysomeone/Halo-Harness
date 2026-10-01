@@ -3,13 +3,13 @@
 V2c (H15): a small, fixed vocabulary -- `orchestrator`, `coder`, `reviewer`,
 `researcher`, `small` -- that lets a team point different kinds of work at
 different models (cheap for exploration, strong for planning/review) without
-editing every agent file by hand. Verified against `rolo_claude/roles.py`,
+editing every agent file by hand. Verified against `halo_harness/roles.py`,
 `config/agents_md.py`, `agent/subagent.py`, `tools/agent.py`, `cli.py`,
 `commands/builtins.py`, and `telemetry.py`. See [MODELS.md](MODELS.md) for
 how a model reference itself resolves, [DATABRICKS.md](DATABRICKS.md)'s
 work-matrix section for endpoint health (a separate concern), and that same
 doc's **End-to-end team workflow** section for how a shared `team.json`'s
-own `roles` table actually gets onto everyone's box via `rolo-claude init
+own `roles` table actually gets onto everyone's box via `halo init
 --provider databricks` (the deprecated `--preset work` still works too).
 
 ## The five roles
@@ -24,11 +24,11 @@ own `roles` table actually gets onto everyone's box via `rolo-claude init
 
 ## Where the table lives
 
-`~/.rolo-claude/config.json`'s own `roles` key (`roles.<name>`, dotted-path,
+`~/.halo/config.json`'s own `roles` key (`roles.<name>`, dotted-path,
 the same convention `databricks.gateway.<endpoint>` uses) -- read/written with
-`rolo-claude config get/set roles.<name> ...` or hand-edited. A shared
+`halo config get/set roles.<name> ...` or hand-edited. A shared
 `team.json`'s own `roles` map (see [DATABRICKS.md](DATABRICKS.md)'s team
-preset section) is seeded into config.json exactly once, at `rolo-claude init
+preset section) is seeded into config.json exactly once, at `halo init
 --preset work` time, by the SAME idempotent idiom `gateway_preference` already
 uses (`roles.py::apply_role_preference`): a role the user already configured
 locally is never overwritten by the team default. Neither file ever holds
@@ -81,7 +81,7 @@ after argument parsing, before either `-p` or the TUI starts building a
 session -- a bad `NAME=MODEL` (no `=`, an unrecognized role name, an empty
 model) is a clean exit-2 usage error, never a traceback.
 ```sh
-rolo-claude -p --role researcher=or:deepseek/deepseek-v4.1-flash \
+halo -p --role researcher=or:deepseek/deepseek-v4.1-flash \
   "use the Researcher agent to summarize this repo"
 ```
 

@@ -9,8 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.prompt import build_system_prompt, family_notation
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.agent.prompt import build_system_prompt, family_notation
+from halo_harness.tools.registry import ToolRegistry
 
 test, TESTS = new_registry()
 

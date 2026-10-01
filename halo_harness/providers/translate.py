@@ -1,4 +1,4 @@
-"""rolo_claude.providers.translate -- Anthropic Messages -> OpenAI chat
+"""halo_harness.providers.translate -- Anthropic Messages -> OpenAI chat
 request translation (anthropic_to_openai and the message-flattening
 algorithm). Moved out of bridge.py unchanged in the H0 package split; see
 wip/SIGNATURES.md part2 for the full message-flattening algorithm contract.
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 
-from rolo_claude.providers.config import estimate_tokens
-from rolo_claude.providers.routing import (
+from halo_harness.providers.config import estimate_tokens
+from halo_harness.providers.routing import (
     Route,
     anthropic_tool_to_openai,
     clamp_max_tokens,

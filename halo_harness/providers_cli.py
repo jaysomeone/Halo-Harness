@@ -1,4 +1,4 @@
-"""rolo_claude.providers_cli -- `rolo-claude providers` subcommand (H15
+"""halo_harness.providers_cli -- `halo providers` subcommand (H15
 item 21.5, table columns updated by the H15 part 2 addendum): a table
 (status -- `auto (detected from <source>)` / `disabled by you` / `enabled
 by you` / `not set up`, reachable, cached model count) plus `enable
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from rolo_claude.providers.enablement import (
+from halo_harness.providers.enablement import (
     PROVIDER_NAMES, canonical, credentials_present, credentials_source, disable, enable, enablement_display,
     is_enabled, label_for,
 )
@@ -23,8 +23,8 @@ def _model_count(name: str) -> "int | None":
     provider has no catalog concept of its own (TypeSafe)."""
     if name == "typesafe":
         return None
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.init_providers import model_entries_for_provider
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.init_providers import model_entries_for_provider
     picker_name = "claude" if name == "claude_subscription" else name
     try:
         return len(model_entries_for_provider(picker_name, bridge_home()))
@@ -50,8 +50,8 @@ def provider_rows() -> "list[dict]":
     listing_effective_env()`, computed once for the whole table, so a
     credential living only in a settings.json `env` block is seen here the
     same way a real session would resolve it."""
-    from rolo_claude.providers.config import listing_effective_env
-    from rolo_claude.providers.reachability import reachability_tag
+    from halo_harness.providers.config import listing_effective_env
+    from halo_harness.providers.reachability import reachability_tag
     env = listing_effective_env()
     rows = []
     for name in PROVIDER_NAMES:
@@ -74,7 +74,7 @@ def format_providers_table(rows: "list[dict]") -> str:
     # H15 part 2 addendum 4: the same balance figure the status bar/`/cost`
     # show, with the key label and reading time -- appended once, after the
     # table, when a fetch has ever succeeded (OpenRouter only, this round).
-    from rolo_claude.providers.openrouter_account import format_balance_line
+    from halo_harness.providers.openrouter_account import format_balance_line
     balance_line = format_balance_line()
     if balance_line:
         lines.append("")
@@ -89,13 +89,11 @@ def cmd_providers(argv: list) -> int:
     # "not set up" here while the TUI's own `/providers` (reached through
     # `Controller`/`HeadlessFacade`, both of which load it earlier in
     # startup) correctly treated it as enabled.
-    import os
-    from pathlib import Path
-    from rolo_claude.config.paths import home
-    from rolo_claude.providers.config import load_env_file
-    load_env_file(Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env")))
+    # 2.0.0 fixpass finding 4: the new env file, then the legacy one too.
+    from halo_harness.providers.config import load_provider_env_files
+    load_provider_env_files()
 
-    from rolo_claude.providers.enablement import ensure_providers_migrated
+    from halo_harness.providers.enablement import ensure_providers_migrated
     migration_note = ensure_providers_migrated()
     if migration_note:
         print(migration_note)
@@ -105,17 +103,17 @@ def cmd_providers(argv: list) -> int:
         return 0
     action = argv[0]
     if action in ("-h", "--help"):
-        print("Usage: rolo-claude providers [list|enable <name>|disable <name>|setup <name>]")
+        print("Usage: halo providers [list|enable <name>|disable <name>|setup <name>]")
         print(f"Providers: {', '.join(PROVIDER_NAMES)}")
         return 0
     if action in ("enable", "disable"):
         if len(argv) < 2:
-            print(f"rolo-claude providers {action}: needs a provider name "
+            print(f"halo providers {action}: needs a provider name "
                   f"({', '.join(PROVIDER_NAMES)})", file=sys.stderr)
             return 2
         name = canonical(argv[1])
         if name not in PROVIDER_NAMES:
-            print(f"rolo-claude providers {action}: unknown provider {argv[1]!r} "
+            print(f"halo providers {action}: unknown provider {argv[1]!r} "
                   f"(expected one of {', '.join(PROVIDER_NAMES)})", file=sys.stderr)
             return 2
         if action == "enable":
@@ -127,21 +125,21 @@ def cmd_providers(argv: list) -> int:
         return 0
     if action == "setup":
         if len(argv) < 2:
-            print(f"rolo-claude providers setup: needs a provider name ({', '.join(PROVIDER_NAMES)})",
+            print(f"halo providers setup: needs a provider name ({', '.join(PROVIDER_NAMES)})",
                   file=sys.stderr)
             return 2
         name = canonical(argv[1])
         if name not in PROVIDER_NAMES:
-            print(f"rolo-claude providers setup: unknown provider {argv[1]!r} "
+            print(f"halo providers setup: unknown provider {argv[1]!r} "
                   f"(expected one of {', '.join(PROVIDER_NAMES)})", file=sys.stderr)
             return 2
         if name == "typesafe":
             print("TypeSafe is a key-only placeholder for a later feature -- there is no setup flow yet "
-                  "(set TYPESAFE_API_KEY in the env file, then `rolo-claude providers enable typesafe`).",
+                  "(set TYPESAFE_API_KEY in the env file, then `halo providers enable typesafe`).",
                   file=sys.stderr)
             return 2
         picker_name = "claude" if name == "claude_subscription" else name
-        from rolo_claude.init_cli import cmd_init
+        from halo_harness.init_cli import cmd_init
         return cmd_init(["--provider", picker_name] + argv[2:])
-    print(f"rolo-claude providers: unrecognized arguments: {' '.join(argv)}", file=sys.stderr)
+    print(f"halo providers: unrecognized arguments: {' '.join(argv)}", file=sys.stderr)
     return 2

@@ -28,12 +28,12 @@ test, TESTS = new_registry()
 
 
 def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model"):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
         "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
     })
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model,
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model,
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -236,9 +236,9 @@ def test_read_only_pool_runs_concurrently_and_preserves_call_order(ctx: Ctx):
     finishes first."""
     import threading
     import time as time_mod
-    from rolo_claude.tools.base import Tool, ToolContext
-    from rolo_claude.tools.base import ToolResult as TR
-    from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+    from halo_harness.tools.base import Tool, ToolContext
+    from halo_harness.tools.base import ToolResult as TR
+    from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
 
     completion_order = []
     lock = threading.Lock()
@@ -275,9 +275,9 @@ def test_read_only_batch_single_call_routes_through_the_same_wait(ctx: Ctx):
     must still be abortable via ctx.abort, same as a batch of 2+."""
     import threading
     import time as time_mod
-    from rolo_claude.tools.base import Tool, ToolContext
-    from rolo_claude.tools.base import ToolResult as TR
-    from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+    from halo_harness.tools.base import Tool, ToolContext
+    from halo_harness.tools.base import ToolResult as TR
+    from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
 
     class _HangingReadOnlyTool(Tool):
         name = "HangRO"
@@ -303,9 +303,9 @@ def test_read_only_batch_per_call_tool_use_id(ctx: Ctx):
     """finding 5 must-do: each pooled call gets its OWN tool_use_id via a
     3-tuple `(name, input, tool_use_id)`, not one shared ctx with
     tool_use_id=None for the whole batch."""
-    from rolo_claude.tools.base import Tool, ToolContext
-    from rolo_claude.tools.base import ToolResult as TR
-    from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
+    from halo_harness.tools.base import Tool, ToolContext
+    from halo_harness.tools.base import ToolResult as TR
+    from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
 
     seen_ids = []
 
@@ -376,10 +376,10 @@ def _make_session(fh, mock, *, scenario: str, extra_profile_fields=None):
     404s every request. Mirrors tests/test_loop_tools.py's own
     test_interrupt_leaves_no_unanswered_tool_use pattern."""
     import dataclasses
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session as _Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session as _Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     model_label = f"mock/{scenario}"
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -566,6 +566,21 @@ def test_loop_breaker_still_works_through_the_new_pipeline(ctx: Ctx):
             target.unlink()
         except OSError:
             pass
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

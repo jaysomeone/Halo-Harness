@@ -1,6 +1,6 @@
-# H8 brief — background jobs, images/vision, notebooks, catalog vendoring, README (rolo-claude)
+# H8 brief — background jobs, images/vision, notebooks, catalog vendoring, README (halo)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**).
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**).
 Baseline = the U5 commit on master, all suites green on Windows and WSL. Do not commit.
 
 ## Read first
@@ -29,9 +29,9 @@ B. **Images/vision**: Read returns `image` blocks for png/jpg/gif/webp when `pro
    downscale to ≤ 1 568 px and ≤ 5 MB (OpenCode's rule), omit with a note otherwise; pasted/attached
    images in the TUI (`--file`-style attach via `@path` for images), MCP image results, screenshots
    from Playwright/Chrome shown as cards; `NotebookEdit` tool (Claude Code's `.ipynb` cell editor).
-C. **Catalog vendoring**: `rolo-claude models --refresh` pulls OpenRouter `/api/v1/models` and
-   models.dev `api.json` into `~/.rolo-claude/` with a vendored fallback copy in the package
-   (`rolo_claude/providers/catalog/`), so profiles resolve offline (work box); Databricks endpoint
+C. **Catalog vendoring**: `halo models --refresh` pulls OpenRouter `/api/v1/models` and
+   models.dev `api.json` into `~/.halo/` with a vendored fallback copy in the package
+   (`halo_harness/providers/catalog/`), so profiles resolve offline (work box); Databricks endpoint
    list cached by `probe`; `doctor` shows catalog ages.
 D. **Truncation and prompts**: Bash/tool output cap 2 000 lines / 50 KB with OpenCode's saved-file
    hint text (in addition to the token-based spill); Kimi-specific prompt block from OpenCode's
@@ -44,7 +44,7 @@ F. **Packaging for the work box**: `tools/vendor_wheels.py` (manylinux cp311/cp3
    textual/rich/mcp/pydantic-core into a gitignored `wheels/`), `pip install --no-index --find-links`
    recipe in INSTALL.md, `uv tool install` path, `ug`-compatibility note (Databricks' unity-gateway CLI
    writes `~/.claude/ucode-settings.json`; read it if present for the gateway URL/token — same
-   discovery chain), a `rolo-claude doctor --work` preset that checks VPN reachability of the
+   discovery chain), a `halo doctor --work` preset that checks VPN reachability of the
    Databricks host, token validity (`GET /api/2.0/serving-endpoints` or a 1-token completion), and the
    two open questions from the plan (reasoning replay forwarded? route split per model?) as
    runnable probes with clear output.
@@ -64,7 +64,7 @@ Databricks host.
 All suites green on Windows and WSL; live: `-p "start sleep 20 in the background, then read
 README.md and tell me the line count, then tell me when the background job finishes" --permission-mode
 auto` → line count first, completion notice later; a Playwright screenshot rendered as an image
-card in the TUI; `rolo-claude models --refresh`; `rolo-claude doctor --work` (offline here: reports
+card in the TUI; `halo models --refresh`; `halo doctor --work` (offline here: reports
 unreachable with the VPN hint); README reviewed by Fable.
 Report ≤ 50 lines. Rules as in the other briefs.
 
@@ -76,6 +76,6 @@ Report ≤ 50 lines. Rules as in the other briefs.
   coverage and write the VPN checklist into `doctor --work` output.
 - Wire the `count_tokens` relay (`providers/http.py` has it, nothing calls it): use it for the
   compaction gate when the route supports it (Databricks/Anthropic), with the estimator as fallback.
-- Verify H5b's three cheap items landed: `compactionModel` from `~/.rolo-claude/config.json` used by
+- Verify H5b's three cheap items landed: `compactionModel` from `~/.halo/config.json` used by
   the summariser; `anthropic-ratelimit-*-reset` parsed as RFC 3339; `_step` caps `Retry-After` at
   300 s instead of 60 s (logged).

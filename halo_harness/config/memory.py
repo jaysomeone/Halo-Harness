@@ -4,8 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from rolo_claude.config.frontmatter import parse as parse_frontmatter
-from rolo_claude.config.paths import memory_dir
+from halo_harness.config.frontmatter import parse as parse_frontmatter
+from halo_harness.config.paths import memory_dir
 
 
 @dataclass
@@ -28,7 +28,7 @@ def render_memory_content(*, name: str, description: str, type: str, body: str,
                            origin_session_id: "str | None" = None,
                            provenance_comment: "str | None" = None) -> "tuple[str, str]":
     """The pure formatting half of `MemoryStore.write` -- extracted so
-    `rolo_claude.improve`'s diff-preview path (an ImproveCard showing what
+    `halo_harness.improve`'s diff-preview path (an ImproveCard showing what
     an UPDATE to an already-provenanced memory file would look like) can
     render the exact same bytes without touching the filesystem. Returns
     `(content, safe_description)` -- Claude Code's exact frontmatter shape,
@@ -210,7 +210,7 @@ class MemoryStore:
         then appends one `update_index` line. Raises `FileExistsError` if
         `filename` already exists -- this is a raw filesystem primitive;
         "only NEW files, never overwrite a user-authored one" is
-        `rolo_claude.improve.apply`'s policy, enforced before this is ever
+        `halo_harness.improve.apply`'s policy, enforced before this is ever
         called."""
         if not filename.endswith(".md"):
             filename += ".md"

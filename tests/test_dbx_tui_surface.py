@@ -26,7 +26,7 @@ class _Env:
                         "BRIDGE_TEST_CC_AUTH_STATUS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-tui-surface-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         # H15 part 2 addendum: `anthropic`/`openrouter`/`typesafe` now
         # auto-enable straight from these keys (providers/enablement.py) --
@@ -44,7 +44,7 @@ class _Env:
         # a real `claude` binary/login, and never pay a real subprocess's
         # worth of latency.
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -75,13 +75,13 @@ def _parsed(name, fm_name, api_types, task="llm/v1/chat"):
 # ---------------------------------------------------------------------------
 
 def _facade():
-    from rolo_claude.commands.builtins import HeadlessFacade
+    from halo_harness.commands.builtins import HeadlessFacade
     return HeadlessFacade(cwd=Path.cwd())
 
 
 @test
 def test_cmd_models_headless_not_configured(ctx: Ctx):
-    from rolo_claude.commands.builtins import _cmd_models
+    from halo_harness.commands.builtins import _cmd_models
     with _Env():
         for k in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
@@ -92,8 +92,8 @@ def test_cmd_models_headless_not_configured(ctx: Ctx):
 
 @test
 def test_cmd_models_headless_bare_reports_cache_state(ctx: Ctx):
-    from rolo_claude.commands.builtins import _cmd_models
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.commands.builtins import _cmd_models
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         os.environ["BRIDGE_DBX_BASE_URL"] = "https://your-workspace.cloud.databricks.com"
         os.environ["BRIDGE_DBX_TOKEN"] = "tok"
@@ -106,7 +106,7 @@ def test_cmd_models_headless_bare_reports_cache_state(ctx: Ctx):
 
 @test
 def test_cmd_models_and_dbx_refresh_against_mock(ctx: Ctx):
-    from rolo_claude.commands.builtins import _cmd_dbx, _cmd_models
+    from halo_harness.commands.builtins import _cmd_dbx, _cmd_models
     mock = MockDatabricks().start()
     mock.set_endpoints_catalog([_raw("databricks-kimi-k3", "kimi-k3", ["mlflow/v1/chat/completions"])])
     try:
@@ -123,8 +123,8 @@ def test_cmd_models_and_dbx_refresh_against_mock(ctx: Ctx):
 
 @test
 def test_cmd_models_refresh_failure_reports_and_keeps_cache_count(ctx: Ctx):
-    from rolo_claude.commands.builtins import _cmd_models
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.commands.builtins import _cmd_models
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     mock = MockDatabricks().start()
     mock.set_endpoints_error("403-ip")
     try:
@@ -160,13 +160,13 @@ class _FakeSession:
 
 
 def _controller(state_dir):
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     return Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=state_dir, routes={})
 
 
 @test
 def test_list_models_includes_databricks_grouped_by_family_hides_non_chat(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         # H15 part 2 addendum: Databricks now auto-enables from real
         # credentials, not "no providers block at all" -- this test cares

@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.log import SessionLog
-from rolo_claude.improve import evidence
+from halo_harness.agent.log import SessionLog
+from halo_harness.improve import evidence
 
 test, TESTS = new_registry()
 

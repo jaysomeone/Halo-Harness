@@ -36,7 +36,7 @@ class _Env:
     """`Session.__init__` builds a real `SessionLog`, which opens/writes
     under `bridge_home()` the moment the Session exists -- NEVER derived
     from `fh["home"]`/`cwd` on its own. Without BRIDGE_TEST_HOME actually
-    set, that falls back to the REAL ~/.rolo-claude/sessions on whatever
+    set, that falls back to the REAL ~/.halo/sessions on whatever
     machine runs the suite."""
 
     def __init__(self, fh):
@@ -57,10 +57,10 @@ class _Env:
 
 
 def _new_session(fh, mock, *, model="or:mock/model", permission_engine=None, interactive=False):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
     model_ref = parse_model_ref(model)
     session = Session(
@@ -120,7 +120,7 @@ def _drive_and_wait_for_waiter(session, prompt: str, request_id: str, *, timeout
 
 @test
 def test_explicit_ask_rule_still_asks_under_auto(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     fh = build_fake_home()
     with _Env(fh):
@@ -161,7 +161,7 @@ def test_explicit_ask_rule_still_asks_under_auto(ctx: Ctx):
 
 @test
 def test_accept_edits_resolves_a_pending_in_workdir_write_card(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     fh = build_fake_home()
     target = fh["proj"] / "finding4b_target.txt"
@@ -195,7 +195,7 @@ def test_nothing_pending_reevaluates_to_none(ctx: Ctx):
     """A stale/unknown request_id (already answered, or never existed) must
     report None, never raise -- the caller (app.py) treats that exactly
     like "still ask": leave whatever's currently pending alone."""
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
     fh = build_fake_home()
     with _Env(fh):
         mock = MockUpstream().start()
@@ -214,7 +214,7 @@ def test_nothing_pending_reevaluates_to_none(ctx: Ctx):
 
 @test
 def test_controller_reevaluate_pending_permission_delegates_to_session(ctx: Ctx):
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
 
     class _FakeSessionWithReeval:
         def __init__(self):
@@ -238,7 +238,7 @@ def test_controller_reevaluate_pending_permission_delegates_to_session(ctx: Ctx)
 
 @test
 def test_resolve_with_message_done_guard_fires_on_decide_at_most_once(ctx: Ctx):
-    from rolo_claude.tui.widgets.cards import PermissionCard
+    from halo_harness.tui.widgets.cards import PermissionCard
     decisions = []
     card = PermissionCard(request_id="r1", summary="Bash(x)", reason="", suggested_rule=None,
                            on_decide=decisions.append)
@@ -256,7 +256,7 @@ def test_resolve_externally_updates_display_without_calling_on_decide(ctx: Ctx):
     permission) -- resolve_externally must only update the card's own
     display, never call on_decide a second time (that would re-resolve the
     SAME waiter/rule bookkeeping the engine call already did)."""
-    from rolo_claude.tui.widgets.cards import PermissionCard
+    from halo_harness.tui.widgets.cards import PermissionCard
     decisions = []
     card = PermissionCard(request_id="r2", summary="Write(x)", reason="", suggested_rule=None,
                            on_decide=decisions.append)

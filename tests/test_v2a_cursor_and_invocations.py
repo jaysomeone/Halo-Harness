@@ -13,11 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_databricks import MockDatabricks
-from rolo_claude.providers.databricks import write_dbx_endpoints_json
-from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import build_request_body
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+from halo_harness.providers.databricks import write_dbx_endpoints_json
+from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import build_request_body
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
 
 test, TESTS = new_registry()
 
@@ -74,8 +74,8 @@ def test_v2a_gpt_family_falls_over_mlflow_to_cursor_on_404(ctx: Ctx):
         paths_hit = [r["path"] for r in mock.requests]
         ctx.check(f"mlflow tried first then cursor, got {paths_hit}",
                   any("/mlflow/" in p for p in paths_hit) and any("/cursor/" in p for p in paths_hit))
-        from rolo_claude.providers.databricks import dbx_cache_get_route
-        from rolo_claude.providers.dbx_routing import chat_route_candidates
+        from halo_harness.providers.databricks import dbx_cache_get_route
+        from halo_harness.providers.dbx_routing import chat_route_candidates
         cands = chat_route_candidates("databricks-gpt-5", state_dir)
         cached_idx = dbx_cache_get_route("databricks-gpt-5", state_dir)
         ctx.check(f"cursor's index cached for next time, got {cands[cached_idx].key}", cands[cached_idx].key == "cursor")
@@ -93,7 +93,7 @@ def test_v2a_bedrock_claude_external_invocations_only_no_model_field(ctx: Ctx):
         write_dbx_endpoints_json(state_dir, [
             {"name": "us-anthropic-claude-3-5-sonnet-v2", "task": "llm/v1/external/chat", "api_types": []},
         ])
-        from rolo_claude.providers.dbx_routing import resolve_databricks_dialect
+        from halo_harness.providers.dbx_routing import resolve_databricks_dialect
         _clean, dialect = resolve_databricks_dialect("us-anthropic-claude-3-5-sonnet-v2", state_dir)
         ctx.check(f"stays openai-chat (never native passthrough), got {dialect!r}", dialect == "openai-chat")
         list(stream_completion(_req_for(mock, "us-anthropic-claude-3-5-sonnet-v2", state_dir)))

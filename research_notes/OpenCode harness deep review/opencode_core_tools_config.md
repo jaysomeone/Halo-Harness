@@ -288,7 +288,7 @@ OpenCode reads Claude Code's `CLAUDE.md` (project, walking up, and `~/.claude/CL
 - Migration doc for 1.0 (TUI rewrite) exists — [REPO release v1.0.0](https://github.com/anomalyco/opencode/releases/tag/v1.0.0); tools like `claude-opencode-mcp` let Claude Code spawn OpenCode as a subagent — [putuandy/claude-opencode-mcp](https://github.com/putuandy/claude-opencode-mcp)
 
 ### Inferences
-- For rolo-claude's "reuse Claude Code config files" goal, OpenCode's compatibility surface is narrow (CLAUDE.md + skills); everything else (settings.json permissions, `.claude/commands`, `.claude/agents`, `~/.claude.json` MCP servers) has to be mapped by the harness itself.
+- For halo's "reuse Claude Code config files" goal, OpenCode's compatibility surface is narrow (CLAUDE.md + skills); everything else (settings.json permissions, `.claude/commands`, `.claude/agents`, `~/.claude.json` MCP servers) has to be mapped by the harness itself.
 - Since OpenCode's rule model is a superset of Claude Code's `permissions.allow/deny` lists, translating `Bash(git *)`-style entries to `{ permission: "bash", pattern: "git *", action }` is straightforward.
 
 ### Gaps

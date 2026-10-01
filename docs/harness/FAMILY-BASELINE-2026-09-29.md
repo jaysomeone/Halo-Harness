@@ -5,7 +5,7 @@ volume yet (RECOMMENDATIONS.md §4): `pong`; Read a 200-line scratch file and an
 line; a Write -> Edit -> Bash chain on a scratch file, `--permission-mode auto`; one steer
 (`--input-format stream-json`, a second line written while the first turn is still in flight).
 Kimi K3 kept to the brief's own cheap subset (pong + Read only). Numbers below are from
-`rolo-claude stats --models --since 1d --all-projects --json` (the session logs these live calls
+`halo stats --models --since 1d --all-projects --json` (the session logs these live calls
 actually wrote), not the driver script's own stdout capture, which is the authoritative source
 per the brief -- and turned out necessary: the driver's own capture of the steer turn's final text
 raced against process exit on 3 of the 4 attempts (see "Driver bugs found" below), while the real
@@ -45,7 +45,7 @@ https://openrouter.ai/settings/privacy
 
 `qwen/qwen3.8-flash` has exactly ONE upstream provider on OpenRouter today, and that provider does
 not meet this account's own Zero-Data-Retention privacy setting -- a real, 100%-reproducible,
-account-configuration fact, not a rolo-claude code defect (no tool id / reasoning replay / sampling
+account-configuration fact, not a halo code defect (no tool id / reasoning replay / sampling
 param / edit format is at fault, so there is nothing in `model_table.json` to fix; the brief's own
 "fix each bug found with a pinning test" categories all assume a code-level defect, which this
 is not). The four live checks above ran against `qwen/qwen3.8-27b` instead (the OTHER `qwen3.8-*`
@@ -54,7 +54,7 @@ multiple providers and answered cleanly on every check. Actionable for a user wh
 wants `qwen3.8-flash`: relax the account's ZDR setting at the URL above, or accept `qwen3.8-27b`
 (or the existing, already-tabulated `qwen/qwen3-coder` line) instead.
 
-## Driver bugs found (in the live-run driver script, never in `rolo_claude` itself)
+## Driver bugs found (in the live-run driver script, never in `halo_harness` itself)
 
 The one-off Python driver used for these live calls (not part of the repo's own test suites) hit
 two real bugs while exercising the steer check, both fixed in the driver before the affected

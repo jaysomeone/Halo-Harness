@@ -1,6 +1,6 @@
 """tests.helpers.fuzz_h9 -- H9 randomised bug-hunt fuzz harness.
 
-Drives a REAL rolo_claude.agent.loop.Session against a deliberately
+Drives a REAL halo_harness.agent.loop.Session against a deliberately
 adversarial scripted mock upstream (malformed/truncated SSE chunks, huge
 outputs, unicode edge cases incl. lone surrogates/RTL/ZWJ emoji, 429/5xx
 storms, overflow errors, control characters in tool results) with a steer
@@ -33,13 +33,13 @@ from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import (
     MockUpstream, SCENARIOS, _finish, start_sse, end_sse, abrupt_disconnect, _write_safe, send_json_response,
 )
-from rolo_claude.agent.assemble import SessionContext
-from rolo_claude.agent.loop import Session
-from rolo_claude.agent.derive import derive_request
-from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
-from rolo_claude.model import ModelProfile, parse_model_ref
-from rolo_claude.providers.stream import ProviderCreds
-from rolo_claude.providers.request import prepare_anthropic_messages
+from halo_harness.agent.assemble import SessionContext
+from halo_harness.agent.loop import Session
+from halo_harness.agent.derive import derive_request
+from halo_harness.agent.invariants import find_unpaired_tool_use_ids
+from halo_harness.model import ModelProfile, parse_model_ref
+from halo_harness.providers.stream import ProviderCreds
+from halo_harness.providers.request import prepare_anthropic_messages
 
 _run_counter = itertools.count(1)
 
@@ -245,7 +245,7 @@ _HOOK_PROFILES = ["none", "none", "none", "none",  # weight: hooks in ~20% of ru
 
 def _build_hook_runner(fh, profile: str):
     import sys as _sys
-    from rolo_claude.hooks import HookDef, HookRunner
+    from halo_harness.hooks import HookDef, HookRunner
     argv = [_sys.executable, "-m", "tests.helpers.hook_scripts"]
     if profile == "stop_sleep":
         hooks_by_event = {"Stop": [HookDef(type="command", args=argv + ["sleep"])]}
@@ -421,7 +421,7 @@ def run_one(seed: int, mock: MockUpstream, *, timeout_s: float = 15.0, allow_slo
             # per-connection worker inside the shared MockUpstream test
             # double (daemon_threads=True, one thread per keep-alive HTTP
             # connection) -- test infrastructure this harness reuses across
-            # every run in a sweep, never something rolo_claude itself
+            # every run in a sweep, never something halo_harness itself
             # spawns, so it is excluded from the leak check by name (Python
             # names a Thread(target=fn) "Thread-N (fn.__name__)" by default).
             leaked = [t for t in threading.enumerate()

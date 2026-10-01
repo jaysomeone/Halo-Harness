@@ -24,8 +24,8 @@ test, TESTS = new_registry()
 def test_openrouter_gpt6_named_model_does_not_get_the_rule(ctx: Ctx):
     """The core bug: an OpenRouter model whose id happens to contain
     "gpt-6" must NOT get reasoning silently disabled on every tool turn."""
-    from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     route = Route(provider="openrouter", upstream_model="openai/gpt-6", dialect="openai-chat")
     profile = resolve_profile(route)
@@ -41,8 +41,8 @@ def test_real_databricks_catalog_naming_gpt_5_6_sol_gets_the_rule(ctx: Ctx):
     """finding 12's own naming bug: models.dev's real Databricks catalog
     names these `databricks-gpt-5-6-{sol,luna,terra}` -- the bare "gpt-6"
     substring the old code checked for is not even a substring of that."""
-    from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     for suffix in ("sol", "luna", "terra"):
         model_id = f"databricks-gpt-5-6-{suffix}"
@@ -62,8 +62,8 @@ def test_real_databricks_catalog_naming_gpt_5_6_sol_gets_the_rule(ctx: Ctx):
 def test_databricks_gpt_6_naming_still_gets_the_rule_too(ctx: Ctx):
     """Both real name shapes are tabled -- `databricks-gpt-6-*` (the
     originally-verified live wording) must keep working exactly as before."""
-    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     for suffix in ("sol", "luna", "terra"):
         model_id = f"databricks-gpt-6-{suffix}"
@@ -80,8 +80,8 @@ def test_rule_is_driven_by_an_explicit_model_table_row(ctx: Ctx):
     exists now (not a substring guess): an explicit `null` override in the
     table must be honoured over the fallback, proving `row.get(...)` -- not
     a hardcoded substring check -- is what actually decides this."""
-    from rolo_claude.providers.profiles import load_model_table, reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import load_model_table, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     table = load_model_table()
     for name in ("databricks-gpt-6-sol", "databricks-gpt-6-luna", "databricks-gpt-6-terra",

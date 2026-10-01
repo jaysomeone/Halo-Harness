@@ -11,9 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.glob_tool import GlobTool
-from rolo_claude.tools.grep_tool import GrepTool
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.glob_tool import GlobTool
+from halo_harness.tools.grep_tool import GrepTool
 
 test, TESTS = new_registry()
 
@@ -66,7 +66,7 @@ def test_glob_sorted_by_mtime_descending(ctx: Ctx):
 
 @test
 def test_glob_500_result_cap(ctx: Ctx):
-    from rolo_claude.tools.glob_tool import MAX_RESULTS
+    from halo_harness.tools.glob_tool import MAX_RESULTS
     d = Path(tempfile.mkdtemp(prefix="glob-cap-"))
     for i in range(MAX_RESULTS + 20):
         (d / f"f{i}.txt").write_text("x", encoding="utf-8")
@@ -181,7 +181,7 @@ def test_grep_rg_vs_python_backend_parity(ctx: Ctx):
     if not shutil.which("rg"):
         raise SkipTest("ripgrep (rg) is not installed on this host -- only the Python engine is exercised here")
     import re
-    from rolo_claude.tools.grep_tool import _run_python_backend, _run_ripgrep_backend
+    from halo_harness.tools.grep_tool import _run_python_backend, _run_ripgrep_backend
     d = _build_tree()
     regex = re.compile("def ")
     py_out = _run_python_backend("def ", regex, d, glob_pattern=None, file_type=None,
@@ -201,7 +201,7 @@ def test_grep_rg_output_parser_handles_colons_in_path_and_text(ctx: Ctx):
     Windows drive-letter path's OWN colon, and a colon inside the matched
     TEXT, must never be mistaken for the path/line-number separator (the
     old `split(":", 2)` broke on both)."""
-    from rolo_claude.tools.grep_tool import _parse_rg_line_output
+    from halo_harness.tools.grep_tool import _parse_rg_line_output
     sample = "C:\\repo\\a.py\x0012:x = {\"k\": 1}\nC:\\repo\\a.py\x0013:y = 2\n"
     parsed = _parse_rg_line_output(sample)
     ctx.check(f"exactly one file key, got {list(parsed.keys())}", len(parsed) == 1)

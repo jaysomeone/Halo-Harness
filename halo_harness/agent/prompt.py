@@ -1,4 +1,4 @@
-"""rolo_claude.agent.prompt -- the dsh-shaped system prompt (H1 scope H).
+"""halo_harness.agent.prompt -- the dsh-shaped system prompt (H1 scope H).
 Byte-stable per session: computed ONCE from (model_label, cwd, tool
 registry, model family) with NO runtime-varying content at all -- CLAUDE.md,
 MEMORY.md, git status, permission mode, etc. are all delivered as USER-role
@@ -9,7 +9,7 @@ which lived in the section this module deleted -- see IDENTITY_TEXT).
 
 Section order (dsh's own numeric ordering, adapted): identity -> persona
 ("coding agent powered by {model}") -> plan-mode policy -> a harness
-self-description (what rolo-claude is and how Claude Code's file-based
+self-description (what Halo Harness is and how Claude Code's file-based
 structure works, for non-Claude models that have never seen either) -> one
 guidance line per tool (name-sorted, from the live registry) -> a short
 per-model-family tool-notation reminder -> an MCP server instructions
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-IDENTITY_TEXT = """You are rolo-claude, a standalone coding/automation agent harness. You read the \
+IDENTITY_TEXT = """You are Halo Harness, a standalone coding/automation agent harness. You read the \
 same configuration Anthropic's own Claude Code product reads (CLAUDE.md, settings.json, MCP \
 servers, auto-memory) so the same setup works across both, but you are driven by whichever model \
 the user configured -- often not a Claude model at all. Be direct and concise; cite exact file \
@@ -45,7 +45,7 @@ does not mean it is currently allowed to run; the permission layer (not this pro
 that at dispatch time."""
 
 _HARNESS_SELF_DESCRIPTION_HEAD = """## How this harness works
-rolo-claude is not Claude Code itself -- it is a separate program that reads Claude Code's own \
+halo is not Claude Code itself -- it is a separate program that reads Claude Code's own \
 configuration files and makes the actual API calls to your model on the user's behalf, over that \
 model's own vendor API (OpenRouter or Databricks), translating this conversation and your tool \
 calls into whatever wire format that API expects. Always use native function/tool calling to \
@@ -156,7 +156,7 @@ def _websearch_capability_sentence(has_websearch: bool) -> Optional[str]:
 
 def build_harness_self_description(tool_definitions: list, mcp_servers: Optional[list] = None) -> str:
     """The whole '## How this harness works' section, built from the
-    REGISTRY (`tool_definitions`, name-sorted per rolo_claude.tools.
+    REGISTRY (`tool_definitions`, name-sorted per halo_harness.tools.
     registry.ToolRegistry.definitions()) instead of hardcoded prose that
     assumed tools (Write, Bash) this build may not actually have --
     finding 14. `mcp_servers` (H3 scope C) is threaded through to
@@ -214,7 +214,7 @@ def family_notation(family: str) -> str:
 
 def tool_guidance_lines(tool_definitions: list) -> str:
     """One line per tool -- the caller passes an already name-sorted list
-    (rolo_claude.tools.registry.ToolRegistry.definitions()), so this
+    (halo_harness.tools.registry.ToolRegistry.definitions()), so this
     function never re-sorts (keeping ordering the registry's single
     responsibility)."""
     lines = []

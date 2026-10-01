@@ -1,4 +1,4 @@
-"""rolo_claude.tools.grep_tool -- the Grep tool (H2 scope A). Wording
+"""halo_harness.tools.grep_tool -- the Grep tool (H2 scope A). Wording
 matches Claude Code's own Grep tool exactly. Uses `rg` when it's on PATH,
 else a pure-Python engine with the SAME output modes -- both backends funnel
 their raw matches through the ONE shared `_format` function below, so the
@@ -18,7 +18,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "A powerful search tool built on ripgrep\n\n"

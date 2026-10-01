@@ -33,11 +33,11 @@ class _Env:
                         "BRIDGE_TEST_CC_AUTH_STATUS")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-model-async-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         os.environ.pop("OPENROUTER_API_KEY", None)
         os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -64,7 +64,7 @@ class _FakeSession:
 
 
 def _controller(state_dir):
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     return Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=state_dir, routes={})
 
 
@@ -80,8 +80,8 @@ def _parsed(name):
 
 @test
 def test_databricks_row_fields_uses_the_passed_in_live_dict_without_reloading(ctx: Ctx):
-    from rolo_claude.model_display import databricks_row_fields
-    import rolo_claude.providers.models_dev as models_dev_mod
+    from halo_harness.model_display import databricks_row_fields
+    import halo_harness.providers.models_dev as models_dev_mod
 
     calls = {"n": 0}
     real_load = models_dev_mod.load_models_dev_json
@@ -112,8 +112,8 @@ def test_databricks_row_fields_uses_the_passed_in_live_dict_without_reloading(ct
 
 @test
 def test_list_models_loads_models_dev_json_exactly_once_for_many_endpoints(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    import rolo_claude.providers.models_dev as models_dev_mod
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    import halo_harness.providers.models_dev as models_dev_mod
 
     calls = {"n": 0}
     real_load = models_dev_mod.load_models_dev_json
@@ -144,7 +144,7 @@ def test_list_models_loads_models_dev_json_exactly_once_for_many_endpoints(ctx: 
 
 @test
 def test_list_models_never_calls_the_real_auth_status_subprocess(ctx: Ctx):
-    import rolo_claude.providers.cc_models as cc_models_mod
+    import halo_harness.providers.cc_models as cc_models_mod
 
     cc_models_mod.reset_cached_claude_auth_status()
     real_status_fn = cc_models_mod.claude_auth_status
@@ -170,7 +170,7 @@ def test_refresh_then_cached_read_reflects_the_primed_status(ctx: Ctx):
     """The startup-worker side of the cache pair: refresh_cached_claude_
     auth_status() (the ONE function that spawns anything) populates what
     cached_claude_auth_status() (list_models()'s own reader) then sees."""
-    import rolo_claude.providers.cc_models as cc_models_mod
+    import halo_harness.providers.cc_models as cc_models_mod
 
     cc_models_mod.reset_cached_claude_auth_status()
     try:
@@ -195,7 +195,7 @@ def test_cached_auth_status_bypasses_cache_under_the_test_seam(ctx: Ctx):
     """A test that sets/changes BRIDGE_TEST_CC_AUTH_STATUS must see its OWN
     current value immediately, never a stale value a previous call cached
     in this same process."""
-    import rolo_claude.providers.cc_models as cc_models_mod
+    import halo_harness.providers.cc_models as cc_models_mod
 
     cc_models_mod.reset_cached_claude_auth_status()
     try:

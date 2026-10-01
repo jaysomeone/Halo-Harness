@@ -1,4 +1,4 @@
-"""rolo_claude.tools.webfetch -- the WebFetch tool (H2 scope A): stdlib
+"""halo_harness.tools.webfetch -- the WebFetch tool (H2 scope A): stdlib
 urllib only, 30s timeout, redirects followed only within the SAME host,
 HTML converted to plain text, a 15-minute in-process cache. The brief's
 "optional small-model summary" step is NOT implemented here (it would need
@@ -18,7 +18,7 @@ import urllib.request
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Fetches content from a URL and returns it as text (HTML is converted to readable plain text). "
@@ -165,9 +165,9 @@ class WebFetchTool(Tool):
         # worked. An explicit HTTPSHandler alongside the redirect handler --
         # build_opener accepts more than one -- fixes it with no change to
         # the redirect-following behavior above.
-        from rolo_claude.providers.http import default_tls_context
+        from halo_harness.providers.http import default_tls_context
         opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=default_tls_context()))
-        req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude/0.3 (+webfetch tool)"})
+        req = urllib.request.Request(url, headers={"User-Agent": "halo/0.3 (+webfetch tool)"})
         try:
             with opener.open(req, timeout=_TIMEOUT_S) as resp:
                 # finding 14: read a few MB of RAW bytes -- html_to_text

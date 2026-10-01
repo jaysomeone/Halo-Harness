@@ -27,10 +27,10 @@ test, TESTS = new_registry()
 
 
 def _new_session(fh, mock, *, model="or:mock/model", permission_engine=None, interactive=False):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
@@ -68,7 +68,7 @@ def test_finding_1_permission_card_answer_is_not_silently_dropped(ctx: Ctx):
     blocks -- popping it up front (the old bug) made `resolve_permission`
     find nothing and return False, so the card's own answer never reached
     the worker; the turn only ever unblocked via `abort`."""
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.permissions import Decision, PermissionEngine
 
     fh = build_fake_home()
     target = fh["proj"] / "finding1_target.txt"
@@ -117,7 +117,7 @@ def test_finding_1_second_answer_after_first_reports_false(ctx: Ctx):
     (not up front) means a SECOND attempt to answer the same request_id
     correctly reports "nothing is waiting" instead of silently no-op'ing
     twice."""
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.permissions import Decision, PermissionEngine
 
     fh = build_fake_home()
     target = fh["proj"] / "finding1b_target.txt"
@@ -197,7 +197,7 @@ def test_finding_2_quit_drains_a_queued_prompt_instead_of_starting_it(ctx: Ctx):
     `Session._stopping` (set before the sentinel is queued) must make
     `run()` skip any command queued ahead of it."""
     import queue as _queue
-    from rolo_claude import events as events_mod
+    from halo_harness import events as events_mod
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -226,7 +226,7 @@ def test_finding_6_mode_change_applies_immediately_not_just_between_turns(ctx: C
     queuing a Command `run()` only reads between turns -- switching to
     `auto` mid-turn must skip a permission card for the SECOND of two
     Write calls in the same turn, not just apply starting next turn."""
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
 
     fh = build_fake_home()
     target1 = fh["proj"] / "finding6_a.txt"
@@ -261,7 +261,7 @@ def test_finding_6_mode_change_applies_immediately_not_just_between_turns(ctx: C
                 # a direct, atomic write, no Command queued.
                 session.permission_engine.mode = "auto"
                 session.resolve_permission(ev.data["id"], __import__(
-                    "rolo_claude.permissions", fromlist=["Decision"]).Decision("allow", "ok"))
+                    "halo_harness.permissions", fromlist=["Decision"]).Decision("allow", "ok"))
         ctx.check("a card was shown for the first Write (default mode)", saw_card)
         ctx.check(f"mode is now auto, got {session.permission_engine.mode}", session.permission_engine.mode == "auto")
     finally:
@@ -277,7 +277,7 @@ def test_finding_14_set_model_logs_a_meta_node_and_regates_vision(ctx: Ctx):
     SCENARIOS["finding14-model"] = lambda h, body: _finish(h, _final_text("ok"))
     try:
         session = _new_session(fh, mock, model="or:mock/finding14-model")
-        from rolo_claude.model import ModelProfile, parse_model_ref
+        from halo_harness.model import ModelProfile, parse_model_ref
         before_nodes = len(session.log.nodes())
         new_ref = parse_model_ref("or:mock/finding14-model-2")
         new_profile = ModelProfile(vision=True)

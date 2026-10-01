@@ -26,9 +26,9 @@ test, TESTS = new_registry()
 
 
 def _run(argv, home: Path, cwd: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(cwd),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(cwd),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -38,19 +38,19 @@ def _sha256_file(path: Path) -> str:
 
 @test
 def test_dismissed_hash_persists_across_calls(ctx: Ctx):
-    from rolo_claude.improve.dismissed import add_dismissed, is_dismissed, load_dismissed
-    from rolo_claude.improve.draft import Candidate
+    from halo_harness.improve.dismissed import add_dismissed, is_dismissed, load_dismissed
+    from halo_harness.improve.draft import Candidate
 
     home = Path(tempfile.mkdtemp(prefix="improve-dismissed-"))
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     cand = Candidate(id="c1", kind="rule", title="t", scope="project", path="p.md", body="b",
                       rationale="r", evidence=[], confidence="low")
     ctx.check("not dismissed initially", not is_dismissed(cand))
-    from rolo_claude.improve.apply import candidate_hash
+    from halo_harness.improve.apply import candidate_hash
     add_dismissed(candidate_hash(cand))
     ctx.check("dismissed after add_dismissed", is_dismissed(cand))
     # Fresh read from disk (simulates a restart -- load_dismissed() re-reads
-    # ~/.rolo-claude/improve/dismissed.json every call).
+    # ~/.halo/improve/dismissed.json every call).
     reloaded = load_dismissed()
     ctx.check("persisted hash present in a fresh load", candidate_hash(cand) in reloaded)
     # A DIFFERENT candidate (different body) is NOT dismissed.
@@ -64,12 +64,12 @@ def test_apply_appends_improve_applied_and_next_turn_snapshot(ctx: Ctx):
     """A real Session (no live model call needed) applies a rule candidate;
     the log gets an `improve_applied` node, and `derive_request` on the
     NEXT turn includes the rule's body (the fresh claude_md snapshot)."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.derive import derive_request
-    from rolo_claude.agent.loop import Session as _Session
-    from rolo_claude.improve import apply as apply_mod
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.derive import derive_request
+    from halo_harness.agent.loop import Session as _Session
+    from halo_harness.improve import apply as apply_mod
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -144,7 +144,7 @@ def test_dash_p_never_drafts_or_writes(ctx: Ctx):
     result = _run(["-p", "/improve", "--model", "or:mock/nonexistent-must-not-be-called"], home, cwd)
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("names the interactive TUI", "interactive TUI" in result.stdout)
-    ctx.check("points at the real headless surface", "rolo-claude improve" in result.stdout)
+    ctx.check("points at the real headless surface", "halo improve" in result.stdout)
     ctx.check("nothing written under .claude", not (cwd / ".claude").exists())
 
 
@@ -188,7 +188,7 @@ def test_credentials_json_sentinel_never_opened(ctx: Ctx):
 
     import builtins
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
-    from rolo_claude.improve import evidence as evidence_mod
+    from halo_harness.improve import evidence as evidence_mod
 
     original_open = builtins.open
     builtins.open = _guarded_open
@@ -197,6 +197,60 @@ def test_credentials_json_sentinel_never_opened(ctx: Ctx):
     finally:
         builtins.open = original_open
     ctx.check("no .credentials.json read during evidence scanning", opened_paths == [])
+
+
+@test
+def test_has_provenance_marker_recognizes_the_legacy_1_0_1_marker(ctx: Ctx):
+    """2.0.0 fixpass finding 6: PROVENANCE_MARKER changed from
+    `<!-- rolo-claude improve: ... -->` to `<!-- halo improve: ... -->` --
+    a file 1.0.1's /improve wrote must still be recognized as
+    already-provenanced, or every such file looks user-authored to 2.0.0."""
+    from halo_harness.improve.apply import PROVENANCE_MARKER, PROVENANCE_MARKER_LEGACY, has_provenance_marker
+
+    legacy_text = (f"body text\n\n{PROVENANCE_MARKER_LEGACY} created=2026-01-01T00:00:00Z sessions=s1 "
+                   f"evidence=1 model=x from_tool_output=false -->\n")
+    new_text = (f"body text\n\n{PROVENANCE_MARKER} created=2026-01-01T00:00:00Z sessions=s1 "
+                f"evidence=1 model=x from_tool_output=false -->\n")
+    ctx.check("a 1.0.1-written file is recognized as provenanced", has_provenance_marker(legacy_text))
+    ctx.check("a 2.0.0-written file is recognized too", has_provenance_marker(new_text))
+    ctx.check("a genuinely user-authored file is not", not has_provenance_marker("just a plain file\n"))
+    ctx.check("PROVENANCE_MARKER itself is the NEW text (a fresh write always uses it)",
+              PROVENANCE_MARKER == "<!-- halo improve:")
+
+
+@test
+def test_next_available_updates_a_1_0_1_written_file_in_place_not_a_collision(ctx: Ctx):
+    """The actual observable bug: a rule file 1.0.1's /improve wrote,
+    targeted again by a fresh candidate with the SAME name, must be
+    treated as an UPDATE (is_update=True, same path) -- never renamed
+    around as if it were a collision with an "unrecognized" user file
+    (which would have written a colliding `foo-2.md` right beside it)."""
+    from halo_harness.improve.apply import PROVENANCE_MARKER_LEGACY, _next_available
+
+    tmp = Path(tempfile.mkdtemp(prefix="improve-legacy-marker-"))
+    target = tmp / "foo.md"
+    target.write_text(f"old body\n\n{PROVENANCE_MARKER_LEGACY} created=2026-01-01T00:00:00Z sessions=s1 "
+                       f"evidence=1 model=x from_tool_output=false -->\n", encoding="utf-8")
+    path, is_update, renamed_from = _next_available(target, is_dir=False)
+    ctx.check(f"same path reused, got {path}", path == target)
+    ctx.check("treated as an update, not a fresh/colliding file", is_update is True)
+    ctx.check("no rename-around-a-collision happened", renamed_from is None)
+    ctx.check("foo-2.md was never created", not (tmp / "foo-2.md").exists())
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

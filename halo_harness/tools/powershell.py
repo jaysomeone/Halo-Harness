@@ -1,5 +1,5 @@
-"""rolo_claude.tools.powershell -- the PowerShell tool (H2 scope A),
-win32 only (rolo_claude/tools/registry.py only registers it when
+"""halo_harness.tools.powershell -- the PowerShell tool (H2 scope A),
+win32 only (halo_harness/tools/registry.py only registers it when
 `sys.platform == "win32"` -- Kali is the primary target and has no
 PowerShell at all). Shares Bash's streamed-output/timeout/kill plumbing
 (tools/_proc.py) but has no `cd`-persistence marker of its own: PowerShell
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import os
 
-from rolo_claude.tools._proc import run_streamed
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools._proc import run_streamed
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000

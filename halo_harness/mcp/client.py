@@ -1,4 +1,4 @@
-"""rolo_claude.mcp.client -- McpLoop: one daemon thread owning a SINGLE
+"""halo_harness.mcp.client -- McpLoop: one daemon thread owning a SINGLE
 asyncio event loop for the whole process's MCP traffic (every transport the
 `mcp` SDK offers -- stdio/http/sse -- is async-only; the rest of this
 harness, including the agent loop, is synchronous). `run(coro, timeout)` is
@@ -8,7 +8,7 @@ the coroutine via `asyncio.run_coroutine_threadsafe` and blocks the CALLING
 
 Deliberately has NO dependency on the `mcp` package itself -- this module
 manages an asyncio loop and nothing else, so it stays importable even when
-`mcp` isn't installed (rolo_claude.mcp.available() gates whether anything
+`mcp` isn't installed (halo_harness.mcp.available() gates whether anything
 ever calls into it).
 """
 
@@ -194,7 +194,7 @@ class McpLoop:
                 finally:
                     loop.close()
 
-            thread = threading.Thread(target=_run, name="rolo-claude-mcp-loop", daemon=True)
+            thread = threading.Thread(target=_run, name="halo-mcp-loop", daemon=True)
             thread.start()
             ready.wait(timeout=10)
             self._loop = holder.get("loop")

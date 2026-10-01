@@ -1,6 +1,6 @@
 """tests.test_agent_cli_h6 -- H6 scope A/D: `--agent`, `@agent-<name>`,
 `--continue`/`--resume`/`--fork-session`/`-n/--name`, and the `/agents`/
-`/rename` slash commands, driven as REAL `python -m rolo_claude` subprocess
+`/rename` slash commands, driven as REAL `python -m halo_harness` subprocess
 invocations against the mock upstream (the same pattern test_loop_headless.py
 uses) -- exercises the actual cli.py argument parsing end to end, not just
 the underlying library functions.
@@ -44,7 +44,7 @@ def _run_cli(fh, mock, prompt, *, steps=None, extra_args=None, timeout=30):
     under a FRESH unique scenario key for THIS call only (see module
     docstring); omit it for a call that doesn't need the model at all
     (e.g. a `--resume` that should fail before ever reaching one)."""
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
         "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
@@ -54,7 +54,7 @@ def _run_cli(fh, mock, prompt, *, steps=None, extra_args=None, timeout=30):
         key = f"h6cli-{uuid.uuid4().hex[:12]}"
         SCENARIOS[key] = ScriptedTurns(steps)
         model_args = ["--model", f"or:mock/{key}"]
-    args = ([sys.executable, "-m", "rolo_claude", "-p", prompt] + model_args
+    args = ([sys.executable, "-m", "halo_harness", "-p", prompt] + model_args
             + ["--cwd", str(fh["proj"]), "--output-format", "json"] + (extra_args or []))
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -66,7 +66,7 @@ def _find_index_json(fh) -> dict:
     filesystems (a tempdir's real path vs. its resolved/symlink-following
     form) that can produce a different slug than hashing `fh["proj"]`
     directly here would."""
-    matches = list((fh["home"] / ".rolo-claude" / "sessions").glob("*/index.json"))
+    matches = list((fh["home"] / ".halo" / "sessions").glob("*/index.json"))
     if not matches:
         return {}
     return json.loads(matches[0].read_text(encoding="utf-8"))
@@ -213,7 +213,7 @@ def test_fork_session_produces_a_new_id_with_full_history(ctx: Ctx):
         # it is PROCESS-WIDE and would leak into every later test/subprocess
         # in this same run, e.g. making a later --name test write into
         # THIS test's fake home instead of its own).
-        matches = list((fh["home"] / ".rolo-claude" / "sessions").glob(f"*/{original_id}.jsonl"))
+        matches = list((fh["home"] / ".halo" / "sessions").glob(f"*/{original_id}.jsonl"))
         ctx.check("original session log untouched by the fork", len(matches) == 1)
     finally:
         mock.stop()
@@ -261,6 +261,21 @@ def test_slash_rename_sets_title(ctx: Ctx):
         ctx.check("title recorded via /rename", index.get(sid, {}).get("title") == "Weekend Project")
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

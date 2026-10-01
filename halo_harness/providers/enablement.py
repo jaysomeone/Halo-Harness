@@ -1,4 +1,4 @@
-"""rolo_claude.providers.enablement -- H15 item 21, REPLACED by the H15
+"""halo_harness.providers.enablement -- H15 item 21, REPLACED by the H15
 part 2 addendum (rolo, live use on his personal Mac, same day): detected
 credentials/a real claude.ai login now AUTO-enable a provider -- the
 "never run init, the harness already finds the available keys and
@@ -6,7 +6,7 @@ subscription and uses those" case. The `"providers"` block in config.json
 stores OVERRIDES only: an explicit `"enabled"` key (true OR false) always
 wins over auto-detection; a provider the block doesn't mention at all (or
 no block yet) falls through to `credentials_present` (the exact same
-detection `/model`'s own hint text and `/providers`/`rolo-claude providers`
+detection `/model`'s own hint text and `/providers`/`halo providers`
 already compute).
 
 Exact per-provider detection rule (`credentials_present` below):
@@ -18,7 +18,7 @@ subscription (`cc:`) ONLY when `claude auth status` reports `loggedIn` with
 a custom base URL (a work box's own settings-driven login) never auto-
 enables it, loggedIn or not.
 
-Stored at `~/.rolo-claude/config.json`'s own `"providers"` key:
+Stored at `~/.halo/config.json`'s own `"providers"` key:
 `{"<name>": {"enabled": bool, ...non-secret settings}}` -- secrets stay in
 the env file, exactly like every other provider credential this harness
 has ever stored; this module never reads/writes a key or token. Migration
@@ -69,7 +69,7 @@ def label_for(name: str) -> str:
 
 
 def _providers_block(state_dir=None) -> Optional[dict]:
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     block = get_config_value("providers", default=None)
     return block if isinstance(block, dict) else None
 
@@ -101,7 +101,7 @@ def is_enabled(name: str, *, state_dir=None, detected: Optional[bool] = None) ->
 def enablement_status(name: str, *, state_dir=None, detected: Optional[bool] = None) -> str:
     """One of `"auto"` (detected, no override), `"enabled_by_user"` /
     `"disabled_by_user"` (an explicit override), or `"not_set_up"` (no
-    override, no credentials either) -- `/providers`/`rolo-claude
+    override, no credentials either) -- `/providers`/`halo
     providers`'s own display tag, see `enablement_display` for the actual
     user-facing string. `detected`: see `is_enabled`'s own docstring."""
     name = canonical(name)
@@ -115,7 +115,7 @@ def enablement_status(name: str, *, state_dir=None, detected: Optional[bool] = N
 
 def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = None) -> str:
     """`"auto (detected from <source>)"` / `"disabled by you"` / `"enabled
-    by you"` / `"not set up"` -- the exact wording `/providers`/`rolo-claude
+    by you"` / `"not set up"` -- the exact wording `/providers`/`halo
     providers` show per provider. `detected`: see `is_enabled`'s own
     docstring."""
     name = canonical(name)
@@ -131,7 +131,7 @@ def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = 
 
 
 def set_enabled(name: str, enabled: bool, *, extra: Optional[dict] = None) -> None:
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.theme import get_config_value, set_config_value
     name = canonical(name)
     block = get_config_value("providers", default=None)
     block = dict(block) if isinstance(block, dict) else {}
@@ -164,7 +164,7 @@ def enable_if_was_explicitly_disabled(name: str) -> None:
     LATER revocation (a claude.ai logout, a deleted key) that auto-
     detection alone would otherwise have reflected immediately. A no-op
     when there's no override at all, or an already-`true` one -- `enable()`
-    itself (the explicit `rolo-claude providers enable <name>`/`/providers
+    itself (the explicit `halo providers enable <name>`/`/providers
     enable <name>` command) is UNCHANGED and still always writes one; this
     helper is only for the IMPLICIT "setup just succeeded" callers."""
     name = canonical(name)
@@ -204,8 +204,8 @@ def is_provider_disabled_message(name: str, *, state_dir=None) -> Optional[str]:
     block = _providers_block(state_dir)
     row = block.get(name) if isinstance(block, dict) else None
     if isinstance(row, dict) and "enabled" in row and not row["enabled"]:
-        return (f"{label_for(name)} is not enabled -- run `rolo-claude providers enable {name}` "
-                f"(or finish its tab in `rolo-claude init`) first")
+        return (f"{label_for(name)} is not enabled -- run `halo providers enable {name}` "
+                f"(or finish its tab in `halo init`) first")
     return None
 
 
@@ -233,16 +233,16 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
     block is seen too, exactly like a real session would resolve it."""
     name = canonical(name)
     if name == "databricks":
-        from rolo_claude.providers.config import resolve_databricks
+        from halo_harness.providers.config import resolve_databricks
         return resolve_databricks(env) is not None
     if name == "openrouter":
-        from rolo_claude.providers.config import resolve_openrouter
+        from halo_harness.providers.config import resolve_openrouter
         return resolve_openrouter(env) is not None
     if name == "anthropic":
-        from rolo_claude.providers.config import resolve_anthropic
+        from halo_harness.providers.config import resolve_anthropic
         return resolve_anthropic(env) is not None
     if name == "claude_subscription":
-        from rolo_claude.init_providers import claude_login_available
+        from halo_harness.init_providers import claude_login_available
         return claude_login_available()
     if name == "typesafe":
         import os
@@ -264,7 +264,7 @@ def credentials_source(name: str, *, detected: Optional[bool] = None) -> Optiona
     if not is_detected:
         return None
     if name == "databricks":
-        from rolo_claude.providers.config import resolve_databricks_source
+        from halo_harness.providers.config import resolve_databricks_source
         return resolve_databricks_source() or "env"
     if name == "claude_subscription":
         return "claude.ai login"

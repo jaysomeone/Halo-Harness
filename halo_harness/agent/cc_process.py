@@ -1,8 +1,8 @@
-"""rolo_claude.agent.cc_process -- H11 Part B: the `claude` subprocess
+"""halo_harness.agent.cc_process -- H11 Part B: the `claude` subprocess
 wrapper (`ClaudeCodeProcess`) and its argv builder (`build_cc_argv`). One
-subprocess per rolo-claude `cc:` session, lazily started on the session's
+subprocess per halo `cc:` session, lazily started on the session's
 first `cc:` turn (see `agent/cc_runtime.py`), stdin held open across
-rolo-claude turns.
+halo turns.
 
 Command line (verified LIVE against the installed claude 2.1.281/2.1.284,
 this milestone's report has the exact transcripts): `-p --output-format
@@ -18,7 +18,7 @@ session still completed a real tool_use/tool_result round trip). No
 `--disallowedTools` fallback has been needed in practice; `cc_disallowed_
 tools_fallback_argv` below exists for `ensure_cc_state` to retry with if a
 future claude version ever stops honouring `--tools ""` the same way.
-`bypassPermissions` is correct here because rolo-claude's own engine
+`bypassPermissions` is correct here because halo's own engine
 (agent/cc_runtime.py's `bridge_call_tool`) gates every bridged call BEFORE
 it runs; Claude Code's own prompts are unanswerable headlessly anyway.
 """
@@ -36,7 +36,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.providers.cc_models import resolve_claude_launch_argv
+from halo_harness.providers.cc_models import resolve_claude_launch_argv
 
 # Fixed, arbitrary namespace UUID for uuid5 -- any constant works; it only
 # needs to be STABLE across processes so the same rolo session id always
@@ -44,7 +44,7 @@ from rolo_claude.providers.cc_models import resolve_claude_launch_argv
 _CC_NAMESPACE = uuid.UUID("6f2f5f2e-8c1a-4e9d-9a2e-1b7a2c9d4e6f")
 
 CC_APPEND_SYSTEM_PROMPT = (
-    "You are running inside rolo-claude, a harness that bridges tools through one MCP server "
+    "You are running inside halo, a harness that bridges tools through one MCP server "
     "named \"rolo\" (mcp__rolo__<Name>). Your own built-in Read/Write/Edit/Bash/Glob/Grep/WebFetch/"
     "WebSearch/TodoWrite/Agent/AskUserQuestion tools are disabled for this session -- use the "
     "mcp__rolo__ tools instead; they behave the same way and are already listed for you."
@@ -52,7 +52,7 @@ CC_APPEND_SYSTEM_PROMPT = (
 
 
 def cc_session_uuid(rolo_session_id: str) -> str:
-    """A canonical UUID for `--session-id`/`--resume` -- rolo-claude's own
+    """A canonical UUID for `--session-id`/`--resume` -- halo's own
     session id (agent/log.py: `uuid.uuid4().hex`, no dashes) is not one.
     Live-verified: `claude -p --session-id not-a-uuid` -> "Error: Invalid
     session ID. Must be a valid UUID." `uuid5` is deterministic (no state
@@ -62,16 +62,16 @@ def cc_session_uuid(rolo_session_id: str) -> str:
 
 
 def _repo_root_for_pythonpath() -> str:
-    import rolo_claude
-    return str(Path(rolo_claude.__file__).resolve().parent.parent)
+    import halo_harness
+    return str(Path(halo_harness.__file__).resolve().parent.parent)
 
 
 def build_mcp_config(server_env: dict) -> dict:
     """The inline `--mcp-config` JSON: one stdio server named "rolo" (so
     Claude Code exposes every bridged tool as `mcp__rolo__<Name>` -- bin
     sec.9's `mcp__${wn(server)}__${wn(tool)}` naming) running the child
-    side of the bridge, `python -m rolo_claude.ccbridge`. `PYTHONPATH` is
-    always set so the child can `import rolo_claude` whether this process
+    side of the bridge, `python -m halo_harness.ccbridge`. `PYTHONPATH` is
+    always set so the child can `import halo_harness` whether this process
     is an editable/repo checkout or an installed package.
 
     H11b finding 16: `server_env` is normally `{}` in production --
@@ -90,7 +90,7 @@ def build_mcp_config(server_env: dict) -> dict:
     return {
         "mcpServers": {
             "rolo": {"type": "stdio", "command": sys.executable,
-                      "args": ["-m", "rolo_claude.ccbridge"], "env": env}
+                      "args": ["-m", "halo_harness.ccbridge"], "env": env}
         }
     }
 
@@ -113,7 +113,7 @@ def build_cc_argv(*, model: str, session_id: str, resume: bool, mcp_config: dict
     json` mode, not a process-lifetime total (two prompts sent 6s apart
     to one `--max-turns 1` process both got their own full "success"
     result) -- safe to forward `session.max_turns` unconditionally.
-    `effort` forwards rolo-claude's own `--effort`/`/effort` the same
+    `effort` forwards halo's own `--effort`/`/effort` the same
     way. `--json-schema` is NOT forwarded: `output.py`'s sinks already
     apply `_try_structured_output` to whatever final text ANY route
     (cc: included) produces, so there is nothing cc:-specific to wire."""

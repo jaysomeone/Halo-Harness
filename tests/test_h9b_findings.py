@@ -65,11 +65,11 @@ def _tool_call_step(name: str, arguments: dict, call_id: str = "call_1") -> list
 
 
 def _new_session(*, mock, model, agents=None, permission_mode="auto", max_turns=10, cwd=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     cwd = cwd or Path(tempfile.mkdtemp(prefix="rc-h9b-e2e-"))
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="rc-h9b-e2e-home-")))
@@ -96,11 +96,11 @@ def _new_session_with_log(base_session, session_log, *, model=None, agents=None)
     session` already wrote to. Deliberately NOT `_new_session()` again,
     which would repoint BRIDGE_TEST_HOME at a fresh temp dir and defeat the
     whole point of testing resume/reconstruction behavior (findings 27, 28)."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     model = model or base_session.model_ref.raw
     cwd = base_session.cwd
@@ -116,7 +116,7 @@ def _new_session_with_log(base_session, session_log, *, model=None, agents=None)
 
 
 def _general_purpose_spec(**overrides):
-    from rolo_claude.config.agents_md import AgentSpec
+    from halo_harness.config.agents_md import AgentSpec
     kwargs = dict(name="general-purpose", description="general purpose sub-agent",
                   tools=None, disallowed_tools=["Agent", "Task"], body="You are a helpful sub-agent.")
     kwargs.update(overrides)
@@ -128,14 +128,14 @@ def _drain(session, prompt) -> list:
 
 
 def _run_cli(fh, mock, prompt, extra_args=None, extra_env=None, timeout=30, model="or:mock/model"):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({
         "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
         "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
     })
     if extra_env:
         env.update(extra_env)
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model,
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model,
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -265,11 +265,11 @@ def test_h9b_f03_sighup_kills_the_process_and_its_background_job_on_posix(ctx: C
                              call_id="call_sighup_bg"),
             _text_step("started it"),
         ])
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                      "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
         proc = subprocess.Popen(
-            [sys.executable, "-m", "rolo_claude", "-p", "start a background job then say ok",
+            [sys.executable, "-m", "halo_harness", "-p", "start a background job then say ok",
              "--model", "or:mock/h9b-f03-sighup", "--cwd", str(fh["proj"]),
              "--permission-mode", "auto"],
             env=env, cwd=str(REPO_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -314,7 +314,7 @@ def test_h9b_f03_sighup_kills_the_process_and_its_background_job_on_posix(ctx: C
 
 # =============================================================================
 # finding 12: the session's own PATH (settings env.PATH / the PATH
-# rolo-claude was started with) survives a Debian/Kali /etc/profile login
+# halo was started with) survives a Debian/Kali /etc/profile login
 # shell that unconditionally reassigns PATH -- both the foreground and
 # background Bash paths
 # =============================================================================
@@ -386,7 +386,7 @@ def test_h9b_f12_session_path_survives_a_debian_profile_login_shell_reset(ctx: C
                              call_id="call_bg"),
             _final_text_after_a_beat,
         ])
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({
             "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
             "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR),
@@ -395,7 +395,7 @@ def test_h9b_f12_session_path_survives_a_debian_profile_login_shell_reset(ctx: C
             "PATH": f"{marker_dir}:{os.environ.get('PATH', '')}",
         })
         inner = (f"mount --bind {shlex.quote(str(profile_path))} /etc/profile && "
-                 f"exec {shlex.quote(sys.executable)} -m rolo_claude -p "
+                 f"exec {shlex.quote(sys.executable)} -m halo_harness -p "
                  f"{shlex.quote('run rvtool in the foreground, then again in the background')} "
                  f"--model or:mock/h9b-f12-path --cwd {shlex.quote(str(fh['proj']))} --permission-mode auto")
         args = ["unshare", "-rm", "bash", "-c", inner]
@@ -417,25 +417,25 @@ def test_h9b_f12_session_path_survives_a_debian_profile_login_shell_reset(ctx: C
 
 
 # =============================================================================
-# finding 24: bin/rolo-claude resolves a SYMLINK to its real location
+# finding 24: bin/halo resolves a SYMLINK to its real location
 # (readlink -f) before deriving repo_root/PYTHONPATH, instead of using the
 # symlink's own directory
 # =============================================================================
 
 @test
-def test_h9b_f24_bin_rolo_claude_runs_via_a_real_symlink_from_outside_the_checkout(ctx: Ctx):
+def test_h9b_f24_bin_halo_harness_runs_via_a_real_symlink_from_outside_the_checkout(ctx: Ctx):
     """Verified bug (finding 24): `dirname "$0"` alone only ever gives the
     directory of WHATEVER PATH invoked the script -- for the documented
-    "no install at all: ln -s .../bin/rolo-claude ~/bin/" recipe, that is
+    "no install at all: ln -s .../bin/halo ~/bin/" recipe, that is
     the SYMLINK's own directory, never the checkout it actually points at,
-    so `repo_root`/PYTHONPATH pointed nowhere near `rolo_claude` and the
-    real binary failed with "No module named rolo_claude" from any
+    so `repo_root`/PYTHONPATH pointed nowhere near `halo_harness` and the
+    real binary failed with "No module named halo_harness" from any
     directory outside the checkout. This creates a REAL symlink (a Git-
     Bash `ln -s` on Windows silently makes a plain file COPY instead, not
     a real symlink -- confirmed via `stat`, hence POSIX-only here) in a
     temp dir OUTSIDE the checkout and runs it from a cwd OUTSIDE the
     checkout too, with $HOME pointed at an empty temp dir (so the
-    `~/.local/bin/rolo-claude` console-script fast path -- which DOES
+    `~/.local/bin/halo` console-script fast path -- which DOES
     exist for real on this box otherwise, see the "installed" branch's own
     comment -- never fires, forcing exactly the code path this finding's
     `readlink -f` fix touches)."""
@@ -448,16 +448,16 @@ def test_h9b_f24_bin_rolo_claude_runs_via_a_real_symlink_from_outside_the_checko
         SCENARIOS["h9b-f24-symlink"] = ScriptedTurns([_text_step("ran via the symlink")])
 
         bin_dir = Path(tempfile.mkdtemp(prefix="rc-f24-bin-"))
-        link_path = bin_dir / "rolo-claude"
-        os.symlink(str(REPO_DIR / "bin" / "rolo-claude"), str(link_path))
+        link_path = bin_dir / "halo"
+        os.symlink(str(REPO_DIR / "bin" / "halo"), str(link_path))
         ctx.check("a REAL symlink was created (not a copy)", link_path.is_symlink())
 
         empty_home = Path(tempfile.mkdtemp(prefix="rc-f24-home-"))
         outside_cwd = Path(tempfile.mkdtemp(prefix="rc-f24-cwd-"))
 
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({
-            "HOME": str(empty_home),  # no ~/.local/bin/rolo-claude console script to fast-path into
+            "HOME": str(empty_home),  # no ~/.local/bin/halo console script to fast-path into
             "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
             "OPENROUTER_API_KEY": "test-key",
         })
@@ -470,8 +470,65 @@ def test_h9b_f24_bin_rolo_claude_runs_via_a_real_symlink_from_outside_the_checko
         ctx.check(f"exit 0 when invoked via a symlink from outside the checkout, "
                   f"got {result.returncode}, stdout={result.stdout!r} stderr={result.stderr[-800:]!r}",
                   result.returncode == 0)
-        ctx.check("never the pre-fix failure mode", "No module named rolo_claude" not in result.stderr)
+        ctx.check("never the pre-fix failure mode", "No module named halo_harness" not in result.stderr)
         ctx.check(f"the real answer came through, got {result.stdout!r}", "ran via the symlink" in result.stdout)
+    finally:
+        mock.stop()
+
+
+# =============================================================================
+# 2.0.0 fixpass finding 7: bin/rolo-claude (the deprecated alias) needs the
+# SAME readlink -f fix bin/halo got for finding 24 above
+# =============================================================================
+
+@test
+def test_fixpass_f07_bin_rolo_claude_symlink_resolves_to_the_real_checkout(ctx: Ctx):
+    """`ln -s .../bin/rolo-claude ~/bin/rolo-claude` (the documented
+    no-install recipe) used to exec `~/bin/halo` -- the SYMLINK's own
+    directory, which has no such file -- instead of the real checkout's
+    bin/halo, exit 127, because bin/rolo-claude computed `here` from plain
+    `dirname "$0"` instead of resolving the symlink first. Same real-
+    symlink setup as the bin/halo finding-24 test above (POSIX-only for
+    the same reason: Git Bash's `ln -s` on Windows silently makes a file
+    copy, not a real symlink)."""
+    if sys.platform == "win32":
+        raise SkipTest("a real symlink (not Git Bash's file-copy fallback) is POSIX-only")
+
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["fixpass-f07-rolo-claude-symlink"] = ScriptedTurns([_text_step("ran via the rolo-claude symlink")])
+
+        bin_dir = Path(tempfile.mkdtemp(prefix="rc-f07-bin-"))
+        link_path = bin_dir / "rolo-claude"
+        os.symlink(str(REPO_DIR / "bin" / "rolo-claude"), str(link_path))
+        ctx.check("a REAL symlink was created (not a copy)", link_path.is_symlink())
+
+        empty_home = Path(tempfile.mkdtemp(prefix="rc-f07-home-"))
+        outside_cwd = Path(tempfile.mkdtemp(prefix="rc-f07-cwd-"))
+
+        env = _hermetic_child_env()
+        env.update({
+            "HOME": str(empty_home),  # no ~/.local/bin/halo console script to fast-path into
+            "BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+            "OPENROUTER_API_KEY": "test-key",
+        })
+        env.pop("PYTHONPATH", None)  # the fix itself must derive this, not inherit it from the test
+        result = subprocess.run(
+            [str(link_path), "-p", "say hi via the rolo-claude symlink",
+             "--model", "or:mock/fixpass-f07-rolo-claude-symlink",
+             "--cwd", str(fh["proj"]), "--permission-mode", "auto"],
+            env=env, cwd=str(outside_cwd), capture_output=True, text=True, timeout=30,
+        )
+        ctx.check(f"exit 0 when invoked via a symlink from outside the checkout, "
+                  f"got {result.returncode}, stdout={result.stdout!r} stderr={result.stderr[-800:]!r}",
+                  result.returncode == 0)
+        ctx.check("never the pre-fix failure mode (exec'd a nonexistent sibling ~/bin/halo)",
+                  result.returncode != 127)
+        ctx.check(f"the real answer came through, got {result.stdout!r}",
+                  "ran via the rolo-claude symlink" in result.stdout)
+        ctx.check(f"the deprecation notice still printed, got stderr={result.stderr!r}",
+                  "'rolo-claude' is deprecated" in result.stderr)
     finally:
         mock.stop()
 
@@ -483,7 +540,7 @@ def test_h9b_f24_bin_rolo_claude_runs_via_a_real_symlink_from_outside_the_checko
 
 @test
 def test_h9b_f04_sanitize_text_covers_every_previously_missed_shape(ctx: Ctx):
-    from rolo_claude.export_cli import sanitize_text
+    from halo_harness.export_cli import sanitize_text
 
     fake_key = "sk-or-v1-" + "a1b2c3" * 6
     cases = [
@@ -516,7 +573,7 @@ def test_h9b_f04_sanitize_node_stays_valid_json_for_a_settings_env_block(ctx: Ct
     sanitize_node is that a redaction must never corrupt the JSON structure
     it's embedded in -- verified against a realistic settings.json `env`
     block nested inside a Read tool_result's own content string."""
-    from rolo_claude.export_cli import sanitize_node
+    from halo_harness.export_cli import sanitize_node
 
     fake_key = "sk-or-v1-" + "c3d4e5" * 6
     settings_blob = json.dumps({"env": {"OPENROUTER_API_KEY": fake_key, "PATH": "/usr/bin:/bin"}}, indent=2)
@@ -538,13 +595,13 @@ def test_h9b_f04_sanitize_node_stays_valid_json_for_a_settings_env_block(ctx: Ct
 
 @test
 def test_h9b_f04_export_cli_and_tui_export_use_the_same_sanitizer(ctx: Ctx):
-    """H9 whole-tree review finding 4: ONE sanitizer for both `rolo-claude
+    """H9 whole-tree review finding 4: ONE sanitizer for both `halo
     export --sanitize` (export_cli.sanitize_text) and the TUI's own
     `/export --sanitize` (controller.sanitize_transcript) -- not two
     independently-maintained regexes that drift (the TUI's OLD one missed
     `OPENROUTER_API_KEY=` entirely: no `\\b` between `_` and `KEY`)."""
-    from rolo_claude.export_cli import sanitize_text
-    from rolo_claude.controller import sanitize_transcript
+    from halo_harness.export_cli import sanitize_text
+    from halo_harness.controller import sanitize_transcript
 
     fake_key = "sk-or-v1-" + "f6a7b8" * 6
     cases = [
@@ -564,22 +621,22 @@ def test_h9b_f04_session_cli_module_is_gone(ctx: Ctx):
     per finding 4/34) is deleted outright, not just unused."""
     import importlib
     try:
-        importlib.import_module("rolo_claude.session_cli")
-        ctx.check("rolo_claude.session_cli must no longer exist", False)
+        importlib.import_module("halo_harness.session_cli")
+        ctx.check("halo_harness.session_cli must no longer exist", False)
     except ModuleNotFoundError:
         pass
 
 
 @test
 def test_h9b_f04_cli_export_sanitize_redacts_a_quoted_export_and_json_env_block(ctx: Ctx):
-    """End to end through the real wired `rolo-claude export --sanitize`
+    """End to end through the real wired `halo export --sanitize`
     CLI (cli.py -> export_cli.cmd_export), the way a user actually runs it
     -- a Bash tool_result containing a QUOTED `export KEY="..."` line (the
     review's own verified repro: `cat ~/.bashrc`) and a settings.json `env`
     block, both in ONE session log."""
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
-    from rolo_claude.agent.log import SessionLog
+    from halo_harness.agent.log import SessionLog
 
     fake_key = "sk-or-v1-" + "112233" * 6
     log = SessionLog(fh["proj"], session_id="h9b-f04-cli-export")
@@ -593,10 +650,10 @@ def test_h9b_f04_cli_export_sanitize_redacts_a_quoted_export_and_json_env_block(
     settings_blob = json.dumps({"env": {"OPENROUTER_API_KEY": fake_key}})
     log.append_tool_result(tool_use_id="call_2", content=f"settings.json:\n{settings_blob}", is_error=False)
 
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
     result = subprocess.run(
-        [sys.executable, "-m", "rolo_claude", "export", "--sanitize", "--cwd", str(fh["proj"]),
+        [sys.executable, "-m", "halo_harness", "export", "--sanitize", "--cwd", str(fh["proj"]),
          "--session", "h9b-f04-cli-export"],
         env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30,
     )
@@ -618,13 +675,13 @@ def test_h9b_f05_session_start_hook_env_file_line_referencing_the_real_key_sees_
     it (the one caller in agent/loop.py did). A hook-written line that
     references `$OPENROUTER_API_KEY` must see NOTHING once that call passes
     `base_env=self.tool_env` (already stripped)."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookDef, HookRunner
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookDef, HookRunner
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -634,7 +691,7 @@ def test_h9b_f05_session_start_hook_env_file_line_referencing_the_real_key_sees_
         real_secret = "sk-or-v1-REALSECRETVALUE-h9bf05-should-never-leak"
         session_id = "h9b-f05-envfile-leak-probe"
         session_log = SessionLog(fh["proj"], session_id=session_id)
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env["PYTHONPATH"] = str(REPO_DIR)
         # The REAL process env this whole test runs in DOES carry the
         # secret (settings.effective_env's "shell env" layer reads real
@@ -783,8 +840,8 @@ def test_h9b_f13_child_usage_and_cost_roll_up_into_the_parents_cost_meter_and_lo
     `parent.cost_meter` (what --max-budget-usd/the TUI status bar read) and
     `parent.log.nodes()` (what /stats -- Controller.session_stats, which
     reads ONLY the current session's own log -- reads)."""
-    from rolo_claude.agent.subagent import run_agent_call
-    from rolo_claude.controller import compute_session_stats
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.controller import compute_session_stats
 
     mock = MockUpstream().start()
     try:
@@ -858,10 +915,10 @@ def test_h9b_f13_max_budget_usd_trips_on_subagent_spend_the_parent_alone_never_w
              {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
              _cost_chunk(1000, 500, 0.05)],
         ])
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                      "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        args = [sys.executable, "-m", "rolo_claude", "-p", "spend via a sub-agent then finish",
+        args = [sys.executable, "-m", "halo_harness", "-p", "spend via a sub-agent then finish",
                 "--model", "or:mock/h9b-f13-cli-parent", "--cwd", str(fh["proj"]),
                 "--output-format", "json", "--permission-mode", "auto", "--max-budget-usd", "0.01"]
         result = subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
@@ -889,7 +946,7 @@ def test_h9b_f27_resuming_a_still_running_background_task_is_refused_not_raced(c
     racing writes. Uses a deliberately slow (0.8s) upstream reply so the
     background thread is provably still in flight when the resume attempt
     lands, then again once it has genuinely finished."""
-    from rolo_claude.agent.subagent import run_agent_call
+    from halo_harness.agent.subagent import run_agent_call
 
     def _slow_then_reply(h, body):
         time.sleep(0.8)
@@ -954,8 +1011,8 @@ def test_h9b_f27_task_map_survives_a_simulated_resume_via_disk_hydration(ctx: Ct
     -- exactly what `-c` gives a fresh process -- and checks that a task_id
     minted under the FIRST resumes cleanly under the SECOND, purely via
     `_hydrate_tasks_from_disk` reading `subagents/*.meta.json` back."""
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.subagent import run_agent_call
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.subagent import run_agent_call
 
     mock = MockUpstream().start()
     try:
@@ -1048,7 +1105,7 @@ def test_h9b_f28_prune_commits_are_logged_and_rebuilt_on_resume(ctx: Ctx):
     40,000, so t0c/t0b/t0 are all candidates) -- so the very first
     `_pruned_messages_for_wire` call commits exactly {t0, t0b, t0c} in one
     batch, none of the filler turns."""
-    from rolo_claude.agent.log import SessionLog
+    from halo_harness.agent.log import SessionLog
 
     old1, old2, old3 = "A" * 30_000, "B" * 30_000, "C" * 30_000
     raw_messages = [
@@ -1114,7 +1171,7 @@ def test_h9b_f26_child_max_turns_exhaustion_is_marked_is_error_not_a_normal_answ
     step-index clamps to the last step, so the SAME tool call replays
     forever) with `max_turns=1` exhausts on its very first turn, never
     producing a final text answer at all."""
-    from rolo_claude.agent.subagent import run_agent_call
+    from halo_harness.agent.subagent import run_agent_call
 
     mock = MockUpstream().start()
     try:
@@ -1209,11 +1266,11 @@ def test_h9b_mcp_stdio_server_dies_with_the_process_normal_exit_and_sighup(ctx: 
 
     try:
         SCENARIOS["h9b-mcp-lifecycle-sighup"] = ScriptedTurns([_slow_reply])
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh2["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock2.base_url,
                      "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
         proc = subprocess.Popen(
-            [sys.executable, "-m", "rolo_claude", "-p", "say hi slowly",
+            [sys.executable, "-m", "halo_harness", "-p", "say hi slowly",
              "--model", "or:mock/h9b-mcp-lifecycle-sighup", "--cwd", str(fh2["proj"]),
              "--permission-mode", "auto"],
             env=env, cwd=str(REPO_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1292,7 +1349,7 @@ class _StubMcpManager:
 def test_h9b_f14_plain_prompt_with_no_at_mention_never_calls_resources(ctx: Ctx):
     """The regex runs FIRST -- a prompt with no `@name:uri`-shaped text at
     all must never trigger the live `resources()` RPC in the first place."""
-    from rolo_claude.mcp.mentions import extract_server_resource_mentions
+    from halo_harness.mcp.mentions import extract_server_resource_mentions
     stub = _StubMcpManager()
     for text in ("fix the failing test", "why is the build red?", "thanks", "email me @ some point please"):
         found = extract_server_resource_mentions(text, mcp_manager=stub)
@@ -1303,7 +1360,7 @@ def test_h9b_f14_plain_prompt_with_no_at_mention_never_calls_resources(ctx: Ctx)
 
 @test
 def test_h9b_f14_resources_listing_is_cached_across_calls(ctx: Ctx):
-    from rolo_claude.mcp.mentions import extract_server_resource_mentions
+    from halo_harness.mcp.mentions import extract_server_resource_mentions
     stub = _StubMcpManager()
     for _ in range(5):
         extract_server_resource_mentions("see @srv:srv://note", mcp_manager=stub)
@@ -1318,10 +1375,10 @@ def test_h9b_f14_ingest_at_mentions_never_blocks_on_a_hung_mcp_server(ctx: Ctx):
     `resources()` sleeps for 2s, simulating a hung server -- the call
     itself must return almost immediately; the snapshot lands later, once
     the background thread's fetch actually completes."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.controller import Controller
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.controller import Controller
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     cwd = Path(tempfile.mkdtemp(prefix="h9b-f14-"))
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="h9b-f14-home-")))
@@ -1353,7 +1410,7 @@ def test_h9b_f14_ingest_at_mentions_never_blocks_on_a_hung_mcp_server(ctx: Ctx):
 
 @test
 def test_h9b_f14_oversized_resource_content_is_skipped_like_at_path(ctx: Ctx):
-    from rolo_claude.mcp.mentions import read_server_resource_snapshots
+    from halo_harness.mcp.mentions import read_server_resource_snapshots
 
     class _HugeContentManager:
         def resources(self):
@@ -1382,13 +1439,13 @@ def test_h9b_f17_turn_finally_drains_a_write_queued_during_a_slow_stop_hook(ctx:
     used to sit stranded in `_pending_worker_writes` until the NEXT turn's
     own first safe point, applied only after that next turn's first model
     reply had already been derived without it."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookDef, HookRunner
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookDef, HookRunner
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -1398,7 +1455,7 @@ def test_h9b_f17_turn_finally_drains_a_write_queued_during_a_slow_stop_hook(ctx:
         os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
         session_id = "h9b-f17-session"
         session_log = SessionLog(fh["proj"], session_id=session_id)
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env["PYTHONPATH"] = str(REPO_DIR)
         env["HOOK_SLEEP_S"] = "2.0"
         hook_runner = HookRunner(
@@ -1450,11 +1507,11 @@ def test_h9b_f17_manual_compact_treats_itself_as_busy_for_queue_log_write(ctx: C
     the real compaction call (the mock summarisation request's own
     handler, closing over `session`) -- deterministic, no thread-timing
     guesswork needed."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -1486,7 +1543,7 @@ def test_h9b_f17_manual_compact_treats_itself_as_busy_for_queue_log_write(ctx: C
             ])
 
         SCENARIOS["h9b-f17-compact"] = _scn_check_busy
-        from rolo_claude.model import parse_model_ref as _pmr
+        from halo_harness.model import parse_model_ref as _pmr
         session.model_ref = _pmr("or:mock/h9b-f17-compact")
 
         events_out = []
@@ -1528,8 +1585,8 @@ def test_h9b_f29_only_real_prompts_count_as_turns(ctx: Ctx):
     node counted, no matter its actual origin) -- a single real prompt
     with a background notice, a continuation, and a steer applied on top
     of it used to report 4 turns for what was genuinely one."""
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.controller import compute_session_stats
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.controller import compute_session_stats
 
     cwd = Path(tempfile.mkdtemp(prefix="h9b-f29-"))
     log = SessionLog(cwd, session_id="h9b-f29-session")
@@ -1551,7 +1608,7 @@ def test_h9b_f29_untagged_legacy_user_nodes_still_count_same_as_before(ctx: Ctx)
     existed has NO `kind` field on any "user" node at all -- every one of
     them must still count, exactly like before this fix, so an old
     session's reported turn count doesn't suddenly change."""
-    from rolo_claude.controller import compute_session_stats
+    from halo_harness.controller import compute_session_stats
 
     legacy_nodes = [
         {"type": "meta", "model": "or:mock/x"},
@@ -1566,8 +1623,8 @@ def test_h9b_f29_untagged_legacy_user_nodes_still_count_same_as_before(ctx: Ctx)
 
 @test
 def test_h9b_f29_cache_tokens_are_tracked_and_displayed(ctx: Ctx):
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.controller import compute_session_stats, format_cache_tokens_suffix
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.controller import compute_session_stats, format_cache_tokens_suffix
 
     cwd = Path(tempfile.mkdtemp(prefix="h9b-f29-cache-"))
     log = SessionLog(cwd, session_id="h9b-f29-cache-session")
@@ -1582,6 +1639,21 @@ def test_h9b_f29_cache_tokens_are_tracked_and_displayed(ctx: Ctx):
     ctx.check(f"the display suffix names both, got {suffix!r}", "150000" in suffix and "5000" in suffix)
     ctx.check("a bucket with no cache activity gets an empty suffix",
               format_cache_tokens_suffix({"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}) == "")
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

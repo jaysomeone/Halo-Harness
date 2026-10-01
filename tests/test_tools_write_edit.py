@@ -11,10 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.edit import EditTool
-from rolo_claude.tools.read import ReadTool
-from rolo_claude.tools.write import WriteTool
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.edit import EditTool
+from halo_harness.tools.read import ReadTool
+from halo_harness.tools.write import WriteTool
 
 test, TESTS = new_registry()
 

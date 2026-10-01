@@ -1,4 +1,4 @@
-"""tests.test_mcp_catalog -- rolo_claude/agent/catalog.py +
+"""tests.test_mcp_catalog -- halo_harness/agent/catalog.py +
 tools/registry.py's add_tool/remove_tool/definitions_for +
 tools/tool_search.py's catalog-aware path (H3 scope C, plan revision 4):
 frozen-catalog preload selection under the 32/128 host caps, ToolSearch
@@ -13,11 +13,11 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.catalog import DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP, SessionCatalog, host_cap, select_preload
-from rolo_claude.mcp.manager import McpManager, McpServerConfig
-from rolo_claude.tools.registry import ToolRegistry
-from rolo_claude.tools.tool_search import ToolSearchTool
-from rolo_claude.tools.base import ToolContext
+from halo_harness.agent.catalog import DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP, SessionCatalog, host_cap, select_preload
+from halo_harness.mcp.manager import McpManager, McpServerConfig
+from halo_harness.tools.registry import ToolRegistry
+from halo_harness.tools.tool_search import ToolSearchTool
+from halo_harness.tools.base import ToolContext
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -127,7 +127,7 @@ def _catalog(mgr, *, cap, preload_names=None, cap_budget=None):
     core = ToolRegistry()
     budget = cap_budget if cap_budget is not None else max(0, cap - len(core.names()))
     preload, deferred = select_preload(triples, preload_names=preload_names, cap_budget=budget)
-    from rolo_claude.tools.mcp_tool import McpTool
+    from halo_harness.tools.mcp_tool import McpTool
     for server, wire_name, sdk_tool in preload:
         core.add_tool(McpTool(server, sdk_tool, mgr, vision=False))
     return SessionCatalog(registry=core, deferred=deferred, manager=mgr, cap=cap, names=core.names())
@@ -243,7 +243,7 @@ def test_catalog_evicted_tool_is_reloadable(ctx: Ctx):
 
 @test
 def test_catalog_deferred_lru_max_100(ctx: Ctx):
-    from rolo_claude.agent.catalog import DEFERRED_LRU_MAX
+    from halo_harness.agent.catalog import DEFERRED_LRU_MAX
     ctx.check("D5's own '100 loaded deferred tools' constant", DEFERRED_LRU_MAX == 100)
 
 
@@ -291,7 +291,7 @@ def test_headless_preload_formula_toolsearch_load_at_databricks_and_openrouter_c
     with the OLD select_preload, headroom differed wildly by provider and
     a load could evict itself; slow_tool used to already be preloaded at
     cap 30 (7 fake tools fit easily), silently defeating this whole test."""
-    from rolo_claude.agent.catalog import DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP
+    from halo_harness.agent.catalog import DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP
     for cap in (DEFAULT_DATABRICKS_CAP, DEFAULT_OPENROUTER_CAP):
         mgr = _manager()
         try:
@@ -391,7 +391,7 @@ def test_registry_definitions_for_preserves_given_order(ctx: Ctx):
 
 @test
 def test_registry_add_and_remove_tool(ctx: Ctx):
-    from rolo_claude.tools.read import ReadTool
+    from halo_harness.tools.read import ReadTool
     reg = ToolRegistry(tools=[])
     ctx.check("empty registry has no tools", reg.names() == [])
     reg.add_tool(ReadTool())
@@ -405,10 +405,10 @@ def test_registry_add_and_remove_tool(ctx: Ctx):
 # ---- finding 12: golden ToolSearch ranking on a real-shaped catalog -------
 # Names below are VERBATIM real deferred tool names from rolo's own live
 # session (`mcp list`/ToolSearch's own reminder block, 2026-09-24), across
-# all 15 of rolo-claude's real configured MCP servers (ableton, codriver,
+# all 15 of halo's real configured MCP servers (ableton, codriver,
 # devices, expanded-models, gui, hardware, hear, jam, kb, max, mix, play,
 # plugins, samples, sd3 -- excludes claude-in-chrome/claude_ai_* connectors,
-# which aren't rolo-claude's own servers). Descriptions are plausible
+# which aren't halo's own servers). Descriptions are plausible
 # reconstructions in this codebase's own terse MCP-tool style (real
 # descriptions aren't captured in any log this offline test can read), sized
 # to match the finding's own repro shape: most are one short sentence,
@@ -516,12 +516,12 @@ def _sdk_tool(name, description):
 @test
 def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx):
     """The exact regression repro from the finding: on a real ~100-tool
-    catalog shape spanning every one of rolo-claude's 15 real MCP servers,
+    catalog shape spanning every one of halo's 15 real MCP servers,
     "list MIDI ports" must rank `mcp__hardware__hw_ports` FIRST -- not
     14th behind a long, MIDI-word-stuffed description (moog_set/
     hw_synth_cc, both deliberately built to recreate that exact
     regression here)."""
-    from rolo_claude.mcp.manager import mcp_tool_name
+    from halo_harness.mcp.manager import mcp_tool_name
 
     deferred = {}
     for server, name, desc in _REAL_TOOL_CATALOG:

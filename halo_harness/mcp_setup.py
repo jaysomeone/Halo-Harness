@@ -1,4 +1,4 @@
-"""rolo_claude.mcp_setup -- shared MCP manager construction (H3). Used by
+"""halo_harness.mcp_setup -- shared MCP manager construction (H3). Used by
 BOTH `headless.py` (building a real session's tools) and `mcp_cli.py`'s
 `mcp list` (a health check against the EXACT SAME resolved config) so the
 two can never disagree about which servers exist or how scope resolution/
@@ -14,12 +14,12 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home, home, managed_dir
+from halo_harness.config.paths import bridge_home, home, managed_dir
 
 
 def load_mcp_approvals() -> dict:
-    """`~/.rolo-claude/mcp-approvals.json` -- OUR OWN approval store for a
-    `.mcp.json` project server (D-CFG: "our `~/.rolo-claude/mcp-approvals.
+    """`~/.halo/mcp-approvals.json` -- OUR OWN approval store for a
+    `.mcp.json` project server (D-CFG: "our `~/.halo/mcp-approvals.
     json`"), never Claude Code's own state. Must-do: keys are each
     approved entry's `manager.mcp_approval_key(raw_entry)` sha256 (an
     edited/tampered entry needs re-approval), never the bare server name.
@@ -42,7 +42,7 @@ def record_mcp_approval(name: str, raw_entry: dict) -> None:
     session). Ready for U2's interactive `question`-event approval flow
     (loop.py's Session.run()/permission-wait-seam, not this module's job)
     to call once the user answers "yes"."""
-    from rolo_claude.mcp.manager import mcp_approval_key
+    from halo_harness.mcp.manager import mcp_approval_key
     path = bridge_home() / "mcp-approvals.json"
     data = load_mcp_approvals()
     data[mcp_approval_key(raw_entry)] = {"name": name}
@@ -66,7 +66,8 @@ def find_claude_exe() -> Optional[str]:
     ONLY for `claude.exe`/`claude.cmd`, so it's never reused here;
     duplicating the small lookup keeps this module usable on Linux without
     touching the proxy's own Windows-only helper)."""
-    env_exe = os.environ.get("BRIDGE_CLAUDE_EXE")
+    from halo_harness.config.paths import env_compat
+    env_exe = env_compat("CLAUDE_EXE")
     if env_exe:
         return env_exe
     for name in ("claude", "claude.exe", "claude.cmd"):
@@ -97,7 +98,7 @@ def resolve_chrome_enabled(claude_json: dict, *, chrome_flag: bool, no_chrome_fl
     documented ladder, but the one override nothing below it can undo).
     `interactive=False` (headless.py's own `-p` call site) means
     `claudeInChromeDefaultEnabled` is NEVER consulted -- before this,
-    every `rolo-claude -p` on a box with that setting on spawned
+    every `halo -p` on a box with that setting on spawned
     `claude.CMD --claude-in-chrome-mcp`, which `claude -p` itself never
     does. The TUI (interactive, U2's own call site) keeps the default
     `interactive=True` and is unaffected."""
@@ -120,7 +121,7 @@ def chrome_server_config(*, bypass_mode: bool = True):
 
     finding 9 (major, h4-h5-h3c review) / "Auto mode = uninterrupted"
     (plan, binding): `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_
-    checks` is now ALWAYS set, unconditionally -- rolo-claude's own
+    checks` is now ALWAYS set, unconditionally -- halo's own
     PermissionEngine already gates every `mcp__claude-in-chrome__*` tool
     call the SAME way it gates any other tool (auto/bypass allow outright;
     default/acceptEdits/plan honour the user's own ask/deny rules), so the
@@ -135,7 +136,7 @@ def chrome_server_config(*, bypass_mode: bool = True):
     = uninterrupted + steering" section forbids outright. `bypass_mode` is
     kept as a parameter (unused) only so existing callers that still pass
     it keep working unchanged."""
-    from rolo_claude.mcp.manager import McpServerConfig
+    from halo_harness.mcp.manager import McpServerConfig
     claude_exe = find_claude_exe()
     if not claude_exe:
         return None, ("--chrome: no claude executable found on PATH -- Claude in Chrome needs Claude "
@@ -150,7 +151,7 @@ def playwright_server_config(*, cdp_endpoint: Optional[str] = None, headless: bo
     args: ["-y", "@playwright/mcp@latest", ...]}`, named `playwright`;
     `--playwright-cdp <endpoint>` -> `--cdp-endpoint <endpoint>`,
     `--playwright-headless` -> `--headless` passthrough to the server."""
-    from rolo_claude.mcp.manager import McpServerConfig
+    from halo_harness.mcp.manager import McpServerConfig
     npx = shutil.which("npx") or shutil.which("npx.cmd")
     node = shutil.which("node") or shutil.which("node.exe")
     if not npx or not node:
@@ -179,7 +180,7 @@ def build_manager(
     bypass_mode: bool = False, start: bool = True, trusted: bool = True,
 ):
     """`(manager_or_None, notices)`. `manager` is None ONLY when the `mcp`
-    package itself isn't installed (`rolo_claude.mcp.available()` False)
+    package itself isn't installed (`halo_harness.mcp.available()` False)
     -- `notices` then carries exactly `NOT_AVAILABLE_NOTICE`. A real but
     EMPTY server set (no servers configured at all) still returns a real
     (zero-handle) `McpManager`, never None, so a caller never has to tell
@@ -189,13 +190,13 @@ def build_manager(
     existing caller that doesn't pass it keeps today's behaviour) gates a
     PROJECT-scope `.mcp.json` server's `headersHelper` (binary-facts sec.9:
     "repo-resident config needs persisted trust")."""
-    from rolo_claude.mcp import NOT_AVAILABLE_NOTICE, available
+    from halo_harness.mcp import NOT_AVAILABLE_NOTICE, available
     notices: list = []
     if not available():
         return None, [NOT_AVAILABLE_NOTICE]
 
-    from rolo_claude.mcp.manager import McpManager, resolve_server_configs
-    from rolo_claude.providers.config import tool_child_env
+    from halo_harness.mcp.manager import McpManager, resolve_server_configs
+    from halo_harness.providers.config import tool_child_env
 
     dynamic: dict = {}
     if chrome:
@@ -213,7 +214,7 @@ def build_manager(
 
     base_env = settings.effective_env if settings is not None else dict(os.environ)
 
-    from rolo_claude.config.plugins import discover_plugin_mcp_servers
+    from halo_harness.config.plugins import discover_plugin_mcp_servers
     # finding 8: `cwd` threaded through so a V2 project/local-scoped
     # plugin record (`projectPath`) is matched against THIS session's own
     # working directory, not silently dropped.
@@ -278,7 +279,7 @@ def bootstrap_lazy_from_cache(manager, configs: "dict[str, object]", lazy_names:
     that. Returns any notices worth surfacing (currently none on the happy
     path -- kept as a list return, matching every other notices-returning
     function in this module, for whichever future case needs one)."""
-    from rolo_claude.mcp import tools_cache
+    from halo_harness.mcp import tools_cache
     notices: list = []
     needs_connect: list = []
     for name in lazy_names:

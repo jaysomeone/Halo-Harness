@@ -1,4 +1,4 @@
-"""rolo_claude.agent.subagent -- the Agent/Task tool's real implementation
+"""halo_harness.agent.subagent -- the Agent/Task tool's real implementation
 (H6 scope B): `AgentRuntime` (what a session's Agent-tool calls need beyond
 a bare ToolContext), spawning a child `agent.loop.Session` per call with a
 fresh log under `<parent_session_dir>/subagents/agent-<id>.jsonl` (+ a
@@ -57,8 +57,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude import events
-from rolo_claude.config.agents_md import AgentSpec, resolve_agent_model
+from halo_harness import events
+from halo_harness.config.agents_md import AgentSpec, resolve_agent_model
 
 MAX_CONCURRENT_AGENTS = 4
 MAX_DEPTH = 1
@@ -114,7 +114,7 @@ def _child_log_paths(parent, agent_id: str):
     `Session.__init__`'s own "resume an existing log" branch with zero
     extra plumbing -- a fresh spawn's file doesn't exist yet, so `_nodes`
     stays `[]` and the "brand new session" branch runs instead."""
-    from rolo_claude.agent.log import SessionLog
+    from halo_harness.agent.log import SessionLog
 
     parent_dir = parent.log.dir / parent.log.session_id
     subdir = parent_dir / "subagents"
@@ -151,10 +151,10 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     per `AgentSpec.skips_claude_md`/`includes_memory`), a resolved model,
     and a permission mode/engine of its own (sharing the parent's rules,
     scoped by `spec.permission_mode` when set)."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookRunner
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookRunner
+    from halo_harness.permissions import PermissionEngine
 
     parent = runtime.parent
     child_log, meta_path = _child_log_paths(parent, agent_id)
@@ -493,8 +493,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     its events (most importantly `permission_request`) reach a live caller
     the instant they happen -- never used for a background child (see
     `_bg_run`, whose events are not forwarded to any live stream)."""
-    from rolo_claude.tools.base import ToolResult
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.base import ToolResult
+    from halo_harness.tools.truncate import spill_and_truncate
 
     _hydrate_tasks_from_disk(runtime)
     if runtime.depth >= MAX_DEPTH:
@@ -655,7 +655,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # H11b finding 14: this background child's own claude
                 # subprocess/bridge/socket (if it ever used cc:) is closed
                 # THE MOMENT this call ends, not left running until the
-                # whole rolo-claude process quits.
+                # whole halo process quits.
                 child.close_cc()
                 runtime.live_children.pop(agent_id, None)
                 with runtime.lock:
@@ -716,8 +716,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
 
 
 def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str, *, on_event=None):
-    from rolo_claude.tools.base import ToolResult
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.base import ToolResult
+    from halo_harness.tools.truncate import spill_and_truncate
 
     parent = runtime.parent
     record = runtime.tasks.get(task_id)

@@ -11,8 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent import repair
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.agent import repair
+from halo_harness.tools.registry import ToolRegistry
 
 test, TESTS = new_registry()
 
@@ -160,7 +160,7 @@ def test_mcp_name_already_loaded_by_an_earlier_block_this_turn(ctx: Ctx):
     block already auto-loaded into `registry` (mutated in place) earlier
     in the SAME turn must still resolve, even though the stale snapshot
     doesn't contain it and it's no longer in `catalog.deferred` either."""
-    from rolo_claude.tools.read import ReadTool
+    from halo_harness.tools.read import ReadTool
     reg = ToolRegistry(tools=[ReadTool()])
     stale_names = reg.names()  # snapshot BEFORE the tool gets added
     reg.add_tool(ReadTool())  # stand-in for an mcp__ tool another block just loaded

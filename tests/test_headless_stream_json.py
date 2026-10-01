@@ -1,4 +1,4 @@
-"""tests.test_headless_stream_json -- rolo_claude/headless.py + output.py
+"""tests.test_headless_stream_json -- halo_harness/headless.py + output.py
 (U0 scope F): `--output-format stream-json` line order/shapes,
 `--input-format stream-json` (one turn per stdin line, ONE init line for
 the whole run), `--max-budget-usd` early exit, `--json-schema` ->
@@ -70,10 +70,10 @@ def _scn_json_reply(h, body):
 
 
 def _run_cli(fh, mock, prompt=None, extra_args=None, stdin_text=None, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-    args = [sys.executable, "-m", "rolo_claude", "-p"]
+    args = [sys.executable, "-m", "halo_harness", "-p"]
     if prompt is not None:
         args.append(prompt)
     args += ["--model", "or:mock/model", "--cwd", str(fh["proj"])] + (extra_args or [])
@@ -97,8 +97,15 @@ def test_stream_json_line_order_and_shapes(ctx: Ctx):
 
         init_line = lines[0]
         for key in ("session_id", "cwd", "model", "permissionMode", "tools", "mcp_servers",
-                    "slash_commands", "rolo_claude_version"):
+                    "slash_commands", "halo_harness_version"):
             ctx.check(f"init line has {key!r}", key in init_line)
+        # 2.0.0 fixpass finding 8: rolo_claude_version ships alongside the
+        # renamed field, same value, for a script that already reads the
+        # old name from stream-json output.
+        ctx.check(f"init line also has the legacy rolo_claude_version alias, got {init_line!r}",
+                  "rolo_claude_version" in init_line)
+        ctx.check(f"both version fields agree, got {init_line!r}",
+                  init_line["rolo_claude_version"] == init_line["halo_harness_version"])
 
         assistant_line = lines[types.index("assistant")]
         content = assistant_line["message"]["content"]
@@ -146,11 +153,11 @@ def test_h5b_f10_stdin_held_open_does_not_deadlock(ctx: Ctx):
     forever with the old code, never seeing turn 1's result."""
     fh = build_fake_home()
     mock = MockUpstream().start()
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     proc = subprocess.Popen(
-        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/model", "--cwd", str(fh["proj"]),
+        [sys.executable, "-m", "halo_harness", "-p", "--model", "or:mock/model", "--cwd", str(fh["proj"]),
          "--input-format", "stream-json", "--output-format", "stream-json"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
@@ -213,11 +220,11 @@ def test_h5c_f10_line_written_while_a_turn_is_in_flight_is_a_real_steer(ctx: Ctx
     original slow one, cut short, plus the steered-in one) -- never 3."""
     fh = build_fake_home()
     mock = MockUpstream().start()
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     proc = subprocess.Popen(
-        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/slow-then-reply", "--cwd", str(fh["proj"]),
+        [sys.executable, "-m", "halo_harness", "-p", "--model", "or:mock/slow-then-reply", "--cwd", str(fh["proj"]),
          "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
@@ -296,11 +303,11 @@ def test_h5c_f13_line_written_during_a_stop_hook_then_stdin_closed_still_runs(ct
         {"choices": [{"index": 0, "delta": {"content": "first done"}}]},
         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
     ])
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR), "HOOK_SLEEP_S": "3"})
     proc = subprocess.Popen(
-        [sys.executable, "-m", "rolo_claude", "-p", "--model", "or:mock/hook-stop-sleep-reply",
+        [sys.executable, "-m", "halo_harness", "-p", "--model", "or:mock/hook-stop-sleep-reply",
          "--cwd", str(fh["proj"]), "--input-format", "stream-json", "--output-format", "stream-json"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env, cwd=str(REPO_DIR), text=True, bufsize=1,
@@ -337,10 +344,10 @@ def test_max_budget_usd_stops_and_reports_error(ctx: Ctx):
     SCENARIOS["cost-reply"] = _scn_cost_reply
     mock = MockUpstream().start()
     try:
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                     "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        args = [sys.executable, "-m", "rolo_claude", "-p", "spend money", "--model", "or:mock/cost-reply",
+        args = [sys.executable, "-m", "halo_harness", "-p", "spend money", "--model", "or:mock/cost-reply",
                 "--cwd", str(fh["proj"]), "--output-format", "json", "--max-budget-usd", "0.01"]
         result = subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         ctx.check(f"exit 1 (is_error), got {result.returncode}", result.returncode == 1)
@@ -433,7 +440,7 @@ def test_system_prompt_full_replacement_reaches_upstream(ctx: Ctx):
 def test_append_system_prompt_file_reaches_upstream(ctx: Ctx):
     fh = build_fake_home()
     mock = MockUpstream().start()
-    tmp = Path(tempfile.mkdtemp(prefix="rolo-claude-append-"))
+    tmp = Path(tempfile.mkdtemp(prefix="halo-append-"))
     marker_file = tmp / "extra.txt"
     marker_file.write_text("PINEAPPLE-APPEND-MARKER", encoding="utf-8")
     try:
@@ -465,6 +472,21 @@ def test_setting_sources_restricts_project_layer(ctx: Ctx):
                   mode_without == "auto")
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

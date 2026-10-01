@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
-from rolo_claude.config.memory import MemoryStore
+from halo_harness.config.memory import MemoryStore
 
 test, TESTS = new_registry()
 

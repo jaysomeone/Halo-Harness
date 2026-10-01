@@ -53,11 +53,11 @@ def _write_fake_mcp_only_claude_json(home: Path) -> None:
 
 
 def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, extra_env=None, model="or:mock/model"):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     env.update(extra_env or {})
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model,
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model,
             "--cwd", str(fh["proj"])] + (extra_args or [])
     return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
 
@@ -94,8 +94,8 @@ def test_mcp_e2e_vision_image_reaches_the_request_body(ctx: Ctx):
     (not just a unit test of the conversion function in isolation)."""
     fh = build_fake_home()
     _write_fake_mcp_only_claude_json(fh["home"])
-    (fh["home"] / ".rolo-claude").mkdir(parents=True, exist_ok=True)
-    (fh["home"] / ".rolo-claude" / "routes.json").write_text(
+    (fh["home"] / ".halo").mkdir(parents=True, exist_ok=True)
+    (fh["home"] / ".halo" / "routes.json").write_text(
         json.dumps({"profiles": {"default": {"vision": True}}}), encoding="utf-8")
 
     seen_bodies = []
@@ -176,10 +176,10 @@ def test_mcp_e2e_isError_tool_result_reaches_the_model(ctx: Ctx):
 
     mock = MockUpstream().start()
     try:
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                     "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
-        args = [sys.executable, "-m", "rolo_claude", "-p", "call the error tool", "--model", "or:mock/h3-mcp-error",
+        args = [sys.executable, "-m", "halo_harness", "-p", "call the error tool", "--model", "or:mock/h3-mcp-error",
                 "--cwd", str(fh["proj"]), "--permission-mode", "auto"]
         result = subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=30)
         ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-800:]!r}", result.returncode == 0)
@@ -198,7 +198,7 @@ def test_permission_denials_includes_a_plain_deny_rule_hit(ctx: Ctx):
     array even though it was never an ask-turned-into-deny. Reproduces via
     `permissions.PermissionEngine.decide` directly (fast, no subprocess) --
     the exact bug fixed at `decide()`'s single entry point."""
-    from rolo_claude import permissions as P
+    from halo_harness import permissions as P
     engine = P.PermissionEngine(
         mode="auto", cwd=Path("/tmp/x"), print_mode=True,
         deny_rules=[P.parse_rule("Bash(rm -rf *)", source="cli_disallow")],
@@ -216,7 +216,7 @@ def test_permission_denials_not_populated_outside_print_mode(ctx: Ctx):
     """The backfill is print-mode-only (matches the pre-existing ask->deny
     behaviour it generalises) -- an interactive/non-print session has no
     JSON `permission_denials` array to populate."""
-    from rolo_claude import permissions as P
+    from halo_harness import permissions as P
     engine = P.PermissionEngine(
         mode="auto", cwd=Path("/tmp/x"), print_mode=False,
         deny_rules=[P.parse_rule("Bash(rm -rf *)", source="cli_disallow")],
@@ -278,6 +278,21 @@ def test_claude_json_checksum_unchanged_after_a_session_with_mcp(ctx: Ctx):
         ctx.check("settings.json untouched", _sha256(settings_path) == settings_before)
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Open-model coding-harness patterns (OpenCode, Cline, Roo, Kilo, Aider, Goose, Qwen Code, Kimi Code, Gemini CLI, Crush, Continue, Codex, oh-my-pi)
 
-Research date: 2026-09-23. Scope: how Claude Code-like harnesses that target DeepSeek / Kimi K2 / Qwen3 / GLM-4.x / Gemini structure their loops, prompts, tool handling and context management, plus a Claude Code feature-parity map for "rolo-claude".
+Research date: 2026-09-23. Scope: how Claude Code-like harnesses that target DeepSeek / Kimi K2 / Qwen3 / GLM-4.x / Gemini structure their loops, prompts, tool handling and context management, plus a Claude Code feature-parity map for "halo".
 
 Source-quality legend used below:
 - **[P]** = primary page fetched and read in full (GitHub issue/PR/docs page/raw file).
@@ -71,7 +71,7 @@ Every surviving harness has converged on **native (OpenAI-style JSON) function c
 - Ollama recommends "a context window of at least 64k tokens for Codex"; example `model_providers` uses `base_url = "http://localhost:11434/v1/"`, `wire_api = "responses"` — [P] https://docs.ollama.com/integrations/codex
 
 ### Inferences
-- The practical loop for an OpenAI-compatible harness like rolo-claude is: native `tools` always → on parse failure run a JSON repair pass (unterminated strings, missing braces, trailing junk/XML) → if still invalid, dispatch to an `invalid` pseudo-tool whose result text tells the model exactly what was wrong (schema errors listed) → distinguish `finish_reason == "length"` from malformed JSON and tell the model to split the operation. This is exactly the shape OpenCode issues #17750/#18108 and PR #23067 converge on.
+- The practical loop for an OpenAI-compatible harness like halo is: native `tools` always → on parse failure run a JSON repair pass (unterminated strings, missing braces, trailing junk/XML) → if still invalid, dispatch to an `invalid` pseudo-tool whose result text tells the model exactly what was wrong (schema errors listed) → distinguish `finish_reason == "length"` from malformed JSON and tell the model to split the operation. This is exactly the shape OpenCode issues #17750/#18108 and PR #23067 converge on.
 - Schema tolerance beats prompt nagging: OpenCode's Kimi fix was to drop a required `description` field, not to add instructions. Keep required params minimal for open models and default the rest.
 - Because Roo/Kilo dropped XML, a self-hosted stack must make the *server* parse tool calls (`--tool-call-parser`); when it does not (Roo #9551, Continue #11070), the harness sees token soup in `content`. A cheap fallback regex for `<tool_call>…</tool_call>` and Kimi's `<|tool_call_begin|>` blocks is worth having behind a flag, but Continue's experience shows text parsers false-positive on quoted syntax.
 - Kimi's `functions.name:idx` id rule matters when a harness fabricates ids (e.g. Claude-format `toolu_*` ids translated to OpenAI) — a bridge should preserve provider ids verbatim and never renumber.
@@ -152,7 +152,7 @@ Two families dominate: (1) tool-based `edit` with exact old/new string replace p
 - Crush GLM 5.2 crash (KQ1) was specifically on `edit`/`write` calls carrying multi-line code blobs, i.e. large string arguments are where JSON-argument serialization breaks first — [P] https://github.com/charmbracelet/crush/issues/3153
 
 ### Inferences
-- For rolo-claude reusing Claude Code's `Edit` (exact old_string/new_string) with DeepSeek/Kimi/Qwen: keep it, but add Aider-style whitespace-tolerant matching on the harness side and a structured "old_string not found / N near-matches" error so the model can self-correct in one turn; open models' failures are dominated by whitespace/indentation drift, which is exactly what `whole` and hash-anchoring sidestep.
+- For halo reusing Claude Code's `Edit` (exact old_string/new_string) with DeepSeek/Kimi/Qwen: keep it, but add Aider-style whitespace-tolerant matching on the harness side and a structured "old_string not found / N near-matches" error so the model can self-correct in one turn; open models' failures are dominated by whitespace/indentation drift, which is exactly what `whole` and hash-anchoring sidestep.
 - Aider's data suggests the switch point: models scoring <85% well-formed on `diff` (Qwen3-32B-class and below) should get a `whole`-file or full-`write` fallback; DeepSeek V3.x, Kimi K2 and Qwen3-235B are fine with search/replace.
 - Very large single edits are the riskiest tool call for GLM-class models (JSON escaping); prefer several small edits or a `write` with raw content.
 
@@ -237,7 +237,7 @@ All harnesses use LLM-written structured summaries triggered by a threshold, but
 - Crush per-model `context-window` and `default-max-tokens` are declared in config (e.g. `--context-window 64000 --default-max-tokens 5000` for deepseek-chat) — [P] https://github.com/charmbracelet/crush
 
 ### Inferences
-- Token counting for open models is done by *estimation* (OpenCode "estimates the final size"), not tokenizer calls; every harness therefore keeps a safety buffer (OpenCode 20k) — rolo-claude can do the same with a chars/4 estimate plus provider `usage` from the previous response.
+- Token counting for open models is done by *estimation* (OpenCode "estimates the final size"), not tokenizer calls; every harness therefore keeps a safety buffer (OpenCode 20k) — halo can do the same with a chars/4 estimate plus provider `usage` from the previous response.
 - The two cheapest wins for DeepSeek/Kimi-class context limits (64k-256k) are OpenCode-style tool-output pruning (drop bodies of old tool results, keep a stub) and Qwen-style hard byte caps on tool results at emission time; both preserve the prefix (system prompt + early turns), which is what provider prompt caching (DeepSeek `caches_by_default`, Kimi) needs even though no harness states this explicitly.
 
 ### Gaps
@@ -318,7 +318,7 @@ Claude Code's *config surface* has become a de-facto standard: OpenCode falls ba
 - Cross-harness: skills 9/11, MCP 8/11 of studied systems — [P] https://arxiv.org/abs/2609.00006
 
 ### Transition checklist (Claude Code → open-model harness), derived from the above
-| Claude Code feature | Closest open-harness equivalent | Notes for rolo-claude |
+| Claude Code feature | Closest open-harness equivalent | Notes for halo |
 |---|---|---|
 | `CLAUDE.md` (+ `~/.claude/CLAUDE.md`) | OpenCode reads both as fallback; oh-my-pi reads `.claude/`; others use `AGENTS.md`/`GEMINI.md`/`QWEN.md`/`CRUSH.md` | Read `CLAUDE.md` first, then `AGENTS.md`; support `instructions` globs |
 | `.claude/commands/*.md` | OpenCode `command.*`/`.opencode/command`, Gemini TOML commands, Qwen commands | Keep Markdown-with-frontmatter format |
@@ -335,7 +335,7 @@ Claude Code's *config surface* has become a de-facto standard: OpenCode falls ba
 | Keyboard shortcuts (Ink) | OpenCode keybinds JSON; Crush Bubble Tea; Kimi TUI | No cross-harness convention found |
 
 ### Inferences
-- Reusing Claude Code's files is a *supported migration path* in at least three harnesses (OpenCode, Qwen Code hooks, oh-my-pi), so rolo-claude's plan to reuse Claude Code config is in line with the ecosystem rather than an outlier.
+- Reusing Claude Code's files is a *supported migration path* in at least three harnesses (OpenCode, Qwen Code hooks, oh-my-pi), so halo's plan to reuse Claude Code config is in line with the ecosystem rather than an outlier.
 - Qwen Code is the closest structural clone (flags, hook contract, event schema) and doubles as a reference implementation for open-model prompt/tool-notation tweaks.
 
 ### Gaps
@@ -394,7 +394,7 @@ Vendor guidance diverges sharply by family: DeepSeek and Kimi thinking endpoints
 - Goose truncates agent input prompts at a 4096 default (#7264) — [S] https://github.com/block/goose/issues/7264
 
 ### Inferences
-- A per-family parameter table for rolo-claude, derived from the citations: **DeepSeek thinking** — omit temperature/top_p, max_tokens 32-64k, always replay `reasoning_content`; **DeepSeek chat** — 0-0.3 (Aider uses default; OpenCode 0), 8k max_tokens; **Kimi K2 instant** — 0.6; **Kimi thinking/K3** — omit temperature, max_tokens ≥16k, replay reasoning, never renumber tool-call ids; **Qwen3-Coder** — 0.7/0.8/20/1.05 (or OpenCode's 0.55) with `qwen3_coder` parser; **GLM-4.7/5.x** — 0.6-0.7 for agentic loops (vendor 1.0 measurably worse), `glm47` parser, smaller edits; **Gemini 3** — 1.0, replay signatures, `diff-fenced`-style forgiving edit parsing.
+- A per-family parameter table for halo, derived from the citations: **DeepSeek thinking** — omit temperature/top_p, max_tokens 32-64k, always replay `reasoning_content`; **DeepSeek chat** — 0-0.3 (Aider uses default; OpenCode 0), 8k max_tokens; **Kimi K2 instant** — 0.6; **Kimi thinking/K3** — omit temperature, max_tokens ≥16k, replay reasoning, never renumber tool-call ids; **Qwen3-Coder** — 0.7/0.8/20/1.05 (or OpenCode's 0.55) with `qwen3_coder` parser; **GLM-4.7/5.x** — 0.6-0.7 for agentic loops (vendor 1.0 measurably worse), `glm47` parser, smaller edits; **Gemini 3** — 1.0, replay signatures, `diff-fenced`-style forgiving edit parsing.
 - `tool_choice`: no harness documents forcing it for open models; the loop is universally "auto until finish_reason != tool_calls". Parallel tool calls: Cline/Kilo/Qwen Code exploit them; Roo serializes execution even when the model emits several — safe default for weaker models is "accept parallel, execute sequentially".
 - Provider pinning matters most for Kimi/GLM on OpenRouter because quantized third-party endpoints change tool-call fidelity (Roo #9551 and the GLM DGX PR both involve quantized deployments); use `quantizations: ["fp8","bf16"]` plus `require_parameters: true`.
 

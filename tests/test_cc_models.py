@@ -16,7 +16,7 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 
 # H11b finding 27: this module's own scratch home -- `profile_fields_for_
 # cc_model`/`refresh_cc_catalog` read/write `<bridge_home()>/cc-models.
-# json`, which defaulted to the REAL ~/.rolo-claude/cc-models.json here
+# json`, which defaulted to the REAL ~/.halo/cc-models.json here
 # (verified: this module read the real file). See test_cc_session.py's
 # own comment on this same line for why it's set once, at import time.
 os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="cc-models-scratchhome-")
@@ -33,7 +33,7 @@ def _clear_cc_env():
 
 @test
 def test_cc_prefix_resolves_all_named_aliases(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         # H15 part 2 addendum: `cc:` auto-enables only with a REAL
@@ -58,7 +58,7 @@ def test_cc_prefix_resolves_all_named_aliases(ctx: Ctx):
 
 @test
 def test_cc_prefix_full_id_passes_through_unchanged(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -70,7 +70,7 @@ def test_cc_prefix_full_id_passes_through_unchanged(ctx: Ctx):
 
 @test
 def test_cc_prefix_1m_suffix_preserved(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -84,7 +84,7 @@ def test_cc_prefix_1m_suffix_preserved(ctx: Ctx):
 
 @test
 def test_ant_prefix_resolves_the_same_alias_names(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         # H15 part 2 addendum: `ant:` auto-enables only with a real
@@ -108,7 +108,7 @@ def test_ant_prefix_resolves_the_same_alias_names(ctx: Ctx):
 def test_ant_prefix_sonnet_and_haiku_resolve_to_concrete_ids_not_bare_aliases(ctx: Ctx):
     """Unlike cc: (where Claude Code resolves its OWN sonnet/haiku
     aliases), ant: hits the real API directly and needs a concrete id."""
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
@@ -123,7 +123,7 @@ def test_ant_prefix_sonnet_and_haiku_resolve_to_concrete_ids_not_bare_aliases(ct
 @test
 def test_ant_prefix_existing_behavior_unaffected_for_unknown_names(ctx: Ctx):
     """Regression guard: test_model.py's own test_parse_ant_prefix case."""
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
@@ -136,7 +136,7 @@ def test_ant_prefix_existing_behavior_unaffected_for_unknown_names(ctx: Ctx):
 
 @test
 def test_routes_json_alias_hop_into_cc_prefix(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -152,7 +152,7 @@ def test_routes_json_alias_hop_into_cc_prefix(ctx: Ctx):
 
 @test
 def test_bare_alias_routes_to_cc_when_logged_in_and_no_key(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -165,7 +165,7 @@ def test_bare_alias_routes_to_cc_when_logged_in_and_no_key(ctx: Ctx):
 
 @test
 def test_bare_alias_routes_to_ant_when_key_set(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
@@ -180,7 +180,7 @@ def test_bare_alias_routes_to_ant_when_key_set(ctx: Ctx):
 def test_bare_alias_key_wins_over_login(ctx: Ctx):
     """Brief: 'ant: when the key is set' -- a deliberate key is never
     silently overridden by an incidental subscription login."""
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
@@ -193,8 +193,8 @@ def test_bare_alias_key_wins_over_login(ctx: Ctx):
 
 @test
 def test_bare_alias_errors_naming_both_options_when_neither_available(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
@@ -212,8 +212,8 @@ def test_bare_alias_errors_naming_both_options_when_neither_available(ctx: Ctx):
 @test
 def test_bare_non_alias_word_still_raises_invalid_model_error(ctx: Ctx):
     """Regression guard: test_model.py's own test_parse_invalid_raises case."""
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.routing import InvalidModelError
     _clear_cc_env()
     try:
         parse_model_ref("totally-unrecognized-form")
@@ -226,7 +226,7 @@ def test_bare_non_alias_word_still_raises_invalid_model_error(ctx: Ctx):
 
 @test
 def test_claude_auth_status_parses_real_shaped_json(ctx: Ctx):
-    from rolo_claude.providers.cc_models import claude_auth_status
+    from halo_harness.providers.cc_models import claude_auth_status
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({
@@ -243,7 +243,7 @@ def test_claude_auth_status_parses_real_shaped_json(ctx: Ctx):
 
 @test
 def test_claude_auth_status_not_logged_in(ctx: Ctx):
-    from rolo_claude.providers.cc_models import claude_auth_status
+    from halo_harness.providers.cc_models import claude_auth_status
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
@@ -255,7 +255,7 @@ def test_claude_auth_status_not_logged_in(ctx: Ctx):
 
 @test
 def test_claude_auth_status_unparseable_output_is_not_logged_in(ctx: Ctx):
-    from rolo_claude.providers.cc_models import claude_auth_status
+    from halo_harness.providers.cc_models import claude_auth_status
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = "not json at all"
@@ -273,7 +273,7 @@ def test_claude_not_found_returns_none(ctx: Ctx):
     as logged_in=False, not None -- see the not-logged-in-shaped tests
     above) -- subprocess.run itself raises FileNotFoundError, which
     claude_auth_status treats as "claude not found"."""
-    from rolo_claude.providers.cc_models import claude_auth_status
+    from halo_harness.providers.cc_models import claude_auth_status
     _clear_cc_env()
     missing = Path(tempfile.gettempdir()) / "definitely-not-a-real-claude-binary-xyz.exe"
     try:
@@ -289,7 +289,7 @@ def test_resolve_claude_launch_argv_honors_bridge_claude_exe_two_tokens(ctx: Ctx
     """Windows can't exec a bare .py path -- BRIDGE_CLAUDE_EXE must accept
     a quoted "<interpreter> <script>" two-token form (Part C's fake claude
     is exactly this shape)."""
-    from rolo_claude.providers.cc_models import resolve_claude_launch_argv
+    from halo_harness.providers.cc_models import resolve_claude_launch_argv
     _clear_cc_env()
     try:
         fake = str(Path(__file__).resolve().parent / "helpers" / "fake_claude_cc.py")
@@ -304,13 +304,13 @@ def test_resolve_claude_launch_argv_honors_bridge_claude_exe_two_tokens(ctx: Ctx
 
 @test
 def test_credentials_file_is_never_opened(ctx: Ctx):
-    """Binding constraint: rolo-claude never reads
+    """Binding constraint: halo never reads
     ~/.claude/.credentials.json -- a sentinel file under BRIDGE_TEST_HOME
     is never touched by claude_auth_status()/bare-alias resolution, even
     though both run real subprocess/env-var logic that COULD have reached
     for it by mistake."""
     import builtins
-    from rolo_claude.providers.cc_models import claude_auth_status, default_bare_alias_route
+    from halo_harness.providers.cc_models import claude_auth_status, default_bare_alias_route
 
     home_dir = Path(tempfile.mkdtemp(prefix="cc-cred-home-"))
     creds_path = home_dir / ".claude" / ".credentials.json"
@@ -353,7 +353,7 @@ def test_credentials_file_is_never_opened(ctx: Ctx):
 
 @test
 def test_profile_fields_known_for_all_six_models_plus_cc_aliases(ctx: Ctx):
-    from rolo_claude.providers.cc_models import profile_fields_for_cc_model
+    from halo_harness.providers.cc_models import profile_fields_for_cc_model
     for model_id in ("claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8",
                        "claude-opus-4-6", "claude-sonnet-5", "sonnet", "haiku"):
         fields = profile_fields_for_cc_model(model_id)
@@ -364,13 +364,13 @@ def test_profile_fields_known_for_all_six_models_plus_cc_aliases(ctx: Ctx):
 
 @test
 def test_profile_fields_unknown_model_returns_none(ctx: Ctx):
-    from rolo_claude.providers.cc_models import profile_fields_for_cc_model
+    from halo_harness.providers.cc_models import profile_fields_for_cc_model
     ctx.check("unknown id -> None", profile_fields_for_cc_model("claude-totally-made-up") is None)
 
 
 @test
 def test_resolve_model_profile_cc_uses_the_table(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
+    from halo_harness.model import parse_model_ref, resolve_model_profile
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -391,7 +391,7 @@ def test_opus_5_5_and_sonnet_5_5_aliases_resolve_the_same_as_the_bare_latest_poi
     nothing is labelled "5.5" -- `opus` resolves to it, but a reader can't
     tell that from the alias name alone. These two new explicit names
     resolve to the identical id the bare "latest" pointer already does."""
-    from rolo_claude.providers.cc_models import ANT_ALIASES, CC_ALIASES
+    from halo_harness.providers.cc_models import ANT_ALIASES, CC_ALIASES
     ctx.check(f"CC_ALIASES['opus-5.5'], got {CC_ALIASES.get('opus-5.5')!r}",
               CC_ALIASES.get("opus-5.5") == "claude-opus-5-5")
     ctx.check(f"CC_ALIASES['opus-5.5'] == CC_ALIASES['opus'], got {CC_ALIASES.get('opus')!r}",
@@ -408,7 +408,7 @@ def test_opus_5_5_and_sonnet_5_5_aliases_resolve_the_same_as_the_bare_latest_poi
 
 @test
 def test_cc_and_ant_prefix_resolve_the_new_dotted_five_five_aliases(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     _clear_cc_env()
     try:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -427,7 +427,7 @@ def test_cc_and_ant_prefix_resolve_the_new_dotted_five_five_aliases(ctx: Ctx):
 
 @test
 def test_alias_display_detail_shows_resolved_id_with_a_latest_note_for_opus_and_sonnet(ctx: Ctx):
-    from rolo_claude.providers.cc_models import alias_display_detail
+    from halo_harness.providers.cc_models import alias_display_detail
     ctx.check(f"opus -> resolved id + latest note, got {alias_display_detail('opus')!r}",
               alias_display_detail("opus") == "-> claude-opus-5-5 (latest Opus)")
     ctx.check(f"sonnet -> resolved id + latest note, got {alias_display_detail('sonnet')!r}",
@@ -436,7 +436,7 @@ def test_alias_display_detail_shows_resolved_id_with_a_latest_note_for_opus_and_
 
 @test
 def test_alias_display_detail_has_no_note_for_an_already_versioned_name(ctx: Ctx):
-    from rolo_claude.providers.cc_models import alias_display_detail
+    from halo_harness.providers.cc_models import alias_display_detail
     ctx.check(f"opus-5.5 -> no parenthetical, got {alias_display_detail('opus-5.5')!r}",
               alias_display_detail("opus-5.5") == "-> claude-opus-5-5")
     ctx.check(f"haiku -> no parenthetical, got {alias_display_detail('haiku')!r}",
@@ -450,8 +450,8 @@ def test_cc_ant_entries_carry_the_display_detail_field(ctx: Ctx):
     """The shared helper `/model`'s ant: group AND the init picker both go
     through (`init_providers._cc_ant_entries`) actually wires `detail` onto
     every row it builds."""
-    from rolo_claude.init_providers import _cc_ant_entries
-    from rolo_claude.providers.cc_models import ANT_ALIASES
+    from halo_harness.init_providers import _cc_ant_entries
+    from halo_harness.providers.cc_models import ANT_ALIASES
     entries = {e["ref"]: e for e in _cc_ant_entries("ant", ANT_ALIASES)}
     ctx.check(f"ant:opus carries a detail, got {entries['ant:opus']}",
               entries["ant:opus"]["detail"] == "-> claude-opus-5-5 (latest Opus)")
@@ -465,8 +465,8 @@ def test_list_models_cc_rows_carry_the_display_detail_and_the_part_c_group_label
     cc: loop also carries `detail`, and the group header is Part C's own
     "Claude Code subscription" label (never the stale "claude.ai
     subscription" string)."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.enablement import enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.enablement import enable
     _clear_cc_env()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     try:
@@ -487,7 +487,7 @@ def test_list_models_cc_rows_carry_the_display_detail_and_the_part_c_group_label
             model_ref = _FakeModelRef()
             model_profile = _FakeModelProfile()
 
-        ctrl = Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=d / ".rolo-claude", routes={})
+        ctrl = Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=d / ".halo", routes={})
         cc_rows = {m["ref"]: m for m in ctrl.list_models() if m.get("provider") == "cc"}
         ctx.check(f"cc:opus present, got {list(cc_rows)}", "cc:opus" in cc_rows)
         ctx.check(f"carries the resolved-id detail, got {cc_rows['cc:opus']}",
@@ -504,7 +504,7 @@ def test_list_models_cc_rows_carry_the_display_detail_and_the_part_c_group_label
 
 @test
 def test_resolve_model_profile_cc_unknown_id_still_gets_a_sane_default(ctx: Ctx):
-    from rolo_claude.model import ModelRef, resolve_model_profile
+    from halo_harness.model import ModelRef, resolve_model_profile
     ref = ModelRef(raw="cc:claude-made-up-9000", provider="cc", model="claude-made-up-9000", dialect="cc-subprocess")
     profile = resolve_model_profile(ref, Path(tempfile.mkdtemp(prefix="cc-profile2-")), {})
     ctx.check("never crashes, has a context window", profile.context_tokens > 0)

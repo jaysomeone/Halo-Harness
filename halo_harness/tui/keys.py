@@ -1,4 +1,4 @@
-"""rolo_claude.tui.keys -- key/mode constants shared by app.py and its
+"""halo_harness.tui.keys -- key/mode constants shared by app.py and its
 widgets, kept in one pure module so tests can import the mode-cycle order
 without pulling in textual. U5 scope A adds: our own default keybindings as
 a data table, expressed in Claude Code's OWN `~/.claude/keybindings.json`
@@ -197,7 +197,7 @@ def load_user_keybindings_doc(path: Path) -> Optional[dict]:
 
 
 def default_keybindings_path() -> Path:
-    from rolo_claude.config.paths import claude_config_dir
+    from halo_harness.config.paths import claude_config_dir
     return claude_config_dir() / "keybindings.json"
 
 

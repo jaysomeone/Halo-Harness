@@ -6,7 +6,7 @@ node interleaving and tool_result pairing.
 finding 16: every `@test` here is transparently wrapped in an isolated,
 per-test `BRIDGE_STATE_DIR` (SessionLog's storage root is ALWAYS
 bridge_home(), which without this fell back to the real
-`~/.rolo-claude/sessions` -- 39 `derive-test-*` dirs accumulated there on
+`~/.halo/sessions` -- 39 `derive-test-*` dirs accumulated there on
 rolo's own box) with the prior value restored afterward, so a LATER test
 module in the same `run_all.py` process (which runs every tests/test_*.py
 file in one interpreter) never inherits it.
@@ -20,8 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.derive import LogAssemblyError, content_hash, content_hash_from_oai_body, derive_request
+from halo_harness.agent.log import SessionLog
+from halo_harness.agent.derive import LogAssemblyError, content_hash, content_hash_from_oai_body, derive_request
 
 _register, TESTS = new_registry()
 
@@ -183,9 +183,9 @@ def test_finding_4_request_hash_from_actual_body_survives_policy_changes(ctx: Ct
     budget choice, not conversation content) differs between the original
     call and the replay; a genuinely different TOOL CATALOG must still
     change it."""
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.request import build_request_body
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.request import build_request_body
+    from halo_harness.providers.routing import Route
 
     log = _fresh_log()
     tools = [{"name": "Read", "description": "reads a file", "input_schema": {"type": "object", "properties": {}}}]
@@ -381,9 +381,9 @@ def test_telemetry_metadata_never_changes_derive_request_output(ctx: Ctx):
 @test
 def test_telemetry_metadata_never_changes_openai_dialect_wire_body(ctx: Ctx):
     import json as _json
-    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.request import build_request_body
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+    from halo_harness.providers.request import build_request_body
+    from halo_harness.providers.routing import Route
 
     reset_model_table_cache()
     route = Route(provider="openrouter", upstream_model="deepseek/deepseek-v4-flash", dialect="openai-chat")
@@ -407,9 +407,9 @@ def test_telemetry_metadata_never_changes_anthropic_dialect_wire_body(ctx: Ctx):
     as a sibling key on the node instead, which derive_request never reads
     into a message at all)."""
     import json as _json
-    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.request import build_anthropic_request_body
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+    from halo_harness.providers.request import build_anthropic_request_body
+    from halo_harness.providers.routing import Route
 
     reset_model_table_cache()
     route = Route(provider="anthropic", upstream_model="claude-sonnet-5", dialect="anthropic-passthrough")

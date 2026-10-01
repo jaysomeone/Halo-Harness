@@ -1,4 +1,4 @@
-"""rolo_claude.tools.ask_user_question -- the AskUserQuestion tool.
+"""halo_harness.tools.ask_user_question -- the AskUserQuestion tool.
 
 H6 scope F (OpenCode adopt items, U2/H3b review must-do): the wire schema
 is Claude Code's OWN `questions: [{question, header, options: [{label,
@@ -21,7 +21,7 @@ result") `run()`'s ONLY implemented behavior is that error path.
 
 from __future__ import annotations
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Ask the user one or more clarifying questions, each with a short list of suggested options, when "

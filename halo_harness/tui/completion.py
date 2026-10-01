@@ -1,4 +1,4 @@
-"""rolo_claude.tui.completion -- `/` (slash command) and `@` (path) prefix
+"""halo_harness.tui.completion -- `/` (slash command) and `@` (path) prefix
 completion for PromptInput's popup. Pure functions, no textual import, so
 they're unit-testable directly. `@path` completion is an `os.scandir` walk
 (never `Path.rglob`, which has no early-exit/prune hook) capped at 20k

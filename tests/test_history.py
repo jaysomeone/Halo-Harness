@@ -1,6 +1,6 @@
-"""tests.test_history -- rolo_claude/history.py: merges Claude Code's own
+"""tests.test_history -- halo_harness/history.py: merges Claude Code's own
 `~/.claude/history.jsonl` (read-only) with this harness's own
-`~/.rolo-claude/history.jsonl`, project-filters across BOTH separator
+`~/.halo/history.jsonl`, project-filters across BOTH separator
 forms, and appends only to our own file (U0 scope C).
 """
 import json
@@ -12,13 +12,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import history as h
+from halo_harness import history as h
 
 test, TESTS = new_registry()
 
 
 def _fresh_home():
-    tmp = Path(tempfile.mkdtemp(prefix="rolo-claude-history-"))
+    tmp = Path(tempfile.mkdtemp(prefix="halo-history-"))
     old = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(tmp)
     return tmp, old
@@ -43,10 +43,10 @@ def test_merges_both_files(ctx: Ctx):
     tmp, old = _fresh_home()
     try:
         _write_jsonl(h.claude_history_path(), [{"display": "from claude code", "project": str(tmp), "timestamp": 1}])
-        h.append_history_entry("from rolo-claude", str(tmp), timestamp=2)
+        h.append_history_entry("from halo", str(tmp), timestamp=2)
         merged = h.load_merged_history()
         displays = [e["display"] for e in merged]
-        ctx.check("both entries present", "from claude code" in displays and "from rolo-claude" in displays)
+        ctx.check("both entries present", "from claude code" in displays and "from halo" in displays)
     finally:
         _restore_home(old)
 

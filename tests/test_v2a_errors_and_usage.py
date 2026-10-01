@@ -16,11 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_databricks import MockDatabricks
-from rolo_claude.providers.databricks import write_dbx_endpoints_json
-from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import build_request_body
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, UpstreamError, stream_completion
+from halo_harness.providers.databricks import write_dbx_endpoints_json
+from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import build_request_body
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ContextOverflow, ProviderCreds, UpstreamError, stream_completion
 
 test, TESTS = new_registry()
 
@@ -122,7 +122,7 @@ def test_v2a_413_overflow_non_retryable_and_context_window_category(ctx: Ctx):
     """V2a fix: a literal 413 is now a non-retryable client error (was
     previously defaulting to retryable=True and being retried up to
     MAX_RETRIES times against the identical, still-too-large body)."""
-    from rolo_claude.providers.errors import CONTEXT_WINDOW_EXCEEDED, classify_error_category
+    from halo_harness.providers.errors import CONTEXT_WINDOW_EXCEEDED, classify_error_category
     mock = MockDatabricks().start()
     try:
         state_dir = Path(tempfile.mkdtemp(prefix="v2a-err-413-"))
@@ -155,7 +155,7 @@ def test_v2a_context_overflow_400_databricks_wording_parsed(ctx: Ctx):
 
 @test
 def test_v2a_429_limit_type_and_retry_after_parsed(ctx: Ctx):
-    from rolo_claude.providers.errors import parse_databricks_rate_limit
+    from halo_harness.providers.errors import parse_databricks_rate_limit
     mock = MockDatabricks().start()
     try:
         state_dir = Path(tempfile.mkdtemp(prefix="v2a-err-429-"))
@@ -221,7 +221,7 @@ def test_v2a_databricks_cost_na_when_price_unknown(ctx: Ctx):
     an OpenRouter-only field), so with NO price configured on the meter
     (the common case: most Databricks endpoints have no models.dev catalog
     entry) a Databricks turn is still "n/a", same as before 1.0.1."""
-    from rolo_claude.model import CostMeter
+    from halo_harness.model import CostMeter
     meter = CostMeter()  # no price_in/price_out -- nothing to fall back on
     cost = meter.add_usage("databricks", {"input_tokens": 100, "output_tokens": 50})
     ctx.check(f"cost is None with no price configured, got {cost!r}", cost is None)
@@ -244,7 +244,7 @@ def test_v2a_databricks_cost_computed_when_price_known(ctx: Ctx):
     cost, same formula as every other provider -- so this is a deliberate
     behavior change, not a regression, and replaces the old
     test_v2a_databricks_cost_always_na_regardless_of_type."""
-    from rolo_claude.model import CostMeter
+    from halo_harness.model import CostMeter
     meter = CostMeter(price_in=0.000001, price_out=0.000002)  # per-TOKEN, e.g. from models.dev/1e6
     cost = meter.add_usage("databricks", {"input_tokens": 100, "output_tokens": 50})
     expected = 100 * 0.000001 + 50 * 0.000002
@@ -258,7 +258,7 @@ def test_v2a_dbu_catalog_rate_converts_to_dollars_when_configured(ctx: Ctx):
     """`dbu_price_usd`/`format_dbu_cost` (providers/dbx_routing.py) is what
     `Controller.list_models()` feeds a catalog endpoint's own
     `usage_policy.output_dbu_per_1k_tokens` through for the `/model` picker's
-    informational DBU column (rolo_claude/controller.py, `tui/dialogs/
+    informational DBU column (halo_harness/controller.py, `tui/dialogs/
     model_picker.py`'s `dbu=...` line) -- Databricks itself never reports a
     per-turn DBU spend, so this conversion is catalog-rate display only; it
     is independent of `/cost`/stats, which (since 1.0.1 hotfix 14) DO get a
@@ -267,12 +267,12 @@ def test_v2a_dbu_catalog_rate_converts_to_dollars_when_configured(ctx: Ctx):
     "n/a" otherwise (test_v2a_databricks_cost_na_when_price_unknown)."""
     import os
     import tempfile as _tempfile
-    from rolo_claude.providers.dbx_routing import dbu_price_usd, format_dbu_cost
-    from rolo_claude.theme import set_config_value
+    from halo_harness.providers.dbx_routing import dbu_price_usd, format_dbu_cost
+    from halo_harness.theme import set_config_value
     saved = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR")}
     home = Path(_tempfile.mkdtemp(prefix="v2a-dbu-"))
     os.environ["BRIDGE_TEST_HOME"] = str(home)
-    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
     try:
         ctx.check("unset -> raw DBU count", format_dbu_cost(1.5) == "1.500 DBU")
         ctx.check("unset -> unknown stays '?'", format_dbu_cost(None) == "?")

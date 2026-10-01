@@ -10,9 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import ToolCatalogTooLarge, budget_max_tokens, build_request_body, simplify_schema_for_databricks
-from rolo_claude.providers.routing import Route
+from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import ToolCatalogTooLarge, budget_max_tokens, build_request_body, simplify_schema_for_databricks
+from halo_harness.providers.routing import Route
 
 test, TESTS = new_registry()
 
@@ -292,7 +292,7 @@ def test_h9_sampling_unsupported_params_wired_from_model_table_json(ctx: Ctx):
     all, so it was silently dropped on load -- pure decoration, byte-
     identical whether the row listed anything or not. Now it round-trips."""
     reset_model_table_cache()
-    from rolo_claude.providers.profiles import load_model_table
+    from halo_harness.providers.profiles import load_model_table
     table = load_model_table()
     for host, model_id in (("openrouter", "moonshotai/kimi-k3"), ("openrouter", "deepseek/deepseek-v4.1-flash"),
                             ("databricks", "databricks-kimi-k3")):

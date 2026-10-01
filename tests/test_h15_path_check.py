@@ -1,7 +1,7 @@
 """tests.test_h15_path_check -- H15 addendum (owner report from the work
-VM, 2026-09-30): a bare `rolo-claude` typed OUTSIDE the checkout directory
+VM, 2026-09-30): a bare `halo` typed OUTSIDE the checkout directory
 did not work, because the installed console script was never put on PATH
--- only the checkout's own `bin/rolo-claude` wrapper had ever been used,
+-- only the checkout's own `bin/halo` wrapper had ever been used,
 from inside the checkout. Pins `doctor.check_command_on_path`/
 `reinstall_command` (the shared check `doctor`'s own check list and
 `init`'s own Summary step both render) and the `init` summary wiring.
@@ -35,7 +35,7 @@ class _Env:
                         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "TYPESAFE_API_KEY")}
         d = Path(tempfile.mkdtemp(prefix="h15-path-check-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         # Never spawn a real `claude auth status` subprocess from
         # `_check_entries`/`_check_providers_enabled` -- same seam
@@ -68,14 +68,14 @@ def _console():
 
 @test
 def test_reinstall_command_prefers_uv_when_present(ctx: Ctx):
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=True)
     ctx.check(f"uv command, got {cmd!r}", cmd == "uv tool install --reinstall .")
 
 
 @test
 def test_reinstall_command_falls_back_to_pip(ctx: Ctx):
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=False, externally_managed=False)
     ctx.check(f"pip command, got {cmd!r}", cmd == "pip install --user -e .")
 
@@ -88,14 +88,14 @@ def test_reinstall_command_falls_back_to_pip(ctx: Ctx):
 
 @test
 def test_reinstall_command_prefers_pipx_when_externally_managed_and_pipx_present(ctx: Ctx):
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=False, externally_managed=True, pipx_found=True)
     ctx.check(f"pipx command, got {cmd!r}", cmd == "pipx install --force -e .")
 
 
 @test
 def test_reinstall_command_falls_back_to_venv_when_externally_managed_and_no_pipx(ctx: Ctx):
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=False, externally_managed=True, pipx_found=False)
     ctx.check(f"a venv command, got {cmd!r}", cmd.startswith("python3 -m venv"))
     ctx.check(f"never a bare pip install --user, got {cmd!r}", "pip install --user" not in cmd)
@@ -104,22 +104,22 @@ def test_reinstall_command_falls_back_to_venv_when_externally_managed_and_no_pip
 @test
 def test_reinstall_command_venv_also_links_the_console_script_into_local_bin(ctx: Ctx):
     """M5 (1.0.1 final pass): a plain venv install puts the console script
-    at .venv/bin/rolo-claude, which is never on PATH by itself (unlike `uv
+    at .venv/bin/halo, which is never on PATH by itself (unlike `uv
     tool install`/`pipx install`, which both register one) -- the fix line
     must also link it into ~/.local/bin so check_command_on_path's own
-    `shutil.which("rolo-claude")` actually resolves afterward (the PATH-for-
+    `shutil.which("halo")` actually resolves afterward (the PATH-for-
     a-non-interactive-shell half of that is already _check_local_bin_on_
     path's own, separate fix)."""
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=False, externally_managed=True, pipx_found=False)
     ctx.check(f"still a venv command, got {cmd!r}", cmd.startswith("python3 -m venv"))
-    ctx.check(f"links the venv's own console script, got {cmd!r}", ".venv/bin/rolo-claude" in cmd)
+    ctx.check(f"links the venv's own console script, got {cmd!r}", ".venv/bin/halo" in cmd)
     ctx.check(f"into ~/.local/bin specifically, got {cmd!r}", "~/.local/bin" in cmd)
 
 
 @test
 def test_reinstall_command_uv_wins_even_when_externally_managed(ctx: Ctx):
-    from rolo_claude.doctor import reinstall_command
+    from halo_harness.doctor import reinstall_command
     cmd = reinstall_command(uv_found=True, externally_managed=True, pipx_found=False)
     ctx.check(f"uv still wins, got {cmd!r}", cmd == "uv tool install --reinstall .")
 
@@ -131,7 +131,7 @@ def test_detect_install_tool_real_marker_check_is_a_test_seam(ctx: Ctx):
     caller (doctor's own real checks) still gets a deterministic answer in
     a test, on every platform, regardless of whether THIS box's own system
     Python happens to carry the marker."""
-    from rolo_claude.doctor import _detect_install_tool
+    from halo_harness.doctor import _detect_install_tool
     saved = os.environ.get("BRIDGE_TEST_EXTERNALLY_MANAGED")
     try:
         os.environ["BRIDGE_TEST_EXTERNALLY_MANAGED"] = "1"
@@ -153,7 +153,7 @@ def test_detect_install_tool_real_marker_check_is_a_test_seam(ctx: Ctx):
 
 @test
 def test_not_found_on_path_warns_with_the_exact_reinstall_fix(ctx: Ctx):
-    from rolo_claude.doctor import MISSING, OK, WARN, check_command_on_path
+    from halo_harness.doctor import MISSING, OK, WARN, check_command_on_path
     with _Env():
         line = check_command_on_path(resolved=None, uv_found=False, externally_managed=False)
         ctx.check(f"a WARN, got {line!r}", line.startswith(WARN))
@@ -165,7 +165,7 @@ def test_not_found_on_path_warns_with_the_exact_reinstall_fix(ctx: Ctx):
 
 @test
 def test_not_found_prefers_uv_reinstall_command_when_uv_is_present(ctx: Ctx):
-    from rolo_claude.doctor import WARN, check_command_on_path
+    from halo_harness.doctor import WARN, check_command_on_path
     with _Env():
         line = check_command_on_path(resolved="", uv_found=True)
         ctx.check(f"a WARN, got {line!r}", line.startswith(WARN))
@@ -178,9 +178,9 @@ def test_repo_bin_wrapper_warns_even_though_something_resolved(ctx: Ctx):
     """The exact bug: `shutil.which` finding the checkout's OWN bin/
     wrapper must still WARN (it only works from inside the checkout) --
     "something resolved" alone is not enough to call this OK."""
-    from rolo_claude.doctor import WARN, _repo_bin_dir, check_command_on_path
+    from halo_harness.doctor import WARN, _repo_bin_dir, check_command_on_path
     with _Env():
-        wrapper_path = str(_repo_bin_dir() / "rolo-claude")
+        wrapper_path = str(_repo_bin_dir() / "halo")
         line = check_command_on_path(resolved=wrapper_path, uv_found=False, externally_managed=False)
         ctx.check(f"a WARN, got {line!r}", line.startswith(WARN))
         ctx.check(f"names the checkout's own bin/ wrapper, got {line!r}",
@@ -191,9 +191,9 @@ def test_repo_bin_wrapper_warns_even_though_something_resolved(ctx: Ctx):
 
 @test
 def test_a_real_installed_script_elsewhere_is_ok(ctx: Ctx):
-    from rolo_claude.doctor import OK, check_command_on_path
+    from halo_harness.doctor import OK, check_command_on_path
     with _Env():
-        fake_installed = str(Path(tempfile.mkdtemp(prefix="h15-fake-install-")) / "rolo-claude")
+        fake_installed = str(Path(tempfile.mkdtemp(prefix="h15-fake-install-")) / "halo")
         line = check_command_on_path(resolved=fake_installed)
         ctx.check(f"an OK line naming the resolved path, got {line!r}",
                   line.startswith(OK) and fake_installed in line)
@@ -205,7 +205,7 @@ def test_a_real_installed_script_elsewhere_is_ok(ctx: Ctx):
 
 @test
 def test_doctor_check_entries_include_command_on_path(ctx: Ctx):
-    from rolo_claude.doctor import _check_entries
+    from halo_harness.doctor import _check_entries
     with _Env():
         ids = [cid for cid, _line in _check_entries(Path.cwd())]
         ctx.check(f"'command_on_path' is one of doctor's own checks, got {ids}", "command_on_path" in ids)
@@ -218,8 +218,8 @@ def test_doctor_check_entries_include_command_on_path(ctx: Ctx):
 
 @test
 def test_init_summary_ends_with_the_path_check_and_extra_sentence_when_not_found(ctx: Ctx):
-    import rolo_claude.doctor as doctor_mod
-    from rolo_claude.init_cli import _step_summary
+    import halo_harness.doctor as doctor_mod
+    from halo_harness.init_cli import _step_summary
     real_check = doctor_mod.check_command_on_path
     doctor_mod.check_command_on_path = lambda **kw: real_check(resolved=None, uv_found=False,
                                                                  externally_managed=False)
@@ -230,7 +230,7 @@ def test_init_summary_ends_with_the_path_check_and_extra_sentence_when_not_found
                            configured_this_run=["openrouter"], final_model="or:deepseek/deepseek-v4.1-flash")
             out = console.file.getvalue()
             ctx.check(f"the summary carries the command-on-path WARN, got {out!r}",
-                      "rolo-claude command: not found on PATH" in out)
+                      "halo command: not found on PATH" in out)
             ctx.check(f"the summary carries the exact fix command, got {out!r}",
                       "pip install --user -e ." in out)
             ctx.check(f"the extra 'run from any directory' sentence is present, got {out!r}",
@@ -241,17 +241,17 @@ def test_init_summary_ends_with_the_path_check_and_extra_sentence_when_not_found
 
 @test
 def test_init_summary_omits_the_extra_sentence_once_the_command_resolves_for_real(ctx: Ctx):
-    import rolo_claude.doctor as doctor_mod
-    from rolo_claude.init_cli import _step_summary
+    import halo_harness.doctor as doctor_mod
+    from halo_harness.init_cli import _step_summary
     real_check = doctor_mod.check_command_on_path
-    doctor_mod.check_command_on_path = lambda **kw: real_check(resolved="/usr/local/bin/rolo-claude")
+    doctor_mod.check_command_on_path = lambda **kw: real_check(resolved="/usr/local/bin/halo")
     try:
         with _Env():
             console = _console()
             _step_summary(console, written=[], pong_ok=True, doctor_lines=[], no_live=True,
                            configured_this_run=["openrouter"], final_model="or:deepseek/deepseek-v4.1-flash")
             out = console.file.getvalue()
-            ctx.check(f"the OK line is present, got {out!r}", "/usr/local/bin/rolo-claude" in out)
+            ctx.check(f"the OK line is present, got {out!r}", "/usr/local/bin/halo" in out)
             ctx.check(f"no extra sentence once it resolves cleanly, got {out!r}",
                       "Run it from any directory" not in out)
     finally:

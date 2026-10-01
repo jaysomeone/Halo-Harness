@@ -42,20 +42,20 @@ _PROVIDER_ENV_VARS = (
 class _Env:
     """Snapshots/restores every provider variable this module touches, plus
     BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/BRIDGE_ENV_FILE -- the real
-    `~/.rolo-claude` is never written."""
+    `~/.halo` is never written."""
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in
                        (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE") + _PROVIDER_ENV_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15b-fixpass-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         for k in _PROVIDER_ENV_VARS:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         self.home = d
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -77,7 +77,7 @@ class _Env:
 
 @test
 def test_tool_child_env_strips_openrouter_management_and_typesafe_keys(ctx: Ctx):
-    from rolo_claude.providers.config import tool_child_env
+    from halo_harness.providers.config import tool_child_env
     raw_env = {
         "OPENROUTER_MANAGEMENT_KEY": "sk-or-mgmt-super-secret",
         "TYPESAFE_API_KEY": "ts-super-secret",
@@ -98,7 +98,7 @@ def test_cc_child_env_also_strips_them(ctx: Ctx):
     """cc_child_env calls tool_child_env first -- the cc: route's own child
     env (the installed `claude` subprocess, and transitively ccbridge) must
     never see either key either; no separate list to fix there."""
-    from rolo_claude.providers.config import cc_child_env
+    from halo_harness.providers.config import cc_child_env
     raw_env = {"OPENROUTER_MANAGEMENT_KEY": "sk-or-mgmt-secret", "TYPESAFE_API_KEY": "ts-secret"}
     with _Env() as env:
         stripped = cc_child_env(raw_env, env_file_path=env.home / "no-such-env-file")
@@ -107,7 +107,7 @@ def test_cc_child_env_also_strips_them(ctx: Ctx):
 
 
 # ---------------------------------------------------------------------------
-# finding 8: `rolo-claude providers` must load the env file, same as
+# finding 8: `halo providers` must load the env file, same as
 # `catalog_cli`/`doctor` already do.
 # ---------------------------------------------------------------------------
 
@@ -115,7 +115,7 @@ def test_cc_child_env_also_strips_them(ctx: Ctx):
 def test_cmd_providers_loads_the_env_file(ctx: Ctx):
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.providers_cli import cmd_providers
+    from halo_harness.providers_cli import cmd_providers
     with _Env():
         env_file = Path(os.environ["BRIDGE_ENV_FILE"])
         env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,7 @@ def test_cmd_providers_loads_the_env_file(ctx: Ctx):
 #
 # M4 (1.0.1 final pass): the routes.json/routes.example "small" default
 # falling back stays SILENT (nobody typed this -- it's a shared file's own
-# lenient choice); an EXPLICIT --small-model/BRIDGE_MODEL_SMALL that gets
+# lenient choice); an EXPLICIT --small-model/HALO_MODEL_SMALL that gets
 # refused must print one stderr line saying so instead.
 # ---------------------------------------------------------------------------
 
@@ -164,8 +164,8 @@ def _close_build(build) -> None:
 def test_build_session_small_model_refusal_falls_back_to_the_main_ref(ctx: Ctx):
     import io
     from contextlib import redirect_stderr
-    from rolo_claude.headless import build_session
-    from rolo_claude.providers.enablement import disable
+    from halo_harness.headless import build_session
+    from halo_harness.providers.enablement import disable
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         disable("databricks")  # the small ref's own provider, explicitly off
@@ -194,8 +194,8 @@ def test_build_session_explicit_small_model_refusal_warns_on_stderr(ctx: Ctx):
     parameter) is an EXPLICIT ask -- a refusal here must never be silent."""
     import io
     from contextlib import redirect_stderr
-    from rolo_claude.headless import build_session
-    from rolo_claude.providers.enablement import disable
+    from halo_harness.headless import build_session
+    from halo_harness.providers.enablement import disable
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         disable("databricks")
@@ -211,8 +211,8 @@ def test_build_session_explicit_small_model_refusal_warns_on_stderr(ctx: Ctx):
             ctx.check(f"a stderr line was printed, got {stderr_text!r}", stderr_text.strip() != "")
             ctx.check(f"names the refused explicit ref, got {stderr_text!r}",
                       "dbx:databricks-explicitly-refused" in stderr_text)
-            ctx.check(f"names --small-model/BRIDGE_MODEL_SMALL, got {stderr_text!r}",
-                      "--small-model" in stderr_text and "BRIDGE_MODEL_SMALL" in stderr_text)
+            ctx.check(f"names --small-model/HALO_MODEL_SMALL, got {stderr_text!r}",
+                      "--small-model" in stderr_text and "HALO_MODEL_SMALL" in stderr_text)
             ctx.check(f"names the main model it fell back to, got {stderr_text!r}",
                       "or:deepseek/deepseek-v3.2" in stderr_text)
         finally:
@@ -226,7 +226,7 @@ def test_build_session_explicit_small_model_refusal_warns_on_stderr(ctx: Ctx):
 
 @test
 def test_is_openrouter_official_host(ctx: Ctx):
-    from rolo_claude.providers.openrouter_account import is_openrouter_official_host
+    from halo_harness.providers.openrouter_account import is_openrouter_official_host
     ctx.check("the real host, https", is_openrouter_official_host("https://openrouter.ai/api/v1") is True)
     ctx.check("plain http refused", is_openrouter_official_host("http://openrouter.ai/api/v1") is False)
     ctx.check("a self-hosted proxy refused", is_openrouter_official_host("https://my-proxy.example.com/v1") is False)
@@ -241,7 +241,7 @@ def test_is_openrouter_official_host_override_seam_requires_loopback(ctx: Ctx):
     (non-loopback) host is still refused even with the seam set, so a
     leaked/misconfigured env var in a real environment can never wave a
     hostile base_url through."""
-    import rolo_claude.providers.openrouter_account as or_mod
+    import halo_harness.providers.openrouter_account as or_mod
     saved = os.environ.get("BRIDGE_TEST_OPENROUTER_HOST_OVERRIDE")
     try:
         os.environ["BRIDGE_TEST_OPENROUTER_HOST_OVERRIDE"] = "1"
@@ -262,7 +262,7 @@ def test_is_openrouter_official_host_override_seam_requires_loopback(ctx: Ctx):
 def test_balance_refresh_refuses_a_non_official_host_before_touching_either_key(ctx: Ctx):
     """The critical part: NEITHER `fetch_key_info` NOR `fetch_credits` may
     even be CALLED for a non-official base_url -- poisoned to prove it."""
-    import rolo_claude.providers.openrouter_account as or_mod
+    import halo_harness.providers.openrouter_account as or_mod
     with _Env():
         or_mod.reset_cached_openrouter_balance()
         real_fetch_key_info = or_mod.fetch_key_info
@@ -293,7 +293,7 @@ def test_balance_refresh_refuses_a_non_official_host_before_touching_either_key(
 
 @test
 def test_write_dbx_endpoints_json_leaves_no_tmp_file_behind(ctx: Ctx):
-    from rolo_claude.providers.databricks import dbx_endpoints_path, load_dbx_endpoints_json, write_dbx_endpoints_json
+    from halo_harness.providers.databricks import dbx_endpoints_path, load_dbx_endpoints_json, write_dbx_endpoints_json
     with _Env() as env:
         write_dbx_endpoints_json(env.state_dir, [{"name": "databricks-x", "task": "llm/v1/chat"}])
         ctx.check("the real file exists", dbx_endpoints_path(env.state_dir).exists())
@@ -304,7 +304,7 @@ def test_write_dbx_endpoints_json_leaves_no_tmp_file_behind(ctx: Ctx):
 
 @test
 def test_write_dbx_endpoints_json_uses_os_replace(ctx: Ctx):
-    import rolo_claude.providers.databricks as dbx_mod
+    import halo_harness.providers.databricks as dbx_mod
     calls = []
     real_replace = os.replace
 
@@ -325,7 +325,7 @@ def test_write_dbx_endpoints_json_uses_os_replace(ctx: Ctx):
 
 @test
 def test_write_ant_models_json_also_atomic(ctx: Ctx):
-    from rolo_claude.providers.anthropic_catalog import ant_models_json_path, load_ant_models_json, write_ant_models_json
+    from halo_harness.providers.anthropic_catalog import ant_models_json_path, load_ant_models_json, write_ant_models_json
     with _Env() as env:
         write_ant_models_json(env.state_dir, [{"id": "claude-opus-5-5", "display_name": "Opus 5.5"}])
         leftovers = [p for p in env.state_dir.iterdir() if p.name.startswith(".ant-models.json.")]
@@ -341,7 +341,7 @@ def test_write_ant_models_json_also_atomic(ctx: Ctx):
 
 @test
 def test_refresh_dbx_catalog_single_flight_refuses_a_concurrent_call(ctx: Ctx):
-    import rolo_claude.providers.databricks as dbx_mod
+    import halo_harness.providers.databricks as dbx_mod
     with _Env() as env:
         dbx_mod._dbx_refresh_lock.acquire()
         try:
@@ -355,7 +355,7 @@ def test_refresh_dbx_catalog_single_flight_refuses_a_concurrent_call(ctx: Ctx):
 
 @test
 def test_refresh_openrouter_catalog_single_flight_refuses_a_concurrent_call(ctx: Ctx):
-    import rolo_claude.providers.databricks as dbx_mod
+    import halo_harness.providers.databricks as dbx_mod
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         dbx_mod._or_refresh_lock.acquire()
@@ -380,7 +380,7 @@ def test_refresh_dbx_catalog_if_stale_backs_off_after_a_recent_failure(ctx: Ctx)
         with _Env() as env:
             os.environ["BRIDGE_DBX_BASE_URL"] = mock.root
             os.environ["BRIDGE_DBX_TOKEN"] = "tok"
-            from rolo_claude.providers.databricks import refresh_dbx_catalog_if_stale
+            from halo_harness.providers.databricks import refresh_dbx_catalog_if_stale
             first = refresh_dbx_catalog_if_stale(env.state_dir, max_age_hours=0)
             ctx.check(f"the first (forced) attempt fails and hits the mock, got {first}",
                       first is not None and first[0] is False)
@@ -401,7 +401,7 @@ def test_refresh_dbx_catalog_explicit_force_ignores_the_backoff(ctx: Ctx):
     mock.set_endpoints_error("403-ip")
     try:
         with _Env() as env:
-            from rolo_claude.providers.databricks import refresh_dbx_catalog
+            from halo_harness.providers.databricks import refresh_dbx_catalog
             first = refresh_dbx_catalog(env.state_dir, mock.root, "tok")
             ctx.check(f"first attempt fails, got {first}", first[0] is False)
             mock.set_endpoints_catalog([])
@@ -421,7 +421,7 @@ def test_refresh_dbx_catalog_explicit_force_ignores_the_backoff(ctx: Ctx):
 
 @test
 def test_refresh_dbx_catalog_if_stale_boot_time_monotonic_is_never_a_false_backoff(ctx: Ctx):
-    import rolo_claude.providers.databricks as dbx_mod
+    import halo_harness.providers.databricks as dbx_mod
     from tests.helpers.mock_databricks import MockDatabricks
     mock = MockDatabricks().start()
     mock.set_endpoints_catalog([])
@@ -484,8 +484,8 @@ class _FakeConn:
 
 @test
 def test_probe_databricks_status_sets_a_30s_read_timeout(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.databricks import probe_databricks_status
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.databricks import probe_databricks_status
     fake_conn = _FakeConn(json.dumps({"endpoints": []}).encode("utf-8"))
     real_open_upstream = http_mod.open_upstream
     http_mod.open_upstream = lambda host, port, tls, *a, **kw: fake_conn
@@ -500,8 +500,8 @@ def test_probe_databricks_status_sets_a_30s_read_timeout(ctx: Ctx):
 
 @test
 def test_probe_openrouter_models_sets_a_30s_read_timeout(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.databricks import probe_openrouter_models
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.databricks import probe_openrouter_models
     fake_conn = _FakeConn(json.dumps({"data": []}).encode("utf-8"))
     real_open_upstream = http_mod.open_upstream
     http_mod.open_upstream = lambda host, port, tls, *a, **kw: fake_conn
@@ -515,8 +515,8 @@ def test_probe_openrouter_models_sets_a_30s_read_timeout(ctx: Ctx):
 
 @test
 def test_fetch_anthropic_models_sets_a_30s_read_timeout(ctx: Ctx):
-    import rolo_claude.providers.http as http_mod
-    from rolo_claude.providers.anthropic_catalog import fetch_anthropic_models
+    import halo_harness.providers.http as http_mod
+    from halo_harness.providers.anthropic_catalog import fetch_anthropic_models
     fake_conn = _FakeConn(json.dumps({"data": []}).encode("utf-8"))
     real_open_upstream = http_mod.open_upstream
     http_mod.open_upstream = lambda host, port, tls, *a, **kw: fake_conn
@@ -557,8 +557,8 @@ class _FakeAppForModelsWorker:
 
 @test
 def test_models_refresh_worker_bare_reports_every_enabled_provider(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_models_json
-    from rolo_claude.tui.slash import _models_refresh_worker
+    from halo_harness.providers.databricks import write_models_json
+    from halo_harness.tui.slash import _models_refresh_worker
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         write_models_json(env.state_dir, [{"id": "vendor/x", "context_length": 1000, "max_output_tokens": 100}])
@@ -574,7 +574,7 @@ def test_models_refresh_worker_bare_reports_every_enabled_provider(ctx: Ctx):
 def test_models_refresh_worker_refresh_hits_both_enabled_providers(ctx: Ctx):
     from tests.helpers.mock_databricks import MockDatabricks
     from tests.helpers.mock_get_endpoints import MockGetEndpoints
-    from rolo_claude.tui.slash import _models_refresh_worker
+    from halo_harness.tui.slash import _models_refresh_worker
     or_mock = MockGetEndpoints({"/api/v1/models": (200, {"data": [
         {"id": "deepseek/deepseek-v3.2", "context_length": 128000},
     ]})}).start()
@@ -602,7 +602,7 @@ def test_models_refresh_worker_refresh_hits_both_enabled_providers(ctx: Ctx):
 
 @test
 def test_dbx_alias_still_names_databricks_not_configured_explicitly(ctx: Ctx):
-    from rolo_claude.tui.slash import _models_refresh_worker
+    from halo_harness.tui.slash import _models_refresh_worker
     with _Env() as env:
         app = _FakeAppForModelsWorker(env.state_dir)
         _models_refresh_worker(app, True, dbx_explicit=True)  # /dbx -- nothing configured at all
@@ -617,7 +617,7 @@ def test_statusline_command_never_inherits_provider_secrets(ctx: Ctx):
     """The user's statusLine script runs with the same stripped child env
     as hooks and tools: no provider key or token reaches it."""
     import subprocess
-    from rolo_claude import statusline
+    from halo_harness import statusline
     captured = {}
     real_run = subprocess.run
 
@@ -650,12 +650,12 @@ def test_is_enabled_with_env_detects_a_settings_only_key(ctx: Ctx):
     """A key that lives only in a settings.json env block (so never in bare
     os.environ) enables the provider for the background workers when they
     pass the session's effective env."""
-    from rolo_claude.providers.enablement import is_enabled_with_env
+    from halo_harness.providers.enablement import is_enabled_with_env
     saved = os.environ.get("OPENROUTER_API_KEY")
     os.environ.pop("OPENROUTER_API_KEY", None)
     home = Path(tempfile.mkdtemp(prefix="h15b-enabled-env-"))
     saved_state = os.environ.get("BRIDGE_STATE_DIR")
-    os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+    os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
     try:
         ctx.check("enabled through the supplied env",
                   is_enabled_with_env("openrouter", {"OPENROUTER_API_KEY": "sk-or-from-settings"}) is True)

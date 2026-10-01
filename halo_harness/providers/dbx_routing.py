@@ -1,11 +1,11 @@
-"""rolo_claude.providers.dbx_routing -- H14 scope D: the generic Databricks
+"""halo_harness.providers.dbx_routing -- H14 scope D: the generic Databricks
 family x api_type RULES table. Nothing here is a vendored per-model list (see
 the brief's own "Correction: discovery only" note) -- `classify_family`
 recognizes a family from the ENDPOINT'S OWN NAME (and, when the discovery
 cache has them, its `foundation_model_name`/`model_class` hints), and
 `chat_route_candidates`/`resolve_databricks_dialect` turn that family plus
 the endpoint's OWN discovered `api_types` (cached by `init --preset work`/
-`models --refresh` to `~/.rolo-claude/dbx-endpoints.json`, never hand-
+`models --refresh` to `~/.halo/dbx-endpoints.json`, never hand-
 maintained) into an ordered, endpoint-specific route.
 
 Two separate decisions, kept apart deliberately (see providers/stream.py's
@@ -15,7 +15,7 @@ dialects never mix mid-request):
     (anthropic-passthrough vs openai-chat), decided once at model-ref-parse
     time. Claude foundation endpoints default here; GLM/Kimi can opt in
     per-call (`dbx:<endpoint>@anthropic`) or per-model (`databricks.gateway.
-    <endpoint>: anthropic` in ~/.rolo-claude/config.json). Bedrock EXTERNAL
+    <endpoint>: anthropic` in ~/.halo/config.json). Bedrock EXTERNAL
     Claude endpoints (`us-anthropic-claude-*`, `claude-3-5-sonnet-...`) are
     force-kept on openai-chat/invocations despite "claude" being in the
     name -- they are not a native Anthropic Messages endpoint at all.
@@ -139,8 +139,8 @@ def classify_family(name: str, *, foundation_model_name: str = "", model_class: 
 
 
 def _cache_entry(name: str, state_dir=None) -> Optional[dict]:
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.databricks import load_dbx_endpoints_json
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.databricks import load_dbx_endpoints_json
     state_dir = state_dir if state_dir is not None else bridge_home()
     entry = load_dbx_endpoints_json(state_dir).get(name)
     return entry if isinstance(entry, dict) else None
@@ -157,7 +157,7 @@ def resolve_databricks_dialect(bare: str, state_dir=None) -> "tuple[str, str]":
     """`(clean_model_name, dialect)` for a bare (already dbx:-stripped)
     Databricks model reference. Strips a `@anthropic` suffix (an explicit,
     per-call override -- always wins), else consults `databricks.gateway.
-    <endpoint>` in `~/.rolo-claude/config.json` (a standing, per-model
+    <endpoint>` in `~/.halo/config.json` (a standing, per-model
     override), else falls back to the family default: Claude foundation ->
     anthropic-passthrough; every other family (INCLUDING Bedrock external
     Claude, despite "claude" appearing in its name) -> openai-chat."""
@@ -165,7 +165,7 @@ def resolve_databricks_dialect(bare: str, state_dir=None) -> "tuple[str, str]":
     clean = bare[: -len(_ANTHROPIC_SUFFIX)] if explicit_anthropic else bare
     if explicit_anthropic:
         return clean, "anthropic-passthrough"
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     override = get_config_value(f"databricks.gateway.{clean}", default=None)
     if isinstance(override, str) and override.strip().lower() == "anthropic":
         return clean, "anthropic-passthrough"
@@ -186,8 +186,8 @@ def refuse_if_non_chat(name: str, state_dir=None) -> Optional[str]:
     if _family_for(name, entry) != "non_chat":
         return None
     task = entry.get("task") or "?"
-    return (f"{name!r} is a non-chat Databricks endpoint (task={task}) -- rolo-claude only drives "
-            f"chat-shaped endpoints; pick a different model (see `rolo-claude models --refresh`).")
+    return (f"{name!r} is a non-chat Databricks endpoint (task={task}) -- halo only drives "
+            f"chat-shaped endpoints; pick a different model (see `halo models --refresh`).")
 
 
 @dataclass(frozen=True)
@@ -209,7 +209,7 @@ def chat_route_candidates(name: str, state_dir=None) -> "list[RouteCandidate]":
     are expected to have already refused it via `refuse_if_non_chat`)."""
     entry = _cache_entry(name, state_dir)
     if entry is None:
-        from rolo_claude.providers.databricks import databricks_route_candidates
+        from halo_harness.providers.databricks import databricks_route_candidates
         out = []
         for path, include_model in databricks_route_candidates(name):
             key = "mlflow" if "/mlflow/" in path else "invocations"
@@ -255,7 +255,7 @@ PATH_TYPE_DISPLAY = {"mlflow": "mlflow-chat", "cursor": "cursor-chat",
 
 
 def is_chat_task(task: Optional[str]) -> bool:
-    """`rolo-claude models`/`/models`/`init`'s own "chat-capable" count all
+    """`halo models`/`/models`/`init`'s own "chat-capable" count all
     key off this ONE check now (task == "llm/v1/chat") instead of two
     different, disagreeing heuristics (`family != "non_chat"` in the table,
     `bool(api_types)` in init's summary -- verified live: a workspace whose
@@ -284,10 +284,10 @@ def default_path_type(name: str, state_dir=None) -> str:
 
 
 def dbu_price_usd() -> Optional[float]:
-    """`databricks.dbu_price_usd` (`~/.rolo-claude/config.json`) -- a
+    """`databricks.dbu_price_usd` (`~/.halo/config.json`) -- a
     workspace's own $/DBU conversion rate; unset -> cost is shown in raw
     DBUs instead of dollars (scope D/H)."""
-    from rolo_claude.theme import get_config_value
+    from halo_harness.theme import get_config_value
     value = get_config_value("databricks.dbu_price_usd", default=None)
     try:
         return float(value) if value is not None else None

@@ -1,8 +1,8 @@
-"""python -m rolo_claude.ccbridge -- the CHILD side of the tool bridge
+"""python -m halo_harness.ccbridge -- the CHILD side of the tool bridge
 (H11 Part B): a real stdio MCP server (the official `mcp` SDK) that
 `claude` itself spawns via `--mcp-config` (named "rolo", so Claude Code
 exposes every bridged tool as `mcp__rolo__<Name>`). Forwards `tools/list`/
-`tools/call` to the PARENT rolo-claude process's ToolBridgeServer over a
+`tools/call` to the PARENT halo process's ToolBridgeServer over a
 local socket (`ccbridge.client.ParentLink`, wired from the environment --
 see server.py's `child_env()`). Every actual dispatch (permission decide,
 hooks, the tool's own run, the session log) happens on the PARENT side
@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from rolo_claude.ccbridge.client import ParentLink, ParentLinkError
+from halo_harness.ccbridge.client import ParentLink, ParentLinkError
 
 
 def _content_blocks(raw_blocks, types_mod):
@@ -133,7 +133,7 @@ def main(argv=None) -> int:
     try:
         link = ParentLink()
     except ParentLinkError as e:
-        print(f"rolo-claude ccbridge: {e}", file=sys.stderr)
+        print(f"halo ccbridge: {e}", file=sys.stderr)
         return 1
     try:
         asyncio.run(_run(link))

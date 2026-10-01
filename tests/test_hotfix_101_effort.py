@@ -45,8 +45,8 @@ def test(fn):
     caching), never where the log itself is written. `build_fake_home()`
     alone sets no env var at all, so every `@test` here is transparently
     wrapped in an isolated, per-test `BRIDGE_STATE_DIR` (found leaking real
-    `rolo-claude-fakehome-*-proj` slug directories into
-    `~/.rolo-claude/sessions` during the H15 fix pass), same pattern
+    `halo-fakehome-*-proj` slug directories into
+    `~/.halo/sessions` during the H15 fix pass), same pattern
     `tests/test_log_derive.py` already uses."""
     @functools.wraps(fn)
     def wrapper(ctx):
@@ -63,10 +63,10 @@ def test(fn):
 
 
 def _new_dbx_session(fh, mock, *, model: str, effort=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
     model_ref = parse_model_ref(model)
     return Session(
@@ -83,14 +83,14 @@ def _new_dbx_session(fh, mock, *, model: str, effort=None):
 
 @test
 def test_clamp_effort_passes_through_a_value_the_route_accepts(ctx: Ctx):
-    from rolo_claude.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
     profile = ProviderProfile(thinking_format="anthropic_thinking", effort_values_supported=ANTHROPIC_EFFORT_LEVELS)
     ctx.check("'high' passes through unchanged", clamp_effort("high", profile) == "high")
 
 
 @test
 def test_clamp_effort_xhigh_becomes_max_on_anthropic_route(ctx: Ctx):
-    from rolo_claude.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
     profile = ProviderProfile(thinking_format="anthropic_thinking", effort_values_supported=ANTHROPIC_EFFORT_LEVELS)
     got = clamp_effort("xhigh", profile)
     ctx.check(f"xhigh -> max on a route with no xhigh, got {got!r}", got == "max")
@@ -101,7 +101,7 @@ def test_clamp_effort_xhigh_stays_xhigh_when_the_route_supports_it(ctx: Ctx):
     """Other families keep their per-family defaults/sets -- a chat-dialect
     route that DOES declare xhigh support (the harness-wide default
     `EFFORT_LEVELS`, unchanged) must never have it narrowed."""
-    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ProviderProfile, clamp_effort
     profile = ProviderProfile(reasoning_effort_supported=True)  # default effort_values_supported = EFFORT_LEVELS
     got = clamp_effort("xhigh", profile)
     ctx.check(f"xhigh preserved on a route that supports it, got {got!r}", got == "xhigh")
@@ -117,7 +117,7 @@ def test_clamp_effort_max_becomes_xhigh_on_a_chat_route_that_supports_it(ctx: Ct
     effort` default, two full levels below what the route can actually
     do (the mirror of xhigh -> max on an Anthropic route, already pinned
     above)."""
-    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ProviderProfile, clamp_effort
     profile = ProviderProfile(reasoning_effort_supported=True,
                                effort_values_supported=("low", "medium", "high", "xhigh"),
                                reasoning_default_effort="medium")
@@ -130,7 +130,7 @@ def test_clamp_effort_max_falls_back_to_default_on_a_route_with_neither_max_nor_
     """The genuinely plain case the mirror rule above must NOT swallow:
     a route offering neither `max` nor `xhigh` still downgrades `max` to
     its own bland default, exactly as before."""
-    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ProviderProfile, clamp_effort
     profile = ProviderProfile(reasoning_effort_supported=True,
                                effort_values_supported=("low", "medium", "high"),
                                reasoning_default_effort="medium")
@@ -140,7 +140,7 @@ def test_clamp_effort_max_falls_back_to_default_on_a_route_with_neither_max_nor_
 
 @test
 def test_clamp_effort_unknown_value_falls_back_to_route_default(ctx: Ctx):
-    from rolo_claude.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile, clamp_effort
     profile = ProviderProfile(thinking_format="anthropic_thinking", effort_values_supported=ANTHROPIC_EFFORT_LEVELS,
                                reasoning_default_effort="medium")
     got = clamp_effort("not-a-real-level", profile)
@@ -149,7 +149,7 @@ def test_clamp_effort_unknown_value_falls_back_to_route_default(ctx: Ctx):
 
 @test
 def test_clamp_effort_none_passes_through_untouched(ctx: Ctx):
-    from rolo_claude.providers.profiles import ProviderProfile, clamp_effort
+    from halo_harness.providers.profiles import ProviderProfile, clamp_effort
     ctx.check("None (nothing configured) is never invented into a value",
               clamp_effort(None, ProviderProfile()) is None)
 
@@ -161,7 +161,7 @@ def test_map_effort_chat_dialect_clamps_through_the_same_helper(ctx: Ctx):
     EFFORT_LEVELS is the default `effort_values_supported`), but wired so a
     future per-family restriction (model_table.json) is honoured
     automatically."""
-    from rolo_claude.providers.profiles import ProviderProfile, map_effort
+    from halo_harness.providers.profiles import ProviderProfile, map_effort
     profile = ProviderProfile(reasoning_effort_supported=True, host_specific_fields=True)
     body = map_effort("xhigh", profile)
     ctx.check(f"xhigh reaches the wire verbatim on a route that supports it, got {body}",
@@ -208,7 +208,7 @@ def test_session_construction_clamps_an_explicit_xhigh_on_anthropic_route(ctx: C
 
 @test
 def test_model_switch_reclamps_and_sets_change_note(ctx: Ctx):
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.model import ModelProfile, parse_model_ref
     fh = build_fake_home()
     mock = MockDatabricks().start()
     try:
@@ -282,7 +282,7 @@ def test_effort_rejected_400_retries_once_with_effort_stripped(ctx: Ctx):
 
 @test
 def test_is_effort_rejected_message_matches_the_live_wording(ctx: Ctx):
-    from rolo_claude.providers.errors import is_effort_rejected_message
+    from halo_harness.providers.errors import is_effort_rejected_message
     ctx.check("matches the verified live wording",
               is_effort_rejected_message("output_config.effort: Input should be 'low', 'medium', 'high' or 'max'"))
     ctx.check("matches a chat-dialect reasoning_effort 400 too",
@@ -296,8 +296,8 @@ def test_is_effort_rejected_message_matches_the_live_wording(ctx: Ctx):
 
 @test
 def test_cmd_effort_bare_shows_effective_value_source_and_accepted_levels(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_effort
-    from rolo_claude.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_effort
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile
 
     class _FakeSession:
         provider_profile = ProviderProfile(thinking_format="anthropic_thinking",
@@ -319,8 +319,8 @@ def test_cmd_effort_with_argument_sets_and_confirms(ctx: Ctx):
     facade's SNAPSHOT effort was (xhigh, from settings) three times in a
     row, ignoring the argument outright -- this must actually change the
     live session's own effort."""
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_effort
-    from rolo_claude.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_effort
+    from halo_harness.providers.profiles import ANTHROPIC_EFFORT_LEVELS, ProviderProfile
 
     class _FakeSession:
         provider_profile = ProviderProfile(thinking_format="anthropic_thinking",
@@ -343,7 +343,7 @@ def test_cmd_effort_with_argument_sets_and_confirms(ctx: Ctx):
 
 @test
 def test_cmd_effort_no_session_is_a_clean_message_not_a_crash(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_effort
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_effort
     facade = HeadlessFacade(cwd=Path("."), session=None, effort=None)
     out = _cmd_effort("high", facade)
     ctx.check(f"a clean message, got {out!r}", "running" in out.lower())
@@ -360,8 +360,8 @@ def test_cmd_effort_no_session_is_a_clean_message_not_a_crash(ctx: Ctx):
 
 @test
 def test_gpt6_forces_reasoning_effort_none_when_tools_present(ctx: Ctx):
-    from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     route = Route(provider="databricks", upstream_model="databricks-gpt-6-sol", dialect="openai-chat")
     profile = resolve_profile(route)
@@ -373,8 +373,8 @@ def test_gpt6_forces_reasoning_effort_none_when_tools_present(ctx: Ctx):
 
 @test
 def test_gpt6_keeps_requested_effort_without_tools(ctx: Ctx):
-    from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.routing import Route
     reset_model_table_cache()
     route = Route(provider="databricks", upstream_model="databricks-gpt-6-sol", dialect="openai-chat")
     profile = resolve_profile(route)
@@ -407,7 +407,7 @@ def test_gpt_family_reasoning_effort_tools_400_retries_with_none(ctx: Ctx):
 
 @test
 def test_is_effort_with_tools_rejected_message_matches_the_live_wording(ctx: Ctx):
-    from rolo_claude.providers.errors import is_effort_with_tools_rejected_message
+    from halo_harness.providers.errors import is_effort_with_tools_rejected_message
     ctx.check("matches the verified live gpt-6 wording", is_effort_with_tools_rejected_message(
         "Function tools with reasoning_effort are not supported for gpt-6-sol in /v1/chat/completions. "
         "To use function tools, use /v1/responses or set reasoning_effort to 'none'."))

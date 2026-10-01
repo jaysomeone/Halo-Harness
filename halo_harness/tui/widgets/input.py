@@ -1,4 +1,4 @@
-"""rolo_claude.tui.widgets.input -- `PromptInput(TextArea)` (auto-growing
+"""halo_harness.tui.widgets.input -- `PromptInput(TextArea)` (auto-growing
 1-8 lines, paste placeholders, `\\`+Enter/Ctrl+J/Alt+Enter newline, history
 Up/Down) and `CompletionPopup` (the `/`+`@` overlay list). Both are dumb
 widgets: PromptInput posts `Submitted`/`CompletionQuery` messages and
@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import OptionList, TextArea
 
-from rolo_claude.tui.keys import PASTE_PLACEHOLDER_MIN_LINES, PROMPT_MAX_LINES, PROMPT_MIN_LINES
+from halo_harness.tui.keys import PASTE_PLACEHOLDER_MIN_LINES, PROMPT_MAX_LINES, PROMPT_MIN_LINES
 
 
 class CompletionPopup(OptionList):
@@ -98,6 +98,20 @@ class PromptInput(TextArea):
     # ---- submit / newline --------------------------------------------
 
     async def _on_key(self, event: events.Key) -> None:
+        # 2.0.0 Launch intro: "any keypress ... completes it instantly" --
+        # a plain PRINTABLE character is consumed by this widget's own
+        # TextArea handling below and never reaches `BridgeApp._on_key`'s
+        # OWN intro-skip check at all (confirmed by this file's sibling
+        # test `test_on_key_debug_trace_never_logs_a_raw_printable_
+        # keystroke`'s own docstring -- driving a printable key through a
+        # real pilot never invokes the App's `_on_key` while this widget
+        # has focus), so the skip ALSO has to happen right here, first,
+        # before anything else below -- a side effect only, never
+        # `event.stop()`, so the key still does whatever it would have
+        # anyway (inserted into the text, or Enter's own branch below).
+        intro_line = getattr(self.app, "intro_line", None)
+        if intro_line is not None and not intro_line.done:
+            intro_line.skip()
         if self.read_only:
             await super()._on_key(event)
             return
@@ -194,7 +208,7 @@ class PromptInput(TextArea):
     # ---- / and @ completion ------------------------------------------
 
     def _maybe_query_completion(self) -> None:
-        from rolo_claude.tui.completion import current_token
+        from halo_harness.tui.completion import current_token
 
         row, col = self.cursor_location
         line = self.document.get_line(row)
@@ -212,7 +226,7 @@ class PromptInput(TextArea):
         first line only, matching `_maybe_query_completion`) with
         `replacement` -- called by app.py after the user accepts a
         completion candidate."""
-        from rolo_claude.tui.completion import current_token
+        from halo_harness.tui.completion import current_token
 
         row, col = self.cursor_location
         line = self.document.get_line(row)

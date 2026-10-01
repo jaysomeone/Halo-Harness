@@ -1,4 +1,4 @@
-# DeepSeek's official agent harness ("DeepSeek Harness", `dsh`) — technical profile for replication in rolo-claude
+# DeepSeek's official agent harness ("DeepSeek Harness", `dsh`) — technical profile for replication in halo
 
 Research date: 2026-09-23/24. Source of truth for code-level claims: a shallow clone of `deepseek-ai/deepseek-harness` at HEAD `46a7f68b0922371ce7144b668b90e377d8e799f4` ("Merge pull request #5073 from deepseek-harness/rel/dsh-0.1.7-rc.1", 2026-09-23 21:03 +0800). File links below point at the `master` branch on GitHub; line numbers refer to that commit.
 
@@ -65,7 +65,7 @@ Yes — since 2026-08-13 DeepSeek ships an official, MIT-licensed, TypeScript/No
 - Headless one-shot semantics: `dsh --profile headless "run the tests"` "creates one fresh persisted Agent…, submits the task, waits for quiescence, and flushes the Session… It streams non-empty provider reasoning deltas to stderr under a `dsh: reasoning:` heading, prints only the final text on stdout, and exits 0 for `completed`, else 1" — [apps/cli/reference/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md). Headless app flags: `--json` ("write newline-delimited run events to stdout instead of the final message"), `--session-id <id>` — [packages/bundle/headless/src/startup.ts](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/headless/src/startup.ts); catalog config `task`, `sessionId`, `json` — [config catalog](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/config-catalog.md).
 
 ### Inferences
-- For rolo-claude: the transferable pattern is "log first, derive request from log" (crash-safe resume, deterministic replay) plus exclusive-vs-parallel-safe classification of tools; DeepSeek Harness relies on the *model* (via reminders/notices) rather than a hard max-turns cap.
+- For halo: the transferable pattern is "log first, derive request from log" (crash-safe resume, deterministic replay) plus exclusive-vs-parallel-safe classification of tools; DeepSeek Harness relies on the *model* (via reminders/notices) rather than a hard max-turns cap.
 
 ### Gaps
 - I did not read `agent.ts` itself; step/turn wording above is from the package README and architecture doc, which the repo marks as authoritative contracts.
@@ -99,7 +99,7 @@ The prompt is assembled from ordered, named sections: a fixed one-line identity,
 - Response-style prose: none beyond the lines above; the persona/identity lines are the only "style" instructions in the default composition (all other sections are tool guidance) — [presets/standard.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/standard.patch.yml).
 
 ### Inferences
-- The prompt is remarkably short compared with Claude Code's; DeepSeek's team pushes behaviour into (a) tool descriptions/schemas, (b) user-role snapshots that change without invalidating the cached prefix, and (c) structural guards. A rolo-claude port should copy the *ordering discipline* (identity → persona → per-tool one-liners → env facts last) and the "policy as user snapshot" trick rather than long prose.
+- The prompt is remarkably short compared with Claude Code's; DeepSeek's team pushes behaviour into (a) tool descriptions/schemas, (b) user-role snapshots that change without invalidating the cached prefix, and (c) structural guards. A halo port should copy the *ordering discipline* (identity → persona → per-tool one-liners → env facts last) and the "policy as user snapshot" trick rather than long prose.
 - Scaffolding-echo avoidance is implicit: nothing in the prompt references XML tags or scaffolding, tool calls are native function calls (no text-embedded format), and the compaction instruction explicitly says "Do NOT mention this summarization request or that the context was compacted."
 
 ### Gaps
@@ -125,7 +125,7 @@ Surprisingly, the native adapter talks to DeepSeek through the **Anthropic Messa
 - Anthropic-format models/endpoint: base URL `https://api.deepseek.com/anthropic`, models `deepseek-flash`, `deepseek-v4-pro` — [Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api/).
 
 ### Inferences
-- Because the native adapter uses the Messages format, the harness never touches `reasoning_content`; it simply replays `thinking` content blocks with signatures. A Chat-Completions-based rolo-claude must instead persist and resend `reasoning_content` on every assistant message once tools are in the request (empty string is accepted by the API per pi-ai's `requiresReasoningContentOnAssistantMessages` semantics, but loses the CoT).
+- Because the native adapter uses the Messages format, the harness never touches `reasoning_content`; it simply replays `thinking` content blocks with signatures. A Chat-Completions-based halo must instead persist and resend `reasoning_content` on every assistant message once tools are in the request (empty string is accepted by the API per pi-ai's `requiresReasoningContentOnAssistantMessages` semantics, but loses the CoT).
 - `max_tokens` is treated as a per-request output cap (default 256k), not an accounting concept; compaction uses `contextWindow − maxTokens − headroomTokens` as the pressure ceiling (see Q9).
 - The harness does not use strict mode; its tool schemas (Q5) leave `additionalProperties` unset on top-level objects, which strict mode would reject.
 
@@ -158,7 +158,7 @@ All schemas below are quoted from the generated [docs/tool-catalog.md](https://g
 - Tool presentation modes: `DSH_TOOLS_MODE` = `native` (default) | `ptc` | `both` — [apps/cli/reference/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md).
 
 ### Inferences
-- The tool surface is a near one-to-one superset of Claude Code's (`Bash/Read/Write/Edit/Glob/Grep/WebSearch/WebFetch/Agent/TodoWrite/AskUserQuestion/ExitPlanMode/Skill`), lower-cased with snake_case names; rolo-claude can keep its Claude Code tool names and schemas and DeepSeek will be on familiar ground.
+- The tool surface is a near one-to-one superset of Claude Code's (`Bash/Read/Write/Edit/Glob/Grep/WebSearch/WebFetch/Agent/TodoWrite/AskUserQuestion/ExitPlanMode/Skill`), lower-cased with snake_case names; halo can keep its Claude Code tool names and schemas and DeepSeek will be on familiar ground.
 
 ### Gaps
 - Not extracted: full schemas for `terminal_*`, `goal`, `lsp`, `session_*`, `schedule_*`, `workflow`, `ralph`, `present`, `run_code` (they are in the same catalog file).
@@ -204,7 +204,7 @@ Almost every Claude Code concept has a counterpart — `AGENTS.md`/`CLAUDE.md` m
 - Missing/limits (stated by the project): no built-in turn budget (Q2); "There is no end-user prompt-editing API" ([system-prompt README](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/system-prompt/README.md)); "Providers that sign in with OAuth, such as Codex, are not supported here yet" ([providers.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)); per-session hook config is a TODO (above); `--host 0.0.0.0` refused; TUI is a plugin.
 
 ### Inferences
-- Because Claude Code can be mounted as a *sub-agent provider* and Claude Code hooks.json is consumed natively, DeepSeek's team is explicitly targeting Claude Code users' muscle memory; rolo-claude can reuse `.claude/settings.json` hook definitions unchanged when talking to DeepSeek.
+- Because Claude Code can be mounted as a *sub-agent provider* and Claude Code hooks.json is consumed natively, DeepSeek's team is explicitly targeting Claude Code users' muscle memory; halo can reuse `.claude/settings.json` hook definitions unchanged when talking to DeepSeek.
 
 ### Gaps
 - Whether a `/clear`, `/model`, `/resume`, `/help` style command exists in the Web UI beyond the registered human commands was not verified (the UI may implement composer-level actions outside `ctx.commands`).
@@ -226,7 +226,7 @@ The dominant failure class is **session poisoning**: any crash or provider rejec
 
 ### Inferences
 - Observation from this research (not a cited source): `git clone --depth 1` on Windows initially failed to check out part of `packages/` until `core.longpaths` was enabled — the repo has deep, long paths; expect the same when installing from source on Windows.
-- For rolo-claude the actionable lessons are: (1) never let an assistant message with tool calls reach the log without a paired tool result — synthesize an error result on any crash/cancel (the harness now emits `ABORTED_BEFORE_DISPATCH` results on cancel); (2) validate `tool_calls` ↔ `tool` pairing and non-empty ids/names/valid JSON at serialize time; (3) make provider rejections of a tool *result* into `isError` tool results, not turn-level errors; (4) use `String.prototype.toWellFormed()` before JSON-serialising truncated tool output.
+- For halo the actionable lessons are: (1) never let an assistant message with tool calls reach the log without a paired tool result — synthesize an error result on any crash/cancel (the harness now emits `ABORTED_BEFORE_DISPATCH` results on cancel); (2) validate `tool_calls` ↔ `tool` pairing and non-empty ids/names/valid JSON at serialize time; (3) make provider rejections of a tool *result* into `isError` tool results, not turn-level errors; (4) use `String.prototype.toWellFormed()` before JSON-serialising truncated tool output.
 
 ### Gaps
 - Issue tracker is disabled, so there is no authoritative list of open bugs; discussions are user-triaged. I did not confirm whether the #2900/#4843 patches have landed in 0.1.7-rc.1.
@@ -245,7 +245,7 @@ Compaction is automatic at step boundaries when estimated tokens exceed 80% of (
 - Manual compaction: `/compact` command; token accounting via `dsh-token-meter` — [command-compact](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/command-compact/src/index.ts).
 
 ### Inferences
-- The "replay the exact prefix, then ask for a checkpoint" design is the cheapest possible compaction on DeepSeek's automatic prefix cache (only the instruction is a cache miss). rolo-claude can adopt the same section template and preamble.
+- The "replay the exact prefix, then ask for a checkpoint" design is the cheapest possible compaction on DeepSeek's automatic prefix cache (only the instruction is a cache miss). halo can adopt the same section template and preamble.
 
 ### Gaps
 - The exact token estimator (`dsh-token-meter`) algorithm was not examined.
@@ -330,7 +330,7 @@ Yes: the `dsh-llm-pi-ai` adapter's "Custom model API" route takes a lowercase pr
   ```
   then export `DATABRICKS_TOKEN` (PAT or OAuth token; pi-ai's OpenAI-compatible client sends it as `Authorization: Bearer …`), select `databricks / <endpoint-name>` in Settings → Models, and disable telemetry (`DSH_TELEMETRY_DISABLED=1`). If the pay-per-token endpoint does not implement `GET /models`, skip "Fetch available models" and type the id.
 - Risks specific to DeepSeek-on-Databricks: (a) Databricks strips or reshapes `reasoning_content` on the way back (litellm needed a fix just to *read* it) — if the gateway does not forward `reasoning_content` on *replayed* assistant messages to DeepSeek, thinking-mode tool calls will 400 exactly as in claude-code-router #1378; mitigation is `reasoningEfforts.off` / `thinkingFormat: deepseek` with `off` for tool-heavy work, or `requiresThinkingAsText`; (b) `stream_options.include_usage` and `finish_reason` behaviour of the gateway are unknown — set `supportsUsageInStreaming`/`supportsFinishReason` if streams end without usage or finish reason; (c) DeepSeek's automatic prefix cache is only observable through DeepSeek's own usage fields; behind Databricks the harness will show no cache hits.
-- For rolo-claude (which speaks Chat Completions): the pi-ai compat matrix above is the checklist of "gateway knobs" a DeepSeek-through-gateway client must expose: system-vs-developer role, `max_tokens` vs `max_completion_tokens`, `reasoning_effort` acceptance, `thinking` object format, `reasoning_content` replay (real text vs empty string vs `<thinking>` text), `stream_options`, `store`, `strict`, tool-result `name`.
+- For halo (which speaks Chat Completions): the pi-ai compat matrix above is the checklist of "gateway knobs" a DeepSeek-through-gateway client must expose: system-vs-developer role, `max_tokens` vs `max_completion_tokens`, `reasoning_effort` acceptance, `thinking` object format, `reasoning_content` replay (real text vs empty string vs `<thinking>` text), `stream_options`, `store`, `strict`, tool-result `name`.
 
 ### Gaps
 - Could not fetch pi-ai's `openai-completions` implementation (both guessed paths 404) so the exact replay semantics (whether the model's real `reasoning_content` text is resent or an empty string, and how `delta.reasoning_content` is parsed) are documented only through dsh's compat descriptions and pi release notes.

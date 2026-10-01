@@ -4,12 +4,12 @@ Everything the full-screen TUI's prompt input understands: `/name` slash
 commands (built-in, custom, skill-provided, MCP-provided), the `@path`/
 `!cmd` prefixes, key bindings and chords, and the cards a permission/
 question/plan/rewind/improve moment shows -- with the exact keys each one
-answers to. For the headless CLI surface (`rolo-claude <subcommand>`), see
+answers to. For the headless CLI surface (`halo <subcommand>`), see
 [COMMANDS.md](COMMANDS.md).
 
 **How this page is kept honest**: `tests/test_docs_slash_commands.py`
-imports the real command registry (`rolo_claude.commands.registry.Registry`)
-and `rolo_claude.commands.builtins._BUILTIN_SPECS`, and fails the suite if a
+imports the real command registry (`halo_harness.commands.registry.Registry`)
+and `halo_harness.commands.builtins._BUILTIN_SPECS`, and fails the suite if a
 registered built-in command has no `### \`/name\`` section here.
 
 Every built-in command works the same in `-p` print mode and the TUI for
@@ -135,8 +135,8 @@ server count, theme, and cost so far.
 ### `/config [key=value]`
 Read-only in headless mode (shows `model=... permissionMode=... theme=...`
 and refuses a write with a pointer to `~/.claude/settings.json`/`--settings`).
-This is **not** the same store as `rolo-claude config` (which reads/writes
-`~/.rolo-claude/config.json`, this harness's own settings) -- see
+This is **not** the same store as `halo config` (which reads/writes
+`~/.halo/config.json`, this harness's own settings) -- see
 `docs/CONFIG.md`.
 
 ### `/skills`
@@ -170,7 +170,7 @@ balance line once a background fetch has ever succeeded (see `/cost`);
 a provider on with no credentials at all; `false` hides one auto-detection
 would otherwise have turned on) right here (`cc`/`ant`/`dbx`/`or` are
 accepted aliases for the canonical names); `setup <name>` needs the
-interactive picker `rolo-claude init`/`rolo-claude providers setup <name>`
+interactive picker `halo init`/`halo providers setup <name>`
 show from a real terminal, so headless just points at that command instead
 of half-implementing it. See `docs/MODELS.md`'s "Provider enablement"
 section for the full prefix/label table and the exact per-provider
@@ -203,12 +203,12 @@ does the actual work as an ordinary turn, this command doesn't write
 anything itself.
 
 ### `/doctor`
-Runs the same read-only checks as `rolo-claude doctor` and prints the
+Runs the same read-only checks as `halo doctor` and prints the
 lines inline in the transcript.
 
 ### `/export` `[TUI-only]`
 In `-p`, prints a note that export needs the TUI's file picker (use
-`rolo-claude export` instead -- see `docs/COMMANDS.md`). In the TUI,
+`halo export` instead -- see `docs/COMMANDS.md`). In the TUI,
 `/export [--sanitize] [path]` writes the session's JSONL transcript to disk
 immediately.
 
@@ -221,7 +221,7 @@ this same headless text today; a directory is normally added via
 ### `/theme [name]`
 No argument: shows the current theme. With a name (`claude-dark`,
 `claude-light`, or either with a `-daltonized`/`-ansi` suffix), persists it
-to `~/.rolo-claude/config.json` and (in the TUI) re-applies it live.
+to `~/.halo/config.json` and (in the TUI) re-applies it live.
 
 ### `/exit`, `/quit` `[TUI-only for /quit]`
 `/exit` in `-p` is a no-op note (the call already ends after this turn).
@@ -242,7 +242,7 @@ immediately.
 Bare: turns/cost/per-model/per-tool counts for *this* session only (from
 already-in-memory log nodes -- cheap, synchronous). `--models`/`--tools`
 switch to the richer cross-session telemetry aggregation (run off the UI
-thread in the TUI) documented under `rolo-claude stats` in
+thread in the TUI) documented under `halo stats` in
 `docs/COMMANDS.md`.
 
 ### `/tasks`
@@ -267,11 +267,19 @@ defaults merged with `~/.claude/keybindings.json`).
 
 ### `/improve` `[TUI-only card review]`
 In `-p`, prints a note pointing at the real headless surface,
-`rolo-claude improve` (a *separate top-level subcommand* -- see
+`halo improve` (a *separate top-level subcommand* -- see
 `docs/COMMANDS.md` -- never this slash command, since `-p` sessions must
 never draft or write on their own). In the TUI, scans recent sessions,
 drafts candidates with one model call, and reviews them one `ImproveCard`
 at a time (see [Cards](#cards-and-their-keys)).
+
+### `/intro` `[TUI-only]`
+Replays the 2.0.0 launch intro (the typewriter line a fresh interactive
+session shows above its first turn) -- a fresh `IntroLine` mounted at the
+current transcript position and typed out again from scratch; any
+keypress or a submitted prompt finishes it instantly, same as the
+launch-time one. In `-p`, prints a note pointing at the interactive TUI
+(there is no transcript to replay it into).
 
 ## Custom commands and skills
 

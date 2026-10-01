@@ -1,4 +1,4 @@
-"""tests.test_fake_controller -- rolo_claude/testing/fake_controller.py
+"""tests.test_fake_controller -- halo_harness/testing/fake_controller.py
 (U0 scope E): the scripted Controller stand-in (submit/interrupt/quit/... +
 call recording) and `run_demo` (`--demo`/`--stress`'s replay through the
 real text/json print-mode sinks).
@@ -11,8 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude import events as ev
-from rolo_claude.testing.fake_controller import (
+from halo_harness import events as ev
+from halo_harness.testing.fake_controller import (
     FakeController, default_demo_turns, run_demo, stress_turns,
 )
 

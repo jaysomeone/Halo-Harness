@@ -1,4 +1,4 @@
-"""rolo_claude.catalog_cli -- `rolo-claude models` subcommand (H1 scope I):
+"""halo_harness.catalog_cli -- `halo models` subcommand (H1 scope I):
 lists OpenRouter models (from the cached models.json, refreshing via a live
 probe when the cache is empty or --refresh is passed) and Databricks
 endpoints (from dbx-endpoints.json), with context/output/price columns, and
@@ -14,13 +14,15 @@ import sys
 
 from pathlib import Path
 
-from rolo_claude.config.paths import bridge_home, home
-from rolo_claude.model_display import ROW_HEADER, format_price_per_m, format_token_count
-from rolo_claude.providers.config import load_env_file, resolve_databricks, resolve_openrouter, derive_workspace_root
-from rolo_claude.providers.databricks import (
+from halo_harness.config.paths import bridge_home
+from halo_harness.model_display import ROW_HEADER, format_price_per_m, format_token_count
+from halo_harness.providers.config import (
+    load_provider_env_files, resolve_databricks, resolve_openrouter, derive_workspace_root,
+)
+from halo_harness.providers.databricks import (
     load_dbx_endpoints_json, load_models_json, probe_openrouter_models, write_models_json,
 )
-from rolo_claude.providers.models_dev import fetch_models_dev, models_dev_json_path, write_models_dev_json
+from halo_harness.providers.models_dev import fetch_models_dev, models_dev_json_path, write_models_dev_json
 
 
 def _fmt_price(v) -> str:
@@ -43,13 +45,13 @@ def near_miss_slug(requested: str, known_ids) -> "list[str]":
 
 
 def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
-    """H11 Part A: `rolo-claude models --cc` -- the nine subscription-model
+    """H11 Part A: `halo models --cc` -- the nine subscription-model
     alias names, their `cc:`/`ant:` targets, and (when a profile row is
     known) context/output/pricing. Never touches the credentials file --
     only `claude auth status` (login line) and, with --refresh, a handful
     of cheap `-p --max-turns 1` pings (providers.cc_models.
     refresh_cc_catalog)."""
-    from rolo_claude.providers.cc_models import (
+    from halo_harness.providers.cc_models import (
         ANT_ALIASES, CC_ALIASES, claude_auth_status, profile_fields_for_cc_model, refresh_cc_catalog,
     )
     status = claude_auth_status()
@@ -85,7 +87,7 @@ def _endpoint_url_for_path_type(root: str, name: str, path_type: str) -> str:
         return f"{root}/ai-gateway/anthropic/v1/messages"
     if path_type in ("none", "?"):
         return "(refused -- non-chat endpoint)" if path_type == "none" else "?"
-    from rolo_claude.providers.dbx_routing import API_TYPE_INFO
+    from halo_harness.providers.dbx_routing import API_TYPE_INFO
     info = API_TYPE_INFO.get(path_type)
     if info is not None:
         return f"{root}{info['path']}"
@@ -105,9 +107,9 @@ def _dbx_rows(endpoints: dict, root: str, state_dir, *, urls: bool) -> dict:
     for every row instead of silently degrading to a wrong "invocations"
     (`chat_route_candidates` can't tell a real invocations-only route from a
     cache that simply never recorded `api_types` at all)."""
-    from rolo_claude.model_display import databricks_row_fields
-    from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape
-    from rolo_claude.providers.dbx_routing import classify_family, default_path_type, is_chat_task
+    from halo_harness.model_display import databricks_row_fields
+    from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape
+    from halo_harness.providers.dbx_routing import classify_family, default_path_type, is_chat_task
     old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
     rows = {}
     for name, e in endpoints.items():
@@ -136,7 +138,7 @@ def _path_display(path_type: str) -> str:
     (refresh needed)"; a real route key gets dbx_routing's own
     `mlflow-chat`/`cursor-chat` spelling). `--json`/`--urls`' machine-
     readable `path_type` field is untouched by this -- see `_dbx_rows`."""
-    from rolo_claude.providers.dbx_routing import PATH_TYPE_DISPLAY
+    from halo_harness.providers.dbx_routing import PATH_TYPE_DISPLAY
     if path_type == "unknown":
         return "unknown (refresh needed)"
     return PATH_TYPE_DISPLAY.get(path_type, path_type)
@@ -145,7 +147,7 @@ def _path_display(path_type: str) -> str:
 def format_dbx_table_lines(rows: dict, *, urls: bool = False) -> "list[str]":
     """The Databricks endpoint table's exact text rendering (name/family/
     path/chat/ctx/out/price[/url] columns) -- ONE implementation shared by
-    `rolo-claude models`, the headless `/models` (`commands/builtins.py::
+    `halo models`, the headless `/models` (`commands/builtins.py::
     _cmd_models`), and the TUI's own `/models` bare rendering (`tui/
     slash.py`), so the three surfaces can never drift apart on column
     widths or wording. `rows` is `_dbx_rows`'s own per-endpoint dict.
@@ -173,7 +175,7 @@ def format_dbx_table_lines(rows: dict, *, urls: bool = False) -> "list[str]":
 
 
 def cmd_models(argv) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude models", add_help=True)
+    parser = argparse.ArgumentParser(prog="halo models", add_help=True)
     parser.add_argument("--refresh", action="store_true", help="Re-probe OpenRouter/Databricks instead of using the cache")
     parser.add_argument("--cc", action="store_true",
                          help="List the Claude subscription models (cc:/ant: aliases) instead of the "
@@ -184,13 +186,13 @@ def cmd_models(argv) -> int:
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     args = parser.parse_args(argv)
 
-    import os
-    load_env_file(Path(os.environ.get("BRIDGE_ENV_FILE", home() / ".config" / "vibes-hacker" / "env")))
+    # 2.0.0 fixpass finding 4: the new env file, then the legacy one too.
+    load_provider_env_files()
 
     state_dir = bridge_home()
     if args.cc:
         return _cmd_models_cc(state_dir, refresh=args.refresh)
-    # 1.0.1 hotfix 3: bare `rolo-claude models` (no --refresh) NEVER touches
+    # 1.0.1 hotfix 3: bare `halo models` (no --refresh) NEVER touches
     # the network, full stop -- not even "the first time the cache is
     # empty" (the old behavior here, and still `--cc`'s own documented
     # first-use exception, which this leaves alone). A DNS/VPN-down box
@@ -200,7 +202,7 @@ def cmd_models(argv) -> int:
     # provider's catalog now -- an explicitly-disabled provider (even with
     # real credentials) is left alone, same rule every other surface
     # follows.
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     models = load_models_json(state_dir)
     if args.refresh:
         orc = resolve_openrouter() if is_enabled("openrouter") else None
@@ -210,32 +212,32 @@ def cmd_models(argv) -> int:
                 write_models_json(state_dir, fetched)
                 models = load_models_json(state_dir)
             except Exception as e:
-                print(f"rolo-claude models: could not refresh from OpenRouter: {e}", file=sys.stderr)
+                print(f"halo models: could not refresh from OpenRouter: {e}", file=sys.stderr)
 
     dbx = resolve_databricks() if is_enabled("databricks") else None
     endpoints = load_dbx_endpoints_json(state_dir)
     dbx_diff = None
     if dbx is not None and args.refresh:
-        from rolo_claude.providers.databricks import refresh_dbx_catalog
+        from halo_harness.providers.databricks import refresh_dbx_catalog
         root = derive_workspace_root(dbx.host)
         ok, diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         if ok:
             endpoints = load_dbx_endpoints_json(state_dir)
             dbx_diff = diff
         else:
-            print(f"rolo-claude models: could not refresh from Databricks: {note}", file=sys.stderr)
+            print(f"halo models: could not refresh from Databricks: {note}", file=sys.stderr)
 
     if args.refresh and is_enabled("anthropic"):
-        from rolo_claude.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale
+        from halo_harness.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale
         ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
         if ok is False:
-            print("rolo-claude models: could not refresh from Anthropic", file=sys.stderr)
+            print("halo models: could not refresh from Anthropic", file=sys.stderr)
 
     # H15 item 21.2: a provider with real credentials but not ENABLED shows
     # one line instead of its table -- same rule `/model`/the init picker/
-    # doctor all follow; `rolo-claude providers enable <name>` is the fix
+    # doctor all follow; `halo providers enable <name>` is the fix
     # every one of those surfaces names too.
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     or_enabled = is_enabled("openrouter")
     dbx_enabled = is_enabled("databricks")
 
@@ -256,7 +258,7 @@ def cmd_models(argv) -> int:
 
     if not or_enabled and models:
         print(f"OpenRouter: {len(models)} model(s) cached, but OpenRouter is not enabled -- "
-              f"run `rolo-claude providers enable openrouter` to show them.")
+              f"run `halo providers enable openrouter` to show them.")
         models = {}
     print("OpenRouter models (models.json):")
     print(f"{'id':<48} {'ctx':>8} {'out':>8} {'in/M':>10} {'out/M':>10}    ({ROW_HEADER})")
@@ -281,7 +283,7 @@ def cmd_models(argv) -> int:
 
     if dbx is not None and endpoints and not dbx_enabled:
         print(f"\nDatabricks: {len(endpoints)} endpoint(s) cached, but Databricks is not enabled -- "
-              f"run `rolo-claude providers enable databricks` to show them.")
+              f"run `halo providers enable databricks` to show them.")
     elif dbx is not None and endpoints:
         root = derive_workspace_root(dbx.host)
         rows = _dbx_rows(endpoints, root, state_dir, urls=args.urls)
@@ -289,7 +291,7 @@ def cmd_models(argv) -> int:
         for line in format_dbx_table_lines(rows, urls=args.urls):
             print(line)
         if dbx_diff is not None:
-            from rolo_claude.providers.databricks import format_dbx_diff
+            from halo_harness.providers.databricks import format_dbx_diff
             print(f"\nDatabricks catalog diff (this refresh): {format_dbx_diff(dbx_diff)}")
 
     # H8 scope C: models.dev's api.json is public/unauthenticated -- cached
@@ -311,6 +313,6 @@ def cmd_models(argv) -> int:
             # vendored/cached catalog stays in use either way -- this was
             # previously just the bare exception, with no indication that
             # nothing else was actually broken by it.
-            print(f"rolo-claude models: could not refresh from models.dev: {e} "
+            print(f"halo models: could not refresh from models.dev: {e} "
                   f"-- the vendored/cached models.dev catalog stays in use.", file=sys.stderr)
     return 0

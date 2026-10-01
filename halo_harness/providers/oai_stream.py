@@ -1,4 +1,4 @@
-"""rolo_claude.providers.oai_stream -- OpenAIStreamToAnthropic, the state
+"""halo_harness.providers.oai_stream -- OpenAIStreamToAnthropic, the state
 machine converting OpenAI-dialect streaming chunks into Anthropic SSE
 events, plus MessageCollector (non-streaming JSON responses) and the small
 event-shape helpers. Moved out of bridge.py unchanged in the H0 package
@@ -11,9 +11,9 @@ import json
 import logging
 import uuid
 
-from rolo_claude.providers.config import jdumps
-from rolo_claude.providers.errors import _coerce_text, flatten_content_parts
-from rolo_claude.providers.hooks import (
+from halo_harness.providers.config import jdumps
+from halo_harness.providers.errors import _coerce_text, flatten_content_parts
+from halo_harness.providers.hooks import (
     args_repair, normalize_tool_id, stream_aggregate_apply, stream_aggregate_key, think_tag_strip,
 )
 

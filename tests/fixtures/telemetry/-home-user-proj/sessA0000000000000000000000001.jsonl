@@ -1,5 +1,5 @@
 {"type": "meta", "model": "or:deepseek/deepseek-v4-flash", "tools": [{"name": "Edit"}, {"name": "Bash"}], "ts": 1790343526.6904368, "seq": 0}
-{"type": "system", "text": "You are rolo-claude.", "ts": 1790343526.6904368, "seq": 1}
+{"type": "system", "text": "You are halo.", "ts": 1790343526.6904368, "seq": 1}
 {"type": "user", "content": [{"type": "text", "text": "list files in /home/user/proj"}], "ts": 1790343526.690943, "seq": 2}
 {"type": "usage", "usage": {"input_tokens": 1200, "output_tokens": 80, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 0}, "cost_usd": 0.0021, "model": "or:deepseek/deepseek-v4-flash", "route": "or", "provider": "DeepInfra", "finish_reason": "end_turn", "latency_ms": 850.0, "ttft_ms": 210.0, "retries": 0, "status": "ok", "ts": 1790343526.690943, "seq": 3}
 {"type": "assistant", "content": [{"type": "tool_use", "id": "toolu_bash_0001", "name": "Bash", "input": {"command": "ls /home/user/proj"}}], "stop_reason": "tool_use", "tool_meta": {"toolu_bash_0001": {"repaired": false, "repair_kind": "none", "promoted_from_leak": false}}, "ts": 1790343526.690943, "seq": 4}
@@ -14,6 +14,6 @@
 {"type": "assistant", "content": [{"type": "tool_use", "id": "toolu_grep_0003", "name": "Grep", "input": {}}], "stop_reason": "tool_use", "tool_meta": {"toolu_grep_0003": {"repaired": false, "repair_kind": "none", "promoted_from_leak": false}}, "ts": 1790343526.6924682, "seq": 13}
 {"type": "tool_result", "tool_use_id": "toolu_grep_0003", "content": "Invalid arguments for Grep: missing required parameter 'pattern'", "is_error": true, "ok": false, "tool": "Grep", "error_class": "schema_invalid", "ms": 2.0, "bytes": 61, "spilled": false, "ts": 1790343526.6924682, "seq": 14}
 {"type": "assistant", "content": [{"type": "tool_use", "id": "toolu_mcp_0004", "name": "mcp__kb__kb_search", "input": {"query": "TODO"}}], "stop_reason": "tool_use", "tool_meta": {"toolu_mcp_0004": {"repaired": false, "repair_kind": "none", "promoted_from_leak": false}}, "ts": 1790343526.6924682, "seq": 15}
-{"type": "tool_result", "tool_use_id": "toolu_mcp_0004", "content": "Full output saved to /home/user/.rolo-claude/sessions/x/tool-results/toolu_mcp_0004.txt (huge result)", "is_error": false, "ok": true, "tool": "mcp__kb__kb_search", "ms": 300.0, "bytes": 9000, "spilled": true, "ts": 1790343526.6924682, "seq": 16}
+{"type": "tool_result", "tool_use_id": "toolu_mcp_0004", "content": "Full output saved to /home/user/.halo/sessions/x/tool-results/toolu_mcp_0004.txt (huge result)", "is_error": false, "ok": true, "tool": "mcp__kb__kb_search", "ms": 300.0, "bytes": 9000, "spilled": true, "ts": 1790343526.6924682, "seq": 16}
 {"type": "compacted", "surface_op": "replace", "trigger": "overflow", "custom_instructions": null, "ts": 1790343526.6924682, "seq": 17}
 {"type": "user", "content": [{"type": "text", "text": "<compacted-summary>...</compacted-summary>"}], "kind": "compaction_summary", "ts": 1790343526.6934679, "seq": 18}

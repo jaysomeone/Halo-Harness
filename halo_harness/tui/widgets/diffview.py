@@ -1,4 +1,4 @@
-"""rolo_claude.tui.widgets.diffview -- `DiffView`, mounted by app.py right
+"""halo_harness.tui.widgets.diffview -- `DiffView`, mounted by app.py right
 after an Edit/Write `ToolCard` (D-TUI: "Edit/Write cards mount DiffView
 (unified diff, context 3)"). Pure-Python diff (stdlib `difflib`); no file
 I/O of its own -- callers hand it the two text snapshots directly (Edit's

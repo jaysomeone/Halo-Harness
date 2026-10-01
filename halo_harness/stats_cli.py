@@ -1,4 +1,4 @@
-"""rolo_claude.stats_cli -- `rolo-claude stats` subcommand (H8 scope D,
+"""halo_harness.stats_cli -- `halo stats` subcommand (H8 scope D,
 extended H10 Part A): a headless, cross-session version of the TUI's own
 `/stats` (which only ever covers the ONE live session it's running in).
 
@@ -6,7 +6,7 @@ The ORIGINAL (no `--models`/`--tools`) path is UNCHANGED byte-for-byte --
 it reads `meta.model` via `controller.compute_session_stats`, so it keeps
 working on a session log recorded before H10 (no `usage.model`/`.provider`
 fields at all). `--models`/`--tools` are a NEW, additive path over
-`rolo_claude.telemetry`'s richer per-(model,provider)/per-tool aggregation,
+`halo_harness.telemetry`'s richer per-(model,provider)/per-tool aggregation,
 which needs those H10 fields to attribute anything -- a pre-H10 log simply
 contributes nothing to those two tables (it still counts under `--json`'s
 plain `sessions`/`tool_counts` as before).
@@ -25,7 +25,7 @@ def _since_arg(value: str) -> str:
     """H13 Part D bug fix: `--since` was `choices=("7d", "30d", "all")`,
     rejecting anything else at the ARGPARSE level -- even though `rolo_
     claude.telemetry._since_cutoff` already parses any `"<N>d"` string
-    generically (`rolo_claude.improve.config.since_str` has produced one
+    generically (`halo_harness.improve.config.since_str` has produced one
     from a custom `improve.since_days` since before this milestone). Found
     live: the brief's own "use `stats --models --since 1d` for the family-
     baseline numbers" acceptance line failed outright with argparse's
@@ -82,8 +82,8 @@ def _session_jsonl_files(cwd: Path, *, all_projects: bool, session_id: "str | No
     twice: once from the parent's rolled-up node, once from the child's own
     native ones. H10 Part A: `session_id`, when given, scopes to exactly
     that one session's own file (`--session ID`)."""
-    from rolo_claude.agent.sessions import sessions_dir
-    from rolo_claude.config.paths import bridge_home
+    from halo_harness.agent.sessions import sessions_dir
+    from halo_harness.config.paths import bridge_home
     if session_id:
         root = bridge_home() / "sessions"
         pattern = f"*/{session_id}.jsonl" if all_projects else None
@@ -304,15 +304,15 @@ def _print_roles_table(rows: list) -> None:
 
 
 def _cmd_stats_telemetry(args) -> int:
-    """The `--models`/`--tools` path -- `rolo_claude.telemetry`'s richer
+    """The `--models`/`--tools` path -- `halo_harness.telemetry`'s richer
     per-(model,provider)/per-tool aggregation, scoped by `--since`/
     `--all-projects`/`--session`."""
-    from rolo_claude import telemetry
+    from halo_harness import telemetry
 
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
     slug = None
     if not args.all_projects:
-        from rolo_claude.config.paths import project_slug
+        from halo_harness.config.paths import project_slug
         slug = project_slug(cwd)
     summaries = telemetry.scan(since=args.since, slug=slug, all_projects=args.all_projects,
                                 session_id=args.session)
@@ -336,7 +336,7 @@ def _cmd_stats_telemetry(args) -> int:
     # --tools run.
     flags = " ".join(f for f, on in (("--models", args.models), ("--tools", args.tools),
                                        ("--roles", args.roles)) if on)
-    print(f"rolo-claude stats {flags} ({scope}, since {args.since}, {len(summaries)} session(s)):")
+    print(f"halo stats {flags} ({scope}, since {args.since}, {len(summaries)} session(s)):")
     if args.models:
         _print_models_table(model_rows, wide=args.wide)
     if args.tools:
@@ -347,7 +347,7 @@ def _cmd_stats_telemetry(args) -> int:
 
 
 def cmd_stats(argv: list) -> int:
-    parser = argparse.ArgumentParser(prog="rolo-claude stats", add_help=True,
+    parser = argparse.ArgumentParser(prog="halo stats", add_help=True,
                                       description="Aggregate tokens/cost/tool-calls across session logs (headless /stats).")
     parser.add_argument("--all", action="store_true", dest="all_projects",
                          help="Aggregate every project's sessions, not just the current directory's")
@@ -372,7 +372,7 @@ def cmd_stats(argv: list) -> int:
     if args.models or args.tools or args.roles:
         return _cmd_stats_telemetry(args)
 
-    from rolo_claude.controller import compute_session_stats, format_cache_tokens_suffix
+    from halo_harness.controller import compute_session_stats, format_cache_tokens_suffix
 
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
     files = _session_jsonl_files(cwd, all_projects=args.all_projects, session_id=args.session)
@@ -386,7 +386,7 @@ def cmd_stats(argv: list) -> int:
         return 0
 
     scope = "all projects" if args.all_projects else str(cwd)
-    print(f"rolo-claude stats ({scope}, {len(files)} session(s)):")
+    print(f"halo stats ({scope}, {len(files)} session(s)):")
     print(f"  Turns: {total['turns']}")
     print(f"  Total cost: ${total['total_cost_usd']:.4f}")
     if total["per_model"]:

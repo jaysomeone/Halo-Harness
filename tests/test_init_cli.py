@@ -1,6 +1,6 @@
-"""tests.test_init_cli -- `rolo-claude init` (H12 brief Part A): the whole
+"""tests.test_init_cli -- `halo init` (H12 brief Part A): the whole
 first run in one command. Every test runs against an isolated BRIDGE_TEST_
-HOME (never the real machine's ~/.config/vibes-hacker/env or ~/.rolo-claude)
+HOME (never the real machine's ~/.config/halo/env, ~/.config/vibes-hacker/env, or ~/.halo)
 and a default `BRIDGE_TEST_CC_AUTH_STATUS` of "not logged in" so a doctor
 check inside `init` never spawns a real `claude auth status` subprocess
 (fast, deterministic, independent of whatever's actually installed on the
@@ -39,7 +39,7 @@ _LOGGED_IN_CLAUDE_AI = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-init-"))
+    return Path(tempfile.mkdtemp(prefix="halo-init-"))
 
 
 def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, timeout: int = 40):
@@ -48,17 +48,21 @@ def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, 
     # test only ever sees what THIS test passes in.
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_",
-                                "ROLO_CLAUDE_", "TYPESAFE_"))}
+                                "ROLO_CLAUDE_", "HALO_", "TYPESAFE_"))}
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
                 "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
     env.update(extra_env or {})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            input=stdin, timeout=timeout)
 
 
 def _env_file(home: Path) -> Path:
-    return home / ".config" / "vibes-hacker" / "env"
+    """2.0.0 rename: `halo init` now writes the NEW default path -- the
+    legacy `~/.config/vibes-hacker/env` is still READ (see
+    test_env_file_still_read_from_legacy_vibes_hacker_path_when_new_
+    absent below) but never written to again."""
+    return home / ".config" / "halo" / "env"
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +82,7 @@ def test_home_preset_stdin_key_writes_env_file_and_config(ctx: Ctx):
     content = env_path.read_text(encoding="utf-8")
     ctx.check(f"it carries the key, got {content!r}", "OPENROUTER_API_KEY=sk-or-fake-key-123" in content)
 
-    cfg_path = home / ".rolo-claude" / "config.json"
+    cfg_path = home / ".halo" / "config.json"
     ctx.check(f"config.json was written at {cfg_path}", cfg_path.exists())
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     ctx.check(f"model set to the home default, got {cfg}", cfg.get("model") == "or:deepseek/deepseek-v4.1-flash")
@@ -158,7 +162,7 @@ def test_preset_claude_accepted_with_a_faked_login(ctx: Ctx):
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("the claude provider path ran", "Claude subscription" in result.stdout)
     ctx.check("credentials step stores nothing", "nothing stored" in result.stdout)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"default model is cc:sonnet, got {cfg}", cfg.get("model") == "cc:sonnet")
 
 
@@ -192,7 +196,7 @@ def test_work_preset_host_and_token_via_stdin(ctx: Ctx):
     content = _env_file(home).read_text(encoding="utf-8")
     ctx.check(f"host written, got {content!r}", "DATABRICKS_HOST=https://fake-ws.cloud.databricks.com" in content)
     ctx.check(f"token written, got {content!r}", "DATABRICKS_TOKEN=fake-token-999" in content)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"model set to the work default, got {cfg}",
               cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
 
@@ -215,7 +219,7 @@ def test_model_flag_overrides_preset_default(ctx: Ctx):
     result = _run(["init", "--preset", "home", "--yes", "--no-live", "--model", "or:deepseek/deepseek-v3.2"],
                    home, stdin="sk-or-x\n")
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"--model wins over the preset default, got {cfg}", cfg.get("model") == "or:deepseek/deepseek-v3.2")
 
 
@@ -225,8 +229,8 @@ def test_model_flag_overrides_preset_default(ctx: Ctx):
 
 @test
 def test_model_precedence_flag_then_config_then_builtin_default(ctx: Ctx):
-    from rolo_claude.model import DEFAULT_MODEL_REF, resolve_default_model_raw
-    from rolo_claude.theme import set_config_value
+    from halo_harness.model import DEFAULT_MODEL_REF, resolve_default_model_raw
+    from halo_harness.theme import set_config_value
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
@@ -260,8 +264,8 @@ def test_headless_build_session_honours_config_json_model(ctx: Ctx):
     """The one shared session builder both `-p` and the TUI call -- proof
     that a `--model` flag beats config.json's own model, which in turn beats
     the hardcoded default, at the ACTUAL session-construction call site."""
-    from rolo_claude import headless
-    from rolo_claude.theme import set_config_value
+    from halo_harness import headless
+    from halo_harness.theme import set_config_value
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
@@ -299,7 +303,7 @@ def test_rc_file_line_written_once_with_marker(ctx: Ctx):
     """`ensure_local_bin_on_rc`/`rc_file_for_shell` (shared by doctor.py's
     own check and this init step): zsh -> ~/.zshenv, else ~/.profile;
     idempotent -- a second call is a pure no-op, never a duplicate line."""
-    from rolo_claude.linux_fixes import PATH_LINE, PATH_MARKER, ensure_local_bin_on_rc, rc_file_for_shell
+    from halo_harness.linux_fixes import PATH_LINE, PATH_MARKER, ensure_local_bin_on_rc, rc_file_for_shell
     home = _fresh_home()
     ctx.check("zsh -> ~/.zshenv", rc_file_for_shell("/usr/bin/zsh", home=home) == home / ".zshenv")
     ctx.check("bash -> ~/.profile", rc_file_for_shell("/bin/bash", home=home) == home / ".profile")
@@ -323,7 +327,7 @@ def test_ripgrep_install_exercised_with_a_fake_download(ctx: Ctx):
     import io
     import tarfile
 
-    from rolo_claude.linux_fixes import install_static_ripgrep, pick_ripgrep_asset, ripgrep_asset_suffix
+    from halo_harness.linux_fixes import install_static_ripgrep, pick_ripgrep_asset, ripgrep_asset_suffix
 
     ctx.check("linux x86_64 -> the musl asset suffix",
               ripgrep_asset_suffix(system="Linux", machine="x86_64") == "x86_64-unknown-linux-musl.tar.gz")
@@ -381,7 +385,7 @@ def test_live_pong_success_against_mock_upstream(ctx: Ctx):
         ctx.check("reports the reply/model/provider/cost line",
                   "reply='pong'" in result.stdout and "provider=openrouter" in result.stdout)
         ctx.check("no key ever printed", "sk-or-x" not in result.stdout)
-        ctx.check("summary points at starting the real thing", "Run `rolo-claude`" in result.stdout)
+        ctx.check("summary points at starting the real thing", "Run `halo`" in result.stdout)
     finally:
         mock.stop()
 
@@ -416,7 +420,7 @@ def test_no_live_skips_pong_and_catalog_refresh(ctx: Ctx):
 
 @test
 def test_top_level_help_epilog_mentions_init(ctx: Ctx):
-    from rolo_claude.cli import _build_parser
+    from halo_harness.cli import _build_parser
     help_text = _build_parser().format_help()
     ctx.check("epilog lists the init command", "init" in help_text.split("Commands:")[-1])
 
@@ -451,8 +455,8 @@ _ONE_ENDPOINT_PER_FAMILY_PARSED = [
 
 
 def _seed_dbx_cache(home: Path) -> None:
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    write_dbx_endpoints_json(home / ".rolo-claude", _ONE_ENDPOINT_PER_FAMILY_PARSED)
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    write_dbx_endpoints_json(home / ".halo", _ONE_ENDPOINT_PER_FAMILY_PARSED)
 
 
 @test
@@ -464,7 +468,7 @@ def test_picker_skipped_with_yes_even_with_a_cached_catalog(ctx: Ctx):
                               "DATABRICKS_TOKEN": "fake-token"})
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("no picker prompt printed", "Pick a default model" not in result.stdout)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"still the plain preset default, got {cfg}",
               cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
 
@@ -478,7 +482,7 @@ def test_picker_skipped_when_model_flag_given(ctx: Ctx):
                               "DATABRICKS_TOKEN": "fake-token"})
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("no picker prompt printed", "Pick a default model" not in result.stdout)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"the explicit --model wins, got {cfg}", cfg.get("model") == "dbx:databricks-kimi-k3")
 
 
@@ -497,7 +501,7 @@ def test_numbered_fallback_picks_the_chosen_entry_non_tty(ctx: Ctx):
                               "DATABRICKS_TOKEN": "fake-token"})
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
     ctx.check("the numbered picker was actually offered", "Pick a default model" in result.stdout)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"the chosen (2nd) endpoint was written, got {cfg}",
               cfg.get("model") == "dbx:databricks-glm-5-3")
 
@@ -510,7 +514,7 @@ def test_numbered_fallback_empty_input_keeps_the_preset_default(ctx: Ctx):
                    extra_env={"DATABRICKS_HOST": "https://fake-ws.cloud.databricks.com",
                               "DATABRICKS_TOKEN": "fake-token"})
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"unchanged preset default, got {cfg}",
               cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
 
@@ -544,7 +548,7 @@ def test_provider_databricks_yes_non_interactive(ctx: Ctx):
     ctx.check("the databricks provider path ran", "Databricks" in result.stdout)
     ctx.check("no preset/home/work wording anywhere", not any(
         w in result.stdout for w in ("Preset:", "home preset", "work preset")))
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"model set to the databricks default, got {cfg}",
               cfg.get("model") == "dbx:databricks-deepseek-v4-1-flash")
 
@@ -554,7 +558,7 @@ def test_provider_openrouter_yes_non_interactive(ctx: Ctx):
     home = _fresh_home()
     result = _run(["init", "--provider", "openrouter", "--yes", "--no-live"], home, stdin="sk-or-x\n")
     ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"model set to the openrouter default, got {cfg}",
               cfg.get("model") == "or:deepseek/deepseek-v4.1-flash")
 
@@ -567,7 +571,7 @@ def test_provider_anthropic_yes_non_interactive_writes_api_key(ctx: Ctx):
     ctx.check("the key is never printed", "sk-ant-fake-1" not in result.stdout)
     content = _env_file(home).read_text(encoding="utf-8")
     ctx.check(f"ANTHROPIC_API_KEY written, got {content!r}", "ANTHROPIC_API_KEY=sk-ant-fake-1" in content)
-    cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
     ctx.check(f"model set to the anthropic default, got {cfg}", cfg.get("model") == "ant:sonnet")
 
 
@@ -606,7 +610,7 @@ def test_preset_alias_prints_a_deprecation_notice_and_behaves_like_provider(ctx:
 
 @test
 def test_unconfigured_provider_status_tag(ctx: Ctx):
-    from rolo_claude.init_providers import provider_status
+    from halo_harness.init_providers import provider_status
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
@@ -657,7 +661,7 @@ def test_scripted_provider_loop_sets_up_two_then_done_then_cross_provider_pick(c
     provider`/`_confirm`/`_run_entry_picker` to walk databricks then
     openrouter, say "yes" to "set up another?" once and "no" the second
     time, then answers the final cross-provider pick explicitly."""
-    import rolo_claude.init_cli as init_cli
+    import halo_harness.init_cli as init_cli
 
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
@@ -672,10 +676,10 @@ def test_scripted_provider_loop_sets_up_two_then_done_then_cross_provider_pick(c
     # Both providers' catalogs are pre-seeded (rather than a live --refresh,
     # which --no-live skips) so the final cross-provider pick has real
     # entries from EACH provider to choose between.
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json, write_models_json
-    write_models_json(home / ".rolo-claude", [{"id": "vendor/model-x", "context_length": 128000,
+    from halo_harness.providers.databricks import write_dbx_endpoints_json, write_models_json
+    write_models_json(home / ".halo", [{"id": "vendor/model-x", "context_length": 128000,
                                                 "max_output_tokens": 8192}])
-    write_dbx_endpoints_json(home / ".rolo-claude", _ONE_ENDPOINT_PER_FAMILY_PARSED)
+    write_dbx_endpoints_json(home / ".halo", _ONE_ENDPOINT_PER_FAMILY_PARSED)
 
     real_select = init_cli._step_select_provider
     real_confirm = init_cli._confirm
@@ -710,7 +714,7 @@ def test_scripted_provider_loop_sets_up_two_then_done_then_cross_provider_pick(c
     try:
         rc = init_cli.cmd_init(["--no-live"])
         ctx.check(f"exit 0, got {rc}", rc == 0)
-        cfg = json.loads((home / ".rolo-claude" / "config.json").read_text(encoding="utf-8"))
+        cfg = json.loads((home / ".halo" / "config.json").read_text(encoding="utf-8"))
         ctx.check(f"both providers' credentials resolve now, got databricks="
                   f"{init_cli.provider_status('databricks')!r} openrouter={init_cli.provider_status('openrouter')!r}",
                   init_cli.provider_status("databricks") == "configured"
@@ -744,7 +748,7 @@ def test_provider_setup_does_not_write_a_permanent_enabled_override_on_a_fresh_b
     result = _run(["init", "--provider", "openrouter", "--yes", "--no-live"], home,
                    extra_env={"OPENROUTER_API_KEY": "sk-or-fake"})
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    config_path = home / ".rolo-claude" / "config.json"
+    config_path = home / ".halo" / "config.json"
     providers_block = None
     if config_path.exists():
         providers_block = json.loads(config_path.read_text(encoding="utf-8")).get("providers")
@@ -755,7 +759,7 @@ def test_provider_setup_does_not_write_a_permanent_enabled_override_on_a_fresh_b
 @test
 def test_provider_setup_flips_an_existing_explicit_disable_back_on(ctx: Ctx):
     home = _fresh_home()
-    config_dir = home / ".rolo-claude"
+    config_dir = home / ".halo"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(
         json.dumps({"providers": {"openrouter": {"enabled": False}}}), encoding="utf-8")

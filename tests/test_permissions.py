@@ -1,4 +1,4 @@
-"""tests.test_permissions -- rolo_claude/permissions.py (H2 scope C): the
+"""tests.test_permissions -- halo_harness/permissions.py (H2 scope C): the
 D-CFG grammar/matcher/mode-table enumeration. Covers the 19 real rules
 round-trip, Bash(ls *) vs lsof, :* placement, compound/subshell, wrapper/env
 stripping, Read(src/**) allow vs deny, negation, Read-deny-blocks-Edit,
@@ -20,10 +20,10 @@ from tests.helpers.fake_home import _SETTINGS_LOCAL_JSON
 from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
 
 ensure_default_provider_credentials()
-from rolo_claude import permissions as P
-from rolo_claude.tools.read import ReadTool
-from rolo_claude.tools.edit import EditTool
-from rolo_claude.tools.write import WriteTool
+from halo_harness import permissions as P
+from halo_harness.tools.read import ReadTool
+from halo_harness.tools.edit import EditTool
+from halo_harness.tools.write import WriteTool
 
 test, TESTS = new_registry()
 
@@ -429,14 +429,14 @@ def test_untrusted_project_allow_dropped_by_settings_layer(ctx: Ctx):
     tests/test_settings.py); this proves the INTEGRATION point -- an
     engine built from an untrusted-filtered Settings object never sees the
     dropped allow rule at all."""
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     raw = {"permissions": {"allow": ["Bash(git push)"]}}
     settings_trusted = Settings(raw=raw, layers=[], errors=[])
     ctx.check("trusted settings still carries the allow rule",
               settings_trusted.permissions_allow == ["Bash(git push)"])
     # The untrusted-drop itself happens in config/settings.py's
     # _apply_trust_filter BEFORE merging -- simulate that here.
-    from rolo_claude.config.settings import _apply_trust_filter
+    from halo_harness.config.settings import _apply_trust_filter
     filtered = _apply_trust_filter(raw, "projectSettings", trusted=False)
     ctx.check("untrusted projectSettings drops permissions.allow",
               filtered.get("permissions", {}).get("allow") is None)
@@ -621,7 +621,7 @@ def test_bare_name_extraction_from_deny_rules(ctx: Ctx):
 
 @test
 def test_bare_name_removal_applies_to_registry(ctx: Ctx):
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.tools.registry import ToolRegistry
     reg = ToolRegistry()
     deny = [P.parse_rule("Bash", source="user")]
     names = P.bare_deny_tool_names(deny)
@@ -795,9 +795,9 @@ def test_h9b_f21_real_session_wires_tool_results_dir_from_its_own_log(ctx: Ctx):
     """End to end: a real Session sets this up automatically -- no caller
     has to remember to."""
     import os
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     # H15 Part D2.1: `Session`'s own `SessionLog` ALWAYS resolves its
     # storage root via `bridge_home()` -- independent of the `state_dir=`
@@ -824,6 +824,149 @@ def test_h9b_f21_real_session_wires_tool_results_dir_from_its_own_log(ctx: Ctx):
             os.environ.pop("BRIDGE_STATE_DIR", None)
         else:
             os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+
+
+@test
+def test_fixpass_f10_read_exemption_rewrites_a_dead_legacy_state_dir_pointer(ctx: Ctx):
+    """2.0.0 fixpass finding 10: a RESUMED 1.0.1 session's own prior
+    transcript can literally contain an absolute pointer under the OLD
+    state dir ("Full output saved to .../.rolo-claude/sessions/.../
+    tool-results/X.txt"). When the finding-1 compatibility link is absent
+    (simulated here: no .rolo-claude dir at all under this scoped home),
+    the Read exemption must rewrite that prefix to the NEW state dir at
+    decide() time -- IN PLACE, so the Read tool that actually runs right
+    after this decision sees the fixed path too -- and still allow it,
+    since the equivalent file genuinely exists there (the rename preserves
+    every relative path underneath it)."""
+    import os
+
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    scoped_home = Path(tempfile.mkdtemp(prefix="h2-f10-permissions-home-"))
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(scoped_home)
+        old_dir = scoped_home / ".rolo-claude"  # deliberately never created -- no link, truly gone
+        new_dir = scoped_home / ".halo"
+        tool_results_dir = new_dir / "sessions" / "proj" / "sess1" / "tool-results"
+        tool_results_dir.mkdir(parents=True)
+        spill_file = tool_results_dir / "call_abc123.txt"
+        spill_file.write_text("the full tool output", encoding="utf-8")
+
+        legacy_pointer = str(old_dir / "sessions" / "proj" / "sess1" / "tool-results" / "call_abc123.txt")
+        engine = P.PermissionEngine(mode="default", cwd=CWD)
+        engine.tool_results_dir = tool_results_dir
+        tool_input = {"file_path": legacy_pointer}
+        d = engine.decide("Read", tool_input)
+        ctx.check(f"allowed via the rewritten path, got {d.action} ({d.reason})", d.action == "allow")
+        ctx.check(f"tool_input was rewritten IN PLACE to the new dir, got {tool_input}",
+                  tool_input["file_path"] == str(spill_file))
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+
+
+@test
+def test_fixpass_f10_read_exemption_leaves_a_working_legacy_link_alone(ctx: Ctx):
+    """When the old path is STILL usable (a working compatibility link, or
+    even a leftover real dir) nothing is rewritten -- the ordinary
+    is_relative_to check already handles it on its own, unchanged."""
+    import os
+
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    scoped_home = Path(tempfile.mkdtemp(prefix="h2-f10-permissions-home2-"))
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(scoped_home)
+        old_dir = scoped_home / ".rolo-claude"
+        old_dir.mkdir()  # simulate a still-usable old path (a link or leftover real dir)
+        tool_results_dir = old_dir / "sessions" / "proj" / "sess1" / "tool-results"
+        tool_results_dir.mkdir(parents=True)
+        spill_file = tool_results_dir / "call_xyz.txt"
+        spill_file.write_text("x", encoding="utf-8")
+
+        engine = P.PermissionEngine(mode="default", cwd=CWD)
+        engine.tool_results_dir = tool_results_dir
+        tool_input = {"file_path": str(spill_file)}
+        d = engine.decide("Read", tool_input)
+        ctx.check(f"still allowed directly, got {d.action}", d.action == "allow")
+        ctx.check("never rewritten -- it already worked", tool_input["file_path"] == str(spill_file))
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+
+
+# ---------------------------------------------------------------------------
+# 2.0.0 fixpass item C: the legacy-state-dir rewrite now happens in
+# decide() itself, so auto/bypassPermissions (which never reach
+# _mode_table_decision at all) get it too.
+# ---------------------------------------------------------------------------
+
+@test
+def test_fixpass_c_read_legacy_rewrite_applies_in_auto_mode(ctx: Ctx):
+    """auto mode short-circuits every non-Bash/PowerShell tool straight to
+    an allow inside _decide(), never reaching _mode_table_decision -- the
+    rewrite must still fire so the Read that runs right after this
+    decision does not reach for a path under the now-nonexistent old
+    state dir."""
+    import os
+
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    scoped_home = Path(tempfile.mkdtemp(prefix="h2-c-auto-rewrite-"))
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(scoped_home)
+        old_dir = scoped_home / ".rolo-claude"  # never created -- truly gone, no link
+        new_dir = scoped_home / ".halo"
+        target_dir = new_dir / "sessions" / "proj" / "sess1" / "tool-results"
+        target_dir.mkdir(parents=True)
+        spill_file = target_dir / "call_abc123.txt"
+        spill_file.write_text("the full tool output", encoding="utf-8")
+
+        legacy_pointer = str(old_dir / "sessions" / "proj" / "sess1" / "tool-results" / "call_abc123.txt")
+        engine = P.PermissionEngine(mode="auto", cwd=CWD)
+        tool_input = {"file_path": legacy_pointer}
+        d = engine.decide("Read", tool_input)
+        ctx.check(f"auto mode allows it, got {d.action}", d.action == "allow")
+        ctx.check(f"tool_input rewritten IN PLACE to the new dir even in auto mode, got {tool_input}",
+                  tool_input["file_path"] == str(spill_file))
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
+
+
+@test
+def test_fixpass_c_read_legacy_rewrite_applies_in_bypass_permissions_mode(ctx: Ctx):
+    """Same as above for bypassPermissions -- the other mode that
+    short-circuits straight to allow without ever calling
+    _mode_table_decision."""
+    import os
+
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    scoped_home = Path(tempfile.mkdtemp(prefix="h2-c-bypass-rewrite-"))
+    try:
+        os.environ["BRIDGE_TEST_HOME"] = str(scoped_home)
+        old_dir = scoped_home / ".rolo-claude"
+        new_dir = scoped_home / ".halo"
+        target_dir = new_dir / "sessions" / "proj" / "sess1" / "tool-results"
+        target_dir.mkdir(parents=True)
+        spill_file = target_dir / "call_xyz999.txt"
+        spill_file.write_text("more output", encoding="utf-8")
+
+        legacy_pointer = str(old_dir / "sessions" / "proj" / "sess1" / "tool-results" / "call_xyz999.txt")
+        engine = P.PermissionEngine(mode="bypassPermissions", cwd=CWD)
+        tool_input = {"file_path": legacy_pointer}
+        d = engine.decide("Read", tool_input)
+        ctx.check(f"bypassPermissions allows it, got {d.action}", d.action == "allow")
+        ctx.check(f"tool_input rewritten IN PLACE to the new dir even in bypassPermissions mode, got {tool_input}",
+                  tool_input["file_path"] == str(spill_file))
+    finally:
+        if old_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old_home
 
 
 if __name__ == "__main__":

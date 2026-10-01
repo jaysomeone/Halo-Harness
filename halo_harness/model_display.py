@@ -1,5 +1,5 @@
-"""rolo_claude.model_display -- 1.0.1 hotfix 12: ONE row format for every
-model-listing surface (`rolo-claude models`, `/models`, the `/model` picker,
+"""halo_harness.model_display -- 1.0.1 hotfix 12: ONE row format for every
+model-listing surface (`halo models`, `/models`, the `/model` picker,
 `init`'s own picker) -- context window, max output and USD/1M-token prices
 on every row, Databricks endpoints included, never wrapped onto a second
 line. Verified live: the pre-hotfix `/model` picker showed a cc: row as
@@ -165,7 +165,7 @@ def databricks_row_fields(name: str, *, state_dir=None, model_table: Optional[di
     source rule:
 
       (a) the models.dev `databricks` provider entry whose id EQUALS `name`
-          (the live `~/.rolo-claude/models-dev.json` cache first, then the
+          (the live `~/.halo/models-dev.json` cache first, then the
           vendored `catalog/models_dev_databricks_fallback.json`) --
           `limit.context`/`limit.output` for ctx/out, `cost.input`/
           `cost.output` for prices, all used AS-IS (models.dev's own cost
@@ -194,8 +194,8 @@ def databricks_row_fields(name: str, *, state_dir=None, model_table: Optional[di
     host, the dominant cost behind `/model`'s multi-second freeze). Both
     default to the original per-call load when omitted, so every OTHER
     caller (doctor, the CLI table, existing tests) is unaffected."""
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.models_dev import (
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.models_dev import (
         databricks_entries_from_full_models_dev, load_models_dev_json, load_vendored_databricks_fallback,
     )
     if live_models_dev is None:
@@ -222,7 +222,7 @@ def databricks_row_fields(name: str, *, state_dir=None, model_table: Optional[di
     # see model.py::resolve_model_profile's identical lookup for pricing-
     # free routing defaults); output/prices stay blank.
     if model_table is None:
-        from rolo_claude.providers.profiles import load_model_table
+        from halo_harness.providers.profiles import load_model_table
         model_table = load_model_table()
     table_entry = (model_table.get("databricks") or {}).get(name) if isinstance(model_table, dict) else None
     if isinstance(table_entry, dict) and isinstance(table_entry.get("context_tokens"), int):

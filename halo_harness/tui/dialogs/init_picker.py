@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.init_picker -- 1.0.1 hotfix 5: `rolo-claude init`'s
+"""halo_harness.tui.dialogs.init_picker -- 1.0.1 hotfix 5: `halo init`'s
 own interactive model picker (a small standalone Textual `App`, since a
 picker offered from a plain CLI command has no host `BridgeApp`/screen stack
 to push onto -- `init_cli.py` runs this synchronously via `run_init_picker`,
@@ -21,8 +21,8 @@ from textual.containers import Vertical
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from rolo_claude.model_display import ROW_HEADER, format_model_row
-from rolo_claude.tui.dialogs.listnav import NavInput
+from halo_harness.model_display import ROW_HEADER, format_model_row
+from halo_harness.tui.dialogs.listnav import NavInput
 
 
 class InitPickerApp(App):
@@ -33,7 +33,7 @@ class InitPickerApp(App):
     caller AFTER `.run()` returns) is the picked `ref`, or `None` on
     Esc/no pick."""
 
-    TITLE = "rolo-claude init -- pick a default model"
+    TITLE = "halo init -- pick a default model"
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
     CSS = """
     Screen { align: center middle; }
@@ -61,7 +61,7 @@ class InitPickerApp(App):
         self.query_one(NavInput).focus()
 
     def _refresh(self, query: str) -> None:
-        from rolo_claude.tui.dialogs.model_picker import _grouped
+        from halo_harness.tui.dialogs.model_picker import _grouped
         query_low = query.strip().lower()
         self._filtered = ([e for e in self.entries
                             if query_low in e["ref"].lower() or query_low in (e.get("group") or "").lower()]

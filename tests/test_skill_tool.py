@@ -11,15 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import add_fake_skill
-from rolo_claude.commands.skills import discover_all_skills, find_skill
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.skill import SkillTool
+from halo_harness.commands.skills import discover_all_skills, find_skill
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.skill import SkillTool
 
 test, TESTS = new_registry()
 
 
 def _project_skills_setup(**skill_kwargs):
-    root = Path(tempfile.mkdtemp(prefix="rolo-claude-skilltool-"))
+    root = Path(tempfile.mkdtemp(prefix="halo-skilltool-"))
     proj = root / "proj"
     home = root / "home"
     (proj / ".claude").mkdir(parents=True, exist_ok=True)
@@ -176,7 +176,7 @@ def test_h5b_f12_claude_skill_dir_and_session_id_and_project_dir_substituted(ctx
     the skill's own body -- a skill referencing its own scripts by
     `${CLAUDE_SKILL_DIR}/scripts/x.py` used to send the model to a
     literal, unresolved string."""
-    root = Path(tempfile.mkdtemp(prefix="rolo-claude-skilltool-vars-"))
+    root = Path(tempfile.mkdtemp(prefix="halo-skilltool-vars-"))
     proj = root / "proj"
     home = root / "home"
     (proj / ".claude").mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def test_h5b_f12_claude_skill_dir_and_session_id_and_project_dir_substituted(ctx
     import os
     os.environ["BRIDGE_TEST_HOME"] = str(home)
     try:
-        ctx_obj = ToolContext(cwd=proj, session_dir=Path("/tmp/rolo-claude-sessions/proj-slug/abc123session"))
+        ctx_obj = ToolContext(cwd=proj, session_dir=Path("/tmp/halo-sessions/proj-slug/abc123session"))
         result = SkillTool().run({"skill": "varskill"}, ctx_obj)
     finally:
         os.environ.pop("BRIDGE_TEST_HOME", None)
@@ -252,7 +252,7 @@ def test_h5c_f15_slash_skill_path_builds_the_same_claude_vars_base_dir_and_sibli
     REAL `SlashCommand.run` a `/varskill` invocation would call (via
     `discover_all_skills`, never `SkillTool` at all) and asserts it now
     matches the tool path's own three behaviors exactly."""
-    root = Path(tempfile.mkdtemp(prefix="rolo-claude-slash-skill-vars-"))
+    root = Path(tempfile.mkdtemp(prefix="halo-slash-skill-vars-"))
     proj = root / "proj"
     home = root / "home"
     (proj / ".claude").mkdir(parents=True, exist_ok=True)

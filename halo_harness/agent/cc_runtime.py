@@ -1,4 +1,4 @@
-"""rolo_claude.agent.cc_runtime -- H11 Part B: turn execution for a `cc:`
+"""halo_harness.agent.cc_runtime -- H11 Part B: turn execution for a `cc:`
 route Session -- lazily starts one `ClaudeCodeProcess` + `ToolBridgeServer`
 pair per session, drives one turn (stream-json user line in, events out),
 and runs the bridge's own "normal dispatch path" for every
@@ -47,12 +47,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
-from rolo_claude import events
-from rolo_claude.agent.cc_process import ClaudeCodeProcess, build_cc_argv, build_mcp_config
-from rolo_claude.ccbridge.server import ToolBridgeServer
-from rolo_claude.providers.cc_models import ClaudeCodeNotFoundError, SUBSCRIPTION_AUTH_METHODS, claude_auth_status, \
+from halo_harness import events
+from halo_harness.agent.cc_process import ClaudeCodeProcess, build_cc_argv, build_mcp_config
+from halo_harness.ccbridge.server import ToolBridgeServer
+from halo_harness.providers.cc_models import ClaudeCodeNotFoundError, SUBSCRIPTION_AUTH_METHODS, claude_auth_status, \
     resolve_claude_launch_argv
-from rolo_claude.tools.base import ToolContext
+from halo_harness.tools.base import ToolContext
 
 log = logging.getLogger("bridge")
 
@@ -131,7 +131,7 @@ def _preflight_cc() -> Optional[str]:
 
 
 def _cc_child_env(session) -> dict:
-    from rolo_claude.providers.config import cc_child_env
+    from halo_harness.providers.config import cc_child_env
     base = getattr(session, "tool_env", None) or dict(os.environ)
     return cc_child_env(base)
 
@@ -252,7 +252,7 @@ def _cc_system_addendum(session) -> str:
     REPLACES the generic bridged-tools blurb entirely (a child's whole
     `session_context.system_prompt` already IS that body -- agent/
     subagent.py's `_build_child_session`)."""
-    from rolo_claude.agent.cc_process import CC_APPEND_SYSTEM_PROMPT
+    from halo_harness.agent.cc_process import CC_APPEND_SYSTEM_PROMPT
 
     # critical live finding (not in the original 28, caught by this pass's
     # own Part D acceptance run): `--append-system-prompt <value>` rides
@@ -274,7 +274,7 @@ def _cc_system_addendum(session) -> str:
     parts.append(CC_APPEND_SYSTEM_PROMPT)
 
     try:
-        from rolo_claude.commands.skills import discover_all_skills
+        from halo_harness.commands.skills import discover_all_skills
         skills = discover_all_skills(session.cwd)
         if skills:
             lines = [f"- {name}: {(getattr(cmd, 'description', '') or '')[:_NAME_DESC_CHARS]}"
@@ -307,7 +307,7 @@ def _cc_system_addendum(session) -> str:
         )
 
     if session.permission_engine.mode == "plan":
-        from rolo_claude.agent.planmode import PLAN_MODE_NOTE
+        from halo_harness.agent.planmode import PLAN_MODE_NOTE
         parts.append(PLAN_MODE_NOTE)
 
     text = "\n\n".join(p for p in parts if p)
@@ -348,7 +348,7 @@ def _record_tool_use_announcements(state: CcState, obj: dict) -> None:
     huge conversation-so-far dump must still be correlatable) -- appends
     every `tool_use` block in an `assistant` message to the FIFO
     `_take_tool_use_id` matches against."""
-    from rolo_claude.mcp.manager import split_mcp_tool_name
+    from halo_harness.mcp.manager import split_mcp_tool_name
     for b in (obj.get("message") or {}).get("content") or []:
         if isinstance(b, dict) and b.get("type") == "tool_use":
             raw_name = b.get("name") or ""
@@ -389,7 +389,7 @@ def _render_conversation_so_far(session) -> str:
     huge one-shot prime is still needless latency/spend for a message
     meant only to "catch up" a fresh/reused process."""
     try:
-        from rolo_claude.controller import render_transcript_markdown
+        from halo_harness.controller import render_transcript_markdown
         text = render_transcript_markdown(session.log.nodes(), session_id=session.log.session_id)
     except Exception:
         text = ""
@@ -495,7 +495,7 @@ def one_shot_cc_call(model: str, system_text: str, user_text: str, *, timeout_s:
         argv = resolve_claude_launch_argv()
     except ClaudeCodeNotFoundError as e:
         raise RuntimeError(f"cc: small-model call unavailable: {e}") from e
-    from rolo_claude.providers.config import cc_child_env
+    from halo_harness.providers.config import cc_child_env
     env = cc_child_env(dict(os.environ))
     argv = argv + [
         "-p", "--model", model, "--output-format", "json", "--max-turns", "1",
@@ -632,7 +632,7 @@ def _log_tool_use(session, tool_use_id: str, name: str, tool_input: dict) -> Non
 
 
 def _build_tool_context(session, tool_use_id: str) -> ToolContext:
-    from rolo_claude.hooks import env_file_path
+    from halo_harness.hooks import env_file_path
     return ToolContext(
         cwd=session.cwd, read_cache=session._read_cache, abort=session.abort,
         bash_state=session._bash_state, session_dir=session.log.dir / session.log.session_id,
@@ -694,9 +694,9 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
     is nothing to repair, only to decide/dispatch. Mirrors `_dispatch_
     tools`'s own post-resolve handling exactly, minus the read-only-
     batch/agent-batch CONCURRENCY (bridged calls are already serial)."""
-    from rolo_claude.agent.repair import RepairOutcome
-    from rolo_claude.agent.subagent import run_agent_call
-    from rolo_claude.tools.base import ToolResult
+    from halo_harness.agent.repair import RepairOutcome
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.tools.base import ToolResult
 
     tu = {"id": tool_use_id, "name": name, "input": tool_input}
     outcome = RepairOutcome(block={"name": name, "input": tool_input}, ok=True)
@@ -976,7 +976,7 @@ def turn_body_cc(session, turn_no: int, text: str, *, images: Optional[list] = N
         # finding 21: a safety net for every exit path, not just Esc -- a
         # cheap no-op scan when (the common case) every bridged call
         # already logged its own result.
-        from rolo_claude.agent.invariants import synthesize_missing_results
+        from halo_harness.agent.invariants import synthesize_missing_results
         synth_reason = {"interrupted": "Tool call interrupted by user",
                           "error": "Tool call never completed (the claude subprocess ended or errored)"}.get(
             reason, "Tool call never received a result")

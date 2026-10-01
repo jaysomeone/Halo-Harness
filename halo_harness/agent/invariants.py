@@ -1,4 +1,4 @@
-"""rolo_claude.agent.invariants -- serialize-time invariants (H1 scope F):
+"""halo_harness.agent.invariants -- serialize-time invariants (H1 scope F):
 dsh's "session poisoning" class of bugs (discussions #2900/#4843) made
 concrete as functions the loop calls at well-defined points, instead of
 hoped for.

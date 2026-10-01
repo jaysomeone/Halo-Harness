@@ -1,4 +1,9 @@
-# rolo-claude
+# Halo Harness
+
+Halo Harness continues `rolo-claude` 1.0.1 under a new name (see
+[CHANGELOG.md](CHANGELOG.md)'s `[2.0.0]` entry for the rename itself) --
+same behavior, a new product/command name (`halo`; `rolo-claude` keeps
+working as a deprecated alias).
 
 A standalone, Claude-Code-compatible agent harness: full-screen TUI, `-p`
 print mode, and the same config, session and tool conventions as the real
@@ -15,55 +20,59 @@ Code configuration (settings, permissions, hooks, CLAUDE.md, memory, skills,
 commands, agents, MCP servers) so nothing has to be set up twice. **Kali
 Linux is the primary target platform** -- Windows is the secondary/build
 host. It also ships the older `claude-bridge` proxy (drives the REAL `claude`
-binary against OpenRouter or Databricks) as the `rolo-claude proxy`
+binary against OpenRouter or Databricks) as the `halo proxy`
 subcommand -- see **Proxy mode** near the end.
 
 ## Quick start (Kali / Linux)
 
+Already have `rolo-claude` 1.0.1 installed? See "Upgrading from rolo-claude
+1.0.1" in `docs/harness/INSTALL.md` first -- `uv tool uninstall rolo-claude`
+(or whichever installer you used), or pass `--force` below instead.
+
 ```sh
-cd /path/to/rolo-claude
+cd /path/to/halo-harness
 uv tool install --editable .        # or: pipx install --editable .
-rolo-claude init                    # one command: pick a provider, credentials, default model, doctor, live pong
-rolo-claude                         # full-screen TUI
+halo init                    # one command: pick a provider, credentials, default model, doctor, live pong
+halo                         # full-screen TUI
 ```
 
-`rolo-claude init` shows an arrow-key list of the four providers it can set up (Databricks, OpenRouter,
+`halo init` shows an arrow-key list of the four providers it can set up (Databricks, OpenRouter,
 the Anthropic API, your Claude subscription), cursor already on whichever one auto-detection would pick
 (an existing OpenRouter key, a Databricks host/`ucode-settings.json`, an `ANTHROPIC_API_KEY`, or a
 claude.ai login, in that order) -- pick one, or a different one, and it asks only for that provider's
-missing credential; `rolo-claude init --provider openrouter --yes` runs it fully non-interactively for
+missing credential; `halo init --provider openrouter --yes` runs it fully non-interactively for
 one provider (repeat `--provider` for more than one; the deprecated `--preset home|work|claude` still
 works too). Re-running is always safe -- it shows the current state and changes nothing already
 configured. See
 `docs/harness/INSTALL.md` for the full walkthrough (offline/work-box install, PEP 668 workarounds,
-terminal notes) and `rolo-claude doctor` for a read-only environment check with a fix for every WARN.
+terminal notes) and `halo doctor` for a read-only environment check with a fix for every WARN.
 
 **Install once, run anywhere.** `uv tool install --editable .`/`pip install --user -e .` puts a real
-console script on PATH -- once it's there, `rolo-claude` works from any directory, not just this
+console script on PATH -- once it's there, `halo` works from any directory, not just this
 checkout (the checkout is only ever needed for `git pull`). Re-run `uv tool install --reinstall .`
 (or `pip install --user -e .` again) after every `git pull` so the installed command actually picks up
-the update; `rolo-claude doctor`'s own "command on PATH" check (and `init`'s own summary line) catches
+the update; `halo doctor`'s own "command on PATH" check (and `init`'s own summary line) catches
 it and names the exact command if you forget.
 
 ### Windows (five lines)
 
 ```powershell
-cd C:\path\to\rolo-claude
+cd C:\path\to\halo-harness
 uv tool install --editable .
-rolo-claude init
-rolo-claude --version
-rolo-claude
+halo init
+halo --version
+halo
 ```
 
 ## What it is
 
-`rolo-claude` is its own agent loop, not a wrapper around `claude`: it reads
+`halo` is its own agent loop, not a wrapper around `claude`: it reads
 your real `~/.claude.json`, `~/.claude/settings.json`, `CLAUDE.md`, hooks,
 skills, custom slash commands, subagent definitions and MCP server configs
 directly, builds the same kind of system prompt and tool set Claude Code
 would, and talks to the model provider itself (no local proxy server, no
 `claude` subprocess, no Anthropic account required). Every model turn is
-derived from an append-only session log (`~/.rolo-claude/sessions/<slug>/
+derived from an append-only session log (`~/.halo/sessions/<slug>/
 <id>.jsonl`) -- if it isn't in that log, the model never sees it, which is
 also what makes `/rewind`, compaction, and session resume all agree with
 each other and with what actually happened.
@@ -86,11 +95,11 @@ new dependency).
 ## A 10-minute walkthrough
 
 ```sh
-rolo-claude init                    # pick a provider, set credentials, doctor, live pong
-rolo-claude                         # full-screen TUI
+halo init                    # pick a provider, set credentials, doctor, live pong
+halo                         # full-screen TUI
 ```
 
-1. **`rolo-claude init`** lets you pick which provider to set up -- Databricks,
+1. **`halo init`** lets you pick which provider to set up -- Databricks,
    OpenRouter, the Anthropic API, or your Claude subscription -- asks for the
    one credential it's missing, picks a default model from that provider's
    own catalog, and ends with a real "pong" from it; it then offers to set up
@@ -126,7 +135,7 @@ rolo-claude                         # full-screen TUI
    first prompt, cwd, or model.
 7. **`/stats --models`** aggregates tokens/cost/tool-error-rate/repair-hit-
    rate across every session logged for this project -- the same data
-   `rolo-claude stats --models` prints headlessly (`docs/COMMANDS.md`).
+   `halo stats --models` prints headlessly (`docs/COMMANDS.md`).
 8. **`/improve`** scans recent sessions for repeated friction (tool errors,
    repair-layer hits, corrections you typed), drafts up to eight candidate
    memory/rule/skill files with one model call, and reviews them one card
@@ -140,7 +149,7 @@ rolo-claude                         # full-screen TUI
 | [docs/COMMANDS.md](docs/COMMANDS.md) | every CLI subcommand and flag, with worked examples |
 | [docs/SLASH-COMMANDS.md](docs/SLASH-COMMANDS.md) | every `/command`, key binding, chord, and `@file`/`!cmd` prefix |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the session log, request derivation, providers, permissions, hooks, MCP, compaction, sub-agents, the `cc:` bridge, telemetry, the TUI event model |
-| [docs/CONFIG.md](docs/CONFIG.md) | exactly which Claude Code files are read (and how), rolo-claude's own files, every environment variable |
+| [docs/CONFIG.md](docs/CONFIG.md) | exactly which Claude Code files are read (and how), halo's own files, every environment variable |
 | [docs/MODELS.md](docs/MODELS.md) | model reference forms, per-family request-shaping rules, catalogs, pricing |
 | [docs/DATABRICKS.md](docs/DATABRICKS.md) | the work-box setup, discovery, routing, team onboarding, troubleshooting by HTTP status, the work-matrix fixes tooling |
 | [docs/ROLES.md](docs/ROLES.md) | orchestrator/coder/reviewer/researcher/small, resolution precedence, `--role`, `/roles`, `stats --roles` |
@@ -151,6 +160,19 @@ rolo-claude                         # full-screen TUI
 
 ## Install
 
+**Upgrading from `rolo-claude` 1.0.1?** Every installer trips over the
+already-installed `rolo-claude` console script (`uv tool install` aborts,
+`pipx` silently refuses, plain `pip` silently overwrites it) -- uninstall
+the old tool first (`uv tool uninstall rolo-claude` / `pipx uninstall
+rolo-claude` / `pip uninstall rolo-claude`, matching whichever you used),
+or install with `--force`. The state directory then migrates itself on
+first run (`~/.rolo-claude` -> `~/.halo`, no link left behind -- the old
+directory is simply gone afterward, so the separate 1.0.1 `rolo-claude`
+install must not be run again); `halo`'s own `rolo-claude` console-script
+ALIAS keeps working forever, but use `halo` itself from here on. See
+`docs/harness/INSTALL.md`'s own "Upgrading from rolo-claude 1.0.1" section
+for the full detail.
+
 See `docs/harness/INSTALL.md` for the full walkthrough (PEP 668/externally-
 managed-environment workarounds, PATH setup, reproducible installs via
 `requirements.lock`, an offline **work box** recipe for a machine with no
@@ -158,32 +180,35 @@ PyPI access, and terminal-specific notes). Short version:
 
 ```sh
 # Kali / any Linux, recommended (never touches system/apt Python):
-cd /path/to/rolo-claude && uv tool install --editable .
+cd /path/to/halo-harness && uv tool install --editable .
 
 # or plain pip:
-cd /path/to/rolo-claude && pip install --user -e .
+cd /path/to/halo-harness && pip install --user -e .
 ```
 
 ```powershell
 # Windows (build host):
-cd C:\path\to\rolo-claude
+cd C:\path\to\halo-harness
 uv tool install --editable .
 ```
 
-Both produce a `rolo-claude` console script. Prerequisite: Python 3.10+;
+Both produce a `halo` console script. Prerequisite: Python 3.10+;
 `uv` is recommended but optional (everything falls back to `pip`/`python3`).
 
 ## Configuration
 
-`rolo-claude init` (see Quick start above) does everything below in one
+`halo init` (see Quick start above) does everything below in one
 command; this section is the manual/reference version of the same steps.
 
-Put `OPENROUTER_API_KEY` in `~/.config/vibes-hacker/env` (`KEY=value`, `#`
+Put `OPENROUTER_API_KEY` in `~/.config/halo/env` (`KEY=value`, `#`
 comments, optional leading `export`; override the path with
-`BRIDGE_ENV_FILE`) or export it yourself -- that's the only required setup
+`HALO_ENV_FILE`, legacy `BRIDGE_ENV_FILE` still honoured; a pre-2.0.0
+`~/.config/vibes-hacker/env` is still read when the new path doesn't exist
+yet) or export it yourself -- that's the only required setup
 for OpenRouter models. Databricks credentials are discovered automatically,
-same chain the whole project has always used: explicit `BRIDGE_DBX_BASE_
-URL`+`BRIDGE_DBX_TOKEN` wins outright, then `ANTHROPIC_BASE_URL`+
+same chain the whole project has always used: explicit `HALO_DBX_BASE_
+URL`+`HALO_DBX_TOKEN` (legacy `BRIDGE_DBX_BASE_URL`/`BRIDGE_DBX_TOKEN`)
+wins outright, then `ANTHROPIC_BASE_URL`+
 `ANTHROPIC_AUTH_TOKEN`/the settings `env` chain when the host is a real
 Databricks host, then `DATABRICKS_HOST`+`DATABRICKS_TOKEN`, then (H8)
 `~/.claude/ucode-settings.json` if Databricks' own `ug`/unity-gateway CLI
@@ -192,14 +217,14 @@ generic, possibly stale/unrelated-workspace fallback).
 Nothing to configure if any of those already work for the real `claude` CLI
 on the same box.
 
-`rolo-claude doctor` is a read-only environment check (Python version,
+`halo doctor` is a read-only environment check (Python version,
 `~/.claude` layout, env file, OpenRouter/Databricks reachability, catalog
 cache ages, chrome/playwright/plugin detection, `rg`/`$VISUAL`/`$EDITOR`/
 tmux mouse mode/Bash-shell presence, clipboard backend, configured MCP
-servers, the default model in `~/.rolo-claude/config.json`); every `WARN`/
+servers, the default model in `~/.halo/config.json`); every `WARN`/
 `MISSING` line ends with the exact fix command (or a doc reference when
 there's no single command), and `doctor --json` prints the same checks as
-`{id, status, message, fix}` records. `rolo-claude doctor --work`
+`{id, status, message, fix}` records. `halo doctor --work`
 is the Databricks-specific preset for a VPN-gated work box (VPN
 reachability, token validity, the reasoning-replay/route-split probes) --
 see INSTALL.md's "Work box" section.
@@ -207,13 +232,13 @@ see INSTALL.md's "Work box" section.
 ## First run
 
 ```sh
-rolo-claude                          # full-screen TUI (needs a real terminal)
-rolo-claude "read README.md"         # TUI, prompt pre-filled as the first turn
-rolo-claude -p "reply with the word pong"   # print mode, scriptable/headless
-rolo-claude --demo                   # scripted TUI walkthrough, no network/model needed
+halo                          # full-screen TUI (needs a real terminal)
+halo "read README.md"         # TUI, prompt pre-filled as the first turn
+halo -p "reply with the word pong"   # print mode, scriptable/headless
+halo --demo                   # scripted TUI walkthrough, no network/model needed
 ```
 
-Bare `rolo-claude` (no `-p`) checks `stdin.isatty()` before importing
+Bare `halo` (no `-p`) checks `stdin.isatty()` before importing
 `textual`; outside a real terminal it prints one line to stderr and exits 2
 instead of hanging -- expected, use `-p` for anything non-interactive
 (cron, CI, a subprocess).
@@ -230,8 +255,8 @@ every `CLAUDE.md` up the directory tree, `~/.claude/agents/*.md` and
 flow), plugins under `~/.claude/plugins/`, and `~/.claude/keybindings.json`
 are all read as-is. A server/command/skill/agent added to any of those
 files (by hand, by `claude mcp add`, or by the real `claude` CLI) is picked
-up by the next `rolo-claude` session with no separate config step; a server
-added via `rolo-claude mcp add` is equally visible to `claude mcp list`.
+up by the next `halo` session with no separate config step; a server
+added via `halo mcp add` is equally visible to `claude mcp list`.
 `--settings`/`--setting-sources`/`--bare`/`--strict-mcp-config`/`--mcp-
 config` all work the same as Claude Code's own flags.
 
@@ -251,10 +276,10 @@ Model reference forms:
 | a bare subscription-model name, no prefix | `opus`, `sonnet`, `fable` | `cc:` if logged in and no key is set, else `ant:` if a key is set, else an error |
 
 `--model`/`--small-model` pick the main/background-task model for the
-session; `rolo-claude models --refresh` pulls OpenRouter's `/api/v1/models`
-and models.dev's `api.json` into `~/.rolo-claude/` (context window, max
+session; `halo models --refresh` pulls OpenRouter's `/api/v1/models`
+and models.dev's `api.json` into `~/.halo/` (context window, max
 output tokens, vision support per model); without ever having run that, a
-vendored fallback copy shipped inside the package (`rolo_claude/providers/
+vendored fallback copy shipped inside the package (`halo_harness/providers/
 catalog/`) still lets profile resolution work completely offline. Databricks'
 own endpoint list is cached by the same probe. Per-family prompt notation
 (including a Kimi-specific block adapted from OpenCode's own) adjusts tool-
@@ -265,36 +290,36 @@ call/thinking conventions per model family automatically.
 `cc:fable`, `cc:opus`, `cc:opus-5`, `cc:opus-5.0`, `cc:opus-4.8`,
 `cc:opus-4.6`, `cc:sonnet`, `cc:sonnet-5` and `cc:haiku` run on the Claude
 models included in your Claude subscription -- **not** the Anthropic API,
-and rolo-claude never touches your Claude Code login to get there.
+and halo never touches your Claude Code login to get there.
 `ant:<same names>` reach the same models through `api.anthropic.com`
 pay-as-you-go instead (needs `ANTHROPIC_API_KEY`); a bare name with no
 prefix (`--model opus`) picks whichever of the two is actually available,
 preferring `cc:` when you're logged in and no key is set.
 
-**How it works**: rolo-claude never reads, copies or replays Claude Code's
+**How it works**: halo never reads, copies or replays Claude Code's
 OAuth credentials (`~/.claude/.credentials.json` is never opened, not even
 to check it exists -- `claude auth status`'s own JSON answers that) and
 never sends them to `api.anthropic.com` itself. Instead it drives the
 `claude` binary you already have installed and logged in, headlessly, as
 the model: one `claude -p --input-format stream-json --output-format
 stream-json ...` subprocess per session, started the first time you use a
-`cc:` model and kept running across turns. rolo-claude's own tools (Read,
+`cc:` model and kept running across turns. halo's own tools (Read,
 Bash, MCP servers, everything) are handed to that subprocess through a
 small local bridge -- Claude Code sees them as one MCP server (`mcp__rolo__
-<Name>`) -- so every `cc:` tool call still goes through rolo-claude's OWN
+<Name>`) -- so every `cc:` tool call still goes through halo's OWN
 permissions, hooks, session log and telemetry, exactly like every other
 route. `doctor` shows "Claude subscription: logged in ... -- cc: models
-available" when this is usable; `rolo-claude models --cc` lists all nine
+available" when this is usable; `halo models --cc` lists all nine
 names with their current targets and pricing.
 
 **Limitations of this v1**: a steer sent mid-turn is forwarded to Claude
-Code immediately, which queues it on its own terms rather than rolo-claude
+Code immediately, which queues it on its own terms rather than halo
 cutting the current reply the way it does for every other route -- Claude
 Code may fold it into the reply already in progress, or answer it as its
-own follow-up turn once that one finishes; either way rolo-claude waits
+own follow-up turn once that one finishes; either way halo waits
 for however many turns it actually takes and shows "queued for Claude
 Code" the moment it's sent. Claude Code applies its own auto-compaction to
-a `cc:` conversation; rolo-claude's own `/compact` is a real no-op there (a
+a `cc:` conversation; halo's own `/compact` is a real no-op there (a
 note explains why, rather than the confusing failure earlier builds gave).
 `stats --models`/`/cost` show a `cc:` row's cost as Claude Code's own
 estimate, logged as the delta since that same `claude` process's previous
@@ -315,29 +340,29 @@ way it would on any other route.
 
 ### Databricks at work
 
-If the box already runs Claude Code against a Databricks workspace, rolo-claude
+If the box already runs Claude Code against a Databricks workspace, halo
 needs zero setup: it reads the SAME `~/.claude/settings.json` `env` block
 Claude Code itself uses (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
 `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`/`_SONNET_MODEL`/
 `_HAIKU_MODEL`, `ANTHROPIC_CUSTOM_HEADERS`), the same host/gateway-path
 convention (`https://<workspace>/ai-gateway/anthropic` splits into the bare
 workspace root plus the gateway path), and maps the default model and bare
-`opus`/`sonnet`/`haiku` through it -- `run rolo-claude` and it drives the
+`opus`/`sonnet`/`haiku` through it -- `run halo` and it drives the
 same models Claude Code would. **Nothing about the real workspace ever
 leaves the box**: the hostname and token live only in the local env file
 (or wherever Claude Code's own settings already put them) and are never
 written into a session log, a cache file, or printed by `doctor`.
 
-**Discovery, not a vendored list.** `rolo-claude models --refresh` (or
+**Discovery, not a vendored list.** `halo models --refresh` (or
 `init --provider databricks`) lists the workspace's own serving endpoints and caches
-them, per user, to `~/.rolo-claude/dbx-endpoints.json` (name, `api_types`,
+them, per user, to `~/.halo/dbx-endpoints.json` (name, `api_types`,
 `foundation_model.name`, task) -- the ONLY source of truth for what a
 workspace serves. A generic family x api_type table (detected from the
 endpoint's own name) then decides each endpoint's route: Claude foundation
 endpoints default to the native `anthropic/v1/messages` gateway; GLM/Kimi
 default to `mlflow/v1/chat/completions` chat (the anthropic gateway is
 selectable per model with `databricks.gateway.<endpoint>: anthropic` in
-`~/.rolo-claude/config.json`, or a one-off `dbx:<endpoint>@anthropic` suffix);
+`~/.halo/config.json`, or a one-off `dbx:<endpoint>@anthropic` suffix);
 DeepSeek/Qwen/Llama/Gemma/gpt-oss/GPT/Grok/Gemini default to mlflow chat
 (the wire "model" value is the endpoint's own discovered
 `foundation_model.name`, e.g. `system.ai.qwen35-122b-a10b`, never guessed by
@@ -351,16 +376,16 @@ doesn't know about yet still works (the pre-discovery candidate order).
 **Team setup.** A shared, checked-in `team.json` (see `team.example.json`)
 holds the workspace host, a default model, a per-family gateway preference,
 and a DBU price -- **never a token, never an endpoint list** -- discovered
-at `.rolo-claude/team.json` in the project, `~/.rolo-claude/team.json`, or
+at `.halo/team.json` in the project, `~/.halo/team.json`, or
 `--team <path|url>`. With a host already known (from `team.json` or Claude
-Code's own settings), `rolo-claude init --provider databricks` asks ONLY for the
+Code's own settings), `halo init --provider databricks` asks ONLY for the
 personal Databricks token (hidden input, written to the env file at 0600),
 refreshes the catalog, and prints how many endpoints are available and the
 default model.
 
 **Keeping the catalog fresh.** `/models refresh` (alias `/dbx`) re-lists the
 workspace off the UI thread and reports what changed since last time;
-`rolo-claude models --refresh --urls [--json]` prints the exact URL and path
+`halo models --refresh --urls [--json]` prints the exact URL and path
 type (mlflow/cursor/anthropic/invocations) each endpoint resolves to, for
 scripting. The cache auto-refreshes off the UI thread, with a one-line diff
 notification, whenever it's older than `databricks.catalog_max_age_hours`
@@ -369,27 +394,27 @@ refreshes silently (never a first-time discovery call) when a Databricks
 session starts. A refresh that fails (offline, or 403 from the IP access
 list) just keeps the existing cache and says so.
 
-**Diagnostics.** `rolo-claude doctor --work` prints the derived workspace
+**Diagnostics.** `halo doctor --work` prints the derived workspace
 root, the gateway path, the header NAMES it sends (never values), the
 resolved default model and effort, and which config source supplied the
 token; it distinguishes a bad token (401) from the IP access list (403 with
 Databricks' own wording -- "connect to the VPN") from a token that can run
 inference but not list endpoints (403 without that wording) from a wrong
-path (404). `rolo-claude doctor --work --probe-all [--both] [--tools]
+path (404). `halo doctor --work --probe-all [--both] [--tools]
 [--only <glob>]` is the full work matrix: one short pong through every
 chat-shaped endpoint on its chosen path (plus the anthropic gateway too for
 Claude/GLM/Kimi with `--both`; a tool-call check with `--tools`), a table of
-status/latency/output tokens, and a JSON report at `~/.rolo-claude/
+status/latency/output tokens, and a JSON report at `~/.halo/
 work-matrix-<date>.json` naming endpoints only -- no host, no token -- so it
 can be pasted back for review.
 
-**Turning probes into fixes.** `rolo-claude work-matrix show <report.json>`
+**Turning probes into fixes.** `halo work-matrix show <report.json>`
 reads that same JSON report and prints one line per failing endpoint with a
 suggested action (a 403 -> get on the VPN; a wrong default gateway path ->
 set `databricks.gateway.<endpoint>`; a family-wide tool-call/reasoning-replay
-issue -> report only, no per-endpoint fix exists); `rolo-claude work-matrix
+issue -> report only, no per-endpoint fix exists); `halo work-matrix
 apply <report.json> [--yes]` writes the one class of fix that maps onto a
-real `~/.rolo-claude/config.json` key, after listing exactly what it's about
+real `~/.halo/config.json` key, after listing exactly what it's about
 to write and asking for confirmation. See
 [docs/DATABRICKS.md](docs/DATABRICKS.md)'s own **End-to-end team workflow**
 section for how this fits together with `team.json` and `init`.
@@ -397,7 +422,7 @@ section for how this fits together with `team.json` and `init`.
 **A Databricks-only edition.** If your whole team only ever talks to a
 Databricks workspace, a separate repository,
 [databricks-claude](https://github.com/roloVibes/databricks-claude), is a
-dedicated Databricks-only edition built for that case. rolo-claude itself
+dedicated Databricks-only edition built for that case. halo itself
 stays the general harness across all four routes above.
 
 ### Roles
@@ -405,13 +430,13 @@ stays the general harness across all four routes above.
 `orchestrator`/`coder`/`reviewer`/`researcher`/`small` (V2c) let a team
 point different kinds of work at different models -- cheap for exploration,
 strong for planning/review -- without hand-editing every agent file.
-`~/.rolo-claude/config.json`'s (or a shared `team.json`'s) `roles` table
+`~/.halo/config.json`'s (or a shared `team.json`'s) `roles` table
 sets a model per role; built-in agents (`general-purpose`, `Explore`,
 `Researcher`, `Plan`, `Reviewer`, `Coder`) each carry a fixed default role, a
 custom `.claude/agents/*.md` sets one with a `role:` frontmatter key, and
 `--role NAME=MODEL`/`Agent(role=...)` override one for a single run/call.
 `/roles` shows the resolved table (model, endpoint/path type, price) per
-role; `rolo-claude stats --roles` sums sub-agent spend per role. See
+role; `halo stats --roles` sums sub-agent spend per role. See
 [docs/ROLES.md](docs/ROLES.md) for the full resolution precedence and the
 (documented, never automatic beyond one specific case) cost-aware defaults.
 
@@ -475,7 +500,7 @@ default**: a server connects the first time one of its tools is actually
 called, or when `/mcp` reconnects it -- `alwaysLoad` servers and one marked
 `"mcpLazy": false` (per-server, or globally via a top-level `"mcpLazy":
 false` in `settings.json`) connect eagerly at session start instead. A
-per-server cache (`~/.rolo-claude/mcp/tools-cache/`) keeps a lazy server's
+per-server cache (`~/.halo/mcp/tools-cache/`) keeps a lazy server's
 tool names/descriptions searchable/preloadable even with zero live
 connections -- the status bar's "MCP n/m" only counts real connections, so
 a fresh session typically starts "MCP 0/m" and climbs as tools are used;
@@ -490,7 +515,7 @@ speaks the kitty graphics protocol (kitty, WezTerm, Ghostty, foot) or sixel
 (detected live; tmux needs `allow-passthrough on` first) it renders inline,
 downscaled to a bounded size; everywhere else it's captioned with its media
 type, real dimensions and size (e.g. "image/png, 1280x800, 84.2 KB"), same
-as before -- `images: "inline"|"caption"|"off"` in `~/.rolo-claude/
+as before -- `images: "inline"|"caption"|"off"` in `~/.halo/
 config.json` (default `"inline"`) or `--no-inline-images` forces the plain
 caption. The real image block is still what the model itself sees (subject
 to the same vision/size gate as any other image) regardless of how it's
@@ -506,7 +531,7 @@ resizing, or when Pillow isn't installed at all -- the `vision` extra,
 this doc, is optional, never required); an MCP
 tool's own image results get the same treatment. `@path` mentions to an
 image file (TUI or a skill/command body) and `--file PATH [PATH ...]`
-(a local path -- see `rolo-claude --help`; Claude Code's own `file_id:
+(a local path -- see `halo --help`; Claude Code's own `file_id:
 relative_path` cloud-resource form isn't backed by anything in a
 standalone harness and gets a clear notice instead of pretending to work)
 both attach the same way.
@@ -544,9 +569,9 @@ Anthropic passthrough), falling back to an estimate otherwise.
 ## Print mode
 
 ```sh
-rolo-claude -p "reply pong"
-rolo-claude -p --output-format json "..."
-rolo-claude -p --output-format stream-json --input-format stream-json < turns.jsonl
+halo -p "reply pong"
+halo -p --output-format json "..."
+halo -p --output-format stream-json --input-format stream-json < turns.jsonl
 ```
 
 `--output-format text|json|stream-json`, `--input-format text|stream-json`
@@ -558,14 +583,14 @@ code is the last turn's; a background job still running when a single-
 prompt `-p` call ends gets its completion notice printed before the
 process exits rather than dropped.
 
-`rolo-claude export --sanitize` and `rolo-claude stats` are headless
+`halo export --sanitize` and `halo stats` are headless
 versions of the TUI's own `/export`/`/stats` slash commands -- the former
 redacts API keys/tokens/secrets from a session log before handing it to
 someone else, the latter aggregates turn/cost/token stats across sessions.
 
 ## Telemetry and `/improve`
 
-`rolo-claude stats --models [--tools] [--since 7d|30d|all] [--all-projects]
+`halo stats --models [--tools] [--since 7d|30d|all] [--all-projects]
 [--session ID] [--json]` (and `/stats --models` in the TUI, off the UI
 thread) aggregates per-model/provider and per-tool counters -- tokens,
 cost, avg ttft/latency, retries, overflows, tool error rates, repair-layer
@@ -580,12 +605,12 @@ memory notes / `.claude/rules/*.md` entries / skills with ONE model call,
 and reviews them one card at a time -- `a` apply, `e` edit in
 `$VISUAL`/`$EDITOR` then apply, `s` skip, `d` dismiss forever, `q` stop.
 Nothing is written without that approval (or an explicit headless
-`rolo-claude improve --apply FILE#ID`); provenance (source sessions,
+`halo improve --apply FILE#ID`); provenance (source sessions,
 evidence count, drafting model, whether an excerpt came from tool output)
-is shown on the card, never used to block anything. `rolo-claude improve
+is shown on the card, never used to block anything. `halo improve
 [--since] [--all-projects] [--json]` prints/saves candidates without
 applying; `-p` sessions never draft or write on their own. Configured via
-`~/.rolo-claude/config.json`'s `improve` key, e.g. `rolo-claude config set
+`~/.halo/config.json`'s `improve` key, e.g. `halo config set
 improve.model or:deepseek/deepseek-v4-flash`.
 
 ## Troubleshooting
@@ -594,9 +619,9 @@ improve.model or:deepseek/deepseek-v4-flash`.
   --refresh`, or a live request) names the VPN as the likely cause.
 - **`externally-managed-environment` from pip**: see INSTALL.md's PEP 668
   note; `uv tool install --editable .` sidesteps it entirely.
-- **`rolo-claude: command not found` right after installing**: `~/.local/
+- **`halo: command not found` right after installing**: `~/.local/
   bin` isn't on PATH yet for a non-login shell -- see INSTALL.md.
-- **Bare `rolo-claude` exits 2 immediately**: expected outside a real
+- **Bare `halo` exits 2 immediately**: expected outside a real
   terminal (piped input, cron, a subprocess with no tty) -- use `-p`.
 - **A tool isn't visible to the model**: check whether it's a deferred MCP
   tool not yet referenced this conversation (`ToolSearch` finds it by
@@ -608,9 +633,9 @@ improve.model or:deepseek/deepseek-v4-flash`.
 - **A flag prints a `not yet` notice**: that flag is parsed (never an
   argparse error) but its feature isn't built yet; `--ide`, `--worktree`,
   `--remote-control`, `--teleport` and a handful of others are intentionally
-  still in that state -- see `rolo_claude/cli.py`'s `_NOT_YET_FLAGS`.
-- **Where to look**: session logs under `~/.rolo-claude/sessions/`;
-  `rolo-claude doctor` / `doctor --work` for environment issues;
+  still in that state -- see `halo_harness/cli.py`'s `_NOT_YET_FLAGS`.
+- **Where to look**: session logs under `~/.halo/sessions/`;
+  `halo doctor` / `doctor --work` for environment issues;
   `--verbose` for a running commentary of intermediate model
   calls/tool calls on stderr in print mode (`-d`/`--debug` is one of the
   not-yet flags above -- it parses but does nothing yet).
@@ -619,7 +644,7 @@ improve.model or:deepseek/deepseek-v4-flash`.
 
 - No local server/open port in the harness itself for the OpenRouter/
   Databricks/`ant:` routes -- a direct in-process HTTP client, not a proxy
-  something else connects to. (`rolo-claude proxy` is one exception, see
+  something else connects to. (`halo proxy` is one exception, see
   below, security posture unchanged from `claude-bridge`'s; a `cc:` session
   is the other -- see just below.)
 - **`cc:` never touches Claude Code's login.** `~/.claude/.credentials.json`
@@ -641,7 +666,7 @@ improve.model or:deepseek/deepseek-v4-flash`.
   the session restarts (`/clear`, `/fork`, a model switch) or ends.
 - Credentials come from the environment, the settings chain, or
   `~/.databrickscfg`/`ucode-settings.json`; they're never written to the
-  repo, a command line, or committed config. `rolo-claude --config`-style
+  repo, a command line, or committed config. `halo --config`-style
   output and logs redact keys/tokens/auth headers.
 - The permission engine is pure grammar (see Permissions above) -- no
   hidden allow-list, no "trusted command" special-casing beyond what a
@@ -662,27 +687,27 @@ INSTALL.md's "Cross-checking on WSL" recipe) -- Kali Linux being the actual
 target, not an afterthought. Suites use mock upstreams throughout; no live
 network call happens as part of `python tests/run_all.py` itself.
 
-## Proxy mode (`claude-bridge` / `rolo-claude proxy`)
+## Proxy mode (`claude-bridge` / `halo proxy`)
 
-Before rolo-claude became its own harness, this repo was `claude-bridge`: a
+Before halo became its own harness, this repo was `claude-bridge`: a
 single-file HTTP proxy (`bridge.py`, stdlib only) that sits in front of the
 REAL `claude` binary and translates its Anthropic-Messages-API calls to
 OpenRouter or Databricks, leaving `claude`'s own subscription, `CLAUDE.md`,
 settings, memory, MCP servers, skills, hooks and permissions completely
 untouched -- it only intercepts the one HTTP call `claude` makes to its
-model. That still exists, unchanged, as `rolo-claude proxy` (equivalently,
+model. That still exists, unchanged, as `halo proxy` (equivalently,
 `python bridge.py ...` directly):
 
 ```sh
-rolo-claude proxy launch --model or:deepseek/deepseek-v3.2 -p "reply pong"
-rolo-claude proxy --probe        # outbound reachability check for both providers
-rolo-claude proxy --config       # resolved configuration as JSON, secrets redacted
-rolo-claude proxy --stop         # shut down a running proxy server
+halo proxy launch --model or:deepseek/deepseek-v3.2 -p "reply pong"
+halo proxy --probe        # outbound reachability check for both providers
+halo proxy --config       # resolved configuration as JSON, secrets redacted
+halo proxy --stop         # shut down a running proxy server
 ```
 
 Use this mode specifically when you want to keep using the real `claude`
 CLI itself (its own update cadence, its own bug-for-bug behavior) with a
-non-Anthropic model underneath, rather than rolo-claude's own agent loop.
+non-Anthropic model underneath, rather than halo's own agent loop.
 State lives in `~/.claude-bridge/` (`BRIDGE_STATE_DIR` to override); loopback-
 only bind, bearer-token-gated, redacted logs -- see `docs/harness/` for the
 proxy's own historical design notes if you need the low-level details

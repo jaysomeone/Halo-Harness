@@ -2,7 +2,7 @@
 the TUI's `@path` image-attach path, both funnelled through
 `headless.attach_cli_files`/`Controller.ingest_at_mentions`. Claude Code's
 own `--file` downloads a claude.ai file_id:relative_path cloud resource;
-rolo-claude has no such backing store, so that SPEC shape gets a clear
+halo has no such backing store, so that SPEC shape gets a clear
 stderr notice instead, while an actual local path (the practically useful
 case, and the one the TUI's `@path` mention shares) attaches for real.
 """
@@ -31,7 +31,7 @@ def test(fn):
     # H15 Part D2.1: `_real_session_and_controller` below builds a real
     # `Session`, whose `SessionLog` ALWAYS resolves its storage root via
     # `bridge_home()` (`BRIDGE_STATE_DIR`, else `BRIDGE_TEST_HOME`-derived,
-    # else the REAL `~/.rolo-claude`) -- independent of the `state_dir=`
+    # else the REAL `~/.halo`) -- independent of the `state_dir=`
     # passed to `Session` itself. Every `@test` here is transparently
     # wrapped in an isolated, per-test `BRIDGE_STATE_DIR` so that path can
     # never resolve to the real machine, same pattern `tests/test_log_derive.py`
@@ -77,7 +77,7 @@ class _FakeSession:
 
 @test
 def test_attach_cli_files_none_or_empty_is_a_noop(ctx: Ctx):
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     session = _FakeSession(vision=True)
     attach_cli_files(session, None, cwd=Path.cwd())
     attach_cli_files(session, [], cwd=Path.cwd())
@@ -86,7 +86,7 @@ def test_attach_cli_files_none_or_empty_is_a_noop(ctx: Ctx):
 
 @test
 def test_attach_cli_files_local_text_file_becomes_a_text_snapshot(ctx: Ctx):
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     with tempfile.TemporaryDirectory() as d:
         cwd = Path(d)
         (cwd / "notes.txt").write_text("hello from a --file attachment", encoding="utf-8")
@@ -101,7 +101,7 @@ def test_attach_cli_files_local_text_file_becomes_a_text_snapshot(ctx: Ctx):
 
 @test
 def test_attach_cli_files_local_image_with_vision_becomes_a_real_image_block(ctx: Ctx):
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     with tempfile.TemporaryDirectory() as d:
         cwd = Path(d)
         (cwd / "shot.png").write_bytes(_PNG_1X1)
@@ -115,7 +115,7 @@ def test_attach_cli_files_local_image_with_vision_becomes_a_real_image_block(ctx
 
 @test
 def test_attach_cli_files_local_image_without_vision_is_a_text_note_not_an_image_block(ctx: Ctx):
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     with tempfile.TemporaryDirectory() as d:
         cwd = Path(d)
         (cwd / "shot.png").write_bytes(_PNG_1X1)
@@ -128,7 +128,7 @@ def test_attach_cli_files_local_image_without_vision_is_a_text_note_not_an_image
 
 @test
 def test_attach_cli_files_missing_local_path_warns_and_does_not_append(ctx: Ctx):
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     session = _FakeSession(vision=True)
     buf = io.StringIO()
     with redirect_stderr(buf):
@@ -140,10 +140,10 @@ def test_attach_cli_files_missing_local_path_warns_and_does_not_append(ctx: Ctx)
 @test
 def test_attach_cli_files_cloud_resource_spec_gets_a_clear_notice_not_a_crash(ctx: Ctx):
     """Claude Code's own `--file file_abc:doc.txt` cloud-resource form:
-    rolo-claude has no claude.ai file store to resolve `file_abc` against,
+    halo has no claude.ai file store to resolve `file_abc` against,
     so this must be a clear stderr notice, never a crash or a silently
     mis-attached local file named literally `file_abc:doc.txt`."""
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     session = _FakeSession(vision=True)
     buf = io.StringIO()
     with redirect_stderr(buf):
@@ -159,7 +159,7 @@ def test_attach_cli_files_windows_style_drive_letter_path_is_not_mistaken_for_a_
     """A `:` at position 1 of an ABSOLUTE local path (`C:\\...`) must resolve
     as a real local file first, before the cloud-resource-spec heuristic
     (which also keys off `:`) ever gets a chance to misfire on it."""
-    from rolo_claude.headless import attach_cli_files
+    from halo_harness.headless import attach_cli_files
     with tempfile.TemporaryDirectory() as d:
         cwd = Path(d)
         real_file = cwd / "drive-letter-style.txt"
@@ -177,7 +177,7 @@ def test_attach_cli_files_windows_style_drive_letter_path_is_not_mistaken_for_a_
 
 @test
 def test_file_flag_is_a_real_flag_not_a_not_yet_flag(ctx: Ctx):
-    from rolo_claude import cli
+    from halo_harness import cli
     real_names = {f for flags, _ in cli._REAL_FLAGS for f in flags}
     not_yet_names = {f for flags, _, _, _ in cli._NOT_YET_FLAGS for f in flags}
     ctx.check("--file is in _REAL_FLAGS", "--file" in real_names)
@@ -185,10 +185,10 @@ def test_file_flag_is_a_real_flag_not_a_not_yet_flag(ctx: Ctx):
 
 
 def _real_session_and_controller(*, vision: bool, cwd: Path):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.controller import Controller
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.controller import Controller
+    from halo_harness.model import ModelProfile, parse_model_ref
     session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
     model_ref = parse_model_ref("or:mock/model")
     session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(vision=vision), creds=None,
@@ -237,7 +237,7 @@ def test_cli_parses_file_flag_with_multiple_specs(ctx: Ctx):
     # a trailing positional PROMPT, exactly the same way those other flags
     # already do -- so PROMPT must come BEFORE it on the command line, same
     # rule a user already has to follow for those.
-    from rolo_claude.cli import _build_parser
+    from halo_harness.cli import _build_parser
     parser = _build_parser()
     args = parser.parse_args(["-p", "hello", "--file", "a.png", "b.txt"])
     ctx.check(f"both specs captured, got {args.file}", args.file == ["a.png", "b.txt"])

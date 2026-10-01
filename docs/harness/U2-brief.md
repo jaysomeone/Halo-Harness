@@ -1,6 +1,6 @@
-# U2 brief — the Textual TUI (rolo-claude launches like `claude`)
+# U2 brief — the Textual TUI (halo launches like `claude`)
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux primary**
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux primary**
 — the TUI must run in a Linux terminal first; Windows Terminal second). Baseline = the H3 commit on
 master, both suites green on Windows and WSL. Do not commit.
 
@@ -9,11 +9,11 @@ master, both suites green on Windows and WSL. Do not commit.
    keys, print mode, packaging, testing, build order U2–U5) and "D-Contract reconciliation"
    (Controller API + event kinds), "Decisions" (rich TUI from day one; rule writes to
    `.claude/settings.local.json`; no safety heuristics), "Primary use case".
-2. `rolo_claude/events.py` (the implemented Event/Command contract — the UI consumes exactly this),
-   `rolo_claude/agent/loop.py` (`Session.run()` command pump, `abort`, permission wait points),
-   `rolo_claude/headless.py` + `output.py` (the sinks; the TUI is another consumer of the same queue),
-   `rolo_claude/commands/` + `history.py` + `theme.py` + `testing/fake_controller.py` (U0),
-   `rolo_claude/permissions.py` (`add_allow_rule`, `suggested_rules`), `cli.py` (bare `rolo-claude`
+2. `halo_harness/events.py` (the implemented Event/Command contract — the UI consumes exactly this),
+   `halo_harness/agent/loop.py` (`Session.run()` command pump, `abort`, permission wait points),
+   `halo_harness/headless.py` + `output.py` (the sinks; the TUI is another consumer of the same queue),
+   `halo_harness/commands/` + `history.py` + `theme.py` + `testing/fake_controller.py` (U0),
+   `halo_harness/permissions.py` (`add_allow_rule`, `suggested_rules`), `cli.py` (bare `halo`
    currently prints "TUI arrives in U2" — replace with the app).
 3. `docs/harness/claude-help-2.1.281.txt` (flags the TUI must honour on launch: `--model`,
    `--permission-mode`, `--continue/--resume`, `--add-dir`, `--agent`, `--theme` ours).
@@ -21,12 +21,12 @@ master, both suites green on Windows and WSL. Do not commit.
 ## Scope (U2 + U3 + U4 of the plan, in one worker; U5 polish later)
 A. **Packaging**: add `textual==8.2.8` + `rich>=14,<16` to `pyproject.toml` dependencies (mcp is
    already there from H3), `requirements.lock` via `uv pip compile`, `uv tool install --editable .`
-   on the Windows host producing `%USERPROFILE%\.local\bin\rolo-claude.exe`; update
-   `~\bin\rolo-claude.cmd` to prefer that exe and fall back to `python -m rolo_claude`;
-   `bin/rolo-claude` (POSIX) mirrors it (`~/.local/bin/rolo-claude` else `python3 -m rolo_claude`);
+   on the Windows host producing `%USERPROFILE%\.local\bin\halo.exe`; update
+   `~\bin\halo.cmd` to prefer that exe and fall back to `python -m halo_harness`;
+   `bin/halo` (POSIX) mirrors it (`~/.local/bin/halo` else `python3 -m halo_harness`);
    for the Kali box document `pip install --user -e .` / `uv tool install`; textual imported only
    inside the TUI entry point.
-B. **App** (`rolo_claude/tui/app.py`, `tui/styles.tcss`, `tui/keys.py`, `tui/theme.py` using U0's
+B. **App** (`halo_harness/tui/app.py`, `tui/styles.tcss`, `tui/keys.py`, `tui/theme.py` using U0's
    theme data): `BridgeApp(App)` with `Transcript(VerticalScroll)`, `CompletionPopup`,
    `PromptInput(TextArea)` auto-growing 1–8 lines, `StatusBar` (model, context bar %, cost, mode
    glyph, cwd + git branch, MCP n/m, spinner + elapsed, "↓ N new"); 30 Hz `_drain` timer pulling
@@ -46,7 +46,7 @@ D. **Inline prompt cards**: `PermissionCard` (1/y once, 2/a session, 3 always �
    interactive `ask` path REALLY wait on the `permission_reply` command (H2b resolves it as a
    non-blocking denial today because no UI existed) — implement the `threading.Event` wait keyed by
    `request_id` in `Session` with the abort Event as the escape.
-E. **Dialogs** (`tui/dialogs/*`): ModelPicker (from `rolo-claude models` data: ref/context/output/
+E. **Dialogs** (`tui/dialogs/*`): ModelPicker (from `halo models` data: ref/context/output/
    price, near-miss correction), SessionPicker (`--resume` list), McpStatus (`/mcp`, `r` reconnect),
    PermissionsDialog (rules by source, add rule), Help, HistorySearch (Ctrl+R).
 F. **Keys** (per D-TUI): Enter submit; `\`+Enter / Ctrl+J / Alt+Enter newline; Esc interrupt →
@@ -57,7 +57,7 @@ F. **Keys** (per D-TUI): Enter submit; `\`+Enter / Ctrl+J / Alt+Enter newline; E
 G. **Slash commands in the TUI** through U0's registry (`/model`, `/mcp`, `/cost`, `/compact` (H5),
    `/permissions`, `/clear`, `/help`, `/theme`, custom commands, skills), `/` and `@` completion
    (`os.scandir` walk with prunes, 20k cap), history Up/Down with prefix filter.
-H. **Controller** (`rolo_claude/controller.py`): the non-blocking UI-thread facade over the
+H. **Controller** (`halo_harness/controller.py`): the non-blocking UI-thread facade over the
    command queue per D-Contract (`submit`, `interrupt`, `set_permission_mode`, `set_model`,
    `add_permission_rule`, `answer_permission`, `answer_question`, `run_slash`, `list_models`,
    `list_sessions`, `resume`, `mcp_status`, `reconnect_mcp`, `memory_path`, `quit` with a 5 s
@@ -78,8 +78,8 @@ Also a real end-to-end pilot against the mock upstream (not the fake controller)
 see streamed text and a Read tool card. Everything OS-neutral; snapshots generated on Linux (WSL).
 
 ## Acceptance
-Both suites + `test_tui.py` green on Windows and WSL; `rolo-claude` (bare, from PATH on Windows;
-`python3 -m rolo_claude` in WSL) opens the full-screen TUI; a live prompt streams text with a tool
+Both suites + `test_tui.py` green on Windows and WSL; `halo` (bare, from PATH on Windows;
+`python3 -m halo_harness` in WSL) opens the full-screen TUI; a live prompt streams text with a tool
 card and a permission card in `default` mode; `/model` picker switches to `or:moonshotai/kimi-k3`
 and the next reply comes from it; Esc interrupts a long answer; Ctrl+C twice exits cleanly and
 restores the terminal; `--demo --stress 500` stays responsive; proxy still works.

@@ -1,4 +1,4 @@
-"""rolo_claude.providers.anthropic_sse -- native-Anthropic-dialect SSE
+"""halo_harness.providers.anthropic_sse -- native-Anthropic-dialect SSE
 decoding for the harness's own agent loop (H0 D2/D3). This is the
 "AnthropicSSEDecoder" counterpart to providers.oai_stream's
 OpenAIStreamToAnthropic: where that state machine TRANSLATES OpenAI-dialect
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from rolo_claude.providers.routing import Route, select_tools
+from halo_harness.providers.routing import Route, select_tools
 
 
 class AnthropicSSEDecoder:

@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.prune import (
+from halo_harness.agent.prune import (
     OLD_TOOL_RESULT_CLEARED, compute_stub_candidates, context_breakdown, estimate_text_tokens, prune_messages,
 )
 

@@ -1,4 +1,4 @@
-/* rolo_claude.tui styles -- colors come from BridgeApp.get_css_variables()
+/* halo_harness.tui styles -- colors come from BridgeApp.get_css_variables()
    (tui/theme.py's `variables_for`), never hardcoded here, so a theme swap
    only ever needs a new palette dict, not a stylesheet edit. */
 
@@ -26,6 +26,13 @@ Screen {
 }
 
 .system-note {
+    color: $bridge-muted;
+}
+
+/* 2.0.0 Launch intro: "a dim first entry of the session" once it finishes
+   typing -- same muted tone as a system note, never competing with real
+   transcript content. */
+.intro-line {
     color: $bridge-muted;
 }
 

@@ -11,13 +11,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools.ask_user_question import AskUserQuestionTool
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.registry import ToolRegistry
-from rolo_claude.tools.skill import SkillTool
-from rolo_claude.tools.todowrite import TodoWriteTool
-from rolo_claude.tools.tool_search import ToolSearchTool
-from rolo_claude.tools.webfetch import WebFetchTool
+from halo_harness.tools.ask_user_question import AskUserQuestionTool
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.registry import ToolRegistry
+from halo_harness.tools.skill import SkillTool
+from halo_harness.tools.todowrite import TodoWriteTool
+from halo_harness.tools.tool_search import ToolSearchTool
+from halo_harness.tools.webfetch import WebFetchTool
 
 test, TESTS = new_registry()
 
@@ -76,7 +76,7 @@ class _LocalServer:
 
 @test
 def test_webfetch_converts_html_to_text(ctx: Ctx):
-    from rolo_claude.tools import webfetch as wf
+    from halo_harness.tools import webfetch as wf
     wf.reset_cache()
     with _LocalServer() as srv:
         result = WebFetchTool().run({"url": f"{srv.base_url}/page.html", "prompt": "extract the title"}, ToolContext(cwd=Path(".")))
@@ -88,7 +88,7 @@ def test_webfetch_converts_html_to_text(ctx: Ctx):
 
 @test
 def test_webfetch_plain_text_passthrough(ctx: Ctx):
-    from rolo_claude.tools import webfetch as wf
+    from halo_harness.tools import webfetch as wf
     wf.reset_cache()
     with _LocalServer() as srv:
         result = WebFetchTool().run({"url": f"{srv.base_url}/plain", "prompt": "read it"}, ToolContext(cwd=Path(".")))
@@ -97,7 +97,7 @@ def test_webfetch_plain_text_passthrough(ctx: Ctx):
 
 @test
 def test_webfetch_follows_same_host_redirect(ctx: Ctx):
-    from rolo_claude.tools import webfetch as wf
+    from halo_harness.tools import webfetch as wf
     wf.reset_cache()
     with _LocalServer() as srv:
         result = WebFetchTool().run({"url": f"{srv.base_url}/redirect-same-host", "prompt": "x"}, ToolContext(cwd=Path(".")))
@@ -106,7 +106,7 @@ def test_webfetch_follows_same_host_redirect(ctx: Ctx):
 
 @test
 def test_webfetch_refuses_cross_host_redirect(ctx: Ctx):
-    from rolo_claude.tools import webfetch as wf
+    from halo_harness.tools import webfetch as wf
     wf.reset_cache()
     with _LocalServer() as srv:
         result = WebFetchTool().run({"url": f"{srv.base_url}/redirect-cross-host", "prompt": "x"}, ToolContext(cwd=Path(".")))
@@ -116,7 +116,7 @@ def test_webfetch_refuses_cross_host_redirect(ctx: Ctx):
 
 @test
 def test_webfetch_caches_for_15_minutes(ctx: Ctx):
-    from rolo_claude.tools import webfetch as wf
+    from halo_harness.tools import webfetch as wf
     wf.reset_cache()
     with _LocalServer() as srv:
         url = f"{srv.base_url}/plain"
@@ -210,7 +210,7 @@ def test_skill_stub_always_errors_honestly(ctx: Ctx):
 
 @test
 def test_truncate_spills_full_content_and_shows_head_tail(ctx: Ctx):
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.truncate import spill_and_truncate
     d = Path(tempfile.mkdtemp(prefix="truncate-"))
     content = "".join(f"line{i}\n" for i in range(5000))
     cap = 1000
@@ -226,7 +226,7 @@ def test_truncate_spills_full_content_and_shows_head_tail(ctx: Ctx):
 
 @test
 def test_truncate_is_a_noop_under_the_cap(ctx: Ctx):
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.truncate import spill_and_truncate
     shown = spill_and_truncate("short", cap=1000, session_dir=None, tool_use_id="call_2")
     ctx.check("content under the cap is returned unchanged", shown == "short")
 
@@ -238,7 +238,7 @@ def test_truncate_none_cap_means_no_truncation(ctx: Ctx):
     entirely, including the H8 backstop below, or a second pass here would
     silently overwrite that tool's own already-spilled full-text file with
     a truncated copy."""
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.truncate import spill_and_truncate
     long_content = "x" * 1_000_000
     shown = spill_and_truncate(long_content, cap=None, session_dir=None, tool_use_id="call_3")
     ctx.check("cap=None never truncates, even far past the 50KB backstop", shown == long_content)
@@ -248,7 +248,7 @@ def test_truncate_none_cap_means_no_truncation(ctx: Ctx):
 
 @test
 def test_truncate_backstop_never_fires_under_2000_lines_and_50kb(ctx: Ctx):
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.truncate import spill_and_truncate
     content = "short line\n" * 500  # well under both 2000 lines and 50KB
     shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_4")
     ctx.check("under both backstop limits -> untouched even with a huge per-tool cap", shown == content)
@@ -259,7 +259,7 @@ def test_truncate_backstop_line_count_binds_tighter_than_a_loose_char_cap(ctx: C
     """Many short lines: under a tool's own (loose) char cap, but over the
     2000-line backstop -- the backstop must still bind and use OpenCode's
     own wording, not the per-tool "result truncated at N characters" one."""
-    from rolo_claude.tools.truncate import MAX_LINES, spill_and_truncate
+    from halo_harness.tools.truncate import MAX_LINES, spill_and_truncate
     content = "\n".join(f"line{i}" for i in range(MAX_LINES + 500))  # ~2500 short lines, well under 50KB
     ctx.check(f"fixture really is under 50KB, got {len(content)}", len(content) < 50 * 1024)
     shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_5")
@@ -273,7 +273,7 @@ def test_truncate_backstop_line_count_binds_tighter_than_a_loose_char_cap(ctx: C
 def test_truncate_backstop_byte_size_binds_with_few_long_lines(ctx: Ctx):
     """A handful of very long lines: under the 2000-line count, but over
     the 50KB byte backstop."""
-    from rolo_claude.tools.truncate import MAX_BYTES, spill_and_truncate
+    from halo_harness.tools.truncate import MAX_BYTES, spill_and_truncate
     content = "A" * (MAX_BYTES + 5000)  # one giant "line", well over 50KB
     shown = spill_and_truncate(content, cap=1_000_000, session_dir=None, tool_use_id="call_6")
     ctx.check("the byte backstop binds despite only one line", len(shown) < len(content))
@@ -286,7 +286,7 @@ def test_truncate_backstop_never_looser_than_an_explicit_tighter_cap(ctx: Ctx):
     what the backstop alone would allow -- the backstop can only make the
     effective cap smaller, never looser (old wording/behaviour preserved
     for the common case, e.g. Bash's 30,000-char cap)."""
-    from rolo_claude.tools.truncate import spill_and_truncate
+    from halo_harness.tools.truncate import spill_and_truncate
     content = "y" * 40_000  # 1 line, under the 50KB byte backstop
     shown = spill_and_truncate(content, cap=1_000, session_dir=None, tool_use_id="call_7")
     ctx.check("the tighter per-tool cap (1000) wins, not the looser 50KB backstop", len(shown) < 5_000)
@@ -295,7 +295,7 @@ def test_truncate_backstop_never_looser_than_an_explicit_tighter_cap(ctx: Ctx):
 
 @test
 def test_truncate_backstop_spills_full_content_and_names_the_file(ctx: Ctx):
-    from rolo_claude.tools.truncate import MAX_LINES, spill_and_truncate
+    from halo_harness.tools.truncate import MAX_LINES, spill_and_truncate
     d = Path(tempfile.mkdtemp(prefix="truncate-backstop-"))
     content = "\n".join(f"line{i}" for i in range(MAX_LINES + 800))
     shown = spill_and_truncate(content, cap=1_000_000, session_dir=d, tool_use_id="call_8")

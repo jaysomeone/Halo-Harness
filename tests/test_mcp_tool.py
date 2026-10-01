@@ -1,4 +1,4 @@
-"""tests.test_mcp_tool -- rolo_claude/tools/mcp_tool.py (H3 scope B):
+"""tests.test_mcp_tool -- halo_harness/tools/mcp_tool.py (H3 scope B):
 content conversion (text/image/embedded resource/structuredContent/
 isError), the output cap (min(_meta[anthropic/maxResultSizeChars],
 MAX_MCP_OUTPUT_TOKENS*4)) + Claude Code's exact truncation string + spill
@@ -16,8 +16,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools import mcp_tool as T
-from rolo_claude.tools.base import ToolContext
+from halo_harness.tools import mcp_tool as T
+from halo_harness.tools.base import ToolContext
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -335,7 +335,7 @@ def test_default_output_token_limit_env_and_default(ctx: Ctx):
 # ---- McpTool through a real fake server ------------------------------------
 
 def _mcp_tool_for(name, *, vision=False, manager=None):
-    from rolo_claude.mcp.manager import McpManager, McpServerConfig
+    from halo_harness.mcp.manager import McpManager, McpServerConfig
     if manager is not None:
         mgr = manager  # already started -- start_all() is for the FIRST call only (it's idempotent, but skip the extra round trip)
     else:
@@ -454,7 +454,7 @@ def test_mcptool_run_aborts_promptly(ctx: Ctx):
 # ---- ListMcpResourcesTool / ReadMcpResourceTool ----------------------------
 
 def _manager_for_resources():
-    from rolo_claude.mcp.manager import McpManager, McpServerConfig
+    from halo_harness.mcp.manager import McpManager, McpServerConfig
     cfg = McpServerConfig(name="fake", type="stdio", command=sys.executable,
                            args=["-m", "tests.helpers.fake_mcp_server"], cwd=str(REPO_DIR))
     mgr = McpManager({"fake": cfg}, tool_env=dict(os.environ), cwd=REPO_DIR)

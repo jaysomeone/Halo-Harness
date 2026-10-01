@@ -25,14 +25,14 @@ test, TESTS = new_registry()
 
 
 def _fresh_home() -> Path:
-    return Path(tempfile.mkdtemp(prefix="rolo-claude-doctor-fix-"))
+    return Path(tempfile.mkdtemp(prefix="halo-doctor-fix-"))
 
 
 def _run(argv, home: Path, timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
                 "BRIDGE_TEST_CC_AUTH_STATUS": json.dumps({"loggedIn": False})})
-    return subprocess.run([sys.executable, "-m", "rolo_claude"] + argv, env=env, cwd=str(REPO_DIR),
+    return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -60,14 +60,14 @@ def _isolated(fn):
 # ---------------------------------------------------------------------------
 
 def _missing_fix_lines(lines: list) -> list:
-    from rolo_claude.doctor import MISSING, WARN
+    from halo_harness.doctor import MISSING, WARN
     return [l for l in lines if (l.startswith(WARN) or l.startswith(MISSING))
             and "-> fix:" not in l and "-> see:" not in l]
 
 
 @test
 def test_every_warn_or_missing_line_in_run_checks_has_a_fix_or_see(ctx: Ctx):
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     lines, ok = _isolated(lambda home: run_checks(cwd=home))
     warn_or_missing = [l for l in lines if l.startswith("[WARN]") or l.startswith("[MISSING]")]
     ctx.check(f"a fresh/unconfigured home actually triggers several WARN/MISSING lines, got "
@@ -79,7 +79,7 @@ def test_every_warn_or_missing_line_in_run_checks_has_a_fix_or_see(ctx: Ctx):
 
 @test
 def test_every_warn_or_missing_line_in_run_work_checks_has_a_fix_or_see(ctx: Ctx):
-    from rolo_claude.doctor import run_work_checks
+    from halo_harness.doctor import run_work_checks
     lines, ok = _isolated(lambda home: run_work_checks())
     bad = _missing_fix_lines(lines)
     ctx.check(f"every --work WARN/MISSING line ends with -> fix: or -> see:, offenders={bad}", not bad)
@@ -104,7 +104,7 @@ def test_real_doctor_cli_shows_a_fix_on_every_warn(ctx: Ctx):
 
 @test
 def test_run_checks_structured_shape(ctx: Ctx):
-    from rolo_claude.doctor import run_checks, run_checks_structured
+    from halo_harness.doctor import run_checks, run_checks_structured
     checks, ok = _isolated(lambda home: run_checks_structured(cwd=home))
     lines, ok2 = _isolated(lambda home: run_checks(cwd=home))
     ctx.check(f"same count as the plain lines list, got {len(checks)} vs {len(lines)}", len(checks) == len(lines))
@@ -149,7 +149,7 @@ def test_doctor_work_json_cli_round_trips(ctx: Ctx):
 
 @test
 def test_local_bin_on_path_check_is_windows_aware(ctx: Ctx):
-    from rolo_claude import doctor
+    from halo_harness import doctor
     if sys.platform == "win32":
         ctx.check("skipped entirely on win32 (no such PATH concept there)",
                   doctor._check_local_bin_on_path() is None)
@@ -159,8 +159,55 @@ def test_local_bin_on_path_check_is_windows_aware(ctx: Ctx):
 
 
 @test
+def test_ensure_local_bin_on_rc_recognizes_the_legacy_1_0_1_marker(ctx: Ctx):
+    """2.0.0 fixpass finding 6: PATH_MARKER changed from `# rolo-claude: put
+    ~/.local/bin on PATH ...` to `# halo: put ~/.local/bin on PATH ...` --
+    a line 1.0.1's `rolo-claude init` already appended must still be
+    recognized as "already done", or a 2.0.0 `halo init` re-run appends a
+    SECOND PATH block right below the first one."""
+    from halo_harness.linux_fixes import PATH_LINE, PATH_MARKER, PATH_MARKER_LEGACY, ensure_local_bin_on_rc
+
+    tmp = Path(tempfile.mkdtemp(prefix="halo-linux-fixes-legacy-"))
+    home = tmp / "home"
+    home.mkdir()
+    rc = home / ".profile"
+    rc.write_text(f"# something the user already had\n{PATH_MARKER_LEGACY}\n{PATH_LINE}\n", encoding="utf-8")
+
+    written, path = ensure_local_bin_on_rc(shell="/bin/bash", home=home)
+    ctx.check(f"a no-op -- already done under the OLD marker, got written={written}", written is False)
+    ctx.check("the file is completely untouched", rc.read_text(encoding="utf-8").count(PATH_LINE) == 1)
+    ctx.check("no SECOND (new-marker) PATH block was appended", PATH_MARKER not in rc.read_text(encoding="utf-8"))
+
+
+@test
+def test_state_dir_migration_check_warns_only_when_both_exist_nonempty(ctx: Ctx):
+    """2.0.0 fixpass finding 1: doctor renders a WARN naming both paths
+    when ~/.rolo-claude and ~/.halo both hold real data (the rename
+    half-succeeded, most commonly a locked file on Windows); silent in
+    every other case, sharing the ONE detection bridge_home() itself uses
+    for its own once-per-process stderr warning."""
+    from halo_harness import doctor
+
+    ctx.check("a fresh home with neither dir -> no line at all",
+              _isolated(lambda home: doctor._check_state_dir_migration()) is None)
+
+    def _both_exist(home):
+        old_dir, new_dir = home / ".rolo-claude", home / ".halo"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "leftover.txt").write_text("x", encoding="utf-8")
+        return doctor._check_state_dir_migration()
+
+    line = _isolated(_both_exist)
+    ctx.check(f"a WARN naming both paths, got {line!r}", line is not None and line.startswith(doctor.WARN))
+    ctx.check("names .rolo-claude", ".rolo-claude" in line)
+    ctx.check("names .halo", ".halo" in line)
+    ctx.check("carries a fix/see suffix", "-> fix:" in line or "-> see:" in line)
+
+
+@test
 def test_tmux_mouse_check_skipped_outside_tmux_and_fix_when_off(ctx: Ctx):
-    from rolo_claude import doctor
+    from halo_harness import doctor
     old_tmux = os.environ.pop("TMUX", None)
     try:
         ctx.check("no $TMUX -> the check doesn't even appear", doctor._check_tmux_mouse() is None)
@@ -179,7 +226,7 @@ def test_tmux_mouse_check_skipped_outside_tmux_and_fix_when_off(ctx: Ctx):
 @test
 def test_tmux_mouse_check_reports_ok_when_tmux_says_on(ctx: Ctx):
     """A fake `tmux show -g mouse` (never a real tmux dependency in CI)."""
-    from rolo_claude import doctor
+    from halo_harness import doctor
     old_tmux = os.environ.get("TMUX")
     old_run = doctor.subprocess.run
     os.environ["TMUX"] = "/tmp/tmux-1000/default,1234,0"
@@ -205,7 +252,7 @@ def test_tmux_mouse_check_reports_ok_when_tmux_says_on(ctx: Ctx):
 
 @test
 def test_mcp_servers_check_none_configured_and_enumeration_failure(ctx: Ctx):
-    from rolo_claude import doctor
+    from halo_harness import doctor
 
     def _check(home):
         return doctor._check_mcp_servers(home)
@@ -214,7 +261,7 @@ def test_mcp_servers_check_none_configured_and_enumeration_failure(ctx: Ctx):
     ctx.check(f"a fresh home with nothing configured -> OK none, got {line!r}",
               line == f"{doctor.OK} MCP servers: none configured")
 
-    import rolo_claude.mcp.manager as mcp_manager_mod
+    import halo_harness.mcp.manager as mcp_manager_mod
     old_fn = mcp_manager_mod.resolve_server_configs
 
     def _boom(**kwargs):
@@ -236,7 +283,7 @@ def test_mcp_servers_check_none_configured_and_enumeration_failure(ctx: Ctx):
 def test_mcp_servers_check_reports_eager_vs_lazy(ctx: Ctx):
     # H13 Part A: lazy is now the DEFAULT -- a server needs an EXPLICIT
     # "mcpLazy": false to count as eager; one with no key at all is lazy.
-    from rolo_claude import doctor
+    from halo_harness import doctor
     home = _fresh_home()
     (home / ".claude.json").write_text(json.dumps({
         "mcpServers": {
@@ -264,7 +311,7 @@ def test_mcp_servers_check_reports_eager_vs_lazy(ctx: Ctx):
 def test_mcp_servers_check_lazy_is_now_the_default_with_no_mcplazy_key(ctx: Ctx):
     """H13 Part A acceptance: a plain server entry with NO "mcpLazy" key at
     all is now lazy by default (the pre-H13 default was eager)."""
-    from rolo_claude import doctor
+    from halo_harness import doctor
     home = _fresh_home()
     (home / ".claude.json").write_text(json.dumps({
         "mcpServers": {"plain-one": {"type": "stdio", "command": "true"}},
@@ -284,8 +331,8 @@ def test_mcp_servers_check_lazy_is_now_the_default_with_no_mcplazy_key(ctx: Ctx)
 
 @test
 def test_default_model_check_unset_configured_and_misconfigured(ctx: Ctx):
-    from rolo_claude import doctor
-    from rolo_claude.theme import set_config_value
+    from halo_harness import doctor
+    from halo_harness.theme import set_config_value
 
     def _unset(home):
         return doctor._check_default_model()
@@ -314,7 +361,7 @@ def test_default_model_check_unset_configured_and_misconfigured(ctx: Ctx):
     # touched -- `--preset work` still works (as a deprecated alias), but
     # nothing prescribes it any more.
     ctx.check(f"set but Databricks not configured -> WARN with a --provider fix, got {line3!r}",
-              line3.startswith(doctor.WARN) and "rolo-claude init --provider databricks" in line3)
+              line3.startswith(doctor.WARN) and "halo init --provider databricks" in line3)
 
     def _garbage(home):
         set_config_value("model", 12345)
@@ -323,6 +370,21 @@ def test_default_model_check_unset_configured_and_misconfigured(ctx: Ctx):
     line4 = _isolated(_garbage)
     ctx.check(f"a non-string model value is treated as unset, never a crash, got {line4!r}",
               line4.startswith(doctor.OK))
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""rolo_claude.agent.jobs -- background Bash job registry (H8 scope A).
+"""halo_harness.agent.jobs -- background Bash job registry (H8 scope A).
 
 Mirrors agent/subagent.py's background-sub-agent pattern (dsh: "background
 jobs ... report completion as a user-role notice in the next step") for
@@ -40,7 +40,7 @@ import time
 import uuid
 from typing import Optional
 
-from rolo_claude.tools._proc import _CappedCollector, _kill_process_group
+from halo_harness.tools._proc import _CappedCollector, _kill_process_group
 
 MAX_CONCURRENT_JOBS = 10
 _QUEUE_POLL_EMPTY = object()  # sentinel: "queue.Empty fired this poll", distinct from a real `None` EOF
@@ -63,7 +63,7 @@ class JobRecord:
     # Set only for an "timeout"-origin record: the SAME per-call nonce
     # tools/bash.py generated for its marker-wrapped script (still running
     # when it was handed off) -- `_drain_and_finalize` uses it to strip the
-    # trailing `__ROLO_CLAUDE_EXIT__`/`__ROLO_CLAUDE_CWD__` marker lines out
+    # trailing `__HALO_EXIT__`/`__HALO_CWD__` marker lines out
     # of what BashOutput ever shows and to recover the ORIGINAL command's
     # real exit status (the wrapper script's own last command is a
     # `printf`, so `proc.returncode` alone would just be the printf's exit
@@ -180,7 +180,7 @@ class JobRegistry:
         docstring); every "background"-origin record has no nonce and
         takes the plain fast path unchanged."""
         if record.nonce:
-            from rolo_claude.tools.bash import _CWD_MARK, _EXIT_MARK
+            from halo_harness.tools.bash import _CWD_MARK, _EXIT_MARK
             exit_prefix = f"{_EXIT_MARK}_{record.nonce}:"
             cwd_prefix = f"{_CWD_MARK}_{record.nonce}:"
             stripped = line.rstrip("\r\n")
@@ -250,7 +250,7 @@ class JobRegistry:
         # block (the same Windows kill race), which here would delay this
         # job's own completion notice rather than a tool call's return, but
         # is just as avoidable.
-        from rolo_claude.tools._proc import _close_stream_async
+        from halo_harness.tools._proc import _close_stream_async
         _close_stream_async(record.proc.stdout)
         with record.lock:
             if record.status == "running":
@@ -391,7 +391,7 @@ class JobRegistry:
             except Exception:
                 pass
         # NEW (H9 post-acceptance): a job's `_CappedCollector` spill file
-        # (`rolo-claude-proc-*.log`, written once its output exceeds the
+        # (`halo-proc-*.log`, written once its output exceeds the
         # 300k-char in-memory cap) was never deleted anywhere -- verified,
         # one leaked per such job, forever, in the OS temp dir ("/tmp/
         # rolo*" left behind by real test/session runs). Can't delete it

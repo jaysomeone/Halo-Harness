@@ -1,5 +1,5 @@
-"""rolo_claude.events -- the authoritative event/command contract between the
-agent loop (rolo_claude.agent.loop.Session) and any UI. Print mode (H0) reads
+"""halo_harness.events -- the authoritative event/command contract between the
+agent loop (halo_harness.agent.loop.Session) and any UI. Print mode (H0) reads
 these directly; the Textual TUI (U2+) will too. This module is pure data --
 zero dependencies on the rest of the package -- so every layer can import it
 without risking a cycle.

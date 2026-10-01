@@ -1,7 +1,7 @@
-# rolo-claude — recommendations (Fable's review, 2026-09-25)
+# halo — recommendations (Fable's review, 2026-09-25)
 
 rolo asked for a written review, after the milestones, of what should be added or changed to make
-rolo-claude work as well and as easily as possible. Everything below is grounded in what was
+halo work as well and as easily as possible. Everything below is grounded in what was
 built and verified this week: eleven milestones, eight review passes, three platforms (Windows
 build host, WSL Ubuntu, the Kali VM), and live acceptance lines against DeepSeek V4.1 Flash on
 OpenRouter. Section 7 ranks the items.
@@ -27,11 +27,11 @@ OpenRouter. Section 7 ranks the items.
 The harness works once a box is set up, but setup is still several manual steps. On the VM today
 it took a PATH line, a static `rg`, a venv and a catalog refresh before daily use was smooth.
 
-1. **`rolo-claude init`** (new subcommand): pick a preset (`home` = DeepSeek V4.1 Flash via
+1. **`halo init`** (new subcommand): pick a preset (`home` = DeepSeek V4.1 Flash via
    OpenRouter; `work` = the Databricks trio), set up the provider credentials through the existing
    config chain, run `doctor`, run `models --refresh`, send a live "pong", and offer the two Linux
    fixes doctor already knows about (a static `rg` into `~/.local/bin`, `~/.local/bin` on the PATH
-   for non-interactive shells). One command, then `rolo-claude`.
+   for non-interactive shells). One command, then `halo`.
 2. **Prescriptive `doctor`**: every WARN line ends with the exact command that fixes it (some do
    already). Add checks for the PATH line, `$EDITOR`, tmux mouse mode, `xclip`/`wl-copy`, and the
    startup cost of each configured MCP server (see §3).
@@ -44,7 +44,7 @@ it took a PATH line, a static `rg`, a venv and a catalog refresh before daily us
   start exists; make it the default with a "MCP 2/5" status-bar indicator until a server is
   touched, and consider a per-user MCP supervisor (one daemon owning long-lived stdio servers,
   sessions attaching over a local socket) so a new session costs nothing.
-- **Quick questions**: document `--bare` prominently and add a `rolo-claude ask "…"` alias that
+- **Quick questions**: document `--bare` prominently and add a `halo ask "…"` alias that
   skips hooks, MCP and memory.
 - **Images in the terminal**: tool results with images are captioned today (type, size,
   dimensions). Add inline rendering via the kitty graphics protocol and sixel, with the caption as
@@ -96,7 +96,7 @@ sessions were removed:
 
 ## 6. Work-box checklist (VPN)
 
-1. `rolo-claude doctor --work` (reachability, token validity, catalog probe).
+1. `halo doctor --work` (reachability, token validity, catalog probe).
 2. `dbx:databricks-deepseek-v4-1-flash` pong, then a Read-then-Edit turn (tool loop through the
    Unity Gateway with the 32-tool cap and the schema simplifier).
 3. The two open questions as probes: does Databricks forward replayed `reasoning_content` after a
@@ -107,12 +107,12 @@ sessions were removed:
 
 ## 7. Roadmap, ranked
 
-- **P0 (this week, before daily use)**: `rolo-claude init`; prescriptive doctor lines; the Edit
+- **P0 (this week, before daily use)**: `halo init`; prescriptive doctor lines; the Edit
   context line per family; README quick start; a weekly `/improve` review habit.
 - **P1 (two to three weeks)**: lazy MCP start by default with the status indicator; the
   telemetry-driven pass over `model_table.json` once GLM, Qwen and MiniMax have real volume;
   the work-box checklist above; inline images; `/resume` search.
-- **P2 (later)**: the MCP supervisor daemon; `rolo-claude plugin install` parity with the
+- **P2 (later)**: the MCP supervisor daemon; `halo plugin install` parity with the
   marketplace; `--worktree`; live validation of the `ant:` route when a key exists; a Databricks
   endpoint-catalog cache for `/model` at work.
 - **P3 (declined for now, revisit with data)**: settings proposals (L2) and a prompt-optimisation

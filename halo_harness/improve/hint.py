@@ -1,4 +1,4 @@
-"""rolo_claude.improve.hint -- H10 Part B4: a per-session, COUNTERS-ONLY
+"""halo_harness.improve.hint -- H10 Part B4: a per-session, COUNTERS-ONLY
 hint check -- never a model call, never interrupts a running turn (auto
 mode identical: status-bar hint only). `improve.hint: false` disables.
 """

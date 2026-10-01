@@ -29,7 +29,7 @@ class _Env:
     """`Session.__init__` builds a real `SessionLog`, which opens/writes
     under `bridge_home()` the moment the Session exists -- NEVER derived
     from `fh["home"]`/`cwd` on its own. Without BRIDGE_TEST_HOME actually
-    set, that falls back to the REAL ~/.rolo-claude/sessions on whatever
+    set, that falls back to the REAL ~/.halo/sessions on whatever
     machine runs the suite."""
 
     def __init__(self, fh):
@@ -50,10 +50,10 @@ class _Env:
 
 
 def _new_dbx_session(fh, mock, *, model: str, effort=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
     model_ref = parse_model_ref(model)
     return Session(
@@ -70,7 +70,7 @@ def _new_dbx_session(fh, mock, *, model: str, effort=None):
 
 @test
 def test_hyphenated_version_parses_as_a_decimal(ctx: Ctx):
-    from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+    from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
     ctx.check("claude-sonnet-4-6 (hyphenated) is adaptive-capable",
               _anthropic_model_supports_adaptive_thinking("claude-sonnet-4-6"))
     ctx.check("databricks-claude-sonnet-4-6 (Databricks id shape) is adaptive-capable",
@@ -87,7 +87,7 @@ def test_hyphenated_version_parses_as_a_decimal(ctx: Ctx):
 
 @test
 def test_hyphenated_pre_4_6_sonnet_stays_non_adaptive(ctx: Ctx):
-    from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+    from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
     ctx.check("claude-sonnet-4-5 (older, hyphenated) is NOT adaptive-capable",
               not _anthropic_model_supports_adaptive_thinking("claude-sonnet-4-5"))
 
@@ -98,7 +98,7 @@ def test_snapshot_date_never_misread_as_a_fake_minor_version(ctx: Ctx):
     (`claude-sonnet-4-20250514`) must fall back to bare major "4" (pre-4.6,
     not adaptive) -- never misread the date's leading digits as a minor
     version."""
-    from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+    from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
     ctx.check("claude-sonnet-4-20250514 is NOT adaptive (reads as bare major 4, not 4.20...)",
               not _anthropic_model_supports_adaptive_thinking("claude-sonnet-4-20250514"))
     ctx.check("claude-sonnet-5-20250514 (bare major 5) IS adaptive",
@@ -111,7 +111,7 @@ def test_snapshot_date_never_misread_as_a_fake_minor_version(ctx: Ctx):
 
 @test
 def test_non_adaptive_budget_capped_at_half_max_tokens(ctx: Ctx):
-    from rolo_claude.providers.request import map_effort_anthropic
+    from halo_harness.providers.request import map_effort_anthropic
     result = map_effort_anthropic("high", "claude-sonnet-4-5", max_tokens=10000)
     ctx.check(f"budget is max_tokens // 2 (5000), not max_tokens - 1 (9999), got {result}",
               result == {"thinking": {"type": "enabled", "budget_tokens": 5000}})
@@ -119,7 +119,7 @@ def test_non_adaptive_budget_capped_at_half_max_tokens(ctx: Ctx):
 
 @test
 def test_non_adaptive_budget_never_below_the_1024_floor(ctx: Ctx):
-    from rolo_claude.providers.request import map_effort_anthropic
+    from halo_harness.providers.request import map_effort_anthropic
     # max_tokens=1500 -> half is 750, below the 1,024 floor -- floored up,
     # still strictly less than max_tokens (1500).
     result = map_effort_anthropic("low", "claude-sonnet-4-5", max_tokens=1500)
@@ -132,7 +132,7 @@ def test_adaptive_model_budget_cap_does_not_apply(ctx: Ctx):
     """The half-max_tokens cap is only relevant to the budget_tokens shape
     -- an adaptive-capable model's {"type": "adaptive"} body has no
     budget_tokens field for it to apply to at all."""
-    from rolo_claude.providers.request import map_effort_anthropic
+    from halo_harness.providers.request import map_effort_anthropic
     result = map_effort_anthropic("high", "claude-sonnet-4-6", max_tokens=10000)
     ctx.check(f"adaptive shape, no budget_tokens anywhere, got {result}",
               result == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}})
@@ -181,8 +181,8 @@ def test_set_model_mid_session_respects_the_same_adaptive_gate(ctx: Ctx):
     with _Env(fh):
         mock = MockDatabricks().start()
         try:
-            from rolo_claude.model import parse_model_ref
-            from rolo_claude.model import ModelProfile as MP
+            from halo_harness.model import parse_model_ref
+            from halo_harness.model import ModelProfile as MP
 
             session = _new_dbx_session(fh, mock, model="or:mock/model", effort=None)
             ctx.check("starting on a chat-dialect route, effort stays unset", session.effort is None)
@@ -201,7 +201,7 @@ def test_opus_is_version_gated_like_sonnet(ctx: Ctx):
     opus id used to be treated as adaptive, which would have sent
     `thinking: adaptive` + `effort: high` by default and failed every turn
     on those two endpoints."""
-    from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking as adaptive
+    from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking as adaptive
     for mid, want in (("databricks-claude-opus-4-1", False), ("databricks-claude-opus-4-5", False),
                       ("databricks-claude-opus-4-6", True), ("databricks-claude-opus-5", True),
                       ("databricks-claude-opus-5-5", True), ("claude-fable-5-1", True)):
@@ -214,7 +214,7 @@ def test_version_before_family_bedrock_ids_parse_their_real_version(ctx: Ctx):
     (`us-anthropic-claude-3-7-sonnet-20250219-v1-0`); the snapshot date
     after the family used to parse as a huge major version and classify
     Claude 3.x as adaptive."""
-    from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking as adaptive
+    from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking as adaptive
     for mid, want in (("us-anthropic-claude-3-7-sonnet-20250219-v1-0", False),
                       ("us-anthropic-claude-3-5-sonnet-20241022-v2-0", False),
                       ("us-anthropic-claude-sonnet-4-20250514-v1-0", False),
@@ -227,7 +227,7 @@ def test_otpm_tracker_counts_output_plus_reasoning_tokens(ctx: Ctx):
     """The Databricks OTPM budget is charged for every generated token;
     since `map_usage` reports reasoning separately, the tracker feed must
     be their sum (review re-check: a reasoning-heavy reply under-counted)."""
-    from rolo_claude.agent.loop import generated_tokens_for_otpm
+    from halo_harness.agent.loop import generated_tokens_for_otpm
     ctx.check("output + reasoning", generated_tokens_for_otpm({"output_tokens": 500, "reasoning_tokens": 1500}) == 2000)
     ctx.check("output only", generated_tokens_for_otpm({"output_tokens": 500}) == 500)
     ctx.check("reasoning only", generated_tokens_for_otpm({"reasoning_tokens": 7}) == 7)

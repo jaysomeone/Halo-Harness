@@ -1,4 +1,4 @@
-"""rolo_claude.tools.read -- the Read tool (H1 scope G): cat -n numbering,
+"""halo_harness.tools.read -- the Read tool (H1 scope G): cat -n numbering,
 offset/limit (default 2000 lines), absolute path required. Wording matches
 Claude Code's own exactly (binary-facts sec.14) so a weaker model gets
 identical guidance to a real Claude Code session -- rule 3/D4 in the plan.
@@ -9,8 +9,8 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
-from rolo_claude.tools.imageutil import image_block_or_note, is_image_path, sniff_media_type
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.imageutil import image_block_or_note, is_image_path, sniff_media_type
 
 DESCRIPTION = (
     "Reads a file from the local filesystem. You can access any file directly by using this tool.\n"

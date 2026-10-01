@@ -1,7 +1,7 @@
 # `docs/harness/` -- the build history
 
 This directory is this project's own **development record**, not
-end-user documentation -- for how to use rolo-claude, start at the
+end-user documentation -- for how to use halo, start at the
 repo-root [README.md](../../README.md) and [docs/](..). Everything here was
 written *during* development, in the order it happened, and is kept as-is:
 a brief states scope and constraints **before** a milestone's work; a
@@ -37,11 +37,11 @@ release (this project didn't use strict per-milestone semver until H10).
 | [U5-brief.md](U5-brief.md) | 0.3.0 | session titles/rename/fork/export/stats; git-shadow `/rewind`; chords + the which-key overlay |
 | [H10-brief.md](H10-brief.md) | 0.3.1 | free telemetry from the existing session logs; the human-gated `/improve` |
 | [H11-brief.md](H11-brief.md) | 0.4.0 | the `cc:` route (your Claude subscription via the installed `claude` binary) and `ant:` aliases |
-| [H12-brief.md](H12-brief.md) | 0.4.1 | `rolo-claude init`; the prescriptive `doctor`; the per-family Edit-tool context hint |
+| [H12-brief.md](H12-brief.md) | 0.4.1 | `halo init`; the prescriptive `doctor`; the per-family Edit-tool context hint |
 | [H13-brief.md](H13-brief.md) | 0.5.0 | lazy MCP by default; inline terminal images; `/resume` search; the first live family-baseline pass |
 | [H14-brief.md](H14-brief.md) | 0.6.0 | Databricks work-config parity: the family x api_type routing table, `doctor --work` accuracy, team onboarding, the work matrix |
 | [H14b-brief.md](H14b-brief.md) | -- | this documentation pass, immediately before the repo goes public |
-| [V2-brief.md](V2-brief.md) | 0.7.0, 0.8.0 | Databricks-first per-family correctness (V2a); matrix-driven fixes (V2b); roles (V2c). The brief's own V2d/V2e (renaming this project to `databricks-claude`) was superseded: the owner spun off a separate `databricks-claude` repository instead, and rolo-claude stayed the general four-route harness, released as `1.0.0` -- see CHANGELOG.md's own `[1.0.0]` entry |
+| [V2-brief.md](V2-brief.md) | 0.7.0, 0.8.0 | Databricks-first per-family correctness (V2a); matrix-driven fixes (V2b); roles (V2c). The brief's own V2d/V2e (renaming this project to `databricks-claude`) was superseded: the owner spun off a separate `databricks-claude` repository instead, and halo stayed the general four-route harness, released as `1.0.0` -- see CHANGELOG.md's own `[1.0.0]` entry |
 
 ## Reviews
 

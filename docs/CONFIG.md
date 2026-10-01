@@ -1,7 +1,7 @@
 # Configuration
 
 Exactly which files this harness reads (Claude Code's own config, unchanged)
-and which it owns (its own small state under `~/.rolo-claude/`), how they're
+and which it owns (its own small state under `~/.halo/`), how they're
 merged, every environment variable, and precisely what is never written.
 Permissions/hooks *behavior* (as opposed to where their config lives) is
 covered in [ARCHITECTURE.md](ARCHITECTURE.md); Databricks credential
@@ -43,7 +43,7 @@ have its own denials honored, just never its own extra permissions/secrets/
 hooks). Trust itself (`config/claude_json.py::is_trusted`) is true when any
 of: `projects[cwd].hasTrustDialogAccepted` for `cwd` or an ancestor up to
 the git root (or the filesystem root if not in a repo); `CLAUDE_CODE_SANDBOXED`
-is set to any non-empty value; or `~/.rolo-claude/trust.json` has an entry
+is set to any non-empty value; or `~/.halo/trust.json` has an entry
 for the normalized cwd (this harness's own trust store -- written by a
 future trust-prompt flow, not yet interactive).
 
@@ -130,7 +130,7 @@ entirely.
 - **`~/.claude.json`**: trust dialog state (`projects[cwd].
   hasTrustDialogAccepted`), user-scope `mcpServers`, and
   `projects[cwd].mcpServers` (local-scope MCP servers) -- read on every
-  session; **written only by `rolo-claude mcp add`/`add-json`/`remove`**
+  session; **written only by `halo mcp add`/`add-json`/`remove`**
   (see `docs/COMMANDS.md`), which preserve the file's own existing indent
   width, trailing newline, BOM, and every key they don't touch, exactly
   matching what the real `claude mcp add`/`remove` would do. No other code
@@ -139,84 +139,96 @@ entirely.
   a server there needs first-time approval (`enabledMcpjsonServers`/
   `enableAllProjectMcpServers` in `~/.claude.json` or settings, or a
   print-mode run, or a prior approval recorded in
-  `~/.rolo-claude/mcp-approvals.json`) before it's ever started.
+  `~/.halo/mcp-approvals.json`) before it's ever started.
 - **Plugins**: `~/.claude/plugins/installed_plugins.json` (both the V1
   single-dict and the real V2 per-scope-array manifest shapes), each
   enabled plugin's own `.mcp.json`/`.claude-plugin/plugin.json` (MCP
   servers) and `hooks/hooks.json` (hooks), with `${CLAUDE_PLUGIN_ROOT}`
   expanded to that plugin's own install directory.
 
-## rolo-claude's own files
+## halo's own files
 
 None of these are read by Claude Code; nothing here is ever confused with
 the files above.
 
 | Path | Holds |
 |---|---|
-| `~/.rolo-claude/config.json` | this harness's own settings -- see the key table below |
-| `~/.config/vibes-hacker/env` (`BRIDGE_ENV_FILE` to override) | `OPENROUTER_API_KEY`/`DATABRICKS_HOST`/`DATABRICKS_TOKEN` etc., `KEY=value` lines, `#` comments, optional `export`; written mode 0600, dir 0700 (POSIX) by `rolo-claude init` |
-| `~/.rolo-claude/sessions/<project-slug>/<id>.jsonl` | one append-only session log per session (see `docs/ARCHITECTURE.md`) |
-| `~/.rolo-claude/sessions/<project-slug>/index.json` | per-session title/first-prompt/turns/cost, for `/resume`'s picker and `-r <text>` |
-| `~/.rolo-claude/models.json`, `dbx-endpoints.json`, `models-dev.json`, `cc-models.json` | cached model catalogs (`docs/MODELS.md`) |
-| `~/.rolo-claude/stats-cache.json` | telemetry aggregation cache, keyed by (path, size, mtime) |
-| `~/.rolo-claude/mcp/tools-cache/<server>.json`, `~/.rolo-claude/mcp/<server>.log` | a lazy MCP server's cached tool list, and its stderr |
-| `~/.rolo-claude/mcp-approvals.json` | remembered `.mcp.json` server approvals |
-| `~/.rolo-claude/trust.json` | this harness's own trust-dialog store |
-| `~/.rolo-claude/history.jsonl` | this harness's own prompt history (merged with Claude Code's own `~/.claude/history.jsonl` at read time, never written to) |
-| `~/.rolo-claude/improve/dismissed.json`, `~/.rolo-claude/improve/<ts>.json` | `/improve` dismissed-candidate hashes, and saved candidate batches |
-| `~/.rolo-claude/work-matrix-<date>.json` | `doctor --work --probe-all` reports (endpoint names only, never a host or token) |
-| `~/.rolo-claude/sessions/<slug>/<id>/shadow/`, `shadow-index.jsonl` | `/rewind`'s git-shadow snapshots |
+| `~/.halo/config.json` | this harness's own settings -- see the key table below |
+| `~/.config/halo/env` (`HALO_ENV_FILE`/legacy `BRIDGE_ENV_FILE` to override; legacy `~/.config/vibes-hacker/env` still READ when this one is absent) | `OPENROUTER_API_KEY`/`DATABRICKS_HOST`/`DATABRICKS_TOKEN` etc., `KEY=value` lines, `#` comments, optional `export`; written mode 0600, dir 0700 (POSIX) by `halo init` |
+| `~/.halo/sessions/<project-slug>/<id>.jsonl` | one append-only session log per session (see `docs/ARCHITECTURE.md`) |
+| `~/.halo/sessions/<project-slug>/index.json` | per-session title/first-prompt/turns/cost, for `/resume`'s picker and `-r <text>` |
+| `~/.halo/models.json`, `dbx-endpoints.json`, `models-dev.json`, `cc-models.json` | cached model catalogs (`docs/MODELS.md`) |
+| `~/.halo/stats-cache.json` | telemetry aggregation cache, keyed by (path, size, mtime) |
+| `~/.halo/mcp/tools-cache/<server>.json`, `~/.halo/mcp/<server>.log` | a lazy MCP server's cached tool list, and its stderr |
+| `~/.halo/mcp-approvals.json` | remembered `.mcp.json` server approvals |
+| `~/.halo/trust.json` | this harness's own trust-dialog store |
+| `~/.halo/history.jsonl` | this harness's own prompt history (merged with Claude Code's own `~/.claude/history.jsonl` at read time, never written to) |
+| `~/.halo/improve/dismissed.json`, `~/.halo/improve/<ts>.json` | `/improve` dismissed-candidate hashes, and saved candidate batches |
+| `~/.halo/work-matrix-<date>.json` | `doctor --work --probe-all` reports (endpoint names only, never a host or token) |
+| `~/.halo/sessions/<slug>/<id>/shadow/`, `shadow-index.jsonl` | `/rewind`'s git-shadow snapshots |
 | `<state_dir>/routes.json` | optional, proxy-era per-box defaults (`aliases`, `default`/`small` model, per-model `profiles`) -- still read by the harness's own default-model resolution chain; see `routes.example.json` |
-| `.rolo-claude/team.json` (project) or `~/.rolo-claude/team.json` | shared Databricks team preset -- see `docs/DATABRICKS.md` |
+| `.halo/team.json` (project) or `~/.halo/team.json` | shared Databricks team preset -- see `docs/DATABRICKS.md` |
 
-### `~/.rolo-claude/config.json` keys
+### `~/.halo/config.json` keys
 
-Read/written with `rolo-claude config get/set` (dotted paths supported) or
+Read/written with `halo config get/set` (dotted paths supported) or
 directly by the features that own them:
 
 | Key | Default | Set by |
 |---|---|---|
-| `model` | unset (built-in default applies) | `rolo-claude init`, `rolo-claude config set model ...` |
-| `theme` | auto-detected from terminal truecolor support | `/theme`, `rolo-claude config set theme ...` |
+| `model` | unset (built-in default applies) | `halo init`, `halo config set model ...` |
+| `theme` | auto-detected from terminal truecolor support | `/theme`, `halo config set theme ...` |
 | `images` | `"inline"` | `--no-inline-images` overrides per-run |
+| `intro` | `true` | `--no-intro` overrides per-run; set `false` to turn off the launch intro for good |
 | `mcpPreload` | unset | hand-edited: a list of wire tool names to preload regardless of the catalog's own `alwaysLoad` rule |
 | `compactionModel` | unset (uses the session model) | hand-edited |
-| `databricks.gateway.<endpoint>` | unset | `rolo-claude init --provider databricks` (from a team.json `gateway_preference`), or hand-edited |
+| `databricks.gateway.<endpoint>` | unset | `halo init --provider databricks` (from a team.json `gateway_preference`), or hand-edited |
 | `databricks.dbu_price_usd` | unset (costs show as raw DBUs) | team.json, or hand-edited |
 | `databricks.catalog_max_age_hours` | `24` | hand-edited |
 | `improve.enabled` | `true` | hand-edited |
 | `improve.hint` | `true` | hand-edited |
-| `improve.model` | unset (small model, then session model) | `rolo-claude config set improve.model or:...` |
+| `improve.model` | unset (small model, then session model) | `halo config set improve.model or:...` |
 | `improve.since_days` | `7` | hand-edited |
 | `improve.max_candidates` | `8` (hard-capped at 8) | hand-edited |
 | `improve.hint_threshold.{repairs,edit_failures,loop_breaker}` | `3`/`2`/`1` | hand-edited |
 
 ## Every environment variable
 
+2.0.0 rename: every harness-owned knob's CANONICAL name is now `HALO_*`;
+the legacy `BRIDGE_*` name (and, for the handful that briefly carried it,
+`ROLO_CLAUDE_*`) each still work exactly as before, forever -- resolved in
+that order (`HALO_*` first), with one DEBUG-level log line the first time a
+legacy name is what actually supplied the value (`--debug`'s own log file).
+A handful of test-only seams (`BRIDGE_STATE_DIR`, `BRIDGE_TEST_*`) are
+deliberately NOT part of this -- they keep their bare `BRIDGE_` names for
+good, with no `HALO_` twin, since the test suites depend on the exact name.
+
 | Variable | Purpose |
 |---|---|
 | `OPENROUTER_API_KEY` | OpenRouter credential |
 | `OPENROUTER_MANAGEMENT_KEY` | a SEPARATE, higher-privilege OpenRouter key (never the ordinary one above) for the whole-account balance (`GET /credits`) the status bar's "OR $X left" segment/`/cost`/`/providers` show (H15 part 2 addendum 4) -- optional; without it, that segment falls back to the ordinary key's own `/key` usage/limit figures |
-| `BRIDGE_OPENROUTER_BASE_URL` | override the OpenRouter base URL (default `https://openrouter.ai/api/v1`) |
+| `HALO_OPENROUTER_BASE_URL` (legacy `BRIDGE_OPENROUTER_BASE_URL`) | override the OpenRouter base URL (default `https://openrouter.ai/api/v1`) |
 | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Databricks credential (see `docs/DATABRICKS.md` for the full discovery chain) |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` | Claude Code's own work-box env names -- read as a Databricks credential when the host matches a Databricks domain |
 | `ANTHROPIC_API_KEY` | `ant:` route credential (`api.anthropic.com` directly) |
+| `HALO_ANTHROPIC_BASE_URL` (legacy `BRIDGE_ANTHROPIC_BASE_URL`) | override the `ant:` route's own base URL (default `https://api.anthropic.com`) |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` | at a Databricks work box, set the default model and what bare `opus`/`sonnet`/`haiku` resolve to |
 | `ANTHROPIC_CUSTOM_HEADERS` | one-or-more `Name: value` lines, merged onto every Databricks request |
-| `BRIDGE_DBX_BASE_URL`, `BRIDGE_DBX_TOKEN` | explicit override, wins outright over every other Databricks discovery step |
-| `BRIDGE_MODEL`, `BRIDGE_MODEL_SMALL` | override the resolved default main/small model (`BRIDGE_MODEL` also used by the older proxy) |
-| `BRIDGE_ENV_FILE` | path to the `KEY=value` env file (default `~/.config/vibes-hacker/env`) |
-| `BRIDGE_STATE_DIR` | this harness's own state directory (default `~/.rolo-claude`) |
-| `BRIDGE_TEST_HOME` | test/scratch seam: overrides `home()` everywhere (`~/.claude`, `~/.rolo-claude`, ...) -- never set this for real use |
-| `BRIDGE_CLAUDE_EXE` | override how the `claude` binary is launched (`cc:` route, `--chrome`) |
-| `BRIDGE_DUMP=1` | dump raw request/response JSON for debugging (proxy mode) |
+| `HALO_DBX_BASE_URL`, `HALO_DBX_TOKEN` (legacy `BRIDGE_DBX_BASE_URL`/`BRIDGE_DBX_TOKEN`) | explicit override, wins outright over every other Databricks discovery step |
+| `HALO_MODEL`, `HALO_MODEL_SMALL` (legacy `BRIDGE_MODEL`/`BRIDGE_MODEL_SMALL`) | override the resolved default main/small model (also used by `halo proxy`) |
+| `HALO_ENV_FILE` (legacy `BRIDGE_ENV_FILE`) | path to the `KEY=value` env file (default `~/.config/halo/env`, falling back to legacy `~/.config/vibes-hacker/env` when that's absent) |
+| `BRIDGE_STATE_DIR` | this harness's own state directory (default `~/.halo`; a test-only-style seam that keeps its bare `BRIDGE_` name for good -- see the note above) |
+| `BRIDGE_TEST_HOME` | test/scratch seam: overrides `home()` everywhere (`~/.claude`, `~/.halo`, ...) -- never set this for real use |
+| `HALO_CLAUDE_EXE` (legacy `BRIDGE_CLAUDE_EXE`) | override how the `claude` binary is launched (`cc:` route, `--chrome`) |
+| `HALO_DUMP=1` (legacy `BRIDGE_DUMP=1`) | dump raw request/response JSON for debugging (proxy mode) |
+| `HALO_CA_BUNDLE` (legacy `BRIDGE_CA_BUNDLE`) | a custom CA bundle path, tried after `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE` |
 | `CLAUDE_CONFIG_DIR` | relocate `~/.claude` (and `~/.claude.json`, honoring a legacy `<dir>/.config.json`) |
 | `CLAUDE_CODE_SANDBOXED` | any non-empty value counts as "trusted" for the current directory |
 | `CLAUDE_CODE_GIT_BASH_PATH` | override Git Bash's location on Windows |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | a settings-independent way to set the sub-agent model fallback |
 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | disables auto-memory entirely |
 | `VISUAL`, `EDITOR` | external editor for `Ctrl+E` (prompt draft) and `/improve`'s `e` (edit a candidate) |
-| `CLAUDE_BRIDGE_THEME`, `ROLO_CLAUDE_THEME` | override the resolved theme (checked in that order) |
+| `HALO_THEME` (legacy `CLAUDE_BRIDGE_THEME`, `ROLO_CLAUDE_THEME`) | override the resolved theme (checked in that order -- `HALO_THEME` first) |
 | `NO_COLOR` | disables ANSI color in `stats`' rich-rendered tables |
 | `RC_TERM_WIDTH` | pin `stats`' table width instead of auto-detecting the terminal |
 | `DISABLE_COMPACT` | disable auto-compaction entirely (manual `/compact` still works) |
@@ -226,7 +238,7 @@ directly by the features that own them:
 | `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | override the `SessionEnd` hook time budget outright |
 | `TMUX` | presence gates `doctor`'s tmux-mouse-mode check |
 
-## Providers (`rolo-claude init --provider ...`)
+## Providers (`halo init --provider ...`)
 
 1.0.1 hotfix 13: `init` selects a PROVIDER to set up, not a "preset" naming
 a bundle of choices; the old `--preset home|work|claude` still works, as a
@@ -244,19 +256,19 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 
 After the provider(s)/default model are settled, `init` also asks for a
 **default permission mode** -- `auto` (recommended, listed first),
-`acceptEdits`, `default`, `plan` -- written to `~/.rolo-claude/config.json`'s
+`acceptEdits`, `default`, `plan` -- written to `~/.halo/config.json`'s
 own flat `permission_mode` key. Precedence for a session's actual starting
 mode, highest first:
 
 1. `--dangerously-skip-permissions`
 2. `--permission-mode` (this run's own flag)
-3. `~/.rolo-claude/config.json`'s `permission_mode` (this section)
+3. `~/.halo/config.json`'s `permission_mode` (this section)
 4. `settings.json`'s `permissions.defaultMode` (user layer, or
    project/local for the manual modes, as before)
 5. the hardcoded `default`
 
-`rolo-claude doctor` prints the effective mode and which layer decided it.
-Never touches `~/.claude/settings.json` -- `rolo-claude config set
+`halo doctor` prints the effective mode and which layer decided it.
+Never touches `~/.claude/settings.json` -- `halo config set
 permission_mode auto` (or any of the four modes) sets the same key directly
 without re-running `init`.
 
@@ -271,7 +283,7 @@ arbitrary other-provider's model over it.
 
 - `~/.claude.json`, `~/.claude/settings.json` -- **never** touched by
   `init`/`doctor`/the agent loop; the ONE deliberate exception is
-  `rolo-claude mcp add`/`add-json`/`remove` writing `~/.claude.json`'s
+  `halo mcp add`/`add-json`/`remove` writing `~/.claude.json`'s
   `mcpServers` keys, precisely mirroring what `claude mcp add`/`remove`
   itself writes.
 - `~/.claude/.credentials.json` -- **never opened at all**, not even to
@@ -279,7 +291,7 @@ arbitrary other-provider's model over it.
   `claude auth status`'s own JSON output.
 - A provider API key or Databricks token is never written into a session
   log, a cache file, or a `doctor`/`--config`/`stats` line -- `redact()`
-  keeps the first four characters and elides the rest; `rolo-claude export
+  keeps the first four characters and elides the rest; `halo export
   --sanitize`/`/export --sanitize` additionally scrub anything that slipped
   into a transcript via a tool's own output (a Bash `env` dump, a Read of a
   settings file).

@@ -1,4 +1,4 @@
-"""rolo_claude.providers.request -- the profile-driven OpenAI-dialect
+"""halo_harness.providers.request -- the profile-driven OpenAI-dialect
 request builder (H1 scope B), replacing the ad-hoc parts of
 `anthropic_to_openai` usage in the agent loop. `bridge.py`'s own proxy path
 still calls `translate.anthropic_to_openai` directly and is UNCHANGED by
@@ -17,10 +17,10 @@ import logging
 import re
 from typing import Optional
 
-from rolo_claude.providers.hooks import host_allowlist, reasoning_echo, system_normalize
-from rolo_claude.providers.profiles import ProviderProfile, clamp_effort, map_effort
-from rolo_claude.providers.routing import anthropic_tool_to_openai, map_tool_choice
-from rolo_claude.providers.translate import _flatten_messages
+from halo_harness.providers.hooks import host_allowlist, reasoning_echo, system_normalize
+from halo_harness.providers.profiles import ProviderProfile, clamp_effort, map_effort
+from halo_harness.providers.routing import anthropic_tool_to_openai, map_tool_choice
+from halo_harness.providers.translate import _flatten_messages
 
 log = logging.getLogger("bridge")
 

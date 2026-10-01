@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.help -- F1 (D-TUI: "Help"). Static key reference
+"""halo_harness.tui.dialogs.help -- F1 (D-TUI: "Help"). Static key reference
 plus the live slash-command list from the registry (`help_rows()`, U0).
 """
 

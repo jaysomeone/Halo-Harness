@@ -10,8 +10,8 @@ pieces you'd be extending fit together, and
 ## Repo layout
 
 ```
-rolo_claude/            the package
-  cli.py                 the rolo-claude entry point + flag table
+halo_harness/            the package
+  cli.py                 the halo entry point + flag table
   headless.py             -p print mode / the shared session builder
   controller.py            the TUI's glue between BridgeApp and Session
   agent/                   the session loop, log, derive/prune, compaction,
@@ -24,8 +24,8 @@ rolo_claude/            the package
   tui/                     the Textual app, widgets, dialogs, dispatch
   improve/                 /improve: evidence clustering, drafting, apply
   ccbridge/                the cc: subprocess's own MCP tool bridge (child side)
-  *_cli.py                 each `rolo-claude <subcommand>`'s own module
-bridge.py                 the original claude-bridge proxy (kept as `rolo-claude proxy`)
+  *_cli.py                 each `halo <subcommand>`'s own module
+bridge.py                 the original claude-bridge proxy (kept as `halo proxy`)
 tests/                    the harness's own suite (tests/run_all.py)
 test_bridge.py            the proxy's own black-box suite
 test_tui.py               Textual pilots + SVG snapshots
@@ -48,7 +48,7 @@ normal run. `tests/run_all.py` discovers every `tests/test_*.py` module
 automatically (`tests/helpers/runner.py`'s `new_registry()`/`@test`
 pattern -- see any existing `test_*.py` file for the shape a new one
 should follow) and prints one combined pass/fail count; it also snapshots
-the *real* `~/.rolo-claude/sessions` directory before and after the run and
+the *real* `~/.halo/sessions` directory before and after the run and
 fails loudly if anything leaked there (a test that built a real `Session`
 without scoping `BRIDGE_TEST_HOME` away from your actual machine state).
 
@@ -60,22 +60,22 @@ checkout:
 ```sh
 # WSL (rsync avoids 9p/DrvFS filesystem quirks a symlink/bind-mount would hide):
 wsl -e bash -lc 'ulimit -n 4096; rsync -a --delete --exclude .git --exclude __pycache__ --exclude wheels --exclude build \
-  /mnt/c/path/to/rolo-claude/ ~/rolo-claude-wt/ \
-  && cd ~/rolo-claude-wt && source ~/rolo-claude-wt-venv/bin/activate \
+  /mnt/c/path/to/halo-harness/ ~/halo-harness-wt/ \
+  && cd ~/halo-harness-wt && source ~/halo-harness-wt-venv/bin/activate \
   && python3 tests/run_all.py && python3 test_bridge.py && python3 test_tui.py'
 ```
 
 ```sh
 # Kali (from Git Bash, over SSH; tar avoids the same filesystem-sharing quirks):
 tar --exclude=.git --exclude=__pycache__ --exclude=wheels --exclude=build -czf - . \
-  | ssh user@<host> 'rm -rf ~/rolo-claude-wt && mkdir -p ~/rolo-claude-wt && tar -xzf - -C ~/rolo-claude-wt'
+  | ssh user@<host> 'rm -rf ~/halo-harness-wt && mkdir -p ~/halo-harness-wt && tar -xzf - -C ~/halo-harness-wt'
 ssh user@<host> 'export PATH="$HOME/.local/bin:$HOME/bin:$PATH"; ulimit -n 4096; \
-  cd ~/rolo-claude-wt && source ~/rolo-claude-wt-venv/bin/activate && \
+  cd ~/halo-harness-wt && source ~/halo-harness-wt-venv/bin/activate && \
   python3 tests/run_all.py && python3 test_bridge.py && python3 test_tui.py'
 ```
 
-Both recipes need a one-time venv (`python3 -m venv ~/rolo-claude-wt-venv &&
-~/rolo-claude-wt-venv/bin/pip install -e ~/rolo-claude-wt`) created once
+Both recipes need a one-time venv (`python3 -m venv ~/halo-harness-wt-venv &&
+~/halo-harness-wt-venv/bin/pip install -e ~/halo-harness-wt`) created once
 before the first run. `test_tui.py` regenerates
 `docs/harness/tui-snapshots/*.svg` on every run (normalized, not
 byte-diffed -- box-drawing/font metrics legitimately differ by terminal).
@@ -98,7 +98,7 @@ as the historical record of intent.
 
 ## How to add a tool
 
-1. Subclass `rolo_claude.tools.base.Tool`: set `name`/`description`/
+1. Subclass `halo_harness.tools.base.Tool`: set `name`/`description`/
    `input_schema` (together, the exact Anthropic tool definition sent on
    the wire), implement `run(self, input: dict, ctx: ToolContext) ->
    ToolResult`, and optionally override `summary()` (a one-line card
@@ -158,7 +158,7 @@ never a per-model code branch:
   filename (minus `.md`) is the invocation. See `docs/SLASH-COMMANDS.md`
   for the `$ARGUMENTS`/`` !`cmd` ``/`@path` body-expansion pipeline every
   custom command and skill shares.
-- **A new built-in** goes in `rolo_claude/commands/builtins.py`: write a
+- **A new built-in** goes in `halo_harness/commands/builtins.py`: write a
   `_cmd_<name>(args: str, facade: HeadlessFacade) -> str` function (the
   `HeadlessFacade` is a read-only view of session state -- see its own
   docstring for every field available), then add `"<name>": (kind,
@@ -166,7 +166,7 @@ never a per-model code branch:
   `"core"` (works identically headless and in the TUI), `"ui"` (the
   headless version prints an honest "needs the interactive TUI" string;
   give it *real* interactive behavior by adding a handler to
-  `rolo_claude/tui/slash.py`'s own dispatch dict in `handle_slash`), or
+  `halo_harness/tui/slash.py`'s own dispatch dict in `handle_slash`), or
   `"prompt"` (the returned string becomes the turn's actual prompt, not
   printed directly -- see `/init`).
 - Add the new command's section to `docs/SLASH-COMMANDS.md`
@@ -175,12 +175,12 @@ never a per-model code branch:
 ## How to add a `doctor` check
 
 Add a `_check_<name>() -> str` (or `-> Optional[str]` if it only sometimes
-applies, e.g. only inside tmux) function to `rolo_claude/doctor.py`
+applies, e.g. only inside tmux) function to `halo_harness/doctor.py`
 returning one line built with the module's own `OK`/`WARN`/`MISSING`
 constants -- use `_fix(line, cmd=...)` or `_fix(line, see=...)` to attach
 the exact fix command/reference a `WARN`/`MISSING` line always ends with.
 Register it with a stable id in `_check_entries()`'s list (the id is what
-`doctor --json` and `rolo-claude init`'s own summary key off -- never
+`doctor --json` and `halo init`'s own summary key off -- never
 reuse or reorder an existing id). Never let a check raise: wrap anything
 that touches the network/filesystem/a subprocess in its own `try/except`
 and degrade to a `WARN` naming what went wrong, since one bad check must
@@ -188,7 +188,7 @@ never take down the rest of `doctor`.
 
 ## Coding rules
 
-- **OS-neutral by default**: `rolo_claude/config/paths.py` is the one place
+- **OS-neutral by default**: `halo_harness/config/paths.py` is the one place
   that knows about Windows vs. POSIX home-directory shapes, Git Bash vs.
   `/bin/bash`, drive letters, etc. -- a new module should go through it
   (`home()`,
@@ -205,11 +205,11 @@ never take down the rest of `doctor`.
   `ANTHROPIC_*`/`CLAUDE_CODE_*`/`CLAUDE*` variable) -- never a raw
   `os.environ` passthrough.
 - **Never write a Claude Code file** outside the one documented exception
-  (`rolo-claude mcp add`/`add-json`/`remove` writing `~/.claude.json`'s
+  (`halo mcp add`/`add-json`/`remove` writing `~/.claude.json`'s
   `mcpServers` keys, byte-compatible with what `claude mcp add` itself
   writes) -- see `docs/CONFIG.md`'s "What is never written" section. A new
   feature that wants to persist something belongs in
-  `~/.rolo-claude/config.json` (via `rolo_claude.theme.get_config_value`/
+  `~/.halo/config.json` (via `halo_harness.theme.get_config_value`/
   `set_config_value`, which already supports dotted paths).
 - **No safety/refusal/classifier logic, anywhere** -- this is a deliberate,
   repeatedly-reaffirmed project decision (see `docs/ARCHITECTURE.md`'s
@@ -223,6 +223,6 @@ never take down the rest of `doctor`.
   across files would scatter one coherent state machine).
 - **`tests/run_all.py`'s own hygiene guards are load-bearing**: a new test
   that constructs a real `Session`/`SessionLog` must set `BRIDGE_TEST_HOME`
-  (or otherwise scope itself away from your actual `~/.rolo-claude`) --
+  (or otherwise scope itself away from your actual `~/.halo`) --
   the suite fails the whole run if it detects a new file under your real
   session directory afterward.

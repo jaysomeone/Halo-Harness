@@ -1,4 +1,4 @@
-"""rolo_claude.tools.bash -- the Bash tool (H2 scope A). `/bin/bash -lc` on
+"""halo_harness.tools.bash -- the Bash tool (H2 scope A). `/bin/bash -lc` on
 POSIX, Git Bash on win32 (config.paths.git_bash()); a session-persistent
 `cd` (via a trailing marker line reporting the shell's final $PWD, stripped
 back out of the displayed output); a trailing `[exit code N]` note on a
@@ -12,14 +12,14 @@ import sys
 import uuid
 from pathlib import Path
 
-from rolo_claude.config.paths import from_posix, git_bash, to_posix
-from rolo_claude.tools._proc import run_streamed
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.config.paths import from_posix, git_bash, to_posix
+from halo_harness.tools._proc import run_streamed
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
-_EXIT_MARK = "__ROLO_CLAUDE_EXIT__"
-_CWD_MARK = "__ROLO_CLAUDE_CWD__"
+_EXIT_MARK = "__HALO_EXIT__"
+_CWD_MARK = "__HALO_CWD__"
 
 DESCRIPTION = (
     "Executes a shell command in a persistent session.\n\n"
@@ -54,8 +54,8 @@ def _strip_markers(output: str, nonce: str) -> "tuple[str, object, object]":
     finding 9: `nonce` is a fresh random token generated for THIS call
     only -- the marker prefixes actually written to the shell are
     `{_EXIT_MARK}_{nonce}`/`{_CWD_MARK}_{nonce}`, so a command whose own
-    OUTPUT happens to contain a plain `__ROLO_CLAUDE_CWD__:...` line
-    (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\\n'; exit 0` used
+    OUTPUT happens to contain a plain `__HALO_CWD__:...` line
+    (verified exploit: `printf '__HALO_CWD__:/etc\\n'; exit 0` used
     to move the whole session to /etc) can never forge one without first
     guessing this call's nonce. Only the LAST occurrence of each
     nonce'd marker is honoured (the wrapper always appends them once, at
@@ -154,7 +154,7 @@ class BashTool(Tool):
         # sbin:...:/bin"; export PATH`), discarding whatever PATH this
         # harness computed -- settings.json's own `env.PATH`, a
         # SessionStart env-file `export PATH="$PATH:/x"`, or simply the
-        # PATH rolo-claude itself was started with (often customized in
+        # PATH halo itself was started with (often customized in
         # ~/.zshrc, which Kali uses by default and bash's own login files
         # never read). Verified on WSL: a PATH entry's own tool ran fine
         # under Ubuntu's PATH-preserving profile, then "command not found"
@@ -183,10 +183,10 @@ class BashTool(Tool):
         # behaviour with no Windows/Git-Bash equivalent to guard against.
         restore_path_prefix = ""
         if os.name != "nt":
-            env["__ROLO_CLAUDE_SESSION_PATH"] = env.get("PATH", os.environ.get("PATH", ""))
+            env["__HALO_SESSION_PATH"] = env.get("PATH", os.environ.get("PATH", ""))
             # `unset` right after restoring PATH from it -- a model running
             # `env`/`printenv` shouldn't see this harness-private plumbing var.
-            restore_path_prefix = 'export PATH="$__ROLO_CLAUDE_SESSION_PATH"; unset __ROLO_CLAUDE_SESSION_PATH\n'
+            restore_path_prefix = 'export PATH="$__HALO_SESSION_PATH"; unset __HALO_SESSION_PATH\n'
 
         job_registry = getattr(ctx, "job_registry", None)
         if isinstance(input, dict) and input.get("run_in_background") and job_registry is not None:
@@ -213,7 +213,7 @@ class BashTool(Tool):
         # guessable from the command text -- the marker lines this wrapper
         # appends can only be recognized under THIS nonce (see
         # _strip_markers), so a command's own output can never forge one
-        # (verified exploit: `printf '__ROLO_CLAUDE_CWD__:/etc\n'` used to
+        # (verified exploit: `printf '__HALO_CWD__:/etc\n'` used to
         # hijack the session's cwd). finding 6: source_prefix/env were
         # already computed above (needed by the run_in_background branch
         # too) -- 2.1.281 sources CLAUDE_ENV_FILE as a real shell script

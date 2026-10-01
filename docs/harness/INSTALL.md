@@ -1,6 +1,6 @@
-# Installing rolo-claude
+# Installing halo
 
-`rolo-claude` is a standalone, Claude-Code-compatible harness (full-screen TUI +
+`halo` is a standalone, Claude-Code-compatible harness (full-screen TUI +
 `-p` print mode + the older `claude-bridge` proxy as a subcommand) driving
 OpenRouter/Databricks models. **Kali Linux is the primary target platform** --
 install there first and treat Windows as the secondary/build host.
@@ -10,13 +10,65 @@ but recommended (both launchers below fall back to plain `pip`/`python3` when
 it's absent).
 
 **Short version**: install with one of the two options below, then run
-`rolo-claude init` -- it picks a preset, sets up credentials, sets a default
+`halo init` -- it picks a preset, sets up credentials, sets a default
 model, runs `doctor`, sends a live pong, and (on Linux) offers the `rg`/PATH
 fixes, all in one command, and is always safe to re-run. Everything else in
 this file is the manual/reference version of what `init` automates, plus the
 offline/work-box and reproducible-install recipes it doesn't cover.
 
+## Upgrading from rolo-claude 1.0.1
+
+`halo` 2.0.0 is a rename, not a fresh product -- but the installed console
+script from 1.0.1 is already named `rolo-claude`, and every installer
+either refuses outright or does something surprising when this checkout's
+NEW `halo`/`rolo-claude` pair tries to land next to it:
+
+- `uv tool install --editable .` aborts with `Executable already exists:
+  rolo-claude (use --force)`.
+- `pipx install --editable .` prints `File exists ... Not modifying`, so
+  the OLD `rolo-claude` keeps running 1.0.1.
+- `pip install --user -e .` silently overwrites it, and a LATER
+  `pip uninstall rolo-claude` would delete halo's own alias with it.
+
+**Uninstall the old tool first**, with whichever installer you used for
+it:
+
+```sh
+uv tool uninstall rolo-claude      # installed with `uv tool install`
+pipx uninstall rolo-claude         # installed with `pipx`
+pip uninstall rolo-claude          # installed with `pip install --user -e .`
+```
+
+Then install `halo` normally (Option 1/2 below). Or skip the uninstall and
+pass `--force` instead: `uv tool install --editable . --force`.
+
+Either way, once `halo` is installed:
+
+- The state directory migrates itself the first time anything in `halo`
+  resolves it: an existing `~/.rolo-claude` is renamed (never copied) to
+  `~/.halo`, announced with one stderr line. No link is created at the old
+  location -- after this first run, `~/.rolo-claude` is simply gone (a
+  trailing-slash `rm -rf ~/.rolo-claude/` on a leftover link would follow
+  it and empty `~/.halo` right along with it, so the decision is to leave
+  nothing behind there at all).
+- Use only `halo` from here on, and **do not use the separate, actually-
+  still-installed `rolo-claude` 1.0.1 binary again** once `~/.halo` exists
+  -- with the real `~/.rolo-claude` renamed away and no link left behind,
+  it would start from a truly empty state directory the next time it runs.
+  (`rolo-claude` the deprecated CONSOLE-SCRIPT ALIAS that ships inside
+  `halo` itself is a different thing and keeps working forever -- one
+  notice line, then runs exactly like `halo`; it's the separate 1.0.1
+  *install* that must not be used again.)
+- If your box somehow ends up with both `~/.rolo-claude` and `~/.halo`
+  holding real data (most commonly a rename that failed partway through,
+  e.g. a locked file on Windows), `halo doctor` reports a WARN naming both
+  paths -- follow its fix.
+
 ## Kali / Linux
+
+Upgrading from rolo-claude 1.0.1? Read "Upgrading from rolo-claude 1.0.1"
+above FIRST -- the plain `uv tool install --editable .` below aborts
+outright on a box that already has the 1.0.1 tool installed.
 
 ### Option 1 -- `uv tool install` (recommended)
 
@@ -25,11 +77,11 @@ packages, sidesteps Debian/Kali's PEP 668 "externally-managed-environment"
 guard entirely) and puts a console script on `~/.local/bin`:
 
 ```sh
-cd /path/to/rolo-claude
+cd /path/to/halo-harness
 uv tool install --editable .
 ```
 
-This produces `~/.local/bin/rolo-claude`. `--editable` means it keeps reading
+This produces `~/.local/bin/halo`. `--editable` means it keeps reading
 this checkout's source directly -- pull/edit the repo and the installed
 command picks it up immediately, no reinstall needed (only a NEW/removed
 dependency in `pyproject.toml` needs a re-run of the install command).
@@ -40,24 +92,24 @@ If `uv` isn't on PATH yet, see <https://docs.astral.sh/uv/getting-started/instal
 ### Option 2 -- `pip install --user -e .`
 
 ```sh
-cd /path/to/rolo-claude
+cd /path/to/halo-harness
 pip install --user -e .
 ```
 
-Also lands on `~/.local/bin/rolo-claude` (pip's own `--user` console-script
+Also lands on `~/.local/bin/halo` (pip's own `--user` console-script
 location), editable the same way. **Kali 2024.x+ / Debian trixie+ enable PEP
 668** and this will refuse with `error: externally-managed-environment` on a
 system Python. Three ways around it, in order of preference:
 
 1. Use Option 1 (`uv tool install`) instead -- it never hits this at all.
-2. Install into a venv: `python3 -m venv ~/.venvs/rolo-claude && ~/.venvs/rolo-claude/bin/pip install -e .`, then symlink or wrap `~/.venvs/rolo-claude/bin/rolo-claude` onto your PATH.
+2. Install into a venv: `python3 -m venv ~/.venvs/halo && ~/.venvs/halo/bin/pip install -e .`, then symlink or wrap `~/.venvs/halo/bin/halo` onto your PATH.
 3. Last resort: `pip install --user -e . --break-system-packages`.
 
 ### Make sure `~/.local/bin` is on PATH
 
 Common gotcha on a fresh Kali box: `~/.local/bin` is on PATH for an
 interactive login shell but not always for scripts/non-login shells/tmux. If
-`rolo-claude --version` says "command not found" right after installing,
+`halo --version` says "command not found" right after installing,
 add to `~/.bashrc`/`~/.zshrc`:
 
 ```sh
@@ -66,51 +118,51 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### No install at all (dev checkout)
 
-`bin/rolo-claude` (POSIX shell) works with zero PACKAGING step -- it
-prefers `~/.local/bin/rolo-claude` when present (Option 1/2 above),
-otherwise falls back to `PYTHONPATH=<repo> python3 -m rolo_claude` from
+`bin/halo` (POSIX shell) works with zero PACKAGING step -- it
+prefers `~/.local/bin/halo` when present (Option 1/2 above),
+otherwise falls back to `PYTHONPATH=<repo> python3 -m halo_harness` from
 this checkout:
 
 ```sh
-ln -s "$(pwd)/bin/rolo-claude" ~/bin/rolo-claude   # a symlink, not a copy -- see below
-chmod +x bin/rolo-claude
+ln -s "$(pwd)/bin/halo" ~/bin/halo   # a symlink, not a copy -- see below
+chmod +x bin/halo
 ```
 
 Symlink it, don't copy it (H9 whole-tree review finding 24): a bare `cp`
 severs the connection back to this checkout entirely -- there is no
-`rolo_claude/` package sitting next to a lone copied file in `~/bin`, so
+`halo_harness/` package sitting next to a lone copied file in `~/bin`, so
 it can never work no matter what. A symlink keeps pointing at the real
 checkout, and the script itself resolves that symlink (`readlink -f`)
 back to this directory before setting `PYTHONPATH`.
 
 This step alone does **not** install this harness's Python dependencies
-(textual, rich, mcp, ...) -- it only makes the `rolo-claude` COMMAND
+(textual, rich, mcp, ...) -- it only makes the `halo` COMMAND
 reachable on PATH. Something still has to have installed those
 dependencies somewhere `python3` can import them from: either run one of
 the `pip install -e .`/`uv tool install --editable .` recipes above at
 least once in this same checkout (their own console-script entry point is
 what line 1 of this section prefers -- once that exists, THIS symlink is
 redundant, though harmless to keep), or point `python3` at a venv that
-already has them (activate it before running `rolo-claude`, or hardcode
+already has them (activate it before running `halo`, or hardcode
 its interpreter on this script's own shebang line).
 
 ## Windows
 
 ```powershell
-cd C:\path\to\rolo-claude
+cd C:\path\to\halo-harness
 uv tool install --editable .
 ```
 
-Produces `%USERPROFILE%\.local\bin\rolo-claude.exe`. `~\bin\rolo-claude.cmd`
+Produces `%USERPROFILE%\.local\bin\halo.exe`. `~\bin\halo.cmd`
 is a PATH wrapper that prefers that exe and falls back to
-`python -m rolo_claude` from this checkout when the exe isn't installed yet --
+`python -m halo_harness` from this checkout when the exe isn't installed yet --
 copy/adapt it for another machine (a teammate substitutes their own repo
 path in the `else` branch).
 
 ## Work box (offline install)
 
 Some boxes only reach Databricks (over a VPN) and have no route to PyPI at
-all. `tools/vendor_wheels.py` pre-downloads every wheel `rolo-claude` needs
+all. `tools/vendor_wheels.py` pre-downloads every wheel `halo` needs
 (`requirements.lock`'s full pinned closure -- textual, rich, mcp,
 pydantic-core and everything under them -- plus the setuptools/wheel build
 backend) for Linux/cp311/cp312/cp313 (Debian 13 and Kali rolling both ship
@@ -127,7 +179,7 @@ python tools/vendor_wheels.py --platform manylinux2014_aarch64   # arm64 work bo
 # (a fresh Python >=3.12 venv has no setuptools/pip preinstalled at all --
 # see the note below on why this must be a venv AND must NOT pass
 # --no-build-isolation):
-python3 -m venv ~/.venvs/rolo-claude && source ~/.venvs/rolo-claude/bin/activate
+python3 -m venv ~/.venvs/halo && source ~/.venvs/halo/bin/activate
 pip install --no-index --find-links=wheels -e .
 ```
 
@@ -164,12 +216,12 @@ that lock file, not something that stays in sync on its own.
 
 Databricks' own `ug` CLI writes `~/.claude/ucode-settings.json` (gateway URL
 and token) when a user has already set up unity-gateway access for the
-stock Claude Code CLI on that box. `rolo-claude` reads it as one more source
+stock Claude Code CLI on that box. `halo` reads it as one more source
 in the same Databricks-credential discovery chain the main README's Install
 section documents (env vars first, then this file) -- a work box already
-configured for `ug` needs no separate rolo-claude setup step at all.
+configured for `ug` needs no separate halo setup step at all.
 
-### `rolo-claude doctor --work`
+### `halo doctor --work`
 
 A preset for exactly this box: VPN reachability of the Databricks host, an
 actual token-validity probe (`GET /api/2.0/serving-endpoints`, or a 1-token
@@ -180,7 +232,7 @@ model -- as runnable probes with a clear OK/WARN/MISSING line each, not just
 prose. Run it any time this box's Databricks setup is in doubt:
 
 ```sh
-rolo-claude doctor --work
+halo doctor --work
 ```
 
 Off the VPN (including from the build host that produced `wheels/`), every
@@ -192,11 +244,11 @@ supplied the token, and distinguishes a bad token (401) from the IP access
 list (403 with Databricks' own wording) from a token that can run inference
 but not list endpoints (403 without it) from a wrong path (404).
 
-`rolo-claude doctor --work --probe-all [--both] [--tools] [--only <glob>]`
+`halo doctor --work --probe-all [--both] [--tools] [--only <glob>]`
 goes further: one short pong through every chat-shaped endpoint the catalog
 knows about, on its own chosen path (`--both` also probes the anthropic
 gateway for Claude/GLM/Kimi; `--tools` adds a one-tool-call check), and a
-JSON report at `~/.rolo-claude/work-matrix-<date>.json` naming endpoints
+JSON report at `~/.halo/work-matrix-<date>.json` naming endpoints
 only -- no host, no token -- to paste back for review. See the README's
 "Databricks at work" section for `team.json` (shared host/default-model/
 gateway-preference setup) and `/models refresh`.
@@ -221,8 +273,8 @@ exactly, e.g. `uv pip sync requirements.lock` inside one.
 ## Verify
 
 ```sh
-rolo-claude --version          # rolo-claude 0.4.1
-rolo-claude doctor             # read-only environment check: Python, ~/.claude,
+halo --version          # halo 0.4.1
+halo doctor             # read-only environment check: Python, ~/.claude,
                                 # env file, OpenRouter/Databricks, claude/node/rg
                                 # on PATH, $VISUAL/$EDITOR, tmux mouse mode, a
                                 # usable Bash shell, clipboard backend, MCP
@@ -233,27 +285,29 @@ rolo-claude doctor             # read-only environment check: Python, ~/.claude,
 
 ## Configuration
 
-`rolo-claude init` does everything below for you in one command (see the top
+`halo init` does everything below for you in one command (see the top
 of this file) -- read on for the manual/reference version of the same steps.
 
-Put `OPENROUTER_API_KEY` in `~/.config/vibes-hacker/env` (`KEY=value`, `#`
-comments, optional leading `export`; override the path with `BRIDGE_ENV_FILE`)
+Put `OPENROUTER_API_KEY` in `~/.config/halo/env` (`KEY=value`, `#`
+comments, optional leading `export`; override the path with `HALO_ENV_FILE`,
+legacy `BRIDGE_ENV_FILE` still honoured; a pre-2.0.0 `~/.config/
+vibes-hacker/env` is still read when the new path doesn't exist yet)
 or export it yourself. Databricks credentials are discovered automatically
-the same way `rolo-claude proxy`/`bridge.py` always has -- see the main
+the same way `halo proxy`/`bridge.py` always has -- see the main
 README's Install section for the full discovery order.
 
 ## Running
 
 ```sh
-rolo-claude                              # full-screen TUI (needs a real terminal)
-rolo-claude "read README.md"             # TUI, prompt pre-filled as the first turn
-rolo-claude -p "reply with the word pong"  # print mode, scriptable/headless
-rolo-claude --demo                       # scripted TUI walkthrough, no network/model needed
-rolo-claude --demo -p                    # same script through print mode instead
-rolo-claude proxy --serve                # the older claude-bridge proxy subcommand
+halo                              # full-screen TUI (needs a real terminal)
+halo "read README.md"             # TUI, prompt pre-filled as the first turn
+halo -p "reply with the word pong"  # print mode, scriptable/headless
+halo --demo                       # scripted TUI walkthrough, no network/model needed
+halo --demo -p                    # same script through print mode instead
+halo proxy --serve                # the older claude-bridge proxy subcommand
 ```
 
-**The full-screen TUI needs a real interactive terminal.** Bare `rolo-claude`
+**The full-screen TUI needs a real interactive terminal.** Bare `halo`
 (no `-p`) checks `stdin.isatty()` before it ever imports `textual`; when
 stdin isn't a tty (piped input, a subprocess, a cron/systemd job with no
 console) it prints one line to stderr and exits 2 instead of hanging. This is
@@ -263,12 +317,12 @@ attach a tty (e.g. proving it renders inside CI, or piping its output through
 another tool), allocate a pty explicitly:
 
 ```sh
-script -q -c "rolo-claude --demo" /dev/null
+script -q -c "halo --demo" /dev/null
 ```
 
 ## Terminal notes (Linux acceptance)
 
-rolo-claude's TUI is built on Textual, which targets any modern terminal
+halo's TUI is built on Textual, which targets any modern terminal
 (xterm, kitty, gnome-terminal, tmux, and others) -- this project's own
 acceptance record has directly exercised WSL Ubuntu's tmux over SSH (see
 `docs/harness/ACCEPTANCE-2026-09-25.md`); a mouse on/off matrix across the
@@ -284,31 +338,31 @@ get the most out of it, on any of them.
   text some OTHER way than what a Ctrl+C-on-selection copy gives you (e.g.
   selecting across a scrolled-off region, or copying into a completely
   different app). Inside tmux specifically, mouse mode is tmux's own
-  setting (`set -g mouse on`, on by default in modern tmux) -- rolo-claude
+  setting (`set -g mouse on`, on by default in modern tmux) -- halo
   just receives whatever tmux forwards; toggle it in tmux itself
   (`tmux set -g mouse off` for a session) if you want the terminal's native
   selection to be the DEFAULT instead of needing Shift.
 - **Clipboard (OSC 52)**: Ctrl+C on a selected transcript run copies via
   OSC 52, which works over SSH and through tmux (with tmux's own
   `set -g set-clipboard on`, the default) without any extra tooling. As a
-  second, best-effort mechanism alongside it, rolo-claude also pipes the
+  second, best-effort mechanism alongside it, halo also pipes the
   same text through `wl-copy` (Wayland) or `xclip`/`xsel` (X11) if one is
   on PATH -- useful on a terminal/multiplexer config that doesn't relay OSC
   52. Neither is required for the primary OSC 52 path to work; install one
   (`apt install xclip` or `wl-clipboard`) only if copy isn't reaching your
   system clipboard and you want the fallback active too.
 - **Resize**: the layout re-flows live (Textual's own resize handling);
-  nothing rolo-claude does needs a restart after resizing a pane/window,
+  nothing halo does needs a restart after resizing a pane/window,
   including the prompt's own auto-grow (1-8 rows, wrap-aware).
-- **Ctrl+Z / `fg`**: rolo-claude never binds Ctrl+Z itself, so it reaches
+- **Ctrl+Z / `fg`**: halo never binds Ctrl+Z itself, so it reaches
   your shell as the normal Unix job-control suspend (SIGTSTP); `fg` resumes
   the TUI cleanly with no hang or redraw glitch (Textual repaints on
   resume).
 - **Chords and the which-key overlay** (`Ctrl+X ...`) work identically
   across all four terminals above; `tmux`'s own prefix key (default
-  `Ctrl+B`) doesn't collide with rolo-claude's `Ctrl+X` chord prefix, but
+  `Ctrl+B`) doesn't collide with halo's `Ctrl+X` chord prefix, but
   if you've remapped tmux's prefix to `Ctrl+X` yourself, remap
-  rolo-claude's instead via `~/.claude/keybindings.json` (see
+  halo's instead via `~/.claude/keybindings.json` (see
   `/keybindings` for the live list, and the `keybindings-help` skill for
   the file format).
 - **SSH**: everything above (mouse, OSC 52 clipboard, resize, chords) is
@@ -331,14 +385,14 @@ a future version of that suite adds a byte-comparison mode that needs it.
 ### Cross-checking on WSL from the Windows build host
 
 Every milestone's suites must stay green on Linux, not just Windows. From a
-Windows checkout, with a one-time `python3 -m venv ~/rolo-claude-wt-venv &&
-~/rolo-claude-wt-venv/bin/pip install -e /mnt/c/path/to/rolo-claude` done
+Windows checkout, with a one-time `python3 -m venv ~/halo-harness-wt-venv &&
+~/halo-harness-wt-venv/bin/pip install -e /mnt/c/path/to/halo-harness` done
 once inside WSL to create the venv:
 
 ```sh
 wsl -e bash -lc 'rsync -a --delete --exclude .git --exclude __pycache__ --exclude wheels \
-  ~/Documents/vibes/appDev/rolo-claude/ ~/rolo-claude-wt/ \
-  && cd ~/rolo-claude-wt && source ~/rolo-claude-wt-venv/bin/activate \
+  ~/Documents/vibes/appDev/Halo-Harness/ ~/halo-harness-wt/ \
+  && cd ~/halo-harness-wt && source ~/halo-harness-wt-venv/bin/activate \
   && python3 tests/run_all.py | tail -5 \
   && python3 test_bridge.py | tail -5 \
   && python3 test_tui.py | tail -5'
@@ -353,9 +407,9 @@ to catch that class of bug before it reaches the Kali VM.
 
 - **`externally-managed-environment` from pip** -- see the PEP 668 note under
   Option 2 above; easiest fix is `uv tool install --editable .` instead.
-- **`rolo-claude: command not found` right after installing** -- `~/.local/bin`
+- **`halo: command not found` right after installing** -- `~/.local/bin`
   isn't on PATH yet; see the PATH note above.
-- **Bare `rolo-claude` exits 2 immediately with a "not a tty" message** --
+- **Bare `halo` exits 2 immediately with a "not a tty" message** --
   expected outside a real terminal; see Running above.
 - **A different `python3`/version than expected gets used** -- both
   `uv tool install` and `pip install --user -e .` bind to whichever
@@ -364,5 +418,5 @@ to catch that class of bug before it reaches the Kali VM.
   explicitly.
 - Everything else (proxy port conflicts, VPN/Databricks reachability, stale
   server hash, `BRIDGE_DUMP=1` request dumps, ...) -- see the main
-  `README.md`'s own Troubleshooting section; `rolo-claude proxy` is the exact
+  `README.md`'s own Troubleshooting section; `halo proxy` is the exact
   same `bridge.py` underneath.

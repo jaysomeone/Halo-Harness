@@ -1,4 +1,4 @@
-"""tests.test_mcp_manager -- rolo_claude/mcp/{client,stdio,http_sse,
+"""tests.test_mcp_manager -- halo_harness/mcp/{client,stdio,http_sse,
 manager}.py (H3 scope A): name sanitising, ${VAR}/${VAR:-d} expansion +
 credential blanking, timeout resolution, McpServerConfig parsing, scope
 resolution precedence + approval states, McpLoop, and live connections
@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.mcp import manager as M
+from halo_harness.mcp import manager as M
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 FAKE_SERVER_ARGS = [sys.executable, "-m", "tests.helpers.fake_mcp_server"]
@@ -261,7 +261,7 @@ def test_resolve_mcp_config_flag_long_inline_json_no_slash(ctx: Ctx):
 
 @test
 def test_load_mcp_config_arg_never_raises_on_a_bad_path(ctx: Ctx):
-    from rolo_claude.mcp.manager import _load_mcp_config_arg
+    from halo_harness.mcp.manager import _load_mcp_config_arg
     with tempfile.TemporaryDirectory() as td:
         # a non-JSON-looking value that ALSO can't be checked as a path
         # cleanly on every OS (a NUL byte is invalid on both Windows and
@@ -387,7 +387,7 @@ def test_resolve_extra_dynamic_dropped_under_managed_mcp_json_with_notice(ctx: C
 
 @test
 def test_managed_denied_mcp_servers_removes_a_server(ctx: Ctx):
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj5")
     claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
     settings = Settings(raw={"deniedMcpServers": [{"serverName": "github"}]}, layers=[], errors=[])
@@ -398,7 +398,7 @@ def test_managed_denied_mcp_servers_removes_a_server(ctx: Ctx):
 
 @test
 def test_managed_allowed_mcp_servers_narrows_to_the_list(ctx: Ctx):
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj6")
     claude_json = _claude_json(user={"github": {"command": "gh"}, "other": {"command": "o"}})
     settings = Settings(raw={"allowedMcpServers": [{"serverName": "github"}]}, layers=[], errors=[])
@@ -412,7 +412,7 @@ def test_allowed_mcp_servers_empty_list_is_lockdown(ctx: Ctx):
     entries -- means "users can use no servers of their own", distinct
     from the key being entirely absent (no restriction at all, covered by
     every other resolve_server_configs test that never sets it)."""
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj6b")
     claude_json = _claude_json(user={"github": {"command": "gh"}})
     settings = Settings(raw={"allowedMcpServers": []}, layers=[], errors=[])
@@ -422,7 +422,7 @@ def test_allowed_mcp_servers_empty_list_is_lockdown(ctx: Ctx):
 
 @test
 def test_denied_mcp_servers_server_command_matches_the_exact_invocation(ctx: Ctx):
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj6c")
     claude_json = _claude_json(user={"a": {"command": "npx", "args": ["-y", "bad-server"]},
                                       "b": {"command": "npx", "args": ["-y", "good-server"]}})
@@ -435,7 +435,7 @@ def test_denied_mcp_servers_server_command_matches_the_exact_invocation(ctx: Ctx
 
 @test
 def test_denied_mcp_servers_server_url_wildcard_matches(ctx: Ctx):
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj6d")
     claude_json = _claude_json(user={
         "remote": {"type": "http", "url": "https://evil.example.com/mcp"},
@@ -455,7 +455,7 @@ def test_malformed_policy_entries_are_skipped_with_a_notice(ctx: Ctx):
     resolve_server_configs (finding 10's exact repro: `TypeError:
     unhashable type: 'dict'`) and must never match anything -- skipped,
     with a notice explaining why, and every server survives untouched."""
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     cwd = Path("/tmp/proj6e")
     claude_json = _claude_json(user={"github": {"command": "gh"}})
     settings = Settings(raw={"deniedMcpServers": [
@@ -477,7 +477,7 @@ def test_disabled_mcpjson_servers_read_from_settings_never_removes_other_scopes(
     """finding 11: (a) disabledMcpjsonServers is read from the resolved
     settings too, not just ~/.claude.json; (b) it removes ONLY the actual
     .mcp.json-sourced entry, never a same-named user/local/flag server."""
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     with tempfile.TemporaryDirectory() as td:
         cwd = Path(td)
         (cwd / ".mcp.json").write_text('{"mcpServers": {"github": {"command": "project-gh"}}}', encoding="utf-8")
@@ -490,7 +490,7 @@ def test_disabled_mcpjson_servers_read_from_settings_never_removes_other_scopes(
 
 @test
 def test_enabled_mcpjson_servers_read_from_settings(ctx: Ctx):
-    from rolo_claude.config.settings import Settings
+    from halo_harness.config.settings import Settings
     with tempfile.TemporaryDirectory() as td:
         cwd = Path(td)
         (cwd / ".mcp.json").write_text('{"mcpServers": {"a": {"command": "a"}}}', encoding="utf-8")
@@ -503,7 +503,7 @@ def test_enabled_mcpjson_servers_read_from_settings(ctx: Ctx):
 
 @test
 def test_mcp_loop_runs_a_coroutine_and_returns_its_result(ctx: Ctx):
-    from rolo_claude.mcp.client import McpLoop
+    from halo_harness.mcp.client import McpLoop
     loop = McpLoop()
     try:
         async def _add(a, b):
@@ -517,7 +517,7 @@ def test_mcp_loop_runs_a_coroutine_and_returns_its_result(ctx: Ctx):
 def test_mcp_loop_timeout_raises(ctx: Ctx):
     import asyncio
     import concurrent.futures
-    from rolo_claude.mcp.client import McpLoop
+    from halo_harness.mcp.client import McpLoop
     loop = McpLoop()
     try:
         async def _slow():
@@ -534,7 +534,7 @@ def test_mcp_loop_timeout_raises(ctx: Ctx):
 
 @test
 def test_mcp_loop_close_is_idempotent(ctx: Ctx):
-    from rolo_claude.mcp.client import McpLoop
+    from halo_harness.mcp.client import McpLoop
     loop = McpLoop()
     loop.run(_noop_coro())
     loop.close()
@@ -556,7 +556,7 @@ def test_progress_keepalive_extends_run_abortable_past_its_own_timeout(ctx: Ctx)
     progress signal, not just whatever the SDK's internal read timeout
     does on its own."""
     import asyncio
-    from rolo_claude.mcp.client import McpLoop, ProgressKeepalive
+    from halo_harness.mcp.client import McpLoop, ProgressKeepalive
     loop = McpLoop()
     keepalive = ProgressKeepalive()
 
@@ -584,7 +584,7 @@ def test_run_abortable_without_keepalive_still_times_out_normally(ctx: Ctx):
     signal still times out on schedule."""
     import asyncio
     import concurrent.futures
-    from rolo_claude.mcp.client import McpLoop
+    from halo_harness.mcp.client import McpLoop
     loop = McpLoop()
     try:
         async def _slow():
@@ -607,7 +607,7 @@ def test_wait_future_abortable_honours_abort(ctx: Ctx):
     import concurrent.futures
     import threading
     import time as _time
-    from rolo_claude.mcp.client import McpAborted, McpLoop
+    from halo_harness.mcp.client import McpAborted, McpLoop
     loop = McpLoop()
     try:
         fut = concurrent.futures.Future()  # never resolved -- simulates a hung connect/close
@@ -635,7 +635,7 @@ def test_http_transport_falls_back_to_sse_on_connect_failure(ctx: Ctx):
     must still connect via the sse fallback instead of failing the whole
     handle."""
     import asyncio
-    from rolo_claude.mcp import http_sse
+    from halo_harness.mcp import http_sse
 
     calls = {"http": 0, "sse": 0}
 
@@ -669,7 +669,7 @@ def test_http_transport_raises_the_original_error_when_sse_also_fails(ctx: Ctx):
     server that's simply unreachable/misconfigured, not a transport
     mismatch."""
     import asyncio
-    from rolo_claude.mcp import http_sse
+    from halo_harness.mcp import http_sse
 
     async def _fake_connect_http(*, url, headers, connect_timeout):
         raise RuntimeError("original streamable-http failure")
@@ -787,7 +787,7 @@ def test_controller_reconnect_mcp_threads_abort_through_to_a_slow_reconnect(ctx:
     not just the bottom primitive tested in isolation elsewhere."""
     import threading
     import time as _time
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
 
     env = {"FAKE_MCP_MODE": "slow", "FAKE_MCP_SLEEP_S": "5"}
     cfg = M.McpServerConfig(name="slowreconnect", type="stdio", command=sys.executable,
@@ -825,7 +825,7 @@ def test_controller_reconnect_mcp_threads_abort_through_to_a_slow_reconnect(ctx:
 # ---- live connections through the REAL fake stdio server -------------------
 
 def _fake_cfg(name="fake", *, mode=None, tool_count=None, cwd=None):
-    from rolo_claude.mcp.manager import McpServerConfig
+    from halo_harness.mcp.manager import McpServerConfig
     env = {}
     if mode:
         env["FAKE_MCP_MODE"] = mode
@@ -838,8 +838,8 @@ def _fake_cfg(name="fake", *, mode=None, tool_count=None, cwd=None):
 
 @test
 def test_handle_connects_lists_tools_and_closes(ctx: Ctx):
-    from rolo_claude.mcp.client import McpLoop
-    from rolo_claude.mcp.manager import McpServerHandle
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerHandle
     loop = McpLoop()
     h = McpServerHandle(_fake_cfg(), loop, tool_env=dict(os.environ), cwd=REPO_DIR)
     try:
@@ -858,7 +858,7 @@ def test_handle_connects_lists_tools_and_closes(ctx: Ctx):
 
 @test
 def test_manager_start_all_is_bounded_by_mcp_timeout(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     old = os.environ.pop("MCP_TIMEOUT", None)
     try:
         os.environ["MCP_TIMEOUT"] = "150"
@@ -881,7 +881,7 @@ def test_manager_start_all_is_bounded_by_mcp_timeout(ctx: Ctx):
 
 @test
 def test_manager_crash_mode_fails_cleanly(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"crash": _fake_cfg("crash", mode="crash")}, tool_env=dict(os.environ))
     try:
         mgr.start_all()
@@ -894,7 +894,7 @@ def test_manager_crash_mode_fails_cleanly(ctx: Ctx):
 
 @test
 def test_manager_starts_multiple_servers_in_parallel(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"a": _fake_cfg("a"), "b": _fake_cfg("b"), "c": _fake_cfg("c")}, tool_env=dict(os.environ))
     try:
         t0 = time.monotonic()
@@ -917,7 +917,7 @@ def test_manager_call_dispatches_a_real_tool(ctx: Ctx):
 
 @test
 def test_manager_all_tools_name_sorted_and_sanitised(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
     try:
         mgr.start_all()
@@ -931,7 +931,7 @@ def test_manager_all_tools_name_sorted_and_sanitised(ctx: Ctx):
 
 @test
 def test_manager_reconnect(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
     try:
         mgr.start_all()
@@ -945,7 +945,7 @@ def test_manager_reconnect(ctx: Ctx):
 
 @test
 def test_manager_resources_and_prompts(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
     try:
         mgr.start_all()
@@ -963,7 +963,7 @@ def test_manager_resources_and_prompts(ctx: Ctx):
 
 @test
 def test_manager_scales_to_300_tools(ctx: Ctx):
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"big": _fake_cfg("big", tool_count=300)}, tool_env=dict(os.environ))
     try:
         mgr.start_all()
@@ -996,7 +996,7 @@ def test_die_mid_call_marks_the_handle_failed_and_drops_session(ctx: Ctx):
     """finding 6: the server process dying mid-call must be detected --
     the call itself returns promptly (an error, not a hang), and the
     handle's status is no longer 'connected' afterward."""
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     cfg = _fake_cfg("fake")
     cfg.env["FAKE_MCP_EXTRA_TOOLS"] = "die_mid_call"
     mgr = McpManager({"fake": cfg}, tool_env=dict(os.environ))
@@ -1026,7 +1026,7 @@ def test_abort_during_call_tool_returns_in_under_1s(ctx: Ctx):
     """finding 4: an in-flight MCP call must poll `abort` in <=0.2s
     slices, not block for the tool's own (here, 6s) sleep."""
     import threading
-    from rolo_claude.mcp.client import McpAborted
+    from halo_harness.mcp.client import McpAborted
     with running_manager_ctx() as mgr:
         h = mgr.handles["fake"]
         abort = threading.Event()
@@ -1103,7 +1103,7 @@ def test_startup_timeout_then_close_all_leaves_no_child_and_no_future_exception(
     exception is exactly what `PYTHONWARNINGS=error::RuntimeWarning`
     would have caught as a cancel-scope RuntimeWarning before finding 15's
     fix)."""
-    from rolo_claude.mcp.manager import McpManager
+    from halo_harness.mcp.manager import McpManager
     with tempfile.TemporaryDirectory() as td:
         pid_file = Path(td) / "pid.txt"
         old = os.environ.pop("MCP_TIMEOUT", None)
@@ -1149,7 +1149,7 @@ def test_looks_like_auth_required_detection(ctx: Ctx):
     401-shaped exception) rather than via a real subprocess -- MCP auth/
     OAuth is an HTTP-transport concept with no stdio equivalent to
     reproduce it through (see fake_mcp_server.py's own docstring)."""
-    from rolo_claude.mcp.http_sse import looks_like_auth_required
+    from halo_harness.mcp.http_sse import looks_like_auth_required
 
     class _FakeResponse:
         status_code = 401
@@ -1168,8 +1168,8 @@ def test_needs_auth_state_via_injected_failure(ctx: Ctx):
     """A McpServerHandle whose transport raises a 401-shaped exception ends
     in state 'needs_auth', not 'failed' -- proven by monkeypatching
     `_open_transport` rather than requiring a live OAuth-gated server."""
-    from rolo_claude.mcp.client import McpLoop
-    from rolo_claude.mcp.manager import McpServerHandle
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerHandle
 
     loop = McpLoop()
     h = McpServerHandle(_fake_cfg(), loop, tool_env=dict(os.environ), cwd=REPO_DIR)
@@ -1195,8 +1195,8 @@ def test_headers_helper_does_not_block_other_loop_work(ctx: Ctx):
     the helper blocked the loop thread (the old sync `_resolved_headers`),
     the unrelated coroutine couldn't even START running until the helper
     finished."""
-    from rolo_claude.mcp.client import McpLoop
-    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
     py = sys.executable
     helper_cmd = f'"{py}" -c "import time,json; time.sleep(1.0); print(json.dumps({{\'X\': \'y\'}}))"'
     cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",
@@ -1223,8 +1223,8 @@ def test_headers_helper_skipped_for_untrusted_project_scope(ctx: Ctx):
     """binary-facts sec.9: "repo-resident config needs persisted trust" --
     an untrusted PROJECT-scope (.mcp.json-sourced) server's headersHelper
     must never run; only the static headers are used."""
-    from rolo_claude.mcp.client import McpLoop
-    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
     cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",
                            headers={"Static": "yes"}, headers_helper="echo should-never-run",
                            scope="project")
@@ -1245,8 +1245,8 @@ def test_headers_helper_runs_for_untrusted_non_project_scope(ctx: Ctx):
     user-scope server's headersHelper is the operator's OWN global
     config and must still run regardless of `trusted` (a fresh/untrusted
     project must not silently disable the user's own working setup)."""
-    from rolo_claude.mcp.client import McpLoop
-    from rolo_claude.mcp.manager import McpServerConfig, McpServerHandle
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
     py = sys.executable
     helper_cmd = f'"{py}" -c "import json; print(json.dumps({{\'X\': \'ran\'}}))"'
     cfg = McpServerConfig(name="s", type="http", url="https://example.invalid/mcp",

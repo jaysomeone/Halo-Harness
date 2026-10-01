@@ -44,7 +44,7 @@ markdown-it-py==4.2.0
     #   rich
     #   textual
 mcp==2.2.0
-    # via rolo-claude (pyproject.toml)
+    # via halo-harness (pyproject.toml)
 mcp-types==2.2.0
     # via mcp
 mdit-py-plugins==0.6.1
@@ -79,7 +79,7 @@ referencing==0.37.0
     #   jsonschema-specifications
 rich==15.0.0
     # via
-    #   rolo-claude (pyproject.toml)
+    #   halo-harness (pyproject.toml)
     #   textual
 rpds-py==2026.6.3
     # via
@@ -92,7 +92,7 @@ starlette==1.7.0
     #   mcp
     #   sse-starlette
 textual==8.2.8
-    # via rolo-claude (pyproject.toml)
+    # via halo-harness (pyproject.toml)
 truststore==0.10.4 ; sys_platform != 'emscripten'
     # via
     #   httpcore2

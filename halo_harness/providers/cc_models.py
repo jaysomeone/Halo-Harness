@@ -1,6 +1,6 @@
-"""rolo_claude.providers.cc_models -- H11 Part A: alias tables for the
+"""halo_harness.providers.cc_models -- H11 Part A: alias tables for the
 `cc:` route (the installed `claude` binary, driven headlessly under the
-user's OWN Claude subscription login -- rolo-claude never reads or
+user's OWN Claude subscription login -- halo never reads or
 replays Claude Code's OAuth credentials, see docs/harness/H11-brief.md)
 and the `ant:` route's matching first-class aliases (the SAME six model
 names resolved to real API ids, for ANTHROPIC_API_KEY pay-as-you-go
@@ -17,7 +17,7 @@ brief's own "Verified facts" and this milestone's report): `fable` ->
 `claude-opus-4-6`, `sonnet` -> Claude Code's OWN `sonnet` alias (today
 `claude-sonnet-5-5`), `sonnet-5` -> `claude-sonnet-5`, `haiku` -> Claude
 Code's own `haiku` alias (today the dated snapshot
-`claude-haiku-4-5-20251001`). `refresh_cc_catalog` (`rolo-claude models
+`claude-haiku-4-5-20251001`). `refresh_cc_catalog` (`halo models
 --cc --refresh`) re-derives the ant: targets for `sonnet`/`haiku` (the two
 whose target drifts over time) from a live `-p --max-turns 1` ping's own
 `modelUsage` key and caches the result to `<state_dir>/cc-models.json`,
@@ -101,7 +101,7 @@ _1M_SUFFIX = "[1m]"
 # the OpenRouter `anthropic/*` catalog rows already cached in this box's
 # own models.json (verified 2026-09-28); `adaptive_thinking` (brief Part
 # A: "adaptive-thinking rule for 4.6+/5.x") is INFORMATIONAL metadata only
-# -- surfaced by `rolo-claude models --cc` and doctor, never consulted by
+# -- surfaced by `halo models --cc` and doctor, never consulted by
 # request-building, since a `cc:` turn never builds a raw API request at
 # all (Claude Code does) and `ant:` reuses the existing native-Anthropic-
 # passthrough path unchanged. True for every opus>=4.6, every 5.x, and
@@ -168,9 +168,9 @@ CC_MODEL_TABLE["haiku"] = CC_MODEL_TABLE["claude-haiku-4-5-20251001"]
 
 
 class ClaudeCodeNotFoundError(Exception):
-    """No `claude` binary could be resolved (BRIDGE_CLAUDE_EXE unset, and
-    none on PATH or at ~/.local/bin) -- doctor.py's "install Claude Code"
-    case."""
+    """No `claude` binary could be resolved (HALO_CLAUDE_EXE/legacy
+    BRIDGE_CLAUDE_EXE unset, and none on PATH or at ~/.local/bin) --
+    doctor.py's "install Claude Code" case."""
 
 
 def _split_1m_suffix(bare: str) -> "tuple[str, str]":
@@ -215,7 +215,7 @@ _LATEST_POINTER_NOTE = {"opus": "latest Opus", "sonnet": "latest Sonnet"}
 def alias_display_detail(alias: str) -> str:
     """`-> <resolved-id>` (plus a "(latest Opus)"/"(latest Sonnet)" note for
     those two names) shown next to every `cc:`/`ant:` alias row in
-    `/model`, `rolo-claude models` and the init picker (`model_display.
+    `/model`, `halo models` and the init picker (`model_display.
     format_model_row`'s own generic `detail` bracket -- the SAME mechanism
     a Databricks row's `<family> · <path>` tag already uses, so the
     subscription enumeration reads the same way). Without this a reader has
@@ -244,7 +244,8 @@ def resolve_claude_launch_argv() -> "list[str]":
     ~/.local/bin/claude[.exe]) wrapped as a one-element list; raises
     ClaudeCodeNotFoundError (never returns None/[]) when nothing resolves,
     so every caller gets one exception type to catch."""
-    env_val = os.environ.get("BRIDGE_CLAUDE_EXE")
+    from halo_harness.config.paths import env_compat
+    env_val = env_compat("CLAUDE_EXE")
     if env_val:
         # posix=True (even on Windows): it is the only mode that strips
         # quotes at all, needed for a two-token "<python> <script>" value
@@ -257,11 +258,11 @@ def resolve_claude_launch_argv() -> "list[str]":
         # ['C:python.exe']). Every test in this tree that sets this var
         # double-quotes both tokens for exactly this reason.
         return shlex.split(env_val, posix=True)
-    from rolo_claude.mcp_setup import find_claude_exe
+    from halo_harness.mcp_setup import find_claude_exe
     exe = find_claude_exe()
     if not exe:
         raise ClaudeCodeNotFoundError(
-            "claude executable not found (BRIDGE_CLAUDE_EXE unset; looked on PATH and ~/.local/bin)"
+            "claude executable not found (HALO_CLAUDE_EXE unset; looked on PATH and ~/.local/bin)"
         )
     return [exe]
 
@@ -324,7 +325,7 @@ def claude_auth_status(*, timeout: float = 10.0, env: Optional[dict] = None) -> 
     except ClaudeCodeNotFoundError:
         return None
     if env is None:
-        from rolo_claude.providers.config import cc_child_env
+        from halo_harness.providers.config import cc_child_env
         env = cc_child_env(dict(os.environ))
     try:
         proc = subprocess.run(argv + ["auth", "status"], capture_output=True, text=True, timeout=timeout, env=env)
@@ -466,11 +467,11 @@ def profile_fields_for_cc_model(model_id: str) -> Optional[dict]:
     return CC_MODEL_TABLE.get(base)
 
 
-# ---- refresh cache (rolo-claude models --cc [--refresh]) ------------------
+# ---- refresh cache (halo models --cc [--refresh]) ------------------
 
 def _cc_models_cache_path(state_dir: Optional[Path] = None) -> Path:
     if state_dir is None:
-        from rolo_claude.config.paths import bridge_home
+        from halo_harness.config.paths import bridge_home
         state_dir = bridge_home()
     return Path(state_dir) / "cc-models.json"
 
@@ -494,7 +495,7 @@ def _cached_ant_alias(bare_name: str) -> Optional[str]:
 
 
 def refresh_cc_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.0) -> dict:
-    """`rolo-claude models --cc --refresh`: pings each of the nine bare
+    """`halo models --cc --refresh`: pings each of the nine bare
     aliases with a cheap `-p --max-turns 1 --tools "" --strict-mcp-config`
     call, reads the REAL canonical id back from the result JSON's
     `modelUsage` key, and caches `{"ant_aliases": {name: canonical_id},
@@ -517,7 +518,7 @@ def refresh_cc_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.
         argv = resolve_claude_launch_argv()
     except ClaudeCodeNotFoundError:
         return _load_cc_models_cache(state_dir)
-    from rolo_claude.providers.config import cc_child_env
+    from halo_harness.providers.config import cc_child_env
     env = cc_child_env(dict(os.environ))
     ant_aliases = dict(_load_cc_models_cache(state_dir).get("ant_aliases", {}))
     for name, cc_value in CC_ALIASES.items():

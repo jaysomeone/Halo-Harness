@@ -12,10 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_databricks import MockDatabricks
-from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import build_request_body
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
+from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import build_request_body
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
 
 test, TESTS = new_registry()
 

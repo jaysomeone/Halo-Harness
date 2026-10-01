@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers.errors import (
+from halo_harness.providers.errors import (
     AUTH, CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, PROVIDER_FAILURE, RATE_LIMIT,
     backoff_delay, classify_error_category, is_reasoning_replay_bug,
     parse_context_overflow, parse_databricks_rate_limit,

@@ -1,4 +1,4 @@
-"""rolo_claude.improve.draft -- H10 Part B2: ONE drafting model call over
+"""halo_harness.improve.draft -- H10 Part B2: ONE drafting model call over
 the evidence clusters, producing <= `improve.max_candidates` (8) candidates
 as JSON. Model precedence: config `improve.model` -> else the session's
 small model -> else the session model (`Session.call_small_model`, H10's
@@ -18,7 +18,7 @@ CANDIDATE_KINDS = ("memory", "rule", "skill")
 CANDIDATE_SCOPES = ("project", "user")
 CONFIDENCE_LEVELS = ("low", "med", "high")
 
-_SYSTEM_PROMPT = """You are the drafting step of rolo-claude's human-gated /improve command.
+_SYSTEM_PROMPT = """You are the drafting step of halo's human-gated /improve command.
 
 You will be given evidence clusters mined from recent session logs (repeated tool errors, \
 repair-layer hits, loop-breaker trips, user corrections, Read failures, recurring tool \
@@ -68,7 +68,7 @@ class Candidate:
     # H10 Part B: True iff ANY cited evidence excerpt originated in a
     # tool_result (a cluster excerpt's own `from_tool_output` flag) rather
     # than the user's own words -- carried onto the candidate so
-    # `rolo_claude.improve.apply`'s provenance comment and the ImproveCard's
+    # `halo_harness.improve.apply`'s provenance comment and the ImproveCard's
     # "derived from tool output" line never have to re-derive it from the
     # evidence refs a second time.
     from_tool_output: bool = False
@@ -92,7 +92,7 @@ def _lenient_parse(text: str) -> Optional[list]:
     reused rather than duplicated. A markdown code fence around the array
     is stripped first (a small model's own habit even when told "no
     markdown fence")."""
-    from rolo_claude.providers.hooks import args_repair
+    from halo_harness.providers.hooks import args_repair
 
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -167,7 +167,7 @@ def resolve_drafting_model_ref(session, configured_model: Optional[str]):
     `Session.call_small_model` use its own default fallback (small model or
     session model) unchanged."""
     if configured_model:
-        from rolo_claude.model import parse_model_ref
+        from halo_harness.model import parse_model_ref
         return parse_model_ref(configured_model)
     return None
 

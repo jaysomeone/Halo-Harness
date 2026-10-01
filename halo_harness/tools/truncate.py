@@ -1,4 +1,4 @@
-"""rolo_claude.tools.truncate -- result truncation to disk (H2 scope A): a
+"""halo_harness.tools.truncate -- result truncation to disk (H2 scope A): a
 tool result over its tool's `result_cap` is spilled in full to
 `<session_dir>/tool-results/<tool_use_id>.txt`; the model sees the head 60%
 + tail 30% of the cap, with the middle 10% replaced by a pointer line naming

@@ -1,11 +1,11 @@
-# H10 brief — telemetry (`stats --models`) + human-gated `/improve` (rolo-claude)
+# H10 brief — telemetry (`stats --models`) + human-gated `/improve` (halo)
 
 Approved by rolo 2026-09-24 after `reports/Self improving agent harnesses.md` ("Let's add the first
 2 bullet points"): **L0 telemetry from the session logs** and **a human-gated `/improve` command**
 (L1 memory/rules + L3 skills). NOT approved, do not build: settings proposals (L2), prompt
 optimisation (L4), code self-edits (L5), any automatic promotion.
 
-Repo: `~\Documents\vibes\appDev\rolo-claude\` (Windows build host; **Kali Linux is the
+Repo: `~\Documents\vibes\appDev\halo\` (Windows build host; **Kali Linux is the
 primary platform**). Baseline = the H9 commit (`v0.3.0`) on master, all suites green on Windows and
 WSL. You are the only worker on the tree. Do not commit (Fable verifies and commits).
 
@@ -24,13 +24,13 @@ WSL. You are the only worker on the tree. Do not commit (Fable verifies and comm
    tool_result error paths; steer/interrupt/compacted/max_steps nodes), `agent/repair.py`,
    `config/memory.py` (`write`, `update_index`, frontmatter), `config/claude_md.py` (rules
    discovery + post-compaction re-injection), `commands/skills.py`, `config_cli.py`
-   (`~/.rolo-claude/config.json`), `agent/sessions.py` (index.json), `tui/widgets/cards.py`
+   (`~/.halo/config.json`), `agent/sessions.py` (index.json), `tui/widgets/cards.py`
    (PermissionCard / PlanCard pattern), `headless.py`, `doctor.py`.
 
 ## Part A — Telemetry (L0)
-`rolo-claude stats [--models] [--tools] [--since 7d|30d|all] [--all-projects] [--session ID]
+`halo stats [--models] [--tools] [--since 7d|30d|all] [--all-projects] [--session ID]
 [--json]` and `/stats --models` in the TUI. Source of truth = the session logs under
-`~/.rolo-claude/sessions/<slug>/*.jsonl` (+ `subagents/`). **Never a new model-visible field.**
+`~/.halo/sessions/<slug>/*.jsonl` (+ `subagents/`). **Never a new model-visible field.**
 Add non-wire metadata to existing nodes where it is missing, and prove with a test that derived
 requests are byte-identical before and after:
 - `usage` node: `model`, `route` (or|dbx|ant + host), `provider` (the responding provider:
@@ -44,12 +44,12 @@ requests are byte-identical before and after:
   `spilled`.
 - turn-level nodes already logged (steer, interrupt, compacted, max_steps): count them.
 
-`rolo_claude/telemetry.py`: `scan(sessions_dir, since, slug|all) -> list[SessionSummary]`;
+`halo_harness/telemetry.py`: `scan(sessions_dir, since, slug|all) -> list[SessionSummary]`;
 `aggregate_by_model(...)` → rows per (model, provider): sessions, turns, model calls, tokens
 in/out/cached, cost, avg ttft/latency, `finish=length` %, retries/429s, overflows, tool calls,
 tool error %, repair-hit % by kind, edit failures (not_found + multiple_matches) %, steers,
 interrupts, compactions, loop-breaker trips; `aggregate_by_tool(...)`; top error classes with one
-example `session#seq` each. Cache `~/.rolo-claude/stats-cache.json` keyed by (path, size, mtime);
+example `session#seq` each. Cache `~/.halo/stats-cache.json` keyed by (path, size, mtime);
 a corrupt line is skipped and counted, never a crash. Output: rich table (honour `NO_COLOR`,
 `--json` = stable schema). `/stats --models` runs the scan off the UI thread (worker Command, as
 U5 did for `list_sessions`); bare `stats` keeps U5's current-session behaviour. `doctor` prints
@@ -61,7 +61,7 @@ was approved by rolo on a card (or by an explicit headless `--apply`); provenanc
 used to block; nothing drafts or writes automatically in `-p`; nothing interrupts a running turn,
 auto mode included — hints only.
 
-B1. **Evidence** (`rolo_claude/improve/evidence.py`): from the telemetry scan of the last `--since`
+B1. **Evidence** (`halo_harness/improve/evidence.py`): from the telemetry scan of the last `--since`
 (default 7 d; current project slug unless `--all-projects`) build failure clusters: (a) repeated
 tool errors of one `error_class` per tool; (b) repair-layer hits per model; (c) loop-breaker
 trips; (d) user corrections = a `user` node in the same turn after a tool error or an assistant
@@ -72,7 +72,7 @@ cluster keeps ≤ 6 excerpts of ≤ 600 chars with `session_id#seq` references a
 `from_tool_output` when the excerpt originated in a tool_result (WebFetch/MCP/file) rather than in
 the user's own words — shown on the card as "derived from tool output", nothing more.
 
-B2. **Drafting** (`rolo_claude/improve/draft.py`): ONE model call (config `improve.model` → else
+B2. **Drafting** (`halo_harness/improve/draft.py`): ONE model call (config `improve.model` → else
 the small model → else the session model) with a fixed system prompt + the clusters, asking for ≤
 `improve.max_candidates` (8) candidates as JSON: `{id, kind: memory|rule|skill, title, target:
 {scope: project|user, path}, body, rationale, evidence: ["<sid>#<seq>", …], confidence:
@@ -88,7 +88,7 @@ schema error → else "no candidates". Exact formats:
   `description`, `disable-model-invocation: true` (rolo removes it once he trusts the skill),
   `argument-hint` when it takes arguments; body ≤ 120 lines.
 Every artifact ends with a provenance comment:
-`<!-- rolo-claude improve: created=<iso> sessions=<ids> evidence=<n> model=<ref> from_tool_output=<bool> -->`.
+`<!-- halo improve: created=<iso> sessions=<ids> evidence=<n> model=<ref> from_tool_output=<bool> -->`.
 Only NEW files are created. A candidate may target an existing file only if that file carries the
 provenance comment (the card then shows a unified diff); user-authored files are never modified —
 the candidate gets a new name instead.
@@ -96,7 +96,7 @@ the candidate gets a new name instead.
 B3. **Review UX**: TUI `ImproveCard` per candidate (PermissionCard/PlanCard pattern): kind badge,
 target path, rendered body (Markdown) or diff, rationale, evidence list (`session#seq`; `o` opens
 the excerpt), provenance line; keys `a` apply, `e` edit in `$VISUAL`/`$EDITOR` via `app.suspend()`
-then apply, `s` skip, `d` dismiss forever (sha256 of kind+target+body → `~/.rolo-claude/improve/
+then apply, `s` skip, `d` dismiss forever (sha256 of kind+target+body → `~/.halo/improve/
 dismissed.json`), `q` stop reviewing. Apply → atomic write (tmp + `os.replace`), an
 `improve_applied` log node `{kind, path, candidate_id, sha256}` in the current session, a toast,
 and a fresh instructions/memory-index snapshot appended so the NEXT turn sees it (same mechanism
@@ -108,14 +108,14 @@ B4. **Hints (never interrupt)**: when the current session's counters cross `impr
 "✦ /improve: N candidates" and one `notification{level: info}` event fires per session — counters
 only, no model call. Auto mode identical: hint only. `improve.hint: false` disables.
 
-B5. **Headless**: `rolo-claude improve [--since 7d] [--all-projects] [--json] [--out FILE]` prints
-candidates (text or JSON) and saves them to `~/.rolo-claude/improve/<timestamp>.json`;
-`rolo-claude improve --apply <file>#<id>` (repeatable) writes exactly those candidates. `-p`
+B5. **Headless**: `halo improve [--since 7d] [--all-projects] [--json] [--out FILE]` prints
+candidates (text or JSON) and saves them to `~/.halo/improve/<timestamp>.json`;
+`halo improve --apply <file>#<id>` (repeatable) writes exactly those candidates. `-p`
 sessions never draft or write; `--bare` disables everything.
 
-B6. **Config**: `~/.rolo-claude/config.json` → `improve: {enabled: true, hint: true, model: null,
+B6. **Config**: `~/.halo/config.json` → `improve: {enabled: true, hint: true, model: null,
 since_days: 7, max_candidates: 8, hint_threshold: {repairs: 3, edit_failures: 2, loop_breaker: 1}}`
-settable via `rolo-claude config set improve.model or:…`; `doctor` shows it; `/help` lists
+settable via `halo config set improve.model or:…`; `doctor` shows it; `/help` lists
 `/improve` and `/stats --models`.
 
 ## Tests (≥ 45, OS-neutral; fixture logs under `tests/fixtures/telemetry/` with Linux paths)
@@ -133,11 +133,11 @@ exactly one; `-p` never drafts; `~/.claude.json` and settings checksums unchange
 `.credentials.json` sentinel never opened.
 
 ## Acceptance (Fable re-runs)
-All suites green on Windows and WSL. `rolo-claude stats --models --since 30d` over rolo's real
-`~/.rolo-claude/sessions` shows the DeepSeek rows with cost, repair and edit-failure columns.
+All suites green on Windows and WSL. `halo stats --models --since 30d` over rolo's real
+`~/.halo/sessions` shows the DeepSeek rows with cost, repair and edit-failure columns.
 TUI `/improve` on this repo yields ≥ 1 sensible candidate from this week's sessions; `a` writes a
 rule with provenance into `.claude/rules/`; `d` on another persists across restarts.
-`rolo-claude improve --json` writes nothing. `settings.json` / `.claude.json` checksums unchanged.
+`halo improve --json` writes nothing. `settings.json` / `.claude.json` checksums unchanged.
 
 Report ≤ 60 lines. Rules as in the other briefs: no safety / refusal / "cyber" language, provenance
 informs and never blocks, ≤ 250 lines per write, no heredocs with backslashes on Windows, no

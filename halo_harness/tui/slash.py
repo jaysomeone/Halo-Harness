@@ -1,4 +1,4 @@
-"""rolo_claude.tui.slash -- slash-command handling for the TUI. A handful of
+"""halo_harness.tui.slash -- slash-command handling for the TUI. A handful of
 "ui"-kind builtins (D-TUI: "still return a real string here -- they just
 describe what needs the interactive TUI instead of performing it") get REAL
 interactive behavior in here -- a picker/dialog, or a direct transcript/
@@ -20,7 +20,7 @@ def _pending_card_note(app, cmd: str) -> "Optional[str]":
     class of bug deferred as finding 16), leaving a blocked tool call with
     no visible way to answer it. Returns a one-line note to show instead,
     or None when nothing is pending and the caller should proceed."""
-    from rolo_claude.tui.widgets.cards import PermissionCard
+    from halo_harness.tui.widgets.cards import PermissionCard
     card = app.pending_card
     if card is None:
         return None
@@ -58,6 +58,8 @@ async def handle_slash(app, name: str, args: str) -> None:
         # 1.0.1 hotfix 20: bare /effort opens the inline selector card;
         # /effort <level> still goes through the plain text path below.
         "effort": _handle_effort,
+        # 2.0.0 Launch intro: replays the typewriter line.
+        "intro": _handle_intro,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -115,7 +117,7 @@ def _cc_auth_status_auto_refresh_worker(app) -> None:
     whatever it was (list_models()'s own try/except around the read is
     unaffected either way)."""
     try:
-        from rolo_claude.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+        from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
         if cached_auth_status_is_stale():
             refresh_cached_claude_auth_status()
     except Exception:
@@ -128,7 +130,7 @@ def _list_models_worker(app) -> None:
 
 
 def _open_model_picker(app, models) -> None:
-    from rolo_claude.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
     app.push_screen(ModelPicker(models, current=app.status_bar.model), lambda ref: _apply_model(app, ref))
 
 
@@ -143,7 +145,7 @@ def catalog_auto_refresh_worker(app) -> None:
     One combined dim notification per provider that actually changed;
     Databricks keeps its own richer added/removed/path-type diff text,
     OpenRouter/Anthropic just name the model count once populated."""
-    from rolo_claude.config.paths import background_net_disabled
+    from halo_harness.config.paths import background_net_disabled
     if background_net_disabled():
         return  # 1.0.1 part 2 fixpass finding 10: test seam, never touch the network
     state_dir = getattr(app.controller, "state_dir", None)
@@ -155,18 +157,18 @@ def catalog_auto_refresh_worker(app) -> None:
     # to bare `os.environ`/the settings chain re-derivation, unchanged.
     settings = getattr(app.controller, "settings", None)
     env = settings.effective_env if settings is not None else None
-    from rolo_claude.providers.enablement import is_enabled_with_env
+    from halo_harness.providers.enablement import is_enabled_with_env
     notes = []
     if is_enabled_with_env("openrouter", env):
-        from rolo_claude.providers.databricks import load_models_json, refresh_openrouter_catalog_if_stale
+        from halo_harness.providers.databricks import load_models_json, refresh_openrouter_catalog_if_stale
         if refresh_openrouter_catalog_if_stale(state_dir, env=env):
             notes.append(f"OpenRouter ({len(load_models_json(state_dir))} models)")
     if is_enabled_with_env("anthropic", env):
-        from rolo_claude.providers.anthropic_catalog import load_ant_models_json, refresh_anthropic_catalog_if_stale
+        from halo_harness.providers.anthropic_catalog import load_ant_models_json, refresh_anthropic_catalog_if_stale
         if refresh_anthropic_catalog_if_stale(state_dir, env=env):
             notes.append(f"Anthropic ({len(load_ant_models_json(state_dir))} models)")
     if is_enabled_with_env("databricks", env):
-        from rolo_claude.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
+        from halo_harness.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
         result = refresh_dbx_catalog_if_stale(state_dir, env=env)
         if result is not None:
             ok, diff, _note = result
@@ -190,7 +192,7 @@ def or_balance_refresh_worker(app, *, force: bool = False) -> None:
     `OPENROUTER_MANAGEMENT_KEY`) when that key is actually configured.
     Scope for this round is OpenRouter only (the one provider with a
     balance API)."""
-    from rolo_claude.config.paths import background_net_disabled
+    from halo_harness.config.paths import background_net_disabled
     if background_net_disabled():
         return  # 1.0.1 part 2 fixpass finding 10: test seam, never touch the network
     # N2c (1.0.1 final pass): the session's own trust-filtered `Settings.
@@ -201,19 +203,19 @@ def or_balance_refresh_worker(app, *, force: bool = False) -> None:
     # settings.json env block still gets its balance segment.
     settings = getattr(getattr(app, "controller", None), "settings", None)
     env = settings.effective_env if settings is not None else None
-    from rolo_claude.providers.enablement import is_enabled_with_env
+    from halo_harness.providers.enablement import is_enabled_with_env
     if not is_enabled_with_env("openrouter", env):
         return
-    from rolo_claude.providers.config import resolve_openrouter, resolve_openrouter_management_key
+    from halo_harness.providers.config import resolve_openrouter, resolve_openrouter_management_key
     orc = resolve_openrouter(env)
     if orc is None:
         return
     if not force:
-        from rolo_claude.providers.openrouter_account import openrouter_balance_refresh_due_after_turn
+        from halo_harness.providers.openrouter_account import openrouter_balance_refresh_due_after_turn
         if not openrouter_balance_refresh_due_after_turn():
             return
     management_key = resolve_openrouter_management_key(env)
-    from rolo_claude.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
+    from halo_harness.providers.openrouter_account import format_status_bar_segment, refresh_cached_openrouter_balance
     entry = refresh_cached_openrouter_balance(orc.base_url, orc.api_key, management_key=management_key)
     if entry is not None:
         segment = format_status_bar_segment()
@@ -241,7 +243,7 @@ def _effort_status_text(session) -> "str | None":
     """1.0.1 part 2 (item 22 remainder): the status bar's own effort tag --
     "<value> (tools)" whenever this route forces an explicit override
     alongside tools, else the plain configured value."""
-    from rolo_claude.providers.profiles import effort_display_override
+    from halo_harness.providers.profiles import effort_display_override
     profile = getattr(session, "provider_profile", None) if session is not None else None
     return effort_display_override(profile) or (getattr(session, "effort", None) if session is not None else None)
 
@@ -267,8 +269,8 @@ async def _handle_effort(app, args: str) -> None:
         app.status_bar.set_effort(_effort_status_text(session))
         return
 
-    from rolo_claude.providers.profiles import effort_display_override
-    from rolo_claude.tui.widgets.cards import EffortCard
+    from halo_harness.providers.profiles import effort_display_override
+    from halo_harness.tui.widgets.cards import EffortCard
 
     profile = getattr(session, "provider_profile", None) if session is not None else None
     if session is None or profile is None or not profile.reasoning_effort_supported:
@@ -333,16 +335,16 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
     plain `/models` on a box where Databricks just isn't enabled silently
     skips it instead, same as it already silently skips a disabled
     OpenRouter/Anthropic."""
-    from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
-    from rolo_claude.providers.databricks import (
+    from halo_harness.providers.config import derive_workspace_root, resolve_databricks
+    from halo_harness.providers.databricks import (
         dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, load_models_json,
         models_json_age_seconds, refresh_dbx_catalog, refresh_openrouter_catalog_if_stale,
     )
-    from rolo_claude.providers.anthropic_catalog import (
+    from halo_harness.providers.anthropic_catalog import (
         ant_models_age_seconds, load_ant_models_json, refresh_anthropic_catalog_if_stale,
     )
-    from rolo_claude.catalog_cli import format_dbx_table_lines, _dbx_rows
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.catalog_cli import format_dbx_table_lines, _dbx_rows
+    from halo_harness.providers.enablement import is_enabled
     state_dir = getattr(app.controller, "state_dir", None)
 
     def _table_text(endpoints: dict, root: str) -> str:
@@ -359,7 +361,7 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
         if not do_refresh:
             # 1.0.1 hotfix 3: renders the CACHED table immediately -- no
             # network call at all (family/path/chat, same columns/wording
-            # `rolo-claude models` prints) -- plus the catalog age.
+            # `halo models` prints) -- plus the catalog age.
             endpoints = load_dbx_endpoints_json(state_dir)
             age = dbx_endpoints_age_seconds(state_dir)
             age_str = "never" if age is None else f"{age / 3600:.1f}h ago"
@@ -380,7 +382,7 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
                 # 1.0.1 hotfix 12: also refreshes models.dev (best-effort
                 # -- a failure here never fails the whole refresh, it just
                 # leaves the existing ctx/price data, if any, in place).
-                from rolo_claude.providers.models_dev import refresh_models_dev_cache
+                from halo_harness.providers.models_dev import refresh_models_dev_cache
                 md_ok, md_note = refresh_models_dev_cache(state_dir)
                 text = (f"{_table_text(endpoints, root)}Refreshed {len(endpoints)} Databricks endpoint(s). "
                         f"{format_dbx_diff(diff)}")
@@ -402,7 +404,7 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
         else:
             ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
             if ok is False:
-                sections.append("OpenRouter refresh failed -- see `rolo-claude doctor`.")
+                sections.append("OpenRouter refresh failed -- see `halo doctor`.")
             elif ok is None:
                 sections.append("OpenRouter: not configured -- nothing to refresh.")
             else:
@@ -417,14 +419,14 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
         else:
             ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
             if ok is False:
-                sections.append("Anthropic refresh failed -- see `rolo-claude doctor`.")
+                sections.append("Anthropic refresh failed -- see `halo doctor`.")
             elif ok is None:
                 sections.append("Anthropic: not configured -- nothing to refresh.")
             else:
                 sections.append(f"Anthropic refreshed: {len(load_ant_models_json(state_dir))} model(s) cached.")
 
     if not sections:
-        sections.append("No providers are enabled yet -- see `rolo-claude providers`.")
+        sections.append("No providers are enabled yet -- see `halo providers`.")
     app.call_from_thread(app.transcript.add_note, "\n\n".join(sections), kind="command")
 
 
@@ -435,7 +437,7 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
 # ============================================================================
 
 async def _handle_providers(app, args: str) -> None:
-    from rolo_claude.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
+    from halo_harness.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
     tokens = (args or "").split()
     action = tokens[0] if tokens else "list"
     if action in ("enable", "disable"):
@@ -458,8 +460,8 @@ async def _handle_providers(app, args: str) -> None:
     if action == "setup":
         name = tokens[1] if len(tokens) > 1 else "<name>"
         await app.transcript.add_note(
-            f"/providers setup needs the interactive picker -- run `rolo-claude providers setup {name}` "
-            f"(or `rolo-claude init`) from a real terminal.", kind="command")
+            f"/providers setup needs the interactive picker -- run `halo providers setup {name}` "
+            f"(or `halo init`) from a real terminal.", kind="command")
         return
     if action != "list":
         await app.transcript.add_note("Usage: /providers [list|enable <name>|disable <name>|setup <name>]",
@@ -469,7 +471,7 @@ async def _handle_providers(app, args: str) -> None:
 
 
 def _providers_list_worker(app) -> None:
-    from rolo_claude.providers_cli import format_providers_table, provider_rows
+    from halo_harness.providers_cli import format_providers_table, provider_rows
     text = format_providers_table(provider_rows())
     app.call_from_thread(app.transcript.add_note, text, kind="command")
 
@@ -479,13 +481,13 @@ async def _handle_doctor(app, _args: str) -> None:
 
 
 def _doctor_worker(app) -> None:
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     lines, _ok = run_checks(cwd=app.cwd)
     app.call_from_thread(app.transcript.add_note, "\n".join(lines), kind="command")
 
 
 async def _handle_mcp(app, _args: str) -> None:
-    from rolo_claude.tui.dialogs.mcp_status import McpStatus
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
 
     list_fn = getattr(app.controller, "list_mcp_servers", None)
     servers = list_fn() if list_fn is not None else []
@@ -512,6 +514,21 @@ async def _handle_clear(app, _args: str) -> None:
     await app.transcript.add_note("Conversation cleared -- starting a new session context.", kind="note")
 
 
+async def _handle_intro(app, _args: str) -> None:
+    """2.0.0 Launch intro: `/intro` replays it -- a FRESH `IntroLine`
+    mounted at the current transcript position (never the launch-time
+    one, which may have scrolled/folded away by now) and started typing
+    again from scratch. `app.intro_line` is repointed at this new widget
+    so a keypress/submitted prompt during the replay still skips it
+    instantly, same contract as the launch-time line."""
+    from halo_harness import __version__ as _halo_version
+    from halo_harness.tui.widgets.transcript import IntroLine
+
+    widget = IntroLine(f"I am just a copy, of a copy, of a copy... halo {_halo_version}")
+    app.intro_line = widget
+    await app.transcript.mount_widget(widget)
+
+
 async def _handle_resume(app, args: str) -> None:
     # U5/review must-do: `list_sessions()` is file I/O -- off the UI thread.
     # H13 Part C: `/resume <text>` opens the picker ALREADY filtered by
@@ -528,7 +545,7 @@ def _resume_list_worker(app, query: str) -> None:
 
 
 def _open_resume_picker(app, sessions, query: str = "") -> None:
-    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from halo_harness.tui.dialogs.session_picker import SessionPicker
 
     def _on_pick(session_id) -> None:
         if session_id:
@@ -538,7 +555,7 @@ def _open_resume_picker(app, sessions, query: str = "") -> None:
 
 
 async def _handle_permissions(app, _args: str) -> None:
-    from rolo_claude.tui.dialogs.permissions import PermissionsDialog
+    from halo_harness.tui.dialogs.permissions import PermissionsDialog
 
     list_fn = getattr(app.controller, "list_permission_rules", None)
     rules = list_fn() if list_fn is not None else []
@@ -551,7 +568,7 @@ async def _handle_exit(app, _args: str) -> None:
 
 
 async def _handle_theme(app, args: str) -> None:
-    from rolo_claude import theme as theme_mod
+    from halo_harness import theme as theme_mod
 
     name = args.strip()
     if not name:
@@ -614,7 +631,7 @@ async def _handle_stats(app, args: str) -> None:
     # H10 Part A: bare `/stats` keeps U5's own current-session behaviour
     # (synchronous, cheap -- one session's own already-in-memory nodes);
     # `/stats --models`/`--tools` is a NEW, richer cross-session path over
-    # `rolo_claude.telemetry`, run OFF the UI thread (same worker pattern
+    # `halo_harness.telemetry`, run OFF the UI thread (same worker pattern
     # U5 used for `/resume`'s `list_sessions` -- see `_handle_resume`/
     # `_resume_list_worker` above) since it globs and parses every session
     # JSONL under the project.
@@ -639,8 +656,8 @@ async def _handle_stats(app, args: str) -> None:
 
 
 def _stats_models_worker(app, show_models: bool, show_tools: bool) -> None:
-    from rolo_claude import telemetry
-    from rolo_claude.config.paths import project_slug
+    from halo_harness import telemetry
+    from halo_harness.config.paths import project_slug
 
     cwd = getattr(app.controller, "cwd", None) or "."
     summaries = telemetry.scan(since="7d", slug=project_slug(cwd))
@@ -686,7 +703,7 @@ def _rewind_picker_worker(app) -> None:
 
 
 def _open_rewind_picker(app, steps: list) -> None:
-    from rolo_claude.tui.dialogs.rewind_picker import RewindPicker
+    from halo_harness.tui.dialogs.rewind_picker import RewindPicker
 
     def _on_pick(step_id) -> None:
         if not step_id:
@@ -706,7 +723,7 @@ async def _show_rewind_confirmation(app, step: dict, verb: str) -> None:
     if note:
         app.notify(note, title=f"/{verb}")
         return
-    from rolo_claude.tui.widgets.cards import RewindCard
+    from halo_harness.tui.widgets.cards import RewindCard
 
     def on_decide(confirmed: bool) -> None:
         app.clear_pending_card()
@@ -756,7 +773,7 @@ async def _handle_undo_redo(app, verb: str) -> None:
 async def _handle_keybindings(app, _args: str) -> None:
     keymap = getattr(app, "_keymap", None)
     if keymap is None:
-        from rolo_claude.tui.keys import load_keymap
+        from halo_harness.tui.keys import load_keymap
         keymap = load_keymap()
     lines = ["Keybindings (~/.claude/keybindings.json merges onto these):"]
     for ctx in sorted(keymap):
@@ -786,7 +803,7 @@ async def _handle_improve(app, _args: str) -> None:
     if session is None:
         app.notify("/improve needs a real session.", severity="warning", title="/improve")
         return
-    from rolo_claude.improve.config import load_improve_config
+    from halo_harness.improve.config import load_improve_config
     cfg = load_improve_config()
     if not cfg.enabled:
         app.notify("/improve is disabled (improve.enabled=false).", title="/improve")
@@ -797,10 +814,10 @@ async def _handle_improve(app, _args: str) -> None:
 
 
 def _improve_draft_worker(app, session, cfg) -> None:
-    from rolo_claude.config.paths import project_slug
-    from rolo_claude.improve import draft as draft_mod
-    from rolo_claude.improve import evidence as evidence_mod
-    from rolo_claude.improve.config import since_str
+    from halo_harness.config.paths import project_slug
+    from halo_harness.improve import draft as draft_mod
+    from halo_harness.improve import evidence as evidence_mod
+    from halo_harness.improve.config import since_str
 
     clusters, candidates, error = [], [], None
     try:
@@ -817,7 +834,7 @@ def _improve_draft_worker(app, session, cfg) -> None:
 
 
 def _start_improve_review(app, session, clusters: list, candidates: list, error) -> None:
-    from rolo_claude.improve.dismissed import is_dismissed, load_dismissed
+    from halo_harness.improve.dismissed import is_dismissed, load_dismissed
 
     if not candidates:
         app.notify(f"/improve: {error or 'no candidates'}", title="/improve")
@@ -841,7 +858,7 @@ def _excerpt_text_for(clusters: list, ref: str) -> str:
 
 
 async def _show_next_improve_card(app) -> None:
-    from rolo_claude.tui.widgets.cards import ImproveCard
+    from halo_harness.tui.widgets.cards import ImproveCard
 
     state = getattr(app, "_improve_state", None)
     if not state:
@@ -853,7 +870,7 @@ async def _show_next_improve_card(app) -> None:
         app._improve_state = None
         return
 
-    from rolo_claude.improve import apply as apply_mod
+    from halo_harness.improve import apply as apply_mod
 
     candidate = queue[idx]
     settings = getattr(session.session_context, "settings", None)
@@ -873,8 +890,8 @@ async def _show_next_improve_card(app) -> None:
         elif action == "edit":
             _edit_candidate_then_apply(app, session, candidate)
         elif action == "dismiss":
-            from rolo_claude.improve.apply import candidate_hash
-            from rolo_claude.improve.dismissed import add_dismissed
+            from halo_harness.improve.apply import candidate_hash
+            from halo_harness.improve.dismissed import add_dismissed
             add_dismissed(candidate_hash(candidate))
         elif action == "quit":
             state["index"] = len(queue)
@@ -887,7 +904,7 @@ async def _show_next_improve_card(app) -> None:
 
 
 def _apply_worker(app, session, candidate) -> None:
-    from rolo_claude.improve import apply as apply_mod
+    from halo_harness.improve import apply as apply_mod
 
     settings = getattr(session.session_context, "settings", None)
     try:
@@ -917,7 +934,7 @@ def _edit_candidate_then_apply(app, session, candidate) -> None:
         app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply",
                         group="improve-apply")
         return
-    fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="rolo-claude-improve-")
+    fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix="halo-improve-")
     tmp_path = Path(tmp_path_str)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

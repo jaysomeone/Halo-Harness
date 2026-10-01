@@ -107,7 +107,7 @@ def _write_json(path: Path, obj) -> None:
 def build_fake_home(root: Optional[Path] = None) -> dict:
     """Build the fixture under `root` (a fresh tempdir if not given) and
     return a dict of useful paths: home, claude_dir, proj, sub, memory_dir."""
-    root = Path(root) if root else Path(tempfile.mkdtemp(prefix="rolo-claude-fakehome-"))
+    root = Path(root) if root else Path(tempfile.mkdtemp(prefix="halo-fakehome-"))
     home = root / "home"
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +157,7 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     )
 
     # projects/<slug>/memory/MEMORY.md (250 lines) + two topic files.
-    from rolo_claude.config.paths import project_slug  # local import: avoid a hard dep for callers that don't need it
+    from halo_harness.config.paths import project_slug  # local import: avoid a hard dep for callers that don't need it
 
     slug = project_slug(proj_dir)
     memory_dir = claude_dir / "projects" / slug / "memory"
@@ -244,7 +244,7 @@ def add_fake_plugin(claude_dir: Path, *, plugin_name: str = "fake-plugin",
     fake_mcp_server.py) so a live-connect test can use this directly, with
     `${CLAUDE_PLUGIN_ROOT}` threaded into its env to prove expansion works."""
     import sys
-    from rolo_claude.config.plugins import plugin_server_name
+    from halo_harness.config.plugins import plugin_server_name
 
     plugins_root = claude_dir / "plugins"
     plugin_root = plugins_root / "cache" / plugin_name

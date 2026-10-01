@@ -56,7 +56,7 @@ def ensure_default_provider_credentials() -> None:
 
 def ensure_scoped_state_dir_once() -> None:
     """`is_enabled()`'s `providers` block (`enablement._providers_block`)
-    reads `~/.rolo-claude/config.json` via plain `bridge_home()` -- NOT
+    reads `~/.halo/config.json` via plain `bridge_home()` -- NOT
     scoped by any `state_dir=` a test passes elsewhere -- so a test file
     that never sets `BRIDGE_TEST_HOME`/`BRIDGE_STATE_DIR` at all would read
     the REAL machine's own config.json for that check. A no-op once either
@@ -65,4 +65,4 @@ def ensure_scoped_state_dir_once() -> None:
     clobbers a more specific scoping scheme already in place."""
     if "BRIDGE_TEST_HOME" in os.environ or "BRIDGE_STATE_DIR" in os.environ:
         return
-    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="provider-env-defaults-scratchhome-")))
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="halo-scratch-")))

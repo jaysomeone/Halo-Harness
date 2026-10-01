@@ -1,7 +1,7 @@
 """tests.test_cc_session -- H11 Part C: agent.loop.Session driving the
 `cc:` route end to end against `tests/helpers/fake_claude_cc.py` (a real
 `claude` stand-in: real stream-json protocol, a REAL MCP client spawning
-the REAL `python -m rolo_claude.ccbridge` child against a REAL
+the REAL `python -m halo_harness.ccbridge` child against a REAL
 ToolBridgeServer -- nothing about the bridge itself is mocked, only the
 "model" driving claude's own side of the stream-json protocol is
 scripted). Covers: lazy start / one subprocess per session, tools/list ==
@@ -28,7 +28,7 @@ from tests.helpers.provider_env_defaults import ensure_default_provider_credenti
 
 # H11b finding 27: THIS module's own scratch home -- every real Session
 # this file builds writes its session log (and, once cc: starts, its
-# ccbridge run/ dir) under here, never the real ~/.rolo-claude. Set at
+# ccbridge run/ dir) under here, never the real ~/.halo. Set at
 # IMPORT time (not per-test) so it's active before this module's very
 # first test runs regardless of whether it's driven by `python tests/
 # test_cc_session.py` directly or by tests/run_all.py's own per-module
@@ -75,10 +75,10 @@ def _fake_claude_env(*, logged_in: bool = True):
 
 def _new_cc_session(*, permission_engine=None, hook_runner=None, cwd=None, model="cc:fable",
                      interactive=False, agents=None, session_catalog=None, mcp_manager=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import parse_model_ref, resolve_model_profile
+    from halo_harness.permissions import PermissionEngine
 
     proj = cwd or Path(tempfile.mkdtemp(prefix="cc-sess-proj-"))
     proj.mkdir(parents=True, exist_ok=True)
@@ -147,7 +147,7 @@ def test_pong_reply_and_session_id_stable(ctx: Ctx):
 
 @test
 def test_bridge_tools_list_equals_frozen_catalog(ctx: Ctx):
-    from rolo_claude.agent.cc_runtime import bridge_list_tools
+    from halo_harness.agent.cc_runtime import bridge_list_tools
     with _fake_claude_env():
         session, _ = _new_cc_session()
         expected_names = sorted(t["name"] for t in session.tool_registry.definitions())
@@ -159,7 +159,7 @@ def test_bridge_tools_list_equals_frozen_catalog(ctx: Ctx):
 
 @test
 def test_tools_call_obeys_deny_rule(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.permissions import PermissionEngine, parse_rule
     with _fake_claude_env():
         engine = PermissionEngine(mode="default", cwd=Path(tempfile.mkdtemp(prefix="cc-deny-")),
                                     deny_rules=[parse_rule("Read", source="test", action="deny")])
@@ -193,7 +193,7 @@ def test_tools_call_shows_permission_card_in_default_mode_and_runs_after_allow(c
     """TUI-pilot-shaped: a real interactive session parked on
     resolve_permission, answered from another thread -- mirrors how the
     real TUI's PermissionCard callback reaches Controller.answer_permission."""
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.permissions import Decision, PermissionEngine
     with _fake_claude_env():
         engine = PermissionEngine(mode="default", cwd=Path(tempfile.mkdtemp(prefix="cc-ask-")))
         session, proj = _new_cc_session(permission_engine=engine)
@@ -223,7 +223,7 @@ def test_hooks_fire_exactly_once_pre_and_post_tool_use(ctx: Ctx):
     and PostToolUse use SEPARATE counter files (HookRunner._env_for builds
     each hook's env from the SAME effective_env, so both hooks would share
     one file/count if not for this)."""
-    from rolo_claude.hooks import HookDef, HookRunner
+    from halo_harness.hooks import HookDef, HookRunner
 
     proj = Path(tempfile.mkdtemp(prefix="cc-hook-proj-"))
     pre_counter = proj / "pre.count"
@@ -277,7 +277,7 @@ def test_hooks_fire_exactly_once_pre_and_post_tool_use(ctx: Ctx):
 
 @test
 def test_pairing_invariant_after_esc_before_any_tool_call(ctx: Ctx):
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
     with _fake_claude_env():
         session, _ = _new_cc_session()
         collected = []
@@ -352,7 +352,7 @@ def test_usage_node_marked_estimate_route_cc(ctx: Ctx):
 
 @test
 def test_cc_session_uuid_is_deterministic(ctx: Ctx):
-    from rolo_claude.agent.cc_process import cc_session_uuid
+    from halo_harness.agent.cc_process import cc_session_uuid
     import uuid as uuid_mod
     a = cc_session_uuid("abc123")
     b = cc_session_uuid("abc123")
@@ -364,12 +364,12 @@ def test_cc_session_uuid_is_deterministic(ctx: Ctx):
 
 @test
 def test_new_process_with_prior_cc_history_uses_resume_not_session_id(ctx: Ctx):
-    """A brand new Session object (as a fresh `rolo-claude -r`/`--continue`
+    """A brand new Session object (as a fresh `halo -r`/`--continue`
     process would build) wrapping a log that ALREADY has a prior cc: usage
     node must use --resume on its very first ensure_cc_state call, never
     --session-id (which claude rejects once that id already exists)."""
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.agent.cc_runtime import ensure_cc_state
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.agent.cc_runtime import ensure_cc_state
     with _fake_claude_env():
         session, proj = _new_cc_session()
         list(session.turn("reply with the single word pong"))
@@ -422,7 +422,7 @@ def test_steer_returns_false_when_not_busy(ctx: Ctx):
 
 @test
 def test_switch_from_cc_to_openrouter_and_back_queues_conversation_so_far(ctx: Ctx):
-    from rolo_claude.model import ModelRef, ModelProfile
+    from halo_harness.model import ModelRef, ModelProfile
     with _fake_claude_env():
         session, _ = _new_cc_session()
         list(session.turn("reply with the single word pong"))
@@ -445,8 +445,8 @@ def test_switch_from_cc_to_openrouter_and_back_queues_conversation_so_far(ctx: C
 
 @test
 def test_claude_not_logged_in_gives_a_precise_error(ctx: Ctx):
-    from rolo_claude.providers.enablement import enable
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.providers.enablement import enable
+    from halo_harness.theme import get_config_value, set_config_value
     # 1.0.1 part 2 fixpass finding 10: this module's own BRIDGE_TEST_HOME is
     # set ONCE at import time (never reset between tests) -- `enable()`'s
     # override must be restored here, or it leaks into every cc: test that
@@ -470,8 +470,8 @@ def test_claude_not_logged_in_gives_a_precise_error(ctx: Ctx):
 
 @test
 def test_claude_binary_missing_gives_a_precise_error(ctx: Ctx):
-    from rolo_claude.providers.enablement import enable
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.providers.enablement import enable
+    from halo_harness.theme import get_config_value, set_config_value
     providers_before = get_config_value("providers", default=None)  # finding 10: see the previous test's own note
     enable("claude_subscription")  # bypass auto-detection -- see this test's own module-level note
     saved = os.environ.get("BRIDGE_CLAUDE_EXE")
@@ -496,7 +496,7 @@ def test_claude_binary_missing_gives_a_precise_error(ctx: Ctx):
 
 @test
 def test_argv_uses_empty_tools_flag_and_strict_mcp_config(ctx: Ctx):
-    from rolo_claude.agent.cc_process import build_cc_argv, build_mcp_config
+    from halo_harness.agent.cc_process import build_cc_argv, build_mcp_config
     argv = build_cc_argv(model="claude-fable-5-1", session_id="11111111-1111-1111-1111-111111111111",
                           resume=False, mcp_config=build_mcp_config({}))
     ctx.check("--tools present", "--tools" in argv)
@@ -509,7 +509,7 @@ def test_argv_uses_empty_tools_flag_and_strict_mcp_config(ctx: Ctx):
 
 @test
 def test_argv_resume_uses_resume_flag_not_session_id(ctx: Ctx):
-    from rolo_claude.agent.cc_process import build_cc_argv, build_mcp_config
+    from halo_harness.agent.cc_process import build_cc_argv, build_mcp_config
     argv = build_cc_argv(model="claude-fable-5-1", session_id="11111111-1111-1111-1111-111111111111",
                           resume=True, mcp_config=build_mcp_config({}))
     ctx.check("--resume present", "--resume" in argv)
@@ -518,7 +518,7 @@ def test_argv_resume_uses_resume_flag_not_session_id(ctx: Ctx):
 
 @test
 def test_disallowed_tools_fallback_swaps_tools_flag(ctx: Ctx):
-    from rolo_claude.agent.cc_process import build_cc_argv, build_mcp_config, cc_disallowed_tools_fallback_argv
+    from halo_harness.agent.cc_process import build_cc_argv, build_mcp_config, cc_disallowed_tools_fallback_argv
     argv = build_cc_argv(model="claude-fable-5-1", session_id="11111111-1111-1111-1111-111111111111",
                           resume=False, mcp_config=build_mcp_config({}))
     fallback = cc_disallowed_tools_fallback_argv(argv, ["Bash", "Read", "Edit"])
@@ -563,7 +563,7 @@ def test_cc_child_env_strips_provider_secrets_and_outer_claude_vars(ctx: Ctx):
 
 @test
 def test_enter_plan_mode_switches_permission_mode_and_logs_note(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
     with _fake_claude_env():
         engine = PermissionEngine(mode="default", cwd=Path(tempfile.mkdtemp(prefix="cc-plan-")))
         session, _ = _new_cc_session(permission_engine=engine)
@@ -576,7 +576,7 @@ def test_enter_plan_mode_switches_permission_mode_and_logs_note(ctx: Ctx):
 
 @test
 def test_exit_plan_mode_interactive_shows_plan_review_and_approves(ctx: Ctx):
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
     with _fake_claude_env():
         engine = PermissionEngine(mode="plan", cwd=Path(tempfile.mkdtemp(prefix="cc-exitplan-")))
         session, _ = _new_cc_session(permission_engine=engine, interactive=True)
@@ -618,7 +618,7 @@ def test_always_allow_rule_persists_via_apply_permission_decision(ctx: Ctx):
     """finding 17: the bridge reuses `_apply_permission_decision` -- an
     "always allow" answer must add a session rule, same as every other
     route, not just resolve the one pending call."""
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.permissions import Decision, PermissionEngine
     with _fake_claude_env():
         engine = PermissionEngine(mode="default", cwd=Path(tempfile.mkdtemp(prefix="cc-alwaysallow-")))
         session, proj = _new_cc_session(permission_engine=engine, interactive=True)
@@ -644,7 +644,7 @@ def test_agent_tool_streams_subagent_events_live(ctx: Ctx):
     """finding 13: Agent/Task goes through the streaming path (on_event=
     _emit), so subagent_start/child events reach the parent's own stream
     instead of only the discarded return-value list."""
-    from rolo_claude.config.agents_md import _builtin_specs
+    from halo_harness.config.agents_md import _builtin_specs
     with _fake_claude_env():
         session, _ = _new_cc_session(agents=_builtin_specs())
         agent_input = {"description": "say pong", "prompt": "reply with the single word pong",
@@ -663,8 +663,8 @@ def test_agent_child_permission_ask_reaches_parent_waiters(ctx: Ctx):
     """finding 13: a foreground cc: child's own "ask" reaches the SAME
     live, answerable permission_request the parent's own calls use
     (agent-tagged), instead of being auto-denied with no UI attached."""
-    from rolo_claude.config.agents_md import _builtin_specs
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.config.agents_md import _builtin_specs
+    from halo_harness.permissions import Decision, PermissionEngine
     with _fake_claude_env():
         engine = PermissionEngine(mode="default", cwd=Path(tempfile.mkdtemp(prefix="cc-agent-ask-")))
         session, proj = _new_cc_session(permission_engine=engine, interactive=True, agents=_builtin_specs())
@@ -741,7 +741,7 @@ def test_background_job_notice_is_sent_to_claude_not_just_logged(ctx: Ctx):
 
 @test
 def test_user_prompt_submit_hook_context_reaches_claude(ctx: Ctx):
-    from rolo_claude.hooks import HookDef, HookRunner
+    from halo_harness.hooks import HookDef, HookRunner
     proj = Path(tempfile.mkdtemp(prefix="cc-hookctx-proj-"))
     # PYTHONPATH=REPO_DIR: `-m tests.helpers.hook_scripts` must resolve
     # that module regardless of this process's own ambient PYTHONPATH
@@ -825,9 +825,9 @@ def test_two_steers_behind_a_running_turn_both_get_answered(ctx: Ctx):
 
 @test
 def test_tool_search_load_sends_list_changed_and_new_tool_becomes_callable(ctx: Ctx):
-    from rolo_claude.agent.catalog import SessionCatalog, select_preload
-    from rolo_claude.mcp.manager import McpManager, McpServerConfig
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.agent.catalog import SessionCatalog, select_preload
+    from halo_harness.mcp.manager import McpManager, McpServerConfig
+    from halo_harness.tools.registry import ToolRegistry
 
     cfg = McpServerConfig(name="fake", type="stdio", command=sys.executable,
                            args=["-m", "tests.helpers.fake_mcp_server"], env={}, cwd=str(REPO_DIR))
@@ -867,7 +867,7 @@ def test_tool_search_load_sends_list_changed_and_new_tool_becomes_callable(ctx: 
 
 
 def bridge_list_tools_names(session) -> set:
-    from rolo_claude.agent.cc_runtime import bridge_list_tools
+    from halo_harness.agent.cc_runtime import bridge_list_tools
     return {t["name"] for t in bridge_list_tools(session)}
 
 
@@ -905,7 +905,7 @@ def test_clear_closes_cc_and_next_turn_starts_a_fresh_conversation(ctx: Ctx):
 
 @test
 def test_fork_session_closes_cc_and_restarts_with_fork_session_flag(ctx: Ctx):
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     with _fake_claude_env():
         session, proj = _new_cc_session()
         controller = Controller(session=session, cwd=proj)
@@ -951,7 +951,7 @@ def test_resume_failure_falls_back_to_a_fresh_session(ctx: Ctx):
 
 @test
 def test_model_switch_cc_to_cc_restarts_with_resume_and_new_model(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref, resolve_model_profile
+    from halo_harness.model import parse_model_ref, resolve_model_profile
     with _fake_claude_env():
         session, _ = _new_cc_session(model="cc:fable")
         list(session.turn("reply with the single word pong"))
@@ -1005,7 +1005,7 @@ def test_error_result_becomes_a_visible_error_event(ctx: Ctx):
 
 @test
 def test_stop_hook_fires_on_result(ctx: Ctx):
-    from rolo_claude.hooks import HookDef, HookRunner
+    from halo_harness.hooks import HookDef, HookRunner
     proj = Path(tempfile.mkdtemp(prefix="cc-stophook-proj-"))
     counter = proj / "stop.count"
     # PYTHONPATH=REPO_DIR: see test_user_prompt_submit_hook_context_reaches_
@@ -1030,7 +1030,7 @@ def test_stop_hook_fires_on_result(ctx: Ctx):
 
 @test
 def test_agent_call_closes_the_childs_own_cc_state(ctx: Ctx):
-    from rolo_claude.config.agents_md import _builtin_specs
+    from halo_harness.config.agents_md import _builtin_specs
     with _fake_claude_env():
         session, _ = _new_cc_session(agents=_builtin_specs())
         agent_input = {"description": "say pong", "prompt": "reply with the single word pong",
@@ -1068,7 +1068,7 @@ def test_posix_close_cc_leaves_no_claude_or_bridge_process(ctx: Ctx):
     _require_pgrep()
     import uuid
     marker = f"cc-pgrep-marker-{uuid.uuid4().hex[:10]}"
-    bridge_before = _pgrep_count("-m rolo_claude.ccbridge")
+    bridge_before = _pgrep_count("-m halo_harness.ccbridge")
     with _fake_claude_env():
         session, _ = _new_cc_session(model=f"cc:{marker}")
         list(session.turn("reply with the single word pong"))
@@ -1080,17 +1080,17 @@ def test_posix_close_cc_leaves_no_claude_or_bridge_process(ctx: Ctx):
         time.sleep(0.2)
     ctx.check("no claude survivor after close_cc", _pgrep_count(f"fake_claude_cc.py -p --model {marker}") == 0)
     deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and _pgrep_count("-m rolo_claude.ccbridge") > bridge_before:
+    while time.monotonic() < deadline and _pgrep_count("-m halo_harness.ccbridge") > bridge_before:
         time.sleep(0.2)
-    ctx.check("no ccbridge child survivor after close_cc", _pgrep_count("-m rolo_claude.ccbridge") <= bridge_before)
+    ctx.check("no ccbridge child survivor after close_cc", _pgrep_count("-m halo_harness.ccbridge") <= bridge_before)
     ctx.check("the bridge socket file is gone", not list(run_dir.glob("*.sock")))
 
 
 @test
 def test_posix_sighup_to_a_headless_cc_run_kills_claude_and_bridge(ctx: Ctx):
     """Brief B: "SIGHUP/SIGTERM kill it; no orphans (pgrep on Linux)" -- a
-    real `rolo-claude -p` process on a cc: model (the fake, kept busy by a
-    SLEEP prompt) gets SIGHUP; rolo-claude's own handler (cli.py) unwinds
+    real `halo -p` process on a cc: model (the fake, kept busy by a
+    SLEEP prompt) gets SIGHUP; halo's own handler (cli.py) unwinds
     through `close_cc`, so nothing of the claude/ccbridge pair survives."""
     _require_pgrep()
     import signal
@@ -1102,8 +1102,8 @@ def test_posix_sighup_to_a_headless_cc_run_kills_claude_and_bridge(ctx: Ctx):
                BRIDGE_CLAUDE_EXE='"' + sys.executable + '" "' + str(FAKE_CLAUDE) + '"',
                FAKE_CLAUDE_CC_LOGGED_IN="1")
     env.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
-    bridge_before = _pgrep_count("-m rolo_claude.ccbridge")
-    proc = subprocess.Popen([sys.executable, "-m", "rolo_claude", "--model", f"cc:{marker}", "-p", "SLEEP:30 nothing"],
+    bridge_before = _pgrep_count("-m halo_harness.ccbridge")
+    proc = subprocess.Popen([sys.executable, "-m", "halo_harness", "--model", f"cc:{marker}", "-p", "SLEEP:30 nothing"],
                              cwd=str(REPO_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 40
@@ -1119,16 +1119,16 @@ def test_posix_sighup_to_a_headless_cc_run_kills_claude_and_bridge(ctx: Ctx):
         except subprocess.TimeoutExpired:
             proc.kill()
             code = None
-        ctx.check(f"rolo-claude exited on SIGHUP (129), got {code}", code == 129)
+        ctx.check(f"halo exited on SIGHUP (129), got {code}", code == 129)
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and _pgrep_count(f"fake_claude_cc.py -p --model {marker}") > 0:
             time.sleep(0.2)
         ctx.check("no claude survivor after SIGHUP", _pgrep_count(f"fake_claude_cc.py -p --model {marker}") == 0)
         deadline = time.monotonic() + 8
-        while time.monotonic() < deadline and _pgrep_count("-m rolo_claude.ccbridge") > bridge_before:
+        while time.monotonic() < deadline and _pgrep_count("-m halo_harness.ccbridge") > bridge_before:
             time.sleep(0.2)
-        ctx.check("no ccbridge survivor after SIGHUP", _pgrep_count("-m rolo_claude.ccbridge") <= bridge_before)
-        ctx.check("no stale socket left in the run dir", not list((home / ".rolo-claude" / "run").glob("*.sock")))
+        ctx.check("no ccbridge survivor after SIGHUP", _pgrep_count("-m halo_harness.ccbridge") <= bridge_before)
+        ctx.check("no stale socket left in the run dir", not list((home / ".halo" / "run").glob("*.sock")))
     finally:
         subprocess.run(["pkill", "-f", f"fake_claude_cc.py -p --model {marker}"], capture_output=True)
         if proc.poll() is None:

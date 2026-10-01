@@ -7,7 +7,7 @@ Ctx/@test/run_all pattern as `test_bridge.py`/`tests/helpers/runner.py`
 `@test` function that calls `asyncio.run(...)` itself, per the brief.
 
 textual/rich are real imports here (this file's whole job is exercising
-them) -- never imported at `rolo_claude` package scope elsewhere.
+them) -- never imported at `halo_harness` package scope elsewhere.
 """
 
 from __future__ import annotations
@@ -27,20 +27,50 @@ if str(REPO_DIR) not in sys.path:
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
-from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
+from tests.helpers.provider_env_defaults import ensure_default_provider_credentials, ensure_scoped_state_dir_once
+
+
+def _clear_halo_env_vars() -> None:
+    """2.0.0 fixpass item G: a stray HALO_* left in the developer's own
+    shell would silently out-rank whatever legacy BRIDGE_*/plain name a
+    fixture or FakeController-based pilot below relies on (env_compat
+    resolves HALO_* first) -- cleared here, before any halo_harness import
+    and before ensure_default_provider_credentials/ensure_scoped_state_
+    dir_once run just below, same timing as test_bridge.py's own sweep."""
+    for key in [k for k in os.environ if k.startswith("HALO_")]:
+        os.environ.pop(key, None)
+
+
+_clear_halo_env_vars()
+# 2.0.0 fixpass item G: a stray BRIDGE_STATE_DIR left in the parent shell
+# would make ensure_scoped_state_dir_once() below treat it as deliberate
+# external scoping and skip setting its own BRIDGE_TEST_HOME, leaving
+# home()-based paths pointed at the real machine home even though
+# bridge_home() itself would still be safely scoped by the stray var.
+os.environ.pop("BRIDGE_STATE_DIR", None)
 
 # H15 part 2 addendum 3.1: a believable default credential (never a real
 # one) keeps every `or:mock/...` ref below resolving exactly as it did
 # before parse_model_ref started refusing an auto-detected-disabled
 # provider; each test here already scopes its OWN BRIDGE_TEST_HOME.
 ensure_default_provider_credentials()
+# 2.0.0 fixpass finding 2: `BridgeApp.__init__` reads config through
+# `bridge_home()` (images_render_mode) and `_submit_prompt` appends to
+# `bridge_home()/history.jsonl` on every scripted submit -- without THIS
+# seam, a test built with neither BRIDGE_TEST_HOME nor BRIDGE_STATE_DIR set
+# (every FakeController-based pilot test below does exactly that) performs
+# the real `~/.rolo-claude` -> `~/.halo` migration and writes real prompt
+# text into the real `~/.halo/history.jsonl` -- confirmed live: 8 entries
+# from this file's own scripted inputs landed there. A no-op once a test
+# (or an earlier-imported module) has already scoped either var itself.
+ensure_scoped_state_dir_once()
 
-from rolo_claude import events as ev
-from rolo_claude.testing.fake_controller import FakeController, default_demo_turns
-from rolo_claude.tui.app import BridgeApp
-from rolo_claude.tui.events import drain_queue
-from rolo_claude.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, ToolCard
-from rolo_claude.tui.widgets.transcript import AssistantText, SystemNote, UserMessage
+from halo_harness import events as ev
+from halo_harness.testing.fake_controller import FakeController, default_demo_turns
+from halo_harness.tui.app import BridgeApp
+from halo_harness.tui.events import drain_queue
+from halo_harness.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, ToolCard
+from halo_harness.tui.widgets.transcript import AssistantText, IntroLine, SystemNote, UserMessage
 
 test, TESTS = new_registry()
 
@@ -170,7 +200,7 @@ def test_tool_card_same_widget_start_to_result_plus_ctrl_o(ctx: Ctx):
     Hz drain timer), so this drives `dispatch.apply_event` directly, one
     event at a time, to observe the SAME `ToolCard` object transition
     running -> ok -- the real invariant this test is about."""
-    from rolo_claude.tui.dispatch import apply_event
+    from halo_harness.tui.dispatch import apply_event
 
     async def body():
         fake = FakeController()
@@ -204,7 +234,7 @@ def test_compaction_events_render_start_and_done_notes_and_status(ctx: Ctx):
     "Compacting..." indicator never appeared and a failure was invisible.
     Drives `dispatch.apply_event` directly with the real event shapes
     `agent/loop.py`'s `_run_compaction` actually yields."""
-    from rolo_claude.tui.dispatch import apply_event
+    from halo_harness.tui.dispatch import apply_event
 
     async def body():
         fake = FakeController()
@@ -246,7 +276,7 @@ def test_steer_queued_note_never_embeds_the_steer_text_only_the_user_bubble_does
     this test now asserts exactly ONE note for that duplicate pair, and
     that a SECOND, genuinely DIFFERENT steer queued afterward still gets
     its own note (never a session-wide "only one note ever" regression)."""
-    from rolo_claude.tui.dispatch import apply_event
+    from halo_harness.tui.dispatch import apply_event
 
     STEER_TEXT = "please use a different approach entirely"
     SECOND_STEER_TEXT = "actually, do something else instead"
@@ -303,7 +333,7 @@ class _RuleWritingController(FakeController):
         self.added_rules.append((rule, scope))
         if scope == "session":
             return None
-        from rolo_claude.permissions import add_allow_rule
+        from halo_harness.permissions import add_allow_rule
         return add_allow_rule(rule, scope, cwd=self._cwd)
 
 
@@ -480,7 +510,7 @@ def test_slash_command_while_permission_card_pending_runs_the_command_not_deny_f
             await _type(pilot, "/permissions")
             await pilot.press("enter")
             await pilot.pause(0.1)
-            from rolo_claude.tui.dialogs.permissions import PermissionsDialog
+            from halo_harness.tui.dialogs.permissions import PermissionsDialog
             ctx.check(f"the command actually ran (PermissionsDialog opened), got {type(app.screen).__name__}",
                       isinstance(app.screen, PermissionsDialog))
             ctx.check("the tool was NOT denied", fake.permission_replies == [])
@@ -534,7 +564,7 @@ def test_effort_card_does_not_intercept_typed_text(ctx: Ctx):
             await _type(pilot, "/effort")
             await pilot.press("enter")
             await pilot.pause(0.1)
-            from rolo_claude.tui.widgets.cards import EffortCard
+            from halo_harness.tui.widgets.cards import EffortCard
             ctx.check(f"an EffortCard is pending, got {type(app.pending_card).__name__}",
                       isinstance(app.pending_card, EffortCard))
             await pilot.click("#prompt-input")
@@ -633,7 +663,7 @@ def test_pager_screen_focus_heal_does_not_leak_to_a_hidden_pending_card(ctx: Ctx
             await pilot.pause(0.02)
             await pilot.press("o")
             await pilot.pause(0.05)
-            from rolo_claude.tui.widgets.cards import PagerScreen
+            from halo_harness.tui.widgets.cards import PagerScreen
             ctx.check(f"PagerScreen is now the active screen, got {type(app.screen).__name__}",
                       isinstance(app.screen, PagerScreen))
             ctx.check("PagerScreen has nothing focusable of its own -- focused is None",
@@ -906,7 +936,7 @@ def test_model_command_with_explicit_ref_sets_fake_model(ctx: Ctx):
 
 @test
 def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
-    from rolo_claude.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
 
     async def body():
         fake = FakeController()
@@ -932,8 +962,8 @@ def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
 # ============================================================================
 
 def _real_registry():
-    from rolo_claude.commands.builtins import register_builtins
-    from rolo_claude.commands.registry import Registry
+    from halo_harness.commands.builtins import register_builtins
+    from halo_harness.commands.registry import Registry
     reg = Registry()
     register_builtins(reg)
     return reg
@@ -941,8 +971,8 @@ def _real_registry():
 
 @test
 def test_completion_popup_down_down_enter_inserts_third_command(ctx: Ctx):
-    from rolo_claude.tui.completion import complete_slash
-    from rolo_claude.tui.widgets.input import CompletionPopup
+    from halo_harness.tui.completion import complete_slash
+    from halo_harness.tui.widgets.input import CompletionPopup
 
     async def body():
         fake = FakeController()
@@ -982,7 +1012,7 @@ def test_completion_popup_enter_runs_the_highlighted_slash_command(ctx: Ctx):
     it (Tab only inserts; `@` completions are only ever inserted). Before
     this, `/models` + Enter merely re-inserted `/models` and a second Enter
     was needed -- which the owner reported as "/models does nothing"."""
-    from rolo_claude.tui.widgets.input import CompletionPopup
+    from halo_harness.tui.widgets.input import CompletionPopup
 
     async def body():
         fake = FakeController()
@@ -1008,7 +1038,7 @@ def test_completion_popup_enter_runs_the_highlighted_slash_command(ctx: Ctx):
 
 @test
 def test_completion_popup_esc_closes_it_without_submitting_or_clearing_text(ctx: Ctx):
-    from rolo_claude.tui.widgets.input import CompletionPopup
+    from halo_harness.tui.widgets.input import CompletionPopup
 
     async def body():
         fake = FakeController()
@@ -1033,8 +1063,8 @@ def test_completion_popup_esc_closes_it_without_submitting_or_clearing_text(ctx:
 
 @test
 def test_completion_popup_typing_keeps_filtering_the_list(ctx: Ctx):
-    from rolo_claude.tui.completion import complete_slash
-    from rolo_claude.tui.widgets.input import CompletionPopup
+    from halo_harness.tui.completion import complete_slash
+    from halo_harness.tui.widgets.input import CompletionPopup
 
     async def body():
         fake = FakeController()
@@ -1057,7 +1087,7 @@ def test_completion_popup_tab_still_accepts_the_highlighted_entry(ctx: Ctx):
     """Regression check: Tab's own accept path (already correct before this
     fix) must keep working unchanged now that Enter/Up/Down also react to
     popup state."""
-    from rolo_claude.tui.completion import complete_slash
+    from halo_harness.tui.completion import complete_slash
 
     async def body():
         fake = FakeController()
@@ -1077,7 +1107,7 @@ def test_completion_popup_tab_still_accepts_the_highlighted_entry(ctx: Ctx):
 
 @test
 def test_at_path_completion_down_down_enter_inserts_third_entry(ctx: Ctx):
-    from rolo_claude.tui.widgets.input import CompletionPopup
+    from halo_harness.tui.widgets.input import CompletionPopup
 
     async def body():
         with tempfile.TemporaryDirectory() as tmp:
@@ -1114,7 +1144,7 @@ def test_at_path_completion_down_down_enter_inserts_third_entry(ctx: Ctx):
 
 @test
 def test_model_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
-    from rolo_claude.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
     from textual.widgets import Input
 
     models = [
@@ -1149,7 +1179,7 @@ def test_model_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ctx
 
 @test
 def test_resume_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
-    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from halo_harness.tui.dialogs.session_picker import SessionPicker
     from textual.widgets import Input
 
     async def body():
@@ -1161,7 +1191,7 @@ def test_resume_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ct
             await _type(pilot, "/resume")
             await pilot.press("enter")
             await pilot.pause(0.2)
-            from rolo_claude.tui.dialogs.session_picker import SessionPicker as SP
+            from halo_harness.tui.dialogs.session_picker import SessionPicker as SP
             ctx.check(f"SessionPicker opened, got {type(app.screen).__name__}", isinstance(app.screen, SP))
             filter_box = app.screen.query_one(Input)
             expected = app.screen._filtered[2].get("id")
@@ -1182,7 +1212,7 @@ def test_resume_picker_down_down_enter_selects_third_entry_filter_keeps_focus(ct
 
 @test
 def test_command_palette_down_down_enter_selects_third_entry_filter_keeps_focus(ctx: Ctx):
-    from rolo_claude.tui.dialogs.palette import CommandPalette
+    from halo_harness.tui.dialogs.palette import CommandPalette
     from textual.widgets import Input
 
     items = [
@@ -1232,7 +1262,7 @@ _INIT_PICKER_ENTRIES = [
 
 @test
 def test_init_picker_down_down_enter_selects_third_entry(ctx: Ctx):
-    from rolo_claude.tui.dialogs.init_picker import InitPickerApp
+    from halo_harness.tui.dialogs.init_picker import InitPickerApp
 
     async def body():
         app = InitPickerApp(_INIT_PICKER_ENTRIES)
@@ -1250,7 +1280,7 @@ def test_init_picker_down_down_enter_selects_third_entry(ctx: Ctx):
 
 @test
 def test_init_picker_typing_filters_and_esc_cancels(ctx: Ctx):
-    from rolo_claude.tui.dialogs.init_picker import InitPickerApp
+    from halo_harness.tui.dialogs.init_picker import InitPickerApp
 
     async def body():
         app = InitPickerApp(_INIT_PICKER_ENTRIES)
@@ -1280,7 +1310,7 @@ _H13_SESSIONS = [
 
 @test
 def test_resume_picker_shows_a_live_text_filter_that_narrows_as_you_type(ctx: Ctx):
-    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from halo_harness.tui.dialogs.session_picker import SessionPicker
     from textual.widgets import Input, OptionList
 
     async def body():
@@ -1319,7 +1349,7 @@ def test_resume_picker_shows_a_live_text_filter_that_narrows_as_you_type(ctx: Ct
 
 @test
 def test_slash_resume_with_args_opens_the_picker_prefiltered(ctx: Ctx):
-    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from halo_harness.tui.dialogs.session_picker import SessionPicker
     from textual.widgets import Input, OptionList
 
     async def body():
@@ -1347,7 +1377,7 @@ def test_ambiguous_startup_resume_opens_the_picker_prefiltered(ctx: Ctx):
     (or no-match) `--resume <text>` at launch defers to the SAME picker,
     pre-filtered, instead of silently guessing or starting a blank session
     with no feedback (`tui/app.py`'s own `_initial_resume_filter`)."""
-    from rolo_claude.tui.dialogs.session_picker import SessionPicker
+    from halo_harness.tui.dialogs.session_picker import SessionPicker
     from textual.widgets import Input
 
     async def body():
@@ -1385,7 +1415,7 @@ def _image_result_turn():
 
 @test
 def test_image_tool_result_reaches_the_tool_card_and_attempts_an_inline_render(ctx: Ctx):
-    from rolo_claude.tui.widgets.cards import ToolCard
+    from halo_harness.tui.widgets.cards import ToolCard
 
     captured = []
 
@@ -1422,7 +1452,7 @@ def test_image_tool_result_reaches_the_tool_card_and_attempts_an_inline_render(c
 
 @test
 def test_image_result_falls_back_to_caption_only_when_render_mode_is_caption(ctx: Ctx):
-    from rolo_claude.tui.widgets.cards import ToolCard
+    from halo_harness.tui.widgets.cards import ToolCard
 
     captured = []
 
@@ -1454,7 +1484,7 @@ def test_image_result_falls_back_to_caption_only_when_render_mode_is_caption(ctx
 
 @test
 def test_image_result_falls_back_to_caption_when_no_protocol_detected(ctx: Ctx):
-    from rolo_claude.tui.widgets.cards import ToolCard
+    from halo_harness.tui.widgets.cards import ToolCard
 
     captured = []
 
@@ -1571,7 +1601,7 @@ def test_force_quit_worker_arms_an_os_exit_timer_after_calling_self_exit(ctx: Ct
     `_force_quit_worker` (never a real running app) so the timer's target
     can be observed without ever letting the real `os._exit` fire here."""
     import threading as threading_mod
-    import rolo_claude.tui.app as app_mod
+    import halo_harness.tui.app as app_mod
 
     class _StubApp:
         def __init__(self):
@@ -1639,7 +1669,7 @@ def test_paste_4_or_more_lines_becomes_a_placeholder(ctx: Ctx):
 
 
 @test
-def test_history_up_recalls_from_both_claude_code_and_rolo_claude_files(ctx: Ctx):
+def test_history_up_recalls_from_both_claude_code_and_halo_harness_files(ctx: Ctx):
     async def body():
         with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as state_dir:
             old_home, old_state = os.environ.get("BRIDGE_TEST_HOME"), os.environ.get("BRIDGE_STATE_DIR")
@@ -1655,7 +1685,7 @@ def test_history_up_recalls_from_both_claude_code_and_rolo_claude_files(ctx: Ctx
                 rolo_dir = Path(state_dir)
                 rolo_dir.mkdir(parents=True, exist_ok=True)
                 (rolo_dir / "history.jsonl").write_text(json.dumps({
-                    "display": "from rolo-claude history", "pastedContents": {}, "project": cwd_str,
+                    "display": "from halo history", "pastedContents": {}, "project": cwd_str,
                     "sessionId": "s2", "timestamp": 2.0,
                 }) + "\n", encoding="utf-8")
 
@@ -1669,8 +1699,8 @@ def test_history_up_recalls_from_both_claude_code_and_rolo_claude_files(ctx: Ctx
                     await pilot.press("up")
                     await pilot.pause(0.05)
                     second = app.prompt_input.text
-                ctx.check(f"the newest (rolo-claude's own file) entry recalls first, got {first!r}",
-                          first == "from rolo-claude history")
+                ctx.check(f"the newest (halo's own file) entry recalls first, got {first!r}",
+                          first == "from halo history")
                 ctx.check(f"the older (Claude Code's own file) entry recalls next, got {second!r}",
                           second == "from claude code history")
             finally:
@@ -1759,7 +1789,7 @@ def test_plan_card_keep_planning_with_feedback(ctx: Ctx):
 
 @test
 def test_folding_after_300_widgets(ctx: Ctx):
-    from rolo_claude.tui.widgets.transcript import FoldedHistory
+    from halo_harness.tui.widgets.transcript import FoldedHistory
 
     async def body():
         fake = FakeController()
@@ -1778,7 +1808,7 @@ def test_folding_after_300_widgets(ctx: Ctx):
 
 @test
 def test_stress_500_turns_stays_responsive(ctx: Ctx):
-    """Acceptance: `python -m rolo_claude --demo --stress 500` must stay
+    """Acceptance: `python -m halo_harness --demo --stress 500` must stay
     responsive. An interactive full-screen session can't be driven headless
     from a test runner, so this is the automated, deterministic proxy: push
     the exact same `stress_turns(500)` scripted event volume (~2,500 events
@@ -1789,7 +1819,7 @@ def test_stress_500_turns_stays_responsive(ctx: Ctx):
     unboundedly for the whole run."""
     import time
 
-    from rolo_claude.testing.fake_controller import stress_turns
+    from halo_harness.testing.fake_controller import stress_turns
 
     async def body():
         fake = FakeController(turns=stress_turns(500))
@@ -1831,7 +1861,7 @@ def _write_snapshot(app, name: str) -> "tuple[Path, str]":
 
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     path = SNAPSHOT_DIR / f"{name}.svg"
-    svg = app.export_screenshot(title=f"rolo-claude -- {name}", simplify=True)
+    svg = app.export_screenshot(title=f"halo -- {name}", simplify=True)
     path.write_text(svg, encoding="utf-8")
     normalised = svg.replace("&#160;", " ").replace("\xa0", " ")
     normalised = re.sub(r"<[^>]+>", "", normalised)
@@ -1902,7 +1932,7 @@ def test_svg_snapshots_main_permission_question_model_picker(ctx: Ctx):
         fake6 = FakeController()
         app6 = await _mounted(fake6)
         async with app6.run_test(size=(100, 40)) as pilot6:
-            from rolo_claude.tui.widgets.cards import RewindCard
+            from halo_harness.tui.widgets.cards import RewindCard
             card = RewindCard(step={"id": "abc123", "ts": 0, "label": "Write(file.txt)", "files": ["file.txt"]},
                               verb="undo", on_decide=lambda _confirmed: None)
             await app6.transcript.mount_widget(card)
@@ -1959,7 +1989,7 @@ def test_real_e2e_pilot_against_mock_upstream_streams_text_and_read_tool_card(ct
         os.environ["OPENROUTER_API_KEY"] = "test-key"
         controller = None
         try:
-            from rolo_claude.tui.bootstrap import build_controller
+            from halo_harness.tui.bootstrap import build_controller
 
             args = argparse.Namespace(
                 cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
@@ -2029,8 +2059,8 @@ def test_slash_model_switches_the_real_session_and_next_reply_uses_it(ctx: Ctx):
         os.environ["OPENROUTER_API_KEY"] = "test-key"
         controller = None
         try:
-            from rolo_claude.tui.bootstrap import build_controller
-            from rolo_claude.tui.slash import handle_slash
+            from halo_harness.tui.bootstrap import build_controller
+            from halo_harness.tui.slash import handle_slash
 
             args = argparse.Namespace(
                 cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
@@ -2199,7 +2229,7 @@ def test_status_bar_nothing_known_shows_used_tokens_and_totals(ctx: Ctx):
 
 @test
 def test_keymap_defaults_merge_with_user_keybindings_json_chords_and_unbind(ctx: Ctx):
-    from rolo_claude.tui import keys as tui_keys
+    from halo_harness.tui import keys as tui_keys
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "keybindings.json"
@@ -2229,7 +2259,7 @@ def test_keymap_defaults_merge_with_user_keybindings_json_chords_and_unbind(ctx:
 
 @test
 def test_keymap_normalize_keystroke_folds_aliases_and_modifier_order(ctx: Ctx):
-    from rolo_claude.tui import keys as tui_keys
+    from halo_harness.tui import keys as tui_keys
 
     ctx.check("control/opt/cmd aliases fold to ctrl/alt/meta",
               tui_keys.normalize_keystroke("Control+Opt+S") == "ctrl+alt+s")
@@ -2242,8 +2272,8 @@ def test_keymap_normalize_keystroke_folds_aliases_and_modifier_order(ctx: Ctx):
 
 @test
 def test_which_key_continuations_and_overlay_widget(ctx: Ctx):
-    from rolo_claude.tui import keys as tui_keys
-    from rolo_claude.tui.widgets.whichkey import WhichKeyOverlay
+    from halo_harness.tui import keys as tui_keys
+    from halo_harness.tui.widgets.whichkey import WhichKeyOverlay
 
     keymap = tui_keys.default_bindings_flat()
     continuations = tui_keys.chord_continuations(keymap["Global"], "ctrl+x")
@@ -2265,7 +2295,7 @@ def test_which_key_continuations_and_overlay_widget(ctx: Ctx):
 
 @test
 def test_palette_filter_items_prefix_then_substring(ctx: Ctx):
-    from rolo_claude.tui.dialogs.palette import filter_items
+    from halo_harness.tui.dialogs.palette import filter_items
 
     items = [
         {"kind": "command", "label": "/model", "detail": "Show or change the model", "value": "model"},
@@ -2285,7 +2315,7 @@ def test_palette_filter_items_prefix_then_substring(ctx: Ctx):
 
 @test
 def test_at_mention_line_range_parsing(ctx: Ctx):
-    from rolo_claude.tui.completion import parse_at_mentions
+    from halo_harness.tui.completion import parse_at_mentions
 
     mentions = parse_at_mentions("look at @src/main.py#L10-20 and also @README.md and @a/b#L5 please")
     ctx.check(f"three mentions found, got {mentions}", len(mentions) == 3)
@@ -2297,7 +2327,7 @@ def test_at_mention_line_range_parsing(ctx: Ctx):
 
 @test
 def test_statusline_command_receives_claude_code_json_contract(ctx: Ctx):
-    from rolo_claude import statusline as sl
+    from halo_harness import statusline as sl
 
     payload = sl.build_payload(session_id="sid1", cwd="/proj", model_id="or:x/y", cost_usd=1.5)
     ctx.check("payload carries Claude Code's own field names",
@@ -2333,23 +2363,23 @@ def test_statusline_command_receives_claude_code_json_contract(ctx: Ctx):
 # ============================================================================
 
 def _real_controller(cwd: Path, *, mode: str = "bypassPermissions"):
-    from rolo_claude.agent.log import SessionLog
-    from rolo_claude.controller import Controller
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.controller import Controller
+    from halo_harness.permissions import PermissionEngine
 
     # H11b finding 27 (same spirit): `SessionLog(cwd)` below honours
     # BRIDGE_TEST_HOME/BRIDGE_STATE_DIR if set, else the REAL
-    # ~/.rolo-claude -- this helper never scoped either one itself, only
+    # ~/.halo -- this helper never scoped either one itself, only
     # ever safe because SOME other test happened to leave one set first.
     # Never overrides a value a caller deliberately set. `BRIDGE_STATE_DIR`
-    # (skips the extra "/.rolo-claude" segment) with a SHORT prefix --
-    # `rolo_claude/shadow.py` re-embeds a tracked file's own full absolute
+    # (skips the extra "/.halo" segment) with a SHORT prefix --
+    # `halo_harness/shadow.py` re-embeds a tracked file's own full absolute
     # path (drive letter included) under `<state_dir>/sessions/<slug>/
     # <session_id>/shadow/_drive_C/...`; a long prefix here pushed a
     # `cwd` already deep under AppData\Local\Temp past Windows' 260-char
     # MAX_PATH, so `git add` silently added zero files (verified: `git
     # ls-tree` on the resulting commit was empty) and rewind/undo restored
-    # nothing -- never a rolo-claude bug, just this helper's own scratch
+    # nothing -- never a halo bug, just this helper's own scratch
     # path being needlessly long.
     if "BRIDGE_TEST_HOME" not in os.environ and "BRIDGE_STATE_DIR" not in os.environ:
         os.environ["BRIDGE_STATE_DIR"] = tempfile.mkdtemp(prefix="th-")
@@ -2409,7 +2439,7 @@ def test_chord_ctrl_x_which_key_then_dispatches_and_suppresses_the_plain_binding
 
 @test
 def test_chord_timeout_cancels_pending_chord(ctx: Ctx):
-    from rolo_claude.tui import keys as tui_keys
+    from halo_harness.tui import keys as tui_keys
 
     async def body():
         fake = FakeController()
@@ -2495,7 +2525,7 @@ def test_write_then_rewind_undo_restores_the_file_via_real_shadow_hook(ctx: Ctx)
             controller = _real_controller(cwd)
             app = await _mounted(controller, cwd=str(cwd))
             async with app.run_test(size=(100, 40)) as pilot:
-                from rolo_claude.tui.dispatch import apply_event
+                from halo_harness.tui.dispatch import apply_event
 
                 await apply_event(app, ev.Event("tool_use_ready", {
                     "id": "w1", "name": "Write", "input": {"file_path": str(target), "content": "version 1\n"},
@@ -2578,8 +2608,8 @@ def test_h5b_f11_compact_is_queued_off_the_ui_thread_not_run_synchronously(ctx: 
     ENTIRE summarisation call there, freezing the whole TUI). `run_slash`
     must return immediately ("") and leave the actual work for
     `Session.run()`'s own worker-thread command loop to pick up."""
-    from rolo_claude.commands.registry import Registry
-    from rolo_claude.commands.builtins import register_builtins
+    from halo_harness.commands.registry import Registry
+    from halo_harness.commands.builtins import register_builtins
 
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
@@ -2639,14 +2669,21 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
     NEW session BEFORE that hook fires, or its own env-file write lands in
     a file keyed to the OLD (stale) session_id that nothing ever reads
     back, and `session.tool_env` never sees `FROM_CLEAR_HOOK`."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.hooks import HookDef, HookRunner
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.hooks import HookDef, HookRunner
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
+        # 2.0.0 fixpass finding 2: this used to overwrite BRIDGE_TEST_HOME
+        # with no save, then unconditionally POP it (never restore) in the
+        # finally below -- the first test anywhere in this file to run
+        # AFTER this one, with no BRIDGE_TEST_HOME/BRIDGE_STATE_DIR of its
+        # own, fell through to the REAL machine home. Save/restore now,
+        # same idiom as every other test in this file.
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
         os.environ["BRIDGE_TEST_HOME"] = str(cwd / "home")
         try:
             session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
@@ -2682,7 +2719,7 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
             ctx.check(f"a NEW session_id was created, got old={old_session_id!r} new={session.log.session_id!r}",
                       session.log.session_id != old_session_id)
             ctx.check("turn_count reset", session.turn_count == 0)
-            from rolo_claude.agent.derive import derive_request
+            from halo_harness.agent.derive import derive_request
             _system, messages, _tools = derive_request(session.log, tools=None)
             all_text = json.dumps(messages)
             ctx.check(f"the old conversation content is GONE from the new log, got {all_text!r}",
@@ -2705,7 +2742,10 @@ def test_h5b_u5_clear_starts_a_new_log_with_session_end_and_start_hooks(ctx: Ctx
             ctx.check(f"SessionEnd(clear) genuinely fired (a real subprocess ran and wrote its counter), "
                       f"got exists={session_end_counter.exists()}", session_end_counter.exists())
         finally:
-            os.environ.pop("BRIDGE_TEST_HOME", None)
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
 
 
 @test
@@ -2834,7 +2874,7 @@ def test_cc_route_permission_card_in_default_mode_runs_after_allow(ctx: Ctx):
         os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
         controller = None
         try:
-            from rolo_claude.tui.bootstrap import build_controller
+            from halo_harness.tui.bootstrap import build_controller
 
             args = argparse.Namespace(
                 cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
@@ -2935,7 +2975,7 @@ def test_h9b_f11_two_parallel_children_get_separate_streams_and_never_touch_main
         os.environ["OPENROUTER_API_KEY"] = "test-key"
         controller = None
         try:
-            from rolo_claude.tui.bootstrap import build_controller
+            from halo_harness.tui.bootstrap import build_controller
 
             args = argparse.Namespace(
                 cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
@@ -3000,8 +3040,8 @@ def test_improve_card_a_e_s_d_q(ctx: Ctx):
     """H10 Part B3: ImproveCard's 5 actions, mounted directly (RewindCard's
     own pilot pattern) -- each key fires `on_action` exactly once with the
     right action name and never again on a second press."""
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.tui.widgets.cards import ImproveCard
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.tui.widgets.cards import ImproveCard
 
     def _candidate(cid):
         return Candidate(id=cid, kind="rule", title=f"rule-{cid}", scope="project", path=f"{cid}.md",
@@ -3013,7 +3053,7 @@ def test_improve_card_a_e_s_d_q(ctx: Ctx):
             app = await _mounted(fake)
             async with app.run_test(size=(100, 40)) as pilot:
                 fired = []
-                card = ImproveCard(candidate=_candidate(key), provenance_line="<!-- rolo-claude improve: x -->",
+                card = ImproveCard(candidate=_candidate(key), provenance_line="<!-- halo improve: x -->",
                                     index=1, total=1, on_action=lambda action, data: fired.append((action, data)))
                 await app.transcript.mount_widget(card)
                 app.set_pending_card(card)
@@ -3033,8 +3073,8 @@ def test_improve_card_a_e_s_d_q(ctx: Ctx):
 def test_improve_card_diff_and_excerpt_render(ctx: Ctx):
     """A card with `diff_lines` shows the diff, not the raw body; `o`
     opens a pager with the excerpt text."""
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.tui.widgets.cards import ImproveCard
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.tui.widgets.cards import ImproveCard
 
     async def body():
         fake = FakeController()
@@ -3042,7 +3082,7 @@ def test_improve_card_diff_and_excerpt_render(ctx: Ctx):
         async with app.run_test(size=(100, 40)) as pilot:
             cand = Candidate(id="c1", kind="rule", title="rule-c1", scope="project", path="c1.md",
                               body="new body text", rationale="r", evidence=["sess1#7"], confidence="low")
-            card = ImproveCard(candidate=cand, provenance_line="<!-- rolo-claude improve: x -->", index=1, total=1,
+            card = ImproveCard(candidate=cand, provenance_line="<!-- halo improve: x -->", index=1, total=1,
                                 diff_lines=["--- old\n", "+++ new\n", "-old line\n", "+new line\n"],
                                 excerpt_text="the raw excerpt text from the session log", on_action=lambda a, d: None)
             await app.transcript.mount_widget(card)
@@ -3089,7 +3129,7 @@ def test_stats_models_runs_off_the_ui_thread(ctx: Ctx):
 
 
 # ============================================================================
-# H15 Part A: `rolo-claude init`'s tabbed provider setup (InitTabsApp) --
+# H15 Part A: `halo init`'s tabbed provider setup (InitTabsApp) --
 # tab navigation, masked picked-up credentials, live status on entry,
 # reachability (mocked), and the catalog cache write on tab completion.
 # ============================================================================
@@ -3104,21 +3144,21 @@ _H15_TABS_PROVIDER_VARS = (
 class _H15TabsEnv:
     """Scopes BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/BRIDGE_ENV_FILE plus every
     provider variable InitTabsApp's own tabs can touch -- the real
-    ~/.rolo-claude is never written by these pilots."""
+    ~/.halo is never written by these pilots."""
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in
                        (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE") + _H15_TABS_PROVIDER_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15-init-tabs-pilot-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = '{"loggedIn": false}'
         for k in _H15_TABS_PROVIDER_VARS:
             if k != "BRIDGE_TEST_CC_AUTH_STATUS":
                 os.environ.pop(k, None)
         self.home = d
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -3135,8 +3175,8 @@ def _static_text(widget) -> str:
 
 @test
 def test_init_tabs_shift_tab_navigates_providers_with_wraparound(ctx: Ctx):
-    from rolo_claude.init_providers import TAB_PROVIDERS
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp, _pane_id
+    from halo_harness.init_providers import TAB_PROVIDERS
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp, _pane_id
     from textual.widgets import TabbedContent
 
     async def body():
@@ -3160,7 +3200,7 @@ def test_init_tabs_shift_tab_navigates_providers_with_wraparound(ctx: Ctx):
 def test_init_tabs_masked_picked_up_credential_with_source(ctx: Ctx):
     """A.2: an already-resolved credential shows "picked up from <source>"
     with the value MASKED, never the raw key."""
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Static
 
     async def body():
@@ -3181,7 +3221,7 @@ def test_init_tabs_masked_picked_up_credential_with_source(ctx: Ctx):
 @test
 def test_init_tabs_inline_entry_updates_the_status_tag(ctx: Ctx):
     """A.2: "the status tag updates as soon as a value is entered"."""
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Input, Static
 
     async def body():
@@ -3208,9 +3248,9 @@ def test_init_tabs_reachability_tag_for_a_refused_host(ctx: Ctx):
     """A.3: "unreachable (one-line reason)" from a bounded probe -- mocked
     here (`providers.reachability.open_upstream`) so the pilot never
     touches the real network."""
-    from rolo_claude.providers.http import UpstreamConnectError
-    import rolo_claude.providers.reachability as reach_mod
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from halo_harness.providers.http import UpstreamConnectError
+    import halo_harness.providers.reachability as reach_mod
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Input, Static
 
     def _fake_open_upstream(host, port, tls, *a, **kw):
@@ -3251,8 +3291,8 @@ def test_init_tabs_catalog_cache_written_on_tab_completion(ctx: Ctx):
     deterministic), the real `write_models_json`/`load_models_json`
     round-trip is NOT mocked, so this proves the cache file is actually
     written to this test's own scoped state dir."""
-    from rolo_claude.providers.databricks import load_models_json
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    from halo_harness.providers.databricks import load_models_json
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Input, Static
 
     def _fake_probe(base_url, api_key):
@@ -3260,7 +3300,7 @@ def test_init_tabs_catalog_cache_written_on_tab_completion(ctx: Ctx):
                  "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]
 
     async def body():
-        import rolo_claude.providers.databricks as dbx_mod
+        import halo_harness.providers.databricks as dbx_mod
         real_probe = dbx_mod.probe_openrouter_models
         dbx_mod.probe_openrouter_models = _fake_probe
         try:
@@ -3304,7 +3344,7 @@ def _pending_permission_card(app) -> PermissionCard:
 
 @test
 def test_effort_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
-    from rolo_claude.tui.slash import handle_slash
+    from halo_harness.tui.slash import handle_slash
 
     async def body():
         fake = FakeController()
@@ -3323,7 +3363,7 @@ def test_effort_shows_a_note_instead_of_opening_while_a_permission_card_is_pendi
 
 @test
 def test_rewind_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
-    from rolo_claude.tui.slash import _show_rewind_confirmation
+    from halo_harness.tui.slash import _show_rewind_confirmation
 
     async def body():
         fake = FakeController()
@@ -3341,7 +3381,7 @@ def test_rewind_shows_a_note_instead_of_opening_while_a_permission_card_is_pendi
 
 @test
 def test_improve_shows_a_note_instead_of_opening_while_a_permission_card_is_pending(ctx: Ctx):
-    from rolo_claude.tui.slash import _handle_improve
+    from halo_harness.tui.slash import _handle_improve
 
     async def body():
         fake = FakeController()
@@ -3361,8 +3401,8 @@ def test_improve_shows_a_note_instead_of_opening_while_a_permission_card_is_pend
 def test_effort_still_opens_normally_with_nothing_pending(ctx: Ctx):
     """Regression guard: the fix must not block /effort when it's actually
     safe to open."""
-    from rolo_claude.tui.slash import handle_slash
-    from rolo_claude.tui.widgets.cards import EffortCard
+    from halo_harness.tui.slash import handle_slash
+    from halo_harness.tui.widgets.cards import EffortCard
 
     async def body():
         fake = FakeController()
@@ -3504,7 +3544,7 @@ class _CcAuthStaleEnv:
     def __enter__(self):
         self._saved = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
         os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
-        from rolo_claude.providers.cc_models import reset_cached_claude_auth_status
+        from halo_harness.providers.cc_models import reset_cached_claude_auth_status
         reset_cached_claude_auth_status()
         return self
 
@@ -3513,7 +3553,7 @@ class _CcAuthStaleEnv:
             os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
         else:
             os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = self._saved
-        from rolo_claude.providers.cc_models import reset_cached_claude_auth_status
+        from halo_harness.providers.cc_models import reset_cached_claude_auth_status
         reset_cached_claude_auth_status()
 
 
@@ -3524,8 +3564,8 @@ def test_cc_auth_status_auto_refresh_worker_refreshes_a_cold_cache(ctx: Ctx):
     sees its own current value) -- these two tests are specifically about
     whether the INTERNAL cache variable gets written, so they read it
     directly rather than through that bypass."""
-    import rolo_claude.providers.cc_models as cc_models_mod
-    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    import halo_harness.providers.cc_models as cc_models_mod
+    from halo_harness.tui.slash import _cc_auth_status_auto_refresh_worker
     with _CcAuthStaleEnv():
         ctx.check("nothing cached yet", cc_models_mod._auth_status_cache is None)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -3538,9 +3578,9 @@ def test_cc_auth_status_auto_refresh_worker_refreshes_a_cold_cache(ctx: Ctx):
 def test_cc_auth_status_auto_refresh_worker_skips_a_fresh_cache(ctx: Ctx):
     """The TTL actually gates the refresh -- a cache that's still fresh
     must not be re-fetched on every single /model open."""
-    import rolo_claude.providers.cc_models as cc_models_mod
-    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
-    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    import halo_harness.providers.cc_models as cc_models_mod
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.tui.slash import _cc_auth_status_auto_refresh_worker
     with _CcAuthStaleEnv():
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         refresh_cached_claude_auth_status()  # a genuinely FRESH cache entry
@@ -3555,9 +3595,9 @@ def test_cc_auth_status_auto_refresh_worker_skips_a_fresh_cache(ctx: Ctx):
 def test_cc_auth_status_auto_refresh_worker_picks_up_a_login_change_once_stale(ctx: Ctx):
     """The exact scenario the reviewer minor names: a login change becomes
     visible without restarting the app, once the cache is stale."""
-    import rolo_claude.providers.cc_models as cc_models_mod
-    from rolo_claude.providers.cc_models import cached_claude_auth_status, refresh_cached_claude_auth_status
-    from rolo_claude.tui.slash import _cc_auth_status_auto_refresh_worker
+    import halo_harness.providers.cc_models as cc_models_mod
+    from halo_harness.providers.cc_models import cached_claude_auth_status, refresh_cached_claude_auth_status
+    from halo_harness.tui.slash import _cc_auth_status_auto_refresh_worker
     with _CcAuthStaleEnv():
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         refresh_cached_claude_auth_status()
@@ -3575,7 +3615,7 @@ def test_cc_auth_status_auto_refresh_worker_picks_up_a_login_change_once_stale(c
 def test_handle_model_fires_the_cc_auth_auto_refresh_worker(ctx: Ctx):
     """Wiring check: bare /model actually starts this worker (its own
     named group, matching every other slash.py worker's convention)."""
-    from rolo_claude.tui.slash import _handle_model
+    from halo_harness.tui.slash import _handle_model
 
     async def body():
         fake = FakeController()
@@ -3611,7 +3651,7 @@ class _InlineAskController:
     that asks, Shift+Tab mode changes that re-decide it for real."""
 
     def __init__(self):
-        from rolo_claude.permissions import Decision
+        from halo_harness.permissions import Decision
         self._Decision = Decision
         self.permission_mode = "default"
         self._waiters: dict = {}
@@ -3622,7 +3662,7 @@ class _InlineAskController:
         return self._Decision("ask", "a plain Bash tool would ask here too", suggested_rule=None)
 
     def run_inline_shell(self, command: str):
-        from rolo_claude.tools.base import ToolResult
+        from halo_harness.tools.base import ToolResult
         self.inline_runs.append(command)
         return f"inline_{len(self.inline_runs)}", ToolResult(content=f"ran: {command}")
 
@@ -3661,7 +3701,7 @@ def test_inline_shell_ask_card_resolves_via_shift_tab_mode_change(ctx: Ctx):
             await pilot.pause(0.05)
             await app._handle_bang_command("echo hi")
             await pilot.pause(0.05)
-            from rolo_claude.tui.widgets.cards import PermissionCard
+            from halo_harness.tui.widgets.cards import PermissionCard
             ctx.check(f"an inline ask card is pending, got {app.pending_card}",
                       isinstance(app.pending_card, PermissionCard))
             card = app.pending_card
@@ -3705,14 +3745,14 @@ def test_inline_shell_ask_card_stays_pending_under_a_mode_that_still_asks(ctx: C
 
 @test
 def test_watchdog_dumps_diagnostics_on_a_stalled_heartbeat(ctx: Ctx):
-    import rolo_claude.tui.app as app_mod
+    import halo_harness.tui.app as app_mod
 
     async def body():
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         old_state = os.environ.get("BRIDGE_STATE_DIR")
         home = Path(tempfile.mkdtemp(prefix="h15-watchdog-"))
         os.environ["BRIDGE_TEST_HOME"] = str(home)
-        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
         real_threshold = app_mod.HANG_HEARTBEAT_THRESHOLD_S
         real_min_interval = app_mod.HANG_DUMP_MIN_INTERVAL_S
         app_mod.HANG_HEARTBEAT_THRESHOLD_S = 0.2
@@ -3734,7 +3774,7 @@ def test_watchdog_dumps_diagnostics_on_a_stalled_heartbeat(ctx: Ctx):
                 app._last_heartbeat_monotonic = time.monotonic() - 5.0
                 deadline = time.monotonic() + 5.0
                 hang_files: list = []
-                from rolo_claude.config.paths import bridge_home
+                from halo_harness.config.paths import bridge_home
                 while time.monotonic() < deadline:
                     hang_files = list(bridge_home().glob("hang-*.log"))
                     if hang_files:
@@ -3764,14 +3804,14 @@ def test_watchdog_dumps_diagnostics_on_a_stalled_heartbeat(ctx: Ctx):
 def test_watchdog_never_dumps_twice_within_the_minimum_interval(ctx: Ctx):
     """"at most once a minute while it persists" -- pinned with a short
     interval so the test itself stays fast."""
-    import rolo_claude.tui.app as app_mod
+    import halo_harness.tui.app as app_mod
 
     async def body():
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         old_state = os.environ.get("BRIDGE_STATE_DIR")
         home = Path(tempfile.mkdtemp(prefix="h15-watchdog-once-"))
         os.environ["BRIDGE_TEST_HOME"] = str(home)
-        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
         real_threshold = app_mod.HANG_HEARTBEAT_THRESHOLD_S
         real_min_interval = app_mod.HANG_DUMP_MIN_INTERVAL_S
         app_mod.HANG_HEARTBEAT_THRESHOLD_S = 0.2
@@ -3783,7 +3823,7 @@ def test_watchdog_never_dumps_twice_within_the_minimum_interval(ctx: Ctx):
                 await pilot.pause(0.1)
                 app._tick_spinner = lambda: None  # see the sibling test's own comment on this
                 app._last_heartbeat_monotonic = time.monotonic() - 5.0
-                from rolo_claude.config.paths import bridge_home
+                from halo_harness.config.paths import bridge_home
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline and not list(bridge_home().glob("hang-*.log")):
                     await pilot.pause(0.1)
@@ -3817,7 +3857,7 @@ def test_sigusr1_dumps_on_demand(ctx: Ctx):
         old_state = os.environ.get("BRIDGE_STATE_DIR")
         home = Path(tempfile.mkdtemp(prefix="h15-sigusr1-"))
         os.environ["BRIDGE_TEST_HOME"] = str(home)
-        os.environ["BRIDGE_STATE_DIR"] = str(home / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(home / ".halo")
         try:
             fake = FakeController()
             app = await _mounted(fake)
@@ -3827,7 +3867,7 @@ def test_sigusr1_dumps_on_demand(ctx: Ctx):
                 import signal
                 os_mod.kill(os_mod.getpid(), signal.SIGUSR1)
                 await pilot.pause(0.3)
-                from rolo_claude.config.paths import bridge_home
+                from halo_harness.config.paths import bridge_home
                 hang_files = list(bridge_home().glob("hang-*.log"))
                 ctx.check(f"SIGUSR1 dumped on demand, got {hang_files}", len(hang_files) == 1)
                 ctx.check("names SIGUSR1 as the reason", "SIGUSR1" in hang_files[0].read_text(encoding="utf-8"))
@@ -3852,7 +3892,7 @@ def test_debug_tracing_logs_key_events_with_focus_and_screen(ctx: Ctx):
     import logging as logging_mod
 
     async def body():
-        logger = logging_mod.getLogger("rolo_claude.tui")
+        logger = logging_mod.getLogger("halo_harness.tui")
         records: list = []
 
         class _Capture(logging_mod.Handler):
@@ -3894,7 +3934,7 @@ def test_debug_tracing_logs_app_blur_and_focus(ctx: Ctx):
     from textual import events as textual_events
 
     async def body():
-        logger = logging_mod.getLogger("rolo_claude.tui")
+        logger = logging_mod.getLogger("halo_harness.tui")
         records: list = []
 
         class _Capture(logging_mod.Handler):
@@ -3926,7 +3966,7 @@ def test_debug_tracing_logs_named_worker_lifecycle(ctx: Ctx):
     import logging as logging_mod
 
     async def body():
-        logger = logging_mod.getLogger("rolo_claude.tui")
+        logger = logging_mod.getLogger("halo_harness.tui")
         records: list = []
 
         class _Capture(logging_mod.Handler):
@@ -3961,7 +4001,7 @@ def test_debug_tracing_logs_named_worker_lifecycle(ctx: Ctx):
 def test_troubleshooting_doc_names_the_hang_log(ctx: Ctx):
     text = (REPO_DIR / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
     ctx.check("names the exact hang log path pattern",
-              "~/.rolo-claude/hang-" in text or "hang-<UTC" in text)
+              "~/.halo/hang-" in text or "hang-<UTC" in text)
     ctx.check("names SIGUSR1 for an on-demand dump", "SIGUSR1" in text)
     ctx.check("mentions the 15s/one-minute cadence", "15s" in text and "minute" in text)
 
@@ -3995,7 +4035,7 @@ def test_launch_actually_populates_an_empty_openrouter_catalog(ctx: Ctx):
             # by `ensure_default_provider_credentials()` above) that now
             # makes that worker return immediately.
             os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
-            from rolo_claude.providers.databricks import load_models_json
+            from halo_harness.providers.databricks import load_models_json
             state_dir = Path(tempfile.mkdtemp(prefix="h15-launch-catalog-"))
             fake = FakeController()
             fake.state_dir = state_dir
@@ -4047,7 +4087,7 @@ def test_background_net_disabled_mount_never_touches_the_network(ctx: Ctx):
     -- any launch worker that still tried to touch the network would raise
     and fail this test."""
     import argparse
-    import rolo_claude.providers.http as http_mod
+    import halo_harness.providers.http as http_mod
 
     async def body():
         fh = build_fake_home()
@@ -4068,7 +4108,7 @@ def test_background_net_disabled_mount_never_touches_the_network(ctx: Ctx):
         http_mod.open_upstream = _poison
         controller = None
         try:
-            from rolo_claude.tui.bootstrap import build_controller
+            from halo_harness.tui.bootstrap import build_controller
             args = argparse.Namespace(
                 cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
                 permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=True,
@@ -4109,7 +4149,7 @@ def test_slash_providers_builds_the_table_off_the_main_thread(ctx: Ctx):
     check -- a real DNS+TCP+TLS connect in production) ever runs on the
     main/UI thread -- it must not, regardless of timing."""
     import threading
-    import rolo_claude.providers.reachability as reach_mod
+    import halo_harness.providers.reachability as reach_mod
 
     seen_main_thread = []
     real_tag = reach_mod.reachability_tag
@@ -4158,7 +4198,7 @@ def test_slash_providers_enable_disable_stay_synchronous(ctx: Ctx):
         old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
         os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="h15b-providers-endis-")))
         try:
-            from rolo_claude.providers.enablement import is_enabled
+            from halo_harness.providers.enablement import is_enabled
             fake = FakeController()
             app = await _mounted(fake)
             async with app.run_test(size=(100, 40)) as pilot:
@@ -4179,7 +4219,7 @@ def test_slash_providers_enable_disable_stay_synchronous(ctx: Ctx):
 @test
 def test_slash_doctor_runs_off_the_main_thread(ctx: Ctx):
     import threading
-    import rolo_claude.doctor as doctor_mod
+    import halo_harness.doctor as doctor_mod
 
     seen_main_thread = []
     real_run_checks = doctor_mod.run_checks
@@ -4225,8 +4265,8 @@ def test_slash_doctor_runs_off_the_main_thread(ctx: Ctx):
 @test
 def test_init_tabs_compose_is_instant_despite_a_slow_claude_check(ctx: Ctx):
     import time as time_mod
-    import rolo_claude.init_providers as init_providers_mod
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    import halo_harness.init_providers as init_providers_mod
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Static
 
     def _slow_claude_login():
@@ -4268,9 +4308,9 @@ def test_init_tabs_check_login_button_does_not_block_the_ui_thread(ctx: Ctx):
     thread=True worker + call_from_thread, same pattern as this file's own
     test_init_tabs_compose_is_instant_despite_a_slow_claude_check above."""
     import time as time_mod
-    import rolo_claude.init_providers as init_providers_mod
-    from rolo_claude.init_providers import TAB_PROVIDERS
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    import halo_harness.init_providers as init_providers_mod
+    from halo_harness.init_providers import TAB_PROVIDERS
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Static
 
     def _slow_claude_login():
@@ -4325,9 +4365,9 @@ def test_init_tabs_check_login_button_does_not_block_the_ui_thread(ctx: Ctx):
 
 @test
 def test_init_tabs_no_live_never_touches_the_network_or_fetches_a_catalog(ctx: Ctx):
-    import rolo_claude.init_providers as init_providers_mod
-    import rolo_claude.providers.reachability as reach_mod
-    from rolo_claude.tui.dialogs.init_tabs import InitTabsApp
+    import halo_harness.init_providers as init_providers_mod
+    import halo_harness.providers.reachability as reach_mod
+    from halo_harness.tui.dialogs.init_tabs import InitTabsApp
     from textual.widgets import Input, Static
 
     def _poison_open_upstream(*a, **kw):
@@ -4380,17 +4420,17 @@ def test_watchdog_paused_flag_suppresses_a_hang_dump(ctx: Ctx):
     around `self.suspend()`); the SAME stale heartbeat dumps once unpaused,
     proving the mechanism genuinely works (not just coincidentally quiet)."""
     import time as time_mod
-    from rolo_claude.tui.app import HANG_HEARTBEAT_THRESHOLD_S
+    from halo_harness.tui.app import HANG_HEARTBEAT_THRESHOLD_S
 
     async def body():
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
         scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-pause-"))
         os.environ["BRIDGE_TEST_HOME"] = str(scratch)
-        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".halo")
         try:
             fake = FakeController()
-            fake.state_dir = scratch / ".rolo-claude"
+            fake.state_dir = scratch / ".halo"
             app = await _mounted(fake)
             async with app.run_test(size=(100, 40)):
                 # The real `_tick_spinner` interval (every 1s) refreshes
@@ -4421,24 +4461,24 @@ def test_watchdog_paused_flag_suppresses_a_hang_dump(ctx: Ctx):
 
 @test
 def test_hang_dump_count_is_capped_per_process(ctx: Ctx):
-    from rolo_claude.tui.app import MAX_HANG_DUMPS_PER_PROCESS
+    from halo_harness.tui.app import MAX_HANG_DUMPS_PER_PROCESS
 
     async def body():
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
         scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-cap-"))
         os.environ["BRIDGE_TEST_HOME"] = str(scratch)
-        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(scratch / ".halo")
         try:
             fake = FakeController()
-            fake.state_dir = scratch / ".rolo-claude"
+            fake.state_dir = scratch / ".halo"
             app = await _mounted(fake)
             async with app.run_test(size=(100, 40)):
                 for i in range(MAX_HANG_DUMPS_PER_PROCESS + 3):
                     app._dump_hang_diagnostics(30.0, reason=f"test-{i}")
                 ctx.check(f"capped at {MAX_HANG_DUMPS_PER_PROCESS}, got {app._watchdog_dump_count}",
                           app._watchdog_dump_count == MAX_HANG_DUMPS_PER_PROCESS)
-                dumps = list((scratch / ".rolo-claude").glob("hang-*.log"))
+                dumps = list((scratch / ".halo").glob("hang-*.log"))
                 ctx.check(f"at most {MAX_HANG_DUMPS_PER_PROCESS} dump files landed on disk, got {len(dumps)}",
                           0 < len(dumps) <= MAX_HANG_DUMPS_PER_PROCESS)
         finally:
@@ -4455,13 +4495,13 @@ def test_hang_dump_count_is_capped_per_process(ctx: Ctx):
 
 @test
 def test_prune_old_hang_dumps_keeps_only_the_newest_ten(ctx: Ctx):
-    from rolo_claude.tui.app import MAX_HANG_DUMP_FILES_KEPT
+    from halo_harness.tui.app import MAX_HANG_DUMP_FILES_KEPT
 
     async def body():
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
         scratch = Path(tempfile.mkdtemp(prefix="h15b-watchdog-prune-"))
-        state_dir = scratch / ".rolo-claude"
+        state_dir = scratch / ".halo"
         state_dir.mkdir(parents=True, exist_ok=True)
         os.environ["BRIDGE_TEST_HOME"] = str(scratch)
         os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
@@ -4499,7 +4539,7 @@ def test_prune_old_hang_dumps_keeps_only_the_newest_ten(ctx: Ctx):
 
 @test
 def test_debug_key_repr_redacts_printable_characters_only(ctx: Ctx):
-    from rolo_claude.tui.app import _debug_key_repr
+    from halo_harness.tui.app import _debug_key_repr
     for ch in ("a", "A", "1", "9", "!", "@", "z"):
         ctx.check(f"{ch!r} redacted, got {_debug_key_repr(ch)!r}", _debug_key_repr(ch) == "<char>")
     for safe in ("enter", "tab", "escape", "backspace", "space", "up", "down", "left", "right", "f5"):
@@ -4540,6 +4580,168 @@ def test_on_key_debug_trace_never_logs_a_raw_printable_keystroke(ctx: Ctx):
         ctx.check(f"the placeholder was logged instead, got {key_args}", "<char>" in key_args)
         ctx.check(f"a control key (escape) still logs its real name, got {key_args}", "escape" in key_args)
     asyncio.run(body())
+
+
+# ============================================================================
+# 2.0.0 Launch intro (IntroLine, BridgeApp's own show_intro/_on_key/
+# _submit_prompt wiring, tui/launch.py's _show_intro_for gating).
+# ============================================================================
+
+@test
+def test_intro_types_out_the_full_line_then_the_cursor_disappears(ctx: Ctx):
+    """Advances time with the per-character delay shrunk to near-zero
+    (IntroLine's own class attributes -- plain, test-overridable constants,
+    restored in `finally`) instead of waiting out the real ~2s animation:
+    asserts the fully-revealed line, the real installed version substring,
+    and the block cursor gone once `done`."""
+    from halo_harness import __version__
+
+    saved = (IntroLine.BASE_DELAY_S, IntroLine.PAUSE_DELAY_S, IntroLine.ELLIPSIS_PAUSE_DELAY_S)
+    IntroLine.BASE_DELAY_S = IntroLine.PAUSE_DELAY_S = IntroLine.ELLIPSIS_PAUSE_DELAY_S = 0.001
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake, show_intro=True)
+        async with app.run_test(size=(100, 40)) as pilot:
+            ctx.check("an IntroLine is mounted as the first transcript child",
+                      isinstance(app.transcript.children[0], IntroLine))
+            await pilot.pause(0.5)  # far more than len(line) * 0.001s at the shrunk delay
+            widget = app.transcript.children[0]
+            expected = f"I am just a copy, of a copy, of a copy... halo {__version__}"
+            rendered = _static_text(widget)
+            ctx.check(f"the full line is revealed, got {rendered!r}", rendered == expected)
+            ctx.check(f"the real version ({__version__!r}) is in the rendered line", __version__ in rendered)
+            ctx.check("the widget itself reports done", widget.done is True)
+            ctx.check(f"the block cursor is gone once done, got {rendered!r}", IntroLine.CURSOR not in rendered)
+            # Visual proof (D-TUI convention): a real SVG screenshot of the
+            # completed intro line, written to docs/harness/tui-snapshots/.
+            path, svg = _write_snapshot(app, "launch-intro")
+            ctx.check(f"launch-intro snapshot written to {path}", path.exists() and len(svg) > 0)
+            ctx.check("the snapshot SVG actually shows the intro text", "just a copy" in svg and "halo" in svg)
+    try:
+        asyncio.run(body())
+    finally:
+        IntroLine.BASE_DELAY_S, IntroLine.PAUSE_DELAY_S, IntroLine.ELLIPSIS_PAUSE_DELAY_S = saved
+
+
+@test
+def test_intro_keypress_mid_typing_completes_it_at_once_and_lands_in_input(ctx: Ctx):
+    """A keypress while the intro is still typing (delay deliberately left
+    LARGE so it's still mid-animation the moment we press) finishes the
+    line INSTANTLY -- no waiting -- and the SAME keystroke still reaches
+    the prompt input (first-frame focus, never stolen by the intro)."""
+    saved = (IntroLine.BASE_DELAY_S, IntroLine.PAUSE_DELAY_S, IntroLine.ELLIPSIS_PAUSE_DELAY_S)
+    IntroLine.BASE_DELAY_S = IntroLine.PAUSE_DELAY_S = IntroLine.ELLIPSIS_PAUSE_DELAY_S = 30.0
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake, show_intro=True)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            widget = app.transcript.children[0]
+            ctx.check("still typing (30s/char delay) right before the keypress", widget.done is False)
+            ctx.check("the prompt input already has focus before any key is pressed",
+                      app.screen.focused is app.prompt_input)
+            await pilot.press("x")
+            ctx.check("the SAME keypress finished the intro instantly", widget.done is True)
+            ctx.check(f"and also landed in the prompt input, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "x")
+    try:
+        asyncio.run(body())
+    finally:
+        IntroLine.BASE_DELAY_S, IntroLine.PAUSE_DELAY_S, IntroLine.ELLIPSIS_PAUSE_DELAY_S = saved
+
+
+@test
+def test_show_intro_false_means_no_intro_widget_at_all(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake, show_intro=False)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause(0.05)
+            ctx.check("show_intro=False (BridgeApp's own default) never mounts one", app.intro_line is None)
+            kinds = [type(w).__name__ for w in app.transcript.children]
+            ctx.check(f"no IntroLine anywhere in the transcript, got {kinds}", "IntroLine" not in kinds)
+    asyncio.run(body())
+
+
+@test
+def test_show_intro_for_honours_no_intro_flag_demo_config_and_tty(ctx: Ctx):
+    """Pure-function coverage of `tui/launch.py::_show_intro_for` -- the
+    REAL gating logic (BridgeApp itself defaults show_intro=False and has
+    no opinion on WHY); covers `--no-intro`, `--demo`, `"intro": false` in
+    `~/.halo/config.json`, and stdout not being a tty, each in isolation."""
+    from types import SimpleNamespace
+    from halo_harness.tui.launch import _show_intro_for
+
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
+    tmp = Path(tempfile.mkdtemp(prefix="h2-intro-gating-"))
+    os.environ["BRIDGE_TEST_HOME"] = str(tmp)
+    real_isatty = sys.stdout.isatty
+    try:
+        sys.stdout.isatty = lambda: True  # pretend a real terminal unless a case below says otherwise
+        args_plain = SimpleNamespace(demo=False, no_intro=False)
+        ctx.check("plain interactive launch: intro shown", _show_intro_for(args_plain) is True)
+
+        args_no_intro = SimpleNamespace(demo=False, no_intro=True)
+        ctx.check("--no-intro: never shown", _show_intro_for(args_no_intro) is False)
+
+        args_demo = SimpleNamespace(demo=True, no_intro=False)
+        ctx.check("--demo: never shown (brief: never in --demo snapshots unless asked)",
+                  _show_intro_for(args_demo) is False)
+
+        sys.stdout.isatty = lambda: False
+        ctx.check("stdout not a tty: never shown", _show_intro_for(args_plain) is False)
+        sys.stdout.isatty = lambda: True
+
+        from halo_harness.theme import set_config_value
+        set_config_value("intro", False)
+        ctx.check('"intro": false in config.json: never shown', _show_intro_for(args_plain) is False)
+        set_config_value("intro", True)
+        ctx.check('"intro": true in config.json: shown again (plain launch)', _show_intro_for(args_plain) is True)
+    finally:
+        sys.stdout.isatty = real_isatty
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+@test
+def test_print_mode_demo_output_contains_no_intro_text(ctx: Ctx):
+    """`run_demo` is `-p --demo`'s own entry point (cli.py: `args.demo and
+    args.print_mode` -> `testing.fake_controller.run_demo`, never
+    `tui.launch.run_tui`/`BridgeApp` at all) -- the structural reason print
+    mode never shows the intro, pinned here as a literal text check on its
+    actual captured output."""
+    import io
+    from halo_harness.testing.fake_controller import run_demo
+
+    buf = io.StringIO()
+    rc = run_demo(output_format="text", stream=buf)
+    ctx.check(f"run_demo exits 0, got {rc}", rc == 0)
+    output = buf.getvalue()
+    ctx.check("print-mode/--demo output has real content (sanity)", len(output) > 0)
+    ctx.check(f"no intro text anywhere in print-mode output, got {output[:200]!r}...",
+              "I am just a copy" not in output)
+
+
+@test
+def test_state_dir_is_scoped_away_from_the_real_machine_home(ctx: Ctx):
+    """2.0.0 fixpass finding 2: `ensure_scoped_state_dir_once()` (called at
+    module import, above) must have already scoped BRIDGE_TEST_HOME/
+    BRIDGE_STATE_DIR away from the real machine before ANY test in this
+    file ever mounts a BridgeApp -- the exact gap that let
+    test_submit_streams_text_and_mounts_tool_card perform the real
+    ~/.rolo-claude -> ~/.halo migration and write real prompt text into
+    the real ~/.halo/history.jsonl (confirmed live: 8 entries landed
+    there from this file's own scripted inputs)."""
+    from halo_harness.config.paths import bridge_home, home
+    ctx.check("BRIDGE_TEST_HOME or BRIDGE_STATE_DIR is set by the time this test runs",
+              "BRIDGE_TEST_HOME" in os.environ or "BRIDGE_STATE_DIR" in os.environ)
+    ctx.check(f"home() is not the real machine home, got {home()}", home() != Path.home())
+    ctx.check(f"bridge_home() is not the real ~/.halo, got {bridge_home()}",
+              bridge_home() != Path.home() / ".halo")
 
 
 if __name__ == "__main__":

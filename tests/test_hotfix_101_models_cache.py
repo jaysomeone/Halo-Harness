@@ -1,6 +1,6 @@
 """tests.test_hotfix_101_models_cache -- 1.0.1 hotfixes 3 and 4:
 
-  (3) `/models` (bare, TUI or headless) and `rolo-claude models` (bare CLI)
+  (3) `/models` (bare, TUI or headless) and `halo models` (bare CLI)
       render the CACHED Databricks table instantly and never touch the
       network; only an explicit `refresh` (or `/dbx`) does, and a failed
       refresh still shows the cached table plus one line naming the error.
@@ -38,10 +38,10 @@ class _Env:
                         "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-models-cache-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         os.environ.pop("OPENROUTER_API_KEY", None)
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -97,11 +97,11 @@ def _parsed_from_raw(entries):
 
 @test
 def test_one_per_family_mock_chat_capable_and_path_type_per_row(ctx: Ctx):
-    from rolo_claude.catalog_cli import _dbx_rows
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.catalog_cli import _dbx_rows
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         write_dbx_endpoints_json(env.state_dir, _parsed_from_raw(_ONE_PER_FAMILY))
-        from rolo_claude.providers.databricks import load_dbx_endpoints_json
+        from halo_harness.providers.databricks import load_dbx_endpoints_json
         endpoints = load_dbx_endpoints_json(env.state_dir)
         rows = _dbx_rows(endpoints, "https://example.cloud.databricks.com", env.state_dir, urls=False)
 
@@ -132,9 +132,9 @@ def test_chat_capable_column_and_init_summary_count_never_disagree(ctx: Ctx):
     """The exact bug reported: the table said chat=yes while init's own
     summary said 0 chat-capable -- both now key off the SAME
     dbx_routing.is_chat_task check."""
-    from rolo_claude.catalog_cli import _dbx_rows
-    from rolo_claude.providers.databricks import load_dbx_endpoints_json, write_dbx_endpoints_json
-    from rolo_claude.providers.dbx_routing import is_chat_task
+    from halo_harness.catalog_cli import _dbx_rows
+    from halo_harness.providers.databricks import load_dbx_endpoints_json, write_dbx_endpoints_json
+    from halo_harness.providers.dbx_routing import is_chat_task
     with _Env() as env:
         write_dbx_endpoints_json(env.state_dir, _parsed_from_raw(_ONE_PER_FAMILY))
         endpoints = load_dbx_endpoints_json(env.state_dir)
@@ -158,7 +158,7 @@ def _old_shape_entry(name: str) -> dict:
 
 @test
 def test_old_shape_cache_is_detected(ctx: Ctx):
-    from rolo_claude.providers.databricks import dbx_endpoints_cache_is_old_shape
+    from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape
     old = {"databricks-kimi-k3": _old_shape_entry("databricks-kimi-k3")}
     new = {"databricks-kimi-k3": {"task": "llm/v1/chat", "api_types": ["mlflow/v1/chat/completions"]}}
     ctx.check("an old-shape cache (no api_types key at all) is detected", dbx_endpoints_cache_is_old_shape(old))
@@ -170,13 +170,13 @@ def test_old_shape_cache_is_detected(ctx: Ctx):
 
 @test
 def test_old_shape_cache_shows_unknown_not_a_wrong_invocations_path(ctx: Ctx):
-    from rolo_claude.catalog_cli import _dbx_rows
+    from halo_harness.catalog_cli import _dbx_rows
     with _Env() as env:
         endpoints = {"databricks-kimi-k3": _old_shape_entry("databricks-kimi-k3"),
                      "databricks-glm-5-3": _old_shape_entry("databricks-glm-5-3")}
-        from rolo_claude.providers.databricks import write_dbx_endpoints_json
+        from halo_harness.providers.databricks import write_dbx_endpoints_json
         write_dbx_endpoints_json(env.state_dir, list(endpoints.values()))
-        from rolo_claude.providers.databricks import load_dbx_endpoints_json
+        from halo_harness.providers.databricks import load_dbx_endpoints_json
         loaded = load_dbx_endpoints_json(env.state_dir)
         rows = _dbx_rows(loaded, "https://example.cloud.databricks.com", env.state_dir, urls=False)
         for name, r in rows.items():
@@ -186,9 +186,9 @@ def test_old_shape_cache_shows_unknown_not_a_wrong_invocations_path(ctx: Ctx):
 
 @test
 def test_old_shape_cache_display_label_says_refresh_needed(ctx: Ctx):
-    from rolo_claude.catalog_cli import format_dbx_table_lines, _dbx_rows
+    from halo_harness.catalog_cli import format_dbx_table_lines, _dbx_rows
     with _Env() as env:
-        from rolo_claude.providers.databricks import load_dbx_endpoints_json, write_dbx_endpoints_json
+        from halo_harness.providers.databricks import load_dbx_endpoints_json, write_dbx_endpoints_json
         write_dbx_endpoints_json(env.state_dir, [_old_shape_entry("databricks-kimi-k3")])
         endpoints = load_dbx_endpoints_json(env.state_dir)
         rows = _dbx_rows(endpoints, "https://example.cloud.databricks.com", env.state_dir, urls=False)
@@ -199,7 +199,7 @@ def test_old_shape_cache_display_label_says_refresh_needed(ctx: Ctx):
 
 @test
 def test_refresh_if_stale_always_refreshes_an_old_shape_cache_regardless_of_age(ctx: Ctx):
-    from rolo_claude.providers.databricks import refresh_dbx_catalog_if_stale, write_dbx_endpoints_json
+    from halo_harness.providers.databricks import refresh_dbx_catalog_if_stale, write_dbx_endpoints_json
     mock = MockDatabricks().start()
     mock.set_endpoints_catalog(_ONE_PER_FAMILY[:2])
     try:
@@ -219,8 +219,8 @@ def test_refresh_if_stale_always_refreshes_an_old_shape_cache_regardless_of_age(
 @test
 def test_init_chat_capable_summary_uses_task_not_api_types_truthiness(ctx: Ctx):
     from rich.console import Console
-    from rolo_claude.init_cli import _print_work_catalog_summary
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.init_cli import _print_work_catalog_summary
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         # Old-shape cache: task says chat, but api_types was never recorded
         # at all -- the OLD `bool(api_types)` count would say 0; the fixed
@@ -243,8 +243,8 @@ def test_init_chat_capable_summary_uses_task_not_api_types_truthiness(ctx: Ctx):
 
 @test
 def test_cli_bare_models_never_touches_network_even_with_unresolvable_host(ctx: Ctx):
-    from rolo_claude.catalog_cli import cmd_models
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.catalog_cli import cmd_models
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         os.environ["BRIDGE_DBX_BASE_URL"] = _UNRESOLVABLE
         os.environ["BRIDGE_DBX_TOKEN"] = "tok"
@@ -263,8 +263,8 @@ def test_cli_bare_models_never_touches_network_even_with_unresolvable_host(ctx: 
 
 @test
 def test_headless_bare_models_never_touches_network_even_with_unresolvable_host(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_models
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_models
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     with _Env() as env:
         os.environ["BRIDGE_DBX_BASE_URL"] = _UNRESOLVABLE
         os.environ["BRIDGE_DBX_TOKEN"] = "tok"
@@ -279,8 +279,8 @@ def test_headless_bare_models_never_touches_network_even_with_unresolvable_host(
 
 @test
 def test_headless_models_refresh_failure_shows_cached_table_plus_one_line_error(ctx: Ctx):
-    from rolo_claude.commands.builtins import HeadlessFacade, _cmd_models
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.commands.builtins import HeadlessFacade, _cmd_models
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
     mock = MockDatabricks().start()
     mock.set_endpoints_error("403-ip")
     try:
@@ -322,9 +322,9 @@ def test_tui_models_worker_bare_never_calls_refresh_dbx_catalog(ctx: Ctx):
     itself must never even be CALLED for a bare (non-refresh) `/models`
     (`_models_refresh_worker` imports it locally at call time, so patching
     the source module's attribute is what a real, unmocked call would see)."""
-    import rolo_claude.providers.databricks as dbx_mod
-    import rolo_claude.tui.slash as slash_mod
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
+    import halo_harness.providers.databricks as dbx_mod
+    import halo_harness.tui.slash as slash_mod
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
 
     with _Env() as env:
         os.environ["BRIDGE_DBX_BASE_URL"] = _UNRESOLVABLE

@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.session_picker -- `/resume` (`--resume` list,
+"""halo_harness.tui.dialogs.session_picker -- `/resume` (`--resume` list,
 D-TUI). `sessions` is `Controller.list_sessions()`'s shape:
 `[{id, cwd, mtime, summary, title, model, cost_usd, turns}, ...]` (U5:
 "title/age/cost/turns" -- `model` and everything after `title` are
@@ -8,7 +8,7 @@ chosen session id, or `None` if cancelled.
 
 H13 Part C ("/resume search"): a live text filter, same shape as `tui/
 dialogs/palette.py`'s own `Input` + `on_input_changed` pattern -- ranking
-itself lives in `rolo_claude.agent.sessions.filter_sessions` (shared with
+itself lives in `halo_harness.agent.sessions.filter_sessions` (shared with
 the CLI's own `--resume <text>` unique-match/ambiguous-picker logic, so
 typing a word here and passing the same word to `--resume` agree on what
 counts as a match) rather than being reimplemented here.
@@ -24,8 +24,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from rolo_claude.agent.sessions import filter_sessions
-from rolo_claude.tui.dialogs.listnav import NavInput
+from halo_harness.agent.sessions import filter_sessions
+from halo_harness.tui.dialogs.listnav import NavInput
 
 
 def _age(mtime: float) -> str:

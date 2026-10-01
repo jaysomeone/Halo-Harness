@@ -1,10 +1,10 @@
-"""rolo_claude.agent.catalog -- SessionCatalog (H3 scope C, plan revision
+"""halo_harness.agent.catalog -- SessionCatalog (H3 scope C, plan revision
 4): the frozen tool catalog + lazy load over deferred MCP tools.
 
 Freezing happens ONCE, before a session's first model call: built-ins +
 MCP tools (already filtered by server-scoped permission deny rules) split
 into "preload" (an MCP tool's own `_meta[anthropic/alwaysLoad]`, or a wire
-name listed in `~/.rolo-claude/config.json`'s `mcpPreload`) vs "deferred"
+name listed in `~/.halo/config.json`'s `mcpPreload`) vs "deferred"
 (everything else, reachable only through ToolSearch), respecting the
 provider's tools_max (32 Databricks / 128 OpenRouter --
 providers/profiles.py). Growth from a ToolSearch load is APPEND-ONLY to an
@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.tools.registry import ToolRegistry
 
 DEFAULT_DATABRICKS_CAP = 32
 DEFAULT_OPENROUTER_CAP = 128
@@ -102,7 +102,7 @@ def select_preload(mcp_triples, *, preload_names=None, always_load_servers=None,
     `cap_budget <= 0` preloads nothing (valid when the built-in tools
     alone already fill the provider's cap); an always/requested tool that
     doesn't fit `cap_budget` is deferred too (never silently dropped)."""
-    from rolo_claude.tools.mcp_tool import tool_always_load
+    from halo_harness.tools.mcp_tool import tool_always_load
 
     preload_names = set(preload_names or ())
     always_load_servers = set(always_load_servers or ())
@@ -191,7 +191,7 @@ class SessionCatalog:
             matched_deferred = [n for n in wanted if n in self.deferred]
             return found, matched_deferred
 
-        from rolo_claude.tools.mcp_tool import tool_search_hint
+        from halo_harness.tools.mcp_tool import tool_search_hint
         # finding 13 must-do: `_meta[anthropic/searchHint]` -- only the
         # DEFERRED pool carries raw sdk_tool meta at all (an already-loaded
         # McpTool's `.definition()` is just name/description/input_schema,
@@ -241,7 +241,7 @@ class SessionCatalog:
         left OUT of the returned list and recorded in `self.last_refused`
         instead, rather than silently exceeding `self.cap` or evicting the
         very tool this call just promised the model."""
-        from rolo_claude.tools.mcp_tool import McpTool
+        from halo_harness.tools.mcp_tool import McpTool
 
         with self._lock:
             touched: list = []

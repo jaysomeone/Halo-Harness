@@ -1,6 +1,6 @@
-"""rolo_claude.ccbridge.client -- ParentLink, the CHILD-side connection to
+"""halo_harness.ccbridge.client -- ParentLink, the CHILD-side connection to
 the PARENT's ToolBridgeServer (H11 Part B). Reads its endpoint from the
-environment (`ROLO_CCBRIDGE_SOCKET` on POSIX, `ROLO_CCBRIDGE_HOST`/`_PORT`/
+environment (`HALO_CCBRIDGE_SOCKET` on POSIX, `HALO_CCBRIDGE_HOST`/`_PORT`/
 `_TOKEN` on Windows -- see server.py's own `child_env()`, folded into the
 `--mcp-config` stdio server's `env` by `agent/cc_process.py`). One
 connection, held for the whole child process lifetime; calls are
@@ -27,22 +27,22 @@ class ParentLink:
         env = env if env is not None else os.environ
         self._lock = threading.Lock()
         self._next_id = 1
-        sock_path = env.get("ROLO_CCBRIDGE_SOCKET")
+        sock_path = env.get("HALO_CCBRIDGE_SOCKET")
         if sock_path:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(sock_path)
         else:
-            host = env.get("ROLO_CCBRIDGE_HOST", "127.0.0.1")
-            port_raw = env.get("ROLO_CCBRIDGE_PORT")
+            host = env.get("HALO_CCBRIDGE_HOST", "127.0.0.1")
+            port_raw = env.get("HALO_CCBRIDGE_PORT")
             if not port_raw:
                 raise ParentLinkError(
-                    "no ccbridge endpoint in the environment (ROLO_CCBRIDGE_SOCKET or "
-                    "ROLO_CCBRIDGE_HOST/_PORT must be set -- this process must be spawned by "
-                    "rolo-claude's own cc: transport, never run standalone)"
+                    "no ccbridge endpoint in the environment (HALO_CCBRIDGE_SOCKET or "
+                    "HALO_CCBRIDGE_HOST/_PORT must be set -- this process must be spawned by "
+                    "halo's own cc: transport, never run standalone)"
                 )
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, int(port_raw)))
-            token = env.get("ROLO_CCBRIDGE_TOKEN", "")
+            token = env.get("HALO_CCBRIDGE_TOKEN", "")
             sock.sendall((json.dumps({"token": token}) + "\n").encode("utf-8"))
         self._sock = sock
         self._rf = sock.makefile("rb")
@@ -56,7 +56,7 @@ class ParentLink:
             self._wf.write((payload + "\n").encode("utf-8"))
             line = self._rf.readline()
         if not line:
-            raise ParentLinkError("ccbridge parent link closed (rolo-claude process gone?)")
+            raise ParentLinkError("ccbridge parent link closed (halo process gone?)")
         resp = json.loads(line.decode("utf-8", "replace"))
         err = resp.get("error")
         if err:

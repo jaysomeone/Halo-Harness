@@ -1,4 +1,4 @@
-# Claude in Chrome — how Claude Code wires it, and how rolo-claude reuses it (verified 2026-09-23)
+# Claude in Chrome — how Claude Code wires it, and how halo reuses it (verified 2026-09-23)
 
 Verified read-only on rolo's box: Claude Code 2.1.281, Claude in Chrome extension 1.0.94
 (id `fcoeoabgfenejglbffodgkkbkcdhcgfn`). Nothing modified.
@@ -41,22 +41,22 @@ agent ⇄ MCP/JSON-RPC over stdio ⇄ [claude.exe --claude-in-chrome-mcp]
   `~/.claude.json`: `claudeInChromeDefaultEnabled=true`, `hasCompletedClaudeInChromeOnboarding=true`,
   `cachedChromeExtensionInstalled=true`.
 
-## rolo-claude design (milestone H7a)
-- `rolo-claude --chrome` (and `claudeInChromeDefaultEnabled` honoured like Claude Code; `--no-chrome`
+## halo design (milestone H7a)
+- `halo --chrome` (and `claudeInChromeDefaultEnabled` honoured like Claude Code; `--no-chrome`
   disables): add a dynamic MCP server `claude-in-chrome` = `{type: stdio, command: <claude.exe path>,
   args: ["--claude-in-chrome-mcp"]}` through the normal MCP manager. Tools appear as
   `mcp__claude-in-chrome__*` with Claude Code's exact schemas, so skills/prompts written for Claude
   Code work unchanged. Locate `claude.exe` via `find_claude_exe()` (already in `bridge.py`:
   `BRIDGE_CLAUDE_EXE` → `which claude.exe` → `claude.cmd` target → `~/.local/bin/claude.exe`).
-- Preconditions surfaced in `/mcp` and `rolo-claude doctor`: Chrome running with the extension enabled
+- Preconditions surfaced in `/mcp` and `halo doctor`: Chrome running with the extension enabled
   (the pipe exists only while the extension holds the native host open); extension not in managed
   mode; per-site permissions granted in the extension UI (or `CLAUDE_CHROME_PERMISSION_MODE=
-  skip_all_permission_checks` when rolo-claude runs in `auto`/`bypassPermissions`, matching Claude
+  skip_all_permission_checks` when halo runs in `auto`/`bypassPermissions`, matching Claude
   Code's bypass behaviour).
 - Fallback without Claude Code installed (work box?): a small Python client speaking the pipe protocol
   directly (`\\.\pipe\claude-mcp-browser-bridge-<username>`, 4-byte-LE JSON `{method:"execute_tool",
   params:{tool, args, …}}`) exposed as the same tool names — later, only if needed.
-- Chrome-less fallback = Playwright (H7b): `rolo-claude --playwright` registers
+- Chrome-less fallback = Playwright (H7b): `halo --playwright` registers
   `{type: stdio, command: "npx", args: ["-y", "@playwright/mcp@latest", …]}` as `playwright`
   (`mcp__playwright__*`), with `--cdp-endpoint` to drive the user's own Chrome started with
   `--remote-debugging-port`. Nothing Playwright is installed on this box yet (`npx` would download

@@ -1,4 +1,4 @@
-"""rolo_claude.tools.imageutil -- pure-stdlib image sniffing + the OpenCode
+"""halo_harness.tools.imageutil -- pure-stdlib image sniffing + the OpenCode
 size rule (H8 scope B): png/jpeg/gif/webp dimension detection with no
 decoder dependency (a manylinux/Windows binary wheel for a real image
 library is exactly the kind of thing `tools/vendor_wheels.py` would need to

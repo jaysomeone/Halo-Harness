@@ -1,4 +1,4 @@
-"""rolo_claude.tools.notebook_edit -- the NotebookEdit tool (H8 scope B):
+"""halo_harness.tools.notebook_edit -- the NotebookEdit tool (H8 scope B):
 Claude Code's own `.ipynb` cell editor. A notebook is plain JSON (nbformat
 4) -- no nbformat/jupyter dependency needed, just `json` plus the cell shape
 itself (`source` as either one string or a list of line strings; both are
@@ -13,7 +13,7 @@ import re
 import uuid
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Replace, insert, or delete a cell in a Jupyter notebook (.ipynb file).\n\n"

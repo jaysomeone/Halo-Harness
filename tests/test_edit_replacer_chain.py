@@ -1,4 +1,4 @@
-"""tests.test_edit_replacer_chain -- rolo_claude/tools/edit.py's 9-stage
+"""tests.test_edit_replacer_chain -- halo_harness/tools/edit.py's 9-stage
 replacer chain (H5 scope F item 1, reports/OpenCode harness deep review.md
 Appendix C), stage-by-stage: each stage function directly, the span guard,
 and end-to-end EditTool runs that exercise the stages naturally reachable
@@ -11,14 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.edit import (
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.edit import (
     BLOCK_ANCHOR_SIMILARITY, CONTEXT_AWARE_MATCH_FRACTION, EditTool, _check_span_guard, _common_indent,
     _levenshtein, _similarity, _unescape, find_replacement, stage_block_anchor, stage_context_aware,
     stage_escape_normalized, stage_indentation_flexible, stage_line_trimmed, stage_trimmed_boundary,
     stage_whitespace_normalized,
 )
-from rolo_claude.tools.read import ReadTool
+from halo_harness.tools.read import ReadTool
 
 test, TESTS = new_registry()
 

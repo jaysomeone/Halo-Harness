@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.config import agents_md as am
+from halo_harness.config import agents_md as am
 
 test, TESTS = new_registry()
 
@@ -132,7 +132,7 @@ class _FakeModelProfile:
 
 @test
 def test_resolve_agent_model_invocation_beats_frontmatter(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref, resolve_model_profile  # noqa: F401 (sanity import)
+    from halo_harness.model import parse_model_ref, resolve_model_profile  # noqa: F401 (sanity import)
 
     parent_ref, parent_profile = _FakeModelRef("or:parent/model"), _FakeModelProfile()
     ref, profile = am.resolve_agent_model(

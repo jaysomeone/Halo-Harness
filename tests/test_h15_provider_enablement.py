@@ -2,9 +2,9 @@
 H15 part 2 addendum: detected credentials/a real claude.ai login now
 AUTO-enable a provider; the `providers` block in config.json stores
 OVERRIDES only (an explicit `enabled: true`/`false` always wins). Covers
-`rolo_claude.providers.enablement`, the `Controller.list_models()`/
+`halo_harness.providers.enablement`, the `Controller.list_models()`/
 `model.parse_model_ref` gates, the now-permanently-no-op migration, and the
-`rolo-claude providers`/`/providers` surfaces.
+`halo providers`/`/providers` surfaces.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ _PROVIDER_ENV_VARS = (
 class _Env:
     """Snapshots/restores every provider variable this module (or a test
     within it) touches, plus BRIDGE_TEST_HOME/BRIDGE_STATE_DIR/BRIDGE_ENV_
-    FILE -- the real `~/.rolo-claude` is never written.
+    FILE -- the real `~/.halo` is never written.
 
     H15 part 2 addendum: `claude_subscription`'s auto-detection shells out
     to the REAL `claude auth status` whenever `BRIDGE_TEST_CC_AUTH_STATUS`
@@ -46,13 +46,13 @@ class _Env:
                        (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE") + _PROVIDER_ENV_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15-provider-enablement-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         for k in _PROVIDER_ENV_VARS:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         self.home = d
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -73,7 +73,7 @@ class _Env:
 def test_is_enabled_false_with_no_block_and_no_credentials(ctx: Ctx):
     """Nothing configured at all (no block, no key, no login) -> every
     provider reads as disabled -- auto-detection found nothing to turn on."""
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     with _Env():
         for name in ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe"):
             ctx.check(f"{name} reads as disabled with nothing detected, got {is_enabled(name)!r}",
@@ -85,7 +85,7 @@ def test_is_enabled_auto_true_from_real_credentials_with_no_block_at_all(ctx: Ct
     """The addendum's own headline case: "the harness already finds the
     available keys and subscription and uses those" -- no `providers`
     block, no `init`, no `enable()` call, just a real key -- auto-enabled."""
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         ctx.check("OpenRouter auto-enabled from the key alone", is_enabled("openrouter") is True)
@@ -97,7 +97,7 @@ def test_is_enabled_auto_true_from_real_credentials_with_no_block_at_all(ctx: Ct
 def test_explicit_enabled_false_overrides_auto_detection(ctx: Ctx):
     """item 3 of the addendum's own worked example: `enabled: false` hides
     a provider that credentials alone would have auto-enabled."""
-    from rolo_claude.providers.enablement import disable, is_enabled
+    from halo_harness.providers.enablement import disable, is_enabled
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         ctx.check("auto-enabled before any override", is_enabled("openrouter") is True)
@@ -110,7 +110,7 @@ def test_explicit_enabled_false_overrides_auto_detection(ctx: Ctx):
 def test_explicit_enabled_true_overrides_missing_credentials(ctx: Ctx):
     """The mirror case: `enabled: true` forces a provider on even with no
     detected credentials at all."""
-    from rolo_claude.providers.enablement import enable, is_enabled
+    from halo_harness.providers.enablement import enable, is_enabled
     with _Env():
         ctx.check("nothing detected -> disabled", is_enabled("openrouter") is False)
         enable("openrouter")
@@ -119,7 +119,7 @@ def test_explicit_enabled_true_overrides_missing_credentials(ctx: Ctx):
 
 @test
 def test_enable_disable_round_trip(ctx: Ctx):
-    from rolo_claude.providers.enablement import disable, enable, is_enabled
+    from halo_harness.providers.enablement import disable, enable, is_enabled
     with _Env():
         enable("openrouter")
         ctx.check("openrouter now enabled", is_enabled("openrouter") is True)
@@ -138,7 +138,7 @@ def test_cc_requires_authmethod_exactly_claude_ai(ctx: Ctx):
     authMethod (an API-token/custom-base-url-driven `claude`, as on a work
     VM) must NOT auto-enable the subscription, even though it's "logged
     in" in a loose sense."""
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     with _Env():
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "not-claude-ai"})
         ctx.check("loggedIn alone, wrong authMethod -> NOT auto-enabled",
@@ -150,7 +150,7 @@ def test_cc_requires_authmethod_exactly_claude_ai(ctx: Ctx):
 
 @test
 def test_canonical_aliases_resolve_to_the_same_row(ctx: Ctx):
-    from rolo_claude.providers.enablement import canonical, enable, is_enabled
+    from halo_harness.providers.enablement import canonical, enable, is_enabled
     with _Env():
         enable("cc")  # the ModelRef.provider spelling
         ctx.check(f"'cc' canonicalizes to 'claude_subscription', got {canonical('cc')!r}",
@@ -167,7 +167,7 @@ def test_canonical_aliases_resolve_to_the_same_row(ctx: Ctx):
 
 @test
 def test_label_strings_match_the_brief_exactly(ctx: Ctx):
-    from rolo_claude.providers.enablement import label_for
+    from halo_harness.providers.enablement import label_for
     ctx.check(f"cc: label, got {label_for('cc')!r}", label_for("cc") == "Claude Code subscription")
     ctx.check(f"claude_subscription label, got {label_for('claude_subscription')!r}",
               label_for("claude_subscription") == "Claude Code subscription")
@@ -180,7 +180,7 @@ def test_label_strings_match_the_brief_exactly(ctx: Ctx):
 
 @test
 def test_prefix_table(ctx: Ctx):
-    from rolo_claude.providers.enablement import PREFIXES
+    from halo_harness.providers.enablement import PREFIXES
     ctx.check(f"dbx:, got {PREFIXES}", PREFIXES["databricks"] == "dbx:")
     ctx.check(f"or:, got {PREFIXES}", PREFIXES["openrouter"] == "or:")
     ctx.check(f"ant:, got {PREFIXES}", PREFIXES["anthropic"] == "ant:")
@@ -196,7 +196,7 @@ def test_prefix_table(ctx: Ctx):
 
 @test
 def test_migration_always_writes_nothing_and_returns_none(ctx: Ctx):
-    from rolo_claude.providers.enablement import ensure_providers_migrated, is_enabled, providers_block_exists
+    from halo_harness.providers.enablement import ensure_providers_migrated, is_enabled, providers_block_exists
     with _Env():
         os.environ["DATABRICKS_HOST"] = "https://fake-ws.cloud.databricks.com"
         os.environ["DATABRICKS_TOKEN"] = "fake-token"
@@ -210,7 +210,7 @@ def test_migration_always_writes_nothing_and_returns_none(ctx: Ctx):
 
 @test
 def test_migration_is_a_noop_even_once_a_providers_block_already_exists(ctx: Ctx):
-    from rolo_claude.providers.enablement import ensure_providers_migrated, enable, is_enabled
+    from halo_harness.providers.enablement import ensure_providers_migrated, enable, is_enabled
     with _Env():
         enable("openrouter")
         note = ensure_providers_migrated()
@@ -224,9 +224,9 @@ def test_migration_is_a_noop_even_once_a_providers_block_already_exists(ctx: Ctx
 
 @test
 def test_hand_typed_ref_for_a_disabled_provider_is_refused(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.enablement import disable, enable
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.enablement import disable, enable
+    from halo_harness.providers.routing import InvalidModelError
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         enable("databricks")  # anything, just to create the block
@@ -238,7 +238,7 @@ def test_hand_typed_ref_for_a_disabled_provider_is_refused(ctx: Ctx):
             raised = True
             msg = str(e)
             ctx.check(f"names the provider, got {msg!r}", "OpenRouter" in msg)
-            ctx.check(f"names the fix command, got {msg!r}", "rolo-claude providers enable" in msg)
+            ctx.check(f"names the fix command, got {msg!r}", "halo providers enable" in msg)
         ctx.check("InvalidModelError was actually raised", raised)
 
 
@@ -253,9 +253,9 @@ def test_doctor_default_model_check_gives_the_specific_reason_for_an_explicit_di
     actually wrong). `doctor._check_default_model`'s own `InvalidModelError`
     branch still recovers the SAME specific "init --provider <name>"
     guidance for THIS (explicit-disable) case."""
-    from rolo_claude import doctor
-    from rolo_claude.providers.enablement import disable
-    from rolo_claude.theme import set_config_value
+    from halo_harness import doctor
+    from halo_harness.providers.enablement import disable
+    from halo_harness.theme import set_config_value
     with _Env():
         os.environ["DATABRICKS_HOST"] = "https://fake-ws.cloud.databricks.com"
         os.environ["DATABRICKS_TOKEN"] = "fake-token"
@@ -266,7 +266,7 @@ def test_doctor_default_model_check_gives_the_specific_reason_for_an_explicit_di
         ctx.check(f"names the specific databricks-not-enabled reason, not a generic parse failure, got {line!r}",
                   "Databricks is not enabled" in line)
         ctx.check(f"still suggests the real fix command, got {line!r}",
-                  "rolo-claude init --provider databricks" in line)
+                  "halo init --provider databricks" in line)
         ctx.check(f"never the generic 'does not resolve' wording, got {line!r}", "does not resolve" not in line)
 
 
@@ -278,22 +278,22 @@ def test_doctor_default_model_check_reports_not_configured_when_nothing_detected
     SAME real credential check `_check_databricks` itself uses) is what
     correctly reports "not configured" instead of the gate pre-empting it
     with "not enabled" (a different problem with a different fix)."""
-    from rolo_claude import doctor
-    from rolo_claude.theme import set_config_value
+    from halo_harness import doctor
+    from halo_harness.theme import set_config_value
     with _Env():
         set_config_value("model", "dbx:databricks-deepseek-v4-1-flash")
         line = doctor._check_default_model()
         ctx.check(f"WARN, got {line!r}", line.startswith(doctor.WARN))
         ctx.check(f"names 'not configured', got {line!r}", "not configured" in line)
         ctx.check(f"still suggests the real fix command, got {line!r}",
-                  "rolo-claude init --provider databricks" in line)
+                  "halo init --provider databricks" in line)
 
 
 @test
 def test_hand_typed_ref_refusal_uses_the_same_message_as_the_model_picker_hint(ctx: Ctx):
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.enablement import disable, enable, is_provider_disabled_message
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.enablement import disable, enable, is_provider_disabled_message
+    from halo_harness.providers.routing import InvalidModelError
     with _Env():
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
         enable("databricks")
@@ -318,7 +318,7 @@ def test_cc_hand_typed_ref_with_no_override_and_no_login_resolves_at_parse_time(
     own job now (`agent.cc_runtime._preflight_cc`, exercised end to end in
     test_cc_session.py), never surfaced this early any more -- with no
     loss of detail, just at the right time instead of speculatively."""
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     with _Env():
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
@@ -334,8 +334,8 @@ def test_is_provider_disabled_message_never_spawns_or_reads_credentials(ctx: Ctx
     regardless of credentials/login state -- it must never even LOOK at
     `claude_login_available()`/`credentials_present()` to decide this.
     Poisons `claude_login_available` to prove it is never called."""
-    from rolo_claude.providers.enablement import is_provider_disabled_message
-    import rolo_claude.init_providers as init_providers_mod
+    from halo_harness.providers.enablement import is_provider_disabled_message
+    import halo_harness.init_providers as init_providers_mod
     real_claude_login = init_providers_mod.claude_login_available
 
     def _poison():
@@ -356,9 +356,9 @@ def test_cc_explicit_disable_still_uses_the_generic_message_not_the_preflight_on
     """The mirror case: once the user has EXPLICITLY disabled claude_
     subscription, the message goes back to the generic "run providers
     enable" wording (there's nothing wrong with claude itself to explain)."""
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.enablement import disable
-    from rolo_claude.providers.routing import InvalidModelError
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.enablement import disable
+    from halo_harness.providers.routing import InvalidModelError
     with _Env():
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
         disable("claude_subscription")
@@ -366,15 +366,15 @@ def test_cc_explicit_disable_still_uses_the_generic_message_not_the_preflight_on
             parse_model_ref("cc:opus")
             ctx.check("should have raised", False)
         except InvalidModelError as e:
-            ctx.check(f"generic wording, got {e}", "rolo-claude providers enable claude_subscription" in str(e))
+            ctx.check(f"generic wording, got {e}", "halo providers enable claude_subscription" in str(e))
 
 
 @test
 def test_enabled_provider_resolves_normally(ctx: Ctx):
     """The gate must never block an ENABLED provider -- a plain regression
     guard alongside the refusal tests above."""
-    from rolo_claude.model import parse_model_ref
-    from rolo_claude.providers.enablement import enable
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.enablement import enable
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         enable("openrouter")
@@ -387,7 +387,7 @@ def test_no_providers_block_at_all_never_blocks_resolution(ctx: Ctx):
     """H15 part 2 addendum's own headline case, at the `parse_model_ref`
     level: a box that never ran `init`/`providers enable` at all, just a
     real key -- a hand-typed `or:` ref resolves normally, auto-enabled."""
-    from rolo_claude.model import parse_model_ref
+    from halo_harness.model import parse_model_ref
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         ref = parse_model_ref("or:deepseek/deepseek-v3.2")
@@ -420,15 +420,15 @@ class _FakeSession:
 
 
 def _seed_openrouter_catalog(state_dir: Path) -> None:
-    from rolo_claude.providers.databricks import write_models_json
+    from halo_harness.providers.databricks import write_models_json
     write_models_json(state_dir, [{"id": "vendor/model-x", "context_length": 128000, "max_output_tokens": 8192,
                                     "pricing": {"prompt": "0.0000008", "completion": "0.0000024"}}])
 
 
 @test
 def test_list_models_hides_openrouter_catalog_when_disabled(ctx: Ctx):
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.enablement import disable, enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.enablement import disable, enable
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         _seed_openrouter_catalog(env.state_dir)
@@ -441,8 +441,8 @@ def test_list_models_hides_openrouter_catalog_when_disabled(ctx: Ctx):
 
 @test
 def test_list_models_shows_a_dim_hint_for_detected_but_disabled_openrouter(ctx: Ctx):
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.enablement import disable, enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.enablement import disable, enable
     with _Env() as env:
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         _seed_openrouter_catalog(env.state_dir)
@@ -452,14 +452,14 @@ def test_list_models_shows_a_dim_hint_for_detected_but_disabled_openrouter(ctx: 
         hints = [m["hint"] for m in ctrl.list_models() if "hint" in m]
         ctx.check(f"exactly one OpenRouter hint, got {hints}", len(hints) == 1)
         ctx.check(f"names OpenRouter and the fix, got {hints}",
-                  "OpenRouter" in hints[0] and "rolo-claude providers enable openrouter" in hints[0])
+                  "OpenRouter" in hints[0] and "halo providers enable openrouter" in hints[0])
 
 
 @test
 def test_list_models_no_hint_when_openrouter_has_no_credentials_at_all(ctx: Ctx):
     """A hint only ever fires for DETECTED-but-disabled -- never for a
     provider that's simply never been set up."""
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     with _Env() as env:
         ctrl = Controller(session=_FakeSession(), cwd=Path.cwd(), state_dir=env.state_dir, routes={})
         hints = [m["hint"] for m in ctrl.list_models() if "hint" in m]
@@ -470,9 +470,9 @@ def test_list_models_no_hint_when_openrouter_has_no_credentials_at_all(ctx: Ctx)
 def test_cc_group_hidden_with_a_claude_ai_login_present_but_explicitly_disabled(ctx: Ctx):
     """`cc:` models must NOT appear once the user has explicitly disabled
     the subscription, even with a real claude.ai login detected."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
-    from rolo_claude.providers.enablement import disable, enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.providers.enablement import disable, enable
     with _Env() as env:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
         refresh_cached_claude_auth_status()
@@ -493,8 +493,8 @@ def test_cc_group_hidden_when_logged_in_via_a_non_claude_ai_authmethod(ctx: Ctx)
     authMethod OTHER than `claude.ai` (an API-token/custom-base-url-driven
     `claude`, as on a work VM) must never auto-enable the group, with NO
     explicit disable() call needed -- pure auto-detection narrowness."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.controller import Controller
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
     with _Env() as env:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "not-claude-ai"})
         refresh_cached_claude_auth_status()
@@ -506,9 +506,9 @@ def test_cc_group_hidden_when_logged_in_via_a_non_claude_ai_authmethod(ctx: Ctx)
 
 @test
 def test_cc_group_shown_once_enabled(ctx: Ctx):
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.cc_models import refresh_cached_claude_auth_status
-    from rolo_claude.providers.enablement import enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.providers.enablement import enable
     with _Env() as env:
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
         refresh_cached_claude_auth_status()
@@ -521,8 +521,8 @@ def test_cc_group_shown_once_enabled(ctx: Ctx):
 
 @test
 def test_ant_group_follows_the_same_rule(ctx: Ctx):
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.enablement import disable, enable
+    from halo_harness.controller import Controller
+    from halo_harness.providers.enablement import disable, enable
     with _Env() as env:
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
         enable("databricks")
@@ -544,7 +544,7 @@ def test_ant_group_follows_the_same_rule(ctx: Ctx):
 
 @test
 def test_model_picker_splits_hints_out_of_the_selectable_list(ctx: Ctx):
-    from rolo_claude.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
     models = [{"ref": "or:a", "provider": "openrouter"}, {"hint": "Databricks detected but not enabled"}]
     picker = ModelPicker(models, current="or:a")
     ctx.check(f"hint split out, got {picker.hints}", picker.hints == ["Databricks detected but not enabled"])
@@ -559,8 +559,8 @@ def test_model_picker_splits_hints_out_of_the_selectable_list(ctx: Ctx):
 
 @test
 def test_configured_providers_excludes_a_disabled_one(ctx: Ctx):
-    from rolo_claude.init_providers import configured_providers
-    from rolo_claude.providers.enablement import disable, enable
+    from halo_harness.init_providers import configured_providers
+    from halo_harness.providers.enablement import disable, enable
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
@@ -573,7 +573,7 @@ def test_configured_providers_excludes_a_disabled_one(ctx: Ctx):
 
 @test
 def test_configured_providers_unaffected_with_no_providers_block(ctx: Ctx):
-    from rolo_claude.init_providers import configured_providers
+    from halo_harness.init_providers import configured_providers
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
@@ -583,14 +583,14 @@ def test_configured_providers_unaffected_with_no_providers_block(ctx: Ctx):
 
 
 # ---------------------------------------------------------------------------
-# `rolo-claude providers` CLI: table + enable/disable.
+# `halo providers` CLI: table + enable/disable.
 # ---------------------------------------------------------------------------
 
 @test
 def test_cmd_providers_table_lists_all_five(ctx: Ctx):
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.providers_cli import cmd_providers
+    from halo_harness.providers_cli import cmd_providers
     with _Env():
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -605,10 +605,10 @@ def test_cmd_providers_table_lists_all_five(ctx: Ctx):
 def test_cmd_providers_shows_openrouter_auto_detected_with_a_key_and_no_init(ctx: Ctx):
     """H15 part 2 addendum's own named test: OpenRouter shown as enabled
     (status "auto (detected from ...)") from a real key alone -- no
-    `rolo-claude init`, no `providers enable` call, ever."""
+    `halo init`, no `providers enable` call, ever."""
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.providers_cli import cmd_providers, provider_rows
+    from halo_harness.providers_cli import cmd_providers, provider_rows
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         rows = {r["name"]: r for r in provider_rows()}
@@ -627,8 +627,8 @@ def test_cmd_providers_shows_openrouter_auto_detected_with_a_key_and_no_init(ctx
 def test_cmd_providers_enable_disable(ctx: Ctx):
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.providers.enablement import is_enabled
-    from rolo_claude.providers_cli import cmd_providers
+    from halo_harness.providers.enablement import is_enabled
+    from halo_harness.providers_cli import cmd_providers
     with _Env():
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -644,8 +644,8 @@ def test_cmd_providers_enable_disable(ctx: Ctx):
 def test_cmd_providers_enable_accepts_cc_alias(ctx: Ctx):
     import io
     from contextlib import redirect_stdout
-    from rolo_claude.providers.enablement import is_enabled
-    from rolo_claude.providers_cli import cmd_providers
+    from halo_harness.providers.enablement import is_enabled
+    from halo_harness.providers_cli import cmd_providers
     with _Env():
         with redirect_stdout(io.StringIO()):
             rc = cmd_providers(["enable", "cc"])
@@ -657,7 +657,7 @@ def test_cmd_providers_enable_accepts_cc_alias(ctx: Ctx):
 def test_cmd_providers_unknown_name_is_exit_2(ctx: Ctx):
     import io
     from contextlib import redirect_stderr
-    from rolo_claude.providers_cli import cmd_providers
+    from halo_harness.providers_cli import cmd_providers
     with _Env():
         with redirect_stderr(io.StringIO()):
             rc = cmd_providers(["enable", "not-a-real-provider"])
@@ -670,11 +670,11 @@ def test_cmd_providers_unknown_name_is_exit_2(ctx: Ctx):
 
 @test
 def test_slash_providers_builtin_registered_and_lists_table(ctx: Ctx):
-    from rolo_claude.commands.builtins import _BUILTIN_SPECS
+    from halo_harness.commands.builtins import _BUILTIN_SPECS
     with _Env():
         ctx.check("'providers' is a registered builtin", "providers" in _BUILTIN_SPECS)
         _kind, _desc, _hint, run = _BUILTIN_SPECS["providers"]
-        from rolo_claude.commands.builtins import HeadlessFacade
+        from halo_harness.commands.builtins import HeadlessFacade
         result = run("", HeadlessFacade(cwd=Path.cwd()))
         for label in ("Databricks", "OpenRouter", "TypeSafe"):
             ctx.check(f"/providers table mentions {label!r}, got {result!r}", label in result)
@@ -689,7 +689,7 @@ def test_enable_if_was_explicitly_disabled_is_a_noop_with_no_override(ctx: Ctx):
     override would survive a LATER revocation (a claude.ai logout, a
     deleted key) that auto-detection alone would otherwise have reflected
     immediately."""
-    from rolo_claude.providers.enablement import enable_if_was_explicitly_disabled, providers_block_exists
+    from halo_harness.providers.enablement import enable_if_was_explicitly_disabled, providers_block_exists
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         enable_if_was_explicitly_disabled("openrouter")
@@ -699,7 +699,7 @@ def test_enable_if_was_explicitly_disabled_is_a_noop_with_no_override(ctx: Ctx):
 
 @test
 def test_enable_if_was_explicitly_disabled_flips_an_existing_false_override(ctx: Ctx):
-    from rolo_claude.providers.enablement import disable, enable_if_was_explicitly_disabled, is_enabled
+    from halo_harness.providers.enablement import disable, enable_if_was_explicitly_disabled, is_enabled
     with _Env():
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
         disable("openrouter")
@@ -712,7 +712,7 @@ def test_enable_if_was_explicitly_disabled_flips_an_existing_false_override(ctx:
 def test_enable_if_was_explicitly_disabled_leaves_an_already_true_override_alone(ctx: Ctx):
     """Regression guard: a provider the user already explicitly enabled
     stays untouched (no redundant write, no change in behavior either way)."""
-    from rolo_claude.providers.enablement import enable, enable_if_was_explicitly_disabled, is_enabled
+    from halo_harness.providers.enablement import enable, enable_if_was_explicitly_disabled, is_enabled
     with _Env():
         enable("databricks")
         enable_if_was_explicitly_disabled("databricks")
@@ -721,8 +721,8 @@ def test_enable_if_was_explicitly_disabled_leaves_an_already_true_override_alone
 
 @test
 def test_slash_providers_enable_disable(ctx: Ctx):
-    from rolo_claude.commands.builtins import _BUILTIN_SPECS, HeadlessFacade
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.commands.builtins import _BUILTIN_SPECS, HeadlessFacade
+    from halo_harness.providers.enablement import is_enabled
     with _Env():
         _kind, _desc, _hint, run = _BUILTIN_SPECS["providers"]
         facade = HeadlessFacade(cwd=Path.cwd())

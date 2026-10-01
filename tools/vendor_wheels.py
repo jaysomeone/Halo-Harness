@@ -1,6 +1,6 @@
 """tools/vendor_wheels.py -- H8 scope F: pre-download manylinux cp311/cp312/
 cp313 (H9 whole-tree review finding 23: Debian 13 and Kali rolling both
-ship 3.13) wheels for rolo-claude's full pinned dependency closure
+ship 3.13) wheels for halo's full pinned dependency closure
 (`requirements.lock`,
 `uv pip compile pyproject.toml --universal -o requirements.lock`) into a
 local directory, so a later `pip install --no-index --find-links=wheels -e .`
@@ -181,7 +181,7 @@ def download_build_backend(*, out_dir: Path, dry_run: bool = False) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Vendor manylinux wheels for rolo-claude's pinned dependencies.")
+    ap = argparse.ArgumentParser(description="Vendor manylinux wheels for halo's pinned dependencies.")
     ap.add_argument("--out", default=str(REPO_DIR / "wheels"),
                      help="destination directory (default: ./wheels, gitignored)")
     ap.add_argument("--python-versions", default="311,312,313",

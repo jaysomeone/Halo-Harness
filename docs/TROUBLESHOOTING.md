@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Symptom -> the `doctor` line that names it -> the fix. Run
-`rolo-claude doctor` (or `doctor --work` at a Databricks box) first for
+`halo doctor` (or `doctor --work` at a Databricks box) first for
 almost everything below -- every `[WARN]`/`[MISSING]` line already ends
 with `-> fix: <command>` or `-> see: <reference>`. See
 [DATABRICKS.md](DATABRICKS.md) for the full Databricks status-code table
@@ -13,13 +13,13 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
   -- Debian/Kali's PEP 668 guard on the system Python. Fixes, in order of
   preference: use `uv tool install --editable .` instead (never hits this
   at all); install into your own venv
-  (`python3 -m venv ~/.venvs/rolo-claude && ~/.venvs/rolo-claude/bin/pip
+  (`python3 -m venv ~/.venvs/halo && ~/.venvs/halo/bin/pip
   install -e .`); last resort, `pip install --user -e . --break-system-packages`.
-- **`rolo-claude: command not found` right after installing** -- `~/.local/bin`
+- **`halo: command not found` right after installing** -- `~/.local/bin`
   (where `uv tool install`/`pip install --user` puts the console script)
   isn't on `PATH` yet, especially for a non-interactive shell/tmux/`ssh
   host cmd`. `doctor`'s `local_bin_on_path` check names the exact rc-file
-  line to add (`rolo-claude init` offers to add it for you on Linux);
+  line to add (`halo init` offers to add it for you on Linux);
   `~/.zshenv` for zsh, `~/.profile` otherwise (read by every invocation,
   not just interactive login shells).
 - **Offline/work-box install fails with `ModuleNotFoundError: No module
@@ -37,7 +37,7 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
 
 - **`rg` (ripgrep) not on PATH** -- `doctor` reports this as a `WARN`, not a
   failure: the Grep tool falls back to a slower pure-Python search engine
-  automatically. `rolo-claude init` offers to install a static binary into
+  automatically. `halo init` offers to install a static binary into
   `~/.local/bin` straight from ripgrep's own GitHub releases (Linux only);
   otherwise use your package manager (`doctor` names the one it detects on
   PATH).
@@ -55,9 +55,9 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
 
 ## MCP servers
 
-- **A server shows `✗ Failed to connect`** -- `rolo-claude mcp get <name>`
+- **A server shows `✗ Failed to connect`** -- `halo mcp get <name>`
   prints the real underlying error (a missing binary, a bad URL, ...);
-  `rolo-claude doctor`'s MCP line shows the eager/lazy split and each lazy
+  `halo doctor`'s MCP line shows the eager/lazy split and each lazy
   server's cache age.
 - **A tool isn't visible to the model** -- check whether it's a deferred
   tool from a *lazy* server that hasn't been called yet (`ToolSearch` finds
@@ -107,7 +107,7 @@ either, since retrying wouldn't fix it.
 | `RATE_LIMIT` | 429 | too many requests | retried automatically; if it persists, the route/model is genuinely saturated |
 | `CONTEXT_WINDOW_EXCEEDED` | 400 (overflow-shaped message) | the request is too large for the model's window | auto-compaction should have caught this first; `/compact` manually, or `/clear`/start a new session |
 | `MALFORMED_RESPONSE` | 400 (anything else) | a bad request body -- usually a model/family whose quirks aren't yet in `model_table.json` | file it; include the model id and the exact error text |
-| `PROVIDER_FAILURE` | 5xx, or a 404/other | the upstream itself failed, or (Databricks) a wrong path/endpoint name | retried automatically for 5xx; a 404 usually means a stale/incorrect endpoint name -- `rolo-claude models --refresh` |
+| `PROVIDER_FAILURE` | 5xx, or a 404/other | the upstream itself failed, or (Databricks) a wrong path/endpoint name | retried automatically for 5xx; a 404 usually means a stale/incorrect endpoint name -- `halo models --refresh` |
 | `EMPTY_RESPONSE` | 200 with no usable content | the model returned nothing usable | retried once automatically; persistent emptiness usually means the model/route itself is having an outage |
 
 ## DNS / connection failures (fail fast, 1.0.1)
@@ -165,9 +165,10 @@ needed.
 
 **"unable to get local issuer certificate"** -- a DIFFERENT problem: the
 corporate CA itself isn't in this machine's trust store at all (not a
-strictness issue). Export `BRIDGE_CA_BUNDLE` (or `NODE_EXTRA_CA_CERTS`/
-`REQUESTS_CA_BUNDLE`, read in that order, first one present that loads
-wins) pointing at the corporate CA's PEM file.
+strictness issue). Export `HALO_CA_BUNDLE` (legacy `BRIDGE_CA_BUNDLE` still
+honoured; `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE` are tried first if
+set, then this one, first one present that loads wins) pointing at the
+corporate CA's PEM file.
 
 ## The subscription route (`cc:`)
 
@@ -253,7 +254,7 @@ THAT is what's stuck) is already writing diagnostics for you: once the UI
 thread's own heartbeat (bumped every second by the status bar's spinner
 timer) goes stale for more than 15s, it dumps every thread's stack, the
 named background-worker list, and the active screen to
-**`~/.rolo-claude/hang-<UTC-timestamp>.log`** (one line also lands in
+**`~/.halo/hang-<UTC-timestamp>.log`** (one line also lands in
 `bridge.log` naming the exact path), at most once a minute for as long as
 the stall continues. Send that file along with a bug report -- the thread
 stacks almost always show exactly which call is stuck (a lock shared with
@@ -268,16 +269,16 @@ things went quiet.
 
 ## The starting permission mode isn't what I expected (1.0.1)
 
-`rolo-claude doctor` prints the effective starting permission mode and
+`halo doctor` prints the effective starting permission mode and
 which layer decided it (`Permission mode: ... (source: ...)`). Precedence,
 highest first: `--dangerously-skip-permissions` > `--permission-mode` (this
-run's own flag) > `~/.rolo-claude/config.json`'s `permission_mode` (set
-once via `rolo-claude init`'s own "Default permission mode" step, or
-`rolo-claude config set permission_mode auto`) > `settings.json`'s
+run's own flag) > `~/.halo/config.json`'s `permission_mode` (set
+once via `halo init`'s own "Default permission mode" step, or
+`halo config set permission_mode auto`) > `settings.json`'s
 `permissions.defaultMode` > the hardcoded `default`. If you want every
 session on this box to start in `auto` (never Claude Code's own `default`,
 which asks before touching anything outside the working directory), either
-re-run `rolo-claude init` or `rolo-claude config set permission_mode auto`
+re-run `halo init` or `halo config set permission_mode auto`
 directly -- this never touches `~/.claude/settings.json`.
 
 As of the H14c fixpass (finding 9), re-running `init` with `--yes` or
@@ -310,28 +311,28 @@ a guess when there is truly no existing value yet.
 
 ## Resetting caches
 
-Every cache under `~/.rolo-claude/` is safe to delete and will be rebuilt
+Every cache under `~/.halo/` is safe to delete and will be rebuilt
 on next use: `models.json`/`dbx-endpoints.json`/`models-dev.json`/
-`cc-models.json` (re-fetched by `rolo-claude models --refresh`),
+`cc-models.json` (re-fetched by `halo models --refresh`),
 `stats-cache.json` (re-derived from the session logs themselves, nothing
 is lost), `mcp/tools-cache/*.json` (a lazy server just reconnects for real
 on next use instead of using a cached tool list).
 
 ## Where logs live
 
-- **Session transcripts**: `~/.rolo-claude/sessions/<project-slug>/<id>.jsonl`
-  (`rolo-claude export`/`/export` reads these; `rolo-claude stats`/`/stats`
+- **Session transcripts**: `~/.halo/sessions/<project-slug>/<id>.jsonl`
+  (`halo export`/`/export` reads these; `halo stats`/`/stats`
   aggregates them).
 - **A running commentary of model/tool calls**: `--verbose` (print mode,
   stderr) or `Ctrl+O` (TUI, expands every tool card and shows reasoning).
 - **The older proxy mode's own log**: `~/.claude-bridge/bridge.log`
-  (`rolo-claude proxy` only -- redacted, rotated at 2 MB).
+  (`halo proxy` only -- redacted, rotated at 2 MB).
 - **`-d`/`--debug`** (or `--debug-file PATH`): real DEBUG-level file
   logging for the whole run, TUI or print mode -- default
-  `~/.rolo-claude/bridge.log` (secrets redacted by the same
+  `~/.halo/bridge.log` (secrets redacted by the same
   `RedactingFormatter` every route uses). In the TUI this also turns on
   per-key/focus/worker-lifecycle tracing (see "The TUI seems hung" above);
   `--verbose` is a separate, UI-only "expand every tool card" toggle
   (`Ctrl+O`), not a logging level.
-- **A stuck/hung TUI**: `~/.rolo-claude/hang-<UTC-timestamp>.log` -- see
+- **A stuck/hung TUI**: `~/.halo/hang-<UTC-timestamp>.log` -- see
   "The TUI seems hung" above.

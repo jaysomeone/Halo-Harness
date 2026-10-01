@@ -1,22 +1,24 @@
-"""rolo_claude.theme -- theme name resolution + persistence (U0 scope D).
+"""halo_harness.theme -- theme name resolution + persistence (U0 scope D).
 
-Precedence: `--theme` (CLI flag) > `CLAUDE_BRIDGE_THEME`/`ROLO_CLAUDE_THEME`
-(env, checked in that order) > settings `theme` > "claude-dark" (built-in
-default). Pure data -- Textual itself is NOT imported here (U2's job); this
-module only decides WHICH theme name is active and reads/writes the one
-place a `/theme` command would persist a user's choice:
-`~/.rolo-claude/config.json`'s `"theme"` key (never Claude Code's own
-settings.json -- that file is config we only ever READ, per D-CFG).
+Precedence: `--theme` (CLI flag) > `HALO_THEME`/`CLAUDE_BRIDGE_THEME`/
+`ROLO_CLAUDE_THEME` (env, checked in that order -- the 2.0.0 rename's new
+canonical name first, both legacy names still honoured) > settings `theme`
+> "claude-dark" (built-in default). Pure data -- Textual itself is NOT
+imported here (U2's job); this module only decides WHICH theme name is
+active and reads/writes the one place a `/theme` command would persist a
+user's choice: `~/.halo/config.json`'s `"theme"` key (never Claude Code's
+own settings.json -- that file is config we only ever READ, per D-CFG).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import bridge_home
+from halo_harness.config.paths import bridge_home
 
 DEFAULT_THEME = "claude-dark"
 
@@ -29,7 +31,14 @@ _SUFFIXES = ("", "-daltonized", "-ansi")
 # "claude-dark", "claude-light", "*-daltonized", "*-ansi").
 VALID_THEMES = frozenset(f"{base}{suffix}" for base in _BASE_THEMES for suffix in _SUFFIXES)
 
-_ENV_VARS = ("CLAUDE_BRIDGE_THEME", "ROLO_CLAUDE_THEME")
+# HALO_THEME is the 2.0.0 canonical name; CLAUDE_BRIDGE_THEME (claude-bridge
+# era) and ROLO_CLAUDE_THEME (rolo-claude era) both still work, checked in
+# this order -- only the ROLO_CLAUDE_* one matches the rename brief's own
+# "BRIDGE_*/ROLO_CLAUDE_* still honoured, one DEBUG line" contract (see
+# _DEPRECATED_ENV_VARS); CLAUDE_BRIDGE_THEME is an older, separate shim this
+# release leaves exactly as it already behaved.
+_ENV_VARS = ("HALO_THEME", "CLAUDE_BRIDGE_THEME", "ROLO_CLAUDE_THEME")
+_DEPRECATED_ENV_VARS = ("ROLO_CLAUDE_THEME",)
 
 
 def is_valid_theme(name: Optional[str]) -> bool:
@@ -41,7 +50,7 @@ def _config_path() -> Path:
 
 
 def load_config() -> dict:
-    """Read `~/.rolo-claude/config.json` fresh every call; `{}` if
+    """Read `~/.halo/config.json` fresh every call; `{}` if
     missing/invalid. Never raises -- this is a small local file a test may
     write then immediately re-read within the same process."""
     path = _config_path()
@@ -62,13 +71,13 @@ def load_persisted_theme() -> Optional[str]:
 
 
 def set_config_value(key: str, value) -> Path:
-    """Write `data[key] = value` into `~/.rolo-claude/config.json` (tmp +
+    """Write `data[key] = value` into `~/.halo/config.json` (tmp +
     `os.replace`, preserving every other key already there) -- the generic
-    form `persist_theme` and `rolo-claude config set` both build on. Never
+    form `persist_theme` and `halo config set` both build on. Never
     touches Claude Code's own settings.json.
 
     H10 Part B: `key` may be dotted (`"improve.model"`, `"improve.
-    hint_threshold.repairs"`) to set a NESTED value -- `rolo-claude config
+    hint_threshold.repairs"`) to set a NESTED value -- `halo config
     set improve.model or:...` -- without disturbing any sibling key already
     under `improve`. A plain (undotted) key, every pre-H10 call site
     (`theme`, `compactionModel`, ...), is unchanged: `data[key] = value`
@@ -113,9 +122,9 @@ def get_config_value(key: str, default=_MISSING):
 
 
 def persist_theme(name: str) -> Path:
-    """Write `name` into `~/.rolo-claude/config.json`'s `"theme"` key,
+    """Write `name` into `~/.halo/config.json`'s `"theme"` key,
     matching D-TUI's "`/theme` persists to `~/.claude-bridge/config.json`
-    [now `~/.rolo-claude`], never Claude's settings". Returns the path
+    [now `~/.halo`], never Claude's settings". Returns the path
     written. Raises ValueError for a name outside `VALID_THEMES` -- callers
     (the `/theme` command, tests) are expected to validate user input
     themselves and surface a friendly message rather than let this raise."""
@@ -180,6 +189,8 @@ def resolve_theme(*, cli_theme: Optional[str] = None, env: Optional[dict] = None
     for var in _ENV_VARS:
         candidate = environ.get(var)
         if is_valid_theme(candidate):
+            if var in _DEPRECATED_ENV_VARS:
+                logging.getLogger(__name__).debug("%s is deprecated, use HALO_THEME instead", var)
             return candidate
 
     if is_valid_theme(settings_theme):

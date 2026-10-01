@@ -10,9 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.providers.profiles import load_model_table, map_effort, model_family, reset_model_table_cache, resolve_profile
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.databricks import load_models_json, write_models_json
+from halo_harness.providers.profiles import load_model_table, map_effort, model_family, reset_model_table_cache, resolve_profile
+from halo_harness.providers.routing import Route
+from halo_harness.providers.databricks import load_models_json, write_models_json
 
 test, TESTS = new_registry()
 

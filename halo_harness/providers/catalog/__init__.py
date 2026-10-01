@@ -1,5 +1,5 @@
-"""rolo_claude.providers.catalog -- vendored, packaged fallback model
-catalogs (H8 scope C). Shipped INSIDE the package (unlike `~/.rolo-claude/
+"""halo_harness.providers.catalog -- vendored, packaged fallback model
+catalogs (H8 scope C). Shipped INSIDE the package (unlike `~/.halo/
 models.json`/`dbx-endpoints.json`, which are live caches under the user's
 state dir) so a fresh install with no network yet -- most notably the
 Databricks work box, behind a VPN that may not be up yet -- still resolves
@@ -8,8 +8,8 @@ harness ships pinned defaults for, instead of falling all the way back to
 generic guessed defaults.
 
 Two files, both small, both real data (fetched live and trimmed down to
-just the rows `rolo_claude/providers/model_table.json` references, 2026-09-
-24 -- see `rolo_claude/providers/models_dev.py`'s own module docstring for
+just the rows `halo_harness/providers/model_table.json` references, 2026-09-
+24 -- see `halo_harness/providers/models_dev.py`'s own module docstring for
 how to regenerate them):
   - `openrouter_fallback.json` -- OpenRouter's own `/api/v1/models` shape
     (same as `providers.databricks.write_models_json`'s own output),

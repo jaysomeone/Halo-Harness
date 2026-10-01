@@ -1,4 +1,4 @@
-"""rolo_claude.mcp.mentions -- `@server:resource` mention expansion (H8
+"""halo_harness.mcp.mentions -- `@server:resource` mention expansion (H8
 scope E, deferred by H3): a prompt or a custom-command/skill body may
 reference an MCP server's resource the same way `@path` references a
 local file (`commands/registry.py`'s own convention, `tui/completion.py`'s

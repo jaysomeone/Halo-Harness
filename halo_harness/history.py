@@ -1,4 +1,4 @@
-"""rolo_claude.history -- merged prompt history (U0 scope C).
+"""halo_harness.history -- merged prompt history (U0 scope C).
 
 Two JSONL files, IDENTICAL schema (`{display, pastedContents, project,
 sessionId, timestamp}` -- Claude Code's own `~/.claude/history.jsonl`
@@ -6,7 +6,7 @@ shape, finding B):
 
   * `~/.claude/history.jsonl`     -- Claude Code's own file, READ-ONLY,
                                      never written by this module.
-  * `~/.rolo-claude/history.jsonl` -- this harness's own file, read AND
+  * `~/.halo/history.jsonl` -- this harness's own file, read AND
                                      appended to.
 
 `project` is a cwd string that may have been written with either path
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.config.paths import claude_config_dir, bridge_home, normalize_cwd
+from halo_harness.config.paths import claude_config_dir, bridge_home, normalize_cwd
 
 HISTORY_SCHEMA_KEYS = ("display", "pastedContents", "project", "sessionId", "timestamp")
 
@@ -92,7 +92,7 @@ def load_merged_history(cwd: Optional[str] = None, *, limit: Optional[int] = Non
 def append_history_entry(display: str, cwd: str, *, session_id: Optional[str] = None,
                           pasted_contents: Optional[dict] = None, timestamp: Optional[float] = None) -> dict:
     """Append one entry (Claude Code's own schema) to OUR history file
-    (`~/.rolo-claude/history.jsonl`) -- never Claude Code's. `project` is
+    (`~/.halo/history.jsonl`) -- never Claude Code's. `project` is
     stored as given (normalization only ever happens at READ time, matching
     how Claude Code's own file already has mixed forms recorded historically
     -- rewriting past entries is never this module's job). Returns the

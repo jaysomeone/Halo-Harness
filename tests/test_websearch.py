@@ -10,9 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, send_json_response
-from rolo_claude.providers.stream import ProviderCreds
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.websearch import WebSearchTool, build_websearch_tool, extract_url_citations
+from halo_harness.providers.stream import ProviderCreds
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.websearch import WebSearchTool, build_websearch_tool, extract_url_citations
 
 test, TESTS = new_registry()
 
@@ -63,6 +63,11 @@ def test_websearch_returns_answer_and_citations(ctx: Ctx):
         ctx.check("citation title present", "DeepSeek on OpenRouter" in result.content)
         ctx.check("request carried the web plugin", mock.requests[0]["body"]["plugins"] == [{"id": "web"}])
         ctx.check("request was non-streaming", mock.requests[0]["body"]["stream"] is False)
+        # 2.0.0 fixpass finding 8: the HTTP-Referer sent with every
+        # WebSearch request names the real repo, not an unrelated
+        # "halo/halo" GitHub account the rename accidentally invented.
+        ctx.check(f"HTTP-Referer is the real repo, got {mock.requests[0]['headers'].get('http-referer')!r}",
+                  mock.requests[0]["headers"].get("http-referer") == "https://github.com/roloVibes/Halo-Harness")
     finally:
         mock.stop()
 

@@ -18,7 +18,7 @@ from tests.helpers.provider_env_defaults import ensure_default_provider_credenti
 # auto-detected-disabled provider.
 ensure_scoped_state_dir_once()
 ensure_default_provider_credentials()
-from rolo_claude.config.agents_md import (
+from halo_harness.config.agents_md import (
     AgentSpec, BUILTIN_NAMES, agent_mention_instruction, discover_agents, find_agent_mentions,
     load_spec_from_file, parse_agents_json, resolve_agent_model,
 )

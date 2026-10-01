@@ -1,0 +1,21 @@
+#!/bin/sh
+# rolo-claude (POSIX) -- DEPRECATED alias for bin/halo (2.0.0 rename brief,
+# Names table: "Console script | rolo-claude | halo (plus rolo-claude kept
+# as a deprecated alias that prints one notice)"). Prints exactly one
+# notice line to stderr, then execs bin/halo with the same argv -- this
+# covers the "no install at all, run straight from the checkout" fallback
+# path; the installed-console-script path's own alias notice is printed by
+# `halo_harness.cli.main_deprecated_alias` (the `rolo-claude` entry point
+# `pyproject.toml` registers), not by this file.
+# 2.0.0 fixpass finding 7: `dirname "$0"` alone only ever gives the
+# directory of WHATEVER PATH INVOKED THIS SCRIPT -- for a SYMLINK (the
+# documented `ln -s .../bin/rolo-claude ~/bin/rolo-claude` recipe), that's
+# ~/bin, the symlink's OWN directory, never the checkout it actually
+# points at, so `$here/halo` resolved to a `halo` that doesn't exist there
+# (exit 127). Same `readlink -f` idiom bin/halo already uses: resolve the
+# symlink chain to the REAL underlying file first (a no-op for an
+# ordinary, non-symlinked copy).
+resolved="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+here="$(cd "$(dirname "$resolved")" && pwd)"
+echo "halo: 'rolo-claude' is deprecated, use 'halo' instead" >&2
+exec "$here/halo" "$@"

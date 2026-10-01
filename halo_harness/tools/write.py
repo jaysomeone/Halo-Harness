@@ -1,4 +1,4 @@
-"""rolo_claude.tools.write -- the Write tool (H2 scope A). Wording matches
+"""halo_harness.tools.write -- the Write tool (H2 scope A). Wording matches
 Claude Code's own Write tool exactly (binary-facts sec.14 style). Must-Read-
 first (unless the file is new), parent directories created on demand, and an
 existing file's line ending style (CRLF vs LF) and UTF-8 BOM are preserved on
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Writes a file to the local filesystem.\n\n"

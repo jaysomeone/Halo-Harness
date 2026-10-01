@@ -48,15 +48,15 @@ def _tool_call_step(name: str, arguments: dict, call_id: str = "call_1") -> list
 def _new_session(*, mock, model, interactive=False, permission_mode="plan", cwd=None, plans_dir=None):
     import os
 
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.permissions import PermissionEngine
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+    from halo_harness.providers.stream import ProviderCreds
 
     # H10b: NONE of this file's 9 callers ever set BRIDGE_TEST_HOME, so
     # every `or:mock/h6-plan-*` Session built here fell through to the REAL
-    # `~/.rolo-claude/sessions` -- exactly how those sessions leaked into
+    # `~/.halo/sessions` -- exactly how those sessions leaked into
     # rolo's real session history (H10b report). One fix here covers every
     # caller.
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="rc-plan-e2e-home-")))
@@ -71,7 +71,7 @@ def _new_session(*, mock, model, interactive=False, permission_mode="plan", cwd=
     )
     session.interactive = interactive
     if plans_dir is not None:
-        from rolo_claude.agent.planmode import ensure_plan_file
+        from halo_harness.agent.planmode import ensure_plan_file
 
         class _Settings:
             plans_directory = str(plans_dir)

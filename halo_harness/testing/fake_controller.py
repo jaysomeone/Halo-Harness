@@ -1,7 +1,7 @@
-"""rolo_claude.testing.fake_controller -- scripted Controller stand-in (U0
+"""halo_harness.testing.fake_controller -- scripted Controller stand-in (U0
 scope E), used by `--demo`/`--stress` (this module) and, per
 `docs/harness/U2-brief.md`, U2's own `test_tui.py` pilots later. Implements
-the same method surface D-Contract gives the real `rolo_claude.controller`
+the same method surface D-Contract gives the real `halo_harness.controller`
 (not built until U2): `submit`/`interrupt`/`set_permission_mode`/
 `set_model`/`add_permission_rule`/`answer_permission`/`answer_question`/
 `run_slash`/`list_models`/`list_sessions`/`resume`/`mcp_status`/
@@ -15,7 +15,7 @@ from __future__ import annotations
 from itertools import chain
 from typing import Iterator, Optional
 
-from rolo_claude import events as ev
+from halo_harness import events as ev
 
 DEFAULT_MODEL = "or:deepseek/deepseek-v4.1-flash"
 
@@ -148,7 +148,7 @@ class FakeController:
         self.question_replies.append((request_id, answer))
 
     def answer_plan(self, approved: bool, *, feedback: str = "", mode_after=None) -> None:
-        # additive, matches rolo_claude.controller.Controller.answer_plan --
+        # additive, matches halo_harness.controller.Controller.answer_plan --
         # no existing test touches this (plan mode/`plan_review` didn't
         # exist before U2's PlanCard).
         self.plan_replies.append({"approved": approved, "feedback": feedback, "mode_after": mode_after})
@@ -173,7 +173,7 @@ class FakeController:
         self.reconnects += 1
 
     def memory_path(self):
-        from rolo_claude.config.paths import memory_dir
+        from halo_harness.config.paths import memory_dir
         return memory_dir(".")
 
     def quit(self) -> int:
@@ -183,7 +183,7 @@ class FakeController:
     # ---- U5: sessions UX / `!cmd` / `@file#L` / git-shadow rewind --------
     # Simple recording stubs -- real behaviour (the small-model title call,
     # the real Bash tool, the real git-shadow repo) lives only in the real
-    # `rolo_claude.controller.Controller`; these just make the SAME
+    # `halo_harness.controller.Controller`; these just make the SAME
     # `tui/slash.py`/`tui/app.py` code paths exercisable against a script,
     # same spirit as `answer_permission`/`add_permission_rule` above.
 
@@ -212,12 +212,12 @@ class FakeController:
         return {"turns": len(self.submitted), "total_cost_usd": 0.0, "per_model": {}, "tool_counts": {}}
 
     def decide_inline_shell(self, command: str):
-        from rolo_claude.permissions import Decision
+        from halo_harness.permissions import Decision
         self.inline_shell_decisions.append(command)
         return Decision("allow", "fake: always allowed")
 
     def run_inline_shell(self, command: str):
-        from rolo_claude.tools.base import ToolResult
+        from halo_harness.tools.base import ToolResult
         self.inline_shell_runs.append(command)
         return f"fake_inline_{len(self.inline_shell_runs)}", ToolResult(content=f"(fake output of: {command})")
 
@@ -245,7 +245,7 @@ def run_demo(*, output_format: str = "text", stress: Optional[int] = None, strea
     flattened into ONE event stream fed to a single `PrintModeSink`, so a
     multi-turn demo prints exactly like a multi-call real session would.
     Returns the process exit code."""
-    from rolo_claude.output import PrintModeSink
+    from halo_harness.output import PrintModeSink
 
     turns = stress_turns(stress) if stress else default_demo_turns()
     flat = list(chain.from_iterable(t() if callable(t) else t for t in turns))

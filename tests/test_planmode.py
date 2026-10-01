@@ -9,11 +9,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.planmode import (
+from halo_harness.agent.planmode import (
     PLAN_MODE_NOTE, EnterPlanModeTool, ExitPlanModeTool, ensure_plan_file, plans_directory, write_plan,
 )
-from rolo_claude.permissions import PermissionEngine
-from rolo_claude.tools.base import ToolContext
+from halo_harness.permissions import PermissionEngine
+from halo_harness.tools.base import ToolContext
 
 test, TESTS = new_registry()
 
@@ -22,7 +22,7 @@ test, TESTS = new_registry()
 
 @test
 def test_plans_directory_default(ctx: Ctx):
-    from rolo_claude.config.paths import plans_dir
+    from halo_harness.config.paths import plans_dir
     ctx.check("default matches config.paths.plans_dir()", plans_directory(None) == plans_dir())
 
 

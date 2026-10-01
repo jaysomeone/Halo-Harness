@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.init_tabs -- H15 Part A: `rolo-claude init`'s
+"""halo_harness.tui.dialogs.init_tabs -- H15 Part A: `halo init`'s
 tabbed provider setup, one tab per `init_providers.TAB_PROVIDERS` entry
 (Databricks, OpenRouter, Anthropic API (key), Claude Code subscription,
 TypeSafe). A standalone Textual `App` (same reason `init_picker.py`'s own
@@ -30,7 +30,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Button, Input, Static, TabbedContent, TabPane
 
-from rolo_claude.init_providers import TAB_LABEL, TAB_PROVIDERS, tab_credential_state
+from halo_harness.init_providers import TAB_LABEL, TAB_PROVIDERS, tab_credential_state
 
 
 def _pane_id(provider: str) -> str:
@@ -50,12 +50,12 @@ def _status_text(provider: str, *, state: Optional[dict] = None) -> str:
 
 
 def _reach_text(provider: str) -> str:
-    from rolo_claude.providers.reachability import reachability_tag
+    from halo_harness.providers.reachability import reachability_tag
     return f"reachability: {reachability_tag(provider)}"
 
 
 class InitTabsApp(App):
-    TITLE = "rolo-claude init"
+    TITLE = "halo init"
     BINDINGS = [
         Binding("shift+tab", "prev_tab", "Previous provider", priority=True, show=False),
         Binding("up", "focus_prev_field", "Up", show=False),
@@ -107,7 +107,7 @@ class InitTabsApp(App):
                                         "known_host": None, "fields": []}
 
     def _load_team_cfg_fast(self) -> "tuple[Optional[dict], bool]":
-        from rolo_claude.team_config import load_team_config, team_config_path
+        from halo_harness.team_config import load_team_config, team_config_path
         try:
             source = team_config_path(Path.cwd(), team_flag=self._team_flag)
         except Exception:
@@ -174,7 +174,7 @@ class InitTabsApp(App):
                 self.run_worker(lambda p=provider: self._probe_worker(p), thread=True, name=f"init-tab-probe-{provider}")
 
     def _team_cfg_worker(self) -> None:
-        from rolo_claude.team_config import load_team_config
+        from halo_harness.team_config import load_team_config
         cfg, warnings = load_team_config(Path.cwd(), team_flag=self._team_flag)
         self.call_from_thread(self._apply_team_cfg, cfg, warnings)
 
@@ -201,7 +201,7 @@ class InitTabsApp(App):
         # (this same worker's own `claude_login_available()` call just
         # above) instead of `reachability_tag` independently re-deriving it
         # via a SECOND `claude auth status` spawn.
-        from rolo_claude.providers.reachability import reachability_tag
+        from halo_harness.providers.reachability import reachability_tag
         reach_text = f"reachability: {reachability_tag('claude', detected=state['configured'])}"
         self.call_from_thread(self._apply_claude_state, state, reach_text)
 
@@ -291,7 +291,7 @@ class InitTabsApp(App):
             # tab's own on_mount check.
             self.run_worker(self._save_claude_worker, thread=True, name="init-tab-save-claude")
             return
-        from rolo_claude.init_providers import save_tab_credentials
+        from halo_harness.init_providers import save_tab_credentials
         values = self._collect_values(provider)
         ok, message = save_tab_credentials(provider, values, team_cfg=self._team_cfg)
         try:
@@ -307,7 +307,7 @@ class InitTabsApp(App):
         # live by auto-detection, so this only ever flips an EXISTING
         # explicit `enabled: false` back to `true`, never writes a fresh
         # permanent override that would outlive a later revocation.
-        from rolo_claude.providers.enablement import enable_if_was_explicitly_disabled
+        from halo_harness.providers.enablement import enable_if_was_explicitly_disabled
         enable_if_was_explicitly_disabled(provider)
         if provider not in self.configured_this_run:
             self.configured_this_run.append(provider)
@@ -338,7 +338,7 @@ class InitTabsApp(App):
         returns `{}` (this tab has no input fields at all), so there is
         nothing to read off a widget here; both calls below spawn `claude
         auth status`, exactly like the synchronous code this replaces did."""
-        from rolo_claude.init_providers import save_tab_credentials, tab_credential_state
+        from halo_harness.init_providers import save_tab_credentials, tab_credential_state
         ok, message = save_tab_credentials("claude", {}, team_cfg=self._team_cfg)
         state = tab_credential_state("claude", team_cfg=self._team_cfg) if ok else None
         self.call_from_thread(self._apply_claude_save, ok, message, state)
@@ -351,7 +351,7 @@ class InitTabsApp(App):
         if not ok:
             status.update(f"not set up ({message})")
             return
-        from rolo_claude.providers.enablement import enable_if_was_explicitly_disabled
+        from halo_harness.providers.enablement import enable_if_was_explicitly_disabled
         enable_if_was_explicitly_disabled("claude")
         if "claude" not in self.configured_this_run:
             self.configured_this_run.append("claude")
@@ -370,7 +370,7 @@ class InitTabsApp(App):
         self.run_worker(lambda: self._finish_tab_worker("claude"), thread=True, name="init-tab-save-claude-finish")
 
     def _probe_worker(self, provider: str) -> None:
-        from rolo_claude.providers.reachability import reachability_tag
+        from halo_harness.providers.reachability import reachability_tag
         tag = reachability_tag(provider)
         self.call_from_thread(self._apply_reach, provider, tag)
 
@@ -378,8 +378,8 @@ class InitTabsApp(App):
         """A.4: a tab that now has credentials gets its catalog fetched
         and cached right away, off the UI thread -- the reachability tag
         updates from the SAME probe pass."""
-        from rolo_claude.init_providers import refresh_tab_catalog
-        from rolo_claude.providers.reachability import reachability_tag
+        from halo_harness.init_providers import refresh_tab_catalog
+        from halo_harness.providers.reachability import reachability_tag
         tag = reachability_tag(provider)
         _ok, note = refresh_tab_catalog(provider)
         if note:

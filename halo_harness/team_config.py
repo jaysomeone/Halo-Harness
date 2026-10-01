@@ -1,13 +1,13 @@
-"""rolo_claude.team_config -- H14 scope I: a shared `team.json` preset (the
+"""halo_harness.team_config -- H14 scope I: a shared `team.json` preset (the
 brief's "the team just inserts their databricks token and they're off"). It
 holds host, default model, per-family gateway preference and a DBU price --
 **never a token, never an endpoint list** (the workspace listing is
 discovered per user by `init --preset work`/`models --refresh` and cached to
-`~/.rolo-claude/dbx-endpoints.json`; team.json is not a substitute for that).
+`~/.halo/dbx-endpoints.json`; team.json is not a substitute for that).
 
 Discovery order: `--team <path|url>` (explicit, always wins), else
-`<cwd>/.rolo-claude/team.json` (checked into the project, alongside
-`.claude/`), else `~/.rolo-claude/team.json` (a personal copy/override, not
+`<cwd>/.halo/team.json` (checked into the project, alongside
+`.claude/`), else `~/.halo/team.json` (a personal copy/override, not
 project-specific). None of these existing is normal, not an error -- a lone
 user with no team preset still runs `init --preset work` off Claude Code's
 own settings env alone.
@@ -16,6 +16,7 @@ own settings env alone.
 from __future__ import annotations
 
 import json
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -31,10 +32,19 @@ def team_config_path(cwd: Path, *, team_flag: Optional[str] = None) -> Optional[
     silently falling through to project/user discovery)."""
     if team_flag:
         return team_flag
-    project = Path(cwd) / ".rolo-claude" / "team.json"
+    project = Path(cwd) / ".halo" / "team.json"
     if project.exists():
         return str(project)
-    from rolo_claude.config.paths import bridge_home
+    # 2.0.0 fixpass finding 5: the project preset moved from
+    # `<cwd>/.rolo-claude/team.json` with no fallback -- a repo whose
+    # checked-in preset still lives at the OLD path (nobody has run `git
+    # mv` on it yet) must keep being found, not silently ignored.
+    legacy_project = Path(cwd) / ".rolo-claude" / "team.json"
+    if legacy_project.exists():
+        print(f"halo: {legacy_project} is deprecated, move it to {project} "
+              f"(.rolo-claude -> .halo)", file=sys.stderr)
+        return str(legacy_project)
+    from halo_harness.config.paths import bridge_home
     user = bridge_home() / "team.json"
     if user.exists():
         return str(user)
@@ -44,7 +54,7 @@ def team_config_path(cwd: Path, *, team_flag: Optional[str] = None) -> Optional[
 def _read_source(source: str) -> str:
     if source.startswith("http://") or source.startswith("https://"):
         # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
-        from rolo_claude.providers.http import urlopen_tls
+        from halo_harness.providers.http import urlopen_tls
         with urlopen_tls(source, timeout=10) as resp:  # noqa: S310 -- explicit, user-initiated
             return resp.read().decode("utf-8", "replace")
     return Path(source).read_text(encoding="utf-8")
@@ -87,7 +97,7 @@ def apply_gateway_preference(gateway_preference: dict) -> None:
     `gateway_preference` map -- idempotent, never overwrites a value the
     user already set locally for that same endpoint (a personal
     `config.json` override always wins over the shared team default)."""
-    from rolo_claude.theme import get_config_value, set_config_value
+    from halo_harness.theme import get_config_value, set_config_value
     for endpoint, preference in (gateway_preference or {}).items():
         key = f"databricks.gateway.{endpoint}"
         if get_config_value(key, default=None) is None:

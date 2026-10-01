@@ -31,10 +31,10 @@ def _text_chunk(text: str, *, finish: str = "stop"):
 
 
 def _make_session(fh, mock, *, scenario: str):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session as _Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session as _Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
 
     model_label = f"mock/{scenario}"
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -48,7 +48,7 @@ def _make_session(fh, mock, *, scenario: str):
     )
 
 
-from rolo_claude.improve.evidence import Cluster, Excerpt
+from halo_harness.improve.evidence import Cluster, Excerpt
 
 _CLUSTER = Cluster("tool_error:Edit:not_found", "tool_error", "Edit: repeated not_found errors", count=2,
                     excerpts=[Excerpt("sessA", 3, "old_string not found", True)], sessions={"sessA"})
@@ -64,7 +64,7 @@ _VALID_REPLY = json.dumps([{
 
 @test
 def test_draft_valid_json_produces_one_candidate(ctx: Ctx):
-    from rolo_claude.improve.draft import draft_candidates
+    from halo_harness.improve.draft import draft_candidates
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -84,7 +84,7 @@ def test_draft_valid_json_produces_one_candidate(ctx: Ctx):
 
 @test
 def test_draft_malformed_then_retry_succeeds(ctx: Ctx):
-    from rolo_claude.improve.draft import draft_candidates
+    from halo_harness.improve.draft import draft_candidates
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -111,7 +111,7 @@ def test_draft_malformed_then_retry_succeeds(ctx: Ctx):
 
 @test
 def test_draft_malformed_twice_gives_no_candidates(ctx: Ctx):
-    from rolo_claude.improve.draft import draft_candidates
+    from halo_harness.improve.draft import draft_candidates
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -128,7 +128,7 @@ def test_draft_malformed_twice_gives_no_candidates(ctx: Ctx):
 
 @test
 def test_draft_empty_clusters_never_calls_the_model(ctx: Ctx):
-    from rolo_claude.improve.draft import draft_candidates
+    from halo_harness.improve.draft import draft_candidates
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -156,8 +156,8 @@ def test_memory_frontmatter_matches_fake_homes_own_topic_files(ctx: Ctx):
     MEMORY_TOPIC_1/2 fixtures (name/description/metadata.node_type/
     metadata.type/metadata.originSessionId/metadata.modified), verified by
     round-tripping through config/frontmatter.py's OWN parser."""
-    from rolo_claude.config.frontmatter import parse as parse_frontmatter
-    from rolo_claude.config.memory import MemoryStore
+    from halo_harness.config.frontmatter import parse as parse_frontmatter
+    from halo_harness.config.memory import MemoryStore
 
     class FakeSettings:
         auto_memory_enabled = True
@@ -166,7 +166,7 @@ def test_memory_frontmatter_matches_fake_homes_own_topic_files(ctx: Ctx):
     store = MemoryStore(d, FakeSettings())
     path = store.write(filename="a_topic.md", name="a-topic", description="A description",
                         type="feedback", body="Body text.", origin_session_id="sess123",
-                        provenance_comment="<!-- rolo-claude improve: created=x sessions=sess123 "
+                        provenance_comment="<!-- halo improve: created=x sessions=sess123 "
                                             "evidence=1 model=m from_tool_output=false -->")
     raw = path.read_text(encoding="utf-8")
     fm, body = parse_frontmatter(raw)
@@ -178,16 +178,16 @@ def test_memory_frontmatter_matches_fake_homes_own_topic_files(ctx: Ctx):
     ctx.check("metadata.type == feedback", metadata.get("type") == "feedback")
     ctx.check("metadata.originSessionId == sess123", metadata.get("originSessionId") == "sess123")
     ctx.check("metadata.modified present (ISO)", isinstance(metadata.get("modified"), str) and "T" in metadata["modified"])
-    ctx.check("provenance comment survives in the body", "rolo-claude improve:" in body)
+    ctx.check("provenance comment survives in the body", "halo improve:" in body)
     idx_text = (store.memory_dir_path / "MEMORY.md").read_text(encoding="utf-8")
     ctx.check("MEMORY.md index line present", "[a-topic](a_topic.md)" in idx_text)
 
 
 @test
 def test_rule_and_skill_shapes(ctx: Ctx):
-    from rolo_claude.improve import apply as apply_mod
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.config.frontmatter import parse as parse_frontmatter
+    from halo_harness.improve import apply as apply_mod
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.config.frontmatter import parse as parse_frontmatter
 
     cwd = Path(tempfile.mkdtemp(prefix="improve-shapes-"))
     rule = Candidate(id="r1", kind="rule", title="my-rule", scope="project", path="my_rule.md",
@@ -208,7 +208,7 @@ def test_rule_and_skill_shapes(ctx: Ctx):
 
 @test
 def test_provenance_comment_shape(ctx: Ctx):
-    from rolo_claude.improve.apply import PROVENANCE_MARKER, has_provenance_marker, provenance_comment
+    from halo_harness.improve.apply import PROVENANCE_MARKER, has_provenance_marker, provenance_comment
 
     comment = provenance_comment(sessions=["sessA", "sessB"], evidence_count=3, model="or:x", from_tool_output=True)
     ctx.check("starts with the marker", comment.startswith(PROVENANCE_MARKER))
@@ -222,8 +222,8 @@ def test_provenance_comment_shape(ctx: Ctx):
 
 @test
 def test_user_authored_file_without_marker_gets_a_new_name(ctx: Ctx):
-    from rolo_claude.improve import apply as apply_mod
-    from rolo_claude.improve.draft import Candidate
+    from halo_harness.improve import apply as apply_mod
+    from halo_harness.improve.draft import Candidate
 
     cwd = Path(tempfile.mkdtemp(prefix="improve-collide-"))
     user_path = cwd / ".claude" / "rules" / "existing.md"
@@ -242,8 +242,8 @@ def test_user_authored_file_without_marker_gets_a_new_name(ctx: Ctx):
 
 @test
 def test_marker_file_update_produces_a_diff(ctx: Ctx):
-    from rolo_claude.improve import apply as apply_mod
-    from rolo_claude.improve.draft import Candidate
+    from halo_harness.improve import apply as apply_mod
+    from halo_harness.improve.draft import Candidate
 
     cwd = Path(tempfile.mkdtemp(prefix="improve-diff-"))
     first = Candidate(id="c1", kind="rule", title="t", scope="project", path="r.md",
@@ -268,8 +268,8 @@ def test_resolve_drafting_model_ref_precedence(ctx: Ctx):
     config value) -- returning None otherwise defers to
     `Session.call_small_model`'s own `small_model_ref or model_ref`
     default, so there is exactly ONE place that fallback logic lives."""
-    from rolo_claude.improve.draft import resolve_drafting_model_ref
-    from rolo_claude.model import ModelRef
+    from halo_harness.improve.draft import resolve_drafting_model_ref
+    from halo_harness.model import ModelRef
 
     ref = resolve_drafting_model_ref(session=None, configured_model="or:deepseek/deepseek-v4-flash")
     ctx.check("configured model resolves to a real ModelRef", isinstance(ref, ModelRef))
@@ -286,7 +286,7 @@ def test_tool_result_ok_field_mirrors_is_error(ctx: Ctx):
     is_error`, always present."""
     import tempfile as _tempfile
     from pathlib import Path as _Path
-    from rolo_claude.agent.log import SessionLog
+    from halo_harness.agent.log import SessionLog
 
     log = SessionLog(_Path(_tempfile.mkdtemp(prefix="ok-field-")), session_id="s")
     ok_node = log.append_tool_result(tool_use_id="t1", content="fine", is_error=False)

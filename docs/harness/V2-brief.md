@@ -38,10 +38,10 @@ test matrix family × type driven by `tests/helpers/mock_databricks.py` speaking
   records the answer per endpoint so the harness can flip the family default from data.
 
 ### V2b — matrix-driven fixes
-`rolo-claude work-matrix show <report.json>` renders a matrix JSON (from the owner's work VM run)
+`halo work-matrix show <report.json>` renders a matrix JSON (from the owner's work VM run)
 as a table with a suggested action per failure (wrong path → set `databricks.gateway.<endpoint>`,
 tool-call failure → family rule, thinking replay failure → disable thinking for tool loops on that
-endpoint); `work-matrix apply` writes the per-endpoint overrides into `~/.rolo-claude/config.json`
+endpoint); `work-matrix apply` writes the per-endpoint overrides into `~/.halo/config.json`
 after a confirmation. Fable feeds each real report back into fixes + pinning tests.
 
 ### V2c — roles (H15)
@@ -55,8 +55,8 @@ beyond the table; sub-agent spend per role in `stats`.
 
 ### V2d — the rename (LAST; re-confirm with rolo before starting)
 `databricks-claude`: package `databricks_claude`, console script `databricks-claude` with a
-`rolo-claude` alias kept, state dir `~/.databricks-claude` with a one-time migration from
-`~/.rolo-claude` (or a fallback read), env var names unchanged, docs and tests regenerated, then
+`halo` alias kept, state dir `~/.databricks-claude` with a one-time migration from
+`~/.halo` (or a fallback read), env var names unchanged, docs and tests regenerated, then
 the GitHub repo rename (old URL redirects). Fable raised once that the name carries two other
 companies' trademarks and implies an official Databricks project; rolo decided to proceed in v2.
 

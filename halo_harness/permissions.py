@@ -1,4 +1,4 @@
-"""rolo_claude.permissions -- the permission engine (H2 scope C), per plan
+"""halo_harness.permissions -- the permission engine (H2 scope C), per plan
 D6/D-CFG's "Permission grammar and matcher" + "Rule writes" sections and
 `docs/harness/claude-code-2.1.281-binary-facts.md` sec.3-5. Grammar and
 modes ONLY -- rolo's "no cyber blocks" decision (plan "Decisions taken with
@@ -1046,7 +1046,7 @@ def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
     elif destination == "project":
         path = Path(cwd) / ".claude" / "settings.json"
     elif destination == "user":
-        from rolo_claude.config.paths import claude_config_dir
+        from halo_harness.config.paths import claude_config_dir
         path = claude_config_dir() / "settings.json"
     else:
         raise ValueError(f"add_allow_rule: unsupported destination {destination!r} (use 'session' in-memory instead)")
@@ -1453,6 +1453,13 @@ class PermissionEngine:
             # docstring -- re-reading THIS session's own tool-result spill
             # file is never mode-gated, the same "no side effects requiring
             # permission" reasoning TodoWrite/ToolSearch get just below.
+            # 2.0.0 fixpass item C: the legacy-state-dir-prefix rewrite
+            # itself no longer happens here -- decide() does it for EVERY
+            # Read call, in every mode, before any mode branching at all
+            # (auto/bypassPermissions used to skip straight past this
+            # method entirely, so a rewrite that only lived here never
+            # fired for them). By the time tool_input reaches this point
+            # it's already been rewritten if it needed to be.
             raw_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if isinstance(raw_path, str) and raw_path:
                 try:
@@ -1525,14 +1532,37 @@ class PermissionEngine:
         JSON result's `permission_denials` array even though Claude Code's
         own does. Rather than touching every `Decision("deny", ...)` call
         site individually, EVERY deny outcome is backfilled here, once, at
-        the single entry point -- matching Claude Code."""
+        the single entry point -- matching Claude Code.
+
+        2.0.0 fixpass item C: the legacy-state-dir-prefix rewrite for a
+        Read call ALSO happens here, first, for the same "single entry
+        point every caller/every mode uses" reason -- it used to live only
+        in `_mode_table_decision`, which `auto`/`bypassPermissions` never
+        reach (they short-circuit to an allow straight out of `_decide`),
+        so a dead old-state-dir pointer in `tool_input` was never fixed up
+        for those two modes even though the call was allowed; the Read
+        tool that then actually ran still reached for a path that no
+        longer exists. Mutates `ti` (the same dict object the caller
+        passed, when one was passed) IN PLACE, same as before."""
+        ti = tool_input if tool_input is not None else {}
         try:
-            decision = self._decide(tool_name, tool_input or {}, tool)
+            # Still inside the finding-15 try/except below on purpose: a
+            # path-resolution error here is exactly the same class of
+            # failure _decide()'s own NUL-byte case guards against, and
+            # must be denied, not left to kill the whole turn, the same way.
+            if tool_name == "Read" and isinstance(ti, dict):
+                raw_path = ti.get("file_path")
+                if isinstance(raw_path, str) and raw_path:
+                    from halo_harness.config.paths import rewrite_legacy_state_dir_prefix
+                    rewritten = rewrite_legacy_state_dir_prefix(raw_path)
+                    if rewritten != raw_path:
+                        ti["file_path"] = rewritten
+            decision = self._decide(tool_name, ti, tool)
         except (ValueError, OSError) as e:
             decision = Decision("deny", f"could not resolve a path for this {tool_name} call: {e}", source="error")
         if decision.action == "deny" and decision.permission_denial is None and self.print_mode:
             decision.permission_denial = {
-                "tool_name": tool_name, "tool_input": tool_input or {},
+                "tool_name": tool_name, "tool_input": ti,
                 "reason": decision.reason, "suggested_rule": decision.suggested_rule,
             }
         return decision

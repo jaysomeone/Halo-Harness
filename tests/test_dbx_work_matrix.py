@@ -25,9 +25,9 @@ class _Env:
                         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS")}
         d = Path(tempfile.mkdtemp(prefix="dbx-work-matrix-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -46,8 +46,8 @@ def _parsed(name, fm_name, api_types, task="llm/v1/chat"):
 
 @test
 def test_run_work_matrix_probes_mlflow_and_anthropic_endpoints(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
 
     mock = MockDatabricks().start()
     try:
@@ -86,8 +86,8 @@ def test_run_work_matrix_probes_mlflow_and_anthropic_endpoints(ctx: Ctx):
 
 @test
 def test_run_work_matrix_both_flag_adds_anthropic_gateway_row_for_glm(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
 
     mock = MockDatabricks().start()
     try:
@@ -109,8 +109,8 @@ def test_run_work_matrix_both_flag_adds_anthropic_gateway_row_for_glm(ctx: Ctx):
 
 @test
 def test_run_work_matrix_only_glob_filters(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
 
     mock = MockDatabricks().start()
     try:
@@ -130,8 +130,8 @@ def test_run_work_matrix_only_glob_filters(ctx: Ctx):
 
 @test
 def test_run_work_matrix_tool_call_probe(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
 
     mock = MockDatabricks().start()
     try:
@@ -153,8 +153,8 @@ def test_run_work_matrix_tool_call_probe(ctx: Ctx):
 
 @test
 def test_run_work_matrix_error_status_reported_not_crashed(ctx: Ctx):
-    from rolo_claude.providers.databricks import write_dbx_endpoints_json
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    from halo_harness.work_matrix import run_work_matrix
 
     mock = MockDatabricks().start()
     try:
@@ -173,7 +173,7 @@ def test_run_work_matrix_error_status_reported_not_crashed(ctx: Ctx):
 
 @test
 def test_run_work_matrix_not_configured_writes_a_note_and_no_rows(ctx: Ctx):
-    from rolo_claude.work_matrix import run_work_matrix
+    from halo_harness.work_matrix import run_work_matrix
     with _Env() as env:
         for k in ("BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
                   "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):

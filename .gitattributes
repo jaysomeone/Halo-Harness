@@ -1,0 +1,4 @@
+bin/halo text eol=lf
+bin/rolo-claude text eol=lf
+bin/claude-bridge text eol=lf
+bin/*.cmd text eol=crlf

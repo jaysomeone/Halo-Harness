@@ -1,5 +1,5 @@
 """tests.test_mcp_resource_mentions_and_prompts -- H8 scope E (deferred by
-H3): `@server:resource` mention expansion (rolo_claude/mcp/mentions.py) and
+H3): `@server:resource` mention expansion (halo_harness/mcp/mentions.py) and
 `/mcp__server__prompt` slash commands (commands/registry.register_mcp_
 prompts), against the real fake MCP server (`fake://note` resource,
 `greet` prompt).
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_mcp_server import running_manager
 from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
-from rolo_claude.mcp.manager import McpServerConfig
+from halo_harness.mcp.manager import McpServerConfig
 
 ensure_default_provider_credentials()
 
@@ -36,7 +36,7 @@ def _fake_config() -> "dict[str, McpServerConfig]":
 
 @test
 def test_extract_server_resource_mentions_matches_a_real_resource(ctx: Ctx):
-    from rolo_claude.mcp.mentions import extract_server_resource_mentions
+    from halo_harness.mcp.mentions import extract_server_resource_mentions
     with running_manager(_fake_config()) as mgr:
         found = extract_server_resource_mentions("please read @fake:fake://note for context", mcp_manager=mgr)
         ctx.check(f"matched the real resource, got {found}", found == [("fake", "fake://note")])
@@ -44,7 +44,7 @@ def test_extract_server_resource_mentions_matches_a_real_resource(ctx: Ctx):
 
 @test
 def test_extract_server_resource_mentions_ignores_unknown_server_and_uri(ctx: Ctx):
-    from rolo_claude.mcp.mentions import extract_server_resource_mentions
+    from halo_harness.mcp.mentions import extract_server_resource_mentions
     with running_manager(_fake_config()) as mgr:
         found = extract_server_resource_mentions("@nosuchserver:fake://note and @fake:not-a-real-uri", mcp_manager=mgr)
         ctx.check(f"neither bogus mention matches, got {found}", found == [])
@@ -52,14 +52,14 @@ def test_extract_server_resource_mentions_ignores_unknown_server_and_uri(ctx: Ct
 
 @test
 def test_extract_server_resource_mentions_none_manager_is_empty(ctx: Ctx):
-    from rolo_claude.mcp.mentions import extract_server_resource_mentions
+    from halo_harness.mcp.mentions import extract_server_resource_mentions
     ctx.check("no manager -> no mentions, never raises",
               extract_server_resource_mentions("@fake:fake://note", mcp_manager=None) == [])
 
 
 @test
 def test_read_server_resource_snapshots_reads_the_real_content(ctx: Ctx):
-    from rolo_claude.mcp.mentions import read_server_resource_snapshots
+    from halo_harness.mcp.mentions import read_server_resource_snapshots
     with running_manager(_fake_config()) as mgr:
         snapshots = read_server_resource_snapshots("see @fake:fake://note", mcp_manager=mgr)
         ctx.check(f"one snapshot returned, got {snapshots}", len(snapshots) == 1)
@@ -72,7 +72,7 @@ def test_read_server_resource_snapshots_reads_the_real_content(ctx: Ctx):
 def test_read_server_resource_snapshots_bad_uri_after_disconnect_is_a_note_not_a_crash(ctx: Ctx):
     """A resource that WAS listed but fails to read (server died between
     listing and reading) becomes a short note, never an exception."""
-    from rolo_claude.mcp.mentions import read_server_resource_snapshots
+    from halo_harness.mcp.mentions import read_server_resource_snapshots
 
     class _FakeManagerRaisesOnRead:
         def resources(self):
@@ -93,9 +93,9 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
     resource-only mention -- not just the standalone mentions.py functions."""
     import os
     import tempfile
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
 
     # H15 Part D2.1: `Session`'s own `SessionLog` ALWAYS resolves its
     # storage root via `bridge_home()` -- independent of the `state_dir=`
@@ -113,14 +113,14 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
                                state_dir=Path(tempfile.mkdtemp(prefix="mcp-mentions-state-")), model_label="or:mock/model",
                                session_context=session_ctx, mcp_manager=mgr)
 
-            from rolo_claude.headless import _append_at_mention_snapshots
+            from halo_harness.headless import _append_at_mention_snapshots
             _append_at_mention_snapshots(session, "look at @fake:fake://note please", cwd)
             snapshot_nodes = [n for n in session.log.nodes() if n.get("kind") == "at_mention"]
             ctx.check(f"headless path appended a snapshot, got {len(snapshot_nodes)}", len(snapshot_nodes) == 1)
             text = snapshot_nodes[0]["content"][0]["text"]
             ctx.check(f"contains the real resource text, got {text!r}", "fake MCP resource" in text)
 
-            from rolo_claude.controller import Controller
+            from halo_harness.controller import Controller
             controller = Controller(session=session, cwd=cwd)
             controller.ingest_at_mentions("also see @fake:fake://note")
             # H9 whole-tree review finding 14: the `@server:resource` fetch now
@@ -149,7 +149,7 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
 
 @test
 def test_register_mcp_prompts_adds_a_command_named_after_the_server_and_prompt(ctx: Ctx):
-    from rolo_claude.commands.registry import Registry, register_mcp_prompts
+    from halo_harness.commands.registry import Registry, register_mcp_prompts
     with running_manager(_fake_config()) as mgr:
         reg = Registry()
         register_mcp_prompts(reg, mgr)
@@ -163,7 +163,7 @@ def test_register_mcp_prompts_adds_a_command_named_after_the_server_and_prompt(c
 
 @test
 def test_register_mcp_prompts_none_manager_is_a_noop(ctx: Ctx):
-    from rolo_claude.commands.registry import Registry, register_mcp_prompts
+    from halo_harness.commands.registry import Registry, register_mcp_prompts
     reg = Registry()
     register_mcp_prompts(reg, None)
     ctx.check("nothing registered", reg.all() == [])
@@ -171,7 +171,7 @@ def test_register_mcp_prompts_none_manager_is_a_noop(ctx: Ctx):
 
 @test
 def test_mcp_prompt_command_run_calls_get_prompt_and_returns_its_text(ctx: Ctx):
-    from rolo_claude.commands.registry import Registry, register_mcp_prompts
+    from halo_harness.commands.registry import Registry, register_mcp_prompts
     with running_manager(_fake_config()) as mgr:
         reg = Registry()
         register_mcp_prompts(reg, mgr)
@@ -182,7 +182,7 @@ def test_mcp_prompt_command_run_calls_get_prompt_and_returns_its_text(ctx: Ctx):
 
 @test
 def test_mcp_prompt_command_run_with_no_args_uses_the_prompt_default(ctx: Ctx):
-    from rolo_claude.commands.registry import Registry, register_mcp_prompts
+    from halo_harness.commands.registry import Registry, register_mcp_prompts
     with running_manager(_fake_config()) as mgr:
         reg = Registry()
         register_mcp_prompts(reg, mgr)
@@ -193,7 +193,7 @@ def test_mcp_prompt_command_run_with_no_args_uses_the_prompt_default(ctx: Ctx):
 
 @test
 def test_mcp_prompt_command_does_not_override_an_existing_command(ctx: Ctx):
-    from rolo_claude.commands.registry import Registry, SlashCommand, register_mcp_prompts
+    from halo_harness.commands.registry import Registry, SlashCommand, register_mcp_prompts
     with running_manager(_fake_config()) as mgr:
         reg = Registry()
         reg.add(SlashCommand(name="mcp__fake__greet", description="a pre-existing builtin", kind="core",

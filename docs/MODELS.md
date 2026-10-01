@@ -2,7 +2,7 @@
 
 How a `--model`/`/model` string resolves to a real upstream call, per-family
 request-shaping rules, the model catalogs and how they refresh, and pricing.
-Verified against `rolo_claude/model.py`, `providers/profiles.py`,
+Verified against `halo_harness/model.py`, `providers/profiles.py`,
 `providers/cc_models.py`, `providers/dbx_routing.py`, and
 `providers/model_table.json`.
 
@@ -35,7 +35,7 @@ unchanged on every full id/alias form.
 The same bare names resolve for both prefixes (`providers/cc_models.py`
 `CC_ALIASES`/`ANT_ALIASES`); `opus` and `sonnet` are deliberately-moving
 "latest" pointers (today both resolve to the `-5-5` point release) --
-every other name is a specific, pinned version. `/model`, `rolo-claude
+every other name is a specific, pinned version. `/model`, `halo
 models` and the init picker show the resolved id next to each alias (e.g.
 `cc:opus -> claude-opus-5-5 (latest Opus)`) for exactly this reason: `opus`
 and `opus-5.5` are the same model.
@@ -53,16 +53,16 @@ and `opus-5.5` are the same model.
 | `sonnet-5` | `claude-sonnet-5` | `claude-sonnet-5` |
 | `haiku` | Claude Code's own `haiku` pointer (today `claude-haiku-4-5-20251001`) | `claude-haiku-4-5-20251001` |
 
-`rolo-claude models --cc --refresh` re-pings each alias (a cheap `-p
+`halo models --cc --refresh` re-pings each alias (a cheap `-p
 --max-turns 1` call) and caches the REAL id it got back to
-`~/.rolo-claude/cc-models.json`, consulted before this static table for
+`~/.halo/cc-models.json`, consulted before this static table for
 `sonnet`/`haiku` specifically (the two whose target moves as Anthropic
 ships new point releases) -- so a stale hardcoded id here is never the
 only source once a refresh has run.
 
 ## Provider enablement
 
-A provider's models reach `/model`/`rolo-claude models`/the `init` default
+A provider's models reach `/model`/`halo models`/the `init` default
 pick/`doctor` once it is **enabled** -- and (H15 part 2 addendum) that
 happens AUTOMATICALLY, straight from real credentials, no `init`/`providers
 enable` step required: OpenRouter/Anthropic API (key)/TypeSafe auto-enable
@@ -71,16 +71,16 @@ Databricks once a host AND token are found (same sources, plus
 `~/.databrickscfg`); Claude Code subscription (`cc:`) ONLY when `claude
 auth status` reports `loggedIn` with `authMethod` exactly `claude.ai` -- a
 `claude` driven by an API token or a custom base URL (a work box's own
-settings-driven login) never auto-enables it. `~/.rolo-claude/config.json`'s
-`"providers"` block stores OVERRIDES only: `rolo-claude providers enable/
+settings-driven login) never auto-enables it. `~/.halo/config.json`'s
+`"providers"` block stores OVERRIDES only: `halo providers enable/
 disable <name>` (or `/providers enable/disable <name>`, or completing a
-tab in `rolo-claude init`) writes an explicit `true`/`false` there that
+tab in `halo init`) writes an explicit `true`/`false` there that
 always wins over auto-detection -- `enabled: false` hides an auto-enabled
 provider, `enabled: true` forces one on with no credentials at all. The
 prefix table (also used by the `/model` picker's group headers, `init`'s
-own tabs, `rolo-claude providers`/`/providers`, and `doctor`):
+own tabs, `halo providers`/`/providers`, and `doctor`):
 
-| Prefix | Label | Provider name (`rolo-claude providers`) |
+| Prefix | Label | Provider name (`halo providers`) |
 |---|---|---|
 | `dbx:` | Databricks | `databricks` |
 | `or:` | OpenRouter | `openrouter` |
@@ -94,9 +94,9 @@ found nothing, never for an explicit override) that message is the SAME
 precise reason (not logged in / claude not installed / logged in via a
 non-claude.ai authMethod, each with its own fix) a turn would have failed
 with anyway, just surfaced earlier; every other provider names the
-`rolo-claude providers enable <name>` fix. A provider that's detected (real
+`halo providers enable <name>` fix. A provider that's detected (real
 credentials/login) but explicitly disabled shows one dim hint line in
-`/model` instead of a selectable row. `rolo-claude providers`/`/providers`
+`/model` instead of a selectable row. `halo providers`/`/providers`
 shows each provider's status as one of `auto (detected from <source>)`,
 `disabled by you`, `enabled by you`, or `not set up`, plus reachable/cached
 model count.
@@ -258,12 +258,12 @@ tag next to the mode glyph.
 
 ## The model table, catalogs, and refresh
 
-Three cached files under `~/.rolo-claude/` back model-profile resolution,
+Three cached files under `~/.halo/` back model-profile resolution,
 consulted in this order before falling back to a hardcoded guess
 (`model.py::resolve_model_profile`):
 
 1. **`models.json`** (OpenRouter) / **`dbx-endpoints.json`** (Databricks) --
-   the live-probed catalog (`rolo-claude models --refresh`; see
+   the live-probed catalog (`halo models --refresh`; see
    `docs/COMMANDS.md`). Supplies real context window, max output tokens,
    vision support, and (OpenRouter) pricing including cache-read/cache-write
    rates.
@@ -284,14 +284,14 @@ consulted in this order before falling back to a hardcoded guess
 `cc:`/`ant:` subscription models are resolved from a **separate**, fourth
 table (`providers/cc_models.py::CC_MODEL_TABLE`) instead -- Claude Code is
 the provider, not OpenRouter/Databricks, so neither of the two live catalogs
-has an entry for these at all. `rolo-claude models --cc --refresh` re-pings
+has an entry for these at all. `halo models --cc --refresh` re-pings
 each of the nine alias names once to confirm the exact ids
 `sonnet`/`haiku` currently resolve to (the two whose target moves as
 Anthropic ships new releases) and caches the result to
-`~/.rolo-claude/cc-models.json`, consulted before the static table.
+`~/.halo/cc-models.json`, consulted before the static table.
 
 `models-dev.json` (models.dev's own public, unauthenticated `api.json`) is
-fetched by `rolo-claude models --refresh` regardless of which providers are
+fetched by `halo models --refresh` regardless of which providers are
 configured -- it backs the Databricks vendored-fallback tier and
 `doctor`'s cache-freshness check.
 
@@ -318,8 +318,8 @@ estimate, never real per-token billing, and never counted toward
 `--max-budget-usd`.
 
 **Listed (not live) context/output/price columns** -- what `/model`,
-`/models`, `rolo-claude models`, and `init`'s own picker show per row
-(`rolo_claude.model_display.format_model_row`, one implementation shared
+`/models`, `halo models`, and `init`'s own picker show per row
+(`halo_harness.model_display.format_model_row`, one implementation shared
 by every one of those surfaces) -- are a DIFFERENT, catalog-level concept:
 a normalized (`200000` -> `200k`, `1048576`/`1050000` -> `1M`) reference
 figure for the model itself, never a live spend number, sourced per
@@ -331,7 +331,7 @@ provider:
     (`providers.cc_models.profile_fields_for_cc_model`).
   - **Databricks**: (a) the [models.dev](https://models.dev) `databricks`
     provider's entry whose id equals the endpoint name (the live
-    `~/.rolo-claude/models-dev.json` cache, refreshed by `models --refresh`/
+    `~/.halo/models-dev.json` cache, refreshed by `models --refresh`/
     `/models refresh`, else the package-vendored fallback) -- `limit.context`/
     `limit.output` for context/output, `cost.input`/`cost.output` (already
     USD per million tokens) for the prices, used AS-IS, never re-multiplied;
@@ -339,7 +339,7 @@ provider:
     prices then stay blank); (c) neither -- every field blank. **A blank
     field is never shown as `?`** -- it just keeps its column's width.
 
-`databricks.dbu_price_usd` (`~/.rolo-claude/config.json`, or a team.json's
+`databricks.dbu_price_usd` (`~/.halo/config.json`, or a team.json's
 `dbu_price_usd`) is a THIRD, separate figure, in a different unit again: it
 converts an endpoint's own **catalog-advertised** DBU rate
 (`usage_policy.output_dbu_per_1k_tokens`, when the workspace publishes one)
@@ -363,9 +363,9 @@ logged in via, say, a Databricks work box's own settings), and
 `Databricks (<family>)` per family, each row showing which gateway path
 type it resolves to (see [DATABRICKS.md](DATABRICKS.md)) alongside the
 ctx/output/price columns above; non-chat endpoints (embeddings/whisper) are
-hidden entirely. `rolo-claude init`'s own per-provider and final
+hidden entirely. `halo init`'s own per-provider and final
 cross-provider model pickers (see [COMMANDS.md](COMMANDS.md)'s `init`
 section) use this exact same list widget and row format. See
 [DATABRICKS.md](DATABRICKS.md) for exactly how a Databricks model
 reference resolves to a URL, and [COMMANDS.md](COMMANDS.md) for
-`rolo-claude models`'s own flags.
+`halo models`'s own flags.

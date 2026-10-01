@@ -1,4 +1,4 @@
-"""rolo_claude.providers.openrouter_account -- H15 part 2 addendum 4
+"""halo_harness.providers.openrouter_account -- H15 part 2 addendum 4
 (corrected against OpenRouter's real OpenAPI spec): the OpenRouter
 account-balance figure shown in the status bar/`/cost`/`/providers`.
 OpenRouter only, the one provider with a balance API this round.
@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-log = logging.getLogger("rolo_claude.providers.openrouter_account")
+log = logging.getLogger("halo_harness.providers.openrouter_account")
 
 # A balance check is a quick, secondary poll -- never worth `open_upstream`'s
 # own 300s post-connect idle timeout (meant for a long SSE chat stream).
@@ -53,7 +53,7 @@ def is_openrouter_official_host(base_url: str) -> bool:
     sends BOTH keys -- the ordinary `OPENROUTER_API_KEY` to `/key`, the
     separate, higher-privilege `OPENROUTER_MANAGEMENT_KEY` to `/credits` --
     to whatever `base_url` resolves to, including the documented
-    `BRIDGE_OPENROUTER_BASE_URL` self-hosted-proxy override (possibly plain
+    `HALO_OPENROUTER_BASE_URL` (legacy `BRIDGE_OPENROUTER_BASE_URL`) self-hosted-proxy override (possibly plain
     http). True ONLY for the real `https://openrouter.ai/...` host -- a
     self-hosted proxy, a typo, or a plain-http override must never receive
     either key.
@@ -63,12 +63,12 @@ def is_openrouter_official_host(base_url: str) -> bool:
     this suite's own mock-server-based tests (`tests/test_h15_openrouter_
     balance.py` and others, all pointed at a loopback `MockGetEndpoints`
     standing in for openrouter.ai) simulate "yes, trust this host" without
-    weakening the real check for an actual `BRIDGE_OPENROUTER_BASE_URL` in
+    weakening the real check for an actual `HALO_OPENROUTER_BASE_URL`/`BRIDGE_OPENROUTER_BASE_URL` in
     the wild.
 
     M2 (1.0.1 final pass): the seam is honoured ONLY when `base_url`'s own
     host is actually loopback (`127.0.0.1`/`localhost`/`::1`) -- a real
-    `BRIDGE_OPENROUTER_BASE_URL` pointed at some OTHER host (e.g. a leaked/
+    `HALO_OPENROUTER_BASE_URL`/`BRIDGE_OPENROUTER_BASE_URL` pointed at some OTHER host (e.g. a leaked/
     misconfigured `BRIDGE_TEST_OPENROUTER_HOST_OVERRIDE=1` in a real
     environment, or just a typo) must still be refused outright, never
     waved through on the env var's say-so alone."""
@@ -100,8 +100,8 @@ def _get(base_url: str, api_key: str, path: str) -> Optional[dict]:
     bearer token -- `fetch_credits`/`fetch_key_info` below each pass the
     RIGHT key in; they must never cross over."""
     import urllib.parse
-    from rolo_claude import __version__
-    from rolo_claude.providers.http import open_upstream
+    from halo_harness import __version__
+    from halo_harness.providers.http import open_upstream
 
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
@@ -109,7 +109,7 @@ def _get(base_url: str, api_key: str, path: str) -> Optional[dict]:
     tls = parsed.scheme == "https"
     full_path = parsed.path.rstrip("/") + path
     headers = {"Authorization": f"Bearer {api_key}", "Accept-Encoding": "identity",
-               "User-Agent": f"rolo-claude/{__version__}"}
+               "User-Agent": f"halo/{__version__}"}
     conn = None
     try:
         conn = open_upstream(host, port, tls)

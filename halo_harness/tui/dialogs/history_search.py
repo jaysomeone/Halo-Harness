@@ -1,4 +1,4 @@
-"""rolo_claude.tui.dialogs.history_search -- Ctrl+R (D-TUI: "HistorySearch
+"""halo_harness.tui.dialogs.history_search -- Ctrl+R (D-TUI: "HistorySearch
 (Ctrl+R)"). `entries` is a plain list of display strings, newest first
 (app.py builds it from `history.load_merged_history(cwd)`). Dismisses with
 the chosen text, or `None` if cancelled.

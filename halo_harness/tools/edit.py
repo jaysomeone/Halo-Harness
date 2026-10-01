@@ -1,4 +1,4 @@
-"""rolo_claude.tools.edit -- the Edit tool (H2 scope A; H5 scope F item 1
+"""halo_harness.tools.edit -- the Edit tool (H2 scope A; H5 scope F item 1
 replaces the old two-stage matcher with OpenCode's NINE-stage replacer
 chain, in its own order, thresholds and error strings, verbatim where given
 -- reports/OpenCode harness deep review.md Appendix C). Parameters and
@@ -14,8 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
-from rolo_claude.tools.write import _detect_bom, _detect_newline
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.write import _detect_bom, _detect_newline
 
 DESCRIPTION = (
     "Performs exact string replacements in files.\n\n"

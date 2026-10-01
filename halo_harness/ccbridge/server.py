@@ -1,4 +1,4 @@
-"""rolo_claude.ccbridge.server -- ToolBridgeServer, the PARENT side of the
+"""halo_harness.ccbridge.server -- ToolBridgeServer, the PARENT side of the
 tool bridge (H11 Part B). Newline-delimited JSON-RPC-shaped messages over
 a local socket:
 
@@ -13,7 +13,7 @@ Tool`). `tools/call` params `{"name": str, "arguments": dict}` -> `{"content":
 [{"type":"text","text":...} | {"type":"image","data":...,"mime_type":...}],
 "is_error": bool}`.
 
-Transport: a Unix domain socket at `~/.rolo-claude/run/<sid>.sock`, mode
+Transport: a Unix domain socket at `~/.halo/run/<sid>.sock`, mode
 0600, on POSIX (no token needed -- filesystem permissions ARE the auth);
 a TCP loopback socket (127.0.0.1, an OS-assigned port) plus a random
 per-session token on Windows (no `AF_UNIX` there before 3.12/certain
@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from rolo_claude.config.paths import bridge_home
+from halo_harness.config.paths import bridge_home
 
 _ACCEPT_POLL_S = 0.5
 _HANDSHAKE_TIMEOUT_S = 5.0    # finding 16: an unauthenticated connection that never sends a line must not pin a thread forever
@@ -43,7 +43,7 @@ _STALE_SOCKET_PROBE_S = 0.2
 
 
 def _sweep_stale_sockets(run_dir: Path) -> None:
-    """H11b finding 15: a SIGKILL'd (or crashed) rolo-claude leaves its
+    """H11b finding 15: a SIGKILL'd (or crashed) halo leaves its
     old `<sid>.sock` file behind forever otherwise -- self-healing rather
     than accumulating: a socket whose listener is gone refuses a connect
     almost instantly (`ConnectionRefusedError`), so this never meaningfully
@@ -132,13 +132,13 @@ class ToolBridgeServer:
         self._sock = sock
 
     def child_env(self) -> dict:
-        """Environment additions the CHILD (`python -m rolo_claude.
+        """Environment additions the CHILD (`python -m halo_harness.
         ccbridge`) needs to reach this server -- folded into the
         `--mcp-config` stdio server's own `env`."""
         if os.name == "nt":
-            return {"ROLO_CCBRIDGE_HOST": self.host or "127.0.0.1", "ROLO_CCBRIDGE_PORT": str(self.port),
-                     "ROLO_CCBRIDGE_TOKEN": self.token or ""}
-        return {"ROLO_CCBRIDGE_SOCKET": str(self.socket_path)}
+            return {"HALO_CCBRIDGE_HOST": self.host or "127.0.0.1", "HALO_CCBRIDGE_PORT": str(self.port),
+                     "HALO_CCBRIDGE_TOKEN": self.token or ""}
+        return {"HALO_CCBRIDGE_SOCKET": str(self.socket_path)}
 
     def _accept_loop(self) -> None:
         while not self._closed.is_set():

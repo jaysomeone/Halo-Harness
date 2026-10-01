@@ -1,4 +1,4 @@
-"""rolo_claude.agent.assemble -- wires config discovery (CLAUDE.md, memory,
+"""halo_harness.agent.assemble -- wires config discovery (CLAUDE.md, memory,
 settings, trust) together into what agent/prompt.py and agent/loop.py need
 (H1 rewrite: findings 5/6 wire real trust into settings/instructions;
 memory/CLAUDE.md/environment move OUT of the system prompt into user-role
@@ -12,12 +12,12 @@ import platform
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.agent.prompt import EnvironmentInfo, build_environment_block, build_system_prompt, collect_git_info
-from rolo_claude.config.claude_md import discover_instructions
-from rolo_claude.config.claude_json import is_trusted, load_claude_json
-from rolo_claude.config.memory import MemoryStore
-from rolo_claude.config.settings import resolve_settings
-from rolo_claude.tools.registry import ToolRegistry
+from halo_harness.agent.prompt import EnvironmentInfo, build_environment_block, build_system_prompt, collect_git_info
+from halo_harness.config.claude_md import discover_instructions
+from halo_harness.config.claude_json import is_trusted, load_claude_json
+from halo_harness.config.memory import MemoryStore
+from halo_harness.config.settings import resolve_settings
+from halo_harness.tools.registry import ToolRegistry
 
 
 class SessionContext:

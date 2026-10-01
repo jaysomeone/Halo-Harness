@@ -1,4 +1,4 @@
-"""rolo_claude.agent.repair -- the repair layer (H2 scope B). Sits between
+"""halo_harness.agent.repair -- the repair layer (H2 scope B). Sits between
 a model's raw reply and real tool dispatch: normalizes an unknown tool name,
 validates/coerces arguments against the tool's own schema, flags a
 duplicate call within one message, and (via `providers.hooks.leak_parser`/
@@ -13,7 +13,7 @@ repair -> permission decide -> ... -> run -> truncate -> result"):
      input) -- unchanged, still the FIRST gate.
   2. repair_assistant_turn (THIS module) -- name resolution, schema
      validate+coerce, duplicate detection, text-embedded-call promotion.
-  3. rolo_claude.permissions.decide.
+  3. halo_harness.permissions.decide.
   4. dispatch / truncate.
 """
 
@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from rolo_claude.providers.hooks import leak_parser
+from halo_harness.providers.hooks import leak_parser
 
 # ---------------------------------------------------------------------------
 # 1. Unknown tool name normalization + difflib rename.

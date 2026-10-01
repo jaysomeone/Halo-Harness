@@ -51,14 +51,14 @@ from tests.helpers.mock_anthropic import (
     _end_sse as _a_end_sse, _finish as _a_finish, _send_json as _a_send_json,
     _start_sse as _a_start_sse, _usage as _a_usage, _write as _a_write,
 )
-from rolo_claude.agent.assemble import SessionContext
-from rolo_claude.agent.derive import derive_request
-from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
-from rolo_claude.agent.loop import Session
-from rolo_claude.model import ModelProfile, parse_model_ref
-from rolo_claude.permissions import Decision, PermissionEngine
-from rolo_claude.providers.request import prepare_anthropic_messages
-from rolo_claude.providers.stream import ProviderCreds
+from halo_harness.agent.assemble import SessionContext
+from halo_harness.agent.derive import derive_request
+from halo_harness.agent.invariants import find_unpaired_tool_use_ids
+from halo_harness.agent.loop import Session
+from halo_harness.model import ModelProfile, parse_model_ref
+from halo_harness.permissions import Decision, PermissionEngine
+from halo_harness.providers.request import prepare_anthropic_messages
+from halo_harness.providers.stream import ProviderCreds
 
 _run_counter = itertools.count(1)
 
@@ -538,7 +538,7 @@ def run_one_anthropic_native(seed: int, mock: MockAnthropic, *, timeout_s: float
     # BRIDGE_TEST_HOME before constructing a real Session -- every sibling
     # engine (run_one_general/_run_one_compaction/_run_one_permission,
     # fuzz_h9.run_one) does. Without it, SessionLog falls through to the
-    # REAL `~/.rolo-claude/sessions` (config/paths.bridge_home's own
+    # REAL `~/.halo/sessions` (config/paths.bridge_home's own
     # documented fallback), which is exactly how `ant:claude-h9fuzz-ant-*`
     # sessions leaked into rolo's real session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])

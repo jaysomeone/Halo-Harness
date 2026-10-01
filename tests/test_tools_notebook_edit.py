@@ -9,8 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.tools.base import ToolContext
-from rolo_claude.tools.notebook_edit import NotebookEditTool
+from halo_harness.tools.base import ToolContext
+from halo_harness.tools.notebook_edit import NotebookEditTool
 
 test, TESTS = new_registry()
 
@@ -38,7 +38,7 @@ def _ctx(cwd: Path) -> ToolContext:
 
 @test
 def test_notebook_edit_is_registered_in_the_default_tool_registry(ctx: Ctx):
-    from rolo_claude.tools.registry import ToolRegistry
+    from halo_harness.tools.registry import ToolRegistry
     reg = ToolRegistry()
     tool = reg.get("NotebookEdit")
     ctx.check("NotebookEdit is a real registered tool", tool is not None and tool.name == "NotebookEdit")

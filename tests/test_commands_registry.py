@@ -1,4 +1,4 @@
-"""tests.test_commands_registry -- rolo_claude/commands/{registry,custom,
+"""tests.test_commands_registry -- halo_harness/commands/{registry,custom,
 skills}.py (U0 scope B): Registry.discover/resolve/complete/help_rows,
 custom command namespace/$ARGUMENTS/$N/`!cmd` gating, skills discovery
 across all three locations incl. synced naming + bare-name alias, and the
@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.commands.registry import Registry, SlashCommand, substitute_arguments
-from rolo_claude.commands.builtins import HeadlessFacade
+from halo_harness.commands.registry import Registry, SlashCommand, substitute_arguments
+from halo_harness.commands.builtins import HeadlessFacade
 
 test, TESTS = new_registry()
 
@@ -23,7 +23,7 @@ class _Env:
     for the duration of one test."""
 
     def __init__(self):
-        self.root = Path(tempfile.mkdtemp(prefix="rolo-claude-cmds-"))
+        self.root = Path(tempfile.mkdtemp(prefix="halo-cmds-"))
         self.cwd = self.root / "proj"
         self.home = self.root / "home"
         (self.cwd).mkdir(parents=True, exist_ok=True)
@@ -213,7 +213,7 @@ def test_h5b_f09_bang_cmd_not_in_frontmatter_still_runs_in_auto_mode(ctx: Ctx):
     bypassPermissions ("a skill whose `` !`git status` `` isn't in its
     frontmatter fails even in bypassPermissions" -- the review's own
     verified repro)."""
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
     env = _Env()
     try:
         env.write("proj/.claude/commands/ungated.md", "---\ndescription: no grant at all\n---\nOutput: !`echo auto-mode-works`\n")
@@ -232,7 +232,7 @@ def test_h5b_f09_bang_cmd_denied_by_an_explicit_user_deny_rule(ctx: Ctx):
     """Auto mode still honours the user's OWN explicit deny rules -- "auto
     mode allows everything except the user's own deny/ask rules" is not
     "auto mode allows literally everything no matter what"."""
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.permissions import PermissionEngine, parse_rule
     env = _Env()
     try:
         env.write("proj/.claude/commands/denied.md", "---\ndescription: should be denied\n---\nOutput: !`echo should-not-run`\n")
@@ -257,7 +257,7 @@ def test_h5b_f09_bang_cmd_uses_the_session_stripped_env_not_raw_os_environ(ctx: 
     """finding 9: no provider secrets (or any other harness-internal
     env var) leak into a `!cmd`'s subprocess -- it gets the SESSION's own
     stripped `tool_env`, never a raw `os.environ` read."""
-    from rolo_claude.permissions import PermissionEngine
+    from halo_harness.permissions import PermissionEngine
     env = _Env()
     try:
         env.write("proj/.claude/commands/envcheck.md",
@@ -339,7 +339,7 @@ def test_synced_skill_not_double_registered_when_cwd_nested_under_home(ctx: Ctx)
     `.claude/skills/synced/` must NOT be re-discovered under a bogus
     `synced:<bucket>:<name>` name; only the ONE proper
     `anthropic-skills:<name>` (+ bare alias) registration may exist."""
-    root = Path(tempfile.mkdtemp(prefix="rolo-claude-nested-"))
+    root = Path(tempfile.mkdtemp(prefix="halo-nested-"))
     home = root / "home"
     cwd = home / "work" / "proj"  # nested UNDER home, unlike _Env's sibling layout
     cwd.mkdir(parents=True, exist_ok=True)

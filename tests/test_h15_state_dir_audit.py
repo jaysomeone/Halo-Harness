@@ -26,7 +26,7 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 
 test, TESTS = new_registry()
 
-_GUARDED_PREFIXES = ("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
+_GUARDED_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
 
 
 class _Env:
@@ -62,7 +62,7 @@ def test_restore_guarded_env_removes_whatever_a_module_left_behind(ctx: Ctx):
         before = run_all_mod._snapshot_guarded_env()
         ctx.check(f"nothing guarded set yet, got {before}", before == {})
         # Simulate a sloppy module: sets state, "forgets" to clean up.
-        os.environ["BRIDGE_STATE_DIR"] = "/tmp/some-module-own-fake-home/.rolo-claude"
+        os.environ["BRIDGE_STATE_DIR"] = "/tmp/some-module-own-fake-home/.halo"
         os.environ["DATABRICKS_TOKEN"] = "leaked-token"
         run_all_mod._restore_guarded_env(before)
         ctx.check("BRIDGE_STATE_DIR is gone", "BRIDGE_STATE_DIR" not in os.environ)
@@ -101,7 +101,16 @@ def test_restore_guarded_env_never_touches_unrelated_vars(ctx: Ctx):
 @test
 def test_main_loop_restores_env_after_each_module_even_on_import_error(ctx: Ctx):
     """End-to-end: run_all.main() itself must leave the guarded env exactly
-    as it found it, even when a module fails to import."""
+    as it found it at the MODULE level, even when a module fails to
+    import. 2.0.0 fixpass finding 2: main() now ALSO sets its own
+    whole-run BRIDGE_TEST_HOME once, by design, before the first module is
+    even imported, when neither test seam was already set -- that ONE var
+    surviving is the intended behavior (it's what keeps every module,
+    including the very first one, off the real ~/.halo), not a leak;
+    anything ELSE surviving still is exactly what this test guards
+    against. 2.0.0 fixpass item G: narrowed back to JUST that one var --
+    main() never sets BRIDGE_STATE_DIR itself (only BRIDGE_TEST_HOME), so
+    allowing it through here too used to mask a real leak."""
     import io
     import sys as sys_mod
     from contextlib import redirect_stdout
@@ -120,8 +129,9 @@ def test_main_loop_restores_env_after_each_module_even_on_import_error(ctx: Ctx)
             with redirect_stdout(buf):
                 rc = run_all_mod.main()
             ctx.check(f"a bad import is a failure exit code, got {rc}", rc == 1)
-            ctx.check("no guarded env var leaked out of the (failed) module run",
-                      run_all_mod._snapshot_guarded_env() == {})
+            leftover = run_all_mod._snapshot_guarded_env()
+            ctx.check(f"nothing but main()'s OWN whole-run BRIDGE_TEST_HOME survives, got {leftover}",
+                      set(leftover) <= {"BRIDGE_TEST_HOME"})
         finally:
             run_all_mod.discover_test_modules = real_discover
             run_all_mod._real_sessions_snapshot = real_snapshot
@@ -135,7 +145,7 @@ def test_main_loop_restores_env_after_each_module_even_on_import_error(ctx: Ctx)
 def test_real_sessions_snapshot_includes_bare_directories(ctx: Ctx):
     import tests.run_all as run_all_mod
     fake_home = Path(tempfile.mkdtemp(prefix="h15-real-sessions-guard-"))
-    sessions_dir = fake_home / ".rolo-claude" / "sessions"
+    sessions_dir = fake_home / ".halo" / "sessions"
     sessions_dir.mkdir(parents=True)
     (sessions_dir / "real-slug-with-a-file").mkdir()
     (sessions_dir / "real-slug-with-a-file" / "abc123.jsonl").write_text("{}\n", encoding="utf-8")
@@ -161,7 +171,7 @@ def test_real_sessions_snapshot_diff_flags_a_new_empty_directory(ctx: Ctx):
     catches a brand-new empty slug directory appearing mid-run."""
     import tests.run_all as run_all_mod
     fake_home = Path(tempfile.mkdtemp(prefix="h15-real-sessions-guard-diff-"))
-    sessions_dir = fake_home / ".rolo-claude" / "sessions"
+    sessions_dir = fake_home / ".halo" / "sessions"
     sessions_dir.mkdir(parents=True)
     (sessions_dir / "already-real").mkdir()
 
@@ -178,6 +188,61 @@ def test_real_sessions_snapshot_diff_flags_a_new_empty_directory(ctx: Ctx):
               len(leaked) == 1 and leaked[0].endswith("some-test-artifact"))
 
 
+@test
+def test_real_sessions_snapshot_also_tracks_the_legacy_rolo_claude_dir(ctx: Ctx):
+    """2.0.0 rename: the default state dir moved from `~/.rolo-claude` to
+    `~/.halo`, but a box that hasn't launched the new build even once yet
+    (so `bridge_home()`'s own one-time migration hasn't fired) still has
+    its real session history under the OLD name -- the guard must keep
+    watching BOTH real directories, never just the new default, so a test
+    that leaks a session into either one is still caught."""
+    import tests.run_all as run_all_mod
+    fake_home = Path(tempfile.mkdtemp(prefix="h15-real-sessions-guard-legacy-"))
+    sessions_dir = fake_home / ".rolo-claude" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "legacy-slug").mkdir()
+    (sessions_dir / "legacy-slug" / "def456.jsonl").write_text("{}\n", encoding="utf-8")
+
+    real_home_fn = Path.home
+    try:
+        Path.home = staticmethod(lambda: fake_home)
+        snapshot = run_all_mod._real_sessions_snapshot()
+    finally:
+        Path.home = real_home_fn
+    ctx.check(f"a session under the LEGACY ~/.rolo-claude/sessions is tracked too, got {snapshot}",
+              any(p.endswith("def456.jsonl") for p in snapshot))
+
+
+@test
+def test_real_sessions_snapshot_unions_both_the_new_and_legacy_dirs(ctx: Ctx):
+    """Both real directories feed the SAME snapshot set at once -- a fake
+    home with session content under both `~/.halo/sessions` and the legacy
+    `~/.rolo-claude/sessions` (e.g. mid-migration, or two different tools
+    on the same box at different versions) is never silently limited to
+    just one of them."""
+    import tests.run_all as run_all_mod
+    fake_home = Path(tempfile.mkdtemp(prefix="h15-real-sessions-guard-both-"))
+    new_dir = fake_home / ".halo" / "sessions"
+    old_dir = fake_home / ".rolo-claude" / "sessions"
+    new_dir.mkdir(parents=True)
+    old_dir.mkdir(parents=True)
+    (new_dir / "new-slug").mkdir()
+    (new_dir / "new-slug" / "new111.jsonl").write_text("{}\n", encoding="utf-8")
+    (old_dir / "old-slug").mkdir()
+    (old_dir / "old-slug" / "old222.jsonl").write_text("{}\n", encoding="utf-8")
+
+    real_home_fn = Path.home
+    try:
+        Path.home = staticmethod(lambda: fake_home)
+        snapshot = run_all_mod._real_sessions_snapshot()
+    finally:
+        Path.home = real_home_fn
+    ctx.check(f"the new dir's session is tracked, got {snapshot}",
+              any(p.endswith("new111.jsonl") for p in snapshot))
+    ctx.check(f"the legacy dir's session is ALSO tracked, got {snapshot}",
+              any(p.endswith("old222.jsonl") for p in snapshot))
+
+
 # ---------------------------------------------------------------------------
 # D2.3: the `!cmd` inline-shell card routes through reevaluate_pending_
 # permission just like a live tool-call ask.
@@ -185,7 +250,7 @@ def test_real_sessions_snapshot_diff_flags_a_new_empty_directory(ctx: Ctx):
 
 @test
 def test_controller_register_and_discard_pending_permission(ctx: Ctx):
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
 
     class _FakeSession:
         def __init__(self):
@@ -207,8 +272,8 @@ def test_inline_slot_is_reachable_through_reevaluate_pending_permission(ctx: Ctx
     Controller.reevaluate_pending_permission call resolves the inline ask
     exactly like a live tool-call one -- re-running the REAL permission
     engine, not a blind allow."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.permissions import PermissionEngine, parse_rule
+    from halo_harness.controller import Controller
+    from halo_harness.permissions import PermissionEngine, parse_rule
 
     class _FakeSession:
         def __init__(self, engine):
@@ -237,7 +302,7 @@ def test_inline_slot_is_reachable_through_reevaluate_pending_permission(ctx: Ctx
 
 @test
 def test_permission_card_on_resolved_externally_fires_for_an_inline_card(ctx: Ctx):
-    from rolo_claude.tui.widgets.cards import PermissionCard
+    from halo_harness.tui.widgets.cards import PermissionCard
     decisions, external_decisions = [], []
     card = PermissionCard(request_id="inline-3", summary="Bash(ls)", reason="", suggested_rule=None,
                            on_decide=decisions.append, on_resolved_externally=external_decisions.append)
@@ -252,7 +317,7 @@ def test_permission_card_on_resolved_externally_fires_for_an_inline_card(ctx: Ct
 def test_permission_card_without_on_resolved_externally_is_unaffected(ctx: Ctx):
     """Regression guard: a live tool-call card (on_resolved_externally
     omitted) must behave EXACTLY as finding 4 left it."""
-    from rolo_claude.tui.widgets.cards import PermissionCard
+    from halo_harness.tui.widgets.cards import PermissionCard
     decisions = []
     card = PermissionCard(request_id="live-1", summary="Write(x)", reason="", suggested_rule=None,
                            on_decide=decisions.append)

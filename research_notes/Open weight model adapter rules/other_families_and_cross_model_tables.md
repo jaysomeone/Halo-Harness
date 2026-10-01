@@ -287,7 +287,7 @@ Agreement is limited to booleans (tools, reasoning, vision, structured output) a
 
 ### Inferences
 - The "0.3 vs omit" style disputes are really disputes about *who owns the default*: Aider assumes the harness owns it (0), OpenCode assumes the provider owns it (omit unless a family is whitelisted), Roo assumes the model row owns it (`defaultTemperature`, else 0 / 1.0 for budget-thinking). A superset schema should carry `temperature: {mode: "omit"|"fixed"|"provider_default", value}` per thinking state rather than a bare number.
-- Where the tables give numbers, OpenRouter `default_parameters` is the most model-card-faithful (it reproduces Gemma 1.0/0.95/64, Qwen 0.6/0.95/20, MiniMax 1.0/0.95, Mistral 0.3, Grok 4.7 0.7/0.95, Nemotron 1.0/0.95, Devstral is absent); it is the best seed for `rolo-claude`'s defaults, with model cards as tie-breakers.
+- Where the tables give numbers, OpenRouter `default_parameters` is the most model-card-faithful (it reproduces Gemma 1.0/0.95/64, Qwen 0.6/0.95/20, MiniMax 1.0/0.95, Mistral 0.3, Grok 4.7 0.7/0.95, Nemotron 1.0/0.95, Devstral is absent); it is the best seed for `halo`'s defaults, with model cards as tie-breakers.
 
 ### Gaps
 - No table records `system_placement` or tool-id format explicitly; both remain code knowledge (Aider `use_system_prompt`, LiteLLM `supports_system_messages`, OpenCode/Roo Mistral branches are the only traces).
@@ -376,7 +376,7 @@ Each field: `type` — `from` (which existing table/code it generalises) — not
 ```json
 {
   "model_table_schema": {
-    "id":                    {"type":"string", "from":"ours", "note":"canonical rolo-claude id"},
+    "id":                    {"type":"string", "from":"ours", "note":"canonical halo id"},
     "aliases":               {"type":"object{openrouter,official,databricks,litellm,models_dev,vllm_hf}", "from":"all tables", "note":"exact provider ids incl. :batch/:exacto variants"},
     "family":                {"type":"string", "from":"models.dev family / OpenCode isKimiFamily-style regexes"},
     "open_weights":          {"type":"bool",   "from":"models.dev open_weights"},

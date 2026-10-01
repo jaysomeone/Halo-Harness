@@ -4,7 +4,7 @@ carry no real hostname, LAN address, username, home path, or token/key
 fragment. Pure text scan -- no subprocess, no network.
 
 Deliberately does NOT ban the bare word "rolo" (the product's own name --
-"rolo-claude"/"rolo_claude"/"~/.rolo-claude" -- appears everywhere on
+"halo"/"halo_harness"/"~/.halo" -- appears everywhere on
 purpose); the real leak vector on this box is a pasted command-output path
 like `C:\\Users\\<name>\\...`, which the home-path check below catches
 directly regardless of what the account happens to be called.
@@ -51,10 +51,10 @@ _DATABRICKS_HOST_RE = re.compile(
 )
 _APPROVED_DATABRICKS_HOST = "your-workspace.cloud.databricks.com"
 
-# ---- token/key fragments: the exact shapes rolo_claude.export_cli already
+# ---- token/key fragments: the exact shapes halo_harness.export_cli already
 # knows how to redact -- reused here rather than re-invented, so this test
 # and the sanitizer it's checking against can never quietly drift apart.
-from rolo_claude.export_cli import _BEARER_RE, _TOKEN_PATTERNS  # noqa: E402
+from halo_harness.export_cli import _BEARER_RE, _TOKEN_PATTERNS  # noqa: E402
 
 
 def _scan(path: Path) -> "list[str]":

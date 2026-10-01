@@ -1,7 +1,7 @@
-"""rolo_claude.linux_fixes -- the two Linux setup fixes `doctor` has always
+"""halo_harness.linux_fixes -- the two Linux setup fixes `doctor` has always
 known about (RECOMMENDATIONS.md P0/H12 brief Part A step 6): a static `rg`
 install into `~/.local/bin`, and the `~/.local/bin`-on-PATH rc-file line for
-a non-interactive shell. Shared by `rolo-claude init` (which actually
+a non-interactive shell. Shared by `halo init` (which actually
 performs them) and `doctor.py` (which only reports whether they're needed,
 with the exact fix command). Every function here is a plain, injectable-seam
 helper -- nothing prompts, nothing touches a shell rc file or downloads
@@ -24,7 +24,14 @@ from typing import Callable, Optional
 # ~/.local/bin on PATH for a non-interactive shell
 # ---------------------------------------------------------------------------
 
-PATH_MARKER = "# rolo-claude: put ~/.local/bin on PATH (added by `rolo-claude init`)"
+PATH_MARKER = "# halo: put ~/.local/bin on PATH (added by `halo init`)"
+# 2.0.0 fixpass finding 6: a line 1.0.1's `rolo-claude init` already
+# appended carries THIS marker -- `ensure_local_bin_on_rc`'s presence check
+# must still recognize it, or a 2.0.0 `halo init` re-run appends a SECOND
+# PATH block right below the first one instead of treating it as already
+# done. Only ever CHECKED, never written -- a fresh append always writes
+# PATH_MARKER (the new one).
+PATH_MARKER_LEGACY = "# rolo-claude: put ~/.local/bin on PATH (added by `rolo-claude init`)"
 PATH_LINE = 'export PATH="$HOME/.local/bin:$HOME/bin:$PATH"'
 
 
@@ -50,7 +57,7 @@ def local_bin_on_noninteractive_path(*, shell: Optional[str] = None, home: Optio
     """True iff `~/.local/bin` is already on PATH for a freshly-started
     NON-interactive `$SHELL` (re-invoked with `-c 'echo $PATH'`, never
     trusting THIS process's own inherited PATH, which may already have been
-    widened by whatever interactive shell launched rolo-claude itself).
+    widened by whatever interactive shell launched halo itself).
     `run` is a test seam (defaults to a real bounded subprocess call);
     any failure to even run the shell degrades to checking this process's
     own os.environ PATH instead of raising."""
@@ -70,7 +77,7 @@ def local_bin_on_noninteractive_path(*, shell: Optional[str] = None, home: Optio
 def ensure_local_bin_on_rc(*, shell: Optional[str] = None, home: Optional[Path] = None) -> "tuple[bool, Path]":
     """Idempotently appends `PATH_MARKER`+`PATH_LINE` to the rc file
     `rc_file_for_shell` picks -- a no-op (returns `(False, path)`) when the
-    marker is already present, so calling this on every `rolo-claude init`
+    marker is already present, so calling this on every `halo init`
     re-run never duplicates the line. Preserves every existing line in the
     file. Returns `(written_this_call, path)`."""
     path = rc_file_for_shell(shell, home=home)
@@ -80,7 +87,7 @@ def ensure_local_bin_on_rc(*, shell: Optional[str] = None, home: Optional[Path] 
             existing = path.read_text(encoding="utf-8")
         except OSError:
             existing = ""
-    if PATH_MARKER in existing:
+    if PATH_MARKER in existing or PATH_MARKER_LEGACY in existing:
         return False, path
     path.parent.mkdir(parents=True, exist_ok=True)
     sep = "" if (not existing or existing.endswith("\n")) else "\n"
@@ -149,16 +156,16 @@ def _default_fetch_json(url: str) -> dict:
     # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
     import json
     import urllib.request
-    from rolo_claude.providers.http import urlopen_tls
-    req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude"})
+    from halo_harness.providers.http import urlopen_tls
+    req = urllib.request.Request(url, headers={"User-Agent": "halo"})
     with urlopen_tls(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _default_fetch_bytes(url: str) -> bytes:
     import urllib.request
-    from rolo_claude.providers.http import urlopen_tls
-    req = urllib.request.Request(url, headers={"User-Agent": "rolo-claude"})
+    from halo_harness.providers.http import urlopen_tls
+    req = urllib.request.Request(url, headers={"User-Agent": "halo"})
     with urlopen_tls(req, timeout=60) as resp:
         return resp.read()
 
@@ -197,7 +204,7 @@ def install_static_ripgrep(dest_dir: Path, *, system: Optional[str] = None, mach
             return False, ripgrep_fallback_message()
         data = fetch_bytes(asset["browser_download_url"])
         dest_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="rolo-claude-rg-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="halo-rg-") as tmp:
             archive_path = Path(tmp) / asset["name"]
             archive_path.write_bytes(data)
             with tarfile.open(archive_path, "r:gz") as tf:

@@ -14,12 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.mock_databricks import MockDatabricks
-from rolo_claude.providers.databricks import write_dbx_endpoints_json
-from rolo_claude.providers.hooks import max_tokens_budget, record_databricks_output_tokens, reset_databricks_otpm_history
-from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
-from rolo_claude.providers.request import build_request_body, convert_tools
-from rolo_claude.providers.routing import Route
-from rolo_claude.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+from halo_harness.providers.databricks import write_dbx_endpoints_json
+from halo_harness.providers.hooks import max_tokens_budget, record_databricks_output_tokens, reset_databricks_otpm_history
+from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+from halo_harness.providers.request import build_request_body, convert_tools
+from halo_harness.providers.routing import Route
+from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
 
 test, TESTS = new_registry()
 
@@ -252,7 +252,7 @@ def test_v2a_stream_true_explicit_on_every_mlflow_request(ctx: Ctx):
 
 @test
 def test_v2a_mlflow_32_tool_cap_and_schema_simplifier(ctx: Ctx):
-    from rolo_claude.providers.request import ToolCatalogTooLarge
+    from halo_harness.providers.request import ToolCatalogTooLarge
     reset_model_table_cache()
     route = Route(provider="databricks", upstream_model="databricks-glm-5-3", dialect="openai-chat")
     profile = resolve_profile(route)
@@ -311,7 +311,7 @@ def test_v2a_reasoning_replay_bug_wording_detected_per_type(ctx: Ctx):
     """DeepSeek's exact 400 wording when this harness fails to replay
     reasoning_content -- classify_error_category must name it PROVIDER_
     FAILURE (never silently retried as an ordinary transient error)."""
-    from rolo_claude.providers.errors import classify_error_category, is_reasoning_replay_bug, PROVIDER_FAILURE
+    from halo_harness.providers.errors import classify_error_category, is_reasoning_replay_bug, PROVIDER_FAILURE
     message = "The reasoning_content in the thinking mode must be passed back to the API."
     ctx.check("detected as a reasoning-replay bug", is_reasoning_replay_bug(message) is True)
     ctx.check(f"classified PROVIDER_FAILURE, got {classify_error_category(400, message)}",

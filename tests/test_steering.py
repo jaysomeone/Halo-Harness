@@ -23,7 +23,7 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, _finish, send_json_response
 from tests.helpers.provider_env_defaults import ensure_default_provider_credentials
-from rolo_claude import events as harness_events
+from halo_harness import events as harness_events
 
 # H15 part 2 addendum 3.1: a believable default credential (never a real
 # one) keeps every `or:mock/...` ref below resolving exactly as it did
@@ -38,10 +38,10 @@ _HOOK_SCRIPT_ARGV = [sys.executable, "-m", "tests.helpers.hook_scripts"]
 
 
 def _new_session(fh, mock, *, model="or:mock/model", permission_engine=None, interactive=False, hook_runner=None):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.providers.stream import ProviderCreds
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.providers.stream import ProviderCreds
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
     session_ctx = SessionContext(cwd=fh["proj"], model_label=model)
@@ -62,8 +62,8 @@ def _hook_runner(fh, *, hooks_by_event):
     uses -- the hook scripts are spawned as `python -m
     tests.helpers.hook_scripts`, which only resolves with PYTHONPATH
     pointing at the repo root."""
-    from rolo_claude.hooks import HookRunner
-    env = dict(os.environ)
+    from halo_harness.hooks import HookRunner
+    env = _hermetic_child_env()
     env["PYTHONPATH"] = str(REPO_DIR)
     return HookRunner(hooks_by_event, cwd=fh["proj"], session_id="test-session",
                        transcript_path=str(fh["proj"] / "transcript.jsonl"), effective_env=env)
@@ -256,7 +256,7 @@ def test_h5c_f23_steer_is_gated_by_userpromptsubmit_and_honours_blocked(ctx: Ctx
     while still telling the user why; `steer_queued`/`steer_applied` still
     both fire so the TUI's dedup pairing (finding 19) never hangs waiting
     for an `steer_applied` that would otherwise never come."""
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -308,7 +308,7 @@ def test_h5c_f23_two_steers_each_get_their_own_userpromptsubmit_context(ctx: Ctx
     (not once for the whole batch, not skipped after the first) -- two
     queued steers with a context-adding hook must produce TWO hook_context
     snapshots, correctly interleaved before their own steer's user text."""
-    from rolo_claude.hooks import HookDef
+    from halo_harness.hooks import HookDef
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -375,7 +375,7 @@ def test_steer_during_a_pending_card_does_not_answer_the_card(ctx: Ctx):
     must not be mistaken for the card's own answer -- the tool stays
     pending until a REAL `resolve_permission` call, and the steer is
     applied only afterward (once the loop is back at a safe point)."""
-    from rolo_claude.permissions import Decision, PermissionEngine
+    from halo_harness.permissions import Decision, PermissionEngine
 
     fh = build_fake_home()
     target = fh["proj"] / "steer_card_target.txt"
@@ -438,7 +438,7 @@ def test_h5b_f03_steer_during_first_of_two_writes_pairs_every_tool_use(ctx: Ctx)
     an unpaired tool_use followed by a later turn (a permanent 400 on
     `ant:`/Databricks Claude routes, and undetectable by the OLD
     last-node-only `find_unpaired_tool_use_ids`)."""
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
 
     fh = build_fake_home()
     target_a = fh["proj"] / "steer_pair_a.txt"
@@ -509,7 +509,7 @@ def test_h5c_f06_steer_queued_before_dispatch_starts_stops_every_call(ctx: Ctx):
     fully formed with its tool_use blocks, but `_dispatch_tools` has not
     been entered yet), steers there, and proves NEITHER of two pending
     Write calls ever runs."""
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
 
     fh = build_fake_home()
     target_a = fh["proj"] / "f06_pre_dispatch_a.txt"
@@ -571,7 +571,7 @@ def test_h5c_f06_batched_read_only_calls_ahead_of_a_queued_steer_do_not_run(ctx:
     all when a steer was already queued before `_dispatch_tools` even
     looked at the first one; `dispatch()` is never called for either, so
     "running tools finish" never applied to them in the first place."""
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
 
     fh = build_fake_home()
     file_a = fh["proj"] / "f06_batch_a.txt"
@@ -827,7 +827,7 @@ def test_h5c_f14_mention_queued_while_busy_never_races_and_orders_after_tool_res
     before tool_result, which Anthropic 400s on). Simulates the UI thread
     calling `queue_log_write` + `steer()` at the exact moment a Read call
     is in flight (mid-turn, `session.busy` True)."""
-    from rolo_claude.agent.derive import derive_request
+    from halo_harness.agent.derive import derive_request
 
     fh = build_fake_home()
     target = fh["proj"] / "b.txt"
@@ -901,7 +901,7 @@ def test_h5c_f14_inline_shell_queued_while_busy_logs_a_paired_tool_use_and_resul
     without the other (an inline `!cmd` landing between an assistant
     `tool_use` and its own `tool_result` used to break pairing on every
     route)."""
-    from rolo_claude.agent.invariants import find_unpaired_tool_use_ids
+    from halo_harness.agent.invariants import find_unpaired_tool_use_ids
 
     fh = build_fake_home()
     mock = MockUpstream().start()
@@ -937,6 +937,21 @@ def test_h5c_f14_inline_shell_queued_while_busy_logs_a_paired_tool_use_and_resul
                   "from inline" in (result_nodes[0].get("content") or ""))
     finally:
         mock.stop()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

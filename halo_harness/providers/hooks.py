@@ -1,4 +1,4 @@
-"""rolo_claude.providers.hooks -- H2 must-do 3: the eight named code
+"""halo_harness.providers.hooks -- H2 must-do 3: the eight named code
 branches the research report (`reports/Open weight model adapter rules.md`)
 says stay in code while their PARAMETERS live in `model_table.json`:
 `reasoning_echo`, `tool_id_normalize`, `system_normalize`, `leak_parser` +
@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Optional
 
-from rolo_claude.providers.errors import classify_error_category
+from halo_harness.providers.errors import classify_error_category
 
 log = logging.getLogger("bridge")
 
@@ -361,7 +361,7 @@ def think_tag_strip(text: str) -> str:
     end-of-sentence sentinel tokens from DISPLAYED text (never from what's
     logged). The canonical implementation lives here now; `oai_stream.
     strip_display_artifacts` re-exports it so existing callers/imports are
-    unaffected. Called from `rolo_claude/output.py` (finding 15)."""
+    unaffected. Called from `halo_harness/output.py` (finding 15)."""
     if not text:
         return text
     think_re = re.compile(r"<think>.*?</think>\s*", re.DOTALL)

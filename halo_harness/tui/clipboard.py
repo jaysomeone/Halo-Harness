@@ -1,4 +1,4 @@
-"""rolo_claude.tui.clipboard -- clipboard fallback for Linux terminals (U5
+"""halo_harness.tui.clipboard -- clipboard fallback for Linux terminals (U5
 scope E). Textual's own `App.copy_to_clipboard` already emits an OSC 52
 escape sequence (works over SSH, tmux-passthrough permitting), which is
 `tui/app.py`'s primary mechanism (review finding 16). Some terminals/multi-

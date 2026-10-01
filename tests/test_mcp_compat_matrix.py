@@ -1,6 +1,6 @@
 """tests.test_mcp_compat_matrix -- H9 Part B: the MCP compatibility matrix
 (rolo's parity promise: "every server configured for Claude Code must work
-unchanged in rolo-claude"). One section per numbered item in the H9 brief's
+unchanged in halo"). One section per numbered item in the H9 brief's
 Part B; each proves that item with a REAL connection through tests/helpers/
 fake_mcp_server.py wherever practical, the real `claude` binary for items
 specifically about interop with it (6/7/8, skipped if `claude` isn't on
@@ -60,7 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
-from rolo_claude.mcp import manager as M
+from halo_harness.mcp import manager as M
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -128,11 +128,11 @@ def _run(args, *, env, cwd=None, timeout=30):
 
 
 def _run_rolo(prompt, mock, *, home, cwd, extra_args=None, extra_env=None, model="or:mock/model", timeout=30):
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(home), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
                 "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
     env.update(extra_env or {})
-    args = [sys.executable, "-m", "rolo_claude", "-p", prompt, "--model", model, "--cwd", str(cwd)] + (extra_args or [])
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model, "--cwd", str(cwd)] + (extra_args or [])
     return _run(args, env=env, timeout=timeout)
 
 
@@ -165,16 +165,16 @@ def test_item1_user_scope_server_extends_fake_home_and_connects(ctx: Ctx):
     # H15 Part D2.1 (found during the state-dir scoping audit, same bug
     # class as the REAL SESSIONS GUARD, different directory): `build_manager`
     # with `start=True` lazily seeds/reads `mcp.tools_cache`
-    # (rolo_claude/mcp/tools_cache.py), which ALSO resolves via
+    # (halo_harness/mcp/tools_cache.py), which ALSO resolves via
     # `bridge_home()` -- unscoped, this reads/writes the REAL
-    # ~/.rolo-claude/mcp/tools-cache/fake.json, so a stale real entry from
+    # ~/.halo/mcp/tools-cache/fake.json, so a stale real entry from
     # an earlier unscoped run makes `manager.status()` report "cached"
     # instead of a genuine live "connected" here. Scoped for the in-process
     # call; the subprocess call just below already scoped its own `env`.
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     try:
-        from rolo_claude import mcp_setup
+        from halo_harness import mcp_setup
         manager, notices = mcp_setup.build_manager(cwd=fh["proj"], claude_json=data, settings=None,
                                                     print_mode=False, start=True)
         try:
@@ -200,11 +200,11 @@ def test_item1_user_scope_server_extends_fake_home_and_connects(ctx: Ctx):
     # exercises a fresh live connect (what this check has always meant
     # to assert), rather than legitimately reporting the lazy "Cached"
     # state a warm cache would now correctly produce.
-    shutil.rmtree(fh["home"] / ".rolo-claude" / "mcp" / "tools-cache", ignore_errors=True)
+    shutil.rmtree(fh["home"] / ".halo" / "mcp" / "tools-cache", ignore_errors=True)
 
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "PYTHONPATH": str(REPO_DIR)})
-    result = _run([sys.executable, "-m", "rolo_claude", "mcp", "list", "--cwd", str(fh["proj"])], env=env)
+    result = _run([sys.executable, "-m", "halo_harness", "mcp", "list", "--cwd", str(fh["proj"])], env=env)
     ctx.check(f"the real CLI's `mcp list` also shows it Connected, got {result.stdout!r}",
               "fake: " in result.stdout and "Connected" in result.stdout)
 
@@ -218,7 +218,7 @@ def test_item1_user_scope_server_extends_fake_home_and_connects(ctx: Ctx):
 
 @test
 def test_item2_dot_mcp_json_pending_before_and_connects_after_approval(ctx: Ctx):
-    from rolo_claude import mcp_setup
+    from halo_harness import mcp_setup
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td) / "proj"
         proj.mkdir()
@@ -227,16 +227,16 @@ def test_item2_dot_mcp_json_pending_before_and_connects_after_approval(ctx: Ctx)
         entry = _fake_stdio_entry()
         (proj / ".mcp.json").write_text(json.dumps({"mcpServers": {"fake": entry}}), encoding="utf-8")
 
-        env = dict(os.environ)
+        env = _hermetic_child_env()
         env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR)})
-        before = _run([sys.executable, "-m", "rolo_claude", "mcp", "list", "--cwd", str(proj)], env=env)
+        before = _run([sys.executable, "-m", "halo_harness", "mcp", "list", "--cwd", str(proj)], env=env)
         ctx.check(f"shows Pending approval BEFORE approval, got {before.stdout!r}",
                   "Pending approval" in (before.stdout or ""))
 
         # in-process calls below touch mcp_setup.{load,record}_mcp_approval,
         # which resolve bridge_home() from os.environ -- isolated the same
         # way the subprocess calls above were, via a save/restore of THIS
-        # process's own env (never rolo's real ~/.rolo-claude/mcp-
+        # process's own env (never rolo's real ~/.halo/mcp-
         # approvals.json). Discovered the hard way: an earlier draft of
         # this test skipped this and wrote a real approval entry into
         # rolo's own state file.
@@ -250,7 +250,7 @@ def test_item2_dot_mcp_json_pending_before_and_connects_after_approval(ctx: Ctx)
 
             mcp_setup.record_mcp_approval("fake", entry)
 
-            after = _run([sys.executable, "-m", "rolo_claude", "mcp", "list", "--cwd", str(proj)], env=env)
+            after = _run([sys.executable, "-m", "halo_harness", "mcp", "list", "--cwd", str(proj)], env=env)
             ctx.check(f"shows Connected AFTER approval, got {after.stdout!r}",
                       "fake: " in (after.stdout or "") and "Connected" in (after.stdout or ""))
 
@@ -313,7 +313,7 @@ def test_item3_build_fake_home_both_key_forms_resolve_and_merge(ctx: Ctx):
 @test
 def test_item3_both_key_forms_live_connect_through_current_project_lookup(ctx: Ctx):
     """Same both-key-forms pattern as build_fake_home(), but with a REAL
-    connectable command under one of the two keys -- proves rolo-claude
+    connectable command under one of the two keys -- proves halo
     doesn't just PARSE both forms but actually USES either one when
     looking up the CURRENT project's servers, functionally."""
     with tempfile.TemporaryDirectory() as td:
@@ -406,7 +406,7 @@ def _write_v2_plugin_manifest(claude_dir: Path, key: str, install_path: Path) ->
 
 @test
 def test_item5_real_marketplace_plugin_discovered_via_v2_manifest(ctx: Ctx):
-    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    from halo_harness.config.plugins import discover_plugin_mcp_servers, plugin_server_name
     real_root = (Path.home() / ".claude" / "plugins" / "marketplaces" / "claude-plugins-official"
                  / "external_plugins" / "playwright")
     if not (real_root / ".mcp.json").exists():
@@ -434,7 +434,7 @@ def test_item5_real_marketplace_plugin_discovered_via_v2_manifest(ctx: Ctx):
 
 @test
 def test_item5_v2_manifest_plugin_server_live_connect_and_naming(ctx: Ctx):
-    from rolo_claude.config.plugins import discover_plugin_mcp_servers, plugin_server_name
+    from halo_harness.config.plugins import discover_plugin_mcp_servers, plugin_server_name
     with tempfile.TemporaryDirectory() as td:
         claude_dir = Path(td) / ".claude"
         plugin_root = Path(td) / "myplugin-1.2.3"
@@ -487,7 +487,7 @@ def _require_real_claude() -> str:
 
 
 def _cross_binary_env(config_dir: Path) -> dict:
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     env["BRIDGE_STATE_DIR"] = str(config_dir / "rolo-state")
     env.pop("BRIDGE_TEST_HOME", None)
@@ -500,11 +500,11 @@ def _run_claude(args, *, config_dir, cwd):
 
 
 def _run_rolo_mcp(args, *, config_dir, cwd):
-    return _run([sys.executable, "-m", "rolo_claude", "mcp"] + args, env=_cross_binary_env(config_dir), cwd=cwd)
+    return _run([sys.executable, "-m", "halo_harness", "mcp"] + args, env=_cross_binary_env(config_dir), cwd=cwd)
 
 
 @test
-def test_item6_server_added_by_real_claude_mcp_add_is_picked_up_by_rolo_claude(ctx: Ctx):
+def test_item6_server_added_by_real_claude_mcp_add_is_picked_up_by_halo_harness(ctx: Ctx):
     _require_real_claude()
     with tempfile.TemporaryDirectory() as td:
         config_dir = Path(td) / "cfg"
@@ -523,13 +523,13 @@ def test_item6_server_added_by_real_claude_mcp_add_is_picked_up_by_rolo_claude(c
         ctx.check(f"real `claude mcp add` succeeds, got {add.returncode} stderr={add.stderr!r}",
                   add.returncode == 0)
         listing = _run_rolo_mcp(["list", "--cwd", str(empty_cwd)], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"the NEXT rolo-claude session picks it up with NO rolo-claude-side config change, "
+        ctx.check(f"the NEXT halo session picks it up with NO halo-side config change, "
                   f"got {listing.stdout!r}", "rc-test: " in (listing.stdout or "")
                   and "Connected" in (listing.stdout or ""))
 
 
 @test
-def test_item7_server_added_by_rolo_claude_mcp_add_is_listed_by_real_claude(ctx: Ctx):
+def test_item7_server_added_by_halo_harness_mcp_add_is_listed_by_real_claude(ctx: Ctx):
     _require_real_claude()
     with tempfile.TemporaryDirectory() as td:
         config_dir = Path(td) / "cfg"
@@ -540,7 +540,7 @@ def test_item7_server_added_by_rolo_claude_mcp_add_is_listed_by_real_claude(ctx:
         add = _run_rolo_mcp(["add", "--scope", "user", "rc-test2", "--", sys.executable,
                               str(REPO_DIR / "tests" / "helpers" / "fake_mcp_server.py")],
                              config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"rolo-claude mcp add succeeds, got {add.returncode} stderr={add.stderr!r}",
+        ctx.check(f"halo mcp add succeeds, got {add.returncode} stderr={add.stderr!r}",
                   add.returncode == 0)
         claude_json = json.loads((config_dir / ".claude.json").read_text(encoding="utf-8"))
         entry = claude_json["mcpServers"]["rc-test2"]
@@ -567,33 +567,33 @@ def test_item8_mcp_remove_both_directions_agree_between_both_clis(ctx: Ctx):
         empty_cwd.mkdir()
         fake_path = str(REPO_DIR / "tests" / "helpers" / "fake_mcp_server.py")
 
-        # direction A: claude adds -> rolo-claude sees it -> rolo-claude
+        # direction A: claude adds -> halo sees it -> halo
         # removes -> BOTH clis agree it's gone. sys.executable, not a bare
         # "python" -- see item 6's own comment.
         _run_claude(["mcp", "add", "--scope", "user", "a-server", "--", sys.executable, fake_path],
                     config_dir=config_dir, cwd=empty_cwd)
         seen = _run_rolo_mcp(["list", "--cwd", str(empty_cwd)], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"rolo-claude sees claude's server, got {seen.stdout!r}", "a-server" in (seen.stdout or ""))
+        ctx.check(f"halo sees claude's server, got {seen.stdout!r}", "a-server" in (seen.stdout or ""))
         removed = _run_rolo_mcp(["remove", "a-server"], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"rolo-claude mcp remove succeeds, got {removed.returncode} {removed.stdout!r}",
+        ctx.check(f"halo mcp remove succeeds, got {removed.returncode} {removed.stdout!r}",
                   removed.returncode == 0)
         gone_rolo = _run_rolo_mcp(["list", "--cwd", str(empty_cwd)], config_dir=config_dir, cwd=empty_cwd)
         gone_claude = _run_claude(["mcp", "list"], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"gone from rolo-claude mcp list, got {gone_rolo.stdout!r}", "a-server" not in (gone_rolo.stdout or ""))
+        ctx.check(f"gone from halo mcp list, got {gone_rolo.stdout!r}", "a-server" not in (gone_rolo.stdout or ""))
         ctx.check(f"gone from real claude mcp list too, got {gone_claude.stdout!r}",
                   "a-server" not in (gone_claude.stdout or ""))
 
-        # direction B: rolo-claude adds -> claude sees it -> claude removes
+        # direction B: halo adds -> claude sees it -> claude removes
         # -> BOTH clis agree it's gone.
         _run_rolo_mcp(["add", "--scope", "user", "b-server", "--", sys.executable, fake_path],
                        config_dir=config_dir, cwd=empty_cwd)
         seen2 = _run_claude(["mcp", "list"], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"claude sees rolo-claude's server, got {seen2.stdout!r}", "b-server" in (seen2.stdout or ""))
+        ctx.check(f"claude sees halo's server, got {seen2.stdout!r}", "b-server" in (seen2.stdout or ""))
         removed2 = _run_claude(["mcp", "remove", "b-server"], config_dir=config_dir, cwd=empty_cwd)
         ctx.check(f"real claude mcp remove succeeds, got {removed2.returncode} {removed2.stdout!r}",
                   removed2.returncode == 0)
         gone_rolo2 = _run_rolo_mcp(["list", "--cwd", str(empty_cwd)], config_dir=config_dir, cwd=empty_cwd)
-        ctx.check(f"gone from rolo-claude mcp list too, got {gone_rolo2.stdout!r}",
+        ctx.check(f"gone from halo mcp list too, got {gone_rolo2.stdout!r}",
                   "b-server" not in (gone_rolo2.stdout or ""))
 
 
@@ -633,7 +633,7 @@ def _anthropic_tool_defs(mgr, *, family=None, vision=False) -> list:
     """Anthropic-shaped tool defs for every tool on `mgr`, built exactly
     the way agent/catalog.py's SessionCatalog does at McpTool construction
     time (the per-family sanitizer applies HERE, not later)."""
-    from rolo_claude.tools.mcp_tool import McpTool
+    from halo_harness.tools.mcp_tool import McpTool
     defs = []
     for server, wire_name, sdk_tool in mgr.all_tools():
         tool = McpTool(server, sdk_tool, mgr, vision=vision, family=family)
@@ -646,9 +646,9 @@ def test_item9_databricks_simplifier_survives_unusual_schemas_structurally(ctx: 
     """The REAL code path: providers.request.convert_tools() with a REAL
     Databricks ProviderProfile (providers.profiles.resolve_profile) -- no
     crash, valid JSON, every name/description intact."""
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.request import convert_tools
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.request import convert_tools
+    from halo_harness.providers.routing import Route
     mgr = _weird_mgr()
     try:
         defs = _anthropic_tool_defs(mgr, family="deepseek")  # family is irrelevant to the databricks branch
@@ -676,7 +676,7 @@ def test_item9_databricks_simplifier_survives_unusual_schemas_structurally(ctx: 
 
 @test
 def test_item9_bug_databricks_simplifier_drops_typing_for_a_wide_anyof(ctx: Ctx):
-    """BUG (b), file:line rolo_claude/providers/request.py:107-132
+    """BUG (b), file:line halo_harness/providers/request.py:107-132
     (simplify_schema_for_databricks's inner strip()): a 3-way anyOf (or any
     anyOf that isn't exactly [T, {"type":"null"}]) is DELETED ENTIRELY by
     the generic keyword-strip -- unlike $ref, which falls back to a
@@ -685,7 +685,7 @@ def test_item9_bug_databricks_simplifier_drops_typing_for_a_wide_anyof(ctx: Ctx)
     before/after captured below (this is a data-quality/tool-reliability
     bug, not a hard 400 -- Databricks likely still accepts the request,
     just with the model given no hint at all about `value`'s real type)."""
-    from rolo_claude.providers.request import simplify_schema_for_databricks
+    from halo_harness.providers.request import simplify_schema_for_databricks
     schema = {"type": "object", "properties": {
         "value": {"anyOf": [{"type": "integer"}, {"type": "string"}, {"type": "null"}]},
     }}
@@ -744,7 +744,7 @@ def test_item9_openrouter_survives_unusual_schemas_structurally_via_mock_session
 
 @test
 def test_item9_bug_openrouter_schema_survives_unresolved_no_general_sanitizer(ctx: Ctx):
-    """BUG (a), file:line rolo_claude/providers/routing.py:142-146
+    """BUG (a), file:line halo_harness/providers/routing.py:142-146
     (sanitize_tool_schema, used by anthropic_tool_to_openai -> providers/
     request.py:147-165 convert_tools -- the path EVERY OpenRouter request
     goes through, for EVERY family except kimi/gemini's separate, EARLIER,
@@ -764,9 +764,9 @@ def test_item9_bug_openrouter_schema_survives_unresolved_no_general_sanitizer(ct
     validator actually REJECTS this (vs. silently accepting/ignoring the
     unresolved parts) is unconfirmed; only the structural fact that
     nothing resolves it is proven here."""
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.request import convert_tools
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.request import convert_tools
+    from halo_harness.providers.routing import Route
     mgr = _weird_mgr()
     try:
         defs = _anthropic_tool_defs(mgr, family="deepseek")  # the harness's own DEFAULT family
@@ -839,10 +839,10 @@ def test_item9_scales_to_300_tools_through_both_conversion_paths(ctx: Ctx):
     goes on the wire per turn BEFORE convert_tools() ever sees it; handing
     convert_tools() all 300 directly (skipping that layer) is exactly what
     trips its own ToolCatalogTooLarge guard, discovered writing this test."""
-    from rolo_claude.agent.catalog import select_preload
-    from rolo_claude.providers.profiles import resolve_profile
-    from rolo_claude.providers.request import convert_tools
-    from rolo_claude.providers.routing import Route
+    from halo_harness.agent.catalog import select_preload
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.request import convert_tools
+    from halo_harness.providers.routing import Route
     cfg = _fake_cfg("fake", tool_count=300, extra_tools=_WEIRD_TOOLS)
     mgr = M.McpManager({"fake": cfg}, tool_env=dict(os.environ))
     try:
@@ -855,7 +855,7 @@ def test_item9_scales_to_300_tools_through_both_conversion_paths(ctx: Ctx):
             profile = resolve_profile(Route(provider=provider, upstream_model=model, dialect="openai-chat"))
             cap = profile.tools_max or 300
             preload, _deferred = select_preload(triples, preload_names=weird_wire_names, cap_budget=cap)
-            from rolo_claude.tools.mcp_tool import McpTool
+            from halo_harness.tools.mcp_tool import McpTool
             defs = [{"name": (t := McpTool(s, sdk, mgr, family="deepseek")).name,
                      "description": t.description, "input_schema": t.input_schema}
                     for s, wn, sdk in preload]
@@ -878,10 +878,10 @@ def test_item9_scales_to_300_tools_through_both_conversion_paths(ctx: Ctx):
 
 @test
 def test_item10_toolsearch_finds_new_tool_by_name_and_by_keyword(ctx: Ctx):
-    from rolo_claude.agent.catalog import SessionCatalog, select_preload
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.registry import ToolRegistry
-    from rolo_claude.tools.tool_search import ToolSearchTool
+    from halo_harness.agent.catalog import SessionCatalog, select_preload
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.registry import ToolRegistry
+    from halo_harness.tools.tool_search import ToolSearchTool
     cfg = _fake_cfg("fake")
     manager = M.McpManager({"fake": cfg}, tool_env=dict(os.environ))
     try:
@@ -890,7 +890,7 @@ def test_item10_toolsearch_finds_new_tool_by_name_and_by_keyword(ctx: Ctx):
         core = ToolRegistry()
         preload, deferred = select_preload(triples, cap_budget=max(0, 30 - len(core.names())))
         for server, wire_name, sdk_tool in preload:
-            from rolo_claude.tools.mcp_tool import McpTool
+            from halo_harness.tools.mcp_tool import McpTool
             core.add_tool(McpTool(server, sdk_tool, manager, vision=False))
         cat = SessionCatalog(registry=core, deferred=deferred, manager=manager, cap=30, names=core.names())
         tctx = ToolContext(cwd=REPO_DIR, registry=cat.registry, catalog=cat)
@@ -917,7 +917,7 @@ def test_item10_toolsearch_finds_new_tool_by_name_and_by_keyword(ctx: Ctx):
 # Item 11 -- /mcp reconnect after editing MCP config mid-session (add or
 # change a server on disk while the session is open, then trigger the
 # reconnect and confirm the new/changed server is picked up). BUG (e),
-# FIXED: `rolo_claude/controller.py`'s `reconnect_mcp` and `rolo_claude/
+# FIXED: `halo_harness/controller.py`'s `reconnect_mcp` and `halo_harness/
 # mcp/manager.py`'s `McpManager.reconnect` neither re-resolved ~/.claude.
 # json/.mcp.json from disk -- reconnect only ever restarted an ALREADY-
 # KNOWN handle using its ORIGINALLY-parsed config, and a brand-new name had
@@ -941,7 +941,7 @@ def test_item11_reconnect_after_changing_an_existing_servers_config_uses_stale_c
     SAME handle with its ORIGINALLY-parsed McpServerConfig object -- it has
     no reference to the config FILE at all, so a real, on-disk edit is
     silently ignored no matter how many times reconnect is triggered."""
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     with tempfile.TemporaryDirectory() as td:
         home = Path(td) / "home"
         (home / ".claude").mkdir(parents=True)
@@ -951,7 +951,7 @@ def test_item11_reconnect_after_changing_an_existing_servers_config_uses_stale_c
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         os.environ["BRIDGE_TEST_HOME"] = str(home)
         try:
-            from rolo_claude.config.claude_json import load_claude_json
+            from halo_harness.config.claude_json import load_claude_json
             claude_json = load_claude_json()
             resolved, _ = M.resolve_server_configs(cwd=REPO_DIR, claude_json=claude_json)
             mgr = M.McpManager(resolved, tool_env=dict(os.environ), cwd=REPO_DIR)
@@ -991,7 +991,7 @@ def test_item11_reconnect_picks_up_a_brand_new_server_name(ctx: Ctx):
     handle for it before the plain per-name reconnect runs, which used to
     unconditionally report `None`/"unchanged" for a name it had never
     heard of."""
-    from rolo_claude.controller import Controller
+    from halo_harness.controller import Controller
     with tempfile.TemporaryDirectory() as td:
         home = Path(td) / "home"
         (home / ".claude").mkdir(parents=True)
@@ -1032,7 +1032,7 @@ def test_item11_reconnect_picks_up_a_brand_new_server_name(ctx: Ctx):
 # server before this file: http_sse.py's own docstring says "none of
 # rolo's real 15 configured servers use http/sse", and the only existing
 # coverage in test_mcp_manager.py monkeypatches connect_http/connect_sse
-# directly). BUG (c), FIXED: file:line rolo_claude/mcp/http_sse.py:96-97
+# directly). BUG (c), FIXED: file:line halo_harness/mcp/http_sse.py:96-97
 # (connect_http) unpacked 3 values from streamable_http_client(...)'s
 # yielded object; the installed SDK (mcp 2.2.0 -- the SAME version this
 # module's own comment claimed to target) actually yields a 2-tuple
@@ -1056,7 +1056,7 @@ def _kill_and_reap(proc) -> None:
 
 def _spawn_fake_transport_server(transport: str, *, extra_tools=None):
     port = _free_port()
-    env = dict(os.environ)
+    env = _hermetic_child_env()
     env["FAKE_MCP_TRANSPORT"] = transport
     env["FAKE_MCP_PORT"] = str(port)
     if extra_tools:
@@ -1178,7 +1178,7 @@ def test_item14_server_name_with_a_dot_connects_and_names_correctly(ctx: Ctx):
         result = mgr.call("my.server", "echo", {"text": "dotted server name"})
         ctx.check("a real call round-trips", result.content[0].text == "dotted server name")
 
-        from rolo_claude import permissions as P
+        from halo_harness import permissions as P
         engine = P.PermissionEngine(mode="default", cwd=REPO_DIR, print_mode=True,
                                      allow_rules=[P.parse_rule("mcp__my_server__*", source="test")])
         decision = engine.decide("mcp__my_server__echo", {}, tool=None)
@@ -1212,11 +1212,11 @@ def test_item14_tool_name_with_a_dot_and_space_sanitises_and_dispatches(ctx: Ctx
     hand-shaped sdk_tool double, since fake_mcp_server.py's own tool
     registration (the `mcp` SDK's own @app.tool) does not accept a raw dot/
     space in ITS OWN name argument -- the wire-naming/dispatch layer this
-    item is actually about is entirely in rolo_claude's own code, covered
+    item is actually about is entirely in halo_harness's own code, covered
     here without needing the SDK to cooperate with an invalid Python
     identifier-shaped registration."""
     from types import SimpleNamespace
-    from rolo_claude.tools.mcp_tool import McpTool
+    from halo_harness.tools.mcp_tool import McpTool
     sdk_tool = SimpleNamespace(name="weird.tool name", description="d",
                                 input_schema={"type": "object", "properties": {}}, meta=None, annotations=None)
 
@@ -1229,7 +1229,7 @@ def test_item14_tool_name_with_a_dot_and_space_sanitises_and_dispatches(ctx: Ctx
               tool.name == "mcp__srv__weird_tool_name")
     ctx.check("split_mcp_tool_name parses it back apart",
               M.split_mcp_tool_name(tool.name) == ("srv", "weird_tool_name"))
-    from rolo_claude.tools.base import ToolContext
+    from halo_harness.tools.base import ToolContext
     result = tool.run({}, ToolContext(cwd=REPO_DIR))
     ctx.check(f"dispatches through McpTool.run() normally, got {result.content}",
               not result.is_error and "weird.tool name" in result.content[0]["text"])
@@ -1242,15 +1242,15 @@ def test_item14_tool_name_with_a_dot_and_space_sanitises_and_dispatches(ctx: Ctx
 
 @test
 def test_confirm_structured_content_without_content_becomes_json_text_via_mcptool_run(ctx: Ctx):
-    """rolo_claude/tools/mcp_tool.py ~line 220 (content_with_structured_
+    """halo_harness/tools/mcp_tool.py ~line 220 (content_with_structured_
     fallback) already has a direct pure-function unit test in test_mcp_
     tool.py -- this drives the SAME behaviour through the actual composed
     entry point, McpTool.run() itself (a duck-typed manager double
     returning content=[]/structured_content={...}, exactly the shape
     McpTool.run() reads via getattr(result, ...))."""
     from types import SimpleNamespace
-    from rolo_claude.tools.base import ToolContext
-    from rolo_claude.tools.mcp_tool import McpTool
+    from halo_harness.tools.base import ToolContext
+    from halo_harness.tools.mcp_tool import McpTool
 
     class _StructuredOnlyManager:
         def call(self, server, tool, arguments, **kw):
@@ -1269,7 +1269,7 @@ def test_confirm_structured_content_without_content_becomes_json_text_via_mcptoo
 @test
 def test_confirm_progress_keepalive_rescues_a_real_progressing_wire_call(ctx: Ctx):
     """H9 bug fix (was a PINNING test for an open bug). BUG (d),
-    rolo_claude/mcp/manager.py's `McpServerHandle.call_tool`: it passed the
+    halo_harness/mcp/manager.py's `McpServerHandle.call_tool`: it passed the
     SAME `timeout` value as BOTH the outer keepalive-extendable
     `run_abortable` bound's basis (timeout+3) AND the SDK's own internal,
     non-resettable per-request deadline (`read_timeout_seconds=timeout`, a
@@ -1304,6 +1304,21 @@ def test_confirm_progress_keepalive_rescues_a_real_progressing_wire_call(ctx: Ct
                   elapsed >= 1.3)
     finally:
         mgr.close_all()
+
+
+def _hermetic_child_env() -> dict:
+    """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
+    (would let bridge_home() escape this test's own BRIDGE_TEST_HOME
+    scoping) or HALO_* (would out-rank the legacy BRIDGE_* name a
+    fixture deliberately sets, per env_compat's own precedence) from
+    the parent process into a spawned child -- same hermeticity
+    tests/test_init_cli.py::_run already has, applied at each of this
+    file's own `env = dict(os.environ)` call sites."""
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
 
 
 if __name__ == "__main__":

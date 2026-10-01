@@ -27,7 +27,7 @@ test, TESTS = new_registry()
 
 @test
 def test_format_token_count_normalizes_k_and_m_units(ctx: Ctx):
-    from rolo_claude.model_display import format_token_count
+    from halo_harness.model_display import format_token_count
     cases = {200000: "200k", 128000: "128k", 1048576: "1M", 1050000: "1M", 500: "500", 16384: "16k"}
     for n, expected in cases.items():
         got = format_token_count(n)
@@ -36,7 +36,7 @@ def test_format_token_count_normalizes_k_and_m_units(ctx: Ctx):
 
 @test
 def test_format_token_count_blank_never_question_mark(ctx: Ctx):
-    from rolo_claude.model_display import format_token_count
+    from halo_harness.model_display import format_token_count
     for bad in (None, 0, -5, "not a number", True, False):
         got = format_token_count(bad)
         ctx.check(f"{bad!r} -> blank, got {got!r}", got == "")
@@ -45,7 +45,7 @@ def test_format_token_count_blank_never_question_mark(ctx: Ctx):
 
 @test
 def test_format_price_per_m_never_multiplies(ctx: Ctx):
-    from rolo_claude.model_display import format_price_per_m
+    from halo_harness.model_display import format_price_per_m
     ctx.check(f"already-per-million value formatted as-is, got {format_price_per_m(3.0)!r}",
               format_price_per_m(3.0) == "$3.00/M")
     ctx.check(f"blank (never '?') for None, got {format_price_per_m(None)!r}", format_price_per_m(None) == "")
@@ -58,7 +58,7 @@ def test_format_price_per_m_never_multiplies(ctx: Ctx):
 
 @test
 def test_format_model_row_models_dev_backed_entry_full_columns(ctx: Ctx):
-    from rolo_claude.model_display import format_model_row
+    from halo_harness.model_display import format_model_row
     entry = {"ref": "dbx:databricks-glm-5-3", "context_tokens": 128000, "max_output_tokens": 64000,
              "price_in_per_m": 1.0, "price_out_per_m": 5.0, "detail": "glm · mlflow-chat"}
     row = format_model_row(entry)
@@ -73,7 +73,7 @@ def test_format_model_row_models_dev_backed_entry_full_columns(ctx: Ctx):
 
 @test
 def test_format_model_row_model_table_only_ctx_present_price_blank(ctx: Ctx):
-    from rolo_claude.model_display import format_model_row
+    from halo_harness.model_display import format_model_row
     entry = {"ref": "dbx:databricks-deepseek-v4-1-flash", "context_tokens": 1048576}
     row = format_model_row(entry)
     ctx.check(f"single line, got {row!r}", "\n" not in row)
@@ -85,7 +85,7 @@ def test_format_model_row_model_table_only_ctx_present_price_blank(ctx: Ctx):
 
 @test
 def test_format_model_row_unknown_endpoint_all_blank(ctx: Ctx):
-    from rolo_claude.model_display import format_model_row
+    from halo_harness.model_display import format_model_row
     entry = {"ref": "dbx:some-brand-new-endpoint"}
     row = format_model_row(entry)
     ctx.check(f"single line, got {row!r}", "\n" not in row)
@@ -96,7 +96,7 @@ def test_format_model_row_unknown_endpoint_all_blank(ctx: Ctx):
 
 @test
 def test_format_model_row_dbu_appended_only_when_known(ctx: Ctx):
-    from rolo_claude.model_display import format_model_row
+    from halo_harness.model_display import format_model_row
     with_dbu = format_model_row({"ref": "dbx:x", "dbu": "0.500 DBU"})
     without_dbu = format_model_row({"ref": "dbx:x"})
     ctx.check(f"dbu appended when known, got {with_dbu!r}", "dbu=0.500 DBU" in with_dbu)
@@ -110,8 +110,8 @@ def test_format_model_row_dbu_appended_only_when_known(ctx: Ctx):
 
 @test
 def test_databricks_row_fields_prefers_live_models_dev_cache(ctx: Ctx):
-    from rolo_claude.model_display import databricks_row_fields
-    from rolo_claude.providers.models_dev import write_models_dev_json
+    from halo_harness.model_display import databricks_row_fields
+    from halo_harness.providers.models_dev import write_models_dev_json
     with tempfile.TemporaryDirectory() as tmp:
         state_dir = Path(tmp)
         write_models_dev_json(state_dir, {"databricks": {"models": {
@@ -127,7 +127,7 @@ def test_databricks_row_fields_prefers_live_models_dev_cache(ctx: Ctx):
 
 @test
 def test_databricks_row_fields_falls_back_to_model_table_ctx_only(ctx: Ctx):
-    from rolo_claude.model_display import databricks_row_fields
+    from halo_harness.model_display import databricks_row_fields
     with tempfile.TemporaryDirectory() as tmp:
         state_dir = Path(tmp)  # no models-dev.json cache at all here
         fake_table = {"databricks": {"databricks-deepseek-v4-1-flash": {"context_tokens": 1048576}}}
@@ -140,7 +140,7 @@ def test_databricks_row_fields_falls_back_to_model_table_ctx_only(ctx: Ctx):
 
 @test
 def test_databricks_row_fields_unknown_endpoint_returns_empty(ctx: Ctx):
-    from rolo_claude.model_display import databricks_row_fields
+    from halo_harness.model_display import databricks_row_fields
     with tempfile.TemporaryDirectory() as tmp:
         state_dir = Path(tmp)
         fields = databricks_row_fields("totally-unknown-endpoint", state_dir=state_dir, model_table={})
@@ -175,8 +175,8 @@ class _CapturingHandler(BaseHTTPRequestHandler):
 
 @test
 def test_fetch_models_dev_sends_a_real_user_agent(ctx: Ctx):
-    from rolo_claude import __version__
-    from rolo_claude.providers.models_dev import fetch_models_dev
+    from halo_harness import __version__
+    from halo_harness.providers.models_dev import fetch_models_dev
     _CapturingHandler.captured_headers = []
     server = _ThreadingHTTPServer(("127.0.0.1", 0), _CapturingHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -187,8 +187,8 @@ def test_fetch_models_dev_sends_a_real_user_agent(ctx: Ctx):
         ctx.check(f"exactly one request captured, got {len(_CapturingHandler.captured_headers)}",
                   len(_CapturingHandler.captured_headers) == 1)
         ua = _CapturingHandler.captured_headers[0].get("User-Agent", "")
-        ctx.check(f"User-Agent names rolo-claude with its version, got {ua!r}",
-                  ua == f"rolo-claude/{__version__}")
+        ctx.check(f"User-Agent names halo with its version, got {ua!r}",
+                  ua == f"halo/{__version__}")
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -203,7 +203,7 @@ def test_fetch_models_dev_sends_a_real_user_agent(ctx: Ctx):
 
 @test
 def test_format_price_per_m_accepts_numeric_strings(ctx: Ctx):
-    from rolo_claude.model_display import format_price_per_m
+    from halo_harness.model_display import format_price_per_m
     ctx.check(f"a numeric string formats exactly like the equivalent float, got {format_price_per_m('3.5')!r}",
               format_price_per_m("3.5") == "$3.50/M")
     ctx.check(f"a non-numeric string is still blank, got {format_price_per_m('n/a')!r}",
@@ -214,8 +214,8 @@ def test_format_price_per_m_accepts_numeric_strings(ctx: Ctx):
 def test_openrouter_price_entries_string_prices_produce_real_numbers(ctx: Ctx):
     """init_providers._openrouter_entries: the models.json shape OpenRouter
     probes actually write (pricing.prompt/completion as strings)."""
-    from rolo_claude.init_providers import _openrouter_entries
-    from rolo_claude.providers.databricks import write_models_json
+    from halo_harness.init_providers import _openrouter_entries
+    from halo_harness.providers.databricks import write_models_json
     with tempfile.TemporaryDirectory() as tmp:
         state_dir = Path(tmp)
         write_models_json(state_dir, [{
@@ -235,8 +235,8 @@ def test_openrouter_price_entries_string_prices_produce_real_numbers(ctx: Ctx):
 def test_controller_list_models_openrouter_string_prices_not_blank(ctx: Ctx):
     """The SAME bug, exercised through Controller.list_models() -- the
     exact path the /model picker and init's own picker both call."""
-    from rolo_claude.controller import Controller
-    from rolo_claude.providers.databricks import write_models_json
+    from halo_harness.controller import Controller
+    from halo_harness.providers.databricks import write_models_json
 
     class _FakeModelRef:
         raw = "or:vendor/model-x"
@@ -289,10 +289,10 @@ class _Env:
                        ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE", "OPENROUTER_API_KEY")}
         d = Path(tempfile.mkdtemp(prefix="hotfix101-price-cli-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -305,13 +305,13 @@ class _Env:
 
 @test
 def test_cmd_models_cli_prints_openrouter_prices_not_blank(ctx: Ctx):
-    """`rolo-claude models` (bare, no --refresh -- must never touch the
+    """`halo models` (bare, no --refresh -- must never touch the
     network) -- the plain-text table's price columns must show a real
     dollar figure, not blank, for a models.json entry with string prices."""
     import contextlib
     import io
-    from rolo_claude.catalog_cli import cmd_models
-    from rolo_claude.providers.databricks import write_models_json
+    from halo_harness.catalog_cli import cmd_models
+    from halo_harness.providers.databricks import write_models_json
 
     with _Env() as env:
         write_models_json(env.state_dir, [{

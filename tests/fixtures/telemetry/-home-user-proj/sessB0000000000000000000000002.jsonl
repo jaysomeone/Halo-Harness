@@ -1,5 +1,5 @@
 {"type": "meta", "model": "dbx:databricks-claude-sonnet-4", "tools": [{"name": "Bash"}], "ts": 1790343526.6934679, "seq": 0}
-{"type": "system", "text": "You are rolo-claude.", "ts": 1790343526.6934679, "seq": 1}
+{"type": "system", "text": "You are halo.", "ts": 1790343526.6934679, "seq": 1}
 {"type": "user", "content": [{"type": "text", "text": "run the deploy script"}], "ts": 1790343526.6934679, "seq": 2}
 {"type": "usage", "usage": {"input_tokens": 900, "output_tokens": 40}, "cost_usd": 0.0009, "model": "dbx:databricks-claude-sonnet-4", "route": "dbx", "provider": "databricks-claude-sonnet-4", "finish_reason": "tool_use", "latency_ms": 600.0, "ttft_ms": 150.0, "retries": 0, "status": "ok", "ts": 1790343526.6934679, "seq": 3}
 {"type": "assistant", "content": [{"type": "tool_use", "id": "toolu_deny_0001", "name": "Bash", "input": {"command": "rm -rf /"}}], "stop_reason": "tool_use", "tool_meta": {"toolu_deny_0001": {"repaired": false, "repair_kind": "none", "promoted_from_leak": false}}, "ts": 1790343526.6944695, "seq": 4}

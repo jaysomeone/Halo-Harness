@@ -1,4 +1,4 @@
-"""rolo_claude.commands.builtins -- the ~22 built-in `/name` commands (U0
+"""halo_harness.commands.builtins -- the ~22 built-in `/name` commands (U0
 scope B), each with a headless-facade implementation: `-p "/cost"` and
 `-p "/help"` must produce real text without a TUI (headless.py calls
 `cmd.run(args_text, facade)` and either prints the string directly, for
@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rolo_claude.commands.registry import Registry, SlashCommand
+from halo_harness.commands.registry import Registry, SlashCommand
 
 
 @dataclass
@@ -112,7 +112,7 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
     # H15 part 2 addendum 4: the same OpenRouter balance figure the status
     # bar shows, with the key label and reading time -- omitted (no second
     # line) when no fetch has ever succeeded (not enabled, or offline).
-    from rolo_claude.providers.openrouter_account import format_balance_line
+    from halo_harness.providers.openrouter_account import format_balance_line
     balance_line = format_balance_line()
     return f"{line}\n{balance_line}" if balance_line else line
 
@@ -124,9 +124,9 @@ def _cmd_context(args: str, facade: HeadlessFacade) -> str:
     limit = facade.context_limit if facade.context_limit is not None else "?"
     session = getattr(facade, "session", None)
     if session is not None:
-        from rolo_claude.agent.compact import opencode_usable
-        from rolo_claude.agent.derive import derive_request
-        from rolo_claude.agent.prune import context_breakdown, prune_messages
+        from halo_harness.agent.compact import opencode_usable
+        from halo_harness.agent.derive import derive_request
+        from halo_harness.agent.prune import context_breakdown, prune_messages
         system_text, messages, tools = derive_request(session.log, tools=None)
         pruned = prune_messages(messages)
         bd = context_breakdown(system_text, messages, tools, pruned)
@@ -159,7 +159,7 @@ def _cmd_model(args: str, facade: HeadlessFacade) -> str:
 def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     """H14 scope J (widened to every enabled provider by the H15 part 2
     addendum 3.2b): `/models [refresh]` (`/dbx` is a plain alias that always
-    refreshes) -- headless surface for the same catalog refresh `rolo-claude
+    refreshes) -- headless surface for the same catalog refresh `halo
     models --refresh`/the TUI's own off-UI-thread `/models refresh` use.
     Bare `/models` reports the cached catalog's size/age without touching
     the network. 1.0.1 hotfix 3: bare now ALSO renders the cached Databricks
@@ -168,19 +168,19 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     failed refresh shows that same (unchanged) table plus the one-line
     error, never just the error alone. OpenRouter/Anthropic (no per-endpoint
     table of their own here) get a one-line cached-count/refreshed-count
-    summary alongside it -- `rolo-claude models --cc`/the full OpenRouter
+    summary alongside it -- `halo models --cc`/the full OpenRouter
     table live elsewhere, this command's own job is the refresh trigger."""
-    from rolo_claude.catalog_cli import _dbx_rows, format_dbx_table_lines
-    from rolo_claude.config.paths import bridge_home
-    from rolo_claude.providers.config import derive_workspace_root, resolve_databricks
-    from rolo_claude.providers.databricks import (
+    from halo_harness.catalog_cli import _dbx_rows, format_dbx_table_lines
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.config import derive_workspace_root, resolve_databricks
+    from halo_harness.providers.databricks import (
         dbx_endpoints_age_seconds, format_dbx_diff, load_dbx_endpoints_json, load_models_json,
         models_json_age_seconds, refresh_dbx_catalog, refresh_openrouter_catalog_if_stale,
     )
-    from rolo_claude.providers.anthropic_catalog import (
+    from halo_harness.providers.anthropic_catalog import (
         ant_models_age_seconds, load_ant_models_json, refresh_anthropic_catalog_if_stale,
     )
-    from rolo_claude.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled
     state_dir = bridge_home()
     wants_refresh = args.strip().lower() in ("refresh", "--refresh")
     dbx_enabled = is_enabled("databricks")
@@ -205,7 +205,7 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
                 # pins "Refresh failed"/"endpoint(s) still cached" verbatim).
                 lines.append(f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached).")
             else:
-                from rolo_claude.providers.models_dev import refresh_models_dev_cache
+                from halo_harness.providers.models_dev import refresh_models_dev_cache
                 md_ok, md_note = refresh_models_dev_cache(state_dir)
                 suffix = "" if md_ok else f" (models.dev refresh failed: {md_note} -- cached price data stays in use.)"
                 # Exact pre-existing wording ("Refreshed: N" pinned verbatim).
@@ -219,13 +219,13 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
             # Exact pre-existing wording ("N Databricks endpoint(s) cached").
             lines.append(f"{len(endpoints)} Databricks endpoint(s) cached (last refreshed {age_str}).")
     elif dbx_enabled:
-        lines.append("Databricks is not configured -- nothing to refresh (see `rolo-claude doctor --work`).")
+        lines.append("Databricks is not configured -- nothing to refresh (see `halo doctor --work`).")
 
     if is_enabled("openrouter"):
         if wants_refresh:
             ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
             if ok is False:
-                lines.append("OpenRouter refresh failed -- see `rolo-claude doctor`.")
+                lines.append("OpenRouter refresh failed -- see `halo doctor`.")
             elif ok is None:
                 lines.append("OpenRouter: not configured -- nothing to refresh.")
             else:
@@ -239,7 +239,7 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
         if wants_refresh:
             ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
             if ok is False:
-                lines.append("Anthropic refresh failed -- see `rolo-claude doctor`.")
+                lines.append("Anthropic refresh failed -- see `halo doctor`.")
             elif ok is None:
                 lines.append("Anthropic: not configured -- nothing to refresh.")
             else:
@@ -250,8 +250,8 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
             lines.append(f"Anthropic: {len(load_ant_models_json(state_dir))} model(s) cached (last refreshed {age_str}).")
 
     if not lines:
-        return ("No provider is set up -- not configured (see `rolo-claude providers`, "
-                 "or run `rolo-claude init`).")
+        return ("No provider is set up -- not configured (see `halo providers`, "
+                 "or run `halo init`).")
     suffix = "" if wants_refresh else "\nUse `/models refresh` (or `/dbx`) to update."
     return f"{dbx_text}{chr(10).join(lines)}{suffix}"
 
@@ -264,7 +264,7 @@ def _cmd_dbx(args: str, facade: HeadlessFacade) -> str:
 def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
     if facade.mcp_status is not None:
         # H3 scope D: real per-server health, same line format `mcp list` uses.
-        from rolo_claude.mcp_cli import format_mcp_list_line
+        from halo_harness.mcp_cli import format_mcp_list_line
         if not facade.mcp_status:
             return "No MCP servers configured."
         lines = ["Configured MCP servers:"]
@@ -308,18 +308,18 @@ def _cmd_improve(args: str, facade: HeadlessFacade) -> str:
     """H10 Part B5: `-p "/improve"` NEVER drafts or writes -- it needs the
     interactive TUI's card review (`a`/`e`/`s`/`d`/`q`); a real `-p`
     invocation points at the real headless surface instead
-    (`rolo-claude improve [--json] [--apply ...]`, a separate top-level
+    (`halo improve [--json] [--apply ...]`, a separate top-level
     subcommand, never this slash command)."""
-    return "Improve review needs the interactive TUI. Use `rolo-claude improve` for the headless surface."
+    return "Improve review needs the interactive TUI. Use `halo improve` for the headless surface."
 
 
 def _cmd_resume(args: str, facade: HeadlessFacade) -> str:
-    from rolo_claude.agent import sessions as agent_sessions
+    from halo_harness.agent import sessions as agent_sessions
 
     if args.strip():
         session_id, err = agent_sessions.resolve_resume(facade.cwd, args.strip())
         if session_id is None:
-            return f"rolo-claude: --resume: {err}"
+            return f"halo: --resume: {err}"
         return (f"Found session {session_id} -- headless mode has no interactive picker to switch into "
                 f"it mid-turn; pass `-r {session_id}` on the command line to actually resume it.")
     rows = agent_sessions.list_sessions(facade.cwd) if hasattr(agent_sessions, "list_sessions") else []
@@ -333,7 +333,7 @@ def _cmd_resume(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_status(args: str, facade: HeadlessFacade) -> str:
-    from rolo_claude import __version__
+    from halo_harness import __version__
     mcp_n = len(facade.mcp_servers)
     session = getattr(facade, "session", None)
     # U5 must-do: model/permission-mode also read from the LIVE session
@@ -349,7 +349,7 @@ def _cmd_status(args: str, facade: HeadlessFacade) -> str:
         permission_mode = getattr(engine, "mode", None) or permission_mode
     else:
         cost_line = f"Cost so far: ${facade.cost_usd:.4f} ({facade.num_turns} turn(s))"
-    return (f"rolo-claude {__version__}\n"
+    return (f"halo {__version__}\n"
             f"Model: {model_id}\n"
             f"cwd: {facade.cwd}\n"
             f"Permission mode: {permission_mode}\n"
@@ -360,7 +360,7 @@ def _cmd_status(args: str, facade: HeadlessFacade) -> str:
 
 def _cmd_config(args: str, facade: HeadlessFacade) -> str:
     if args.strip():
-        return "rolo-claude: /config is read-only in headless mode; edit ~/.claude/settings.json or pass --settings."
+        return "halo: /config is read-only in headless mode; edit ~/.claude/settings.json or pass --settings."
     theme = facade.theme or "?"
     mode = facade.permission_mode
     return f"model={facade.model_ref or '?'} permissionMode={mode} theme={theme}"
@@ -383,7 +383,7 @@ def _cmd_agents(args: str, facade: HeadlessFacade) -> str:
     session = getattr(facade, "session", None)
     agents = getattr(getattr(session, "agent_runtime", None), "agents", None)
     if not agents:
-        from rolo_claude.config.agents_md import discover_agents
+        from halo_harness.config.agents_md import discover_agents
         agents = discover_agents(facade.cwd, settings=facade.settings)
     if not agents:
         return "No agent definitions found (not even the built-ins -- this shouldn't happen)."
@@ -401,7 +401,7 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
     `.cli_role_overrides` (the SAME table `Agent(role=...)`/a role-bearing
     agent actually resolves against) when one is running, exactly like
     `/agents` above."""
-    from rolo_claude.roles import format_roles_table, resolve_all_roles, resolve_role_table
+    from halo_harness.roles import format_roles_table, resolve_all_roles, resolve_role_table
     session = getattr(facade, "session", None)
     if session is None:
         return "Nothing to show yet: /roles needs a live session to resolve against."
@@ -419,14 +419,14 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
-    """H15 item 21.5: `/providers` -- the SAME table `rolo-claude providers`
+    """H15 item 21.5: `/providers` -- the SAME table `halo providers`
     prints (`format_providers_table`/`provider_rows`, so the two surfaces
     never drift apart), plus `enable <name>`/`disable <name>` right here.
     `setup <name>` needs the interactive provider picker/tabs `init` itself
     shows -- not available headless, so this just points at the real
     command instead of half-implementing it."""
-    from rolo_claude.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
-    from rolo_claude.providers_cli import format_providers_table, provider_rows
+    from halo_harness.providers.enablement import PROVIDER_NAMES, canonical, disable, enable, label_for
+    from halo_harness.providers_cli import format_providers_table, provider_rows
     tokens = (args or "").split()
     if not tokens or tokens[0] == "list":
         return format_providers_table(provider_rows())
@@ -443,8 +443,8 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
         disable(name)
         return f"{label_for(name)}: disabled"
     if action == "setup":
-        return ("/providers setup needs the interactive picker -- run `rolo-claude providers setup "
-                f"{tokens[1] if len(tokens) > 1 else '<name>'}` (or `rolo-claude init`) from a real terminal.")
+        return ("/providers setup needs the interactive picker -- run `halo providers setup "
+                f"{tokens[1] if len(tokens) > 1 else '<name>'}` (or `halo init`) from a real terminal.")
     return "Usage: /providers [list|enable <name>|disable <name>|setup <name>]"
 
 
@@ -484,7 +484,7 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
         # EFFECTIVE value ("none (tools)"), with the source line explaining
         # why, instead of the configured value that the next (tool-
         # carrying) turn will ignore anyway.
-        from rolo_claude.providers.profiles import effort_display_override
+        from halo_harness.providers.profiles import effort_display_override
         override_display = effort_display_override(profile)
         if override_display:
             return (f"Effort level: {override_display} (source: this route forces reasoning_effort="
@@ -497,7 +497,7 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
         return "Effort can only be changed once a session is running."
     if not profile.reasoning_effort_supported:
         return f"{session.model_ref.raw} has no adjustable effort level -- nothing to set."
-    from rolo_claude.providers.profiles import clamp_effort
+    from halo_harness.providers.profiles import clamp_effort
     clamped = clamp_effort(requested, profile)
     session.effort = clamped
     session.effort_source = "session"
@@ -517,7 +517,7 @@ def _cmd_init(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_doctor(args: str, facade: HeadlessFacade) -> str:
-    from rolo_claude.doctor import run_checks
+    from halo_harness.doctor import run_checks
     lines, _ok = run_checks(cwd=facade.cwd)
     return "\n".join(lines)
 
@@ -529,16 +529,16 @@ def _cmd_export(args: str, facade: HeadlessFacade) -> str:
 def _cmd_add_dir(args: str, facade: HeadlessFacade) -> str:
     if not args.strip():
         return "Usage: /add-dir <directory> (or pass --add-dir on the command line to start with one)."
-    return f"rolo-claude: /add-dir needs a running session to extend; pass --add-dir {args.strip()!r} on the command line instead."
+    return f"halo: /add-dir needs a running session to extend; pass --add-dir {args.strip()!r} on the command line instead."
 
 
 def _cmd_theme(args: str, facade: HeadlessFacade) -> str:
-    from rolo_claude import theme as theme_mod
+    from halo_harness import theme as theme_mod
     name = args.strip()
     if not name:
         return f"Current theme: {facade.theme or theme_mod.DEFAULT_THEME}"
     if not theme_mod.is_valid_theme(name):
-        return f"rolo-claude: not a valid theme name: {name!r} (expected one of {sorted(theme_mod.VALID_THEMES)})"
+        return f"halo: not a valid theme name: {name!r} (expected one of {sorted(theme_mod.VALID_THEMES)})"
     theme_mod.persist_theme(name)
     return f"Theme set to {name}."
 
@@ -559,7 +559,7 @@ def _cmd_rename(args: str, facade: HeadlessFacade) -> str:
     title = args.strip()
     if not title:
         return "Usage: /rename <title>"
-    from rolo_claude.agent import sessions as agent_sessions
+    from halo_harness.agent import sessions as agent_sessions
     agent_sessions.set_title(facade.cwd, facade.session_id, title)
     return f"Renamed this session to {title!r}."
 
@@ -569,9 +569,9 @@ def _cmd_fork(args: str, facade: HeadlessFacade) -> str:
     original is never touched) -- `-p` has no live worker thread to hand
     the new session off to mid-turn, so the result is the id to `-r` into
     afterward, not a live switch (that part IS the TUI's own job)."""
-    from rolo_claude.agent import sessions as agent_sessions
+    from halo_harness.agent import sessions as agent_sessions
     if not facade.session_id:
-        return "rolo-claude: no active session to fork."
+        return "halo: no active session to fork."
     new_id = agent_sessions.fork_session(facade.cwd, facade.session_id)
     return f"Forked this session -> {new_id}. Continue it with: -r {new_id}"
 
@@ -580,7 +580,7 @@ def _cmd_stats(args: str, facade: HeadlessFacade) -> str:
     session = getattr(facade, "session", None)
     if session is None:
         return f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s)."
-    from rolo_claude.controller import compute_session_stats, format_cache_tokens_suffix
+    from halo_harness.controller import compute_session_stats, format_cache_tokens_suffix
     stats = compute_session_stats(session.log.nodes())
     lines = [f"Turns: {stats['turns']}", f"Total cost: ${stats['total_cost_usd']:.4f}"]
     for model, bucket in sorted(stats["per_model"].items()):
@@ -611,19 +611,27 @@ def _cmd_tasks(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_rewind(args: str, facade: HeadlessFacade) -> str:
-    return "rolo-claude: /rewind needs the interactive TUI (a file's history lives per-session)."
+    return "halo: /rewind needs the interactive TUI (a file's history lives per-session)."
 
 
 def _cmd_undo(args: str, facade: HeadlessFacade) -> str:
-    return "rolo-claude: /undo needs the interactive TUI."
+    return "halo: /undo needs the interactive TUI."
 
 
 def _cmd_redo(args: str, facade: HeadlessFacade) -> str:
-    return "rolo-claude: /redo needs the interactive TUI."
+    return "halo: /redo needs the interactive TUI."
+
+
+def _cmd_intro(args: str, facade: HeadlessFacade) -> str:
+    """2.0.0 Launch intro: the headless ("ui"-kind builtin) fallback --
+    `tui/slash.py::_handle_intro` is what actually replays the typewriter
+    line in the real TUI; this text is only ever seen from `-p`/a context
+    with no interactive session at all."""
+    return "halo: /intro needs the interactive TUI (it replays the launch typewriter line)."
 
 
 def _cmd_keybindings(args: str, facade: HeadlessFacade) -> str:
-    from rolo_claude.tui.keys import load_keymap
+    from halo_harness.tui.keys import load_keymap
     keymap = load_keymap()
     lines = ["Keybindings (~/.claude/keybindings.json merges onto these):"]
     for ctx in sorted(keymap):
@@ -657,11 +665,11 @@ _BUILTIN_SPECS = {
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
-    "doctor": ("core", "Check the health of this rolo-claude installation", None, _cmd_doctor),
+    "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
     "export": ("ui", "Export the conversation", None, _cmd_export),
     "add-dir": ("core", "Add a working directory", "<directory>", _cmd_add_dir),
     "theme": ("core", "Show or set the color theme", "[theme]", _cmd_theme),
-    "exit": ("ui", "Exit rolo-claude", None, _cmd_exit),
+    "exit": ("ui", "Exit halo", None, _cmd_exit),
     "rename": ("ui", "Rename this session", "<title>", _cmd_rename),
     "fork": ("ui", "Fork this session into a new one", None, _cmd_fork),
     "stats": ("core", "Show tokens/cost per model and tool-call counts (--models, --tools)", None, _cmd_stats),
@@ -669,6 +677,7 @@ _BUILTIN_SPECS = {
     "rewind": ("ui", "Restore the working tree to a recorded step", "[step-id]", _cmd_rewind),
     "undo": ("ui", "Rewind one recorded step back", None, _cmd_undo),
     "redo": ("ui", "Rewind one recorded step forward", None, _cmd_redo),
+    "intro": ("ui", "Replay the launch intro", None, _cmd_intro),
     "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
     "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
 }

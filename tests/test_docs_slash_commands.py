@@ -1,6 +1,6 @@
 """tests.test_docs_slash_commands -- H14b brief: docs/SLASH-COMMANDS.md must
 document every registered built-in `/command`. Gathered from the real
-registry (`rolo_claude.commands.builtins._BUILTIN_SPECS`), never a hardcoded
+registry (`halo_harness.commands.builtins._BUILTIN_SPECS`), never a hardcoded
 list here, so this can't silently drift from the code.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ _HEADING_RE = re.compile(r"^#{1,4}\s+.*$", re.MULTILINE)
 
 @test
 def test_every_builtin_command_has_a_section(ctx: Ctx):
-    from rolo_claude.commands.builtins import _BUILTIN_SPECS
+    from halo_harness.commands.builtins import _BUILTIN_SPECS
 
     text = (REPO_DIR / "docs" / "SLASH-COMMANDS.md").read_text(encoding="utf-8")
     ctx.check("_BUILTIN_SPECS is non-empty (sanity)", _BUILTIN_SPECS)
@@ -43,7 +43,7 @@ def test_no_heading_documents_a_fictional_builtin(ctx: Ctx):
     non-built-in alias this same registry resolves (`/quit`), or a name
     this page explicitly documents as NOT a built-in (custom commands,
     skills, MCP prompts -- covered in prose, not their own heading here)."""
-    from rolo_claude.commands.builtins import _BUILTIN_SPECS
+    from halo_harness.commands.builtins import _BUILTIN_SPECS
 
     text = (REPO_DIR / "docs" / "SLASH-COMMANDS.md").read_text(encoding="utf-8")
     known = set(_BUILTIN_SPECS) | {"quit"}  # /quit: a real TUI alias for /exit, see tui/slash.py
@@ -58,10 +58,10 @@ def test_no_heading_documents_a_fictional_builtin(ctx: Ctx):
 @test
 def test_keybindings_defaults_are_represented(ctx: Ctx):
     """Spot-check that every DEFAULT_KEYBINDINGS action string (the
-    canonical source, `rolo_claude.tui.keys`) has some mention on the
+    canonical source, `halo_harness.tui.keys`) has some mention on the
     page -- catches a chord/binding added to the code but never
     documented."""
-    from rolo_claude.tui.keys import DEFAULT_KEYBINDINGS
+    from halo_harness.tui.keys import DEFAULT_KEYBINDINGS
 
     text = (REPO_DIR / "docs" / "SLASH-COMMANDS.md").read_text(encoding="utf-8").lower()
     # Display aliases the doc prose uses for the same physical key/chord

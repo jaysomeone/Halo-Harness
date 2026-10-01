@@ -1,8 +1,8 @@
-"""rolo_claude.providers.anthropic_catalog -- H15 part 2 addendum 3.2: a
+"""halo_harness.providers.anthropic_catalog -- H15 part 2 addendum 3.2: a
 live catalog cache for the `ant:` (direct Anthropic API key) provider,
 fetched from the real `GET /v1/models` the same way OpenRouter's own
 models.json / Databricks' own dbx-endpoints.json already are -- so a box
-that only ever sets ANTHROPIC_API_KEY (no `rolo-claude init` run) still
+that only ever sets ANTHROPIC_API_KEY (no `halo init` run) still
 gets a live catalog without any extra step, the same "already finds the
 available keys ... and uses those" promise the rest of this addendum makes.
 
@@ -37,7 +37,7 @@ def fetch_anthropic_models(base_url: str, api_key: str) -> "list[dict]":
     on connect/DNS failure, same bounded-connect contract every other probe
     in this harness uses."""
     import urllib.parse
-    from rolo_claude.providers.http import format_connect_error, open_upstream, UpstreamConnectError
+    from halo_harness.providers.http import format_connect_error, open_upstream, UpstreamConnectError
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -133,7 +133,7 @@ def refresh_anthropic_catalog_if_stale(state_dir, *, max_age_hours: Optional[flo
     key = str(state_dir)
     try:
         if max_age_hours is None:
-            from rolo_claude.theme import get_config_value
+            from halo_harness.theme import get_config_value
             max_age_hours = get_config_value("databricks.catalog_max_age_hours", default=24)
         age = ant_models_age_seconds(state_dir)
         always = float(max_age_hours) <= 0
@@ -147,7 +147,7 @@ def refresh_anthropic_catalog_if_stale(state_dir, *, max_age_hours: Optional[flo
         last_failure_at = _ant_last_failure_at.get(key)
         if not force and last_failure_at is not None and (time.monotonic() - last_failure_at) < _AUTO_REFRESH_BACKOFF_S:
             return None
-        from rolo_claude.providers.config import resolve_anthropic
+        from halo_harness.providers.config import resolve_anthropic
         ant = resolve_anthropic(env)
         if ant is None:
             return None

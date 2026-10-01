@@ -1,4 +1,4 @@
-"""rolo_claude.providers.learned_rules -- the LEARNED per-endpoint
+"""halo_harness.providers.learned_rules -- the LEARNED per-endpoint
 `reasoning_effort_with_tools` rule (1.0.1 part 2, item 22 remainder): when a
 live 400 proves a Databricks endpoint with no `model_table.json` row of its
 own ALSO rejects `reasoning_effort` alongside tools (the same shape the

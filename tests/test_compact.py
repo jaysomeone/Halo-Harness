@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
-from rolo_claude.agent.compact import (
+from halo_harness.agent.compact import (
     MIN_VIABLE_RESERVE_TOKENS, SUMMARY_HEADINGS, CompactionKnobs, build_summary_instruction,
     compaction_trigger_tokens, dsh_trigger_tokens, find_prior_summary, opencode_usable, resolve_knobs,
     select_verbatim_tail, should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
@@ -100,7 +100,7 @@ def test_disable_compact_env_wins(ctx: Ctx):
 @test
 def test_h5b_f01_real_models_json_zero_trigger_rows_now_get_a_sane_trigger(ctx: Ctx):
     """finding 1: 29 of 105 real DeepSeek/Kimi/GLM/Qwen/MiniMax rows in
-    rolo's own ~/.rolo-claude/models.json got a trigger of EXACTLY 0 (21
+    rolo's own ~/.halo/models.json got a trigger of EXACTLY 0 (21
     more under 40k) because the gate subtracted the model's raw advertised
     max_output_tokens -- often close to the whole context window -- with
     no 32k cap. Fixture = the exact (context_length, max_output_tokens)
@@ -108,7 +108,7 @@ def test_h5b_f01_real_models_json_zero_trigger_rows_now_get_a_sane_trigger(ctx: 
     name. Every one must now land at a large, usable fraction of its own
     context window, never anywhere near 0."""
     # name -> (context_length, max_output_tokens), copied verbatim from
-    # ~/.rolo-claude/models.json on 2026-09-24.
+    # ~/.halo/models.json on 2026-09-24.
     real_rows = {
         "moonshotai/kimi-k2.5": (262_144, 235_929),
         "moonshotai/kimi-k2.6": (262_144, 235_929),
@@ -196,7 +196,7 @@ def test_h5c_f24_the_exact_zero_trigger_rows_the_finding_names_are_fixed(ctx: Ct
     only covers finding 1's 8 LARGE-window rows (Kimi/Qwen3.5/MiniMax/
     GLM-5/DeepSeek-v3.2) -- never the actual ZERO-trigger rows finding 3
     itself names. These 5 exact (context_length, max_output_tokens) pairs
-    are copied verbatim from rolo's real ~/.rolo-claude/models.json on
+    are copied verbatim from rolo's real ~/.halo/models.json on
     2026-09-24 for the finding's own named ids, and verified below to
     genuinely give the OLD formula a trigger of exactly 0 (matching
     finding 3's "21 of 458 real models.json rows still have a trigger of
@@ -279,7 +279,7 @@ def test_auto_compact_enabled_false_disables(ctx: Ctx):
 def test_compaction_model_from_settings_raw(ctx: Ctx):
     """H5c finding 18: settings.raw is only the FALLBACK -- isolated with
     an empty `BRIDGE_TEST_HOME` (never the real machine's own
-    `~/.rolo-claude/config.json`) so this stays deterministic regardless
+    `~/.halo/config.json`) so this stays deterministic regardless
     of what that file happens to contain wherever the suite runs."""
     import os
     import tempfile
@@ -291,7 +291,7 @@ def test_compaction_model_from_settings_raw(ctx: Ctx):
         raw = {"compactionModel": "or:some/small-model"}
 
     old = os.environ.get("BRIDGE_TEST_HOME")
-    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-empty-")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="halo-compactcfg-empty-")
     try:
         knobs = resolve_knobs(FakeSettings(), {})
         ctx.check("compactionModel read from settings.raw (no config.json override present)",
@@ -304,17 +304,17 @@ def test_compaction_model_from_settings_raw(ctx: Ctx):
 
 
 @test
-def test_h5c_f18_compaction_model_from_rolo_claude_config_json_wins_over_settings(ctx: Ctx):
-    """H5c finding 18: `~/.rolo-claude/config.json`'s own `compactionModel`
+def test_h5c_f18_compaction_model_from_halo_harness_config_json_wins_over_settings(ctx: Ctx):
+    """H5c finding 18: `~/.halo/config.json`'s own `compactionModel`
     key (brief D: "can point at the small one") wins over Claude Code's
     settings chain -- the OLD code read settings ONLY, silently ignoring
     it. Driven through the REAL config path (`theme.set_config_value` ->
-    `~/.rolo-claude/config.json`, redirected to an isolated
+    `~/.halo/config.json`, redirected to an isolated
     `BRIDGE_TEST_HOME`), never an injected knob."""
     import os
     import tempfile
 
-    from rolo_claude import theme as theme_mod
+    from halo_harness import theme as theme_mod
 
     class FakeSettings:
         auto_compact_window = None
@@ -323,7 +323,7 @@ def test_h5c_f18_compaction_model_from_rolo_claude_config_json_wins_over_setting
         raw = {"compactionModel": "or:from-settings/should-lose"}
 
     old = os.environ.get("BRIDGE_TEST_HOME")
-    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="halo-compactcfg-")
     try:
         theme_mod.set_config_value("compactionModel", "or:from-config-json/should-win")
         knobs = resolve_knobs(FakeSettings(), {})
@@ -338,13 +338,13 @@ def test_h5c_f18_compaction_model_from_rolo_claude_config_json_wins_over_setting
 
 @test
 def test_h5c_f18_compaction_model_falls_back_to_settings_when_config_json_has_no_key(ctx: Ctx):
-    """H5c finding 18: an empty/missing `~/.rolo-claude/config.json` (or
+    """H5c finding 18: an empty/missing `~/.halo/config.json` (or
     one with unrelated keys) must still fall back to settings -- config.json
     winning is a PRIORITY rule, not a requirement that it be set at all."""
     import os
     import tempfile
 
-    from rolo_claude import theme as theme_mod
+    from halo_harness import theme as theme_mod
 
     class FakeSettings:
         auto_compact_window = None
@@ -353,7 +353,7 @@ def test_h5c_f18_compaction_model_falls_back_to_settings_when_config_json_has_no
         raw = {"compactionModel": "or:some/small-model"}
 
     old = os.environ.get("BRIDGE_TEST_HOME")
-    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="rolo-claude-compactcfg-unrelated-")
+    os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="halo-compactcfg-unrelated-")
     try:
         theme_mod.set_config_value("theme", "claude-dark")  # a real key, just not compactionModel
         knobs = resolve_knobs(FakeSettings(), {})

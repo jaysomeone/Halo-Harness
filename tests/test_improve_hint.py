@@ -28,7 +28,7 @@ class _FakeConfig:
 
 @test
 def test_should_hint_thresholds(ctx: Ctx):
-    from rolo_claude.improve.hint import count_edit_failures, count_loop_breaker_trips, count_repair_hits, should_hint
+    from halo_harness.improve.hint import count_edit_failures, count_loop_breaker_trips, count_repair_hits, should_hint
 
     nodes = []
     ctx.check("nothing crosses an empty log", should_hint(nodes, _FakeConfig()) is None)
@@ -60,10 +60,10 @@ def test_hint_fires_once_per_session_never_a_card(ctx: Ctx):
     twice, and proves it yields exactly one `notification` event the FIRST
     time and NOTHING the second (fires at most once per session), and that
     it never yields anything card/permission-shaped."""
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session as _Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.theme import set_config_value
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session as _Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.theme import set_config_value
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -92,10 +92,10 @@ def test_hint_fires_once_per_session_never_a_card(ctx: Ctx):
 
 @test
 def test_hint_disabled_by_config(ctx: Ctx):
-    from rolo_claude.agent.assemble import SessionContext
-    from rolo_claude.agent.loop import Session as _Session
-    from rolo_claude.model import ModelProfile, parse_model_ref
-    from rolo_claude.theme import set_config_value
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session as _Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.theme import set_config_value
 
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
@@ -165,8 +165,8 @@ class _FakeApp:
 
 @test
 def test_edit_then_apply_with_mocked_editor_changes_the_body(ctx: Ctx):
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.tui.slash import _edit_candidate_then_apply
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.tui.slash import _edit_candidate_then_apply
 
     cwd = Path(tempfile.mkdtemp(prefix="improve-edit-cwd-"))
     home = Path(tempfile.mkdtemp(prefix="improve-edit-home-"))
@@ -208,8 +208,8 @@ def test_edit_then_apply_with_mocked_editor_changes_the_body(ctx: Ctx):
 
 @test
 def test_edit_then_apply_without_editor_set_falls_back_to_apply_as_drafted(ctx: Ctx):
-    from rolo_claude.improve.draft import Candidate
-    from rolo_claude.tui.slash import _edit_candidate_then_apply
+    from halo_harness.improve.draft import Candidate
+    from halo_harness.tui.slash import _edit_candidate_then_apply
 
     cwd = Path(tempfile.mkdtemp(prefix="improve-noedit-cwd-"))
     home = Path(tempfile.mkdtemp(prefix="improve-noedit-home-"))

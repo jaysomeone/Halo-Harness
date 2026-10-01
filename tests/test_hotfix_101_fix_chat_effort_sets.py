@@ -21,13 +21,13 @@ test, TESTS = new_registry()
 
 
 def _route(host, model):
-    from rolo_claude.providers.routing import Route
+    from halo_harness.providers.routing import Route
     return Route(provider=host, upstream_model=model, dialect="openai-chat")
 
 
 @test
 def test_databricks_chat_route_no_longer_accepts_max(ctx: Ctx):
-    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
+    from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
     reset_model_table_cache()
     # gpt-oss-120b: a real tabled row with an ordinary (not "max") default.
     profile = resolve_profile(_route("databricks", "databricks-gpt-oss-120b"))
@@ -39,7 +39,7 @@ def test_databricks_chat_route_no_longer_accepts_max(ctx: Ctx):
 
 @test
 def test_openrouter_chat_route_no_longer_accepts_max(ctx: Ctx):
-    from rolo_claude.providers.profiles import reset_model_table_cache, resolve_profile
+    from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile
     reset_model_table_cache()
     profile = resolve_profile(_route("openrouter", "deepseek/deepseek-v4.1-flash"))
     ctx.check(f"no 'max' in the accepted set, got {profile.effort_values_supported}",
@@ -60,7 +60,7 @@ def test_clamp_effort_downgrades_max_on_a_plain_chat_route(ctx: Ctx):
     nor `xhigh` is covered separately in
     tests/test_hotfix_101_effort.py::
     test_clamp_effort_max_falls_back_to_default_on_a_route_with_neither_max_nor_xhigh."""
-    from rolo_claude.providers.profiles import clamp_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.profiles import clamp_effort, reset_model_table_cache, resolve_profile
     reset_model_table_cache()
     profile = resolve_profile(_route("databricks", "databricks-gpt-oss-120b"))
     clamped = clamp_effort("max", profile)
@@ -74,7 +74,7 @@ def test_data_driven_row_default_outside_the_base_set_is_still_honoured(ctx: Ctx
     no_disable forces a disabling --effort UP to it) -- the narrower
     default must not make clamp_effort then reject that same value as
     unsupported and silently fall back to "medium" instead."""
-    from rolo_claude.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
+    from halo_harness.providers.profiles import map_effort, reset_model_table_cache, resolve_profile
     reset_model_table_cache()
     for host, model in (("openrouter", "z-ai/glm-5.3"), ("databricks", "databricks-glm-5-3")):
         profile = resolve_profile(_route(host, model))
@@ -91,14 +91,14 @@ def test_data_driven_row_default_outside_the_base_set_is_still_honoured(ctx: Ctx
 
 @test
 def test_recognises_openrouter_dotted_reasoning_effort_path(ctx: Ctx):
-    from rolo_claude.providers.errors import is_effort_rejected_message
+    from halo_harness.providers.errors import is_effort_rejected_message
     ctx.check("matches OpenRouter's nested reasoning.effort wording",
               is_effort_rejected_message("Invalid value for 'reasoning.effort': 'max' is not supported."))
 
 
 @test
 def test_recognises_generic_openai_invalid_value_wording(ctx: Ctx):
-    from rolo_claude.providers.errors import is_effort_rejected_message
+    from halo_harness.providers.errors import is_effort_rejected_message
     ctx.check("matches a plain OpenAI-style enum-validation 400 for 'max'",
               is_effort_rejected_message("Invalid value: 'max'. Supported values are: 'low', 'medium', and 'high'."))
     ctx.check("matches the same wording for 'xhigh'",

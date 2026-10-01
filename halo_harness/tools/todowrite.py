@@ -1,4 +1,4 @@
-"""rolo_claude.tools.todowrite -- the TodoWrite tool (H2 scope A): a
+"""halo_harness.tools.todowrite -- the TodoWrite tool (H2 scope A): a
 structured, session-visible task list. Each call REPLACES the whole list
 (never merges); the tool validates shape (every item has content/status/
 activeForm, status is one of pending/in_progress/completed, at most one
@@ -8,7 +8,7 @@ and a transcript reader can see current state.
 
 from __future__ import annotations
 
-from rolo_claude.tools.base import Tool, ToolContext, ToolResult
+from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
 DESCRIPTION = (
     "Use this tool to create and manage a structured task list for the current session. This helps "

@@ -1,4 +1,4 @@
-"""rolo_claude.agent.loop -- the agent loop (H1 rewrite, scope E-H; H2
+"""halo_harness.agent.loop -- the agent loop (H1 rewrite, scope E-H; H2
 must-do 3-6 + findings 1-16 layered on top).
 
 Every model request is DERIVED from the append-only SessionLog
@@ -39,44 +39,45 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rolo_claude import events
-from rolo_claude.agent.planmode import PLAN_MODE_NOTE, ensure_plan_file, write_plan
-from rolo_claude.agent.jobs import JobRegistry
-from rolo_claude.agent.subagent import AgentRuntime
-from rolo_claude.agent.compact import (
+from halo_harness import events
+from halo_harness.config.paths import env_compat
+from halo_harness.agent.planmode import PLAN_MODE_NOTE, ensure_plan_file, write_plan
+from halo_harness.agent.jobs import JobRegistry
+from halo_harness.agent.subagent import AgentRuntime
+from halo_harness.agent.compact import (
     CHARS_PER_TOKEN, build_files_read_snapshot, build_summary_instruction, resolve_knobs, select_verbatim_tail,
     should_compact, tail_retention_tokens, validate_summary, wrap_compacted_summary,
 )
-from rolo_claude.agent.compact import opencode_usable as _opencode_usable
-from rolo_claude.agent.derive import content_hash_from_oai_body, derive_request
-from rolo_claude.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
-from rolo_claude.agent.log import SessionLog
-from rolo_claude.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
-from rolo_claude.agent.repair import build_tool_meta, repair_assistant_turn
-from rolo_claude.hooks import HookRunner
-from rolo_claude.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
-from rolo_claude.permissions import Decision, PermissionEngine
-from rolo_claude.providers.errors import (
+from halo_harness.agent.compact import opencode_usable as _opencode_usable
+from halo_harness.agent.derive import content_hash_from_oai_body, derive_request
+from halo_harness.agent.invariants import repair_truncated_text, synthesize_missing_results, validate_tool_use
+from halo_harness.agent.log import SessionLog
+from halo_harness.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
+from halo_harness.agent.repair import build_tool_meta, repair_assistant_turn
+from halo_harness.hooks import HookRunner
+from halo_harness.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
+from halo_harness.permissions import Decision, PermissionEngine
+from halo_harness.providers.errors import (
     CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_effort_rejected_message, is_effort_with_tools_rejected_message,
     is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
 )
-from rolo_claude.providers.http import is_connect_failure_message
-from rolo_claude.providers.hooks import (
+from halo_harness.providers.http import is_connect_failure_message
+from halo_harness.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
     max_tokens_budget, overflow_classifier, record_databricks_output_tokens,
 )
-from rolo_claude.providers.config import tool_child_env
-from rolo_claude.providers.profiles import ProviderProfile, resolve_profile
-from rolo_claude.providers.request import ToolCatalogTooLarge, build_anthropic_request_body, build_request_body
-from rolo_claude.providers.routing import InvalidModelError, Route
-from rolo_claude.providers.stream import (
+from halo_harness.providers.config import tool_child_env
+from halo_harness.providers.profiles import ProviderProfile, resolve_profile
+from halo_harness.providers.request import ToolCatalogTooLarge, build_anthropic_request_body, build_request_body
+from halo_harness.providers.routing import InvalidModelError, Route
+from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
     UpstreamError, stream_anthropic_completion, stream_completion,
 )
-from rolo_claude.tools.base import ToolContext, ToolResult
-from rolo_claude.tools.imageutil import sniff_dimensions
-from rolo_claude.tools.registry import ToolRegistry, run_read_only_batch
-from rolo_claude.tools.truncate import spill_and_truncate
+from halo_harness.tools.base import ToolContext, ToolResult
+from halo_harness.tools.imageutil import sniff_dimensions
+from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
+from halo_harness.tools.truncate import spill_and_truncate
 
 log = logging.getLogger("bridge")
 
@@ -160,7 +161,7 @@ def _mcp_blocks_for_log(blocks: list, *, meta, session_dir, tool_use_id) -> list
     so Claude Code's own truncation string never reached the model
     intact and no spill path was ever named -- both fixed by having
     exactly one capping pass, here.)"""
-    from rolo_claude.tools.mcp_tool import cap_and_spill
+    from halo_harness.tools.mcp_tool import cap_and_spill
     filtered = [b for b in blocks if not (isinstance(b, dict) and b.get("type") == "tool_reference")]
     if not filtered:
         filtered = [{"type": "text", "text": "(no content returned)"}]
@@ -671,13 +672,13 @@ class Session:
         # sent no thinking at all. A non-adaptive model keeps the old
         # "omit -> provider default" behaviour (`self.effort` stays None)
         # unless the user/settings explicitly set one (still clamped below).
-        from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+        from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
         if (self.effort is None and self.provider_profile.thinking_format == "anthropic_thinking"
                 and _anthropic_model_supports_adaptive_thinking(self.model_ref.model)):
             self.effort = "high"
             self.effort_source = self.effort_source or "default"
         elif self.effort is not None:
-            from rolo_claude.providers.profiles import clamp_effort
+            from halo_harness.providers.profiles import clamp_effort
             clamped = clamp_effort(self.effort, self.provider_profile)
             if clamped != self.effort:
                 self.effort = clamped
@@ -806,7 +807,7 @@ class Session:
         # `_maybe_auto_compact`'s own docstring).
         self._compaction_backoff_remaining: int = 0
         # print-mode `ask` denials accumulate here for the json result's
-        # `permission_denials` (rolo_claude/output.py reads this list).
+        # `permission_denials` (halo_harness/output.py reads this list).
         self.permission_denials: list = []
         # U2/D-Contract: `interactive=True` (set by the TUI's Controller, and
         # ONLY by it) makes an `ask` decision REALLY block -- the turn emits
@@ -1064,7 +1065,7 @@ class Session:
         # get a live per-call `source` (PowerShell, MCP stdio spawns,
         # other hook subprocesses); the Bash tool's OWN per-call sourcing
         # (tools/bash.py, via `ctx.env_file`) never depends on this at all.
-        from rolo_claude.hooks import env_file_path, read_env_file_exports
+        from halo_harness.hooks import env_file_path, read_env_file_exports
         # H9 whole-tree review finding 5: `base_env=self.tool_env` -- the
         # ALREADY tool_child_env()-stripped env (no provider secret keys) --
         # not `read_env_file_exports`'s own default (the harness's raw,
@@ -1101,7 +1102,7 @@ class Session:
         session -- a safe no-op otherwise. Called from Controller.quit(),
         headless.py's own atexit/finally cleanup, and SIGTERM/SIGHUP (via
         the same paths that already call job_registry.kill_all())."""
-        from rolo_claude.agent import cc_runtime
+        from halo_harness.agent import cc_runtime
         cc_runtime.close_cc(self)
 
     def clear(self) -> None:
@@ -1128,7 +1129,7 @@ class Session:
         # `--resume uuid5(<new session id>)` -- an id claude never created,
         # which fails outright ("No conversation found").
         if getattr(self, "_cc_state", None) is not None:
-            from rolo_claude.agent import cc_runtime
+            from halo_harness.agent import cc_runtime
             cc_runtime.close_cc(self)
             self._cc_state = None
         self._fire_session_end("clear")
@@ -1191,7 +1192,7 @@ class Session:
         provider small-model routing (separate creds/profile resolution)
         is a follow-up refinement; this already gives every hook a real
         model call today. Thin wrapper around `call_small_model` (H10 Part
-        B: generalized so `rolo_claude.improve.draft`'s ONE drafting call
+        B: generalized so `halo_harness.improve.draft`'s ONE drafting call
         can reuse the SAME one-shot, never-logged, mock-interceptable
         plumbing with its own system prompt/model/token budget instead of
         this method's fixed JSON-verdict shape)."""
@@ -1207,7 +1208,7 @@ class Session:
         (never through `derive_request`/the session log, so this call is
         NEVER part of the logged conversation) -- shared by
         `_call_model_for_hook` (title generation, prompt-hook verdicts) and
-        `rolo_claude.improve.draft`'s own drafting call. `model_ref`
+        `halo_harness.improve.draft`'s own drafting call. `model_ref`
         defaults to `self.small_model_ref or self.model_ref` (unchanged
         behavior for every existing caller); a caller that resolved its
         OWN model (e.g. `improve.model` from config) passes it explicitly.
@@ -1223,7 +1224,7 @@ class Session:
         conversation)."""
         ref = model_ref or self.small_model_ref or self.model_ref
         if ref.provider == "cc":
-            from rolo_claude.agent.cc_runtime import one_shot_cc_call
+            from halo_harness.agent.cc_runtime import one_shot_cc_call
             return one_shot_cc_call(ref.model, system_text, user_text, timeout_s=timeout_s)
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
@@ -1322,7 +1323,7 @@ class Session:
         Claude Code, which only ever listed tools once at startup, never
         learns it exists and can never call it."""
         self.log.append_meta(tools=self.tool_registry.definitions_for(names))
-        from rolo_claude.agent import cc_runtime
+        from halo_harness.agent import cc_runtime
         cc_runtime.notify_catalog_changed(self)
 
     # ---- request construction ------------------------------------------
@@ -1383,7 +1384,7 @@ class Session:
             # counter from the highest `functions.{name}:{idx}` already
             # logged anywhere this session, never 0 -- see
             # agent/invariants.highest_kimi_functions_idx's own docstring.
-            from rolo_claude.agent.invariants import highest_kimi_functions_idx
+            from halo_harness.agent.invariants import highest_kimi_functions_idx
             kimi_tool_id_start = highest_kimi_functions_idx(self.log) + 1
         kwargs = dict(
             body={"messages": []}, route=self.route,
@@ -1391,7 +1392,7 @@ class Session:
                      "max_output_tokens": self.model_profile.max_output_tokens},
             creds=self.creds, state_dir=self.state_dir, extra_headers=self.extra_headers,
             model_label=self.model_ref.raw, openrouter_base_url=self.openrouter_base_url,
-            harness_mode=True, ping_interval=float(os.environ.get("BRIDGE_PING_INTERVAL", "15")),
+            harness_mode=True, ping_interval=float(env_compat("PING_INTERVAL", default="15")),
             tool_id_format=self.provider_profile.tool_id_format,
             kimi_tool_id_start=kimi_tool_id_start,
         )
@@ -1853,7 +1854,7 @@ class Session:
                 if self.provider_profile.reasoning_effort_with_tools != "none":
                     self.provider_profile = dataclasses.replace(
                         self.provider_profile, reasoning_effort_with_tools="none")
-                from rolo_claude.providers.learned_rules import learn_reasoning_effort_with_tools
+                from halo_harness.providers.learned_rules import learn_reasoning_effort_with_tools
                 learn_reasoning_effort_with_tools(self.state_dir, "databricks", self.model_ref.model, "none")
             if effort_stripped_retried and self.effort is not None:
                 # 1.0.1 fixpass finding 10: a successful strip-the-field
@@ -1994,8 +1995,8 @@ class Session:
         interrupt anything already in flight."""
         if self._improve_hint_fired:
             return
-        from rolo_claude.improve.config import load_improve_config
-        from rolo_claude.improve.hint import should_hint
+        from halo_harness.improve.config import load_improve_config
+        from halo_harness.improve.hint import should_hint
         try:
             cfg = load_improve_config()
             count = should_hint(self.log.nodes(), cfg)
@@ -2060,7 +2061,7 @@ class Session:
         if self.route.dialect != "anthropic-passthrough" or self.creds is None:
             return None
         try:
-            from rolo_claude.providers.http import call_databricks_count_tokens
+            from halo_harness.providers.http import call_databricks_count_tokens
             system_text, messages, tools = derive_request(self.log, tools=None)
             body = build_anthropic_request_body(
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
@@ -2347,7 +2348,7 @@ class Session:
         if self.model_ref.provider == "cc":
             yield events.compaction(
                 phase="failed", trigger=trigger, turn=turn_no,
-                reason="rolo-claude's own compaction is a no-op for cc: sessions -- Claude Code "
+                reason="halo's own compaction is a no-op for cc: sessions -- Claude Code "
                        "manages its own context/compaction internally.",
             )
             return False
@@ -2619,7 +2620,7 @@ class Session:
                     # user/assistant/tool_result/usage nodes so every OTHER
                     # route's history reconstruction, /stats, /export and
                     # resume all keep working unchanged.
-                    from rolo_claude.agent import cc_runtime
+                    from halo_harness.agent import cc_runtime
                     yield from cc_runtime.turn_body_cc(self, turn_no, text, images=images,
                                                         hook_context=hook_context_text)
                 else:
@@ -3508,7 +3509,7 @@ class Session:
         """Called from the UI THREAD: answer the `permission_request` for
         `request_id`, unblocking the worker thread parked in
         `_await_permission_decision`. `decision` is a
-        `rolo_claude.permissions.Decision` or a `{"action": ...}` dict
+        `halo_harness.permissions.Decision` or a `{"action": ...}` dict
         (repaired by `set_permission_mode`/mode changes before this). Returns
         False when no such request is waiting (already answered/aborted)."""
         slot = self._permission_waiters.get(request_id)
@@ -3777,7 +3778,7 @@ class Session:
         session. Returns True (via the generator's return value) iff the
         turn should end now rather than call the model again."""
         tool_call_flags = tool_call_flags or {}
-        from rolo_claude.hooks import env_file_path
+        from halo_harness.hooks import env_file_path
         ctx = ToolContext(cwd=self.cwd, read_cache=self._read_cache, abort=self.abort,
                            bash_state=self._bash_state, session_dir=self.log.dir / self.log.session_id,
                            registry=self.tool_registry, env=self.tool_env, catalog=self.session_catalog,
@@ -3819,8 +3820,8 @@ class Session:
             Each item's `tool_result` is finalized (in ORIGINAL order) only
             once every child in this batch has actually finished."""
             nonlocal end_turn
-            from rolo_claude.agent.subagent import MAX_CONCURRENT_AGENTS, run_agent_call
-            from rolo_claude.tools.base import ToolResult
+            from halo_harness.agent.subagent import MAX_CONCURRENT_AGENTS, run_agent_call
+            from halo_harness.tools.base import ToolResult
 
             q: "queue.Queue" = queue.Queue()
             _DONE = object()
@@ -4186,12 +4187,12 @@ class Session:
         far>` stashed but unsent forever -- `ensure_cc_state`'s reuse path
         now drains it (capped) before returning, see that function."""
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
-            from rolo_claude.agent import cc_runtime
+            from halo_harness.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
         elif self.model_ref.provider == "cc" and (
             model_ref.provider != "cc" or model_ref.model != self.model_ref.model
         ):
-            from rolo_claude.agent import cc_runtime
+            from halo_harness.agent import cc_runtime
             cc_runtime.close_cc(self)
             self._cc_state = None
         self.model_ref = model_ref
@@ -4227,8 +4228,8 @@ class Session:
         # (agent/loop.py's own command pump and controller.py's `set_model`)
         # to tell the user their effort level just changed under them.
         self.effort_change_note: Optional[str] = None
-        from rolo_claude.providers.profiles import clamp_effort
-        from rolo_claude.providers.request import _anthropic_model_supports_adaptive_thinking
+        from halo_harness.providers.profiles import clamp_effort
+        from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
         if self.effort is not None:
             clamped = clamp_effort(self.effort, self.provider_profile)
             if clamped != self.effort:
@@ -4250,7 +4251,7 @@ class Session:
             if hasattr(tool, "vision"):
                 tool.vision = model_profile.vision
         if self.session_catalog is not None:
-            from rolo_claude.agent.catalog import host_cap
+            from halo_harness.agent.catalog import host_cap
             self.session_catalog.cap = host_cap(model_ref.provider)
             self.session_catalog.vision = model_profile.vision
             while (len(self.session_catalog.names) > self.session_catalog.cap
@@ -4282,7 +4283,7 @@ class Session:
         # or a learned per-endpoint rule) -- what's ACTUALLY sent on
         # essentially every real turn, never the raw configured value that
         # would otherwise read as a lie the moment the next turn goes out.
-        from rolo_claude.providers.profiles import effort_display_override
+        from halo_harness.providers.profiles import effort_display_override
         effort_tag = effort_display_override(self.provider_profile) or self.effort
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
@@ -4333,7 +4334,7 @@ class Session:
             # its own result JSON's queued_turn_count confirms this)
             # rather than queued here for a `_step`/`_dispatch_tools`
             # safe point a cc: turn never runs.
-            from rolo_claude.agent import cc_runtime
+            from halo_harness.agent import cc_runtime
             return cc_runtime.steer_cc(self, text)
         with self._steer_lock:
             if not self._busy.is_set():

@@ -1,6 +1,6 @@
-"""rolo_claude.improve.evidence -- H10 Part B1: failure clusters from the
+"""halo_harness.improve.evidence -- H10 Part B1: failure clusters from the
 telemetry scan of the last `--since` (default 7d; current project slug
-unless `--all-projects`), feeding `rolo_claude.improve.draft`'s ONE
+unless `--all-projects`), feeding `halo_harness.improve.draft`'s ONE
 drafting model call.
 
 Six cluster classes, each keeping <= 6 excerpts of <= 600 chars with
@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from rolo_claude import telemetry
+from halo_harness import telemetry
 
 MAX_EXCERPTS = 6
 MAX_EXCERPT_CHARS = 600

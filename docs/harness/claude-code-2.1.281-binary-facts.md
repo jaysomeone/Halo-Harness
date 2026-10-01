@@ -2,7 +2,7 @@
 
 Source: `claude.exe` 2.1.281 help output, `claude mcp list`, `claude auto-mode defaults`, and string
 greps of the binary. Minified identifiers (`Fm`, `qY`, …) are the binary's own. These override the
-docs-derived notes in the plan where they differ. rolo-claude mirrors these unless a decision in the
+docs-derived notes in the plan where they differ. halo mirrors these unless a decision in the
 plan says otherwise (e.g. "no cyber blocks": the auto-mode defaults, protected paths and other
 safety heuristics are NOT reproduced).
 
@@ -30,12 +30,12 @@ safety heuristics are NOT reproduced).
   `"default"` all, or names `"Bash,Edit,Read"`).
 - Hidden (not in help): `--permission-prompt-tool <tool>` (print only), `--max-turns <turns>` (print
   only), `--system-prompt-file <file>`, `--append-system-prompt-file <file>`.
-- `--theme`: does not exist. (rolo-claude may add its own `--theme`.)
+- `--theme`: does not exist. (halo may add its own `--theme`.)
 - Other flags rolo asked for by name (`--enable-auto-mode`, `--chrome`) were not in this capture:
   re-run `claude --help` and grep the binary for `--chrome`/`enable-auto-mode` when writing `cli.py`,
   and treat every flag in the live help as required (parity rule).
 - `claude auto-mode defaults` → `{allow[17], soft_deny[70], hard_deny[1], environment[21]}`, all
-  strings. NOT reproduced in rolo-claude (no cyber blocks).
+  strings. NOT reproduced in halo (no cyber blocks).
 
 ## 2. Hook timeouts and caps
 - Constants: `Ha=600000, Whe=30000, kwt=6000, Ghe=30000, vXe=5000`. Command hook default 600 s

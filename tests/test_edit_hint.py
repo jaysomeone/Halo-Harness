@@ -41,7 +41,7 @@ def _table() -> dict:
 
 @test
 def test_family_default_applies_to_the_five_named_families(ctx: Ctx):
-    from rolo_claude.providers.profiles import edit_hint_for
+    from halo_harness.providers.profiles import edit_hint_for
     table = _table()
     for model_id in ("deepseek/deepseek-v4.1-flash", "moonshotai/kimi-k3", "z-ai/glm-5.3",
                       "qwen/qwen3-coder", "minimax/minimax-m2"):
@@ -51,7 +51,7 @@ def test_family_default_applies_to_the_five_named_families(ctx: Ctx):
 
 @test
 def test_claude_and_gpt_and_generic_get_no_hint(ctx: Ctx):
-    from rolo_claude.providers.profiles import edit_hint_for
+    from halo_harness.providers.profiles import edit_hint_for
     table = _table()
     for provider, model_id in (("anthropic", "claude-sonnet-5-5"), ("openrouter", "openai/gpt-5"),
                                 ("openrouter", "some-vendor/some-model")):
@@ -61,7 +61,7 @@ def test_claude_and_gpt_and_generic_get_no_hint(ctx: Ctx):
 
 @test
 def test_per_model_row_override_wins_over_the_family_default(ctx: Ctx):
-    from rolo_claude.providers.profiles import edit_hint_for
+    from halo_harness.providers.profiles import edit_hint_for
     table = _table()
     hint = edit_hint_for("openrouter", "deepseek/special-row", table)
     ctx.check(f"the row's own edit_hint wins, got {hint!r}", hint == "a per-model override")
@@ -69,7 +69,7 @@ def test_per_model_row_override_wins_over_the_family_default(ctx: Ctx):
 
 @test
 def test_explicit_empty_row_override_silences_the_family_default(ctx: Ctx):
-    from rolo_claude.providers.profiles import edit_hint_for
+    from halo_harness.providers.profiles import edit_hint_for
     table = _table()
     hint = edit_hint_for("openrouter", "deepseek/silenced-row", table)
     ctx.check(f"an explicit '' row override silences the family default, got {hint!r}", hint is None)
@@ -77,13 +77,13 @@ def test_explicit_empty_row_override_silences_the_family_default(ctx: Ctx):
 
 @test
 def test_no_model_table_at_all_degrades_to_no_hint(ctx: Ctx):
-    from rolo_claude.providers.profiles import edit_hint_for
+    from halo_harness.providers.profiles import edit_hint_for
     ctx.check("an empty table -> no hint, never a crash", edit_hint_for("openrouter", "deepseek/x", {}) is None)
 
 
 @test
 def test_headless_build_session_deepseek_edit_carries_the_line(ctx: Ctx):
-    from rolo_claude import headless
+    from halo_harness import headless
     home = Path(tempfile.mkdtemp(prefix="edit-hint-home-"))
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
@@ -110,7 +110,7 @@ def test_headless_build_session_cc_and_ant_edit_has_no_line_and_wire_is_otherwis
     OTHER tool definition on the wire (name-sorted, exactly what a real
     request would send) is byte-identical to a DeepSeek session's -- this
     feature touches ONLY the Edit tool's own description string."""
-    from rolo_claude import headless
+    from halo_harness import headless
     home = Path(tempfile.mkdtemp(prefix="edit-hint-home-"))
     old_home = os.environ.get("BRIDGE_TEST_HOME")
     old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")

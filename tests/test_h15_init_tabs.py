@@ -1,4 +1,4 @@
-"""tests.test_h15_init_tabs -- H15 Part A: `rolo-claude init`'s tabbed
+"""tests.test_h15_init_tabs -- H15 Part A: `halo init`'s tabbed
 provider setup. Pure-logic pieces (`init_providers.tab_credential_state`/
 `save_tab_credentials`/`refresh_tab_catalog`) and `cmd_init`'s own
 tabs-vs-sequential-picker wiring (the numbered/sequential fallback with no
@@ -36,14 +36,14 @@ class _Env:
                        (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_ENV_FILE") + _PROVIDER_ENV_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15-init-tabs-logic-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
-        os.environ["BRIDGE_STATE_DIR"] = str(d / ".rolo-claude")
+        os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         os.environ["BRIDGE_ENV_FILE"] = str(d / "no-env-file")
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = '{"loggedIn": false}'
         for k in _PROVIDER_ENV_VARS:
             if k != "BRIDGE_TEST_CC_AUTH_STATUS":
                 os.environ.pop(k, None)
         self.home = d
-        self.state_dir = d / ".rolo-claude"
+        self.state_dir = d / ".halo"
         return self
 
     def __exit__(self, *exc):
@@ -99,7 +99,7 @@ def _console():
 
 @test
 def test_tab_state_databricks_not_set_up_needs_both_fields(ctx: Ctx):
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         state = tab_credential_state("databricks")
         ctx.check(f"not configured, got {state}", state["configured"] is False)
@@ -109,7 +109,7 @@ def test_tab_state_databricks_not_set_up_needs_both_fields(ctx: Ctx):
 
 @test
 def test_tab_state_databricks_configured_shows_masked_source(ctx: Ctx):
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         os.environ["DATABRICKS_HOST"] = "https://fake-ws.cloud.databricks.com"
         os.environ["DATABRICKS_TOKEN"] = "fake-token-value"
@@ -122,7 +122,7 @@ def test_tab_state_databricks_configured_shows_masked_source(ctx: Ctx):
 
 @test
 def test_tab_state_openrouter_anthropic_typesafe_shapes(ctx: Ctx):
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         for provider, env_key in (("openrouter", "OPENROUTER_API_KEY"), ("anthropic", "ANTHROPIC_API_KEY"),
                                     ("typesafe", "TYPESAFE_API_KEY")):
@@ -140,7 +140,7 @@ def test_tab_state_openrouter_anthropic_typesafe_shapes(ctx: Ctx):
 @test
 def test_tab_state_claude_reflects_login(ctx: Ctx):
     import json as json_mod
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         ctx.check("not logged in by default", tab_credential_state("claude")["configured"] is False)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json_mod.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -153,7 +153,7 @@ def test_tab_state_claude_reflects_login(ctx: Ctx):
 
 @test
 def test_save_databricks_needs_both_fields(ctx: Ctx):
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env():
         ok, msg = save_tab_credentials("databricks", {"host": "https://x.cloud.databricks.com", "token": ""})
         ctx.check(f"refused without a token, got {(ok, msg)}", ok is False)
@@ -162,7 +162,7 @@ def test_save_databricks_needs_both_fields(ctx: Ctx):
 
 @test
 def test_save_databricks_writes_env_file_and_process_env(ctx: Ctx):
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env() as env:
         ok, msg = save_tab_credentials("databricks", {"host": "https://x.cloud.databricks.com", "token": "tok-1"})
         ctx.check(f"accepted, got {(ok, msg)}", ok is True)
@@ -176,7 +176,7 @@ def test_save_databricks_writes_env_file_and_process_env(ctx: Ctx):
 
 @test
 def test_save_openrouter_blank_key_refused(ctx: Ctx):
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env():
         ok, msg = save_tab_credentials("openrouter", {"key": "   "})
         ctx.check(f"refused, got {(ok, msg)}", ok is False)
@@ -185,7 +185,7 @@ def test_save_openrouter_blank_key_refused(ctx: Ctx):
 @test
 def test_save_claude_reflects_login_without_writing_anything(ctx: Ctx):
     import json as json_mod
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env():
         ok, msg = save_tab_credentials("claude", {})
         ctx.check(f"refused -- not logged in, got {(ok, msg)}", ok is False)
@@ -202,9 +202,9 @@ def test_save_claude_reflects_login_without_writing_anything(ctx: Ctx):
 
 @test
 def test_refresh_tab_catalog_openrouter_writes_the_cache(ctx: Ctx):
-    import rolo_claude.providers.databricks as dbx_mod
-    from rolo_claude.init_providers import refresh_tab_catalog
-    from rolo_claude.providers.databricks import load_models_json
+    import halo_harness.providers.databricks as dbx_mod
+    from halo_harness.init_providers import refresh_tab_catalog
+    from halo_harness.providers.databricks import load_models_json
 
     def _fake_probe(base_url, api_key):
         return [{"id": "vendor/x", "context_length": 1000, "max_output_tokens": 100}]
@@ -224,7 +224,7 @@ def test_refresh_tab_catalog_openrouter_writes_the_cache(ctx: Ctx):
 
 @test
 def test_refresh_tab_catalog_not_configured_is_a_clean_failure(ctx: Ctx):
-    from rolo_claude.init_providers import refresh_tab_catalog
+    from halo_harness.init_providers import refresh_tab_catalog
     with _Env():
         ok, note = refresh_tab_catalog("databricks")
         ctx.check(f"not ok, got {(ok, note)}", ok is False)
@@ -232,7 +232,7 @@ def test_refresh_tab_catalog_not_configured_is_a_clean_failure(ctx: Ctx):
 
 @test
 def test_refresh_tab_catalog_noop_for_claude_and_typesafe(ctx: Ctx):
-    from rolo_claude.init_providers import refresh_tab_catalog
+    from halo_harness.init_providers import refresh_tab_catalog
     with _Env():
         for provider in ("claude", "typesafe"):
             ok, note = refresh_tab_catalog(provider)
@@ -247,10 +247,10 @@ def test_refresh_tab_catalog_noop_for_claude_and_typesafe(ctx: Ctx):
 
 @test
 def test_numbered_fallback_without_a_tty_never_launches_the_tabs_app(ctx: Ctx):
-    import rolo_claude.init_cli as init_cli
+    import halo_harness.init_cli as init_cli
     called = []
     real_run_tabs = None
-    import rolo_claude.tui.dialogs.init_tabs as tabs_mod
+    import halo_harness.tui.dialogs.init_tabs as tabs_mod
     real_run_tabs = tabs_mod.run_init_tabs
 
     def _poison(*a, **kw):
@@ -274,9 +274,9 @@ def test_tabs_app_used_on_a_real_terminal_feeds_the_rest_of_init(ctx: Ctx):
     test is about cmd_init's OWN wiring, not the widget) to prove its
     result actually drives the default-model/permission-mode/summary steps
     that follow, exactly like the old one-provider-at-a-time loop did."""
-    import rolo_claude.init_cli as init_cli
-    import rolo_claude.tui.dialogs.init_tabs as tabs_mod
-    from rolo_claude.theme import get_config_value
+    import halo_harness.init_cli as init_cli
+    import halo_harness.tui.dialogs.init_tabs as tabs_mod
+    from halo_harness.theme import get_config_value
 
     class _FakeTabsApp:
         configured_this_run = ["openrouter"]
@@ -313,8 +313,8 @@ def test_tabs_app_failure_falls_back_to_the_sequential_picker(ctx: Ctx):
     the OLD one-provider-at-a-time loop instead of crashing `init`
     outright -- same "interactive picker failed" shape every other picker
     in this file already uses."""
-    import rolo_claude.init_cli as init_cli
-    import rolo_claude.tui.dialogs.init_tabs as tabs_mod
+    import halo_harness.init_cli as init_cli
+    import halo_harness.tui.dialogs.init_tabs as tabs_mod
 
     def _boom(**kw):  # finding 6: see the previous test's own **kw note
         raise RuntimeError("no real terminal available (simulated)")
@@ -351,8 +351,8 @@ def test_tabs_app_failure_falls_back_to_the_sequential_picker(ctx: Ctx):
 
 @test
 def test_run_init_tabs_skips_typesafe_in_the_default_model_loop(ctx: Ctx):
-    import rolo_claude.init_cli as init_cli
-    import rolo_claude.tui.dialogs.init_tabs as tabs_mod
+    import halo_harness.init_cli as init_cli
+    import halo_harness.tui.dialogs.init_tabs as tabs_mod
 
     class _FakeTypesafeOnlyApp:
         configured_this_run = ["typesafe"]
@@ -385,7 +385,7 @@ def test_run_init_tabs_skips_typesafe_in_the_default_model_loop(ctx: Ctx):
 
 @test
 def test_tab_state_databricks_known_host_renders_token_only_and_team_fallback(ctx: Ctx):
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         # No Claude-Code-settings host discoverable -- team_cfg is the ONLY
         # source for the host hint.
@@ -400,7 +400,7 @@ def test_tab_state_databricks_known_host_renders_token_only_and_team_fallback(ct
 
 @test
 def test_tab_state_databricks_discovered_host_wins_over_team_cfg(ctx: Ctx):
-    from rolo_claude.init_providers import tab_credential_state
+    from halo_harness.init_providers import tab_credential_state
     with _Env():
         os.environ["ANTHROPIC_MODEL"] = "claude-opus-4-6"
         os.environ["DATABRICKS_HOST"] = "https://discovered-ws.cloud.databricks.com"
@@ -417,7 +417,7 @@ def test_save_databricks_token_only_falls_back_to_the_known_discovered_host(ctx:
     test, standing in for it) never has a "host" key to pass at all --
     `save_tab_credentials` used to demand both outright and refuse every
     such save."""
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env() as env:
         os.environ["ANTHROPIC_MODEL"] = "claude-opus-4-6"
         os.environ["DATABRICKS_HOST"] = "https://discovered-ws.cloud.databricks.com"
@@ -432,7 +432,7 @@ def test_save_databricks_token_only_falls_back_to_the_known_discovered_host(ctx:
 
 @test
 def test_save_databricks_token_only_falls_back_to_the_team_host(ctx: Ctx):
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env():
         ok, msg = save_tab_credentials("databricks", {"token": "tok-team"},
                                         team_cfg={"host": "https://team-ws.cloud.databricks.com"})
@@ -447,7 +447,7 @@ def test_save_databricks_token_only_falls_back_to_the_team_host(ctx: Ctx):
 def test_save_databricks_still_refuses_with_no_host_anywhere(ctx: Ctx):
     """Regression guard: the fallback chain must not silently invent a host
     -- genuinely missing everywhere is still refused."""
-    from rolo_claude.init_providers import save_tab_credentials
+    from halo_harness.init_providers import save_tab_credentials
     with _Env():
         ok, msg = save_tab_credentials("databricks", {"token": "tok-only"})
         ctx.check(f"still refused, got {(ok, msg)}", ok is False)
@@ -456,8 +456,8 @@ def test_save_databricks_still_refuses_with_no_host_anywhere(ctx: Ctx):
 
 @test
 def test_save_databricks_applies_team_gateway_and_role_preferences(ctx: Ctx):
-    from rolo_claude.init_providers import save_tab_credentials
-    from rolo_claude.theme import get_config_value
+    from halo_harness.init_providers import save_tab_credentials
+    from halo_harness.theme import get_config_value
     with _Env():
         team_cfg = {
             "host": "https://team-ws.cloud.databricks.com",

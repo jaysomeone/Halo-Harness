@@ -1,4 +1,4 @@
-"""rolo_claude.agent.prune -- deterministic, cache-prefix-preserving pruning
+"""halo_harness.agent.prune -- deterministic, cache-prefix-preserving pruning
 of the DERIVED request (H5 scope A). Applied AFTER agent/derive.py's
 derive_request() and BEFORE providers/request.py's build_request_body(), so
 the session LOG always keeps the full, unpruned text -- only what actually
