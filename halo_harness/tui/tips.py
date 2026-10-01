@@ -97,9 +97,14 @@ TIPS: "tuple[Tip, ...]" = (
     Tip('/rename titles this session so it is easy to find later in /resume'),
     Tip('Ctrl+E opens your $EDITOR to compose a longer prompt'),
     Tip('/keybindings shows every key and chord bound right now'),
-    Tip('Ctrl+X is a chord prefix for session actions; /keybindings lists them all'),
+    Tip('Ctrl+X cuts a selection in the chat box, or is a chord prefix for session actions'),
     Tip('/config shows the current model, permission mode and theme at a glance'),
     Tip('/tips shows every tip that applies to this session right now'),
+    # W2c items 2/3: "copy / paste is off in the chat box" -- two tips
+    # naming the real keys now that Ctrl+C/Ctrl+X/Ctrl+A/Ctrl+V all work on
+    # an in-box selection, not just a screen/transcript one.
+    Tip('Ctrl+A selects all text in the chat box; Ctrl+C then copies it, Ctrl+X cuts it'),
+    Tip('Ctrl+V pastes in the chat box when a clipboard tool is available, or use your terminal shortcut'),
 )
 
 

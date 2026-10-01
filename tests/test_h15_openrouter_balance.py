@@ -434,7 +434,18 @@ def test_or_balance_refresh_worker_failing_endpoint_never_raises_and_leaves_bar_
 def _run_in_mounted_app(fn) -> None:
     """Mounts a real (FakeController-backed) BridgeApp and calls
     `fn(app.status_bar)` from inside its `run_test()` context -- `fn` does
-    its own ctx.check calls via closure."""
+    its own ctx.check calls via closure.
+
+    W2c: widened from 120 to 240 columns -- `cwd` here is the repo's own
+    absolute path on WHATEVER machine runs this suite, long enough on this
+    host (`C:\\Users\\rolo\\...\\Halo-Harness`) that at 120 columns the
+    status bar's own overflow cascade (statusbar.py's `_refresh_display`)
+    now drops the OR-balance segment first to protect the cwd (point 4's
+    own deliberate new priority: low-priority segments drop WHOLESALE
+    before the cwd is ever touched) -- these tests are about the balance
+    segment's own TEXT/position/dimming, never about the width cascade
+    itself, so they need enough room that it never engages regardless of
+    this host's own path length."""
     import asyncio
     from halo_harness.testing.fake_controller import FakeController
     from halo_harness.tui.app import BridgeApp
@@ -443,7 +454,7 @@ def _run_in_mounted_app(fn) -> None:
         fake = FakeController()
         fake.state_dir = Path(tempfile.mkdtemp(prefix="h15-or-balance-bar-"))
         app = BridgeApp(fake, cwd=str(Path(__file__).resolve().parent.parent))
-        async with app.run_test(size=(120, 40)):
+        async with app.run_test(size=(240, 40)):
             fn(app.status_bar)
     asyncio.run(body())
 

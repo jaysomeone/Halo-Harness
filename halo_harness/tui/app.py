@@ -844,6 +844,12 @@ class BridgeApp(App):
         if self._borrowing_card is not None:
             if is_slash_command:
                 self.prompt_input.clear_submitted()
+                # W2c item 1: this slash command used to bypass history
+                # entirely (only the DEFAULT path at the bottom of this
+                # method, via `_submit_prompt`, ever appended) -- Up now
+                # recalls a command typed while a card was borrowing input
+                # the same as any other submission.
+                self._record_submitted_history(text, event.pasted)
                 from halo_harness.tui.slash import handle_slash
                 name, _, args = stripped[1:].partition(" ")
                 await handle_slash(self, name, args)
@@ -869,6 +875,10 @@ class BridgeApp(App):
             # as if nothing were pending; every OTHER card still gates
             # here exactly as before.
             if is_slash_command:
+                # W2c item 1: same history gap as the borrow-card branch
+                # above -- a slash command typed while a permission/plan/
+                # question card is pending used to never reach history.
+                self._record_submitted_history(text, event.pasted)
                 from halo_harness.tui.slash import handle_slash
                 name, _, args = stripped[1:].partition(" ")
                 await handle_slash(self, name, args)
@@ -890,7 +900,11 @@ class BridgeApp(App):
                 return
             # A card with no free-text answer (a rewind confirmation) --
             # unchanged: a steer on the turn running underneath it, same as
-            # before this fix.
+            # before this fix. W2c item 1: THIS steer path (unlike the
+            # common mid-turn steer, which reaches the default path below
+            # via `_submit_prompt`) used to skip history entirely -- Up
+            # must still recall it.
+            self._record_submitted_history(text, event.pasted)
             self.controller.submit(_expand_pasted(text, event.pasted), pasted=event.pasted or None)
             return
         # 1.0.1 hotfix 16: a fresh prompt always re-anchors the transcript
@@ -908,6 +922,26 @@ class BridgeApp(App):
         self.status_bar.set_new_count(0)
         await self._submit_prompt(text, event.pasted)
 
+    def _record_submitted_history(self, text: str, pasted: "dict | None") -> None:
+        """W2c item 1: append to `~/.halo/history.jsonl` and invalidate the
+        Up-arrow cache -- called from EVERY place text the user typed
+        leaves the prompt box as a real submission (a fresh prompt via
+        `_submit_prompt` below, a slash command typed while a card is
+        borrowing/pending, or a steer on the turn running underneath a
+        non-answerable card), not only the default path, so Up always
+        recalls the exact thing just typed regardless of which of those
+        paths it went through. The raw (unexpanded) `text` is stored --
+        same convention `_submit_prompt` always used: a paste placeholder
+        stays a placeholder in history/the transcript, only the MODEL ever
+        sees the expanded form."""
+        from halo_harness import history as history_mod
+
+        try:
+            history_mod.append_history_entry(text, str(self.cwd), pasted_contents=pasted or None)
+        except OSError:
+            pass
+        self._history_cache = []  # re-read next Up-arrow, this entry is now in it
+
     async def _submit_prompt(self, text: str, pasted: dict) -> None:
         # 2.0.0 Launch intro: "a submitted prompt finishes the line
         # instantly" -- covers the one case a keypress alone wouldn't (the
@@ -916,13 +950,7 @@ class BridgeApp(App):
         # once already done/never shown.
         if self.intro_line is not None and not self.intro_line.done:
             self.intro_line.skip()
-        from halo_harness import history as history_mod
-
-        try:
-            history_mod.append_history_entry(text, str(self.cwd), pasted_contents=pasted or None)
-        except OSError:
-            pass
-        self._history_cache = []  # re-read next Up-arrow, this entry is now in it
+        self._record_submitted_history(text, pasted)
         stripped = text.strip()
         # U5 scope A: `!cmd` runs a shell command inline, through the Bash
         # tool + permissions, OUTSIDE the model loop entirely -- checked
@@ -1147,6 +1175,23 @@ class BridgeApp(App):
     # ---- chord prefixes + which-key overlay (U5 scope A) ---------------
 
     def action_chord_prefix(self) -> None:
+        # W2c item 2: bare Ctrl+X is normally the chord PREFIX (session
+        # export/rename/fork/... -- DEFAULT_KEYBINDINGS), caught here before
+        # PromptInput ever sees it (priority=True on the App's own
+        # Binding) -- exactly why plain Ctrl+X never cut a selection in the
+        # chat box. A selection there means the user wants to CUT it
+        # instead (same priority Ctrl+C's own fix above gives copying over
+        # the ordinary interrupt/quit path); `TextArea.action_cut` already
+        # deletes the selection and copies it via `self.app.copy_to_
+        # clipboard` (OSC 52) on its own, so this only adds the belt-and-
+        # suspenders external-tool fallback and a friendly notice on top.
+        if self.screen.focused is self.prompt_input and self.prompt_input.selected_text:
+            selected = self.prompt_input.selected_text
+            self.prompt_input.action_cut()
+            self.run_worker(lambda: self._clipboard_fallback_worker(selected), thread=True,
+                            name="clipboard-fallback")
+            self.notify(f"Cut {len(selected)} characters", timeout=2)
+            return
         self._begin_chord("ctrl+x")
 
     def action_next_subagent(self) -> None:
@@ -1333,9 +1378,20 @@ class BridgeApp(App):
                 entries = history_mod.load_merged_history(str(self.cwd))
             except OSError:
                 entries = []
-            self._history_cache = [e.get("display", "") for e in entries if e.get("display")]
-            self._history_index = len(self._history_cache)
+            all_displays = [e.get("display", "") for e in entries if e.get("display")]
             self._history_draft = self.prompt_input.text
+            # W2c item 1: "with text typed on the first line, Up walks only
+            # entries that start with that text" (Claude Code's own prefix-
+            # filtered recall); "Up on an EMPTY first line recalls the
+            # newest entry" -- no filter at all. The prefix is captured
+            # ONCE, right here at the START of this navigation run (the
+            # same moment `_history_draft` above is captured) -- walking
+            # further with Up/Down never re-derives it from whatever
+            # recalled text is currently showing.
+            prefix = self.prompt_input.document.get_line(0)
+            self._history_cache = ([d for d in all_displays if d.startswith(prefix)] if prefix
+                                    else all_displays)
+            self._history_index = len(self._history_cache)
         if event.direction < 0 and self._history_index > 0:
             self._history_index -= 1
             self.prompt_input.text = self._history_cache[self._history_index]
@@ -1576,6 +1632,22 @@ class BridgeApp(App):
         self.controller.interrupt()
 
     def action_interrupt_or_quit(self) -> None:
+        # W2c item 2: a selection made INSIDE the prompt TextArea (mouse
+        # drag or Shift+arrows) is `prompt_input.selected_text` -- a
+        # COMPLETELY different mechanism from `screen.get_selected_text()`
+        # just below (Textual's own screen-level drag-select, which never
+        # sees into a focused TextArea's own internal selection), so Ctrl+C
+        # in the chat box used to fall straight through to the double-
+        # press-quit arming below instead of copying. Checked FIRST, and
+        # only while the prompt genuinely has focus (a stale selection left
+        # over from before focus moved elsewhere must never be copied).
+        if self.screen.focused is self.prompt_input and self.prompt_input.selected_text:
+            selected = self.prompt_input.selected_text
+            self.copy_to_clipboard(selected)  # OSC 52 -- primary mechanism, works over SSH
+            self.run_worker(lambda: self._clipboard_fallback_worker(selected), thread=True,
+                            name="clipboard-fallback")
+            self.notify(f"Copied {len(selected)} characters", timeout=2)
+            return
         # review finding 16: the priority Ctrl+C binding shadowed
         # Textual's own `screen.copy_text` (Screen binds ctrl+c to it) --
         # a drag-selected transcript run then interrupted the turn and
@@ -1610,6 +1682,34 @@ class BridgeApp(App):
     def _clipboard_fallback_worker(self, text: str) -> None:
         from halo_harness.tui.clipboard import copy_via_external_tool
         copy_via_external_tool(text)
+
+    # ---- Ctrl+V: a real system-clipboard paste (W2c item 3) --------------
+    #
+    # Bracketed paste (the terminal's own native paste -- Ctrl+Shift+V on
+    # most Linux terminals, right-click/Ctrl+V on Windows Terminal, Shift+
+    # middle-click anywhere) already reaches `PromptInput._on_paste`
+    # directly and is completely unchanged by this. Plain Ctrl+V itself is
+    # a DIFFERENT story: `PromptInput.action_paste` posts `PasteRequested`
+    # (never pastes Textual's own in-process `app.clipboard` register,
+    # which nothing here ever populates from the real OS clipboard) and
+    # this handler reads the REAL system clipboard off the UI thread
+    # (`tui/clipboard.py`'s read-direction helper -- a subprocess call can
+    # take real time) before handing the text back to the SAME widget
+    # method a terminal-driven paste's own placeholder rule uses.
+    def on_prompt_input_paste_requested(self, _event: PromptInput.PasteRequested) -> None:
+        self.run_worker(self._paste_from_clipboard_worker, thread=True, name="clipboard-paste")
+
+    def _paste_from_clipboard_worker(self) -> None:
+        from halo_harness.tui.clipboard import read_via_external_tool
+        text = read_via_external_tool()
+        if text:
+            self.call_from_thread(self.prompt_input.paste_text, text)
+        else:
+            self.call_from_thread(
+                self.notify,
+                "Paste with your terminal's shortcut (Ctrl+Shift+V) or Shift+middle-click",
+                timeout=4,
+            )
 
     def action_quit_on_empty(self) -> None:
         if self.prompt_input.text.strip():

@@ -263,6 +263,53 @@ claim with tests, rather than changing that discovery behavior itself.
      data-side contract a later TUI liveness pass renders a live phase
      line from; print/stream-json output is unchanged (no new stdout
      noise).
+8. **Visible thinking, live counters, rotating tips** (W2b, the TUI side
+   of the GLM round; see "Is it frozen?" in
+   [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)):
+   - A live phase line per model call, ticked by the drain timer at least
+     once a second: `Sending request to <model>…`, `Thinking… (12 s, no
+     tokens yet)`, `Thinking… (18 s · 412 reasoning tokens)`, `Writing…`,
+     `Waiting for model…` between tool results and the next call, then
+     `Thought for 18 s` as the summary; after 30 s without data the line
+     says so and names Esc and steering.
+   - The thinking preview shows the last three lines of streamed
+     reasoning in every wire shape, collapses to the summary on
+     completion and stays open under Ctrl+O; reasoning that arrives only
+     with the final chunk shows the summary at that moment.
+   - Status bar: spinner, phase word, elapsed seconds and a received-token
+     counter that climbs as chunks arrive; idle only on turn done (a
+     mid-turn tool step no longer blanks it). Running tool cards show
+     elapsed seconds; a nested sub-agent card shows the child's phase and
+     tool count live.
+   - Rotating tips replace the static prompt placeholder: 52 curated tips
+     plus one generated per slash command, a new tip at launch, after
+     every turn and every 15 s while idle, never while typing; `/tips`
+     lists them; `tips: false` in config.json or `HALO_TIPS=0` restores a
+     plain placeholder; a test checks every command, flag and key a tip
+     names.
+   - The `/effort` card marks a clamped choice inline (`medium (sent as
+     high on this route)`) and the status chip shows the sent value.
+9. **Prompt history recall, copy and paste in the chat box** (W2c):
+   - Up recalls the prompt just typed in halo again: Claude Code's
+     history stores millisecond timestamps and halo stored seconds, so
+     the merged sort put every Claude Code entry after every halo entry.
+     Both units are normalised at read time and halo now writes
+     milliseconds; Up on an empty first line recalls the newest entry, a
+     typed prefix walks only matching entries, Down past the newest
+     restores the draft; a steer or slash command typed over a pending
+     card also reaches history.
+   - Ctrl+C copies a selection made inside the chat box (OSC 52 plus the
+     external-tool fallback) instead of arming quit; Ctrl+X cuts it;
+     Ctrl+A selects all; Ctrl+V pastes from the system clipboard through
+     xclip, xsel or wl-paste, pbpaste, or PowerShell Get-Clipboard when
+     one exists, otherwise it names the terminal's own paste shortcut.
+     Bracketed paste is unchanged. The keys are listed in the F1 help and
+     in TROUBLESHOOTING.md "Copy and paste".
+   - Status bar: the phase word follows the phase line within one drain
+     tick (a reasoning model's thinking-to-writing transition fired no
+     second phase event); when the bar overflows it drops the MCP count,
+     then the balance, then shortens the cwd to its last component
+     instead of slicing a path mid-word.
 
 ## [1.0.1] - 2026-09-30
 

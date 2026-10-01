@@ -53,6 +53,32 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
   `Shift` while dragging any time you want the terminal's own native text
   selection instead, regardless of mouse mode.
 
+## Copy and paste
+
+- **Selecting and copying**: select with the mouse (a drag, anywhere --
+  the chat box or the transcript) and `Ctrl+C` copies it; `Ctrl+A` selects
+  everything currently in the chat box, `Shift`+arrow keys extends a
+  selection from the keyboard there. A selection always wins over `Ctrl+C`'s
+  other job (interrupt/quit) and `Ctrl+X`'s other job (the session-actions
+  chord prefix) -- `Ctrl+X` on a chat-box selection cuts it instead of
+  opening the which-key overlay.
+- **Pasting**: a terminal's own native paste (bracketed paste -- most
+  reliable) always works in the chat box already: `Ctrl+Shift+V` on most
+  Linux terminals, right-click or `Ctrl+V` in Windows Terminal, or
+  `Shift`+middle-click anywhere (X11's PRIMARY-selection paste; `Shift`
+  bypasses the app's own mouse capture the same way it does for a
+  transcript drag-select). Plain `Ctrl+V` ALSO works directly in the chat
+  box now, reading the real system clipboard through whatever tool is on
+  PATH (`xclip`/`xsel`/`wl-paste` on Linux, `pbpaste` on macOS,
+  PowerShell's `Get-Clipboard` on Windows) -- if none is found, it notifies
+  you to use your terminal's own shortcut instead rather than silently
+  doing nothing. A paste of 4 or more lines becomes a `[Pasted text #1]`
+  placeholder either way (the model still sees the full text).
+- **Why a selection sometimes doesn't copy** -- see "PATH, `rg`, clipboard
+  (Linux)" above: the primary mechanism (OSC 52) works over SSH with no
+  extra tooling, but a terminal/multiplexer that doesn't relay it needs
+  `xclip`/`xsel`/`wl-clipboard` on PATH as the fallback.
+
 ## MCP servers
 
 - **A server shows `✗ Failed to connect`** -- `halo mcp get <name>`

@@ -27,6 +27,24 @@ _LIVE_PHASE_WORDS = frozenset({"thinking", "writing", "tool", "waiting"})
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def _cwd_last_component(cwd: str) -> str:
+    """point 4 (Halo 2.0.1 W2c live-capture polish): the final path
+    component of `cwd` (e.g. "/home/kali/project" -> "project") -- used
+    only once the FULL cwd no longer fits, so a narrow terminal still shows
+    a real (if short) path segment instead of `_refresh_display`'s old
+    character-level slice, which cut "/home/kali" down to "/home/kal" then
+    "/home/k" at 140 columns -- neither of which is an actual path. Handles
+    either separator form (never host-os-dependent, same "detected by
+    pattern" spirit as `config.paths.normalize_cwd`) so a Windows-shaped
+    path shortens correctly even read on Linux and vice versa. A path with
+    no separator at all -- already one bare component, or a root -- is
+    returned unchanged."""
+    normalized = cwd.replace("\\", "/").rstrip("/")
+    if "/" not in normalized:
+        return cwd
+    return normalized.rsplit("/", 1)[-1] or cwd
+
+
 class StatusBar(Static):
     def __init__(self, *, cwd: str = "", branch: str = "") -> None:
         super().__init__(classes="status-bar")
@@ -324,24 +342,52 @@ class StatusBar(Static):
         # layout pass (e.g. a bare unit test that never mounted it) --
         # skip shrinking entirely then, same as an unbounded-width terminal.
         width = self.size.width
+        mcp_shown = True
+        or_balance_shown = bool(or_balance_str)
         if width and self.cwd:
-            fixed_bits = [b for b in (ctx_str, cost_str, or_balance_str, mode_str, effort_str, permission_str,
-                                       mcp_str, spinner_str, new_str) if b]
-            # Each segment below is rendered as "<text> " with a "│ "
-            # separator before it -- 3 extra columns per segment is that
-            # separator plus its own trailing space, a close-enough
-            # approximation of the real layout to decide when to shrink
-            # (not a character-exact fit -- Rich wraps a genuine overflow
-            # instead of clipping, so erring a little wide costs nothing).
-            fixed_width = sum(len(b) + 3 for b in fixed_bits) + len(model_label) + 3
-            overflow = fixed_width + len(loc_str) + 3 - width
-            if overflow > 0:
-                if len(loc_str) > overflow:
-                    loc_str = loc_str[:len(loc_str) - overflow].rstrip()
-                else:
-                    overflow -= len(loc_str)
-                    loc_str = ""
-                    model_label = truncate_label_left(model_label, max(4, len(model_label) - overflow))
+            def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
+                bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
+                                     permission_str, mcp_on and mcp_str, spinner_str, new_str) if b]
+                # Each segment below is rendered as "<text> " with a "│ "
+                # separator before it -- 3 extra columns per segment is
+                # that separator plus its own trailing space, a close-
+                # enough approximation of the real layout to decide when to
+                # shrink (not a character-exact fit -- Rich wraps a genuine
+                # overflow instead of clipping, so erring a little wide
+                # costs nothing).
+                fixed_width = sum(len(b) + 3 for b in bits) + len(model_label) + 3
+                return fixed_width + len(loc) + 3 - width
+
+            over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            # W2c (live-capture polish): a 140-column terminal used to
+            # character-slice the cwd ("/home/kali" -> "/home/kal" -> "/
+            # home/k") while the MCP/balance segments stayed fixed-width,
+            # untouchable -- unreadable, and not even a real path any more.
+            # Low-priority segments now drop WHOLESALE instead, in this
+            # order: MCP, then the OR balance; only once BOTH are already
+            # gone does the cwd itself give way, shortened to just its last
+            # path component (never a character slice). The cwd disappears
+            # entirely, and the model label starts shrinking, only as the
+            # final resort -- unchanged from before this brief.
+            if over > 0 and mcp_shown:
+                mcp_shown = False
+                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            if over > 0 and or_balance_shown:
+                or_balance_shown = False
+                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            if over > 0 and loc_str:
+                shortened = _cwd_last_component(self.cwd)
+                loc_str = f"{shortened} ({self.branch})" if self.branch else shortened
+                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            if over > 0 and loc_str:
+                loc_str = ""
+                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            if over > 0:
+                model_label = truncate_label_left(model_label, max(4, len(model_label) - over))
+        if not mcp_shown:
+            mcp_str = ""
+        if not or_balance_shown:
+            or_balance_str = ""
 
         text = Text()
         text.append(f" {model_label} ", style="bold")
@@ -368,8 +414,13 @@ class StatusBar(Static):
         if loc_str:
             text.append("│ ", style="dim")
             text.append(f"{loc_str} ", style="dim")
-        text.append("│ ", style="dim")
-        text.append(f"{mcp_str} ", style=mcp_style)
+        if mcp_str:
+            # W2c: MCP is now a droppable low-priority segment (see the
+            # shrink cascade above) -- guarded the same way or_balance_str/
+            # spinner_str/new_str already were, so dropping it removes the
+            # WHOLE "│ MCP n/m " chunk instead of leaving a bare separator.
+            text.append("│ ", style="dim")
+            text.append(f"{mcp_str} ", style=mcp_style)
         if spinner_str:
             # U5 must-do: "compacting" (Session._run_compaction's own
             # "Compacting..." indicator, via the new `compaction` event

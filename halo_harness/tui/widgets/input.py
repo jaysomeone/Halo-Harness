@@ -74,9 +74,29 @@ class PromptInput(TextArea):
             super().__init__()
             self.direction = direction
 
+    class PasteRequested(Message):
+        """W2c item 3: Ctrl+V. Some Linux terminals never translate this
+        into a bracketed-paste sequence at all (the terminal relies on its
+        own separate shortcut instead, e.g. Ctrl+Shift+V) -- it reaches
+        here as a bare control character, which `TextArea`'s own built-in
+        `action_paste` (bound to this same key, overridden below) would
+        otherwise insert FROM Textual's in-process `app.clipboard` register
+        -- nothing in this app ever populates that from the real OS
+        clipboard, so the built-in action silently "pastes" nothing useful.
+        `app.py`'s own handler reads the REAL system clipboard off the UI
+        thread instead and hands the text back via `paste_text` below."""
+        pass
+
     BINDINGS = [
         Binding("tab", "accept_completion", "Complete", show=False),
         Binding("ctrl+j,alt+enter", "insert_newline", "Newline", show=False),
+        # W2c item 2: TextArea's own inherited binding is "home,ctrl+a" ->
+        # cursor-to-line-start; this REPLACES only the "ctrl+a" half (Ctrl+A
+        # "selects all text in the input", D-TUI/Claude Code convention --
+        # "home" alone still moves the cursor, completely unaffected,
+        # verified: Textual's own per-class binding merge resolves each
+        # keystroke independently, never as an all-or-nothing combo string).
+        Binding("ctrl+a", "select_all", "Select all", show=False),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -195,15 +215,48 @@ class PromptInput(TextArea):
         # call to `TextArea._on_paste` performs the (correct, one-time)
         # insertion itself, using our substituted text.
         event.stop()  # never let it also bubble to the Screen/App
-        text = event.text
-        line_count = text.count("\n") + 1
-        if line_count >= PASTE_PLACEHOLDER_MIN_LINES:
-            self._paste_counter += 1
-            n = self._paste_counter
-            self.pasted[n] = text
-            event.text = f"[Pasted text #{n} +{line_count} lines]"
+        event.text = self._placeholder_text_for(event.text)
         # `_auto_grow`/`_maybe_query_completion` run from `on_text_area_
         # changed` once the (still-pending) real insertion actually happens.
+
+    def _placeholder_text_for(self, text: str) -> str:
+        """The 4+-line-paste-becomes-a-placeholder rule (D-TUI) -- factored
+        out so `_on_paste` (a real terminal paste) and `paste_text` below
+        (a Ctrl+V-triggered system-clipboard paste, no real `events.Paste`
+        object at all) apply the EXACT SAME rule through the EXACT SAME
+        code, never a second, independently-drifting copy of it."""
+        line_count = text.count("\n") + 1
+        if line_count < PASTE_PLACEHOLDER_MIN_LINES:
+            return text
+        self._paste_counter += 1
+        n = self._paste_counter
+        self.pasted[n] = text
+        return f"[Pasted text #{n} +{line_count} lines]"
+
+    # ---- Ctrl+V: a real system-clipboard paste (W2c item 3) --------------
+
+    def action_paste(self) -> None:
+        """Overrides TextArea's own built-in `action_paste` (bound to this
+        same "ctrl+v" key) -- see `PasteRequested`'s own docstring for why
+        pasting Textual's in-process `app.clipboard` register directly,
+        the built-in behavior, is never the right thing here."""
+        if self.read_only:
+            return
+        self.post_message(self.PasteRequested())
+
+    def paste_text(self, text: str) -> None:
+        """Called by `app.py` once a Ctrl+V-triggered system-clipboard read
+        (performed off the UI thread -- a subprocess call can take real
+        time) actually comes back with something -- applies the same
+        paste-placeholder rule `_on_paste` uses for a real terminal paste,
+        then inserts at the current selection/cursor, exactly like
+        TextArea's own built-in paste."""
+        if self.read_only or not text:
+            return
+        display_text = self._placeholder_text_for(text)
+        if result := self._replace_via_keyboard(display_text, *self.selection):
+            self.move_cursor(result.end_location)
+        self._auto_grow()
 
     # ---- / and @ completion ------------------------------------------
 

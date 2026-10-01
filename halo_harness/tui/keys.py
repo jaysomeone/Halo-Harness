@@ -55,14 +55,17 @@ CHORD_TIMEOUT_S = 1.0
 # `tui/app.py`'s own `BridgeApp.BINDINGS` declares directly (priority
 # Textual `Binding`s, never remappable via keybindings.json -- see this
 # module's own docstring on why DEFAULT_KEYBINDINGS deliberately excludes
-# them). Kept here, as plain normalized strings with no textual import, so
-# `tui/tips.py`'s own `key_is_bound` can validate a tip's "Ctrl+O"/"Esc"
-# mention against the full, real set of bound keys -- not just the
-# remappable chord table -- without this pure module ever importing
-# textual itself.
+# them), PLUS (W2c item 2/3) `PromptInput`'s own hardcoded "ctrl+a"/
+# "ctrl+v" (select-all/paste) -- same non-remappable, always-on nature,
+# just declared on the widget instead of the App. Kept here, as plain
+# normalized strings with no textual import, so `tui/tips.py`'s own
+# `key_is_bound` can validate a tip's "Ctrl+O"/"Esc" mention against the
+# full, real set of bound keys -- not just the remappable chord table --
+# without this pure module ever importing textual itself.
 STATIC_APP_BINDINGS = frozenset({
     "ctrl+c", "ctrl+d", "escape", "shift+tab", "ctrl+l", "ctrl+o", "ctrl+r",
     "f1", "ctrl+p", "ctrl+e", "ctrl+x", "ctrl+end", "end", "ctrl+q",
+    "ctrl+a", "ctrl+v",
 })
 
 # ============================================================================

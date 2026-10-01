@@ -141,6 +141,67 @@ def test_schema_keys_present_on_appended_entry(ctx: Ctx):
         _restore_home(old)
 
 
+# ============================================================================
+# W2c item 1: Claude Code's own history.jsonl stores `timestamp` in
+# MILLISECONDS (verified live on the Kali VM: 1790623928405); halo's own
+# file stored SECONDS (`time.time()`, e.g. 1790882425.67, the OLD default).
+# Sorting by the raw value put every Claude Code entry after every halo
+# entry regardless of real time -- Up always recalled the last `claude`
+# prompt for that directory, never the one just typed in halo.
+# ============================================================================
+
+@test
+def test_mixed_ms_and_seconds_timestamps_sort_by_real_time_not_raw_value(ctx: Ctx):
+    """The exact bug: a ms Claude entry that is NEWER in real time than a
+    seconds halo entry, and an older ms Claude entry too -- both units
+    read back and interleaved correctly, oldest-first, by REAL time (never
+    by raw magnitude, which would put every ms value after every seconds
+    one)."""
+    tmp, old = _fresh_home()
+    try:
+        older_claude_ms = 1790623928405  # real time ~1790623928.405s -- verified live
+        halo_seconds = 1790882425.67  # real time ~1790882425.67s -- verified live, NEWER than the above
+        newer_claude_ms = 1790999999000  # real time ~1790999999.0s -- NEWER than both
+        _write_jsonl(h.claude_history_path(), [
+            {"display": "older claude (ms)", "project": str(tmp), "timestamp": older_claude_ms},
+            {"display": "newer claude (ms)", "project": str(tmp), "timestamp": newer_claude_ms},
+        ])
+        h.append_history_entry("halo entry (seconds)", str(tmp), timestamp=halo_seconds)
+        merged = h.load_merged_history(cwd=str(tmp))
+        displays = [e["display"] for e in merged]
+        ctx.check(f"oldest-first by REAL time despite raw ms values dwarfing the raw seconds "
+                  f"one, got {displays!r}",
+                  displays == ["older claude (ms)", "halo entry (seconds)", "newer claude (ms)"])
+    finally:
+        _restore_home(old)
+
+
+@test
+def test_append_history_entry_now_default_writes_milliseconds(ctx: Ctx):
+    """`append_history_entry`'s own "now" default (no explicit `timestamp`)
+    now writes MILLISECONDS -- Claude Code's own schema -- not seconds. An
+    explicit `timestamp` argument (every other test in this file) is
+    untouched by this change; only the "now" default's unit moved."""
+    import time as time_mod
+
+    tmp, old = _fresh_home()
+    try:
+        before_ms = time_mod.time() * 1000.0
+        entry = h.append_history_entry("now entry", str(tmp))
+        after_ms = time_mod.time() * 1000.0
+        ts = entry["timestamp"]
+        ctx.check(f"the default timestamp is ms-shaped (> 1e11), got {ts!r}", ts > 1e11)
+        ctx.check(f"it is genuinely 'now' in milliseconds, got {ts!r} not within "
+                  f"[{before_ms!r}, {after_ms!r}]", before_ms <= ts <= after_ms + 1000)
+        # An explicit timestamp (e.g. a seconds-shaped one, every other
+        # fixture in this file) must still round-trip completely untouched.
+        explicit = h.append_history_entry("explicit entry", str(tmp), timestamp=42.0)
+        ctx.check(f"an explicit timestamp is never rescaled, got {explicit['timestamp']!r}",
+                  explicit["timestamp"] == 42.0)
+    finally:
+        _restore_home(old)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

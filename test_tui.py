@@ -5760,6 +5760,478 @@ def test_svg_snapshots_phase_line_and_tips_placeholder(ctx: Ctx):
     asyncio.run(body())
 
 
+# ============================================================================
+# W2c item 1: prompt history recall -- rolo live, "using the up arrow ...
+# does not bring up the last message to edit if something happened". The
+# mixed-ms/seconds-timestamp sort fix itself lives in tests/test_history.py
+# (pure, no textual); these are the TUI-layer pieces: the prefix filter,
+# draft restore, and the real end-to-end submit -> Up round trip, plus the
+# two bypass paths (a steer, a slash command typed over a pending card)
+# that used to skip the history append entirely.
+# ============================================================================
+
+def _scoped_history_home():
+    """A FRESH BRIDGE_TEST_HOME for one test -- never the shared module-
+    level scratch dir `ensure_scoped_state_dir_once()` set at import time,
+    so one test's own history.jsonl entries can never leak into (or be
+    polluted by) another test's. Returns (tmp_path, restore_callable)."""
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    tmp = Path(tempfile.mkdtemp(prefix="halo-history-nav-"))
+    os.environ["BRIDGE_TEST_HOME"] = str(tmp)
+
+    def _restore():
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
+    return tmp, _restore
+
+
+@test
+def test_up_arrow_prefix_filter_walks_only_matching_entries(ctx: Ctx):
+    """"with text typed on the first line, Up walks only entries that
+    start with that text" (Claude Code's own prefix-filtered recall)."""
+    from halo_harness import history as history_mod
+
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            history_mod.append_history_entry("fix the bug", str(app.cwd), timestamp=1.0)
+            history_mod.append_history_entry("add a feature", str(app.cwd), timestamp=2.0)
+            history_mod.append_history_entry("fix the typo", str(app.cwd), timestamp=3.0)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "fix")
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"prefix-filtered Up recalls the newest MATCHING entry, "
+                          f"got {app.prompt_input.text!r}", app.prompt_input.text == "fix the typo")
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"a second Up walks to the NEXT matching entry, skipping the "
+                          f"non-matching one in between, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "fix the bug")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+@test
+def test_up_arrow_empty_box_recalls_newest_entry_unfiltered(ctx: Ctx):
+    from halo_harness import history as history_mod
+
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            history_mod.append_history_entry("fix the bug", str(app.cwd), timestamp=1.0)
+            history_mod.append_history_entry("add a feature", str(app.cwd), timestamp=2.0)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"an empty first line recalls the newest entry regardless of its "
+                          f"text, got {app.prompt_input.text!r}", app.prompt_input.text == "add a feature")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+@test
+def test_down_past_the_newest_restores_the_unsent_draft(ctx: Ctx):
+    """The draft typed before Up was first pressed must be a PREFIX of the
+    history entry it recalls (W2c's own prefix filter, pinned separately
+    above, means an unrelated draft would simply find no match at all and
+    Up would be a no-op) -- "an old" recalls "an old prompt", and Down past
+    the newest hands back exactly "an old", not the full recalled text."""
+    from halo_harness import history as history_mod
+
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            history_mod.append_history_entry("an old prompt", str(app.cwd), timestamp=1.0)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "an old")
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"Up recalls the matching old prompt, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "an old prompt")
+                await pilot.press("down")
+                await app._drain()
+                ctx.check(f"Down past the newest restores the unsent draft, got "
+                          f"{app.prompt_input.text!r}", app.prompt_input.text == "an old")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+@test
+def test_submit_then_up_recalls_the_exact_prompt_just_sent(ctx: Ctx):
+    """End-to-end: rolo's own report -- submit a real prompt through the
+    pilot's own keyboard path (never history.append_history_entry called
+    directly), then Up must hand back that EXACT text."""
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "what does this repo do")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot, n=10, pause=0.02)
+                ctx.check("the prompt box is empty right after submit", app.prompt_input.text == "")
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"Up recalls the exact prompt just submitted, got "
+                          f"{app.prompt_input.text!r}", app.prompt_input.text == "what does this repo do")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+@test
+def test_steer_on_a_non_answerable_pending_card_still_reaches_history(ctx: Ctx):
+    """A steer typed while a card with no free-text answer (a rewind
+    confirmation) is pending used to bypass `_submit_prompt` -- and its
+    history append -- entirely."""
+    from halo_harness.tui.widgets.cards import RewindCard
+
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                card = RewindCard(step={"id": "s1", "ts": 0, "label": "x", "files": []},
+                                   verb="rewind", on_decide=lambda confirmed: None)
+                app.set_pending_card(card)
+                await pilot.click("#prompt-input")
+                await _type(pilot, "steer while rewind pending")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot, n=5, pause=0.02)
+                ctx.check("the steer reached the controller (not swallowed)",
+                          "steer while rewind pending" in fake.submitted)
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"Up recalls that steer, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "steer while rewind pending")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+@test
+def test_slash_command_typed_over_a_pending_card_still_reaches_history(ctx: Ctx):
+    """A slash command typed while a PermissionCard is pending used to
+    bypass `_submit_prompt` (and its history append) entirely -- it only
+    ever reached history when nothing was pending at all."""
+    tmp, restore = _scoped_history_home()
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.05)
+                card = _pending_permission_card(app)
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/effort")
+                await pilot.press("enter")
+                await _drain_a_few(app, pilot, n=5, pause=0.02)
+                ctx.check("the ORIGINAL permission card is still pending, untouched",
+                          app.pending_card is card)
+                await pilot.press("up")
+                await app._drain()
+                ctx.check(f"Up recalls the slash command typed while the card was pending, "
+                          f"got {app.prompt_input.text!r}", app.prompt_input.text == "/effort")
+        asyncio.run(body())
+    finally:
+        restore()
+
+
+# ============================================================================
+# W2c items 2/3: copy / cut / select-all / paste in the chat box -- rolo
+# live, "copy / paste is off in the chat box too". `screen.get_selected_
+# text()`'s OWN branch in `action_interrupt_or_quit` (a transcript/screen-
+# level drag-select) is COMPLETELY UNCHANGED by this round -- it is only
+# ever reached once the NEW prompt-input-selection branch above it finds
+# nothing to copy; the pre-existing `test_ctrl_c_twice_quits_cleanly` above
+# already pins "no selection anywhere -> double-press quit" untouched.
+# ============================================================================
+
+@test
+def test_ctrl_c_with_input_selection_copies_and_does_not_arm_quit(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "secret text")
+            await pilot.press("shift+home")  # Shift+arrows: select back to line start (D-TUI)
+            ctx.check(f"a selection now exists in the prompt box, got {app.prompt_input.selected_text!r}",
+                      app.prompt_input.selected_text == "secret text")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("ctrl+c")
+            ctx.check(f"a 'Copied N characters' notice was shown, got {notified}",
+                      any("Copied 11 characters" in m for m in notified))
+            ctx.check(f"the text landed in Textual's own clipboard register, got {app.clipboard!r}",
+                      app.clipboard == "secret text")
+            ctx.check("Ctrl+C did not arm the double-press quit countdown",
+                      app._ctrl_c_deadline is None)
+            ctx.check(f"the text itself is untouched (copy, not cut), got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "secret text")
+    asyncio.run(body())
+
+
+@test
+def test_ctrl_c_with_no_selection_keeps_todays_interrupt_quit_behavior(ctx: Ctx):
+    """W2c item 2 test list, named explicitly alongside the pre-existing
+    `test_ctrl_c_twice_quits_cleanly` above (which this is a focused,
+    single-press slice of): an EMPTY prompt box has no `selected_text` at
+    all, so the new copy branch is a no-op and the first Ctrl+C arms the
+    double-press quit exactly as it always did."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            ctx.check("no selection in the empty prompt box", not app.prompt_input.selected_text)
+            ctx.check("nothing selected on the screen either", not app.screen.get_selected_text())
+            await pilot.press("ctrl+c")
+            ctx.check("the FIRST Ctrl+C with nothing selected arms the double-press quit",
+                      app._ctrl_c_deadline is not None)
+    asyncio.run(body())
+
+
+@test
+def test_ctrl_x_cuts_an_input_selection_instead_of_opening_the_chord(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "cut me")
+            await pilot.press("shift+home")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("ctrl+x")
+            ctx.check(f"the selection was deleted from the input, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "")
+            ctx.check(f"it landed in the clipboard register too, got {app.clipboard!r}",
+                      app.clipboard == "cut me")
+            ctx.check(f"a 'Cut N characters' notice was shown, got {notified}",
+                      any("Cut 6 characters" in m for m in notified))
+            ctx.check("the chord did NOT open (a selection means cut, not the chord)",
+                      app._pending_chord is None and app.which_key.display is False)
+    asyncio.run(body())
+
+
+@test
+def test_ctrl_a_selects_all_text_in_the_chat_box(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "select everything")
+            await pilot.press("ctrl+a")
+            ctx.check(f"the whole line is now selected, got {app.prompt_input.selected_text!r}",
+                      app.prompt_input.selected_text == "select everything")
+    asyncio.run(body())
+
+
+@test
+def test_ctrl_v_with_stubbed_clipboard_tool_inserts_the_text(ctx: Ctx):
+    import halo_harness.tui.clipboard as clipboard_mod
+
+    old_read = clipboard_mod.read_via_external_tool
+    clipboard_mod.read_via_external_tool = lambda **kw: "pasted from the system clipboard"
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await pilot.press("ctrl+v")
+                await app.workers.wait_for_complete()
+                ctx.check(f"the stubbed clipboard text was inserted, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "pasted from the system clipboard")
+        asyncio.run(body())
+    finally:
+        clipboard_mod.read_via_external_tool = old_read
+
+
+@test
+def test_ctrl_v_applies_the_four_line_placeholder_rule(ctx: Ctx):
+    import halo_harness.tui.clipboard as clipboard_mod
+
+    long_text = "line1\nline2\nline3\nline4\nline5"
+    old_read = clipboard_mod.read_via_external_tool
+    clipboard_mod.read_via_external_tool = lambda **kw: long_text
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await pilot.press("ctrl+v")
+                await app.workers.wait_for_complete()
+                ctx.check(f"a 5-line paste became the placeholder, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "[Pasted text #1 +5 lines]")
+                ctx.check(f"the FULL text is stashed for the model to see later, got "
+                          f"{app.prompt_input.pasted!r}", app.prompt_input.pasted.get(1) == long_text)
+        asyncio.run(body())
+    finally:
+        clipboard_mod.read_via_external_tool = old_read
+
+
+@test
+def test_ctrl_v_with_no_clipboard_tool_notifies_instead_of_pasting(ctx: Ctx):
+    import halo_harness.tui.clipboard as clipboard_mod
+
+    old_read = clipboard_mod.read_via_external_tool
+    clipboard_mod.read_via_external_tool = lambda **kw: None
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                notified = []
+                app.notify = lambda msg, **kw: notified.append(msg)
+                await pilot.press("ctrl+v")
+                await app.workers.wait_for_complete()
+                ctx.check(f"nothing was inserted, got {app.prompt_input.text!r}", app.prompt_input.text == "")
+                ctx.check(f"the terminal-shortcut notice was shown, got {notified}",
+                          any("terminal" in m.lower() and "shift" in m.lower() for m in notified))
+        asyncio.run(body())
+    finally:
+        clipboard_mod.read_via_external_tool = old_read
+
+
+@test
+def test_help_text_lists_copy_cut_select_all_and_paste_keys(ctx: Ctx):
+    """W2c items 2/3 test list: "the help text lists the keys"."""
+    from halo_harness.tui.dialogs.help import _KEY_ROWS
+
+    rows = dict(_KEY_ROWS)
+    ctx.check(f"Ctrl+A row exists and names select-all, got {rows.get('Ctrl+A')!r}",
+              "elect all" in rows.get("Ctrl+A", ""))
+    ctx.check(f"Ctrl+V row exists and names paste, got {rows.get('Ctrl+V')!r}",
+              "aste" in rows.get("Ctrl+V", ""))
+    ctx.check(f"Ctrl+X row names cutting a selection, got {rows.get('Ctrl+X')!r}",
+              "Cuts a chat-box selection" in rows.get("Ctrl+X", ""))
+    ctx.check(f"Ctrl+C row mentions copying a selection, got {rows.get('Ctrl+C (x2)')!r}",
+              "copies it" in rows.get("Ctrl+C (x2)", ""))
+
+
+# ============================================================================
+# W2c item 4: two polish items from the Kali live capture of W2b.
+# ============================================================================
+
+@test
+def test_cwd_last_component_handles_both_separator_forms(ctx: Ctx):
+    from halo_harness.tui.widgets.statusbar import _cwd_last_component
+
+    ctx.check("POSIX form", _cwd_last_component("/home/kali/project") == "project")
+    ctx.check("Windows form", _cwd_last_component("C:\\Users\\rolo\\project") == "project")
+    ctx.check("a trailing slash is ignored", _cwd_last_component("/home/kali/project/") == "project")
+    ctx.check("no separator at all -> unchanged", _cwd_last_component("project") == "project")
+
+
+@test
+def test_status_bar_phase_word_follows_the_phase_line_without_a_second_phase_event(ctx: Ctx):
+    """The live capture: the status-bar cluster said 'thinking 2 s' while
+    the transcript's own phase line already said 'Writing…'. Root cause:
+    `agent/loop.py`'s own `chunk_started` latch fires the 'phase'/
+    first_token event exactly ONCE per call, for whichever kind streams
+    first -- a reasoning model that thinks before writing never gets a
+    SECOND phase event for the reasoning -> text transition within that
+    same call, so the cluster (driven only by that event) used to stay on
+    'thinking' while the phase line (driven straight off content arrival
+    via `Transcript.append_text`'s own `enter_writing()`) had already moved
+    on."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            # ONLY ONE first_token event, kind=reasoning -- the real one-shot
+            # latch; no second phase event ever arrives for the reasoning ->
+            # text transition within this same call.
+            app._local_events.put(ev.phase(state="first_token", turn=1, kind="reasoning"))
+            app._local_events.put(ev.thinking_delta("considering this", turn=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"both start out on 'thinking', got cluster={app.status_bar.phase!r}",
+                      app.status_bar.phase == "thinking")
+            phase_line = app.transcript._phase_lines.get((None, 1))
+            ctx.check("the phase line is reasoning too", phase_line.phase_state == "reasoning")
+
+            # The model moves straight into its answer -- text_delta only,
+            # no second "phase" event at all.
+            app._local_events.put(ev.text_delta("the answer is", turn=1, index=1))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"the transcript's own phase line moved to writing, got "
+                      f"{phase_line.phase_state!r}", phase_line.phase_state == "writing")
+            ctx.check(f"the status bar cluster followed within the SAME drain tick, got "
+                      f"{app.status_bar.phase!r} (rendered: {str(app.status_bar.render())!r})",
+                      app.status_bar.phase == "writing")
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_drops_mcp_then_balance_then_shortens_cwd_before_a_mid_word_slice(ctx: Ctx):
+    """A 140-column terminal used to character-slice the cwd ("/home/kali"
+    -> "/home/kal" -> "/home/k") while the MCP/balance segments stayed
+    fixed-width -- low-priority segments must now drop WHOLESALE first
+    (MCP, then the balance), and the cwd itself must shorten to its last
+    path component, never a mid-word slice. Pilot test at 100, 120 and 140
+    columns, per the brief."""
+    from halo_harness.testing.fake_controller import DEFAULT_MODEL
+
+    cwd = "/home/kali/vibes/appDev/some-very-long-project-name"
+
+    async def rendered_at(width: int) -> str:
+        fake = FakeController()
+        app = BridgeApp(fake, cwd=Path(cwd))
+        async with app.run_test(size=(width, 40)) as pilot:
+            await pilot.pause(0.05)
+            await app.workers.wait_for_complete()  # let the automatic git-branch worker settle first
+            app.status_bar.mcp_connected = 2
+            app.status_bar.mcp_total = 3
+            app.status_bar.set_or_balance("OR $12.40 left")
+            app.status_bar.set_cwd_branch(cwd, "main")
+            return str(app.status_bar.render())
+
+    async def body():
+        at_140 = await rendered_at(140)
+        ctx.check(f"at 140 cols the FULL cwd survives intact (never cut mid-word), got {at_140!r}",
+                  cwd in at_140 and "(main)" in at_140)
+        ctx.check(f"MCP and the OR balance drop first to make room, got {at_140!r}",
+                  "MCP" not in at_140 and "OR $12.40" not in at_140)
+        ctx.check(f"no mid-word fragment of the path leaked through, got {at_140!r}",
+                  "/home/kal " not in at_140 and "/home/k " not in at_140)
+
+        at_120 = await rendered_at(120)
+        ctx.check(f"at 120 cols the cwd shortens to its LAST component, got {at_120!r}",
+                  "some-very-long-project-name" in at_120 and cwd not in at_120)
+
+        at_100 = await rendered_at(100)
+        ctx.check(f"at 100 cols the cwd is gone entirely, got {at_100!r}",
+                  "some-very-long-project-name" not in at_100)
+        ctx.check(f"the model label is still intact at 100 cols (cwd gives way first), got {at_100!r}",
+                  DEFAULT_MODEL in at_100)
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

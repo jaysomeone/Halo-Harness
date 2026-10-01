@@ -15,7 +15,11 @@ _KEY_ROWS = [
     ("Enter", "Submit"),
     ("\\ + Enter, Ctrl+J, Alt+Enter", "Insert a newline"),
     ("Esc", "Interrupt the running turn / dismiss a card / deny"),
-    ("Ctrl+C (x2)", "Interrupt, then quit (Ctrl+C on a selection copies it instead)"),
+    ("Ctrl+C (x2)", "Interrupt, then quit (Ctrl+C on a selection -- in the chat box or the "
+                     "transcript -- copies it instead)"),
+    ("Ctrl+A", "Select all text in the chat box"),
+    ("Ctrl+V", "Paste the system clipboard into the chat box (notifies if no clipboard "
+                "tool is found -- use your terminal's own paste instead)"),
     ("Ctrl+D", "Quit (on an empty prompt)"),
     ("Shift+Tab", "Cycle permission mode: default -> acceptEdits -> plan -> auto"),
     ("Ctrl+L", "Clear the transcript view"),
@@ -24,8 +28,9 @@ _KEY_ROWS = [
     ("Ctrl+R", "Search prompt history"),
     ("Ctrl+P", "Command palette (slash commands, skills, files, sessions)"),
     ("Ctrl+E", "Edit the current prompt draft in $VISUAL/$EDITOR"),
-    ("Ctrl+X ...", "Chord prefix -- shows a which-key overlay listing continuations "
-                    "(export/rename/fork/undo/redo/stats/child-session nav; see /keybindings)"),
+    ("Ctrl+X", "Cuts a chat-box selection; otherwise a chord prefix -- shows a which-key "
+                "overlay listing continuations (export/rename/fork/undo/redo/stats/"
+                "child-session nav; see /keybindings)"),
     ("PgUp / PgDn", "Scroll the transcript"),
     ("Tab", "Accept the highlighted / completion"),
     ("F1", "This help"),

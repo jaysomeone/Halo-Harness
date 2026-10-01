@@ -243,12 +243,29 @@ async def _apply_event_inner(app, event) -> None:
         # A3: the status bar's own received-token counter -- never for a
         # child's delta (finding 11's own "never touch the MAIN status bar"
         # rule, unchanged by this brief).
+        #
+        # W2c (live-capture polish): `set_phase_word` BEFORE `add_received_
+        # chars`, never after -- a word CHANGE resets the char counter, so
+        # reversing this order would add this delta's own chars and then
+        # immediately zero them back out. This mirrors `append_text` just
+        # above's own direct `enter_writing()` call on the transcript's
+        # phase line, for the SAME reason: `agent/loop.py`'s own
+        # `chunk_started` latch fires the "phase"/first_token event ONCE
+        # per call, for whichever kind (reasoning/tool/text) streams first
+        # -- a model that reasons before writing never gets a SECOND phase
+        # event for the reasoning -> text transition, so the cluster used to
+        # stay stuck on "thinking" while the phase line (driven straight off
+        # content arrival, not off that one-shot event) had already moved on
+        # to "Writing". Reacting to the SAME delta here closes that gap:
+        # same event, same drain tick, one source for both widgets' words.
         if agent_id is None:
+            app.status_bar.set_phase_word("writing")
             app.status_bar.add_received_chars(len(text))
     elif kind == "thinking_delta":
         text = data.get("text", "")
         await app.transcript.append_thinking(turn, data.get("index", 0), text, agent_id=agent_id)
         if agent_id is None:
+            app.status_bar.set_phase_word("thinking")
             app.status_bar.add_received_chars(len(text))
     elif kind == "tool_use_ready":
         await _mount_tool_card(app, data)

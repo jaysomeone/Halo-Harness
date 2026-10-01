@@ -1,12 +1,19 @@
 """halo_harness.tui.clipboard -- clipboard fallback for Linux terminals (U5
-scope E). Textual's own `App.copy_to_clipboard` already emits an OSC 52
-escape sequence (works over SSH, tmux-passthrough permitting), which is
-`tui/app.py`'s primary mechanism (review finding 16). Some terminals/multi-
-plexer configs don't relay OSC 52 at all -- this module is the belt-and-
-suspenders fallback: best-effort, also pipe the text into `xclip`/`wl-copy`
-if either is on PATH, so at least ONE mechanism lands the text on the
-system clipboard. Pure subprocess plumbing, no textual import, so it's
-unit-testable without a running App.
+scope E), plus (W2c item 3) the READ-direction counterpart Ctrl+V needs.
+Textual's own `App.copy_to_clipboard` already emits an OSC 52 escape
+sequence (works over SSH, tmux-passthrough permitting), which is
+`tui/app.py`'s primary COPY mechanism (review finding 16). Some terminals/
+multiplexer configs don't relay OSC 52 at all -- `copy_via_external_tool`
+below is the belt-and-suspenders fallback: best-effort, also pipe the text
+into `xclip`/`wl-copy` if either is on PATH, so at least ONE mechanism
+lands the text on the system clipboard. `read_via_external_tool` is the
+other direction entirely: Ctrl+V has no OSC 52 equivalent to rely on at all
+(OSC 52's own "read" variant is disabled by default in most terminals, as a
+security measure), so a real system-clipboard PASTE always goes through one
+of these external tools, by PATH/platform detection -- `xclip -o`/`xsel -o`
+on X11, `wl-paste` on Wayland, `pbpaste` on macOS, PowerShell's own
+`Get-Clipboard` on win32. Pure subprocess plumbing, no textual import, so
+it's unit-testable without a running App.
 
 `doctor.py` is H8's module (docs/harness/H8-brief.md lists it under H8's
 own files) -- rather than edit a contested file, `clipboard_doctor_line()`
@@ -55,6 +62,51 @@ def copy_via_external_tool(text: str, *, timeout_s: float = 3.0) -> bool:
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
+
+
+# The READ-direction argv for each name `find_clipboard_tool` can return --
+# never a separate detection pass: wl-copy/wl-paste, xclip and xsel each
+# ship as one package/pair, so "wl-copy is on PATH" is already a reliable
+# proxy for "wl-paste is too" (same convention `find_clipboard_tool` already
+# uses for the write direction).
+_LINUX_CLIPBOARD_READ_ARGV = {
+    "wl-copy": ["wl-paste", "--no-newline"],
+    "xclip": ["xclip", "-selection", "clipboard", "-o"],
+    "xsel": ["xsel", "--clipboard", "--output"],
+}
+
+_MACOS_PASTE_ARGV = ["pbpaste"]
+_WINDOWS_PASTE_ARGV = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"]
+
+
+def read_via_external_tool(*, timeout_s: float = 3.0) -> "Optional[str]":
+    """Best-effort read of the REAL system clipboard -- `None` for "nothing
+    usable" (no tool available, the run failed, or it timed out), never
+    raises. `tui/app.py`'s own Ctrl+V handler shows the same "paste with
+    your terminal" notice `doctor`'s clipboard line already points at when
+    this comes back `None`. An empty clipboard also comes back as `None`
+    (via the empty-string-is-falsy check its one caller already does) --
+    pasting nothing is a no-op either way, so this never needs to
+    distinguish "empty" from "no tool" any more precisely than that."""
+    if sys.platform == "win32":
+        argv = _WINDOWS_PASTE_ARGV
+    elif sys.platform == "darwin":
+        argv = _MACOS_PASTE_ARGV
+    else:
+        found = find_clipboard_tool()
+        if found is None:
+            return None
+        name, _write_argv = found
+        argv = _LINUX_CLIPBOARD_READ_ARGV.get(name)
+        if argv is None:
+            return None
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+        if proc.returncode != 0:
+            return None
+        return proc.stdout or None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def clipboard_doctor_line() -> str:
