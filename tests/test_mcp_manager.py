@@ -163,6 +163,71 @@ def test_parse_server_ws_and_sdk_skipped_with_reason(ctx: Ctx):
 
 
 @test
+def test_websocket_client_available_is_false_against_the_real_pinned_sdk(ctx: Ctx):
+    """Verified, not assumed: `mcp==2.2.0` (requirements.lock) has no
+    `mcp.client.websocket` module at all."""
+    ctx.check("mcp 2.2.0 has no websocket client", M.websocket_client_available() is False)
+
+
+@test
+def test_ws_and_sdk_get_distinct_reasons(ctx: Ctx):
+    ws_cfg = M.parse_server("s", {"type": "ws", "url": "wss://x"}, scope="user")
+    sdk_cfg = M.parse_server("s", {"type": "sdk", "url": "x"}, scope="user")
+    ctx.check(f"ws names the SDK limitation, got {ws_cfg.disabled_reason!r}",
+              "websocket client" in ws_cfg.disabled_reason.lower())
+    ctx.check(f"sdk names the structural reason, got {sdk_cfg.disabled_reason!r}",
+              "agent sdk" in sdk_cfg.disabled_reason.lower())
+    ctx.check("the two reasons are not the same text", ws_cfg.disabled_reason != sdk_cfg.disabled_reason)
+
+
+@test
+def test_ws_becomes_a_real_config_once_the_sdk_supports_it(ctx: Ctx):
+    """Forward-looking: once a future `mcp` version ships a websocket
+    client, `ws`/`websocket` entries stop being disabled on their own --
+    `sdk` never does (see test_ws_and_sdk_get_distinct_reasons)."""
+    old = M.websocket_client_available
+    M.websocket_client_available = lambda: True
+    try:
+        cfg = M.parse_server("s", {"type": "ws", "url": "wss://example/mcp"}, scope="user")
+        ctx.check(f"no longer disabled, got disabled_reason={cfg.disabled_reason!r}", cfg.disabled_reason is None)
+        ctx.check("type preserved", cfg.type == "ws")
+        ctx.check("url carried through like http/sse", cfg.url == "wss://example/mcp")
+
+        sdk_cfg = M.parse_server("s", {"type": "sdk", "url": "x"}, scope="user")
+        ctx.check("'sdk' is STILL disabled even when ws becomes available",
+                  sdk_cfg.disabled_reason is not None)
+    finally:
+        M.websocket_client_available = old
+
+
+@test
+def test_disabled_handle_state_and_error_carry_the_reason(ctx: Ctx):
+    """W4b "explain the zero"/WHY: a disabled handle's `.error` is its own
+    `disabled_reason`, so `mcp list`/`/mcp`/doctor's WHY display covers a
+    disabled server the same way it covers a real connect failure."""
+    import asyncio
+    from halo_harness.mcp.client import McpLoop
+    cfg = M.parse_server("s", {"type": "sdk", "url": "x"}, scope="user")
+    loop = McpLoop()
+    try:
+        h = M.McpServerHandle(cfg, loop, tool_env={}, cwd=REPO_DIR)
+        ctx.check(f"state is disabled, got {h.state!r}", h.state == "disabled")
+        ctx.check(f"error carries the disabled_reason, got {h.error!r}", h.error == cfg.disabled_reason)
+        h.start()  # must be a safe no-op, never attempt to connect
+        ctx.check("start() on a disabled handle never changes its state", h.state == "disabled")
+    finally:
+        loop.close()
+
+
+@test
+def test_mcp_cli_shows_the_disabled_reason_next_to_the_status(ctx: Ctx):
+    from halo_harness.mcp_cli import format_mcp_list_line
+    cfg = M.parse_server("s", {"type": "sdk", "url": "x"}, scope="user")
+    line = format_mcp_list_line({"name": "s", "type": "sdk", "state": "disabled", "error": cfg.disabled_reason})
+    ctx.check(f"the structural reason is shown, got {line!r}", "agent sdk" in line.lower())
+
+
+@test
 def test_parse_server_neither_command_nor_url(ctx: Ctx):
     cfg = M.parse_server("s", {}, scope="user")
     ctx.check("no command and no url -> invalid", cfg.type == "invalid")

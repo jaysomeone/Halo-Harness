@@ -251,6 +251,13 @@ class ModelProfile:
     context_tokens: int = 128000
     max_output_tokens: int = 16384
     vision: bool = False
+    # W4 unbuilt surfaces (MCP): "audio content from MCP tools passed
+    # through as a typed block to models that accept audio, otherwise the
+    # existing note" -- same shape/plumbing as `vision` above. False for
+    # every model today (no family in model_table.json claims audio input
+    # support yet); a future model row can set it without touching this
+    # dataclass again.
+    audio: bool = False
     reasoning: str = "none"  # "none" | "openai" | "native"
     parallel_tools: bool = True
     reasoning_passback: bool = False

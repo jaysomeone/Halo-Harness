@@ -308,14 +308,24 @@ class Controller:
 
     def list_mcp_servers(self) -> list:
         """One dict per configured server (`McpManager.status()`'s own
-        shape) for the `/mcp` dialog -- `[]` when no manager was built this
-        session (`--bare`, or MCP failed to start)."""
-        if self.mcp_manager is None:
-            return []
+        shape) for the `/mcp` dialog, PLUS one synthetic row per cached
+        claude.ai connector (W4b connectors bridge -- `type: "connector"`,
+        `mcp.connectors_bridge.connector_status_entry`) so the dialog shows
+        them too, labelled `claude.ai connector (via claude)`. Cache-only
+        (never spawns `claude` from the UI thread); `[]`/no connector rows
+        when no manager was built this session or none are cached yet."""
+        rows: list = []
+        if self.mcp_manager is not None:
+            try:
+                rows = list(self.mcp_manager.status())
+            except Exception:
+                rows = []
         try:
-            return self.mcp_manager.status()
+            from halo_harness.mcp import connectors_bridge
+            rows += [connectors_bridge.connector_status_entry(info) for info in connectors_bridge.get_connectors()]
         except Exception:
-            return []
+            pass
+        return rows
 
     def list_permission_rules(self) -> list:
         """`[{"action": "allow"|"ask"|"deny", "source": ..., "rule": ...},

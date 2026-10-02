@@ -360,8 +360,12 @@ def managed_dir() -> Path:
     etc = Path("/etc/claude-code")
     if etc.exists():
         return etc
-    # Then /Library/Application Support/ClaudeCode on macOS
-    return Path("/Library/Application Support/ClaudeCode")
+    # macOS keeps managed settings under /Library; every other POSIX box
+    # (Linux first) uses /etc/claude-code whether or not it exists yet --
+    # seen live on the Kali VM: `halo mcp list` named the macOS path.
+    if os.uname().sysname == "Darwin":
+        return Path("/Library/Application Support/ClaudeCode")
+    return etc
 
 
 def managed_settings_files() -> list[Path]:

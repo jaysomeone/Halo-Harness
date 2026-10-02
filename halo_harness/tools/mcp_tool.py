@@ -271,13 +271,17 @@ def _image_block_from_b64(b64_data: str, media_type: str) -> dict:
     return {"type": "text", "text": note}
 
 
-def convert_content_blocks(content, *, vision: bool) -> list:
+def convert_content_blocks(content, *, vision: bool, audio: bool = False) -> list:
     """One `CallToolResult.content` list -> Anthropic-shaped blocks (scope
     B): text passthrough; `image` -> a real `image` block when `vision`,
-    else a short text note; embedded resource -> its own text when
-    present, an image block for a binary/image resource (same `vision`
-    gate), else a short note. Never raises -- an unrecognised block type
-    becomes an honest placeholder rather than being silently dropped."""
+    else a short text note; `audio` (W4 unbuilt surfaces) -> a typed
+    `audio` block, same `{"source": {"type": "base64", ...}}` shape as an
+    image block, when `audio`, else the existing text note (no model in
+    this build's own table claims audio support yet -- see `model.
+    ModelProfile.audio`); embedded resource -> its own text when present,
+    an image block for a binary/image resource (same `vision` gate), else
+    a short note. Never raises -- an unrecognised block type becomes an
+    honest placeholder rather than being silently dropped."""
     blocks: list = []
     for item in (content or []):
         itype = getattr(item, "type", None)
@@ -306,7 +310,13 @@ def convert_content_blocks(content, *, vision: bool) -> list:
             else:
                 blocks.append({"type": "text", "text": f"[resource: {uri}]"})
         elif itype == "audio":
-            blocks.append({"type": "text", "text": "[audio content omitted -- not supported in this build]"})
+            mime = getattr(item, "mime_type", None) or "audio/wav"
+            if audio:
+                blocks.append({"type": "audio", "source": {"type": "base64", "media_type": mime,
+                                                              "data": getattr(item, "data", "") or ""}})
+            else:
+                blocks.append({"type": "text",
+                                "text": f"[audio content ({mime}) omitted -- this model has no audio support]"})
         else:
             blocks.append({"type": "text", "text": f"[unsupported MCP content block: {itype or 'unknown'}]"})
     return blocks
@@ -399,7 +409,7 @@ class McpTool(Tool):
     result_cap = None  # manages its own truncation+spill (cap_and_spill), like tools/read.py
 
     def __init__(self, server_name: str, sdk_tool, manager, *, vision: bool = False,
-                 family: Optional[str] = None) -> None:
+                 audio: bool = False, family: Optional[str] = None) -> None:
         self.server_name = server_name
         self.sdk_tool = sdk_tool  # kept for agent/catalog.py's LRU eviction (rebuild the deferred-pool entry)
         self.tool_name = getattr(sdk_tool, "name", "")
@@ -413,6 +423,7 @@ class McpTool(Tool):
         self.is_destructive = bool(getattr(annotations, "destructive_hint", False))
         self.meta = getattr(sdk_tool, "meta", None) or {}
         self.vision = vision
+        self.audio = audio
         self.manager = manager
 
     def always_load(self) -> bool:
@@ -443,7 +454,7 @@ class McpTool(Tool):
         except Exception as e:  # a hung/failed/disconnected server must never crash the loop
             return ToolResult(f"MCP tool {self.name!r} call failed: {type(e).__name__}: {e}", is_error=True)
 
-        blocks = convert_content_blocks(getattr(result, "content", None) or [], vision=self.vision)
+        blocks = convert_content_blocks(getattr(result, "content", None) or [], vision=self.vision, audio=self.audio)
         blocks = content_with_structured_fallback(blocks, getattr(result, "structured_content", None))
         if not blocks:
             blocks = [{"type": "text", "text": "(no content returned)"}]

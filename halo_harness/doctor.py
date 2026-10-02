@@ -701,12 +701,25 @@ def _check_mcp_servers(cwd: Optional[Path]) -> str:
     try:
         from halo_harness.config.claude_json import load_claude_json
         from halo_harness.mcp.manager import resolve_server_configs
-        resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json())
+        claude_json = load_claude_json()
+        resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=claude_json)
     except Exception as e:
         return _fix(f"{WARN} MCP servers: could not enumerate ({type(e).__name__}: {e})",
                      cmd="halo doctor")
     if not resolved:
-        return f"{OK} MCP servers: none configured"
+        # "explain the zero" (gap-list brief): never a bare 0 -- name every
+        # scope searched and its own count, plus another directory's own
+        # .mcp.json when the user's history shows one.
+        try:
+            from halo_harness.mcp import explain
+            scope_text = explain.scope_summary_line(cwd=cwd, claude_json=claude_json)
+            others = explain.other_project_mcp_jsons(cwd=cwd, claude_json=claude_json)
+        except Exception:
+            scope_text, others = "", []
+        suffix = f" -- {scope_text}" if scope_text else ""
+        if others:
+            suffix += f" ({'; '.join(others)})"
+        return f"{OK} MCP servers: none configured{suffix}"
     eager = sorted(name for name, cfg in resolved.items() if not cfg.lazy)
     lazy_names = sorted(name for name, cfg in resolved.items() if cfg.lazy)
     hint = ("" if not eager else
@@ -729,6 +742,26 @@ def _check_mcp_servers(cwd: Optional[Path]) -> str:
     cache_hint = f"; cache ages: {', '.join(ages)}" if ages else ""
     return (f"{OK} MCP servers: {len(resolved)} configured "
             f"({len(eager)} eager, {len(lazy_names)} lazy){hint}{cache_hint}")
+
+
+def _check_mcp_connectors() -> str:
+    """W4 MCP connectors-bridge item 5: "Doctor shows the bridge state."
+    Cache-only (never spawns `claude` from a doctor run)."""
+    try:
+        from halo_harness.mcp import connectors_bridge
+    except Exception as e:
+        return f"{WARN} claude.ai connectors: could not check ({type(e).__name__}: {e})"
+    if not connectors_bridge.bridge_enabled():
+        return f"{OK} claude.ai connectors: bridge disabled (connectors.bridge=false in ~/.halo/config.json)"
+    reason = connectors_bridge.unavailable_reason()
+    if reason:
+        return f"{OK} {reason}"
+    connectors, _fetched_at = connectors_bridge.load_cache()
+    if not connectors:
+        return (f"{OK} claude.ai connectors: bridge enabled, none discovered yet "
+                f"(discovery runs in the background on the next launch, or `halo mcp list --refresh` now)")
+    names = ", ".join(sorted(c.name for c in connectors))
+    return f"{OK} claude.ai connectors: bridge enabled, {len(connectors)} discovered ({names})"
 
 
 def _format_age(seconds: float) -> str:
@@ -1342,6 +1375,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     from halo_harness.tui.clipboard import clipboard_doctor_line
     entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
+    entries.append(("mcp_connectors", _check_mcp_connectors()))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))

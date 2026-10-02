@@ -41,6 +41,32 @@ log = logging.getLogger("bridge")
 # completion. `_do()` now AWAITS that cleanup directly instead (see
 # `_connect_once`), so this bookkeeping set is no longer needed.
 
+# ---- ws/websocket/sdk transport support (W4 unbuilt surfaces) -------------
+
+_WS_UNAVAILABLE_REASON = (
+    "'{stype}' needs the installed mcp SDK's own websocket client (mcp.client.websocket), "
+    "which this version does not provide -- see `halo doctor`"
+)
+_SDK_UNSUPPORTED_REASON = (
+    "'sdk' describes embedding another Claude Agent SDK process in the SAME run, not a "
+    "subprocess or network endpoint -- halo's out-of-process MCP manager has no place to "
+    "embed one; use stdio/http/sse/ws instead"
+)
+
+
+def websocket_client_available() -> bool:
+    """True iff the installed `mcp` package ships its own websocket
+    transport client (`mcp.client.websocket`) -- verified NOT present in
+    the pinned `mcp==2.2.0` this project ships with; checked by spec
+    lookup only (never imports the SDK itself), same convention as
+    `halo_harness.mcp.available()`."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("mcp.client.websocket") is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
 # ---- timeouts (binary-facts sec.9) -----------------------------------------
 
 _INT32_MAX = 2**31 - 1
@@ -219,10 +245,16 @@ def parse_server(name: str, raw, *, scope: str, source_path: Optional[str] = Non
                                     disabled_reason="entry has neither `command` nor `url`+`type`")
     if stype == "streamable-http":
         stype = "http"
-    if stype in ("ws", "websocket", "sdk"):
+    if stype == "sdk":
+        # structurally unsupportable, not "not yet": 'sdk' means embedding
+        # another Agent SDK process in-proc, which this out-of-process
+        # manager has no place to do regardless of SDK version.
         return McpServerConfig(name=name, type=stype, scope=scope, source_path=source_path,
-                                disabled_reason=f"{stype!r} servers are not supported yet (skipped)")
-    if stype not in ("stdio", "http", "sse"):
+                                disabled_reason=_SDK_UNSUPPORTED_REASON)
+    if stype in ("ws", "websocket") and not websocket_client_available():
+        return McpServerConfig(name=name, type=stype, scope=scope, source_path=source_path,
+                                disabled_reason=_WS_UNAVAILABLE_REASON.format(stype=stype))
+    if stype not in ("stdio", "http", "sse", "ws", "websocket"):
         return McpServerConfig(name=name, type="invalid", scope=scope, source_path=source_path,
                                 disabled_reason=f"unknown transport {stype!r}")
     return McpServerConfig(
@@ -630,13 +662,24 @@ class McpServerHandle:
         self._tool_env = tool_env
         self._cwd = cwd
         self._trusted = trusted
-        if config.type in ("invalid", "ws", "websocket", "sdk"):
+        # W4b "explain the zero"/WHY: `disabled_reason` (set by parse_server
+        # for EVERY disabled config -- invalid, unknown transport, 'sdk',
+        # or 'ws'/'websocket' without SDK support) IS the one signal that
+        # this handle is disabled; checking it directly (not a hardcoded
+        # type list) means a transport that becomes supported later (a
+        # future SDK version's websocket client) needs no change here.
+        if config.disabled_reason is not None:
             self.state = "disabled"
         elif config.pending_approval:
             self.state = "pending_approval"
         else:
             self.state = "pending"
-        self.error: Optional[str] = None
+        # the reason a DISABLED handle will never even attempt to connect
+        # is exactly its own disabled_reason -- surfaced through the same
+        # `error` field a real connect failure uses, so `mcp list`/`/mcp`/
+        # doctor's WHY display (mcp_cli.failure_reason) covers both without
+        # a separate code path.
+        self.error: Optional[str] = config.disabled_reason
         self.instructions: Optional[str] = None
         self.tools: list = []       # raw SDK Tool objects
         self.tools_fetch_failed = False
@@ -748,6 +791,12 @@ class McpServerHandle:
             headers = await self._resolved_headers()
             return await http_sse_mod.connect_sse(
                 url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+        if self.config.type in ("ws", "websocket"):
+            # only ever reached when parse_server already found a real
+            # mcp.client.websocket (websocket_client_available()) -- a
+            # config without it is disabled before a handle is even built.
+            from halo_harness.mcp import websocket as websocket_mod
+            return await websocket_mod.connect_websocket(url=self.config.url, connect_timeout=connect_timeout)
         raise ValueError(f"unsupported transport: {self.config.type!r}")
 
     async def _connect_once(self) -> None:

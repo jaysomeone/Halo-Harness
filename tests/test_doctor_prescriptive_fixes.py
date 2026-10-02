@@ -258,8 +258,13 @@ def test_mcp_servers_check_none_configured_and_enumeration_failure(ctx: Ctx):
         return doctor._check_mcp_servers(home)
 
     line = _isolated(_check)
+    # W4b "explain the zero": the zero case now also names every scope
+    # searched (never a bare 0) -- see test_mcp_explain.py for the
+    # scope-breakdown's own pinning tests; this one just checks doctor
+    # still reports OK/"none configured" and doesn't lose the explanation.
     ctx.check(f"a fresh home with nothing configured -> OK none, got {line!r}",
-              line == f"{doctor.OK} MCP servers: none configured")
+              line.startswith(f"{doctor.OK} MCP servers: none configured"))
+    ctx.check(f"names what was searched, got {line!r}", "Searched --" in line)
 
     import halo_harness.mcp.manager as mcp_manager_mod
     old_fn = mcp_manager_mod.resolve_server_configs

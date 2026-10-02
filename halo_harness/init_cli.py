@@ -465,8 +465,11 @@ def _step_checks(args, console: Console, cwd: Path, *, provider: str = "", model
     console.print("Checks:")
     from halo_harness.doctor import run_checks
     lines, ok = run_checks(cwd=cwd)
+    from rich.markup import escape
     for line in lines:
-        console.print(f"   {line}")
+        # Doctor lines carry paths and brackets; print them literally so a
+        # `[/home/...]` in a path can never read as a rich closing tag.
+        console.print(f"   {escape(line)}")
     if args.no_live:
         console.print("   (catalog refresh skipped: --no-live)")
     else:

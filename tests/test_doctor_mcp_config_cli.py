@@ -167,10 +167,15 @@ def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
 
 @test
 def test_mcp_list_no_servers(ctx: Ctx):
+    """W4b "explain the zero": a truly empty result now also names every
+    scope searched (never a bare 0) -- see test_mcp_explain.py for the
+    scope-breakdown's own pinning tests."""
     home = _fresh_home()
     result = _run(["mcp", "list"], home)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
-    ctx.check("reports no servers configured", "No MCP servers configured." in result.stdout)
+    ctx.check("reports no servers configured in this directory",
+              "No MCP servers configured in this directory" in result.stdout)
+    ctx.check("explains what was searched", "Searched --" in result.stdout)
 
 
 @test
@@ -301,12 +306,20 @@ def test_mcp_config_flag_long_inline_json_works_end_to_end(ctx: Ctx):
 
 
 @test
-def test_mcp_other_subcommands_still_not_yet(ctx: Ctx):
+def test_mcp_subcommands_are_real_not_stubs(ctx: Ctx):
+    """W4b: add-from-claude-desktop/reset-project-choices/serve/login/
+    logout are all implemented now (see tests/test_mcp_subcommands.py,
+    tests/test_mcp_serve.py and tests/test_mcp_oauth.py for their own real
+    behaviour) -- `--help` is the fast, hang-free way to confirm each is a
+    real argparse subcommand and not the old "not supported yet" stub."""
     home = _fresh_home()
-    for sub in (["login"], ["logout"], ["serve"]):
-        result = _run(["mcp"] + sub, home)
-        ctx.check(f"mcp {sub[0]}: exit 0, got {result.returncode}", result.returncode == 0)
-        ctx.check(f"mcp {sub[0]}: not-yet line printed", f"halo: mcp {sub[0]} is not supported yet" in result.stderr)
+    for sub in ("add-from-claude-desktop", "reset-project-choices", "serve", "login", "logout"):
+        result = _run(["mcp", sub, "--help"], home)
+        ctx.check(f"mcp {sub} --help: exit 0, got {result.returncode} stderr={result.stderr!r}",
+                  result.returncode == 0)
+        ctx.check(f"mcp {sub}: no longer a not-yet stub", "is not supported yet" not in result.stderr)
+        ctx.check(f"mcp {sub} --help: prints real usage, got {result.stdout!r}",
+                  f"halo mcp {sub}" in result.stdout)
 
 
 @test

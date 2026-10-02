@@ -88,6 +88,80 @@ def _parse_argv(argv: "list[str]") -> dict:
     return opts
 
 
+def _log_argv(argv: "list[str]") -> None:
+    """W4b connectors-bridge tests: `FAKE_CLAUDE_CC_ARGV_LOG` (a path), when
+    set, gets one JSON-array line appended per invocation -- the simplest
+    way for a test to assert the EXACT command line a real caller built
+    (`--allowedTools`, `--max-turns`, the system prompt, ...) without
+    mocking `subprocess.run` itself."""
+    path = os.environ.get("FAKE_CLAUDE_CC_ARGV_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(argv, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _connector_tool_names() -> "list[str]":
+    """W4b connectors-bridge discovery: `FAKE_CLAUDE_CC_CONNECTOR_TOOLS`
+    (comma-separated `mcp__claude_ai_<Name>__<tool>` wire names) -- merged
+    into the `system/init` line's `tools` regardless of whether a real
+    `--mcp-config` "rolo" bridge is also present, since a real discovery
+    probe never sets one up at all (bare `-p --output-format stream-json`,
+    no mcp-config)."""
+    raw = os.environ.get("FAKE_CLAUDE_CC_CONNECTOR_TOOLS", "")
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _cmd_mcp_list() -> int:
+    """W4b connectors-bridge tests: `claude mcp list` -- prints one
+    `claude.ai <Name>: <url> - <status>` line per entry in the JSON array
+    `FAKE_CLAUDE_CC_CONNECTORS` (`[{"name", "url", "status_text"}, ...]`),
+    or nothing at all when unset (zero connectors configured)."""
+    raw = os.environ.get("FAKE_CLAUDE_CC_CONNECTORS")
+    if not raw:
+        return 0
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        rows = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name", "Connector")
+        url = row.get("url", "https://example.invalid/mcp")
+        status_text = row.get("status_text", "✔ Connected")
+        print(f"claude.ai {name}: {url} - {status_text}")
+    return 0
+
+
+def _output_format(argv: "list[str]") -> str:
+    for i, a in enumerate(argv):
+        if a == "--output-format" and i + 1 < len(argv):
+            return argv[i + 1]
+    return "text"
+
+
+def _one_shot_json(argv: "list[str]") -> int:
+    """W4b connectors-bridge tests: `-p --output-format json <prompt>` (the
+    connector bridge tool's own call shape -- ONE turn, no stream-json
+    envelope) -- `FAKE_CLAUDE_CC_JSON_MODE` ("echo", the default: result is
+    `"ECHO:<prompt>"`, so a test can see exactly what the bridge sent;
+    "error": an `is_error: true` result) controls the reply."""
+    prompt = argv[-1] if argv and not argv[-1].startswith("-") else ""
+    if os.environ.get("FAKE_CLAUDE_CC_JSON_MODE") == "error":
+        _write({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                 "result": "fake connector error", "session_id": "fake-json",
+                 "total_cost_usd": 0.0, "duration_ms": 1, "usage": {}})
+        return 0
+    _write({"type": "result", "subtype": "success", "is_error": False, "result": f"ECHO:{prompt}",
+             "session_id": "fake-json", "total_cost_usd": 0.0012, "duration_ms": 7,
+             "usage": {"input_tokens": 3, "output_tokens": 4}})
+    return 0
+
+
 def _load_registry(path: str) -> set:
     try:
         return set(json.loads(open(path, encoding="utf-8").read()))
@@ -423,7 +497,7 @@ async def _amain(argv: "list[str]") -> int:
     rolo_cfg = (mcp_config.get("mcpServers") or {}).get("rolo")
 
     if not rolo_cfg:
-        await _serve_turns(None, session_id, [])
+        await _serve_turns(None, session_id, _connector_tool_names())
         return 0
 
     from mcp import ClientSession
@@ -443,13 +517,26 @@ async def _amain(argv: "list[str]") -> int:
         async with ClientSession(read, write, message_handler=_message_handler) as mcp_session:
             await mcp_session.initialize()
             listed = await mcp_session.list_tools()
-            tools_wire = [f"mcp__rolo__{t.name}" for t in listed.tools]
+            tools_wire = [f"mcp__rolo__{t.name}" for t in listed.tools] + _connector_tool_names()
             await _serve_turns(mcp_session, session_id, tools_wire)
     return 0
 
 
 def main(argv=None) -> int:
+    # W4b connectors-bridge tests: real claude.ai status text carries
+    # "✔"/"✗" glyphs -- Windows' own default console codepage
+    # (cp1252) can't encode them, which crashed this CHILD process's own
+    # `print`/`sys.stdout.write` before a single byte ever reached the
+    # parent (verified live). Real `claude`, a Node binary, defaults to
+    # UTF-8 regardless of host locale; this fake, being Python, needs to
+    # say so explicitly. Best-effort: a stream that refuses to reconfigure
+    # (rare, e.g. already closed) just keeps its old behaviour.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     argv = sys.argv[1:] if argv is None else argv
+    _log_argv(argv)
     if len(argv) >= 2 and argv[0] == "auth" and argv[1] == "status":
         _write(_auth_status_json())
         return 0
@@ -458,9 +545,13 @@ def main(argv=None) -> int:
         # own JSON (which has no version key at all, verified live).
         print("2.1.284-fake (Claude Code)")
         return 0
+    if len(argv) >= 2 and argv[0] == "mcp" and argv[1] == "list":
+        return _cmd_mcp_list()
     if not argv or argv[0] != "-p":
         # Any other invocation -- harmless no-op.
         return 0
+    if _output_format(argv) == "json":
+        return _one_shot_json(argv)
     return asyncio.run(_amain(argv))
 
 

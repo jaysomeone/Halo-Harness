@@ -161,6 +161,8 @@ the files above.
 | `~/.halo/stats-cache.json` | telemetry aggregation cache, keyed by (path, size, mtime) |
 | `~/.halo/mcp/tools-cache/<server>.json`, `~/.halo/mcp/<server>.log` | a lazy MCP server's cached tool list, and its stderr |
 | `~/.halo/mcp-approvals.json` | remembered `.mcp.json` server approvals |
+| `~/.halo/mcp/connectors.json` | cached claude.ai connectors (name/url/status/tools) discovered through `claude mcp list` -- see `docs/COMMANDS.md`'s "claude.ai connectors bridge" section |
+| `~/.halo/mcp/oauth/<server-name>.json` | `halo mcp login`'s own OAuth tokens for one remote (http/sse) MCP server -- never written to any Claude Code file |
 | `~/.halo/trust.json` | this harness's own trust-dialog store |
 | `~/.halo/history.jsonl` | this harness's own prompt history (merged with Claude Code's own `~/.claude/history.jsonl` at read time, never written to) |
 | `~/.halo/improve/dismissed.json`, `~/.halo/improve/<ts>.json` | `/improve` dismissed-candidate hashes, and saved candidate batches |
@@ -191,6 +193,10 @@ directly by the features that own them:
 | `improve.since_days` | `7` | hand-edited |
 | `improve.max_candidates` | `8` (hard-capped at 8) | hand-edited |
 | `improve.hint_threshold.{repairs,edit_failures,loop_breaker}` | `3`/`2`/`1` | hand-edited |
+| `connectors.bridge` | `true` | `halo config set connectors.bridge false` disables claude.ai connector discovery and every `connector__<slug>` tool outright |
+| `connectors.<slug>.enabled` | `true` | hand-edited; `false` removes just that one connector's tool |
+| `connectors.<slug>.alwaysLoad` | `false` | hand-edited; preloads that connector's tool instead of leaving it to ToolSearch |
+| `connectors.<slug>.max_turns` | `4` | hand-edited; forwarded as the bridge's own `claude -p --max-turns` |
 
 ## Every environment variable
 

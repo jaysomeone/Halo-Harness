@@ -103,6 +103,18 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         (H9 bug fix, item 11) is also where the config-file resync now
         happens -- BEFORE this plain restart -- so this function itself
         stays the simple "just restart this one handle" primitive."""
+        if name.startswith("connector__"):
+            # W4b connectors bridge: a connector row has no McpManager
+            # handle at all (it's a cached claude.ai account connector, not
+            # a locally-configured server) -- `r` here forces a fresh
+            # `claude mcp list` + tool-name discovery instead.
+            from halo_harness.mcp import connectors_bridge
+            slug = name[len("connector__"):]
+            connectors = connectors_bridge.refresh_now()
+            info = next((c for c in connectors if c.slug == slug), None)
+            if info is None:
+                return [f"{name}: no longer reported by `claude mcp list`."]
+            return [connectors_bridge.status_line(info)]
         if build.mcp_manager is None:
             return [f"MCP support is not enabled this session ({name} unchanged)."]
         ok = build.mcp_manager.reconnect(name, abort=abort)

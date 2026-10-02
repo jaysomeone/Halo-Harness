@@ -789,9 +789,14 @@ Commands:
   add [options] <name> <commandOrUrl> [args...]  Add a server
   add-json <name> <json>  Add a server via JSON
   remove <name>           Remove a server
+  add-from-claude-desktop Import MCP servers from Claude Desktop's config
+  reset-project-choices   Reset approved project-scoped (.mcp.json) servers
+  serve                   Expose halo's own built-in tools as an MCP server
+  login <name>            OAuth-authenticate a remote MCP server
+  logout <name>           Clear stored OAuth credentials for a server
 ```
 
-### `mcp list [--cwd DIR]`
+### `mcp list [--cwd DIR] [--refresh]`
 Builds a real (temporary) MCP manager against the resolved config and prints
 one line per server, same format as the real `claude` binary:
 `<name>: <command> <args> - <status>`, or `<name>: <url> (HTTP|SSE) - <status>`.
@@ -799,13 +804,24 @@ Status labels: `✔ Connected`, `✗ Failed to connect`, `! Needs authentication
 `⏸ Pending approval`, `- Not configured`, `! Connected · tools fetch failed`,
 and halo's own `◐ Cached (connects on first use)` for a lazy server
 that hasn't connected yet (Claude Code has no lazy-start concept, so there is
-no binary-derived wording for this one state).
+no binary-derived wording for this one state). A `failed`/`needs_auth`/
+`disabled` line also names WHY in parentheses (command not found on PATH,
+connection refused on host:port, or the reason a transport is disabled).
+
+Before the health check, `mcp list` always explains what it searched:
+every scope (user `~/.claude.json`, project-local, this directory's own
+`.mcp.json`, plugins, managed) with its own count, another directory's
+`.mcp.json` when your own `~/.claude.json` history remembers one, and the
+claude.ai connectors `claude` itself reports (see below) -- never a bare
+"0 servers". `--refresh` forces a fresh connectors discovery first,
+ignoring the `~/.halo/mcp/connectors.json` cache.
 ```sh
 halo mcp list
 ```
 ```
 Checking MCP server health...
-No MCP servers configured.
+Searched -- user (~/.claude.json): 0; project-local (~/.claude.json (projects[...])): 0; this directory's .mcp.json (.../.mcp.json): 0; plugins (installed, enabled plugins): 0; managed (...): 0.
+No MCP servers configured in this directory (see above for connectors/other scopes).
 ```
 
 ### `mcp get <name> [--cwd DIR]`
@@ -837,10 +853,101 @@ halo mcp add-json my-remote '{"type":"http","url":"https://example.com/mcp"}'
 Without `-s`, tries `local`, then `user`, then `project`, removing from the
 first scope where the name is found.
 
-### Not-yet `mcp` subcommands
-`add-from-claude-desktop`, `login`, `logout`, `reset-project-choices`,
-`serve` all parse and print `halo: mcp <sub> is not supported yet
-(planned: H8)`, exit 0.
+### `mcp add-from-claude-desktop [-s local|user|project] [--dry-run]`
+Imports every server from Claude Desktop's own `claude_desktop_config.json`
+(macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`,
+or -- from WSL -- the Windows side's own AppData under `/mnt/c`; a plain
+Linux box has no Claude Desktop to import from, same restriction the real
+`claude mcp add-from-claude-desktop` documents). `--dry-run` lists what
+would be imported and writes nothing.
+
+### `mcp reset-project-choices [--cwd DIR]`
+Forgets every approval halo recorded for a server currently listed in this
+directory's `.mcp.json` -- it goes back to `⏸ Pending approval` and halo
+asks again next time. Halo's own approval store only ever tracks
+approvals (there is no separate "rejected" state to also reset).
+
+### `mcp serve [--cwd DIR]`
+Starts halo itself as a stdio MCP server, exposing a curated, stateless
+subset of its own built-in tools (Bash/PowerShell, Read, Write, Edit, Glob,
+Grep, NotebookEdit, TodoWrite, WebFetch -- never Agent/AskUserQuestion/
+ToolSearch/background-job tools, which all need a live session) to any
+other MCP client. The ccbridge code (`halo_harness/ccbridge/__main__.py`,
+the `cc:` route's own tool bridge) is the base this reuses.
+
+### `mcp login <name> [--no-browser] [--timeout SECONDS]` / `mcp logout <name>`
+A generic OAuth 2.0 authorization-code (+ PKCE) flow for one already-added
+`http`/`sse` server: opens (or prints, with `--no-browser`) an authorize URL
+built from that server's own `oauth` config block (`mcp add --client-id ...
+--client-secret ... --callback-port ...`) or, failing that, OAuth 2.0
+Authorization Server Metadata discovery (RFC 8414) at the server's own
+`/.well-known/oauth-authorization-server`; waits for the browser's redirect
+on a local callback, exchanges the code for tokens, and stores them at
+`~/.halo/mcp/oauth/<name>.json` -- never in any of Claude Code's files, and
+halo never reads `~/.claude/.credentials.json` either. `logout` deletes that
+one file. Tested only against a local fake OAuth server
+(`tests/helpers/fake_oauth_server.py`); this flow has not been verified
+against any specific vendor's real endpoints, and no vendor is named here
+or in the code.
+
+## claude.ai connectors bridge
+
+When `claude` is installed and logged in with a claude.ai subscription,
+halo discovers the account-side connectors it reports (Claude Docs today;
+generic -- any future connector shows up the same way) through `claude`
+itself, since halo can never see or authorize them directly and never
+reads claude's own credentials file. Discovery (`claude mcp list` plus one
+headless `claude -p --output-format stream-json` start, read only for its
+`system/init` line's tool names) runs once per session on a background
+worker -- never on the UI thread -- and is cached at
+`~/.halo/mcp/connectors.json`; `halo mcp list --refresh` and the `/mcp`
+dialog's `r` (reconnect) force a fresh one.
+
+Each connector becomes one halo tool, `connector__<slug>` (e.g.
+`connector__claude_docs`), schema `{request: string, tool?: string, args?:
+object}` -- describe what to do in plain words, or name one of the
+connector's own tools directly. Running it spawns a scoped, headless
+`claude -p --allowedTools "mcp__claude_ai_<Name>__*" --max-turns N
+--output-format json` that performs exactly the request and returns the
+result verbatim; halo's own permission rules gate the call exactly like
+any other tool (`connector__claude_docs(batch)` targets one specific
+underlying tool, the same parenthesised-content grammar every other tool
+rule already has), and the bridge itself never refuses a call. A deny/ask
+rule written for claude's own `mcp__claude_ai_<Name>__*` tool in Claude
+Code's settings is automatically translated to the matching
+`connector__<slug>` rule, so it still applies here.
+
+Config (`~/.halo/config.json`, dotted `halo config` keys): `connectors.
+bridge` (default `true`, `false` disables discovery and every connector
+tool outright), `connectors.<slug>.enabled`, `connectors.<slug>.
+alwaysLoad` (preload instead of leaving it to ToolSearch), `connectors.
+<slug>.max_turns` (default 4). `/mcp`, `halo mcp list` and `halo doctor`
+all show each connector's status, labelled `claude.ai connector (via
+claude)`; a `needs_auth` one names the exact next step (authorize at
+claude.ai or inside `claude` with `/mcp`, then reconnect here). When
+`claude` is missing, not logged in with a subscription, or gateway-driven,
+the connectors line says so in one sentence instead of being silently
+absent. Nothing here is specific to any one vendor's connectors, by design.
+
+## Unsupported MCP transports
+
+`sdk`-type servers are always disabled: `'sdk'` describes embedding
+another Claude Agent SDK process in the same run, not a subprocess or
+network endpoint, so halo's out-of-process MCP manager has nowhere to
+embed one (use stdio/http/sse/ws instead). `ws`/`websocket`-type servers
+connect for real once halo's installed `mcp` package ships its own
+websocket client (`mcp.client.websocket`) -- the pinned `mcp==2.2.0` this
+build ships with does not, so they're disabled too today, with that exact
+reason shown next to them (`halo doctor`, `mcp list`/`get`, `/mcp`).
+
+## MCP audio content
+
+An MCP tool's `audio` content block is passed through as a typed `audio`
+block (same `{"source": {"type": "base64", ...}}` shape an image block
+already uses) to a model whose profile declares audio support; every model
+in this build's own table omits that today, so in practice every MCP
+audio result still becomes the existing `[audio content (<mime>) omitted
+-- this model has no audio support]` text note.
 
 ## `halo config`
 

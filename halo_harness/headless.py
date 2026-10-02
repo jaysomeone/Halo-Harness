@@ -514,6 +514,16 @@ def build_session(
         settings, cwd=cwd, claude_json_allowed_tools=claude_json_allowed_tools,
         cli_allow=cli_allow, cli_disallow=cli_disallow,
     )
+    # W4 MCP connectors-bridge item 6: the user's own deny/ask (and, for
+    # symmetry, allow) rules for `mcp__claude_ai_<Name>__*` in Claude Code's
+    # own settings are translated to the matching `connector__<slug>` rule,
+    # so a rule written for claude still applies to halo's own bridge tool
+    # -- ADDED alongside the original (never replacing it; the original
+    # `mcp__claude_ai_*` rule simply never matches anything here).
+    from halo_harness.mcp.connectors_bridge import translate_rules
+    deny_rules = translate_rules(deny_rules, action="deny")
+    ask_rules = translate_rules(ask_rules, action="ask")
+    allow_rules = translate_rules(allow_rules, action="allow")
 
     # 1.0.1 hotfix 18.2: `~/.halo/config.json`'s own `permission_mode`
     # (item 18.1's new init step) is a NEW layer, spliced in between the CLI
@@ -772,8 +782,30 @@ def build_session(
                                                 always_load_servers=always_load_servers, cap_budget=cap_budget)
 
             for server_name, _wire_name, sdk_tool in preload:
-                frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager,
-                                                  vision=model_profile.vision, family=family))
+                frozen_registry.add_tool(McpTool(server_name, sdk_tool, mcp_manager, vision=model_profile.vision,
+                                                  audio=model_profile.audio, family=family))
+
+            # W4b claude.ai connectors bridge: one `connector__<slug>` tool
+            # per discovered connector (cache-only read here -- discovery
+            # itself is a background worker kicked off below, never inline
+            # on a session build), gated by --tools/deny the same way a
+            # built-in would be, preloaded or deferred same as any MCP tool.
+            from halo_harness.mcp import connectors_bridge
+            from halo_harness.tools.connector_tool import ConnectorTool
+            for info in connectors_bridge.get_connectors():
+                if not connectors_bridge.connector_enabled(info.slug):
+                    continue
+                connector_wire_name = f"connector__{info.slug}"
+                if tools_subset is not None and connector_wire_name not in tools_subset:
+                    continue
+                if connector_wire_name in bare_denied_names:
+                    continue
+                connector_tool = ConnectorTool(info)
+                if connector_tool.always_load():
+                    frozen_registry.add_tool(connector_tool)
+                else:
+                    deferred[connector_wire_name] = (None, connector_tool)
+            connectors_bridge.ensure_discovered_in_background()
 
             # finding 13 must-do: keep ToolSearch whenever the deferred pool
             # is non-empty, even when --tools/a deny rule would otherwise
@@ -784,7 +816,7 @@ def build_session(
 
             session_catalog = SessionCatalog(
                 registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
-                vision=model_profile.vision, family=family, names=frozen_registry.names(),
+                vision=model_profile.vision, audio=model_profile.audio, family=family, names=frozen_registry.names(),
             )
             mcp_servers_for_prompt = [
                 {"name": name, "instructions": h.instructions}

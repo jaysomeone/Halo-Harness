@@ -143,6 +143,11 @@ class SessionCatalog:
     manager: object                                      # McpManager, or a test double with the same .call()
     cap: int
     vision: bool = False
+    # W4 unbuilt surfaces (MCP): same freeze-once plumbing as `vision` --
+    # threaded into every McpTool `load()` constructs so a deferred-loaded
+    # tool's audio content gets passed through exactly like a preloaded
+    # one would (headless.py's own McpTool construction already does).
+    audio: bool = False
     # OpenCode-H9 MCP-compatibility item: `providers.profiles.model_family()`'s
     # coarse family string, threaded into every McpTool `load()` constructs
     # so its input_schema gets the same per-family sanitising a PRELOADED
@@ -262,7 +267,13 @@ class SessionCatalog:
                     continue
                 self.deferred.pop(name, None)
                 server, sdk_tool = entry
-                tool = McpTool(server, sdk_tool, self.manager, vision=self.vision, family=self.family)
+                # W4b connectors bridge: a `server is None` entry is already
+                # a built Tool instance (ConnectorTool -- see tools/
+                # connector_tool.py), not an MCP sdk_tool to wrap; used
+                # as-is so this one deferred/LRU/ToolSearch mechanism serves
+                # both kinds of tool without a second abstraction layer.
+                tool = sdk_tool if server is None else \
+                    McpTool(server, sdk_tool, self.manager, vision=self.vision, audio=self.audio, family=self.family)
                 self.registry.add_tool(tool)
                 self.names.append(name)
                 self._loaded_order.append(name)

@@ -56,6 +56,47 @@ def record_mcp_approval(name: str, raw_entry: dict) -> None:
         pass
 
 
+def reset_project_approvals(mcp_json_path: Path) -> int:
+    """`halo mcp reset-project-choices` (Halo 2.0.1 gap-list brief): forgets
+    every approval recorded for an entry CURRENTLY present in this
+    project's `.mcp.json` -- real `claude mcp reset-project-choices`'s own
+    wording: "Reset all approved and rejected project-scoped (.mcp.json)
+    servers within this project." Halo's own approval store only ever
+    tracks APPROVALS (a server simply stays `pending_approval` until
+    approved -- there is no separate persisted "rejected" state to also
+    reset). An entry approved under a PRIOR version of a since-edited
+    server (a different `mcp_approval_key`) is already unreachable from
+    `.mcp.json`'s CURRENT content and needs no reset -- it already demands
+    re-approval. Returns the count actually forgotten; never raises."""
+    if not mcp_json_path.exists():
+        return 0
+    try:
+        import json
+        data = json.loads(mcp_json_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return 0
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        return 0
+    from halo_harness.mcp.manager import mcp_approval_key
+    keys = {mcp_approval_key(raw) for raw in servers.values() if isinstance(raw, dict)}
+    approvals = load_mcp_approvals()
+    removed = [k for k in keys if k in approvals]
+    if not removed:
+        return 0
+    for k in removed:
+        approvals.pop(k, None)
+    try:
+        import json
+        path = bridge_home() / "mcp-approvals.json"
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(approvals, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        return 0
+    return len(removed)
+
+
 def managed_mcp_json_path() -> Path:
     return managed_dir() / "managed-mcp.json"
 

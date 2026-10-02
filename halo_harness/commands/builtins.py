@@ -293,18 +293,29 @@ def _cmd_dbx(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
+    # "explain the zero" (gap-list brief, W4b item 1): scopes searched +
+    # claude.ai connectors, shared verbatim with `halo mcp list`/doctor so
+    # the three never disagree. Never allowed to crash `/mcp`.
+    explain_lines: list = []
+    try:
+        from halo_harness.mcp import explain
+        explain_lines = explain.explain_lines(cwd=facade.cwd, claude_json=facade.claude_json,
+                                                settings=facade.settings)
+    except Exception:
+        pass
+
     if facade.mcp_status is not None:
         # H3 scope D: real per-server health, same line format `mcp list` uses.
         from halo_harness.mcp_cli import format_mcp_list_line
         if not facade.mcp_status:
-            return "No MCP servers configured."
-        lines = ["Configured MCP servers:"]
+            return "\n".join(explain_lines + ["No MCP servers configured in this directory."])
+        lines = explain_lines + ["Configured MCP servers:"]
         for entry in sorted(facade.mcp_status, key=lambda e: e.get("name", "")):
             lines.append(f"  {format_mcp_list_line(entry)}")
         return "\n".join(lines)
     if not facade.mcp_servers:
-        return "No MCP servers configured."
-    lines = ["Configured MCP servers:"]
+        return "\n".join(explain_lines + ["No MCP servers configured in this directory."])
+    lines = explain_lines + ["Configured MCP servers:"]
     for name, spec in sorted(facade.mcp_servers.items()):
         kind = spec.get("type", "stdio") if isinstance(spec, dict) else "stdio"
         lines.append(f"  {name} ({kind}) - not checked (no MCP client ran this session)")

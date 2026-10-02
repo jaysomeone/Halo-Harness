@@ -41,6 +41,10 @@ def _resource_blob(uri, blob="QQ==", mime="image/png"):
     return SimpleNamespace(type="resource", resource=res)
 
 
+def _audio(data="QQ==", mime="audio/wav"):
+    return SimpleNamespace(type="audio", data=data, mime_type=mime)
+
+
 # ---- content conversion ------------------------------------------------
 
 @test
@@ -62,6 +66,31 @@ def test_convert_image_block_without_vision_becomes_note(ctx: Ctx):
     ctx.check("becomes a text note, not an image block", blocks[0]["type"] == "text")
     ctx.check("note mentions no vision support", "no vision support" in blocks[0]["text"])
     ctx.check("mime type mentioned", "image/png" in blocks[0]["text"])
+
+
+@test
+def test_convert_audio_block_with_audio_support(ctx: Ctx):
+    """W4 unbuilt surfaces (MCP): "audio content from MCP tools passed
+    through as a typed block to models that accept audio"."""
+    blocks = T.convert_content_blocks([_audio(data="QQ==", mime="audio/mpeg")], vision=False, audio=True)
+    ctx.check(f"becomes a real audio block, got {blocks}", blocks[0]["type"] == "audio")
+    ctx.check("base64 source shape, same convention as an image block",
+              blocks[0]["source"] == {"type": "base64", "media_type": "audio/mpeg", "data": "QQ=="})
+
+
+@test
+def test_convert_audio_block_without_audio_support_becomes_note(ctx: Ctx):
+    """"otherwise the existing note" -- the default (every model today)."""
+    blocks = T.convert_content_blocks([_audio(mime="audio/wav")], vision=False, audio=False)
+    ctx.check("becomes a text note, not an audio block", blocks[0]["type"] == "text")
+    ctx.check("note mentions no audio support", "no audio support" in blocks[0]["text"])
+    ctx.check("mime type mentioned", "audio/wav" in blocks[0]["text"])
+
+
+@test
+def test_convert_audio_defaults_to_the_note_when_audio_kwarg_omitted(ctx: Ctx):
+    blocks = T.convert_content_blocks([_audio()], vision=True)  # audio= not passed at all
+    ctx.check("vision=True alone never turns on audio pass-through", blocks[0]["type"] == "text")
 
 
 @test
@@ -346,6 +375,34 @@ def _mcp_tool_for(name, *, vision=False, manager=None):
     triples = {t[2].name: t for t in mgr.all_tools()}
     server, wire_name, sdk_tool = triples[name]
     return T.McpTool(server, sdk_tool, mgr, vision=vision), mgr
+
+
+class _FakeManager:
+    """A minimal duck-typed `.call()` double -- McpTool.run() only ever
+    calls this one method; no real subprocess needed to test the
+    audio-flag threading from __init__ through run()."""
+
+    def __init__(self, content) -> None:
+        self._content = content
+
+    def call(self, server, tool, arguments, abort=None):
+        return SimpleNamespace(content=self._content, is_error=False, structured_content=None)
+
+
+@test
+def test_mcptool_run_passes_the_audio_flag_through_to_convert_content_blocks(ctx: Ctx):
+    sdk_tool = SimpleNamespace(name="hear", description="", input_schema={}, annotations=None, meta=None)
+    fake_mgr = _FakeManager([_audio(data="QQ==", mime="audio/mpeg")])
+    tool = T.McpTool("srv", sdk_tool, fake_mgr, audio=True)
+    ctx.check("constructor stores the flag", tool.audio is True)
+    result = tool.run({}, ToolContext(cwd=REPO_DIR))
+    ctx.check(f"a real audio block came back through run(), got {result.content!r}",
+              isinstance(result.content, list) and result.content[0]["type"] == "audio")
+
+    tool_off = T.McpTool("srv", sdk_tool, _FakeManager([_audio()]))
+    ctx.check("defaults to False", tool_off.audio is False)
+    result_off = tool_off.run({}, ToolContext(cwd=REPO_DIR))
+    ctx.check("without the flag it's the text note instead", result_off.content[0]["type"] == "text")
 
 
 @test

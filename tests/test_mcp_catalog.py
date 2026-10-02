@@ -538,6 +538,43 @@ def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx
               "mcp__ableton__moog_set" not in ranked_names or ranked_names[0] != "mcp__ableton__moog_set")
 
 
+@test
+def test_catalog_deferred_pool_accepts_a_prebuilt_tool_not_only_mcp_sdk_tools(ctx: Ctx):
+    """W4b connectors bridge: a `(None, tool_instance)` deferred entry is
+    an ALREADY-BUILT Tool (e.g. ConnectorTool), not an MCP sdk_tool to
+    wrap -- reuses the exact same preload/defer/LRU/ToolSearch/eviction
+    machinery with no second abstraction layer (catalog.py's own
+    `server is None` branch in `load()`; `_evict_one()` needed no change
+    at all, since ConnectorTool sets `self.sdk_tool = self` /
+    `self.server_name = None` for exactly this)."""
+    from halo_harness.mcp.connectors import ConnectorInfo
+    from halo_harness.tools.connector_tool import ConnectorTool
+
+    registry = ToolRegistry([])
+    info = ConnectorInfo(name="Claude Docs", slug="claude_docs", account_token="Claude_Docs",
+                           url="https://x/mcp", host="x", status="connected", tools=["batch"])
+    tool = ConnectorTool(info)
+    catalog = SessionCatalog(registry=registry, deferred={"connector__claude_docs": (None, tool)},
+                              manager=None, cap=5, names=[])
+
+    defs, deferred_names = catalog.search("claude docs")
+    ctx.check(f"found via keyword search, got {[d['name'] for d in defs]}",
+              "connector__claude_docs" in [d["name"] for d in defs])
+    ctx.check("reported as still deferred", "connector__claude_docs" in deferred_names)
+
+    loaded = catalog.load(["connector__claude_docs"])
+    ctx.check(f"load() recognises it, got {loaded}", loaded == ["connector__claude_docs"])
+    ctx.check("the REAL ConnectorTool instance is now in the registry, unchanged",
+              registry.get("connector__claude_docs") is tool)
+    ctx.check("names grew", catalog.names == ["connector__claude_docs"])
+
+    evicted = catalog._evict_one()
+    ctx.check("evicted successfully", evicted is True)
+    ctx.check("back in the deferred pool as (None, tool)",
+              catalog.deferred["connector__claude_docs"] == (None, tool))
+    ctx.check("removed from the live registry", registry.get("connector__claude_docs") is None)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)
