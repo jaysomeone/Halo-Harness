@@ -194,7 +194,8 @@ def configured_providers() -> "list[str]":
 # plain numbered-fallback path with no real terminal).
 # ---------------------------------------------------------------------------
 
-def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None) -> dict:
+def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
+                          cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> dict:
     """`{"configured", "source", "masked", "known_host", "fields"}` for one
     TAB_PROVIDERS entry:
 
@@ -218,9 +219,17 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None) -> d
     Detection for `openrouter`/`anthropic`/`typesafe` now goes through
     `providers.config.listing_effective_env()` (finding 3) so a key living
     only in a settings.json `env` block shows as configured here too,
-    matching what a real session would resolve."""
+    matching what a real session would resolve.
+
+    `cwd`/`settings_flag` (findings 22/23, 2.0.1): threaded straight into
+    `listing_effective_env` -- both default to `None` (today's unchanged
+    behavior, bare process `Path.cwd()`, no settings-flag override) since
+    `halo init` has no `--cwd`/`--settings` flags of its own yet; present so
+    a caller that DOES have an explicit cwd/settings-flag (a future `halo
+    init --cwd`, or a direct test) never has to re-derive this function's
+    own env resolution a second way."""
     from halo_harness.providers.config import listing_effective_env, redact
-    env = listing_effective_env()
+    env = listing_effective_env(cwd, settings_flag)
     if provider == "databricks":
         from halo_harness.providers.config import resolve_databricks, resolve_databricks_source
         dbx = resolve_databricks(env)

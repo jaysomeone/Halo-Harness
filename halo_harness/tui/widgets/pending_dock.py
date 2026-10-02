@@ -15,8 +15,6 @@ how to show/hide exactly one card.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 

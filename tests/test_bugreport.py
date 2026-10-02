@@ -276,7 +276,10 @@ def test_session_turn_writes_one_meta_timeline_node_per_turn_never_model_visible
             session = build.session
             list(session.turn("hello"))
 
-            record = debug_timeline.last_turn()
+            # W3b item 11: the per-turn timeline is now the SESSION's own
+            # instance (`self._timeline`), never the `debug_timeline`
+            # module's shared default -- see TurnTimeline's own docstring.
+            record = session._timeline.last_turn()
             ctx.check(f"a timeline record was captured, got {record}", record is not None)
 
             nodes = session.log.read_all()

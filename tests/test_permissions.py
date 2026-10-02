@@ -576,6 +576,56 @@ def test_add_allow_rule_preserves_existing_content(ctx: Ctx):
 
 
 @test
+def test_add_allow_rule_preserves_pretty_printed_indentation_and_key_order(ctx: Ctx):
+    """W3b hygiene: add_allow_rule used to always re-serialise with a
+    hardcoded indent=2, reflowing a file written with a different width
+    even though the only logical change is one new array entry (seen live:
+    a fixture settings.json's indentation changed with identical values).
+    A 4-space, specifically-ordered input must come back 4-space with the
+    SAME key order, one new rule appended -- never flattened to this
+    harness's own 2-space default."""
+    tmp = Path(tempfile.mkdtemp(prefix="addrule-pretty-"))
+    settings_path = tmp / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True)
+    original = (
+        "{\n"
+        '    "model": "sonnet",\n'
+        '    "permissions": {\n'
+        '        "allow": [\n'
+        '            "Bash(existing)"\n'
+        "        ]\n"
+        "    },\n"
+        '    "env": {\n'
+        '        "FOO": "bar"\n'
+        "    }\n"
+        "}\n"
+    )
+    settings_path.write_text(original, encoding="utf-8")
+    P.add_allow_rule("Bash(new)", "local", cwd=tmp)
+    after = settings_path.read_text(encoding="utf-8")
+    ctx.check(f"4-space indentation preserved, got {after!r}", after.startswith('{\n    "model"'))
+    ctx.check(f"nested 4-space indentation preserved too, got {after!r}",
+              '\n        "allow"' in after)
+    parsed = json.loads(after)
+    ctx.check(f"key order preserved (model, permissions, env), got {list(parsed.keys())!r}",
+              list(parsed.keys()) == ["model", "permissions", "env"])
+    ctx.check("existing rule preserved and new rule appended",
+              parsed["permissions"]["allow"] == ["Bash(existing)", "Bash(new)"])
+    ctx.check("unrelated env block untouched", parsed["env"] == {"FOO": "bar"})
+
+
+@test
+def test_add_allow_rule_defaults_to_2_space_indent_for_a_brand_new_file(ctx: Ctx):
+    """The pretty-printed-input fix above must never change today's
+    behaviour for the common case -- no settings.local.json exists yet."""
+    tmp = Path(tempfile.mkdtemp(prefix="addrule-newfile-"))
+    written_path = P.add_allow_rule("Bash(ls:*)", "local", cwd=tmp)
+    after = written_path.read_text(encoding="utf-8")
+    ctx.check(f"a brand-new file still gets the harness's own 2-space default, got {after!r}",
+              after.startswith('{\n  "permissions"'))
+
+
+@test
 def test_add_allow_rule_user_destination(ctx: Ctx):
     import os
     tmp_home = Path(tempfile.mkdtemp(prefix="addrule-user-"))

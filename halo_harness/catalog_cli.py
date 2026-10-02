@@ -12,8 +12,6 @@ import difflib
 import json
 import sys
 
-from pathlib import Path
-
 from halo_harness.config.paths import bridge_home
 from halo_harness.model_display import ROW_HEADER, format_price_per_m, format_token_count
 from halo_harness.providers.config import (
@@ -237,14 +235,42 @@ def cmd_models(argv) -> int:
     # one line instead of its table -- same rule `/model`/the init picker/
     # doctor all follow; `halo providers enable <name>` is the fix
     # every one of those surfaces names too.
-    from halo_harness.providers.enablement import is_enabled
+    from halo_harness.providers.enablement import is_enabled, is_provider_disabled_message
     or_enabled = is_enabled("openrouter")
     dbx_enabled = is_enabled("databricks")
 
+    # 2.0.1 hygiene: doctor's own catalog-age check (`_check_catalog_ages`)
+    # already tells the user "models.json: never cached (vendored package
+    # fallback still applies)" -- a bare `halo models` with no OpenRouter
+    # key/cache printed an empty table right underneath that claim, which
+    # read as a flat contradiction. No live cache (and no EXPLICIT
+    # `providers disable openrouter` override -- that message already
+    # covers the "deliberately off" case) now falls back to the SAME
+    # package-vendored rows `resolve_model_profile` itself already
+    # consults, clearly labelled as such rather than looking like a live
+    # probe.
+    or_vendored_fallback = False
+    if not models and is_provider_disabled_message("openrouter") is None:
+        from halo_harness.providers.models_dev import load_vendored_openrouter_fallback
+        vendored = load_vendored_openrouter_fallback()
+        if vendored:
+            models = vendored
+            or_vendored_fallback = True
+
+    # The vendored rows are static package data, not a credential-gated
+    # live probe result -- shown whenever there's no explicit "disabled by
+    # you" override, same as doctor's own unconditional catalog-age claim,
+    # regardless of whether OpenRouter also happens to read as "enabled"
+    # (the common fresh-install case: no key yet -> not auto-enabled, but
+    # still not explicitly disabled either).
+    show_openrouter = or_enabled or or_vendored_fallback
+
     if args.json:
-        payload = {"openrouter": models if or_enabled else {}}
-        if not or_enabled and models:
+        payload = {"openrouter": models if show_openrouter else {}}
+        if not or_enabled and models and not or_vendored_fallback:
             payload["openrouter_disabled"] = True
+        if or_vendored_fallback:
+            payload["openrouter_vendored_fallback"] = True
         if dbx is not None:
             if dbx_enabled:
                 payload["databricks"] = _dbx_rows(endpoints, derive_workspace_root(dbx.host), state_dir,
@@ -256,11 +282,15 @@ def cmd_models(argv) -> int:
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
-    if not or_enabled and models:
+    if not or_enabled and models and not or_vendored_fallback:
         print(f"OpenRouter: {len(models)} model(s) cached, but OpenRouter is not enabled -- "
               f"run `halo providers enable openrouter` to show them.")
         models = {}
-    print("OpenRouter models (models.json):")
+    if or_vendored_fallback:
+        print("OpenRouter models (vendored fallback -- no live cache yet; "
+              "set OPENROUTER_API_KEY and run `halo models --refresh` for live pricing):")
+    else:
+        print("OpenRouter models (models.json):")
     print(f"{'id':<48} {'ctx':>8} {'out':>8} {'in/M':>10} {'out/M':>10}    ({ROW_HEADER})")
     for mid in sorted(models):
         entry = models[mid]

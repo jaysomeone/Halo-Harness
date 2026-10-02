@@ -1033,6 +1033,30 @@ class SettingsWriteRefused(Exception):
     that file's content (its `env` block, other permission rules, ...)."""
 
 
+def _detect_json_indent(text: str) -> "int | str":
+    """2.0.1 hygiene: the existing file's own indent width, read from its
+    first indented line -- `add_allow_rule` used to always re-serialise
+    with a hardcoded `indent=2`, silently reflowing a file written with a
+    different width (a hand-edited 4-space file, or anything else Claude
+    Code or an editor produced) even though the only LOGICAL change is one
+    new array entry (seen live: a fixture settings.json's indentation
+    changed even though every value stayed the same). Key order itself was
+    already preserved (Python's `dict`/`json.loads` keep source order, and
+    `add_allow_rule` only ever mutates/appends in place) -- this fixes the
+    other half, indentation. Tabs are preserved as `"\\t"` (json.dumps
+    accepts a string `indent` too); a file with no indented line at all
+    (compact/single-line JSON, or one that doesn't exist yet) falls back to
+    2, this harness's own existing default."""
+    for line in text.splitlines():
+        if line[:1] in (" ", "\t"):
+            stripped = line.lstrip(" \t")
+            if not stripped:
+                continue
+            indent_chars = line[: len(line) - len(stripped)]
+            return "\t" if "\t" in indent_chars else len(indent_chars)
+    return 2
+
+
 def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
     """Write `rule_text` into `<dest>/settings[.local].json`'s
     `permissions.allow` list, tmp + `os.replace` (D-CFG). `destination` is
@@ -1052,6 +1076,7 @@ def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
         raise ValueError(f"add_allow_rule: unsupported destination {destination!r} (use 'session' in-memory instead)")
 
     data: dict = {}
+    indent: "int | str" = 2
     if path.exists():
         try:
             text = path.read_text(encoding="utf-8-sig")
@@ -1065,6 +1090,9 @@ def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
             ) from e
         if not isinstance(data, dict):
             raise SettingsWriteRefused(f"{path} does not contain a JSON object at its root -- refusing to overwrite it")
+        # 2.0.1 hygiene: the file's OWN indent width, never this harness's
+        # hardcoded 2-space default -- see _detect_json_indent's docstring.
+        indent = _detect_json_indent(text)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     perms = data.get("permissions")
@@ -1079,7 +1107,7 @@ def add_allow_rule(rule_text: str, destination: str, *, cwd: Path) -> Path:
         allow_list.append(rule_text)
 
     tmp_path = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp_path.write_text(json.dumps(data, indent=indent) + "\n", encoding="utf-8")
     os.replace(tmp_path, path)
     return path
 

@@ -273,13 +273,19 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
 
 
 def _fire_subagent_hook(child, event_name: str) -> None:
+    """W3b item 11: `child._run_hook`/`_run_hook_stop` (never the bare
+    `child.hook_runner.run(...)` this used to call directly) so a child's
+    own SubagentStart/SubagentStop lands in ITS OWN per-turn timeline
+    (`child._timeline`, never the parent's or the shared module-level
+    default) -- the exact per-session isolation this round's own gap list
+    asks for."""
     if child.hook_runner is None:
         return
     try:
         if event_name == "SubagentStop":
-            child.hook_runner.run_stop("SubagentStop")
+            child._run_hook_stop("SubagentStop")
         else:
-            child.hook_runner.run(event_name, child.hook_runner.payload(event_name))
+            child._run_hook(event_name, child.hook_runner.payload(event_name))
     except Exception:
         pass
 

@@ -3,9 +3,10 @@
 info, provider enablement (with the REASON, never a key), the current
 route, permission mode, MCP servers, a redacted `~/.halo/config.json`,
 settings source paths (paths only), catalog cache ages, this session's own
-learned permission rules, the last turn's timeline (`debug_timeline.
-last_turn()`), the last N session events, and the last 50 `bridge.log`
-lines. Every line passes through `redact.redact_for_bugreport` (the SAME
+learned permission rules, the last turn's timeline (read from the session
+LOG's own `meta`/`timeline` node -- `_timeline_lines`, W3b item 11), the
+last N session events, and the last 50 `bridge.log` lines. Every line
+passes through `redact.redact_for_bugreport` (the SAME
 base patterns `halo export --sanitize` uses, plus a stronger pass for this
 module's much wider surface) before anything is written or printed.
 
@@ -264,11 +265,31 @@ def _session_events_lines(log, n: int, *, include_content: bool) -> list:
     return lines
 
 
-def _timeline_lines() -> list:
-    from halo_harness import debug_timeline
-    record = debug_timeline.last_turn()
-    if record is None:
-        return ["Last turn's timeline: (none recorded yet this process)"]
+def _timeline_lines(session) -> list:
+    """W3b item 11: reads the LAST `timeline` meta node straight from
+    `session.log` (the same persisted record `halo timeline`/`bugreport_
+    timeline_cli.read_timeline_records` already read back from a DIFFERENT
+    process) instead of the in-memory `debug_timeline.last_turn()` -- that
+    module-level reader only ever saw whichever Session happened to write
+    the shared DEFAULT `TurnTimeline` instance (never a real session's own
+    one since the W3b per-session refactor), so standalone `halo bugreport`
+    always printed "(none recorded yet this process)" even for a session
+    with real turns on disk. Reading the log works identically for a live
+    `/bugreport` (session.log IS that live session's own log) and headless
+    `halo bugreport` (`_LogOnlySession` wraps the most recent session's log
+    for this cwd) -- one code path, no "is there a live _timeline" branch
+    needed at all."""
+    log = getattr(session, "log", None) if session is not None else None
+    if log is None:
+        return ["Last turn's timeline: (no session found)"]
+    try:
+        nodes = log.read_all()
+    except Exception as e:
+        return [f"Last turn's timeline: (could not read: {type(e).__name__}: {e})"]
+    timeline_nodes = [n.get("timeline") for n in nodes if n.get("type") == "meta" and isinstance(n.get("timeline"), dict)]
+    if not timeline_nodes:
+        return ["Last turn's timeline: (none recorded yet)"]
+    record = timeline_nodes[-1]
     return ["Last turn's timeline:", f"  {json.dumps(record, default=str, sort_keys=True)}"]
 
 
@@ -324,7 +345,7 @@ def build_bugreport_text(*, facade=None, session=None, settings=None, state_dir:
     lines.append("")
     lines += _learned_rules_lines(session)
     lines.append("")
-    lines += _timeline_lines()
+    lines += _timeline_lines(session)
     lines.append("")
     log = getattr(session, "log", None) if session is not None else None
     lines += _session_events_lines(log, last, include_content=include_content)

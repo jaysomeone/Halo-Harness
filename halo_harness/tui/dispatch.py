@@ -262,12 +262,30 @@ async def _apply_event_inner(app, event) -> None:
         if agent_id is None:
             app.status_bar.set_phase_word("writing")
             app.status_bar.add_received_chars(len(text))
+        else:
+            # W3b (item 10): the SAME one-shot chunk_started latch gap
+            # this file's own W2c comment above describes for the main
+            # status bar applies identically to a child's own SubAgentCard
+            # -- its phase word used to be driven ONLY by the `phase`/
+            # first_token event (below), so a child that reasons then
+            # writes within one call never got a second phase event for
+            # the transition and stayed stuck on "thinking" while its card
+            # kept streaming real text. Reacting to the same text_delta
+            # here closes that gap for children exactly as it already does
+            # for the main session.
+            card = app.transcript.subagent_cards.get(agent_id)
+            if card is not None:
+                card.set_phase_word("writing")
     elif kind == "thinking_delta":
         text = data.get("text", "")
         await app.transcript.append_thinking(turn, data.get("index", 0), text, agent_id=agent_id)
         if agent_id is None:
             app.status_bar.set_phase_word("thinking")
             app.status_bar.add_received_chars(len(text))
+        else:
+            card = app.transcript.subagent_cards.get(agent_id)
+            if card is not None:
+                card.set_phase_word("thinking")
     elif kind == "tool_use_ready":
         await _mount_tool_card(app, data)
         # A3/A5: "tool <Name> <Ns>" on the main status bar, or the running

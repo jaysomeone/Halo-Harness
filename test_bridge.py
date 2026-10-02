@@ -1098,14 +1098,20 @@ class BridgeProc:
         full_env.update(self.env)
         full_env.pop("CLAUDECODE", None)
         args = [sys.executable, str(BRIDGE_PY), "--serve", "--port", str(self.port), "--state-dir", str(self.state_dir)]
-        log_fh = open(self.log_path, "wb")
-        self.proc = subprocess.Popen(args, env=full_env, stdout=log_fh, stderr=subprocess.STDOUT, cwd=str(REPO_DIR))
+        # Hygiene (W3b): the child inherits its own duplicate of this fd via
+        # Popen's stdout redirection, so the parent's own handle is closed
+        # right away rather than kept open (unused) for the subprocess's
+        # whole lifetime -- the previous code only ever closed it on the
+        # early-exit branch below, leaking an open _io.BufferedWriter (a
+        # ResourceWarning at GC/interpreter-shutdown time) on every
+        # successful start.
+        with open(self.log_path, "wb") as log_fh:
+            self.proc = subprocess.Popen(args, env=full_env, stdout=log_fh, stderr=subprocess.STDOUT, cwd=str(REPO_DIR))
         deadline = time.monotonic() + timeout
         last_err: Exception | str | None = None
         healthy = False
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                log_fh.close()
                 out = self.log_path.read_text(encoding="utf-8", errors="replace") if self.log_path.exists() else ""
                 raise BridgeStartError(f"bridge --serve exited early with code {self.proc.returncode}: {out[-3000:]}")
             try:
@@ -3061,7 +3067,8 @@ def test_passthrough_header_swap(ctx: Ctx):
         end_sse(h)
     ctx.dbx_mock.handlers["/ai-gateway/anthropic/v1/messages"] = handler
     body = areq("dbx:databricks-claude-headers", [{"role": "user", "content": "hi"}])
-    ctx.dbx_call("/v1/messages", body)  # ignore response
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body)  # ignore response
+    conn.close()
     last_req = ctx.dbx_mock.requests[-1]
     hdr = last_req["headers"]
     ctx.check(f"authorization == 'Bearer test-dbx-token', got {hdr.get('authorization')!r}",
@@ -3087,7 +3094,8 @@ def test_passthrough_strips_bridge1_signed_thinking_block(ctx: Ctx):
             {"type": "text", "text": "normal answer"},
         ]},
     ])
-    ctx.dbx_call("/v1/messages", body)  # ignore response
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body)  # ignore response
+    conn.close()
     ctx.check("mock received a body", len(recorded) == 1)
     if recorded:
         messages = recorded[0].get("messages", [])
@@ -3111,9 +3119,10 @@ def test_passthrough_beta_header_filters_tool_search_keeps_others(ctx: Ctx):
         end_sse(h)
     ctx.dbx_mock.handlers["/ai-gateway/anthropic/v1/messages"] = handler
     body = areq("dbx:databricks-claude-beta", [{"role": "user", "content": "hi"}])
-    ctx.dbx_call("/v1/messages", body, headers={
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body, headers={
         "anthropic-beta": "tool-search-tool-2025-01-01, some-other-beta",
     })
+    conn.close()
     ctx.check("mock received a request", len(recorded) == 1)
     if recorded:
         hdr = recorded[0]
@@ -3137,7 +3146,8 @@ def test_passthrough_model_rewritten_dbx_prefix_stripped(ctx: Ctx):
         end_sse(h)
     ctx.dbx_mock.handlers["/ai-gateway/anthropic/v1/messages"] = handler
     body = areq("dbx:databricks-claude-rewrite", [{"role": "user", "content": "hi"}])
-    ctx.dbx_call("/v1/messages", body)
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body)
+    conn.close()
     ctx.check("mock received a body", len(recorded) == 1)
     if recorded:
         relayed_model = recorded[0].get("model")
@@ -3207,7 +3217,8 @@ def test_passthrough_defer_loading_stripped_and_capped(ctx: Ctx):
     ctx.dbx_mock.handlers["/ai-gateway/anthropic/v1/messages"] = handler
     tools = [tool_def("core_tool"), tool_def("deferred_never_referenced", defer_loading=True)]
     body = areq("dbx:databricks-claude-defer", [{"role": "user", "content": "hi"}], tools=tools)
-    ctx.dbx_call("/v1/messages", body)
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body)
+    conn.close()
     ctx.check("mock received a body", len(recorded) == 1)
     if recorded:
         up_tools = recorded[0].get("tools") or []
@@ -3241,7 +3252,8 @@ def test_passthrough_tool_reference_replaced_with_text(ctx: Ctx):
             ]},
         ]},
     ])
-    ctx.dbx_call("/v1/messages", body)
+    _, _, _, conn = ctx.dbx_call("/v1/messages", body)
+    conn.close()
     ctx.check("mock received a body", len(recorded) == 1)
     if recorded:
         body_json = json.dumps(recorded[0])

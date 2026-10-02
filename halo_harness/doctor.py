@@ -851,12 +851,18 @@ def _check_default_model() -> str:
                  cmd=f"halo init --provider {provider_flag}")
 
 
-def _check_providers_enabled() -> str:
+def _check_providers_enabled(cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> str:
     """H15 item 21: a one-line summary of the explicit provider-enablement
     table (`halo providers` has the full detail) -- always INFO
     (never WARN/MISSING: a box with nothing enabled yet is normal before
     the first `init`/`providers enable`, same as every other "not
-    configured yet" line in this module)."""
+    configured yet" line in this module).
+
+    Findings 22/23 (2.0.1): `cwd`/`settings_flag` (this command's own
+    `--cwd`/`--settings` flags, see `cmd_doctor`) are threaded into
+    `listing_effective_env` so this line never disagrees with what a real
+    session launched against that same `--cwd`/`--settings` would
+    resolve."""
     from halo_harness.providers.config import listing_effective_env
     from halo_harness.providers.enablement import PROVIDER_NAMES, credentials_present, is_enabled
     # 1.0.1 part 2 fixpass finding 3: the merged settings-aware env (a
@@ -864,7 +870,7 @@ def _check_providers_enabled() -> str:
     # too), and `credentials_present` computed exactly once per provider --
     # same "detection for listing" fix `/providers`'s own `provider_rows()`
     # applies, reused here so doctor never disagrees with it.
-    env = listing_effective_env()
+    env = listing_effective_env(cwd, settings_flag)
     detected = {p: credentials_present(p, env=env) for p in PROVIDER_NAMES}
     enabled = [p for p in PROVIDER_NAMES if is_enabled(p, detected=detected[p])]
     detected_not_enabled = [p for p in PROVIDER_NAMES if detected[p] and p not in enabled]
@@ -1266,7 +1272,7 @@ def _work_check_entries() -> "list[tuple[str, str]]":
         ("token_validity", _work_check_token_validity(host, token)),
     ]
     config_ids = ("work_root", "work_gateway", "work_headers", "work_default_model", "work_effort", "work_token_source")
-    entries.extend(zip(config_ids, _work_check_config_summary()))
+    entries.extend(zip(config_ids, _work_check_config_summary(), strict=False))
     probe_lines = _work_check_reasoning_replay_after_tool_call(host, token, bridge_home())
     entries.extend((f"reasoning_replay_probe_{i}", line) for i, line in enumerate(probe_lines))
     return entries
@@ -1297,7 +1303,7 @@ def run_work_checks_structured() -> "tuple[list, bool]":
     return checks, ok
 
 
-def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
+def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> "list[tuple[str, str]]":
     """`[(id, rendered_line), ...]` -- the ONE table both `run_checks`
     (the plain `lines`/`ok` pair every existing caller/test already uses)
     and `run_checks_structured`/`doctor --json` (H12 Part B: "for init to
@@ -1307,7 +1313,7 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     rather than appearing as an empty/placeholder entry."""
     entries: "list[tuple[str, Optional[str]]]" = [("python", _check_python())]
     claude_ids = ("claude_dir", "claude_settings_json", "claude_dot_json")
-    entries.extend(zip(claude_ids, _check_claude_layout()))
+    entries.extend(zip(claude_ids, _check_claude_layout(), strict=False))
     entries.append(("state_dir_migration", _check_state_dir_migration()))
     entries.append(("env_file", _check_env_file()))
     entries.append(("openrouter", _check_openrouter()))
@@ -1323,9 +1329,9 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries.append(("local_bin_on_path", _check_local_bin_on_path()))
     entries.append(("tmux_mouse", _check_tmux_mouse()))
     catalog_ids = ("catalog_models_json", "catalog_dbx_endpoints", "catalog_models_dev")
-    entries.extend(zip(catalog_ids, _check_catalog_ages()))
+    entries.extend(zip(catalog_ids, _check_catalog_ages(), strict=False))
     telemetry_ids = ("sessions", "improve")
-    entries.extend(zip(telemetry_ids, _check_telemetry_and_improve()))
+    entries.extend(zip(telemetry_ids, _check_telemetry_and_improve(), strict=False))
     # U5 leftover / H8 cheap must-do: tui/clipboard.py's own
     # clipboard_doctor_line() was written ready-to-call but never actually
     # wired into a real doctor run. H12 Part B: that function's own WARN
@@ -1338,22 +1344,22 @@ def _check_entries(cwd: Optional[Path] = None) -> "list[tuple[str, str]]":
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
-    entries.append(("providers_enabled", _check_providers_enabled()))
+    entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))
     entries.append(("command_on_path", check_command_on_path()))
     entries.append(("old_rolo_claude_on_path", _check_old_rolo_claude_leftover()))
     return [(cid, line) for cid, line in entries if line is not None]
 
 
-def run_checks(cwd: Optional[Path] = None) -> "tuple[list, bool]":
+def run_checks(cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> "tuple[list, bool]":
     """Returns (lines, ok) -- `ok` is True iff nothing came back MISSING
     (a WARN is informational, e.g. "no Databricks configured", and never
     fails doctor as a whole)."""
-    lines = [line for _cid, line in _check_entries(cwd)]
+    lines = [line for _cid, line in _check_entries(cwd, settings_flag)]
     ok = not any(line.startswith(MISSING) for line in lines)
     return lines, ok
 
 
-def run_checks_structured(cwd: Optional[Path] = None) -> "tuple[list, bool]":
+def run_checks_structured(cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> "tuple[list, bool]":
     """H12 Part B: `doctor --json`'s own payload, and what `halo
     init` consumes to build its own Summary step -- `[{"id", "status",
     "message", "fix", "see"}, ...]`, the SAME checks/order/wording
@@ -1361,7 +1367,7 @@ def run_checks_structured(cwd: Optional[Path] = None) -> "tuple[list, bool]":
     re-parsed from it. `ok` matches `run_checks`' own definition exactly
     (True iff nothing is "missing")."""
     checks = []
-    for cid, line in _check_entries(cwd):
+    for cid, line in _check_entries(cwd, settings_flag):
         parsed = _parse_check_line(line)
         parsed["id"] = cid
         checks.append(parsed)
@@ -1386,7 +1392,17 @@ def cmd_doctor(argv: list) -> int:
                          help="With --probe-all: also check one Read tool-call per endpoint")
     parser.add_argument("--only", default=None, metavar="GLOB",
                          help="With --probe-all: only endpoints matching this glob")
+    # Findings 22/23 (2.0.1): threaded into listing_effective_env (via
+    # run_checks/_check_providers_enabled) so the provider-enablement line
+    # never disagrees with what a real session launched against this same
+    # --cwd/--settings would resolve -- matches halo providers' own flags.
+    parser.add_argument("--cwd", default=None, metavar="DIR",
+                         help="Resolve settings/credentials as if run from DIR")
+    parser.add_argument("--settings", default=None, metavar="JSON_OR_PATH",
+                         help="Extra settings (inline JSON or a file path), same as a session's --settings")
     args = parser.parse_args(argv)
+    doctor_cwd = Path(args.cwd).resolve() if args.cwd else None
+    settings_flag = args.settings
     # H15 item 21.4: one-time migration -- a box with credentials from
     # before provider enablement existed gets exactly those enabled. A
     # no-op (returns None) once a `providers` block already exists,
@@ -1421,10 +1437,10 @@ def cmd_doctor(argv: list) -> int:
             print(f"  {line}")
         return 0 if ok else 1
     if args.json:
-        checks, ok = run_checks_structured()
+        checks, ok = run_checks_structured(doctor_cwd, settings_flag)
         print(json.dumps(checks, indent=2))
         return 0 if ok else 1
-    lines, ok = run_checks()
+    lines, ok = run_checks(doctor_cwd, settings_flag)
     print("halo doctor")
     for line in lines:
         print(f"  {line}")

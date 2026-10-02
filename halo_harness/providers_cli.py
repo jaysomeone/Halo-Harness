@@ -32,7 +32,7 @@ def _model_count(name: str) -> "int | None":
         return None
 
 
-def provider_rows() -> "list[dict]":
+def provider_rows(*, cwd=None, settings_flag=None, env=None) -> "list[dict]":
     """`[{"name", "label", "enabled", "status", "credentials",
     "credentials_source", "reachable", "model_count"}, ...]`, one row per
     `PROVIDER_NAMES` entry, in that fixed order. `status` (H15 part 2
@@ -49,10 +49,20 @@ def provider_rows() -> "list[dict]":
     10s timeout apiece). `env` (finding 3) is `providers.config.
     listing_effective_env()`, computed once for the whole table, so a
     credential living only in a settings.json `env` block is seen here the
-    same way a real session would resolve it."""
+    same way a real session would resolve it.
+
+    Findings 22/23 (2.0.1): `env`, when given, is used as-is -- the exact
+    `Settings.effective_env` of a REAL running session (`/providers`'s own
+    `commands.builtins._cmd_providers`, when a live session is attached,
+    passes this instead of letting the table re-derive a possibly-different
+    one), never re-resolved. Without `env`, `cwd`/`settings_flag` (a
+    caller's own `--cwd`/`--settings` flag values, when it has them -- the
+    standalone `halo providers` CLI) are threaded into `listing_effective_
+    env` so this never disagrees with what that same flag combination would
+    resolve in a real session."""
     from halo_harness.providers.config import listing_effective_env
     from halo_harness.providers.reachability import reachability_tag
-    env = listing_effective_env()
+    env = env if env is not None else listing_effective_env(cwd, settings_flag)
     rows = []
     for name in PROVIDER_NAMES:
         detected = credentials_present(name, env=env)
@@ -83,6 +93,21 @@ def format_providers_table(rows: "list[dict]") -> str:
 
 
 def cmd_providers(argv: list) -> int:
+    # Findings 22/23 (2.0.1): peeled off here (not a full argparse parser,
+    # to keep every existing positional `list|enable <name>|disable <name>|
+    # setup <name>` form working unchanged) so `halo providers --cwd DIR
+    # --settings JSON_OR_PATH` resolves credentials against that explicit
+    # cwd/settings-flag value, same as a real session launched with either
+    # flag would -- matching `halo doctor`'s own new `--cwd`/`--settings`.
+    import argparse
+    from pathlib import Path
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--cwd", default=None)
+    _pre.add_argument("--settings", default=None, dest="settings_flag", metavar="JSON_OR_PATH")
+    _ns, argv = _pre.parse_known_args(argv)
+    cwd = Path(_ns.cwd).resolve() if _ns.cwd else None
+    settings_flag = _ns.settings_flag
+
     # 1.0.1 part 2 fixpass finding 8: `catalog_cli`/`doctor` both load the
     # env file before resolving anything -- this command didn't, so a key
     # that lives ONLY in the env file (never a real shell export) showed
@@ -112,7 +137,7 @@ def cmd_providers(argv: list) -> int:
                 refresh_cached_claude_auth_status()
         except Exception:
             pass
-        print(format_providers_table(provider_rows()))
+        print(format_providers_table(provider_rows(cwd=cwd, settings_flag=settings_flag)))
         return 0
     action = argv[0]
     if action in ("-h", "--help"):

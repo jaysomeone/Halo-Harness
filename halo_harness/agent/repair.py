@@ -378,7 +378,7 @@ def build_tool_meta(tool_use_blocks: list, repair_outcomes: list, tool_call_flag
     never recomputed) and passes it to `SessionLog.append_assistant`."""
     tool_call_flags = tool_call_flags or {}
     meta: dict = {}
-    for tu, outcome in zip(tool_use_blocks, repair_outcomes):
+    for tu, outcome in zip(tool_use_blocks, repair_outcomes, strict=False):
         tool_id = tu.get("id") if isinstance(tu, dict) else None
         if not tool_id:
             continue

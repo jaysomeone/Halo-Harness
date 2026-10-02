@@ -20,17 +20,11 @@ from __future__ import annotations
 
 import os
 import sys
-import io
 import re
 import json
 import time
-import uuid
 import select
 import socket
-import ssl
-import ipaddress
-import hashlib
-import secrets
 import shutil
 import signal
 import argparse
@@ -43,10 +37,7 @@ import http.client
 import http.server
 import urllib.request
 import urllib.parse
-import socketserver
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Any
 
 DEFAULT_PORT = 8787
 PROG = "claude-bridge"
@@ -94,7 +85,6 @@ from halo_harness.providers.routing import (
 )
 from halo_harness.providers.translate import (
     WebSearchUnavailable,
-    anthropic_to_openai,
 )
 from halo_harness.providers.errors import (
     build_prompt_too_long_message,

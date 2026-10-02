@@ -395,14 +395,25 @@ class InitTabsApp(App):
     def _finish_tab_worker(self, provider: str) -> None:
         """A.4: a tab that now has credentials gets its catalog fetched
         and cached right away, off the UI thread -- the reachability tag
-        updates from the SAME probe pass."""
+        comes from its OWN probe pass.
+
+        W3b test-determinism fix: the reachability tag is pushed to the UI
+        RIGHT AWAY, before `refresh_tab_catalog` runs -- previously the tag
+        update waited on BOTH calls finishing, so a slow/unreachable
+        catalog fetch (its own, separate up-to-8s connect attempt) left
+        "reachability: checking..." on screen for as long as the catalog
+        fetch took, even though the reachability answer itself was already
+        known. `catalog_notes` is only ever read AFTER the whole tabs app
+        closes (`init_cli.py`'s own summary step) -- nothing live displays
+        it mid-session, so finishing the catalog fetch after the tag update
+        changes no visible behaviour, only its timing."""
         from halo_harness.init_providers import refresh_tab_catalog
         from halo_harness.providers.reachability import reachability_tag
         tag = reachability_tag(provider)
+        self.call_from_thread(self._apply_reach, provider, tag)
         _ok, note = refresh_tab_catalog(provider)
         if note:
             self.catalog_notes[provider] = note
-        self.call_from_thread(self._apply_reach, provider, tag)
 
     def _apply_reach(self, provider: str, tag: str) -> None:
         try:

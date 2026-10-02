@@ -29,8 +29,10 @@ can never run by mistake, clones to `~/Halo-Harness` (or pulls an existing
 clone), runs `uv tool install --reinstall .`, checks PATH, verifies that
 `halo` is the installed command, and finishes with `halo doctor`. Options:
 `--yes` (no questions), `--no-clone` (install straight from GitHub),
-`HALO_CLONE_DIR=/some/dir`. Then `cd ~ && halo init`. The sections below
-are the same steps by hand.
+`--dry-run` (print every command it would run -- installs, uninstalls,
+clone/pull -- without running any of them; never prompts), `HALO_CLONE_
+DIR=/some/dir`. Then `cd ~ && halo init`. The sections below are the same
+steps by hand.
 
 ### From a clone (recommended -- this is also how you get `git pull` updates)
 

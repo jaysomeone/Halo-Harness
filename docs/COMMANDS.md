@@ -1028,6 +1028,86 @@ GitHub/AWS-shaped tokens, quoted or JSON-encoded `export KEY="value"`/
 by round-tripping each log node through JSON text -- the same sanitizer the
 TUI's own `/export --sanitize` calls, so the two can never disagree.
 
+## `halo bugreport`
+
+"One paste instead of screenshots" -- writes a redacted diagnostic report
+to `~/.halo/bugreports/<timestamp>.md` (or `--out FILE`) against the most
+recent session for the cwd (or `--session ID`). `/bugreport` in the TUI/`-p`
+is the same report, built from the live session instead.
+
+```sh
+halo bugreport --help
+```
+```
+usage: halo bugreport [-h] [--last N] [--session ID] [--out FILE] [--copy]
+                      [--include-content] [--cwd DIR]
+
+Write a redacted diagnostic report (one paste instead of screenshots).
+
+options:
+  -h, --help         show this help message and exit
+  --last N           Session events to include (default 20)
+  --session ID       Session id or unique prefix
+  --out FILE         Write to FILE instead of ~/.halo/bugreports/
+  --copy             Also copy the report text to the clipboard
+  --include-content  Include prompt/output text, not just shapes
+  --cwd DIR
+```
+
+Contents, in order: halo version, Python/OS/terminal/shell/cwd/git branch,
+install mode; which providers are enabled and WHY (env file, settings env,
+`~/.databrickscfg`, claude.ai login -- never a key, not even a fingerprint);
+the current route (ref, provider, api_type, dialect, profile, effort
+requested and effort SENT); permission mode; MCP servers with state;
+`~/.halo/config.json` with secret-shaped values replaced; settings source
+paths (paths only); catalog cache age per provider; this session's own
+learned permission rules; the last turn's timeline (see `halo timeline`
+below); the last N session events (types, durations, tool names, status
+codes and error messages -- prompt/output text only with
+`--include-content`); and the last 50 `bridge.log` lines. Every line passes
+through the same redactor `halo export --sanitize` uses, plus a stronger
+pass (long hex/base64 runs, `sk-`/`dapi`/`Bearer ` shapes, and the literal
+value of any secret env var this process can see) -- a planted fake key
+never survives into the report from any of these sources. `--copy` copies
+the report text to the clipboard with whatever exists (`clip` on Windows,
+`pbcopy` on macOS, `wl-copy`/`xclip` on Linux; otherwise just the path is
+printed).
+
+## `halo timeline`
+
+Reads the per-turn request/tool/hook/permission-wait/compaction timing
+timeline a session's own log already recorded (`agent.loop.Session.turn`'s
+own wrapper, for every turn regardless of dialect) back from that session's
+log file -- works for a session from an earlier process, not just a live
+one. `/timeline [N]` in the TUI/`-p` shows the SAME shape for the live
+session's own in-memory copy instead (identical fields); `--debug` prints
+the same lines live as they happen.
+
+```sh
+halo timeline --help
+```
+```
+usage: halo timeline [-h] [--last N] [--session ID] [--cwd DIR] [--json]
+
+Show the per-turn request/tool timing timeline for a session.
+
+options:
+  -h, --help    show this help message and exit
+  --last N      Turns to show (default 1, the most recent)
+  --session ID
+  --cwd DIR
+  --json        Print raw JSON instead of formatted text
+```
+
+Per turn: request-sent/headers/first-reasoning/first-text/first-tool-call/
+message-end elapsed milliseconds; each tool call's own name/start/end/
+status; each hook that ran (event name + real duration); each permission
+ask that blocked the turn (start, end, resolved decision -- "allow"/"deny"/
+"dismissed"); compactions (phase, trigger, tokens before/after when
+known -- auto-compaction only, a manual `/compact` runs outside any turn);
+steers; and retries/errors with status codes. `--json` prints the raw
+records instead of the formatted text.
+
 ## `halo proxy`
 
 The original `claude-bridge`: a single-file HTTP proxy (`bridge.py`) that

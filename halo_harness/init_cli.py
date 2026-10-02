@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm
 
 from halo_harness.init_providers import (
     PRESET_TO_PROVIDER, PROVIDER_DEFAULT_MODEL, PROVIDER_LABEL, PROVIDERS,

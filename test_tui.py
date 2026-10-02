@@ -3339,10 +3339,24 @@ def test_stats_models_runs_off_the_ui_thread(ctx: Ctx):
 # ============================================================================
 
 _H15_TABS_PROVIDER_VARS = (
-    "OPENROUTER_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN",
+    "OPENROUTER_API_KEY", "BRIDGE_OPENROUTER_BASE_URL", "DATABRICKS_HOST", "DATABRICKS_TOKEN",
+    "BRIDGE_DBX_BASE_URL", "BRIDGE_DBX_TOKEN",
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "BRIDGE_ANTHROPIC_BASE_URL",
     "TYPESAFE_API_KEY", "BRIDGE_TEST_CC_AUTH_STATUS",
 )
+
+# W3b test-determinism: a loopback address nothing listens on -- "connection
+# refused" comes back near-instantly on every OS, no DNS lookup, no real
+# 8s-capped connect attempt. `InitTabsApp._finish_tab_worker`'s own catalog
+# refresh (`refresh_tab_catalog` -> `probe_openrouter_models`) uses a
+# DIFFERENT `open_upstream` import than `providers.reachability`'s own (the
+# one `test_init_tabs_reachability_tag_for_a_refused_host` mocks), so
+# without this override entering an OpenRouter key in ANY pilot using
+# `_H15TabsEnv` made that worker actually dial the real openrouter.ai --
+# the root cause of "reachability: checking..." intermittently taking
+# several real seconds under load (never reproduced "mocked", per that
+# test's own docstring promise, until this fixes it for real).
+_H15_TABS_FAST_REFUSED_LOCAL_URL = "http://127.0.0.1:1"
 
 
 class _H15TabsEnv:
@@ -3361,6 +3375,7 @@ class _H15TabsEnv:
         for k in _H15_TABS_PROVIDER_VARS:
             if k != "BRIDGE_TEST_CC_AUTH_STATUS":
                 os.environ.pop(k, None)
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = _H15_TABS_FAST_REFUSED_LOCAL_URL
         self.home = d
         self.state_dir = d / ".halo"
         return self
@@ -3375,6 +3390,28 @@ class _H15TabsEnv:
 
 def _static_text(widget) -> str:
     return str(widget.renderable) if hasattr(widget, "renderable") else str(widget.render())
+
+
+async def _poll_until(pilot, predicate, *, deadline_s: float = 5.0, step_s: float = 0.05):
+    """W3b test-determinism: waits for `predicate()` (called fresh each
+    tick) to become truthy, polling every `step_s` up to a WALL-CLOCK
+    `deadline_s` -- never a fixed iteration count. A fixed `for _ in
+    range(20): await pilot.pause(0.05)` budget is only ever "1.0s" when
+    every tick actually takes its nominal 0.05s; under load (another
+    suite running concurrently, a background worker thread genuinely
+    slower to schedule) each tick can take longer while the iteration
+    count stays the same, silently shrinking the REAL budget -- exactly
+    the class of flake the Kali VM showed concurrently with the Windows
+    suites. Returns the last predicate() value (truthy on success, falsy
+    if the deadline passed first) so a caller's own ctx.check still gets
+    a real value to report either way."""
+    import time
+    start = time.monotonic()
+    value = predicate()
+    while not value and (time.monotonic() - start) < deadline_s:
+        await pilot.pause(step_s)
+        value = predicate()
+    return value
 
 
 @test
@@ -3474,11 +3511,9 @@ def test_init_tabs_reachability_tag_for_a_refused_host(ctx: Ctx):
                     for ch in "sk-or-fake":
                         await pilot.press(ch)
                     await pilot.press("enter")
-                    for _ in range(20):
-                        await pilot.pause(0.05)
-                        reach = _static_text(app.query_one("#openrouter-reach", Static))
-                        if "unreachable" in reach:
-                            break
+                    await _poll_until(
+                        pilot, lambda: "unreachable" in _static_text(app.query_one("#openrouter-reach", Static)))
+                    reach = _static_text(app.query_one("#openrouter-reach", Static))
                     ctx.check(f"shows unreachable with a one-line reason, got {reach!r}",
                               "unreachable" in reach and "connection refused" in reach)
                     await pilot.press("escape")
@@ -3497,7 +3532,7 @@ def test_init_tabs_catalog_cache_written_on_tab_completion(ctx: Ctx):
     written to this test's own scoped state dir."""
     from halo_harness.providers.databricks import load_models_json
     from halo_harness.tui.dialogs.init_tabs import InitTabsApp
-    from textual.widgets import Input, Static
+    from textual.widgets import Input
 
     def _fake_probe(base_url, api_key):
         return [{"id": "vendor/fake-model", "context_length": 128000, "max_output_tokens": 8192,
@@ -3517,10 +3552,7 @@ def test_init_tabs_catalog_cache_written_on_tab_completion(ctx: Ctx):
                     for ch in "sk-or-fake":
                         await pilot.press(ch)
                     await pilot.press("enter")
-                    for _ in range(20):
-                        await pilot.pause(0.05)
-                        if "openrouter" in app.catalog_notes:
-                            break
+                    await _poll_until(pilot, lambda: "openrouter" in app.catalog_notes)
                     ctx.check(f"a catalog note was recorded, got {app.catalog_notes}",
                               "openrouter" in app.catalog_notes)
                     cached = load_models_json(env.state_dir)
@@ -5953,6 +5985,66 @@ def test_effort_card_and_chip_show_sent_as_max_for_an_anthropic_route_requesting
     asyncio.run(body())
 
 
+@test
+def test_bare_effort_card_selection_persists_like_the_plain_text_path(ctx: Ctx):
+    """W3b item 11 (W3a scope cut): the BARE `/effort` path (opens the
+    card, the user arrows to a level and presses Enter -- `EffortCard`'s
+    own `on_select` callback in tui/slash.py's `_handle_effort`) must
+    persist exactly like the plain-text `/effort <level>` path already
+    does (test_slash_effort_against_a_real_session_persists_the_sent_
+    value, against a real session) -- `on_select`'s own comment says so
+    ("same persistence as the plain-text path") but nothing exercised the
+    actual card interaction before this test."""
+    from types import SimpleNamespace
+    from halo_harness import launch_state
+    from halo_harness.providers.profiles import ProviderProfile
+    from halo_harness.tui import slash as slash_mod
+    from halo_harness.tui.widgets.cards import EffortCard
+
+    profile = ProviderProfile(reasoning_effort_supported=True, effort_values_supported=("low", "medium", "high"))
+    session = SimpleNamespace(provider_profile=profile, effort="low", effort_requested="low",
+                               effort_source="session", model_ref=SimpleNamespace(raw="or:mock/bare-effort-card"))
+
+    def _fake_run_slash(name: str, args: str = "") -> str:
+        # Stands in for commands.builtins._cmd_effort's own real behavior
+        # (mutates the live session's effort directly, no event round
+        # trip) -- FakeController.run_slash itself is a canned no-op stub,
+        # and the real version is already covered end to end against a
+        # REAL session by test_slash_effort_against_a_real_session_
+        # persists_the_sent_value; this test's own focus is the CARD
+        # interaction and persistence call that happen AROUND that call,
+        # in tui/slash.py's `_handle_effort`/`on_select` themselves.
+        if name == "effort" and args:
+            session.effort = args
+            return f"Effort level set to '{args}'"
+        return f"(fake) ran /{name} {args}".rstrip()
+
+    async def body():
+        fake = FakeController()
+        fake.run_slash = _fake_run_slash
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app.controller.session = session
+            ctx.check("nothing persisted yet", launch_state.resolve_last_effort(app.cwd) != "medium")
+            await slash_mod._handle_effort(app, "")
+            await pilot.pause(0.05)
+            card = app.pending_card
+            ctx.check(f"the bare /effort card opened, got {type(card).__name__}", isinstance(card, EffortCard))
+            ctx.check(f"starts on the session's current level 'low', got index={card.index}",
+                      card.levels[card.index] == "low")
+            await pilot.press("right")  # low -> medium
+            await pilot.pause(0.05)
+            await pilot.press("enter")  # apply -- fires on_select("medium")
+            await pilot.pause(0.1)
+            ctx.check("the card closed", app.pending_card is None)
+            ctx.check(f"the session's own effort was actually set to 'medium', got {session.effort!r}",
+                      session.effort == "medium")
+            ctx.check(f"the CARD-selected level persisted to ~/.halo/state.json exactly like the plain-text "
+                      f"/effort <level> path, got {launch_state.resolve_last_effort(app.cwd)!r}",
+                      launch_state.resolve_last_effort(app.cwd) == "medium")
+    asyncio.run(body())
+
+
 # ============================================================================
 # SVG snapshots (Part A/B): the phase-line states and the rotating tips
 # placeholder, alongside the existing main/permission/question/model-picker
@@ -6411,6 +6503,57 @@ def test_status_bar_phase_word_follows_the_phase_line_without_a_second_phase_eve
             ctx.check(f"the status bar cluster followed within the SAME drain tick, got "
                       f"{app.status_bar.phase!r} (rendered: {str(app.status_bar.render())!r})",
                       app.status_bar.phase == "writing")
+    asyncio.run(body())
+
+
+@test
+def test_subagent_card_phase_word_follows_its_own_text_delta_without_a_second_phase_event(ctx: Ctx):
+    """W3b item 10: the SAME one-shot chunk_started-latch gap the test just
+    above pins for the MAIN status bar applies identically to a child's own
+    SubAgentCard -- before this fix its phase word was driven ONLY by the
+    `phase`/first_token event, so a child that reasons then writes within
+    one call never got a second phase event for the transition and its
+    card stayed on 'thinking' while it was visibly streaming real text.
+    `ev.thinking_delta`/`ev.text_delta` carry no `agent_id` of their own
+    (the factory never needed one before sub-agents existed) -- set
+    directly on the constructed Event, the same dataclass field
+    `_apply_event_inner` itself reads, exactly as a real child's own event
+    stream would carry it."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            start_ev = ev.Event("subagent_start", {"name": "researcher"}, turn=1)
+            start_ev.agent_id = "child-1"
+            app._local_events.put(start_ev)
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            card = app.transcript.subagent_cards.get("child-1")
+            ctx.check(f"the child's own SubAgentCard was mounted, got {card!r}", card is not None)
+            ctx.check(f"starts on 'thinking' (the card's own default), got {card.phase_word!r}",
+                      card.phase_word == "thinking")
+
+            phase_ev = ev.phase(state="first_token", turn=1, kind="reasoning")
+            phase_ev.agent_id = "child-1"
+            app._local_events.put(phase_ev)
+            thinking_ev = ev.thinking_delta("considering this", turn=1)
+            thinking_ev.agent_id = "child-1"
+            app._local_events.put(thinking_ev)
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"still 'thinking' after the one-shot reasoning phase event, got {card.phase_word!r}",
+                      card.phase_word == "thinking")
+            # The child moves straight into its answer -- text_delta only,
+            # no second "phase" event at all (the real one-shot latch).
+            text_ev = ev.text_delta("the answer is", turn=1, index=1)
+            text_ev.agent_id = "child-1"
+            app._local_events.put(text_ev)
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check(f"the child's card followed to 'writing' within the SAME drain tick despite no "
+                      f"second phase event, got {card.phase_word!r}", card.phase_word == "writing")
+            # Finding 11's own "never touch the MAIN status bar" rule,
+            # unchanged by this fix -- a child's own deltas still never
+            # reach the main cluster.
+            ctx.check(f"the MAIN status bar was never touched by the child's own deltas, got "
+                      f"{app.status_bar.phase!r}", app.status_bar.phase == "idle")
     asyncio.run(body())
 
 

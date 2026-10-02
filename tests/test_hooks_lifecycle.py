@@ -9,6 +9,7 @@ as real subprocesses for the `command` handler type.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -834,6 +835,31 @@ def test_build_payload_common_fields(ctx: Ctx):
     ctx.check("effort wrapped", payload["effort"] == {"level": "high"})
     ctx.check("agent fields present", payload["agent_id"] == "a1" and payload["agent_type"] == "reviewer")
     ctx.check("extra merged", payload["tool_name"] == "Bash")
+
+
+@test
+def test_readme_never_fired_hook_names_are_all_really_in_not_emitted_v1(ctx: Ctx):
+    """W3b docs drift: README's "a name Claude Code also recognizes but
+    this build doesn't fire yet (...)" parenthetical names a handful of
+    NOT_EMITTED_V1 entries by example -- every name it lists must actually
+    be IN that set (the concrete bug this pins: `Notification` was named
+    there even though it had already been removed from NOT_EMITTED_V1,
+    directly contradicting `hooks.py`'s own source of truth); a name
+    REMOVED from NOT_EMITTED_V1 in a future change must be caught here
+    rather than leaving a stale claim in the README."""
+    readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
+    marker = "doesn't fire yet ("
+    start = readme.index(marker) + len(marker)
+    end = readme.index(")", start)
+    snippet = readme[start:end]
+    named = re.findall(r"`([A-Z][A-Za-z]+)`", snippet)
+    ctx.check(f"the parenthetical actually names at least one hook, got {named!r} (from {snippet!r})",
+              len(named) >= 1)
+    for name in named:
+        ctx.check(f"README's {name!r} is really in hooks.NOT_EMITTED_V1, got {sorted(H.NOT_EMITTED_V1)!r}",
+                  name in H.NOT_EMITTED_V1)
+    ctx.check("README never claims 'Notification' doesn't fire (it isn't in NOT_EMITTED_V1)",
+              "Notification" not in named)
 
 
 if __name__ == "__main__":

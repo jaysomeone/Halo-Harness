@@ -236,10 +236,14 @@ running at all (reads the most recent session for the cwd, or `--session
 request-sent/headers/first-reasoning/first-text/first-tool-call/message-end
 elapsed milliseconds, each tool call's start/end/status, steers, and
 retries/errors -- recorded by `agent.loop.Session.turn` for every turn
-regardless of dialect. `--debug` prints the same lines live as they happen.
-`halo timeline --last N [--session ID] [--json]` (a separate command) reads
-the same records back from a session's own log file instead, for after the
-fact or a different process.
+regardless of dialect. 2.0.1 W3b also records each HOOK that ran (event
+name + real duration), each PERMISSION ask that blocked the turn (start,
+end, resolved decision), and auto-compactions (phase, trigger, tokens
+before/after) -- a manual `/compact` isn't a turn, so it never appears
+here. `--debug` prints the same lines live as they happen. `halo timeline
+--last N [--session ID] [--json]` (a separate command, `docs/COMMANDS.md`)
+reads the same records back from a session's own log file instead, for
+after the fact or a different process.
 
 ### `/add-dir <directory>`
 In `-p`, explains that a running session can't be extended this way --

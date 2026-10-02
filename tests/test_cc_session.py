@@ -283,7 +283,14 @@ def test_pairing_invariant_after_esc_before_any_tool_call(ctx: Ctx):
         collected = []
         t = threading.Thread(target=lambda: collected.extend(session.turn("SLEEP:5 nothing to see")))
         t.start()
-        time.sleep(0.3)
+        # W3b test-determinism: same fix as test_esc_then_next_turn_
+        # restarts_and_resumes above -- a fixed sleep here raced ensure_cc_
+        # state() under load; poll for the real readiness signal instead.
+        deadline = time.monotonic() + 10.0
+        while getattr(session, "_cc_state", None) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        ctx.check("the cc: process actually started before aborting it",
+                  getattr(session, "_cc_state", None) is not None)
         session.abort.set()
         t.join(timeout=10)
         ctx.check("turn ended interrupted", collected[-1].kind == "turn_done"
@@ -317,7 +324,25 @@ def test_esc_then_next_turn_restarts_and_resumes(ctx: Ctx):
         collected = []
         t = threading.Thread(target=lambda: collected.extend(session.turn("SLEEP:5 nothing")))
         t.start()
-        time.sleep(0.3)
+        # W3b test-determinism: a fixed `time.sleep(0.3)` here assumed
+        # ensure_cc_state() (spawns the real fake-claude subprocess, sets
+        # session._cc_state) always finishes within 0.3s -- under load
+        # (the Kali VM running concurrently with the Windows suites) the
+        # worker thread above can take longer just to get SCHEDULED, so
+        # `abort.set()` fired before `_cc_state` existed, the abort
+        # watcher thread (cc_runtime.py's `watch_abort`, started only
+        # AFTER ensure_cc_state returns) never saw it, and the turn ran to
+        # completion unaborted -- the exact "restarted with a new pid,
+        # X -> X" (no restart at all) failure mode. Poll on the real
+        # readiness signal instead: `watch_abort` starts checking
+        # `session.abort` within `_ABORT_POLL_S` (0.05s) of `_cc_state`
+        # existing, so once that attribute appears, setting `abort` is
+        # guaranteed to be seen regardless of how slow the system is.
+        deadline = time.monotonic() + 10.0
+        while getattr(session, "_cc_state", None) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        ctx.check("the cc: process actually started before aborting it",
+                  getattr(session, "_cc_state", None) is not None)
         session.abort.set()
         t.join(timeout=10)
         old_pid = session._cc_state.process.pid
@@ -1083,7 +1108,19 @@ def test_posix_close_cc_leaves_no_claude_or_bridge_process(ctx: Ctx):
     while time.monotonic() < deadline and _pgrep_count("-m halo_harness.ccbridge") > bridge_before:
         time.sleep(0.2)
     ctx.check("no ccbridge child survivor after close_cc", _pgrep_count("-m halo_harness.ccbridge") <= bridge_before)
-    ctx.check("the bridge socket file is gone", not list(run_dir.glob("*.sock")))
+    # W3b test-determinism: the socket file is unlinked by the ccbridge
+    # child's OWN cleanup as it exits, which can trail `pgrep` no longer
+    # seeing that pid by a beat (the process table entry disappears before
+    # its last filesystem cleanup is guaranteed to have landed, especially
+    # under load) -- a bare, unpolled glob() right after the process-
+    # absence checks above raced that gap. Bounded poll instead of a bare
+    # check, same deadline style as the two process-absence waits above.
+    deadline = time.monotonic() + 8
+    sock_files = list(run_dir.glob("*.sock"))
+    while time.monotonic() < deadline and sock_files:
+        time.sleep(0.2)
+        sock_files = list(run_dir.glob("*.sock"))
+    ctx.check(f"the bridge socket file is gone, got {sock_files}", not sock_files)
 
 
 @test

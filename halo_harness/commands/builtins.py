@@ -487,7 +487,15 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
                 refresh_cached_claude_auth_status()
         except Exception:
             pass
-        return format_providers_table(provider_rows())
+        # Findings 22/23 (2.0.1): this session's OWN cwd, and (when a real
+        # Settings object was resolved for it) its own effective_env --
+        # passed straight through rather than letting provider_rows()
+        # re-derive a fresh listing_effective_env() against bare
+        # Path.cwd()/no settings-flag, which could disagree with a session
+        # actually launched via --cwd/--settings (same fix `/doctor` already
+        # had for --cwd via facade.cwd, below).
+        live_env = facade.settings.effective_env if getattr(facade, "settings", None) is not None else None
+        return format_providers_table(provider_rows(cwd=facade.cwd, env=live_env))
     action = tokens[0]
     if action in ("enable", "disable"):
         if len(tokens) < 2:
@@ -640,17 +648,27 @@ def _cmd_bugreport(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_timeline(args: str, facade: HeadlessFacade) -> str:
-    """2.0.1 W3a: THIS process's own per-turn timeline (`debug_timeline.
-    last_n_turns`) -- `halo timeline --last N` (a separate command,
-    `bugreport_timeline_cli.py`) reads the same data back from the session
-    LOG instead, for after the fact / a different process."""
+    """2.0.1 W3a/W3b: THIS session's own per-turn timeline -- `halo
+    timeline --last N` (a separate command, `bugreport_timeline_cli.py`)
+    reads the same data back from the session LOG instead, for after the
+    fact / a different process.
+
+    W3b item 11: reads `facade.session._timeline` (the REAL session's own
+    instance, see `debug_timeline.TurnTimeline`) rather than the
+    `debug_timeline` module's shared default -- a live session is the
+    common case this command exists for at all; the module-level default
+    is only ever a fallback for a bare/test facade with no real session
+    attached (never written to by a real `Session.turn()` any more, so it
+    naturally stays empty there, which is the correct, honest answer)."""
     from halo_harness import debug_timeline
     from halo_harness.bugreport_timeline_cli import format_timeline_record
     try:
         n = int(args.strip()) if args.strip() else 1
     except ValueError:
         n = 1
-    records = debug_timeline.last_n_turns(n)
+    session = getattr(facade, "session", None)
+    timeline = getattr(session, "_timeline", None) if session is not None else None
+    records = timeline.last_n_turns(n) if timeline is not None else debug_timeline.last_n_turns(n)
     if not records:
         return "No turns recorded yet this session."
     return "\n\n".join(format_timeline_record(r) for r in records)

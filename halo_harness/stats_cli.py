@@ -255,10 +255,10 @@ def _print_plain_table(title: str, columns: list, rows: list) -> None:
     carries every requested column's FULL value on one line."""
     print(title)
     widths = [max(len(header), max((len(fmt(r)) for r in rows), default=0)) for header, fmt in columns]
-    print("  ".join(header.ljust(w) for (header, _), w in zip(columns, widths)))
+    print("  ".join(header.ljust(w) for (header, _), w in zip(columns, widths, strict=False)))
     print("  ".join("-" * w for w in widths))
     for r in rows:
-        print("  ".join(fmt(r).ljust(w) for (_, fmt), w in zip(columns, widths)))
+        print("  ".join(fmt(r).ljust(w) for (_, fmt), w in zip(columns, widths, strict=False)))
 
 
 def _print_table(console, title: str, columns: list, rows: list) -> None:

@@ -745,8 +745,16 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
             "reason": item["ask_reason"], "suggested_rule": item.get("suggested_rule"),
         }, turn=turn_no))
     if item.get("pending_ask"):
-        session._apply_permission_decision(
-            item, session._await_permission_decision(item.get("ask_request_id", tool_use_id)))
+        # W3b item 11: same start/end/decision recording as the native
+        # route's own identical call site (agent/loop.py) -- the `cc:`
+        # route has its own SEPARATE copy of this blocking-ask pattern
+        # (Claude Code's own MCP tool call, bridged), so it needs its own
+        # copy of this instrumentation too.
+        wait_start_ms = session._timeline.elapsed_ms()
+        decision = session._await_permission_decision(item.get("ask_request_id", tool_use_id))
+        decision_label = getattr(decision, "action", None) if decision is not None else "dismissed"
+        session._timeline.record_permission_wait(wait_start_ms, session._timeline.elapsed_ms(), decision_label)
+        session._apply_permission_decision(item, decision)
     if item.get("pending_question"):
         _emit(session, events.Event("question", {"id": tool_use_id, "name": name, "input": item["input"]},
                                       turn=turn_no))
@@ -990,8 +998,8 @@ def turn_body_cc(session, turn_no: int, text: str, *, images: Optional[list] = N
             # (logged + tracked exactly like a steer) for claude's NEXT
             # turn to see, rather than extending this one.
             last_text = _last_assistant_text(session.log)
-            stop_outcome = session.hook_runner.run_stop("Stop", last_assistant_message=last_text,
-                                                          prompt_id=f"turn_{turn_no}", abort=session.abort)
+            stop_outcome = session._run_hook_stop("Stop", last_assistant_message=last_text,
+                                                   prompt_id=f"turn_{turn_no}", abort=session.abort)
             for msg in stop_outcome.system_messages:
                 yield events.notification(msg)
             if stop_outcome.blocked:

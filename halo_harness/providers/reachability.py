@@ -17,19 +17,26 @@ from typing import Optional
 from halo_harness.providers.http import UpstreamConnectError, open_upstream
 
 
-def probe_host_reachable(base_url: str) -> "tuple[bool, Optional[str]]":
+def probe_host_reachable(base_url: str, *, connect_timeout: Optional[int] = None) -> "tuple[bool, Optional[str]]":
     """`(True, None)` once a TCP/TLS connection to `base_url`'s host opens
     within the usual 8s connect cap; `(False, "<one-line reason>")`
     otherwise (DNS failure, refused, timeout -- `UpstreamConnectError`'s
-    own message, already one line). Never raises."""
+    own message, already one line). Never raises.
+
+    `connect_timeout` (W3b test-determinism seam): forwarded straight to
+    `open_upstream`'s own `connect_timeout` -- `None` (every pre-existing
+    caller) keeps the real 8s default; a test that wants a probe to fail
+    fast (never actually waiting out a real connect attempt) passes a tiny
+    value instead of monkeypatching `open_upstream` itself."""
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     if not host:
         return False, f"not a valid URL: {base_url!r}"
     port = parsed.port or (443 if parsed.scheme != "http" else 80)
     tls = parsed.scheme != "http"
+    kwargs = {} if connect_timeout is None else {"connect_timeout": connect_timeout}
     try:
-        conn = open_upstream(host, port, tls)
+        conn = open_upstream(host, port, tls, **kwargs)
     except UpstreamConnectError as e:
         return False, str(e)
     except Exception as e:  # never let a reachability probe crash a caller
@@ -63,7 +70,7 @@ def provider_base_url(name: str) -> Optional[str]:
     return None
 
 
-def reachability_tag(name: str, *, detected: Optional[bool] = None) -> str:
+def reachability_tag(name: str, *, detected: Optional[bool] = None, connect_timeout: Optional[int] = None) -> str:
     """item 21.5/A.3's three-state tag, as plain text: "reachable",
     "unreachable: <reason>", or "not set up" -- credentials are checked
     FIRST (never probes a host with nothing configured for it). The Claude
@@ -77,7 +84,8 @@ def reachability_tag(name: str, *, detected: Optional[bool] = None) -> str:
     computed `credentials_present(canon, ...)` itself (`/providers`'s own
     `provider_rows()`) passes it straight through instead of this function
     re-deriving it a second time (for `claude_subscription`, an extra
-    uncached `claude auth status` spawn)."""
+    uncached `claude auth status` spawn). `connect_timeout` (W3b): forwarded
+    to `probe_host_reachable` -- see its own docstring."""
     from halo_harness.providers.enablement import canonical, credentials_present
     canon = canonical(name)
     is_detected = credentials_present(canon) if detected is None else detected
@@ -90,5 +98,5 @@ def reachability_tag(name: str, *, detected: Optional[bool] = None) -> str:
     base_url = provider_base_url(canon)
     if not base_url:
         return "not set up"
-    ok, reason = probe_host_reachable(base_url)
+    ok, reason = probe_host_reachable(base_url, connect_timeout=connect_timeout)
     return "reachable" if ok else f"unreachable: {reason}"

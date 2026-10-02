@@ -518,7 +518,7 @@ handler type a hook definition can invoke for them -- `command` (shell),
 `prompt` (inject text), `agent` (run a sub-agent), `http` (call a URL),
 `mcp_tool` (call a tool on a configured MCP server) -- is wired. A settings.
 json/hooks.json entry for a name Claude Code also recognizes but this
-build doesn't fire yet (`Notification`, `TaskCreated`/`TaskCompleted`,
+build doesn't fire yet (`TaskCreated`/`TaskCompleted`,
 `PreModelSwitch`/`PostModelSwitch`, the worktree lifecycle events, and a
 few others -- see `hooks.py`'s own `NOT_EMITTED_V1`) parses fine and is
 silently never triggered, rather than erroring.
@@ -609,9 +609,9 @@ Anthropic passthrough), falling back to an estimate otherwise.
 ## Print mode
 
 ```sh
-halo -p "reply pong"
-halo -p --output-format json "..."
-halo -p --output-format stream-json --input-format stream-json < turns.jsonl
+halo -p --permission-mode auto "reply pong"
+halo -p --permission-mode auto --output-format json "..."
+halo -p --permission-mode auto --output-format stream-json --input-format stream-json < turns.jsonl
 ```
 
 `--output-format text|json|stream-json`, `--input-format text|stream-json`
@@ -622,6 +622,16 @@ for each turn's result before sending the next one never deadlocks),
 code is the last turn's; a background job still running when a single-
 prompt `-p` call ends gets its completion notice printed before the
 process exits rather than dropped.
+
+**Permission mode for unattended runs**: `-p` has no terminal to ask a
+permission question on, so the ordinary interactive default (`default`:
+asks before Bash/Edit/Write/...) denies every one of those calls outright
+-- a real model-quality finding (telemetry: a chunk of print-mode Bash
+calls fail as `denied_by_rule` for exactly this reason). Pass
+`--permission-mode auto` (no prompts, everything allowed except your own
+deny/ask rules) for a script/CI/cron run that should actually DO things;
+`acceptEdits`/`bypassPermissions`/`dontAsk` are the other non-interactive
+choices when you want different rules (see `halo --help`).
 
 `halo export --sanitize` and `halo stats` are headless
 versions of the TUI's own `/export`/`/stats` slash commands -- the former
@@ -655,6 +665,15 @@ improve.model or:deepseek/deepseek-v4-flash`.
 
 ## Troubleshooting
 
+- **Reporting a problem**: `halo bugreport` (or `/bugreport` in a live
+  session) writes one redacted diagnostic report -- version, environment,
+  provider/route/permission-mode state, MCP servers, catalog ages, the last
+  turn's own timeline, and recent session events/log lines, with every
+  secret-shaped value stripped -- to `~/.halo/bugreports/`, "one paste
+  instead of screenshots" (`--copy` puts it on the clipboard too). `halo
+  timeline`/`/timeline` shows just the per-turn request/tool/hook/
+  permission-wait/compaction timing on its own, live with `--debug`. See
+  `docs/COMMANDS.md` for both commands' full flags.
 - **VPN hint**: any Databricks connect failure (`doctor --work`, `models
   --refresh`, or a live request) names the VPN as the likely cause.
 - **`externally-managed-environment` from pip**: see INSTALL.md's PEP 668
@@ -677,8 +696,10 @@ improve.model or:deepseek/deepseek-v4-flash`.
 - **Where to look**: session logs under `~/.halo/sessions/`;
   `halo doctor` / `doctor --work` for environment issues;
   `--verbose` for a running commentary of intermediate model
-  calls/tool calls on stderr in print mode (`-d`/`--debug` is one of the
-  not-yet flags above -- it parses but does nothing yet).
+  calls/tool calls on stderr in print mode; `-d`/`--debug` (or
+  `--debug-file PATH`) for DEBUG-level file logging of the whole run (TUI
+  or print mode) -- defaults to `~/.halo/bridge.log` (rotating, secrets
+  redacted), `--debug-file` picks a different path.
 
 ## Security posture
 

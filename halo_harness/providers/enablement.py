@@ -258,7 +258,16 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
     if name == "typesafe":
         import os
         e = env if env is not None else os.environ
-        return bool(e.get("TYPESAFE_API_KEY"))
+        value = e.get("TYPESAFE_API_KEY")
+        if not value and e is os.environ:
+            # Finding 20 (2.0.1): same settings-env-chain fallback
+            # resolve_openrouter/resolve_anthropic now have -- a bare call
+            # (no env=) also checks a trusted settings.json env block.
+            from pathlib import Path
+
+            from halo_harness.providers.config import load_settings_env_chain
+            value = load_settings_env_chain(Path.cwd()).get("TYPESAFE_API_KEY")
+        return bool(value)
     return False
 
 

@@ -303,7 +303,7 @@ def load_settings_env_chain(cwd: Path, *, trusted: "bool | None" = None) -> dict
     return merged
 
 
-def listing_effective_env(cwd: Optional[Path] = None) -> dict:
+def listing_effective_env(cwd: Optional[Path] = None, settings_flag: Optional[str] = None) -> dict:
     """1.0.1 part 2 fixpass finding 3: the merged env a credential-LISTING
     surface with no real `Settings` object of its own (`/providers`, the
     init tabs, `doctor`'s provider summary -- never the parse-time gate,
@@ -316,16 +316,52 @@ def listing_effective_env(cwd: Optional[Path] = None) -> dict:
     credential lives only in a settings.json `env` block. A cheap,
     read-only, no-network call (only local JSON files); any failure (a
     malformed settings file, ...) falls back to bare `os.environ` -- the
-    unchanged pre-fix behavior for whichever caller hit it, never a crash."""
+    unchanged pre-fix behavior for whichever caller hit it, never a crash.
+
+    Findings 22/23 (2.0.1): `cwd` (an explicit `--cwd` flag value, when the
+    caller has one) and `settings_flag` (an explicit `--settings` flag
+    value) are both threaded straight into `resolve_settings`, exactly like
+    a real session's `headless.build_session` already does -- before this
+    fix neither ever reached here, so `/providers`/doctor/the init tabs
+    could disagree with what a real session launched with either flag
+    would resolve. Both default to `None` (today's behavior: process
+    `Path.cwd()`, no settings-flag override) for every caller that has
+    neither to give."""
     try:
         from halo_harness.config.claude_json import is_trusted, load_claude_json
         from halo_harness.config.settings import resolve_settings
         where = cwd or Path.cwd()
         # Trust-aware like a real session: an untrusted folder's project/local
         # settings never show up as "picked up" credentials in a listing.
-        return resolve_settings(where, trusted=is_trusted(where, load_claude_json())).effective_env
+        return resolve_settings(
+            where, settings_flag=settings_flag, trusted=is_trusted(where, load_claude_json()),
+        ).effective_env
     except Exception:
         return dict(os.environ)
+
+
+def _settings_fallback_value(env: dict, key: str) -> Optional[str]:
+    """Finding 20 (2.0.1): `env.get(key)`, falling back to the settings-env
+    chain (`load_settings_env_chain(Path.cwd())`) when `env` is the bare
+    `os.environ` a caller gets by not passing one -- the exact same gate
+    `resolve_databricks`'s own settings-chain re-derivation already uses
+    (`env is os.environ`). A caller that already handed in a merged
+    `Settings.effective_env` (a real session, or a listing surface via
+    `listing_effective_env`) is unaffected: that env dict already IS the
+    trust-filtered chain, so re-deriving it again here would be redundant,
+    not wrong -- which is why this only fires for the bare-os.environ case,
+    matching Databricks exactly. Used by `resolve_openrouter`/`resolve_
+    anthropic` (and TypeSafe's own inline check in `providers.enablement.
+    credentials_present`) to give all three the fallback Databricks already
+    had, so `credentials_present` stops disagreeing with what a real
+    session (which always passes `effective_env` explicitly) would
+    resolve."""
+    value = env.get(key)
+    if value:
+        return value
+    if env is not os.environ:
+        return None
+    return load_settings_env_chain(Path.cwd()).get(key)
 
 
 @dataclass
@@ -342,9 +378,14 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     flag < policy -- so a settings.json `env` block can supply the key;
     the proxy's own callers pass nothing and keep reading bare
     `os.environ`, unchanged). Returns None if OPENROUTER_API_KEY not set.
+
+    Finding 20 (2.0.1): a bare call (no `env`) also falls back to the
+    settings-env chain (`_settings_fallback_value`), same as `resolve_
+    databricks` already did -- a key living only in a trusted project/user
+    settings.json `env` block is no longer invisible to auto-detection.
     """
     env = env if env is not None else os.environ
-    api_key = env.get("OPENROUTER_API_KEY")
+    api_key = _settings_fallback_value(env, "OPENROUTER_API_KEY")
     if not api_key:
         return None
     base_url = env_compat("OPENROUTER_BASE_URL", env, "https://openrouter.ai/api/v1")
@@ -378,9 +419,15 @@ class AntConfig:
 
 def resolve_anthropic(env: dict | None = None) -> AntConfig | None:
     """None if `ANTHROPIC_API_KEY` isn't set -- the acceptance contract is
-    "`ant:` skipped unless an ANTHROPIC_API_KEY exists", not an error."""
+    "`ant:` skipped unless an ANTHROPIC_API_KEY exists", not an error.
+
+    Finding 20 (2.0.1): a bare call (no `env`) falls back to the settings-
+    env chain the same way `resolve_openrouter`/`resolve_databricks` do
+    (`_settings_fallback_value`) -- never collides with Databricks' own use
+    of `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, since this reads
+    `ANTHROPIC_API_KEY` specifically."""
     env = env if env is not None else os.environ
-    api_key = env.get("ANTHROPIC_API_KEY")
+    api_key = _settings_fallback_value(env, "ANTHROPIC_API_KEY")
     if not api_key:
         return None
     base_url = env_compat("ANTHROPIC_BASE_URL", env, "https://api.anthropic.com")

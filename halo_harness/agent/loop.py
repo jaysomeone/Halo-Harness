@@ -207,15 +207,18 @@ def _image_caption(block: dict) -> str:
     display caption -- media type, dimensions (sniffed from the raw bytes,
     same pure-stdlib sniffer `tools/imageutil.py` uses elsewhere, never
     requires Pillow) and a human byte size, e.g. "[image: image/png,
-    1280x800, 84.2 KB]" -- shown as the tool card's body via the SAME
-    plain-text card rendering every other tool result already uses (no new
-    widget/event field: `ToolCard`'s `Static(markup=False)` can't safely
-    interpret Rich markup from untrusted content, so real terminal pixel
-    rendering -- which would need a whole cross-terminal graphics-protocol
-    layer, Kitty/iTerm2/Sixel detection, entirely new widget plumbing -- is
-    deliberately out of scope here; this replaces the old bare "[image]"
-    placeholder with an honest, concrete description of what was captured
-    instead). Degrades all the way back to the plain "[image]" this
+    1280x800, 84.2 KB]" -- this is the `tool_result` EVENT's own display-
+    only `summary` text (never what's sent to the model, see
+    `_summary_text_for_blocks`), and the TUI's fallback display: real
+    inline terminal rendering (the kitty graphics protocol,
+    WezTerm/Ghostty/foot, or sixel, live-detected, downscaled) is handled
+    separately by `tui/images.py`/`ToolCard` (H13 Part B) and shown INSTEAD
+    of this caption whenever the terminal supports it and `images` isn't
+    set to `"caption"`/`"off"` -- this text is what appears everywhere else
+    (no graphics protocol, `images: "caption"`/`--no-inline-images`, or a
+    render attempt that itself fails), replacing the old bare "[image]"
+    placeholder with an honest, concrete description of what was captured.
+    Degrades all the way back to the plain "[image]" this
     replaces when the block truly carries nothing describable (no
     media_type, no decodable data -- e.g. a hand-built `{"type": "image",
     "source": {}}` in a test)."""
@@ -925,6 +928,16 @@ class Session:
         # or a settings tree with no hooks configured at all: every call
         # site below guards on `self.hook_runner is not None`).
         self.hook_runner = hook_runner
+        # W3b item 11: THIS session's own per-turn timeline instance --
+        # never the `debug_timeline` module's shared default -- so two
+        # parallel sub-agent Sessions (agent/subagent.py's own
+        # ThreadPoolExecutor batch dispatch) each keep their own turn
+        # history instead of racing over shared module-level state. See
+        # `debug_timeline.TurnTimeline`'s own docstring for the full
+        # rationale; `turn()`'s wrapper and `_run_hook`/the permission-wait
+        # call site below are its only writers.
+        from halo_harness.debug_timeline import TurnTimeline
+        self._timeline = TurnTimeline()
         # D-CFG: `stop_hook_active` is True only on a RE-ENTRANT Stop-hook
         # evaluation within the SAME "the model tried to stop" attempt --
         # reset at the start of every new turn() call, never carried from
@@ -1109,6 +1122,36 @@ class Session:
                         self._prune_committed_stub_ids |= {i for i in ids if isinstance(i, str)}
             self._fire_session_start("resume")
 
+    def _run_hook(self, event: str, payload: dict, **kwargs):
+        """W3b item 11: every `self.hook_runner.run(...)` call site in this
+        class (and `agent/subagent.py`'s own `child._run_hook(...)`, a
+        sub-agent's child Session) goes through here instead -- the ONE
+        choke point every hook invocation already shares, regardless of
+        which event (SessionStart, PreToolUse, PermissionRequest,
+        PostToolBatch, ...) fired it -- so the per-turn timeline
+        (`self._timeline.record_hook`) sees each hook's own event name and
+        real wall-clock duration. A pure timing wrapper: the real call's
+        own `HookOutcome` return value is passed through unchanged, and a
+        hook that fires outside any turn (SessionStart/SessionEnd) still
+        times correctly -- `TurnTimeline.record_hook` itself is just a
+        no-op when there's no active turn to attach the entry to."""
+        t0 = time.monotonic()
+        outcome = self.hook_runner.run(event, payload, **kwargs)
+        self._timeline.record_hook(event, (time.monotonic() - t0) * 1000.0)
+        return outcome
+
+    def _run_hook_stop(self, event: str, **kwargs):
+        """W3b item 11: the `run_stop(...)` counterpart to `_run_hook`
+        above (Stop/SubagentStop's own consecutive-block-cap variant of
+        `run`, `hooks.py::HookRunner.run_stop`) -- same timing-wrapper
+        purpose, recorded under the same event name (`agent/subagent.py`'s
+        own `child._run_hook_stop(...)` reaches this for a sub-agent's
+        SubagentStop too, `child` being that sub-agent's own Session)."""
+        t0 = time.monotonic()
+        outcome = self.hook_runner.run_stop(event, **kwargs)
+        self._timeline.record_hook(event, (time.monotonic() - t0) * 1000.0)
+        return outcome
+
     def _fire_session_start(self, source: str) -> None:
         """H4 scope B: SessionStart(startup|resume|clear|compact) -- `resume`
         fires from `__init__`, `compact` from `_run_compaction`, `clear`
@@ -1130,7 +1173,7 @@ class Session:
         # H5c finding 12: `abort` threaded through -- Esc during a slow
         # SessionStart command hook (startup/resume/clear/compact) used to
         # be completely ignored.
-        outcome = self.hook_runner.run("SessionStart", payload, matched=source, abort=self.abort)
+        outcome = self._run_hook("SessionStart", payload, matched=source, abort=self.abort)
         if outcome.additional_context:
             self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
         # finding 6: re-read on EVERY SessionStart source, not just
@@ -1225,6 +1268,10 @@ class Session:
             self.hook_runner.session_id = self.log.session_id
             self.hook_runner.transcript_path = str(self.log.path)
         self.turn_count = 0
+        # W3b item 11: a fresh conversation starts a fresh timeline -- a
+        # turn from the conversation /clear just dropped has no business
+        # appearing in this (same Session object's) own /timeline any more.
+        self._timeline.reset()
         self._last_prompt_tokens = None
         self._just_compacted = False
         self._compaction_backoff_remaining = 0
@@ -2252,7 +2299,6 @@ class Session:
             first_text_ms=result.first_text_ms, first_tool_ms=result.first_tool_ms,
             reasoning_streamed=result.reasoning_streamed,
         )
-        output_tokens = result.usage.get("output_tokens") if isinstance(result.usage, dict) else None
         if self.model_ref.provider == "databricks":
             record_databricks_output_tokens(self.model_ref.raw, generated_tokens_for_otpm(result.usage))
         # H5 scope B: the provider's own reported prompt size drives the
@@ -2657,7 +2703,7 @@ class Session:
                                                                       "custom_instructions": custom_instructions})
             # H5c finding 12: `abort` threaded through -- Esc during a slow
             # PreCompact command hook used to be completely ignored.
-            outcome = self.hook_runner.run("PreCompact", payload, matched=trigger, abort=self.abort)
+            outcome = self._run_hook("PreCompact", payload, matched=trigger, abort=self.abort)
             if outcome.additional_context:
                 self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
 
@@ -2808,7 +2854,7 @@ class Session:
 
         if self.hook_runner is not None and self.hook_runner.has_hooks("PostCompact"):
             payload = self.hook_runner.payload("PostCompact", extra={"trigger": trigger, "compact_summary": summary_text})
-            self.hook_runner.run("PostCompact", payload, matched=trigger)
+            self._run_hook("PostCompact", payload, matched=trigger)
         self._fire_session_start("compact")
 
         after_system, after_messages, _ = derive_request(self.log, tools=None)
@@ -2826,24 +2872,26 @@ class Session:
     # ---- the turn: model call(s) + tool dispatch ------------------------
 
     def turn(self, text: str, images: Optional[list] = None) -> Iterator[events.Event]:
-        """2.0.1 W3a: a thin wrapper around `_turn_inner` (this method's own
-        FULL body, unchanged, just renamed) -- every event either of them
-        would ever yield passes through `debug_timeline.record_turn_event`
-        here FIRST, the ONE choke point that sees every turn's events
-        regardless of dialect (native/openai-chat/cc-subprocess) or caller
-        (the TUI's drain loop, headless -p's sink) without needing its own
-        instrumentation inside `_turn_body`/`cc_runtime.turn_body_cc`. The
-        finished record is appended to the session log as one `timeline`
-        node (`halo bugreport`/`/timeline`/`halo timeline --last N` all
-        read it back from there -- see `agent/log.py`'s own node kinds)."""
-        from halo_harness import debug_timeline
-        debug_timeline.start_turn(self.turn_count + 1)
+        """2.0.1 W3a/W3b: a thin wrapper around `_turn_inner` (this method's
+        own FULL body, unchanged, just renamed) -- every event either of
+        them would ever yield passes through `self._timeline.record_turn_
+        event` here FIRST, the ONE choke point that sees every turn's
+        events regardless of dialect (native/openai-chat/cc-subprocess) or
+        caller (the TUI's drain loop, headless -p's sink) without needing
+        its own instrumentation inside `_turn_body`/`cc_runtime.turn_body_
+        cc`. The finished record is appended to the session log as one
+        `timeline` node (`halo bugreport`/`/timeline`/`halo timeline --last
+        N` all read it back from there -- see `agent/log.py`'s own node
+        kinds). `self._timeline` (W3b item 11): THIS session's own
+        instance, never the `debug_timeline` module's shared default --
+        see `Session.__init__`'s own comment."""
+        self._timeline.start_turn(self.turn_count + 1)
         try:
             for ev in self._turn_inner(text, images=images):
-                debug_timeline.record_turn_event(ev)
+                self._timeline.record_turn_event(ev)
                 yield ev
         finally:
-            record = debug_timeline.end_turn()
+            record = self._timeline.end_turn()
             if record is not None:
                 try:
                     # `append_meta` (never `append_snapshot`) -- a `meta`
@@ -2902,7 +2950,7 @@ class Session:
                 # slow UserPromptSubmit command hook used to be completely
                 # ignored (the WHOLE turn couldn't even start until it
                 # returned).
-                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="", abort=self.abort)
+                outcome = self._run_hook("UserPromptSubmit", payload, matched="", abort=self.abort)
                 for msg in outcome.system_messages:
                     yield events.notification(msg)
                 if outcome.blocked:
@@ -3228,8 +3276,8 @@ class Session:
                     # is now killed and `run_stop` returns almost
                     # immediately once Esc fires (the `reason` computed
                     # below then correctly reports "interrupted").
-                    stop_outcome = self.hook_runner.run_stop("Stop", last_assistant_message=last_text,
-                                                              prompt_id=f"turn_{self.turn_count}", abort=self.abort)
+                    stop_outcome = self._run_hook_stop("Stop", last_assistant_message=last_text,
+                                                        prompt_id=f"turn_{self.turn_count}", abort=self.abort)
                     for msg in stop_outcome.system_messages:
                         yield events.notification(msg)
                     if stop_outcome.blocked:
@@ -3433,8 +3481,8 @@ class Session:
                 "PreToolUse", prompt_id=f"turn_{self.turn_count}",
                 extra={"tool_name": name, "tool_input": tool_input, "tool_use_id": tool_id},
             )
-            pre_outcome = self.hook_runner.run("PreToolUse", payload, matched=name, tool_name=name,
-                                                 tool_input=tool_input, tool=tool, abort=self.abort)
+            pre_outcome = self._run_hook("PreToolUse", payload, matched=name, tool_name=name,
+                                           tool_input=tool_input, tool=tool, abort=self.abort)
             for msg in pre_outcome.system_messages:
                 item.setdefault("hook_system_messages", []).append(msg)
             if pre_outcome.updated_input is not None:
@@ -3485,8 +3533,8 @@ class Session:
                     "PermissionRequest", extra={"tool_name": name, "tool_input": tool_input,
                                                  "tool_use_id": tool_id, "permission_suggestions": None},
                 )
-                pr_outcome = self.hook_runner.run("PermissionRequest", pr_payload, matched=name, tool_name=name,
-                                                    tool_input=tool_input, tool=tool, abort=self.abort)
+                pr_outcome = self._run_hook("PermissionRequest", pr_payload, matched=name, tool_name=name,
+                                              tool_input=tool_input, tool=tool, abort=self.abort)
                 for msg in pr_outcome.system_messages:
                     item.setdefault("hook_system_messages", []).append(msg)
                 if pr_outcome.updated_input is not None:
@@ -3651,7 +3699,7 @@ class Session:
         payload = self.hook_runner.payload("PermissionDenied", extra={"tool_name": name, "tool_input": tool_input,
                                                                         "reason": reason})
         try:
-            self.hook_runner.run("PermissionDenied", payload, matched=name, tool_name=name, tool_input=tool_input)
+            self._run_hook("PermissionDenied", payload, matched=name, tool_name=name, tool_input=tool_input)
         except Exception:
             pass
 
@@ -3701,8 +3749,8 @@ class Session:
         # slow PostToolUse/PostToolUseFailure command hook used to be
         # completely ignored (no way to notice Esc until the hook's own
         # (default 600s) timeout elapsed).
-        outcome = self.hook_runner.run(event, payload, matched=name, tool_name=name, tool_input=tool_input, tool=tool,
-                                        abort=self.abort)
+        outcome = self._run_hook(event, payload, matched=name, tool_name=name, tool_input=tool_input, tool=tool,
+                                  abort=self.abort)
         extra_note = ""
         if outcome.blocked:
             extra_note = f"\n\n[PostToolUse hook: {outcome.block_reason or 'blocked'}]"
@@ -3796,6 +3844,26 @@ class Session:
         # need the PRE-cap text this function no longer has by this point.
         spilled = _SPILL_MARKER in summary_text if isinstance(summary_text, str) else False
         error_class = (_classify_tool_error_text(name, summary_text) if tr.is_error else None)
+        # W3b model quality (RECOMMENDATIONS.md section 8): DeepSeek V4.1
+        # Flash's 8% Edit failure rate is almost entirely "Found multiple
+        # matches" from too little old_string context. The SAME per-family
+        # hint the Edit tool's own description already carries once, up
+        # front (edit_hint_for, H12 Part C) is reinforced HERE, appended to
+        # the actual failing result -- right when it matters, rather than
+        # relying on a model deep in a long turn still attending to text it
+        # read once at session start. Never for Claude/GPT (no family hint
+        # configured at all -- see edit_hint_for's own docstring) and never
+        # for any other error kind.
+        if error_class == "multiple_matches" and name == "Edit":
+            from halo_harness.providers.profiles import edit_hint_for
+            hint = edit_hint_for(self.model_ref.provider, self.model_ref.model)
+            if hint:
+                reminder = f"\n\n[hint: {hint}]"
+                if isinstance(content_for_log, list):
+                    content_for_log = content_for_log + [{"type": "text", "text": reminder.strip()}]
+                else:
+                    content_for_log += reminder
+                summary_text += reminder
         # H13 Part B ("inline images in the terminal"): the real (already
         # capped/spilled by _mcp_blocks_for_log above -- never the raw
         # uncapped tool output) base64 image data, extracted from
@@ -4317,8 +4385,17 @@ class Session:
                 # U2: this really BLOCKS the worker thread until the UI's
                 # PermissionCard answers (`answer_permission` ->
                 # `resolve_permission`) or the abort Event fires.
-                self._apply_permission_decision(
-                    item, self._await_permission_decision(item.get("ask_request_id", tool_id)))
+                #
+                # W3b item 11: start/end (turn-relative ms, same clock
+                # `self._timeline` uses everywhere else) and the resolved
+                # decision recorded around the real blocking call -- the
+                # `permission_request` event just above marks only the ASK,
+                # never how long the answer took or what it was.
+                wait_start_ms = self._timeline.elapsed_ms()
+                decision = self._await_permission_decision(item.get("ask_request_id", tool_id))
+                decision_label = getattr(decision, "action", None) if decision is not None else "dismissed"
+                self._timeline.record_permission_wait(wait_start_ms, self._timeline.elapsed_ms(), decision_label)
+                self._apply_permission_decision(item, decision)
 
             if item.get("pending_question"):
                 # U2: the AskUserQuestion round trip -- never dispatched to
@@ -4467,7 +4544,7 @@ class Session:
         payload = self.hook_runner.payload("PostToolBatch", extra={"tool_calls": tool_calls})
         # H5c finding 12: `abort` threaded through -- Esc during a slow
         # PostToolBatch command hook used to be completely ignored.
-        outcome = self.hook_runner.run("PostToolBatch", payload, matched="", abort=self.abort)
+        outcome = self._run_hook("PostToolBatch", payload, matched="", abort=self.abort)
         for msg in outcome.system_messages:
             yield events.notification(msg)
 
@@ -4792,7 +4869,7 @@ class Session:
             if self.hook_runner is not None and self.hook_runner.has_hooks("UserPromptSubmit"):
                 payload = self.hook_runner.payload("UserPromptSubmit", prompt_id=f"prompt_{turn_no}_steer_{i}",
                                                      extra={"prompt": text})
-                outcome = self.hook_runner.run("UserPromptSubmit", payload, matched="", abort=self.abort)
+                outcome = self._run_hook("UserPromptSubmit", payload, matched="", abort=self.abort)
                 for msg in outcome.system_messages:
                     yield events.notification(msg)
                 if outcome.blocked:

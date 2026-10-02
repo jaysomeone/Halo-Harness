@@ -52,6 +52,86 @@ class _Env:
                 os.environ[k] = v
 
 
+# ---------------------------------------------------------------------------
+# W3b hygiene: `halo models` with no OpenRouter key/cache must agree with
+# `doctor`'s own "models.json: never cached (vendored package fallback
+# still applies)" claim -- showing the vendored rows, clearly labelled,
+# rather than a contradicting empty table.
+# ---------------------------------------------------------------------------
+
+@test
+def test_cmd_models_shows_vendored_rows_labelled_when_no_openrouter_key_or_cache(ctx: Ctx):
+    import io
+    from contextlib import redirect_stdout
+    from halo_harness.catalog_cli import cmd_models
+    with _Env():
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cmd_models([])
+        ctx.check(f"exits 0, got {rc}", rc == 0)
+        out = buf.getvalue()
+        ctx.check(f"labelled as a vendored fallback, not a live cache, got {out!r}",
+                  "vendored fallback" in out)
+        ctx.check(f"actually lists real vendored model ids, got {out!r}",
+                  "deepseek" in out.lower())
+
+
+@test
+def test_cmd_models_json_flags_the_vendored_fallback(ctx: Ctx):
+    import io
+    import json as _json
+    from contextlib import redirect_stdout
+    from halo_harness.catalog_cli import cmd_models
+    with _Env():
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_models(["--json"])
+        payload = _json.loads(buf.getvalue())
+        ctx.check(f"openrouter_vendored_fallback flag set, got {payload!r}",
+                  payload.get("openrouter_vendored_fallback") is True)
+        ctx.check(f"openrouter rows actually present (not hidden), got {len(payload.get('openrouter') or {})}",
+                  len(payload.get("openrouter") or {}) > 0)
+
+
+@test
+def test_cmd_models_no_vendored_fallback_when_explicitly_disabled(ctx: Ctx):
+    """An explicit `providers disable openrouter` must still win -- the
+    vendored rows are an auto-detection-era convenience, never a reason to
+    show a provider's table the user deliberately turned off."""
+    import io
+    from contextlib import redirect_stdout
+    from halo_harness.catalog_cli import cmd_models
+    from halo_harness.providers.enablement import disable
+    with _Env():
+        disable("openrouter")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_models([])
+        out = buf.getvalue()
+        ctx.check(f"no vendored fallback for an explicitly disabled provider, got {out!r}",
+                  "vendored fallback" not in out)
+
+
+@test
+def test_cmd_models_vendored_fallback_steps_aside_once_a_real_cache_exists(ctx: Ctx):
+    """The vendored rows are a LAST resort -- a real (even stale) cache
+    always wins, same precedence doctor's own catalog-age check implies
+    ("never cached" is the only case the vendored tier is mentioned for)."""
+    import io
+    from contextlib import redirect_stdout
+    from halo_harness.catalog_cli import cmd_models
+    from halo_harness.providers.databricks import write_models_json
+    with _Env() as env:
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+        write_models_json(env.state_dir, [{"id": "real/cached-model", "context_length": 1000}])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_models([])
+        out = buf.getvalue()
+        ctx.check(f"real cache shown, got {out!r}", "real/cached-model" in out)
+        ctx.check(f"not labelled as vendored fallback, got {out!r}", "vendored fallback" not in out)
+
+
 def _raw(name, fm_name, api_types, task="llm/v1/chat", model_class=None):
     fm = {"name": fm_name, "api_types": api_types}
     if model_class:
