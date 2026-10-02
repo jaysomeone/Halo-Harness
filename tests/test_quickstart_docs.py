@@ -230,8 +230,12 @@ def test_upgrading_section_exists_in_readme_and_install_md(ctx: Ctx):
     command for each of the three installers."""
     readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
     install = (REPO_DIR / "docs" / "harness" / "INSTALL.md").read_text(encoding="utf-8")
-    ctx.check("README.md names the upgrade path", "upgrading from" in readme.lower()
-              and "rolo-claude 1.0.1" in readme.lower())
+    # The front page no longer talks about the previous name at all (2026-10-02
+    # README redo); the upgrade path lives in docs/INSTALL.md, which the
+    # README's Quick start links to.
+    ctx.check("README.md links to docs/INSTALL.md for the upgrade path", "docs/INSTALL.md" in readme)
+    ctx.check("docs/INSTALL.md names the upgrade path", "upgrading from" in install.lower()
+              and "rolo-claude 1.0.1" in install.lower())
     ctx.check("INSTALL.md has a real '## Upgrading from rolo-claude 1.0.1' section",
               "## Upgrading from rolo-claude 1.0.1" in install)
     install_section = install.split("## Upgrading from rolo-claude 1.0.1", 1)[1].split("\n## ", 1)[0]
