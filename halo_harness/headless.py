@@ -483,7 +483,27 @@ def build_session(
     # own "effective value and its source" line -- "flag"/"settings" here;
     # Session itself labels its own Anthropic-family "high" default (see
     # `agent/loop.py::__init__`) as "default" when NEITHER of these fired.
+    #
+    # 2.0.1 W3a ("launch with the last session's model and effort"):
+    # precedence is now --effort flag > last_effort (persisted by `/effort`,
+    # cwd-then-global per `model_memory`) > ~/.halo/config.json's own
+    # "effort" key > settings.json's effortLevel > the route's own default
+    # (unchanged below). Never consulted for -c/--resume -- a resumed
+    # session keeps its own prior effort, read from its log, not this chain.
+    from halo_harness import launch_state
+    from halo_harness.theme import get_config_value
     effort_source = "flag" if effort is not None else None
+    model_memory = get_config_value("model_memory", default="cwd")
+    if effort is None and not (continue_ or resume):
+        last_effort = launch_state.resolve_last_effort(cwd, memory=model_memory)
+        if last_effort is not None:
+            effort = last_effort
+            effort_source = "last"
+    if effort is None:
+        config_effort = get_config_value("effort", default=None)
+        if isinstance(config_effort, str) and config_effort:
+            effort = config_effort
+            effort_source = "config"
     if effort is None:
         effort = settings.resolved_effort_level()
         if effort is not None:
@@ -545,7 +565,28 @@ def build_session(
     # chain) rather than bare os.environ, so "at work" default-model
     # resolution honors the SAME trust rules every other provider lookup
     # here already does.
-    model_raw = model_ref_raw or resolve_default_model_raw(routes, env=settings.effective_env)
+    #
+    # 2.0.1 W3a: --model flag > last_model (persisted by `/model`, cwd-
+    # then-global per `model_memory`) > resolve_default_model_raw's own
+    # existing chain (HALO_MODEL env > routes.json default > config.json's
+    # "model" key > the work-env Databricks shortcut > the hardcoded
+    # default). Never consulted for -c/--resume -- a resumed session keeps
+    # its own prior model, read from its log. A persisted ref whose
+    # provider is no longer enabled (or that otherwise fails to resolve)
+    # falls through to the next source with one notice line naming it,
+    # rather than failing the whole launch over a stale choice.
+    model_raw = model_ref_raw
+    if model_raw is None and not (continue_ or resume):
+        last_model_raw = launch_state.resolve_last_model(cwd, memory=model_memory)
+        if last_model_raw:
+            try:
+                parse_model_ref(last_model_raw, routes)  # validate only -- parsed for real just below
+                model_raw = last_model_raw
+            except InvalidModelError as e:
+                print(f"halo: the last-used model {last_model_raw!r} is no longer available ({e}) -- "
+                      f"using the configured default instead", file=sys.stderr)
+    if model_raw is None:
+        model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
     explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
     small_raw = explicit_small_raw or routes.get("small") or model_raw

@@ -179,9 +179,20 @@ def _bounded_connect(conn, timeout_s: float, host: str) -> None:
     blocking C call) -- same "abandoned, not stopped" caveat as every other
     abort-aware wait in this codebase (see tui/dialogs/mcp_status.py) -- and
     this call raises UpstreamConnectError immediately either way, so the
-    caller never actually waits on it past `timeout_s`."""
+    caller never actually waits on it past `timeout_s`.
+
+    2.0.1 finding 18: an abandoned connect that later succeeds (or fails
+    PART way through -- e.g. the TCP handshake lands but a slow TLS
+    handshake is what actually blew the budget, leaving `conn.sock` set to
+    a raw, un-wrapped socket) used to leak that socket forever -- nobody
+    else ever gets a reference to `conn` once this function has already
+    raised and moved on. `_target` itself closes `conn` the moment it
+    finishes IF this function already gave up on it (`abandoned` below),
+    whether that finish was a success or a late failure -- `HTTPConnection.
+    close()` is a safe no-op when `.sock` is None."""
     outcome: list = []
     done = threading.Event()
+    abandoned = threading.Event()
 
     def _target() -> None:
         try:
@@ -190,10 +201,16 @@ def _bounded_connect(conn, timeout_s: float, host: str) -> None:
             outcome.append(e)
         finally:
             done.set()
+        if abandoned.is_set():
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     t = threading.Thread(target=_target, daemon=True, name="rolo-connect")
     t.start()
     if not done.wait(timeout_s):
+        abandoned.set()
         raise UpstreamConnectError(
             format_connect_error(host, f"timed out after {timeout_s:.0f}s connecting -- "
                                         f"likely a DNS lookup that never returned"),

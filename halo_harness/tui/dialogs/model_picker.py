@@ -62,7 +62,7 @@ class ModelPicker(ModalScreen):
     ModelPicker OptionList { height: 1fr; }
     """
 
-    def __init__(self, models: "list", *, current: str = "") -> None:
+    def __init__(self, models: "list", *, current: str = "", last_used: str = "") -> None:
         super().__init__()
         # `Controller.list_models()` returns dicts; `FakeController`'s own
         # (tests/test_fake_controller.py-pinned) shape is a bare list of ref
@@ -74,6 +74,10 @@ class ModelPicker(ModalScreen):
         self.models = [m if isinstance(m, dict) else {"ref": m, "provider": "?"}
                        for m in models if not (isinstance(m, dict) and "hint" in m)]
         self.current = current
+        # 2.0.1 W3a ("launch with the last session's model and effort"):
+        # the ref `launch_state.resolve_last_model` would pick on the NEXT
+        # launch -- "" (the default) marks no row at all, same as today.
+        self.last_used = last_used
         self._filtered = self.models
 
     def compose(self):
@@ -103,8 +107,10 @@ class ModelPicker(ModalScreen):
                     option_list.add_option(Option(Text(f"── {group} ──", style="bold dim"),
                                                    disabled=True))
                 for m in members:
-                    option_list.add_option(
-                        Option(Text(format_model_row(m), no_wrap=True, overflow="ellipsis"), id=m["ref"]))
+                    row_text = Text(format_model_row(m), no_wrap=True, overflow="ellipsis")
+                    if self.last_used and m["ref"] == self.last_used:
+                        row_text.append("  (last used)", style="dim italic")
+                    option_list.add_option(Option(row_text, id=m["ref"]))
             # 1.0.1 hotfix addendum 7: highlights the first SELECTABLE row
             # up front (`action_first` skips a disabled group-header, unlike
             # a bare `.highlighted = 0`) -- otherwise `highlighted` starts

@@ -372,6 +372,61 @@ def test_default_model_check_unset_configured_and_misconfigured(ctx: Ctx):
               line4.startswith(doctor.OK))
 
 
+# ---------------------------------------------------------------------------
+# 2.0.1 W3a: doctor pins the tested Claude Code version range
+# (providers/cc_tested.json) and WARNs when the installed claude is newer.
+# ---------------------------------------------------------------------------
+
+@test
+def test_claude_subscription_warns_when_installed_claude_is_newer_than_tested(ctx: Ctx):
+    import halo_harness.doctor as doctor_mod
+    from halo_harness.providers.cc_models import load_cc_tested_range
+
+    tested = load_cc_tested_range()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_HOME"] = str(_fresh_home())
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+    real_version = doctor_mod._claude_version
+    doctor_mod._claude_version = lambda: "99.0.0"  # newer than any real tested max
+    try:
+        line = doctor_mod._check_claude_subscription()
+        ctx.check(f"WARN (never OK) for a too-new install, got {line!r}", line.startswith(doctor_mod.WARN))
+        ctx.check(f"names 'newer than the tested range', got {line!r}", "newer than the tested range" in line)
+        ctx.check(f"names the tested max, got {line!r}", str(tested.get("max")) in line)
+    finally:
+        doctor_mod._claude_version = real_version
+        for var, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_TEST_CC_AUTH_STATUS", old_auth)):
+            if old is not None:
+                os.environ[var] = old
+            else:
+                os.environ.pop(var, None)
+
+
+@test
+def test_claude_subscription_ok_when_installed_claude_is_within_tested_range(ctx: Ctx):
+    import halo_harness.doctor as doctor_mod
+    from halo_harness.providers.cc_models import load_cc_tested_range
+
+    tested = load_cc_tested_range()
+    old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
+    os.environ["BRIDGE_TEST_HOME"] = str(_fresh_home())
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+    real_version = doctor_mod._claude_version
+    doctor_mod._claude_version = lambda: tested.get("max")
+    try:
+        line = doctor_mod._check_claude_subscription()
+        ctx.check(f"OK for a version exactly at the tested max, got {line!r}", line.startswith(doctor_mod.OK))
+    finally:
+        doctor_mod._claude_version = real_version
+        for var, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_TEST_CC_AUTH_STATUS", old_auth)):
+            if old is not None:
+                os.environ[var] = old
+            else:
+                os.environ.pop(var, None)
+
+
 def _hermetic_child_env() -> dict:
     """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
     (would let bridge_home() escape this test's own BRIDGE_TEST_HOME

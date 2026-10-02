@@ -219,8 +219,16 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
             dbx_text = _table_text(endpoints, root)
             if not ok:
                 # Exact pre-existing wording (tests/test_dbx_tui_surface.py
-                # pins "Refresh failed"/"endpoint(s) still cached" verbatim).
-                lines.append(f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached).")
+                # pins "Refresh failed"/"endpoint(s) still cached" verbatim)
+                # for a GENUINE failure. 2.0.1 finding 24: a lock LOST to a
+                # concurrent refresh is not a failure -- never this prefix,
+                # which would read as self-contradictory next to REFRESH_
+                # BUSY_NOTE's own "already running" wording.
+                from halo_harness.providers.databricks import REFRESH_BUSY_NOTE
+                if note == REFRESH_BUSY_NOTE:
+                    lines.append(f"Databricks: {note} ({len(endpoints)} endpoint(s) still cached).")
+                else:
+                    lines.append(f"Refresh failed: {note} ({len(endpoints)} endpoint(s) still cached).")
             else:
                 from halo_harness.providers.models_dev import refresh_models_dev_cache
                 md_ok, md_note = refresh_models_dev_cache(state_dir)
@@ -240,8 +248,11 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
 
     if is_enabled("openrouter"):
         if wants_refresh:
+            from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
             ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
-            if ok is False:
+            if ok is CATALOG_REFRESH_BUSY:
+                lines.append(f"OpenRouter: {REFRESH_BUSY_NOTE}.")
+            elif ok is False:
                 lines.append("OpenRouter refresh failed -- see `halo doctor`.")
             elif ok is None:
                 lines.append("OpenRouter: not configured -- nothing to refresh.")
@@ -254,8 +265,11 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
 
     if is_enabled("anthropic"):
         if wants_refresh:
+            from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
             ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
-            if ok is False:
+            if ok is CATALOG_REFRESH_BUSY:
+                lines.append(f"Anthropic: {REFRESH_BUSY_NOTE}.")
+            elif ok is False:
                 lines.append("Anthropic refresh failed -- see `halo doctor`.")
             elif ok is None:
                 lines.append("Anthropic: not configured -- nothing to refresh.")
@@ -605,6 +619,43 @@ def _cmd_exit(args: str, facade: HeadlessFacade) -> str:
     return "Nothing to exit: a single -p call already ends after this turn."
 
 
+def _cmd_bugreport(args: str, facade: HeadlessFacade) -> str:
+    """2.0.1 W3a: "one paste instead of screenshots" -- a REAL, fully
+    functional command here (unlike /export's interactive-picker-only
+    stub above), since writing a report file (and optionally copying it)
+    needs no picker and works identically headless or in the TUI. `halo
+    bugreport` itself (`halo_harness.bugreport.cmd_bugreport`) is the
+    separate entry point for when nothing is running at all."""
+    from halo_harness.bugreport import build_bugreport_text, copy_to_clipboard, write_bugreport
+    from halo_harness.config.paths import bridge_home
+    opts = (args or "").split()
+    state_dir = bridge_home()
+    text = build_bugreport_text(facade=facade, state_dir=state_dir, cwd=facade.cwd,
+                                 include_content="--include-content" in opts)
+    path = write_bugreport(text, state_dir)
+    lines = [f"Bugreport written to {path}"]
+    if "--copy" in opts:
+        lines.append("Copied to clipboard." if copy_to_clipboard(text) else "No clipboard tool found -- see the path above.")
+    return "\n".join(lines)
+
+
+def _cmd_timeline(args: str, facade: HeadlessFacade) -> str:
+    """2.0.1 W3a: THIS process's own per-turn timeline (`debug_timeline.
+    last_n_turns`) -- `halo timeline --last N` (a separate command,
+    `bugreport_timeline_cli.py`) reads the same data back from the session
+    LOG instead, for after the fact / a different process."""
+    from halo_harness import debug_timeline
+    from halo_harness.bugreport_timeline_cli import format_timeline_record
+    try:
+        n = int(args.strip()) if args.strip() else 1
+    except ValueError:
+        n = 1
+    records = debug_timeline.last_n_turns(n)
+    if not records:
+        return "No turns recorded yet this session."
+    return "\n\n".join(format_timeline_record(r) for r in records)
+
+
 # ---- U5 sessions UX + git-shadow rewind + keymap: "ui"-kind stubs here
 # (headless -p has no interactive picker/card/worker thread to run these
 # for real), real behaviour lives in tui/slash.py's own handler dict --
@@ -740,6 +791,9 @@ _BUILTIN_SPECS = {
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
     "export": ("ui", "Export the conversation", None, _cmd_export),
+    "bugreport": ("core", "Write a redacted diagnostic report (one paste instead of screenshots)",
+                  "[--copy] [--include-content]", _cmd_bugreport),
+    "timeline": ("core", "Show the last turn's request/tool/timing timeline", "[N]", _cmd_timeline),
     "add-dir": ("core", "Add a working directory", "<directory>", _cmd_add_dir),
     "theme": ("core", "Show or set the color theme", "[theme]", _cmd_theme),
     "exit": ("ui", "Exit halo", None, _cmd_exit),

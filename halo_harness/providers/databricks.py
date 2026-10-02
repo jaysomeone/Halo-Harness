@@ -42,6 +42,32 @@ _CATALOG_READ_TIMEOUT_S = 30
 # True` -- `/models refresh`, `/dbx`, `halo models --refresh`) is
 # never subject to the backoff, only to the single-flight lock.
 _dbx_refresh_lock = threading.Lock()
+
+# 2.0.1 finding 24: the exact wording shown whenever a caller loses one of
+# the three catalog-refresh single-flight locks (Databricks/OpenRouter/
+# Anthropic) -- shown AS-IS, never dressed up as "refresh failed" (a lock a
+# CONCURRENT refresh already holds is not a failure; the caller just needs
+# to try again in a moment). `CATALOG_REFRESH_BUSY` is the matching
+# sentinel for the two bool-returning refreshers (OpenRouter/Anthropic,
+# which have no note string of their own to carry this) -- falsy (`bool()`
+# is False) so every existing `if ok:`/`if not ok:` caller keeps treating
+# it the same as a plain `False` failure; only a caller that wants the
+# distinction checks `is CATALOG_REFRESH_BUSY` (or, for Databricks, compares
+# the returned note to `REFRESH_BUSY_NOTE` verbatim).
+REFRESH_BUSY_NOTE = "a refresh is already running, try again in a second"
+
+
+class _RefreshBusy:
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "CATALOG_REFRESH_BUSY"
+
+
+CATALOG_REFRESH_BUSY = _RefreshBusy()
 _dbx_last_failure_at: "dict[str, float]" = {}  # keyed by str(state_dir) -- see refresh_dbx_catalog
 _or_refresh_lock = threading.Lock()
 _or_last_failure_at: "dict[str, float]" = {}
@@ -425,7 +451,7 @@ def refresh_dbx_catalog(state_dir, host: str, token: str) -> "tuple[bool, dict, 
     another's backoff) for `refresh_dbx_catalog_if_stale`'s own backoff."""
     key = str(state_dir)
     if not _dbx_refresh_lock.acquire(blocking=False):
-        return False, {}, "a refresh is already in progress -- keeping the cached catalog"
+        return False, {}, REFRESH_BUSY_NOTE
     try:
         old = load_dbx_endpoints_json(state_dir)
         try:
@@ -664,7 +690,9 @@ def refresh_openrouter_catalog_if_stale(state_dir, *, max_age_hours: Optional[fl
         if orc is None:
             return None
         if not _or_refresh_lock.acquire(blocking=False):
-            return False
+            # 2.0.1 finding 24: distinguishable from a genuine failure --
+            # see CATALOG_REFRESH_BUSY's own module-level docstring.
+            return CATALOG_REFRESH_BUSY
         try:
             fetched = probe_openrouter_models(orc.base_url, orc.api_key)
             write_models_json(state_dir, fetched)

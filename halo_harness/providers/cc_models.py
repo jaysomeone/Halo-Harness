@@ -530,7 +530,20 @@ def default_bare_alias_route(*, api_key: Optional[str] = None,
     if status is None:
         if is_claude_gateway_driven():
             return "none"
-        status = claude_auth_status()
+        # 2.0.1 finding 26: prefer whatever's already cached (instant, no
+        # subprocess) over a fresh live spawn -- a caller on a live UI
+        # thread (the interactive `/model <bare-alias>` slash command,
+        # typed well after the startup worker's own `refresh_cached_
+        # claude_auth_status()` call has almost certainly already landed)
+        # must never block on `claude auth status` when a perfectly good
+        # answer is already sitting in the cache. Only a genuinely cold
+        # cache (nothing primed yet -- true cold start, which has no later
+        # retry to defer to) still falls back to the direct spawn; see
+        # `tui/slash.py::_apply_model_or_defer` for the belt-and-suspenders
+        # fix that covers even THAT case for the live/interactive path.
+        status = cached_claude_auth_status()
+        if status is None:
+            status = claude_auth_status()
     if status is not None and status.logged_in:
         return "cc"
     return "none"
@@ -631,3 +644,74 @@ def refresh_cc_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.
     except OSError:
         pass
     return result
+
+
+# ---------------------------------------------------------------------------
+# 2.0.1 W3a (small intuitiveness items): the Claude Code version range the
+# `cc:` route has actually been verified against -- never invented, always
+# this committed file (`docs/harness/H11-brief.md`'s own "Verified facts":
+# `claude` 2.1.263 through 2.1.284, 2026-09-28; `agent/cc_runtime.py`'s
+# "live-verified against 2.1.284"). `doctor.py::_check_claude_subscription`
+# WARNs when the installed `claude` is newer; `agent/cc_runtime.py`'s own
+# one-shot notice covers whoever never runs `halo doctor` at all.
+# ---------------------------------------------------------------------------
+_CC_TESTED_PATH = Path(__file__).resolve().parent / "cc_tested.json"
+
+
+def load_cc_tested_range() -> dict:
+    """`{}` on any read/parse failure (a corrupted or missing file must
+    never crash doctor/the cc: route) -- callers treat a missing `"max"`
+    key the same way (see `version_outside_tested_range`)."""
+    try:
+        with open(_CC_TESTED_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _version_tuple(v: "Optional[str]") -> "Optional[tuple]":
+    if not v:
+        return None
+    parts = []
+    for p in v.strip().split("."):
+        if not p.isdigit():
+            break
+        parts.append(int(p))
+    return tuple(parts) if parts else None
+
+
+def version_outside_tested_range(version: "Optional[str]", *, tested: "Optional[dict]" = None) -> bool:
+    """True only when `version` parses AND is STRICTLY NEWER than the
+    tested range's own `"max"` -- an older version, or one that fails to
+    parse at all (a dev build, a non-numeric suffix), is never flagged:
+    this is an informational heads-up for "newer than we've verified",
+    never a reason to withhold cc: itself. `tested` defaults to a fresh
+    `load_cc_tested_range()` -- a caller that already loaded it once
+    (doctor, the cc: route's own one-shot check) passes it to avoid
+    re-reading the file."""
+    tested = tested if tested is not None else load_cc_tested_range()
+    cur = _version_tuple(version)
+    mx = _version_tuple(tested.get("max") if isinstance(tested, dict) else None)
+    if cur is None or mx is None:
+        return False
+    return cur > mx
+
+
+def installed_claude_version() -> "Optional[str]":
+    """`claude --version`'s first whitespace-separated token -- the ONE
+    place that spawns it. `doctor.py::_claude_version` is now a thin
+    wrapper around this (moved here so `agent/cc_runtime.py`'s own one-shot
+    "installed claude is newer than the tested range" notice can read it
+    too, without an import cycle through doctor.py). `claude auth status`'s
+    own JSON carries no version key at all (H11b finding 23), hence the
+    separate subprocess call."""
+    try:
+        argv = resolve_claude_launch_argv()
+    except ClaudeCodeNotFoundError:
+        return None
+    try:
+        proc = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=10.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return (proc.stdout or "").strip().split(" ")[0] or None

@@ -1,6 +1,12 @@
 """tests.test_hotfix_101_fail_fast -- 1.0.1 hotfix 2: DNS/connection
-failures must fail fast (bounded connect, no backoff-ladder retries beyond
-phase 1's own single immediate one) and name the host in a clear message.
+failures must fail fast (bounded connect, no backoff-ladder retries) and
+name the host in a clear message. 2.0.1 finding 18 removed phase 1's own
+former single immediate retry for a genuine CONNECT-phase failure (a retry
+cannot help DNS) -- it is terminal on the very first attempt now, so the
+documented 8s connect budget is really just 8s, never up to 16s; a POST-
+connect failure (a dropped keep-alive, no CONNECT_FAILURE_MARKER) still
+gets its own one immediate re-dial (see test_hotfix_101_fail_fast.py's own
+`test_step_retries_a_post_connect_failure_through_the_normal_ladder`).
 Every case is time-bounded (< 10s) and never touches a real network beyond
 an intentionally-unresolvable RFC 2606 `.invalid` hostname.
 """
@@ -106,6 +112,42 @@ def test_bounded_connect_caps_a_hung_connect_call(ctx: Ctx):
               not conn.connected.is_set())
 
 
+class _LateSucceedingConn:
+    """2.0.1 finding 18: simulates a connect() that blows the budget but
+    then succeeds shortly after -- close() is tracked so the test can
+    prove the abandoned connection gets cleaned up instead of leaking
+    its socket forever."""
+
+    def __init__(self, hang_s: float):
+        self.hang_s = hang_s
+        self.connected = threading.Event()
+        self.closed = threading.Event()
+
+    def connect(self):
+        time.sleep(self.hang_s)
+        self.connected.set()
+
+    def close(self):
+        self.closed.set()
+
+
+@test
+def test_bounded_connect_closes_an_abandoned_connection_that_later_succeeds(ctx: Ctx):
+    """2.0.1 finding 18: an abandoned connect thread that later succeeds
+    must not leak its socket forever -- `_bounded_connect`'s own `_target`
+    now closes `conn` itself once it finishes, since this function already
+    raised and nobody else will ever get a reference to it."""
+    from halo_harness.providers.http import UpstreamConnectError, _bounded_connect
+    conn = _LateSucceedingConn(hang_s=0.5)
+    try:
+        _bounded_connect(conn, 0.1, "example.invalid")
+        ctx.check("expected UpstreamConnectError on timeout", False)
+    except UpstreamConnectError:
+        pass
+    ctx.check("the late connect eventually succeeds (not force-killed)", conn.connected.wait(3.0))
+    ctx.check("close() was called on the abandoned-then-succeeded connection", conn.closed.wait(3.0))
+
+
 @test
 def test_bounded_connect_propagates_a_fast_exception(ctx: Ctx):
     from halo_harness.providers.http import UpstreamConnectError, _bounded_connect
@@ -200,13 +242,15 @@ def test_is_connect_failure_message_survives_both_wire_mappers(ctx: Ctx):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 (providers/stream.py): exactly ONE immediate retry, then terminal --
-# never the 1-2-4-8-16s ladder -- for BOTH the openai-chat and the
-# anthropic-passthrough dialect's own phase1.
+# Phase 1 (providers/stream.py): a genuine CONNECT-phase failure is terminal
+# on the FIRST attempt -- 2.0.1 finding 18 removed the former single
+# immediate retry (a retry cannot help DNS) -- never the 1-2-4-8-16s ladder
+# either, for BOTH the openai-chat and the anthropic-passthrough dialect's
+# own phase1.
 # ---------------------------------------------------------------------------
 
 @test
-def test_openai_chat_dialect_connect_failure_is_terminal_after_one_retry_no_ladder(ctx: Ctx):
+def test_openai_chat_dialect_connect_failure_is_terminal_on_the_first_attempt_no_retry(ctx: Ctx):
     import halo_harness.providers.http as http_mod
     from halo_harness.providers.routing import Route
     from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
@@ -236,8 +280,8 @@ def test_openai_chat_dialect_connect_failure_is_terminal_after_one_retry_no_ladd
         except UpstreamError as e:
             from halo_harness.providers.http import is_connect_failure_message
             elapsed = time.monotonic() - t0
-            ctx.check(f"exactly 2 connect attempts (1 immediate retry, never a ladder), got {call_count[0]}",
-                      call_count[0] == 2)
+            ctx.check(f"exactly 1 connect attempt (finding 18: never retried, never a ladder), "
+                      f"got {call_count[0]}", call_count[0] == 1)
             ctx.check(f"no backoff sleep at all -- near-instant, got {elapsed:.2f}s", elapsed < 1.0)
             ctx.check(f"the resulting UpstreamError's message is recognized as a connect failure "
                       f"(what agent/loop.py's _step keys off to skip its own ladder), got {e.message!r}",
@@ -275,8 +319,8 @@ def test_step_never_ladder_retries_a_connect_failure(ctx: Ctx):
             elapsed = time.monotonic() - t0
             kinds = [e.kind for e in events_seen]
             ctx.check(f"turn ends in an error event, got kinds={kinds}", "error" in kinds)
-            ctx.check(f"exactly 2 connect attempts total for the WHOLE turn (no outer ladder re-invoking "
-                      f"_stream), got {call_count[0]}", call_count[0] == 2)
+            ctx.check(f"exactly 1 connect attempt total for the WHOLE turn (finding 18: no phase-1 retry, "
+                      f"no outer ladder re-invoking _stream either), got {call_count[0]}", call_count[0] == 1)
             ctx.check(f"no backoff delay anywhere -- the whole turn resolves in well under 2s, got {elapsed:.2f}s",
                       elapsed < 2.0)
     finally:

@@ -36,6 +36,7 @@ from halo_harness.tui.dispatch import apply_event
 from halo_harness.tui.events import drain_queue
 from halo_harness.tui.keys import DOUBLE_CTRL_C_WINDOW_S, DRAIN_HZ, next_mode
 from halo_harness.tui.widgets.input import CompletionPopup, PromptInput
+from halo_harness.tui.widgets.pending_dock import PendingDock
 from halo_harness.tui.widgets.statusbar import StatusBar
 from halo_harness.tui.widgets.transcript import IntroLine, Transcript
 from halo_harness.tui.widgets.whichkey import WhichKeyOverlay
@@ -244,6 +245,17 @@ class BridgeApp(App):
         self._local_events: "queue.Queue" = queue.Queue()
         self.verbose = False
         self.pending_card = None
+        # Halo 2.0.1 W3a (finding 16 / PendingDock): a FIFO of cards
+        # waiting BEHIND whatever `self.pending_card` currently is -- a
+        # second concurrent ask (another sub-agent, or a rare second
+        # top-level one) no longer overwrites it; it waits its turn,
+        # activated in `clear_pending_card` once the current one resolves.
+        # `_pending_markers` is the matching `id(card) -> SystemNote`
+        # transcript marker each queued/active card gets the MOMENT it
+        # arrives (see `enqueue_pending_card`) -- popped and rewritten to
+        # the card's own `decision_line` once it's actually answered.
+        self._pending_queue: "list" = []
+        self._pending_markers: "dict" = {}
         self._borrowing_card = None
         self._ctrl_c_deadline: Optional[float] = None
         self._quitting = False
@@ -318,6 +330,14 @@ class BridgeApp(App):
         yield Transcript()
         yield CompletionPopup()
         yield WhichKeyOverlay()
+        # Halo 2.0.1 W3a: PendingDock -- "nothing that waits for the user
+        # may be off-screen". A NORMAL (non-docked) flow child, placed
+        # right here between Transcript (height: 1fr, grows to fill
+        # whatever's left) and `bottom-dock` below (dock: bottom, out of
+        # normal flow entirely) -- this always ends up sitting directly
+        # above the prompt row, hidden (zero height) until a card actually
+        # needs it. See `enqueue_pending_card`/`clear_pending_card` below.
+        yield PendingDock(id="pending-dock")
         # One bottom-docked container holds the prompt row ABOVE the status
         # bar. Docking both widgets to the bottom edge separately made
         # Textual overlap them: the status bar (composed last, height 1)
@@ -346,6 +366,7 @@ class BridgeApp(App):
         self.transcript = self.query_one(Transcript)
         self.completion_popup = self.query_one(CompletionPopup)
         self.which_key = self.query_one(WhichKeyOverlay)
+        self.pending_dock = self.query_one(PendingDock)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
         # B2: the compose()-time placeholder was fitted against a guessed
@@ -558,6 +579,18 @@ class BridgeApp(App):
             pass  # not the main thread, not POSIX, or a platform that refuses it -- the timer-based watchdog still runs
 
     def _on_sigusr1(self, signum, frame) -> None:
+        # 2.0.1 finding 25: once MAX_HANG_DUMPS_PER_PROCESS is reached,
+        # `_dump_hang_diagnostics` below silently no-ops -- fine for the
+        # heartbeat path (nobody is watching for it in real time), but a
+        # user who deliberately sends SIGUSR1 (expecting an on-demand dump)
+        # deserves to know why nothing happened, rather than wondering if
+        # the signal was even delivered. One line per signal received while
+        # capped (never the dump itself, which stays capped).
+        if self._watchdog_dump_count >= MAX_HANG_DUMPS_PER_PROCESS:
+            logging.getLogger("bridge").warning(
+                "SIGUSR1 received but the per-process hang-dump cap (%d) was already reached -- "
+                "no new dump written", MAX_HANG_DUMPS_PER_PROCESS)
+            return
         self._dump_hang_diagnostics(time.monotonic() - self._last_heartbeat_monotonic, reason="SIGUSR1")
 
     def _prune_old_hang_dumps(self) -> None:
@@ -1060,8 +1093,9 @@ class BridgeApp(App):
                                reason=getattr(decision, "reason", "") or "runs now, outside the model turn (! prefix)",
                                suggested_rule=getattr(decision, "suggested_rule", None), on_decide=on_decide,
                                on_resolved_externally=on_decide)
-        await self.transcript.mount_widget(card)
-        self.set_pending_card(card)
+        # Halo 2.0.1 W3a (finding 16 / PendingDock): same queued path every
+        # other permission/question/plan ask goes through now.
+        await self.enqueue_pending_card(card, marker_text=f"⏸ permission needed for Bash({command}), see below")
 
     def _start_inline_shell_worker(self, command: str) -> None:
         self.run_worker(lambda: self._inline_shell_worker(command), thread=True, name="inline-shell")
@@ -1433,6 +1467,44 @@ class BridgeApp(App):
         if isinstance(card, PermissionCard):
             self.prompt_input.placeholder = "1-4 answers the request above, or type why not"
             self.status_bar.set_pending_permission(True)
+        self._refresh_needs_you_tag()
+
+    def _refresh_needs_you_tag(self) -> None:
+        """Halo 2.0.1 W3a: `needs you · N` -- N is the active card (if any)
+        plus everything still queued behind it; the tag disappears only
+        once N reaches 0 (finding 16: "the status tag stays up while any
+        entry remains")."""
+        count = (1 if self.pending_card is not None else 0) + len(self._pending_queue)
+        self.status_bar.set_needs_you(count)
+
+    async def enqueue_pending_card(self, card, *, marker_text: str) -> None:
+        """Halo 2.0.1 W3a (finding 16 / PendingDock): the ONE entry point
+        `tui/dispatch.py`'s permission/question/plan handlers and `_handle_
+        bang_command`'s inline-shell ask all go through now, replacing the
+        old `await app.transcript.mount_widget(card); app.set_pending_card
+        (card)` pair -- a queue keyed by each card's own `request_id`
+        (carried on the card object itself) means a second concurrent ask
+        no longer silently overwrites the first.
+
+        The transcript ALWAYS gets a one-line marker right where the ask
+        happened -- its natural position in the conversation -- whether
+        this card becomes active immediately or has to wait; `clear_
+        pending_card` rewrites it to the card's own `decision_line` once
+        it's actually answered. The card itself only ever gets MOUNTED
+        (into `self.pending_dock`) once it's actually active -- a queued
+        card is tracked here but not yet a live widget anywhere."""
+        marker = await self.transcript.add_note(marker_text, kind="pending-marker")
+        self._pending_markers[id(card)] = marker
+        if self.pending_card is None:
+            await self.pending_dock.show_card(card)
+            self.set_pending_card(card)
+        else:
+            self._pending_queue.append(card)
+            self._refresh_needs_you_tag()
+
+    async def _activate_next_pending_card(self, card) -> None:
+        await self.pending_dock.show_card(card)
+        self.set_pending_card(card)
 
     def _maybe_notify_input_needed(self) -> None:
         """U5 scope D: "terminal bell + notify-send/toast when input is
@@ -1457,6 +1529,16 @@ class BridgeApp(App):
             pass
 
     def clear_pending_card(self) -> None:
+        # Halo 2.0.1 W3a (finding 16 / PendingDock): rewrite this card's own
+        # transcript marker (if it went through `enqueue_pending_card`, i.e.
+        # it's a permission/question/plan card -- an EffortCard/RewindCard/
+        # ImproveCard, which never gets a marker, is a harmless no-op pop
+        # here) to its decision line BEFORE anything else -- same
+        # "⏸ ... see below" widget, now showing what was actually decided.
+        finished = self.pending_card
+        marker = self._pending_markers.pop(id(finished), None) if finished is not None else None
+        if marker is not None:
+            marker.update(getattr(finished, "decision_line", None) or "(resolved)")
         self.pending_card = None
         self.prompt_input.placeholder = self._current_placeholder_text()
         self.status_bar.set_pending_permission(False)
@@ -1474,6 +1556,23 @@ class BridgeApp(App):
         if self._card_interrupted_following:
             self.transcript.scroll_end(animate=False)
         self._card_interrupted_following = False
+        # Finding 16: activate whatever's next in the queue (if anything) --
+        # scheduled via call_later (Textual's own async-aware callback
+        # scheduling) rather than awaited here, since this method is called
+        # from many SYNC contexts (a card's own on_decide/on_answer/on_reply
+        # closure, itself invoked from a Textual key-binding action).
+        if self._pending_queue:
+            nxt = self._pending_queue.pop(0)
+            self.call_later(self._activate_next_pending_card, nxt)
+        else:
+            if marker is not None:
+                # `finished` went through `enqueue_pending_card` (it's the
+                # dock's own card) and nothing else is queued behind it --
+                # hide the dock. An EffortCard/RewindCard/ImproveCard etc.
+                # (no marker at all -- never routed through the dock) skips
+                # this entirely, same as before this brief.
+                self.call_later(self.pending_dock.clear)
+            self._refresh_needs_you_tag()
 
     def borrow_input(self, card, *, placeholder: str) -> None:
         """A card needs one line of free text (deny feedback, "Other...",
@@ -1524,6 +1623,11 @@ class BridgeApp(App):
         self.controller.set_permission_mode(new_mode)
         self.status_bar.set_mode(new_mode)
         self._reevaluate_pending_permission_for_mode(new_mode)
+        # 2.0.1 W3a: a plain one-line toast naming what the new mode does --
+        # describes behaviour only (tui/keys.py::MODE_DESCRIPTIONS), never
+        # gates it.
+        from halo_harness.tui.keys import MODE_DESCRIPTIONS
+        self.notify(f"{new_mode}: {MODE_DESCRIPTIONS.get(new_mode, '')}", title="Mode", timeout=3)
 
     def _reevaluate_pending_permission_for_mode(self, mode: str) -> None:
         """1.0.1 hotfix 17.2: switching mode (Shift+Tab here, `/permissions`
@@ -1591,8 +1695,19 @@ class BridgeApp(App):
         card = self.pending_card
         await self.transcript.clear_view()
         if card is not None:
-            await self.transcript.mount_widget(card)
-            self.set_focus(card)
+            # Halo 2.0.1 W3a: a permission/question/plan card now lives in
+            # `self.pending_dock` (finding 16's queue), a SIBLING of the
+            # transcript -- `/clear` only wipes the transcript, so that
+            # card was never removed at all and must not be re-mounted a
+            # second time (Textual raises on mounting an already-mounted
+            # widget). An EffortCard/RewindCard/ImproveCard etc. still
+            # mounts directly into the transcript (unchanged), so it DOES
+            # need re-mounting here, same as before this brief.
+            if getattr(card, "parent", None) is self.pending_dock:
+                self.set_focus(card)
+            else:
+                await self.transcript.mount_widget(card)
+                self.set_focus(card)
 
     def action_toggle_verbose(self) -> None:
         self.verbose = not self.verbose

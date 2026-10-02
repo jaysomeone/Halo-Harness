@@ -1944,12 +1944,13 @@ class Session:
                 # ladder, full stop. Checked BEFORE `is_retryable_message`,
                 # which would otherwise blanket-retry it anyway (status is
                 # always 502, and that function retries any status>=500
-                # regardless of message). Phase 1
-                # (`_run_phase1_attempts`/`_run_phase1_anthropic`) already
-                # made its own ONE immediate retry before this `UpstreamError`
-                # was ever raised, so this is correctly terminal here --
-                # retrying a DNS failure on a 1-16s timer just repeats the
-                # identical failure, slower.
+                # regardless of message). 2.0.1 finding 18: phase 1
+                # (`_run_phase1_attempts`/`_run_phase1_anthropic`) no longer
+                # retries a connect-phase failure AT ALL (a retry cannot
+                # help DNS) -- this `UpstreamError` is raised straight from
+                # phase 1's own first and only attempt, so this is correctly
+                # terminal here either way -- retrying a DNS failure on a
+                # 1-16s timer just repeats the identical failure, slower.
                 if is_connect_failure_message(e.message):
                     self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
                     yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=False,
@@ -2825,6 +2826,38 @@ class Session:
     # ---- the turn: model call(s) + tool dispatch ------------------------
 
     def turn(self, text: str, images: Optional[list] = None) -> Iterator[events.Event]:
+        """2.0.1 W3a: a thin wrapper around `_turn_inner` (this method's own
+        FULL body, unchanged, just renamed) -- every event either of them
+        would ever yield passes through `debug_timeline.record_turn_event`
+        here FIRST, the ONE choke point that sees every turn's events
+        regardless of dialect (native/openai-chat/cc-subprocess) or caller
+        (the TUI's drain loop, headless -p's sink) without needing its own
+        instrumentation inside `_turn_body`/`cc_runtime.turn_body_cc`. The
+        finished record is appended to the session log as one `timeline`
+        node (`halo bugreport`/`/timeline`/`halo timeline --last N` all
+        read it back from there -- see `agent/log.py`'s own node kinds)."""
+        from halo_harness import debug_timeline
+        debug_timeline.start_turn(self.turn_count + 1)
+        try:
+            for ev in self._turn_inner(text, images=images):
+                debug_timeline.record_turn_event(ev)
+                yield ev
+        finally:
+            record = debug_timeline.end_turn()
+            if record is not None:
+                try:
+                    # `append_meta` (never `append_snapshot`) -- a `meta`
+                    # node carries no transcript CONTENT `derive_request`
+                    # ever replays to the model (agent/derive.py's own
+                    # `kind == "meta"` branch only ever reads `tools` off
+                    # one); a snapshot's own `content` list, by contrast,
+                    # becomes a real user-role message the model would see
+                    # raw internal timing/tool-status telemetry inside.
+                    self.log.append_meta(timeline=record)
+                except Exception:
+                    pass
+
+    def _turn_inner(self, text: str, images: Optional[list] = None) -> Iterator[events.Event]:
         """Run one turn to completion (which may involve several model
         calls interleaved with tool dispatch, bounded by `--max-turns`
         MODEL CALLS -- finding 9, see `_turn_body`). Always ends by

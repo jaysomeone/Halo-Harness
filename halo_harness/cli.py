@@ -337,6 +337,12 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "export":
         from halo_harness.export_cli import cmd_export
         return cmd_export(argv[1:])
+    if argv and argv[0] == "bugreport":
+        from halo_harness.bugreport import cmd_bugreport
+        return cmd_bugreport(argv[1:])
+    if argv and argv[0] == "timeline":
+        from halo_harness.bugreport_timeline_cli import cmd_timeline
+        return cmd_timeline(argv[1:])
 
     parser = _build_parser()
     try:

@@ -143,20 +143,21 @@ def test_case5_abort_makes_the_mock_see_a_disconnect(ctx: Ctx):
         mock.stop()
 
 
-# ---- case 6: connection refused, then OK -----------------------------------
+# ---- case 6: connection refused is terminal (2.0.1 finding 18) ------------
 
 @test
-def test_case6_connection_refused_then_ok_retries_transparently(ctx: Ctx):
-    """H0 #14 case 6: providers/stream.py's own single connect retry
-    (`_run_phase1_attempts`: `except UpstreamConnectError: if attempt==0:
-    continue`) must transparently succeed on a refusal-then-OK sequence.
-    `open_upstream` itself is monkeypatched to simulate exactly ONE
-    refusal deterministically -- real sockets can't reliably reproduce
-    "refused on attempt 1, listening by attempt 2" since phase 1's two
-    attempts run back to back with NO delay between them at all."""
+def test_case6_connection_refused_is_terminal_no_phase1_retry(ctx: Ctx):
+    """H0 #14 case 6, superseded by 2.0.1 finding 18: phase 1
+    (`_run_phase1_attempts`) used to retry a connect failure once
+    (`except UpstreamConnectError: if attempt==0: continue`), silently
+    succeeding on a refusal-then-OK sequence -- finding 18 removed that
+    retry entirely for a genuine CONNECT-phase failure (a retry cannot
+    help DNS, and the documented 8s connect budget must be real, not up
+    to 16s): a FIRST refusal is now terminal even though a second attempt
+    would have reached the very same mock listening right behind it."""
     import halo_harness.providers.http as http_mod
     from halo_harness.providers.routing import Route
-    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, stream_completion
+    from halo_harness.providers.stream import CompletionRequest, ProviderCreds, UpstreamError, stream_completion
 
     mock = MockUpstream().start()
     real_open_upstream = http_mod.open_upstream
@@ -179,11 +180,13 @@ def test_case6_connection_refused_then_ok_retries_transparently(ctx: Ctx):
             state_dir=Path(tempfile.mkdtemp(prefix="case6-state-")), extra_headers={}, model_label=model,
             ping_interval=15.0,
         )
-        events = list(stream_completion(req))
-        kinds = [e.get("type") for e in events]
-        ctx.check(f"the call succeeded despite the first connect being refused, got kinds={kinds}",
-                   "message_stop" in kinds)
-        ctx.check(f"exactly 2 connect attempts (1 refused + 1 ok), got {call_count[0]}", call_count[0] == 2)
+        try:
+            list(stream_completion(req))
+            ctx.check("expected UpstreamError (the refusal is terminal, never retried)", False)
+        except UpstreamError:
+            pass
+        ctx.check(f"exactly 1 connect attempt (finding 18: no phase-1 retry for a connect failure), "
+                  f"got {call_count[0]}", call_count[0] == 1)
     finally:
         http_mod.open_upstream = real_open_upstream
         mock.stop()

@@ -240,20 +240,28 @@ def _check_claude_subscription() -> str:
         return _fix(f"{WARN} Claude subscription: logged in via {via}, not claude.ai{version_bit} -- cc: will "
                      f"not use this (that's the ant: route); log in with `claude` and no ANTHROPIC_API_KEY set "
                      f"for cc:", cmd="unset ANTHROPIC_API_KEY && claude")
+    # 2.0.1 W3a: doctor pins the tested Claude Code version range
+    # (providers/cc_tested.json) and WARNs (never fails `ok`) when the
+    # installed claude is NEWER than it -- an older install is never
+    # flagged here (a different, pre-existing kind of compatibility
+    # concern, out of this round's scope).
+    from halo_harness.providers.cc_models import load_cc_tested_range, version_outside_tested_range
+    tested = load_cc_tested_range()
+    if version_outside_tested_range(version, tested=tested):
+        return _fix(f"{WARN} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available, "
+                     f"but this is newer than the tested range ({tested.get('min')}-{tested.get('max')}, "
+                     f"verified {tested.get('date')}) -- watch for behavior changes", cmd="halo doctor")
     return f"{OK} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available"
 
 
 def _claude_version() -> Optional[str]:
-    from halo_harness.providers.cc_models import ClaudeCodeNotFoundError, resolve_claude_launch_argv
-    try:
-        argv = resolve_claude_launch_argv()
-    except ClaudeCodeNotFoundError:
-        return None
-    try:
-        proc = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=10.0)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return (proc.stdout or "").strip().split(" ")[0] or None
+    # 2.0.1 W3a: the real implementation moved to providers.cc_models
+    # (`installed_claude_version`) so `agent/cc_runtime.py`'s own one-shot
+    # "newer than the tested range" notice can call it too, without an
+    # import cycle through this module -- this name/location stays for
+    # every existing caller (and test double) of `doctor._claude_version`.
+    from halo_harness.providers.cc_models import installed_claude_version
+    return installed_claude_version()
 
 
 _CHROME_NATIVE_HOST_ID = "com.anthropic.claude_code_browser_extension"

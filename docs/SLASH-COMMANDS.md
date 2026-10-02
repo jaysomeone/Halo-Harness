@@ -212,6 +212,35 @@ In `-p`, prints a note that export needs the TUI's file picker (use
 `/export [--sanitize] [path]` writes the session's JSONL transcript to disk
 immediately.
 
+### `/bugreport [--copy] [--include-content]`
+2.0.1: writes a redacted diagnostic report to `~/.halo/bugreports/<timestamp>.md`
+("one paste instead of screenshots") -- halo version, Python/OS/terminal,
+install mode, which providers are enabled and WHY (env file, settings env,
+databrickscfg, claude.ai login -- never a key, not even a fingerprint), the
+current route (ref/provider/dialect/effort requested and sent), permission
+mode, MCP servers, `~/.halo/config.json` with secret-shaped values replaced,
+settings source paths (paths only), catalog cache age per provider, this
+session's own learned permission rules, the last turn's timeline, the last
+N session events, and the last 50 `bridge.log` lines. Every line passes
+through the same redactor `/export --sanitize`/`halo export --sanitize`
+use, plus a stronger pass (long hex/base64 runs, and the literal value of
+any secret env var this process can see). `--copy` also copies the report
+text to the clipboard; `--include-content` includes prompt/output text, not
+just event shapes. `halo bugreport [--last N] [--session ID] [--out FILE]
+[--copy] [--include-content]` is the equivalent command when nothing is
+running at all (reads the most recent session for the cwd, or `--session
+<id>`).
+
+### `/timeline [N]`
+2.0.1: shows the last `N` (default 1) turns' own request/tool timing --
+request-sent/headers/first-reasoning/first-text/first-tool-call/message-end
+elapsed milliseconds, each tool call's start/end/status, steers, and
+retries/errors -- recorded by `agent.loop.Session.turn` for every turn
+regardless of dialect. `--debug` prints the same lines live as they happen.
+`halo timeline --last N [--session ID] [--json]` (a separate command) reads
+the same records back from a session's own log file instead, for after the
+fact or a different process.
+
 ### `/add-dir <directory>`
 In `-p`, explains that a running session can't be extended this way --
 pass `--add-dir` on the command line at startup instead. (The TUI shares

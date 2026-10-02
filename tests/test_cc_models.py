@@ -434,6 +434,46 @@ def test_refresh_cached_claude_auth_status_never_spawns_when_gateway_driven(ctx:
 
 
 @test
+def test_default_bare_alias_route_prefers_the_primed_cache_over_a_live_spawn(ctx: Ctx):
+    """2.0.1 finding 26: the interactive `/model <bare-alias>` slash command
+    runs on the UI thread -- `default_bare_alias_route()` must never spawn
+    `claude auth status` there when the startup worker has ALREADY primed
+    the cache (the common case: a user types a command well after launch).
+    Only a genuinely cold cache still falls back to a direct spawn (the
+    true-cold-start case, unaffected -- see the gateway test just below for
+    that one's own coverage)."""
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    def _poison(*, timeout=10.0, env=None):
+        raise AssertionError("claude auth status must never be spawned when the cache is already primed")
+
+    _clear_cc_env()
+    os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+    cc_models_mod.reset_cached_claude_auth_status()
+    try:
+        # Primes the cache through the test seam (no real subprocess) --
+        # the SAME call tui/app.py's own startup worker makes.
+        cc_models_mod.refresh_cached_claude_auth_status()
+        cached = cc_models_mod.cached_claude_auth_status()
+        ctx.check(f"the cache is primed and logged in, got {cached!r}",
+                  cached is not None and cached.logged_in is True)
+        # Now remove the test seam (so a live spawn, if one happened, would
+        # be real) and poison the live-spawn path itself -- default_bare_
+        # alias_route must read the cache above instead of ever reaching it.
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        real_claude_auth_status = cc_models_mod.claude_auth_status
+        cc_models_mod.claude_auth_status = _poison
+        try:
+            route = cc_models_mod.default_bare_alias_route()
+            ctx.check(f"'cc' from the cache, never raised, got {route!r}", route == "cc")
+        finally:
+            cc_models_mod.claude_auth_status = real_claude_auth_status
+    finally:
+        cc_models_mod.reset_cached_claude_auth_status()
+        _clear_cc_env()
+
+
+@test
 def test_default_bare_alias_route_never_spawns_when_gateway_driven(ctx: Ctx):
     import halo_harness.providers.cc_models as cc_models_mod
 
@@ -613,6 +653,63 @@ def test_resolve_model_profile_cc_unknown_id_still_gets_a_sane_default(ctx: Ctx)
     profile = resolve_model_profile(ref, Path(tempfile.mkdtemp(prefix="cc-profile2-")), {})
     ctx.check("never crashes, has a context window", profile.context_tokens > 0)
     ctx.check("reasoning native (a real Claude model always supports thinking)", profile.reasoning == "native")
+
+
+# ---------------------------------------------------------------------------
+# 2.0.1 W3a: the tested Claude Code version range (providers/cc_tested.json)
+# -- never invented numbers, always the committed file; doctor WARNs (never
+# fails `ok`) only for a version NEWER than the tested max.
+# ---------------------------------------------------------------------------
+
+@test
+def test_load_cc_tested_range_reads_the_committed_file(ctx: Ctx):
+    from halo_harness.providers.cc_models import load_cc_tested_range
+    tested = load_cc_tested_range()
+    ctx.check(f"has min/max/date, got {tested!r}", {"min", "max", "date"} <= tested.keys())
+    ctx.check(f"min is a dotted version string, got {tested['min']!r}", tested["min"].count(".") >= 1)
+    ctx.check(f"max is a dotted version string, got {tested['max']!r}", tested["max"].count(".") >= 1)
+
+
+@test
+def test_version_outside_tested_range_true_only_for_strictly_newer(ctx: Ctx):
+    from halo_harness.providers.cc_models import version_outside_tested_range
+    tested = {"min": "2.1.263", "max": "2.1.284", "date": "2026-09-28"}
+    ctx.check("newer patch -> outside", version_outside_tested_range("2.1.285", tested=tested) is True)
+    ctx.check("newer minor -> outside", version_outside_tested_range("2.2.0", tested=tested) is True)
+    ctx.check("exactly the max -> NOT outside", version_outside_tested_range("2.1.284", tested=tested) is False)
+    ctx.check("older than max -> NOT outside (not this round's concern)",
+              version_outside_tested_range("2.1.263", tested=tested) is False)
+    ctx.check("unparseable version -> never flagged", version_outside_tested_range("dev-build", tested=tested) is False)
+    ctx.check("None version -> never flagged", version_outside_tested_range(None, tested=tested) is False)
+    ctx.check("missing max in tested -> never flagged", version_outside_tested_range("99.0.0", tested={}) is False)
+
+
+@test
+def test_cc_runtime_version_notice_fires_at_most_once_per_process(ctx: Ctx):
+    """agent/cc_runtime.py's own one-shot notice for whoever never runs
+    `halo doctor` -- logs once, never again, and never raises even when
+    everything underneath it is faked."""
+    import logging
+    import halo_harness.agent.cc_runtime as cc_runtime_mod
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    real_installed_version = cc_models_mod.installed_claude_version
+    cc_models_mod.installed_claude_version = lambda: "99.0.0"
+    logger = logging.getLogger("bridge")
+    real_warning = logger.warning
+    captured = []
+    logger.warning = lambda msg, *a, **kw: captured.append(msg % a if a else msg)
+    cc_runtime_mod._version_range_notice_emitted = False
+    try:
+        cc_runtime_mod._maybe_warn_cc_version_outside_tested_range()
+        cc_runtime_mod._maybe_warn_cc_version_outside_tested_range()
+        cc_runtime_mod._maybe_warn_cc_version_outside_tested_range()
+        ctx.check(f"logged exactly once despite 3 calls, got {captured}", len(captured) == 1)
+        ctx.check(f"names the installed version, got {captured[0]!r}", "99.0.0" in captured[0])
+    finally:
+        cc_models_mod.installed_claude_version = real_installed_version
+        logger.warning = real_warning
+        cc_runtime_mod._version_range_notice_emitted = False
 
 
 if __name__ == "__main__":

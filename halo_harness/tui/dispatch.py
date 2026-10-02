@@ -147,8 +147,11 @@ async def _show_permission_card(app, data: dict, *, agent_id: "str | None" = Non
 
     card = PermissionCard(request_id=request_id, summary=summary,
                            reason=data.get("reason", ""), suggested_rule=suggested, on_decide=on_decide)
-    await app.transcript.mount_widget(card)
-    app.set_pending_card(card)
+    # Halo 2.0.1 W3a (finding 16 / PendingDock): queued, never mounted
+    # straight into the transcript any more -- a second concurrent ask no
+    # longer silently overwrites this one. The transcript keeps a one-line
+    # marker at this exact point in the conversation either way.
+    await app.enqueue_pending_card(card, marker_text=f"⏸ permission needed for {summary}, see below")
 
 
 async def _show_question_card(app, data: dict) -> None:
@@ -163,8 +166,7 @@ async def _show_question_card(app, data: dict) -> None:
         app.clear_pending_card()
 
     card = QuestionCard(request_id=request_id, input_data=input_data, on_answer=on_answer)
-    await app.transcript.mount_widget(card)
-    app.set_pending_card(card)
+    await app.enqueue_pending_card(card, marker_text="⏸ question asked, see below")
 
 
 async def _show_plan_card(app, data: dict) -> None:
@@ -176,8 +178,7 @@ async def _show_plan_card(app, data: dict) -> None:
         app.clear_pending_card()
 
     card = PlanCard(request_id=request_id, input_data=data, on_reply=on_reply)
-    await app.transcript.mount_widget(card)
-    app.set_pending_card(card)
+    await app.enqueue_pending_card(card, marker_text="⏸ plan ready for review, see below")
 
 
 def _format_todos(data: dict) -> str:

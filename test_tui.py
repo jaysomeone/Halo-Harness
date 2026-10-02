@@ -935,6 +935,116 @@ def test_model_command_with_explicit_ref_sets_fake_model(ctx: Ctx):
 
 
 @test
+def test_bare_alias_model_command_defers_cold_auth_check_off_the_ui_thread(ctx: Ctx):
+    """2.0.1 finding 26: `/model opus` (a BARE alias, no provider prefix)
+    with no ANTHROPIC_API_KEY and a COLD auth-status cache must never spawn
+    `claude auth status` synchronously on the UI thread -- `claude_auth_
+    status` itself is poisoned (raises if called at all) to prove the
+    gating check in `_apply_model_or_defer` never reaches it; the actual
+    cache-warm is done by a worker (`refresh_cached_claude_auth_status`,
+    faked here to avoid a real subprocess), and the model is applied only
+    once that worker's `call_from_thread` callback lands."""
+    import halo_harness.providers.cc_models as cc_models_mod
+
+    async def body():
+        def _poison(*, timeout=10.0, env=None):
+            raise AssertionError("claude auth status must never be spawned on the UI thread")
+
+        real_claude_auth_status = cc_models_mod.claude_auth_status
+        real_cached = cc_models_mod.cached_claude_auth_status
+        real_refresh = cc_models_mod.refresh_cached_claude_auth_status
+        real_gateway = cc_models_mod.is_claude_gateway_driven
+        cc_models_mod.claude_auth_status = _poison
+        cc_models_mod.cached_claude_auth_status = lambda: None  # cold cache
+        cc_models_mod.is_claude_gateway_driven = lambda *a, **kw: False
+        refreshed = []
+
+        def _fake_refresh(*, timeout=10.0):
+            refreshed.append(True)
+        cc_models_mod.refresh_cached_claude_auth_status = _fake_refresh
+
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                # on_mount's own startup worker (_prime_auth_status_worker)
+                # also calls refresh_cached_claude_auth_status() once, at
+                # launch -- unrelated to this test's own deferred-worker
+                # check. Let it settle, then isolate the measurement to
+                # just the /model-triggered call below.
+                await pilot.pause(0.2)
+                refreshed.clear()
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/model opus")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                deadline = time.monotonic() + 3.0
+                while fake.model != "opus" and time.monotonic() < deadline:
+                    await pilot.pause(0.05)
+                ctx.check(f"the worker warmed the cache exactly once, got {refreshed}", refreshed == [True])
+                ctx.check(f"fake.model eventually updated via the deferred worker, got {fake.model!r}",
+                          fake.model == "opus")
+        finally:
+            cc_models_mod.claude_auth_status = real_claude_auth_status
+            cc_models_mod.cached_claude_auth_status = real_cached
+            cc_models_mod.refresh_cached_claude_auth_status = real_refresh
+            cc_models_mod.is_claude_gateway_driven = real_gateway
+            if old_key is not None:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+    asyncio.run(body())
+
+
+@test
+def test_slash_model_persists_as_last_used_and_picker_marks_the_row(ctx: Ctx):
+    """2.0.1 W3a: a successful /model change persists to ~/.halo/state.json
+    (cwd-scoped) and the next time the picker opens, the matching row is
+    marked '(last used)'."""
+    from halo_harness import launch_state
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
+
+    async def body():
+        scratch_home = Path(tempfile.mkdtemp(prefix="w3a-model-persist-"))
+        old_home = os.environ.get("BRIDGE_TEST_HOME")
+        old_state = os.environ.get("BRIDGE_STATE_DIR")
+        os.environ["BRIDGE_TEST_HOME"] = str(scratch_home)
+        os.environ["BRIDGE_STATE_DIR"] = str(scratch_home / ".halo")
+        try:
+            fake = FakeController()
+            cwd = scratch_home / "proj"
+            app = await _mounted(fake, cwd=cwd)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/model or:vendor/persisted-model")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"fake.model applied, got {fake.model}", fake.model == "or:vendor/persisted-model")
+                ctx.check("persisted to state.json for this cwd",
+                          launch_state.resolve_last_model(cwd) == "or:vendor/persisted-model")
+
+                # Reopen the picker (bare /model) -- FakeController.
+                # list_models() returns just [self.model], already the
+                # persisted ref itself (set by the /model command above);
+                # what matters here is the picker's OWN last_used wiring.
+                await _type(pilot, "/model")
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"ModelPicker opened, got {type(app.screen).__name__}", isinstance(app.screen, ModelPicker))
+                ctx.check(f"picker's own last_used matches what was persisted, got {app.screen.last_used!r}",
+                          app.screen.last_used == "or:vendor/persisted-model")
+        finally:
+            if old_home is None:
+                os.environ.pop("BRIDGE_TEST_HOME", None)
+            else:
+                os.environ["BRIDGE_TEST_HOME"] = old_home
+            if old_state is None:
+                os.environ.pop("BRIDGE_STATE_DIR", None)
+            else:
+                os.environ["BRIDGE_STATE_DIR"] = old_state
+    asyncio.run(body())
+
+
+@test
 def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
     from halo_harness.tui.dialogs.model_picker import ModelPicker
 
@@ -1531,6 +1641,37 @@ def test_shift_tab_cycles_the_status_text_through_all_four_modes(ctx: Ctx):
 
 
 @test
+def test_shift_tab_shows_a_toast_describing_the_new_mode(ctx: Ctx):
+    """2.0.1 W3a: Shift+Tab's toast names the mode and a plain description
+    of what it does -- 'auto: no prompts', never a safety/gating phrase."""
+    from halo_harness.tui.keys import MODE_DESCRIPTIONS
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            # on_mount's own startup workers (auth-status/catalog/balance)
+            # can post their OWN notify (e.g. "Claude subscription
+            # detected...") asynchronously, racing this test's own capture
+            # -- let them settle first so `notified` below holds only this
+            # test's own Shift+Tab toasts.
+            await pilot.pause(0.3)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("shift+tab")  # default -> acceptEdits
+            await pilot.press("shift+tab")  # acceptEdits -> plan
+            await pilot.press("shift+tab")  # plan -> auto
+            ctx.check(f"one toast per Shift+Tab, got {notified}", len(notified) == 3)
+            ctx.check(f"each names mode and plain description, got {notified}",
+                      notified == [f"acceptEdits: {MODE_DESCRIPTIONS['acceptEdits']}",
+                                   f"plan: {MODE_DESCRIPTIONS['plan']}",
+                                   f"auto: {MODE_DESCRIPTIONS['auto']}"])
+            ctx.check(f"the auto toast describes behaviour plainly, got {notified[-1]!r}",
+                      notified[-1] == "auto: no prompts")
+    asyncio.run(body())
+
+
+@test
 def test_esc_interrupts_a_running_turn(ctx: Ctx):
     async def body():
         fake = FakeController()
@@ -2106,6 +2247,61 @@ def test_slash_model_switches_the_real_session_and_next_reply_uses_it(ctx: Ctx):
                 texts = [w.raw_text for w in app.transcript.children if isinstance(w, AssistantText)]
                 ctx.check(f"the NEXT turn's reply actually came from the switched model, got {texts}",
                           any("second model reply" in t for t in texts))
+        finally:
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
+@test
+def test_slash_effort_against_a_real_session_persists_the_sent_value(ctx: Ctx):
+    """2.0.1 W3a: `/effort <level>` against a REAL session (FakeController
+    has no `.session` at all, so this needs the same real-controller rig as
+    the /model switch test above) persists the session's own clamped
+    `effort` -- not the raw typed text -- to ~/.halo/state.json."""
+    import argparse
+    from halo_harness import launch_state
+
+    async def body():
+        fh = build_fake_home()
+        SCENARIOS["tui-effort-a"] = ScriptedTurns([_final_text_chunk("ok")])
+        mock = MockUpstream().start()
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_OPENROUTER_BASE_URL", "OPENROUTER_API_KEY")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        controller = None
+        try:
+            from halo_harness.tui.bootstrap import build_controller
+            from halo_harness.tui.slash import handle_slash
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="or:mock/tui-effort-a", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                ctx.check("the real session exists before /effort runs", controller.session is not None)
+                await handle_slash(app, "effort", "medium")
+                await pilot.pause(0.1)
+                sent = getattr(controller.session, "effort", None)
+                ctx.check(f"the session's own (clamped) effort is non-empty, got {sent!r}", bool(sent))
+                ctx.check(f"persisted value matches the session's SENT effort, got "
+                          f"{launch_state.resolve_last_effort(fh['proj'])!r} vs session={sent!r}",
+                          launch_state.resolve_last_effort(fh["proj"]) == sent)
         finally:
             if controller is not None:
                 controller.quit()
@@ -4638,6 +4834,37 @@ def test_hang_dump_count_is_capped_per_process(ctx: Ctx):
 
 
 @test
+def test_sigusr1_after_the_cap_logs_one_line_instead_of_staying_silent(ctx: Ctx):
+    """2.0.1 finding 25: before this fix, a SIGUSR1 sent after `MAX_HANG_
+    DUMPS_PER_PROCESS` was already reached did PRECISELY nothing -- no file,
+    no log line, nothing to tell the sender their signal landed at all.
+    `_on_sigusr1` now logs one "bridge" warning per such signal instead,
+    without writing a new dump file (the cap itself is unchanged)."""
+    import logging
+    from halo_harness.tui.app import MAX_HANG_DUMPS_PER_PROCESS
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            app._watchdog_dump_count = MAX_HANG_DUMPS_PER_PROCESS
+            logger = logging.getLogger("bridge")
+            real_warning = logger.warning
+            captured = []
+            logger.warning = lambda msg, *a, **kw: captured.append(msg % a if a else msg)
+            try:
+                app._on_sigusr1(None, None)
+            finally:
+                logger.warning = real_warning
+            ctx.check(f"no new dump attempted (count unchanged), got {app._watchdog_dump_count}",
+                      app._watchdog_dump_count == MAX_HANG_DUMPS_PER_PROCESS)
+            ctx.check(f"exactly one warning logged, got {captured}", len(captured) == 1)
+            ctx.check(f"it names the cap, got {captured[0]!r}",
+                      "SIGUSR1" in captured[0] and str(MAX_HANG_DUMPS_PER_PROCESS) in captured[0])
+    asyncio.run(body())
+
+
+@test
 def test_prune_old_hang_dumps_keeps_only_the_newest_ten(ctx: Ctx):
     from halo_harness.tui.app import MAX_HANG_DUMP_FILES_KEPT
 
@@ -6229,6 +6456,213 @@ def test_status_bar_drops_mcp_then_balance_then_shortens_cwd_before_a_mid_word_s
                   "some-very-long-project-name" not in at_100)
         ctx.check(f"the model label is still intact at 100 cols (cwd gives way first), got {at_100!r}",
                   DEFAULT_MODEL in at_100)
+    asyncio.run(body())
+
+
+# ============================================================================
+# Halo 2.0.1 W3a: finding 16 (a request_id-keyed queue -- a second
+# concurrent ask no longer overwrites the first) + PendingDock ("nothing
+# that waits for the user may be off-screen").
+# ============================================================================
+
+def _two_permission_asks_turn() -> list:
+    """Finding 16's own repro: two tool calls each needing permission,
+    back to back, in the SAME session -- before this fix the second
+    `permission_request` silently overwrote the first (the "permission
+    needed" tag cleared on an answer to a DIFFERENT card than the one
+    still blocking the first child)."""
+    return [[
+        ev.user_message("do two things", turn=1),
+        ev.Event("tool_use_ready", {"id": "tu1", "name": "Bash", "input": {"command": "rm -rf /tmp/x"},
+                                     "repaired": False}, turn=1),
+        ev.Event("permission_request", {"id": "tu1", "name": "Bash", "input": {"command": "rm -rf /tmp/x"},
+                                         "reason": "first ask", "suggested_rule": "Bash(rm:*)"}, turn=1),
+        ev.Event("tool_use_ready", {"id": "tu2", "name": "Bash", "input": {"command": "rm -rf /tmp/y"},
+                                     "repaired": False}, turn=1),
+        ev.Event("permission_request", {"id": "tu2", "name": "Bash", "input": {"command": "rm -rf /tmp/y"},
+                                         "reason": "second ask", "suggested_rule": "Bash(rm:*)"}, turn=1),
+    ]]
+
+
+@test
+def test_pending_dock_shows_the_card_and_hides_once_answered_marker_becomes_decision(ctx: Ctx):
+    from halo_harness.tui.widgets.cards import PermissionCard
+
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            # Pad the transcript so there's something to scroll away from,
+            # then scroll to the TOP before the ask arrives -- the dock
+            # must stay visible regardless of transcript scroll position.
+            for i in range(60):
+                await app.transcript.add_note(f"padding line {i}", kind="note")
+            app.transcript.scroll_home(animate=False)
+            await pilot.pause(0.05)
+
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+
+            ctx.check("the dock is visible", bool(app.pending_dock.display))
+            ctx.check("the dock holds the pending card", app.pending_dock.card is app.pending_card)
+            ctx.check(f"it's a PermissionCard, got {type(app.pending_dock.card).__name__}",
+                      isinstance(app.pending_dock.card, PermissionCard))
+            ctx.check("needs-you tag reads 1", app.status_bar.needs_you_count == 1)
+            marker_texts = [_static_text(w) for w in app.transcript.children
+                            if getattr(w, "classes", None) and "system-note-pending-marker" in w.classes]
+            ctx.check(f"a transcript marker exists at the ask's own position, got {marker_texts}",
+                      any("permission needed" in t and "see below" in t for t in marker_texts))
+
+            await pilot.press("1")  # allow once
+            await pilot.pause(0.1)
+
+            ctx.check("the dock hides once answered", not app.pending_dock.display)
+            ctx.check("pending_card cleared", app.pending_card is None)
+            ctx.check("needs-you tag back to 0", app.status_bar.needs_you_count == 0)
+            marker_texts_after = [_static_text(w) for w in app.transcript.children
+                                   if getattr(w, "classes", None) and "system-note-pending-marker" in w.classes]
+            ctx.check(f"the SAME marker widget now shows the decision, got {marker_texts_after}",
+                      any("allowed" in t and "rm -rf /tmp/x" in t for t in marker_texts_after))
+    asyncio.run(body())
+
+
+@test
+def test_pending_dock_queues_a_second_concurrent_ask_instead_of_overwriting_the_first(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_two_permission_asks_turn())
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do two things")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=10)
+
+            ctx.check(f"the FIRST ask is the one shown, got {getattr(app.pending_card, 'summary', None)}",
+                      "tmp/x" in (getattr(app.pending_card, "summary", "") or ""))
+            ctx.check(f"needs-you reads 2 (one shown, one queued), got {app.status_bar.needs_you_count}",
+                      app.status_bar.needs_you_count == 2)
+            ctx.check("exactly one card queued behind the active one", len(app._pending_queue) == 1)
+
+            await pilot.press("1")  # answers the FIRST
+            await pilot.pause(0.2)
+            await _drain_a_few(app, pilot, n=5)
+
+            ctx.check(f"the SECOND ask is now shown, got {getattr(app.pending_card, 'summary', None)}",
+                      "tmp/y" in (getattr(app.pending_card, "summary", "") or ""))
+            ctx.check("the queue is now empty", app._pending_queue == [])
+            ctx.check(f"needs-you dropped to 1, got {app.status_bar.needs_you_count}",
+                      app.status_bar.needs_you_count == 1)
+            ctx.check("the dock still shows a card (the second one)", bool(app.pending_dock.display))
+
+            await pilot.press("1")  # answers the SECOND
+            await pilot.pause(0.1)
+            ctx.check("both resolved -- dock hidden, tag at 0", not app.pending_dock.display
+                      and app.status_bar.needs_you_count == 0)
+    asyncio.run(body())
+
+
+@test
+def test_pending_dock_sub_agent_ask_names_the_agent(ctx: Ctx):
+    from halo_harness.tui.widgets.cards import PermissionCard
+
+    async def body():
+        turns = [[
+            ev.user_message("spawn a helper", turn=1),
+            ev.Event("tool_use_ready", {"id": "tu1", "name": "Bash", "input": {"command": "echo hi"},
+                                         "repaired": False}, turn=1, agent_id="child-1"),
+            ev.Event("permission_request", {"id": "tu1", "name": "Bash", "input": {"command": "echo hi"},
+                                             "reason": "child ask", "suggested_rule": "Bash(echo:*)"},
+                      turn=1, agent_id="child-1"),
+        ]]
+        fake = FakeController(turns=turns)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "spawn a helper")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check(f"a PermissionCard is pending, got {type(app.pending_card).__name__}",
+                      isinstance(app.pending_card, PermissionCard))
+            ctx.check(f"it names the sub-agent, got {app.pending_card.summary!r}",
+                      "child-1" in app.pending_card.summary)
+    asyncio.run(body())
+
+
+@test
+def test_pending_dock_holds_a_question_card_then_a_plan_card(ctx: Ctx):
+    from halo_harness.tui.widgets.cards import PlanCard, QuestionCard
+
+    async def body():
+        fake = FakeController(turns=[[
+            ev.user_message("pick", turn=1),
+            ev.Event("question", {"id": "q1", "name": "AskUserQuestion",
+                                   "input": {"question": "Which color?", "options": ["Red", "Blue"]}}, turn=1),
+        ]])
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "pick")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check(f"the dock holds a QuestionCard, got {type(app.pending_dock.card).__name__}",
+                      isinstance(app.pending_dock.card, QuestionCard))
+
+        fake2 = FakeController(turns=[[
+            ev.user_message("make a plan", turn=1),
+            ev.Event("plan_review", {"id": "p1", "plan": "1. do a thing\n2. do another"}, turn=1),
+        ]])
+        app2 = await _mounted(fake2)
+        async with app2.run_test(size=(100, 40)) as pilot2:
+            await pilot2.click("#prompt-input")
+            await _type(pilot2, "make a plan")
+            await pilot2.press("enter")
+            await _drain_a_few(app2, pilot2, n=6)
+            ctx.check(f"the dock holds a PlanCard, got {type(app2.pending_dock.card).__name__}",
+                      isinstance(app2.pending_dock.card, PlanCard))
+    asyncio.run(body())
+
+
+@test
+def test_pending_dock_o_opens_a_pager_with_the_full_content(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            await pilot.press("o")
+            await pilot.pause(0.1)
+            from halo_harness.tui.widgets.cards import PagerScreen
+            ctx.check(f"'o' opened the pager, got {type(app.screen).__name__}", isinstance(app.screen, PagerScreen))
+    asyncio.run(body())
+
+
+@test
+def test_svg_snapshot_pending_dock_with_two_queued_asks(ctx: Ctx):
+    async def body():
+        fake = FakeController(turns=_two_permission_asks_turn())
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do two things")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=10)
+            path, svg = _write_snapshot(app, "pending-dock-two-queued")
+            ctx.check(f"pending-dock snapshot written to {path}", path.exists() and len(svg) > 0)
+            ctx.check(f"SVG shows the active card's own prompt, got len={len(svg)}", "Permission needed" in svg)
+            # The status bar's OWN rendered content (not the clipped SVG
+            # viewport, which this test's unusually busy status line --
+            # permission_str + needs_you_str + a running-tool spinner +
+            # the unread-count all at once -- genuinely overflows at 100
+            # cols; that width-based drop/shrink cascade is separately
+            # covered by test_status_bar_drops_mcp_then_balance_then_
+            # shortens_cwd_before_a_mid_word_slice) always carries it.
+            bar_text = _static_text(app.status_bar)
+            ctx.check(f"status bar shows the needs-you · 2 tag, got {bar_text!r}", "needs you · 2" in bar_text)
     asyncio.run(body())
 
 

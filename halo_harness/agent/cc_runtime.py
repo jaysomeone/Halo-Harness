@@ -100,6 +100,36 @@ class CcState:
         self.tool_use_cond = threading.Condition(self.lock)
 
 
+# 2.0.1 W3a: "the cc: route prints one line on first use outside the
+# [tested] range" -- doctor's own check (halo_harness/doctor.py) is the
+# rich, always-on version of this; this is the SAME data (providers/
+# cc_tested.json) consulted once per PROCESS, the first time a cc: session
+# actually starts, for whoever never runs `halo doctor` at all. A plain
+# module-level flag (never reset in production -- a test resets it
+# directly, same convention as cc_models.reset_cached_claude_auth_status).
+_version_range_notice_emitted = False
+
+
+def _maybe_warn_cc_version_outside_tested_range() -> None:
+    """Informational only -- never raises, never blocks/gates `cc:` itself."""
+    global _version_range_notice_emitted
+    if _version_range_notice_emitted:
+        return
+    _version_range_notice_emitted = True
+    try:
+        from halo_harness.providers.cc_models import (
+            installed_claude_version, load_cc_tested_range, version_outside_tested_range,
+        )
+        version = installed_claude_version()
+        tested = load_cc_tested_range()
+        if version_outside_tested_range(version, tested=tested):
+            log.warning("cc: installed claude %s is newer than the tested range (%s-%s, verified %s) -- "
+                        "watch for behavior changes", version, tested.get("min"), tested.get("max"),
+                        tested.get("date"))
+    except Exception:
+        pass
+
+
 def _preflight_cc() -> Optional[str]:
     """None when `cc:` is usable right now; else a precise one-line
     reason. Critical finding 2: `claude auth status` is checked in the
@@ -174,6 +204,10 @@ def ensure_cc_state(session) -> CcState:
     err = _preflight_cc()
     if err:
         raise ClaudeCodeUnavailable(err)
+    # 2.0.1 W3a: same thread _preflight_cc() just spawned `claude auth
+    # status` on (the session's own worker thread, never the UI thread) --
+    # one more one-shot subprocess here is no new UI-thread risk.
+    _maybe_warn_cc_version_outside_tested_range()
 
     old_bridge = state.bridge if state is not None else None
     fork_requested = bool(getattr(session, "_cc_fork_session", False))

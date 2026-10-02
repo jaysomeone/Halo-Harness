@@ -310,6 +310,11 @@ claim with tests, rather than changing that discovery behavior itself.
      second phase event); when the bar overflows it drops the MCP count,
      then the balance, then shortens the cwd to its last component
      instead of slicing a path mid-word.
+10. **Deprecation notice**: the legacy env file `~/.config/vibes-hacker/env`
+    (still read as a fallback behind the new `~/.config/halo/env`, see the
+    2.0.0 entry above) stops being read starting in 2.0.3 -- move any
+    credential that still lives only in the old file into the new one
+    (`halo init`, or hand-edit) before upgrading past 2.0.2.
 
 ## [1.0.1] - 2026-09-30
 

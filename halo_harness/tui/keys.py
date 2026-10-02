@@ -28,6 +28,26 @@ def next_mode(current: str) -> str:
     return MODE_CYCLE[(i + 1) % len(MODE_CYCLE)]
 
 
+# 2.0.1 W3a (small intuitiveness items): a plain, one-line description of
+# what each permission mode actually DOES -- shown as a toast the instant
+# Shift+Tab switches into it (`tui/app.py::action_cycle_mode`), so a user
+# who doesn't already know Claude Code's own mode vocabulary isn't left
+# guessing what they just switched to. Plain behaviour, nothing else -- no
+# safety/refusal wording, no "not allowed", no "for safety" (WORKER-RULES):
+# `auto` is described purely as "no prompts", never as a safety trade-off.
+# `bypassPermissions`/`dontAsk` are CLI-only starting modes (never reached
+# by Shift+Tab's own 4-mode MODE_CYCLE above) but are described here too,
+# for `/permissions` or any other future caller that wants the same wording.
+MODE_DESCRIPTIONS = {
+    "auto": "no prompts",
+    "default": "asks before edits and commands",
+    "acceptEdits": "edits allowed, commands ask",
+    "plan": "read-only until you approve",
+    "dontAsk": "prompts become denials",
+    "bypassPermissions": "everything allowed",
+}
+
+
 # Ctrl+C "double press to quit" window (D-TUI: 1.5s).
 DOUBLE_CTRL_C_WINDOW_S = 1.5
 

@@ -152,7 +152,12 @@ def refresh_anthropic_catalog_if_stale(state_dir, *, max_age_hours: Optional[flo
         if ant is None:
             return None
         if not _ant_refresh_lock.acquire(blocking=False):
-            return False
+            # 2.0.1 finding 24: distinguishable from a genuine failure --
+            # see providers.databricks.CATALOG_REFRESH_BUSY's own
+            # module-level docstring (the single shared sentinel every
+            # catalog refresher returns on lock contention).
+            from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY
+            return CATALOG_REFRESH_BUSY
         try:
             fetched = fetch_anthropic_models(ant.base_url, ant.api_key)
             write_ant_models_json(state_dir, fetched)

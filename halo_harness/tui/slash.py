@@ -72,7 +72,7 @@ async def handle_slash(app, name: str, args: str) -> None:
 async def _handle_model(app, args: str) -> None:
     args = args.strip()
     if args:
-        _apply_model(app, args)
+        _apply_model_or_defer(app, args)
         return
     # H14 scope J (widened to every enabled provider by the H15 part 2
     # addendum, see `catalog_auto_refresh_worker`): auto-refresh a stale
@@ -131,7 +131,11 @@ def _list_models_worker(app) -> None:
 
 def _open_model_picker(app, models) -> None:
     from halo_harness.tui.dialogs.model_picker import ModelPicker
-    app.push_screen(ModelPicker(models, current=app.status_bar.model), lambda ref: _apply_model(app, ref))
+    from halo_harness.theme import get_config_value
+    from halo_harness import launch_state
+    last_used = launch_state.resolve_last_model(app.cwd, memory=get_config_value("model_memory", default="cwd")) or ""
+    app.push_screen(ModelPicker(models, current=app.status_bar.model, last_used=last_used),
+                     lambda ref: _apply_model(app, ref))
 
 
 def catalog_auto_refresh_worker(app) -> None:
@@ -222,6 +226,42 @@ def or_balance_refresh_worker(app, *, force: bool = False) -> None:
         app.call_from_thread(app.status_bar.set_or_balance, segment, fetched_at=entry["fetched_at"])
 
 
+def _apply_model_or_defer(app, ref: str) -> None:
+    """2.0.1 finding 26: a BARE alias (`/model opus`, no provider prefix)
+    with no ANTHROPIC_API_KEY resolves through `providers.cc_models.
+    default_bare_alias_route`, which -- outside the gateway case (already
+    short-circuited) -- falls back to a LIVE `claude auth status` spawn (up
+    to 10s) whenever the cache is cold. `_apply_model` below runs
+    SYNCHRONOUSLY on the UI thread (`Controller.set_model` resolves the ref
+    before ever reaching a worker), so that spawn used to freeze the whole
+    TUI for its duration. `default_bare_alias_route` itself now prefers the
+    cache when one exists (covers the common case: the startup worker has
+    almost always already primed it by the time a user actually types a
+    command) -- this covers the remaining cold-cache edge case by warming
+    the cache in a worker FIRST, applying once it lands, so NO path here
+    ever spawns the subprocess on the UI thread. Anything else (already
+    prefixed, vendor/model, a key set, a primed cache, or gateway-driven)
+    applies immediately, exactly as before this fix."""
+    from halo_harness.providers.cc_models import BARE_ALIAS_NAMES, cached_claude_auth_status, is_claude_gateway_driven
+    import os
+    needs_live_check = (
+        ref in BARE_ALIAS_NAMES and not os.environ.get("ANTHROPIC_API_KEY")
+        and not is_claude_gateway_driven() and cached_claude_auth_status() is None
+    )
+    if not needs_live_check:
+        _apply_model(app, ref)
+        return
+    app.notify(f"Checking Claude Code login status for {ref!r}...", title="/model")
+    app.run_worker(lambda: _resolve_bare_alias_worker(app, ref), thread=True,
+                    name="model-bare-alias-auth-check", group="model-bare-alias-auth-check")
+
+
+def _resolve_bare_alias_worker(app, ref: str) -> None:
+    from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    refresh_cached_claude_auth_status()
+    app.call_from_thread(_apply_model, app, ref)
+
+
 def _apply_model(app, ref) -> None:
     if not ref:
         return
@@ -229,7 +269,14 @@ def _apply_model(app, ref) -> None:
     if err:
         app.notify(err, severity="error", title="/model")
     else:
-        app.notify(f"Model set to {ref}", title="/model")
+        # 2.0.1 W3a ("launch with the last session's model and effort"):
+        # every successful /model change persists -- the NEXT launch (in
+        # this cwd, then globally; headless.build_session's own precedence
+        # chain) starts from it instead of always falling back to the
+        # provider default.
+        from halo_harness import launch_state
+        launch_state.record_last_model(ref, cwd=app.cwd)
+        app.notify(f"Model set to {ref} -- saved as the default for next launch", title="/model")
 
 
 # ============================================================================
@@ -287,6 +334,12 @@ async def _handle_effort(app, args: str) -> None:
         # tag right away rather than waiting for the next turn's status
         # event to happen to carry it.
         app.status_bar.set_effort(_effort_status_text(session))
+        # 2.0.1 W3a: persist the session's own (already-clamped) effort --
+        # reading it back rather than the raw typed `args` means a rejected/
+        # unsupported level is never persisted as if it had applied.
+        if session is not None:
+            from halo_harness import launch_state
+            launch_state.record_last_effort(getattr(session, "effort", None), cwd=app.cwd)
         return
 
     from halo_harness.providers.profiles import effort_display_override
@@ -316,6 +369,10 @@ async def _handle_effort(app, args: str) -> None:
         result = app.controller.run_slash("effort", level)
         app.notify(result or f"Effort level set to '{level}'", title="/effort")
         app.status_bar.set_effort(_effort_status_text(session))
+        # 2.0.1 W3a: same persistence as the plain-text /effort <level> path.
+        if session is not None:
+            from halo_harness import launch_state
+            launch_state.record_last_effort(getattr(session, "effort", None), cwd=app.cwd)
 
     card = EffortCard(levels=levels, current=current, model_id=model_id, on_select=on_select,
                        override_note=override_note, requested=requested)
@@ -398,9 +455,14 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
                 # (unchanged) cached table, plus exactly ONE line naming
                 # the error -- never just a bare toast with no context for
                 # what's still usable.
-                sections.append(f"{_table_text(endpoints, root)}Databricks refresh failed: {note}")
-                app.call_from_thread(app.notify, f"Databricks refresh failed: {note}", severity="warning",
-                                      title="/models")
+                # 2.0.1 finding 24: a lock LOST to a concurrent refresh is
+                # not a failure -- never prefixed "Databricks refresh
+                # failed:", which would read as self-contradictory next to
+                # REFRESH_BUSY_NOTE's own "already running" wording.
+                from halo_harness.providers.databricks import REFRESH_BUSY_NOTE
+                prefix = "Databricks: " if note == REFRESH_BUSY_NOTE else "Databricks refresh failed: "
+                sections.append(f"{_table_text(endpoints, root)}{prefix}{note}")
+                app.call_from_thread(app.notify, f"{prefix}{note}", severity="warning", title="/models")
             else:
                 # 1.0.1 hotfix 12: also refreshes models.dev (best-effort
                 # -- a failure here never fails the whole refresh, it just
@@ -425,8 +487,11 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
             sections.append(f"OpenRouter: {len(load_models_json(state_dir))} model(s) cached "
                              f"(last refreshed {age_str}).")
         else:
+            from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
             ok = refresh_openrouter_catalog_if_stale(state_dir, force=True)
-            if ok is False:
+            if ok is CATALOG_REFRESH_BUSY:
+                sections.append(f"OpenRouter: {REFRESH_BUSY_NOTE}.")
+            elif ok is False:
                 sections.append("OpenRouter refresh failed -- see `halo doctor`.")
             elif ok is None:
                 sections.append("OpenRouter: not configured -- nothing to refresh.")
@@ -440,8 +505,11 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
             sections.append(f"Anthropic: {len(load_ant_models_json(state_dir))} model(s) cached "
                              f"(last refreshed {age_str}).")
         else:
+            from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
             ok = refresh_anthropic_catalog_if_stale(state_dir, force=True)
-            if ok is False:
+            if ok is CATALOG_REFRESH_BUSY:
+                sections.append(f"Anthropic: {REFRESH_BUSY_NOTE}.")
+            elif ok is False:
                 sections.append("Anthropic refresh failed -- see `halo doctor`.")
             elif ok is None:
                 sections.append("Anthropic: not configured -- nothing to refresh.")

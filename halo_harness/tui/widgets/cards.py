@@ -306,6 +306,9 @@ class PermissionCard(Static, can_focus=True):
         self._on_resolved_externally = on_resolved_externally
         self.awaiting_feedback = False
         self.done = False
+        # 2.0.1 W3a (PendingDock): the transcript marker's eventual decision
+        # line -- None until _finish/resolve_externally sets it.
+        self.decision_line: "Optional[str]" = None
         self._refresh()
 
     def _refresh(self) -> None:
@@ -326,6 +329,16 @@ class PermissionCard(Static, can_focus=True):
         self.done = True
         self.awaiting_feedback = False
         outcome = {"allow": "allowed", "deny": "denied"}.get(decision["action"], decision["action"])
+        # 2.0.1 W3a (PendingDock): the one-line form of this resolution --
+        # `app.clear_pending_card()` writes this over the transcript's own
+        # "⏸ permission needed ..., see below" marker (BridgeApp.
+        # enqueue_pending_card), so the "see below" marker IS the decision
+        # once this fires -- computed from the ORIGINAL summary, before
+        # the line below overwrites it with the same text for the card's
+        # own (still-visible-briefly) in-dock rendering.
+        glyph = "✓" if decision["action"] == "allow" else "✗"
+        scope_bit = f" ({decision.get('scope')})" if decision.get("scope") not in (None, "once") else ""
+        self.decision_line = f"{glyph} {outcome}{scope_bit} {self.summary}"
         self.summary = f"{self.summary} -- {outcome}"
         self._refresh()
         self._on_decide(decision)
@@ -374,6 +387,8 @@ class PermissionCard(Static, can_focus=True):
         self.done = True
         self.awaiting_feedback = False
         outcome = "allowed" if action == "allow" else "denied"
+        glyph = "✓" if action == "allow" else "✗"
+        self.decision_line = f"{glyph} {outcome} (mode changed) {self.summary}"
         self.summary = f"{self.summary} -- {outcome} (mode changed)"
         self._refresh()
         # H15 Part D2.3: for an inline-shell card specifically (the ONLY
@@ -435,6 +450,8 @@ class QuestionCard(Static, can_focus=True):
         self.active_index = 0
         self.done = False
         self._lists: list = []
+        # 2.0.1 W3a (PendingDock): see PermissionCard's own matching attribute.
+        self.decision_line: "Optional[str]" = None
 
     def compose(self):
         for i, (question, options) in enumerate(self.questions):
@@ -452,6 +469,7 @@ class QuestionCard(Static, can_focus=True):
         if self.done:
             return
         self.done = True
+        self.decision_line = "✗ question dismissed"
         for ol in self._lists:
             ol.disabled = True
         self._on_answer(None)
@@ -491,8 +509,11 @@ class QuestionCard(Static, can_focus=True):
             for ol in self._lists:
                 ol.disabled = True
             if len(self.questions) == 1:
-                self._on_answer(next(iter(self.answers.values())))
+                answer = next(iter(self.answers.values()))
+                self.decision_line = f"✓ answered: {answer}"
+                self._on_answer(answer)
             else:
+                self.decision_line = "✓ answered: " + "; ".join(f"{q}={a}" for q, a in self.answers.items())
                 self._on_answer(self.answers)
             return
         self.active_index = remaining[0]
@@ -518,6 +539,8 @@ class PlanCard(Static, can_focus=True):
         self.request_id = request_id
         self._on_reply = on_reply
         self.done = False
+        # 2.0.1 W3a (PendingDock): see PermissionCard's own matching attribute.
+        self.decision_line: "Optional[str]" = None
         self._refresh()
 
     def _refresh(self) -> None:
@@ -528,6 +551,10 @@ class PlanCard(Static, can_focus=True):
 
     def _finish(self, decision: dict) -> None:
         self.done = True
+        if decision["approved"]:
+            self.decision_line = f"✓ plan approved ({decision.get('mode_after') or 'default'})"
+        else:
+            self.decision_line = "↻ plan: keep planning"
         self._refresh()
         self._on_reply(decision)
 

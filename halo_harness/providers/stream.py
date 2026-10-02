@@ -2,10 +2,18 @@
 plan section D2). This module is the library form of what used to live
 inline in bridge.py's Handler._handle_messages_post/_handle_upstream_stream/
 _reader_thread: given an Anthropic-shaped request body plus a resolved
-Route/profile/credentials, it does the one-silent-connect-retry and
-one-fixable-overflow-clamp-retry dance against the openai-chat dialect
-(OpenRouter or Databricks-chat), then yields the Anthropic SSE events for
-the reply as plain dicts.
+Route/profile/credentials, it does the one-fixable-overflow-clamp-retry
+dance against the openai-chat dialect (OpenRouter or Databricks-chat), then
+yields the Anthropic SSE events for the reply as plain dicts.
+
+2.0.1 finding 18: a genuine CONNECT-phase failure (DNS/TCP/TLS/our own
+bounded-connect timeout -- `providers.http.is_connect_failure_message`)
+is never retried here any more -- a retry cannot help DNS, and the
+documented 8s connect budget (`providers.http.DEFAULT_CONNECT_TIMEOUT_S`)
+is now really just 8s, not up to 16s. The one silent retry THIS module
+still does is for a POST-connect failure (a dropped keep-alive/mid-
+response RST -- `format_post_connect_error`, no CONNECT_FAILURE_MARKER):
+that one genuinely can recover on an immediate re-dial.
 
 Two phases, exactly like the design doc:
   * phase 1 (nothing yielded yet): translate the body, apply the profile/
@@ -42,7 +50,9 @@ from halo_harness.providers.errors import (
     map_upstream_error, parse_context_overflow,
     parse_databricks_rate_limit, upstream_error_text,
 )
-from halo_harness.providers.http import UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat
+from halo_harness.providers.http import (
+    UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat, is_connect_failure_message,
+)
 from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
 from halo_harness.providers.routing import Route
 from halo_harness.providers.translate import anthropic_to_openai
@@ -324,7 +334,18 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
                 # abort, not a genuine connectivity failure; never retry it
                 # or map it to a 502.
                 raise _Aborted() from e
-            if attempt == 0:
+            # 2.0.1 finding 18: a genuine CONNECT-phase failure (DNS/TCP/
+            # TLS/our own bounded-connect timeout -- carries CONNECT_
+            # FAILURE_MARKER) is NEVER retried here any more -- a retry
+            # cannot help DNS, so the documented 8s connect budget is now
+            # really just 8s, not up to 16s. Only a POST-connect failure
+            # (a dropped keep-alive/mid-response RST, no marker -- 1.0.1
+            # fixpass finding 2) still gets this one immediate re-dial,
+            # since THAT can genuinely recover (review finding 2's own
+            # "a load balancer drops a keep-alive while Databricks queues
+            # the request" scenario -- see test_step_retries_a_post_
+            # connect_failure_through_the_normal_ladder).
+            if attempt == 0 and not is_connect_failure_message(str(e)):
                 continue
             # 1.0.1 hotfix 2: the wire mapping here is DELIBERATELY left
             # byte-for-byte unchanged (`bridge.py`'s legacy proxy path calls
@@ -593,7 +614,12 @@ def _run_phase1_anthropic(req: CompletionRequest, abort: "threading.Event | None
             except UpstreamConnectError as e:
                 if abort is not None and abort.is_set():
                     raise _Aborted() from e
-                if attempt == 0:
+                # 2.0.1 finding 18: see _run_phase1_attempts's matching
+                # comment -- a genuine connect-phase failure is terminal
+                # on the first attempt; only a post-connect failure (no
+                # CONNECT_FAILURE_MARKER) still gets the one immediate
+                # re-dial.
+                if attempt == 0 and not is_connect_failure_message(str(e)):
                     continue
                 # 1.0.1 hotfix 2: see _run_phase1_attempts's matching comment
                 # -- wire mapping here stays exactly as it was (bridge.py's

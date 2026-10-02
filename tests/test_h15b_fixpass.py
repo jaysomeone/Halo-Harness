@@ -346,8 +346,13 @@ def test_refresh_dbx_catalog_single_flight_refuses_a_concurrent_call(ctx: Ctx):
         dbx_mod._dbx_refresh_lock.acquire()
         try:
             ok, diff, note = dbx_mod.refresh_dbx_catalog(env.state_dir, "https://doesnt-matter.invalid", "tok")
-            ctx.check(f"refused as already-in-progress, got {(ok, note)}", ok is False)
-            ctx.check(f"says a refresh is already running, got {note!r}", "already in progress" in note)
+            ctx.check(f"refused as already-running, got {(ok, note)}", ok is False)
+            # 2.0.1 finding 24: the exact wording changed from "already in
+            # progress -- keeping the cached catalog" to this -- never
+            # dressed up as "refresh failed" by a caller (tui/slash.py,
+            # commands/builtins.py both special-case this exact note).
+            ctx.check(f"says a refresh is already running, try again in a second, got {note!r}",
+                      note == dbx_mod.REFRESH_BUSY_NOTE and "already running" in note)
             ctx.check("the diff is empty (no write happened)", diff == {})
         finally:
             dbx_mod._dbx_refresh_lock.release()
@@ -361,9 +366,33 @@ def test_refresh_openrouter_catalog_single_flight_refuses_a_concurrent_call(ctx:
         dbx_mod._or_refresh_lock.acquire()
         try:
             result = dbx_mod.refresh_openrouter_catalog_if_stale(env.state_dir, force=True)
-            ctx.check(f"refused (False) while a refresh is already in flight, got {result!r}", result is False)
+            # 2.0.1 finding 24: distinguishable from a genuine failure --
+            # CATALOG_REFRESH_BUSY is falsy, so this is still "not ok" for
+            # any caller that only checks truthiness...
+            ctx.check(f"refused (falsy) while a refresh is already in flight, got {result!r}", not result)
+            # ... but a caller that wants the distinction (the TUI's
+            # /models refresh, halo models --refresh) can tell it apart
+            # from a plain False failure by identity.
+            ctx.check(f"specifically the CATALOG_REFRESH_BUSY sentinel, not a plain False, got {result!r}",
+                      result is dbx_mod.CATALOG_REFRESH_BUSY and result is not False)
         finally:
             dbx_mod._or_refresh_lock.release()
+
+
+@test
+def test_refresh_anthropic_catalog_single_flight_refuses_a_concurrent_call(ctx: Ctx):
+    import halo_harness.providers.anthropic_catalog as ant_mod
+    import halo_harness.providers.databricks as dbx_mod
+    with _Env() as env:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-fake"
+        ant_mod._ant_refresh_lock.acquire()
+        try:
+            result = ant_mod.refresh_anthropic_catalog_if_stale(env.state_dir, force=True)
+            ctx.check(f"refused (falsy) while a refresh is already in flight, got {result!r}", not result)
+            ctx.check(f"the SAME shared sentinel as the OpenRouter/Databricks refreshers, got {result!r}",
+                      result is dbx_mod.CATALOG_REFRESH_BUSY)
+        finally:
+            ant_mod._ant_refresh_lock.release()
 
 
 # ---------------------------------------------------------------------------

@@ -78,6 +78,14 @@ class StatusBar(Static):
         # mounted and unanswered -- the bar shows "permission needed: ..."
         # in the warning colour so a pending ask is impossible to miss.
         self.permission_pending: bool = False
+        # Halo 2.0.1 W3a (finding 16 / PendingDock): the total count of
+        # permission/question/plan cards currently active-or-queued
+        # (BridgeApp._refresh_needs_you_tag) -- 0 means the segment is
+        # omitted entirely, same "blank, not a placeholder" convention as
+        # effort_str/or_balance_str below. ADDITIVE to permission_pending
+        # above (never replaces it) -- that one keeps its own richer
+        # PermissionCard-specific "1 yes · 2 session · ..." text unchanged.
+        self.needs_you_count: int = 0
         self.mode = "default"
         self.cwd = cwd
         self.branch = branch
@@ -242,6 +250,11 @@ class StatusBar(Static):
         self.permission_pending = pending
         self._refresh_display()
 
+    def set_needs_you(self, count: int) -> None:
+        if count != self.needs_you_count:
+            self.needs_you_count = count
+            self._refresh_display()
+
     def set_effort(self, effort: "str | None") -> None:
         # 1.0.1 hotfix 20.3: `/effort`'s own immediate UI update -- unlike
         # apply_status's fields, this DOES accept None (a switch to a model
@@ -329,6 +342,18 @@ class StatusBar(Static):
         # style, same widths math as every other segment below.
         permission_str = "permission needed: 1 yes · 2 session · 3 always · 4 no" \
             if self.permission_pending else ""
+        # Halo 2.0.1 W3a (finding 16 / PendingDock): "needs you · N" -- 0
+        # omits the segment entirely, same convention as every other
+        # optional one here. Suppressed specifically when it would be
+        # REDUNDANT with permission_str (a single PermissionCard pending,
+        # N==1 -- permission_str already says a request needs an answer,
+        # in more detail) -- still shown whenever N>1 (a real queue behind
+        # it, which permission_str alone never conveys) or for a lone
+        # question/plan card (permission_pending is False there, so there
+        # is nothing else saying so at all).
+        needs_you_str = (f"needs you · {self.needs_you_count}"
+                          if self.needs_you_count and not (self.permission_pending and self.needs_you_count == 1)
+                          else "")
         loc_str = self.cwd if not self.branch else f"{self.cwd} ({self.branch})"
         model_label = self.model
 
@@ -347,7 +372,7 @@ class StatusBar(Static):
         if width and self.cwd:
             def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
                 bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
-                                     permission_str, mcp_on and mcp_str, spinner_str, new_str) if b]
+                                     permission_str, needs_you_str, mcp_on and mcp_str, spinner_str, new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
                 # that separator plus its own trailing space, a close-
@@ -411,6 +436,9 @@ class StatusBar(Static):
         if permission_str:
             text.append("│ ", style="dim")
             text.append(f"{permission_str} ", style="bold yellow")
+        if needs_you_str:
+            text.append("│ ", style="dim")
+            text.append(f"{needs_you_str} ", style="bold yellow")
         if loc_str:
             text.append("│ ", style="dim")
             text.append(f"{loc_str} ", style="dim")
