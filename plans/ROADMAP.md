@@ -105,3 +105,12 @@ the authority for the order after 2.0.2.
   review + security review + privacy audit + front page, then the 3.0.1.1
   research: unchanged.
 
+## ADDED 2026-10-03 (rolo): self-update and clear install steps, in 2.0.2
+
+- 2.0.2 round 6: `halo update` on the CLI and `/update` inside halo (check,
+  apply, update-and-restart with the session resumed), the installed
+  commit shown by `halo --version` and `halo doctor`, a once-a-day startup
+  note when an update is available, a PowerShell install one-liner, and
+  README + docs/INSTALL.md rewritten as short fresh-install and update
+  steps per platform. Brief: `2.0.2-round6-update-brief.md`.
+
