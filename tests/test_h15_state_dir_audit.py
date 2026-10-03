@@ -110,7 +110,14 @@ def test_main_loop_restores_env_after_each_module_even_on_import_error(ctx: Ctx)
     anything ELSE surviving still is exactly what this test guards
     against. 2.0.0 fixpass item G: narrowed back to JUST that one var --
     main() never sets BRIDGE_STATE_DIR itself (only BRIDGE_TEST_HOME), so
-    allowing it through here too used to mask a real leak."""
+    allowing it through here too used to mask a real leak.
+
+    W6b section E: `_ensure_whole_run_test_seams()` sets two more, at the
+    SAME "before the first module is even imported" point and for the
+    exact same reason (closing a WSL hang in a module that never scopes
+    these itself) -- `BRIDGE_TEST_NO_BACKGROUND_NET` and `BRIDGE_TEST_
+    CC_AUTH_STATUS` are now ALSO intended whole-run survivors, not a
+    leak."""
     import io
     import sys as sys_mod
     from contextlib import redirect_stdout
@@ -130,8 +137,9 @@ def test_main_loop_restores_env_after_each_module_even_on_import_error(ctx: Ctx)
                 rc = run_all_mod.main()
             ctx.check(f"a bad import is a failure exit code, got {rc}", rc == 1)
             leftover = run_all_mod._snapshot_guarded_env()
-            ctx.check(f"nothing but main()'s OWN whole-run BRIDGE_TEST_HOME survives, got {leftover}",
-                      set(leftover) <= {"BRIDGE_TEST_HOME"})
+            ctx.check(f"nothing but main()'s OWN whole-run seam vars survives, got {leftover}",
+                      set(leftover) <= {"BRIDGE_TEST_HOME", "BRIDGE_TEST_NO_BACKGROUND_NET",
+                                         "BRIDGE_TEST_CC_AUTH_STATUS"})
         finally:
             run_all_mod.discover_test_modules = real_discover
             run_all_mod._real_sessions_snapshot = real_snapshot

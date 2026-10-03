@@ -50,6 +50,13 @@ class _Env:
 
     def __enter__(self):
         self._snap = {k: os.environ.get(k) for k in self.KEYS}
+        # W6b section E fallout: tests/run_all.py's own whole-run default
+        # (closing a WSL hang in an unrelated module) now leaves this set
+        # ambiently for every module -- this file's own cold-start tests
+        # need it genuinely ABSENT to exercise "discovery actually ran",
+        # so it is cleared here; a test that wants it set does so itself,
+        # same as it always has.
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
         return self
 
     def __exit__(self, *exc):
@@ -74,7 +81,7 @@ def _make_eligible() -> None:
     os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 
 
-def _tiny_catalog():
+def _tiny_catalog(**extra):
     from halo_harness.agent.catalog import SessionCatalog
     from halo_harness.tools.registry import ToolRegistry
 
@@ -85,7 +92,7 @@ def _tiny_catalog():
         def ensure_lazy_started_all(self, abort=None):
             return []
 
-    return SessionCatalog(registry=ToolRegistry(tools=[]), deferred={}, manager=_StubManager(), cap=32)
+    return SessionCatalog(registry=ToolRegistry(tools=[]), deferred={}, manager=_StubManager(), cap=32, **extra)
 
 
 # ---- SessionCatalog.add_connector_tools ------------------------------------
@@ -125,6 +132,31 @@ def test_add_connector_tools_skips_one_already_loaded(ctx: Ctx):
         added = catalog.add_connector_tools([info])
         ctx.check(f"never re-added over an already-loaded tool, got {added}", added == [])
         ctx.check("deferred stays empty", catalog.deferred == {})
+
+
+@test
+def test_add_connector_tools_respects_tools_subset_and_bare_denied_names(ctx: Ctx):
+    """Release review finding 30: `add_connector_tools` skipped the
+    --tools/bare-deny filters `headless.build_session`'s own, otherwise
+    identical, warm-cache loop already applies -- a connector excluded by
+    `--tools` or a bare deny rule at session start became loadable again
+    the moment it was (re)discovered mid-session."""
+    from halo_harness.mcp.connectors import ConnectorInfo
+    with _Env():
+        _scoped_home()
+        a = ConnectorInfo(name="Claude Docs", slug="claude_docs", account_token="Claude_Docs",
+                           url="https://x/mcp", host="x", status="connected", status_text="OK")
+        b = ConnectorInfo(name="Gmail", slug="gmail", account_token="Gmail",
+                           url="https://y/mcp", host="y", status="connected", status_text="OK")
+
+        subset_catalog = _tiny_catalog(tools_subset={"connector__claude_docs"})
+        added = subset_catalog.add_connector_tools([a, b])
+        ctx.check(f"--tools subset excludes the one not named, got {added}", added == ["connector__claude_docs"])
+
+        denied_catalog = _tiny_catalog(bare_denied_names={"connector__claude_docs"})
+        added2 = denied_catalog.add_connector_tools([a, b])
+        ctx.check(f"a bare deny rule excludes it even with no --tools subset, got {added2}",
+                  added2 == ["connector__gmail"])
 
 
 # ---- SessionCatalog.ensure_connectors_discovered_for_query -----------------
@@ -168,6 +200,33 @@ def test_ensure_connectors_discovered_for_query_keyword_connector_discovers(ctx:
                   [c.name for c in found] == ["Claude Docs"])
 
 
+@test
+def test_ensure_connectors_discovered_for_query_skips_auth_priming_when_cache_already_warm(ctx: Ctx):
+    """Release review finding 30: `prime_auth_cache_if_stale()` (a real
+    `claude auth status` spawn, up to 10s, once the 30s auth TTL has
+    lapsed) used to run unconditionally, BEFORE the cheap "is the cache
+    already warm" check that `ensure_discovered_synchronously_if_cold`
+    only ran internally, AFTER it. A warm cache must skip straight past
+    it now."""
+    from halo_harness.mcp.connectors import ConnectorInfo
+    with _Env():
+        _scoped_home()
+        _make_eligible()  # eligible for discovery, but the point is this never has to matter
+        connectors_bridge.reset_session_state()
+        connectors_bridge.save_cache([ConnectorInfo(name="Already Warm", slug="already_warm",
+                                                       account_token="Already_Warm", url="https://x/mcp",
+                                                       host="x", status="connected", status_text="OK")])
+        calls = []
+        original = connectors_bridge.prime_auth_cache_if_stale
+        connectors_bridge.prime_auth_cache_if_stale = lambda: calls.append(1)
+        try:
+            catalog = _tiny_catalog()
+            catalog.ensure_connectors_discovered_for_query("find a connector tool", timeout=15.0)
+            ctx.check(f"prime_auth_cache_if_stale was never called, got {len(calls)} call(s)", calls == [])
+        finally:
+            connectors_bridge.prime_auth_cache_if_stale = original
+
+
 # ---- ToolSearchTool.run() end to end ---------------------------------------
 
 @test
@@ -208,6 +267,12 @@ def _cli_env(home: Path, *, extra: Optional[dict] = None) -> dict:
     env.pop("BRIDGE_STATE_DIR", None)
     for k in [k for k in env if k.startswith("HALO_")]:
         env.pop(k, None)
+    # W6b section E fallout: tests/run_all.py's own whole-run default
+    # (closing a WSL hang in an unrelated module) now leaves this set
+    # ambiently in the PARENT process -- these child CLI runs need it
+    # genuinely ABSENT to actually run the synchronous cold-start
+    # discovery several of this file's own tests check for.
+    env.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
     env.update({
         "BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR), "HALO_CLAUDE_EXE": FAKE_CLAUDE,
         "FAKE_CLAUDE_CC_CONNECTORS": json.dumps(

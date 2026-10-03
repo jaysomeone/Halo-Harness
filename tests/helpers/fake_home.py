@@ -1,4 +1,4 @@
-"""tests.helpers.fake_home -- builds a temp home directory mirroring rolo's
+"""tests.helpers.fake_home -- builds a temp home directory mirroring the owner's
 real ~/.claude layout (plan D-CFG "Fixtures"), for BRIDGE_TEST_HOME.
 
 Both settings.json and settings.local.json are ALWAYS the synthetic
@@ -7,7 +7,7 @@ suite (finding 14/16: a prior version copied the live settings.json/
 settings.local.json when present, so the suite's actual behavior -- model
 name, permission mode, the count and shape of settings.local.json's rules
 -- silently depended on whichever machine happened to run it, passing only
-on rolo's own box and reading a different rule count on any other, incl.
+on the owner's own box and reading a different rule count on any other, incl.
 the Kali VM this suite ultimately runs on).
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 # Fallback (used only if the real files aren't present on this machine) --
-# the SAME 19-rule shape/escaping as rolo's real settings.local.json, a
+# the SAME 19-rule shape/escaping as the owner's real settings.local.json, a
 # smaller stand-in with the same escaping patterns finding B calls out
 # (doubled backslashes, escaped parens inside Tool(...)).
 _FALLBACK_SETTINGS_JSON = {
@@ -31,7 +31,7 @@ _FALLBACK_SETTINGS_JSON = {
     "autoMode": {"environment": ["### Org-wide", "**Organization**: None configured"]},
 }
 
-# A FIXED 19-rule snapshot exhibiting the same escaping shapes as rolo's
+# A FIXED 19-rule snapshot exhibiting the same escaping shapes as the owner's
 # real settings.local.json (escaped parens `\(`/`\)`, doubled backslashes in
 # a Windows path, an admin/elevation-style GetCurrent() one-liner) WITHOUT
 # reproducing his actual personal script names/paths -- synthetic, not a
@@ -113,7 +113,7 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     claude_dir.mkdir(parents=True, exist_ok=True)
 
     # finding 16: settings.json is ALWAYS the synthetic stand-in now, same
-    # as settings.local.json below -- a prior version copied rolo's real
+    # as settings.local.json below -- a prior version copied the owner's real
     # settings.json when present, so the suite's actual behavior depended
     # on whatever happened to be in it on whichever machine ran the tests
     # (the model name, permission mode, etc.), exactly the "must not depend
@@ -122,7 +122,7 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     _write_json(claude_dir / "settings.local.json", _SETTINGS_LOCAL_JSON)
 
     # ~/.claude.json -- projects keyed in BOTH separator forms, plus a
-    # stdio mcpServers entry (finding B: 15 real stdio servers on rolo's
+    # stdio mcpServers entry (finding B: 15 real stdio servers on the owner's
     # box; one representative entry is enough for these fixtures).
     proj_dir = root / "proj"
     claude_json = {

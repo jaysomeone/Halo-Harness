@@ -64,7 +64,17 @@ def start_background_run(argv: list, *, popen=subprocess.Popen) -> dict:
     try:
         proc = popen(
             command, cwd=str(Path.cwd()), stdout=log_fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+            # review finding 37: CREATE_NEW_PROCESS_GROUP alone still
+            # leaves this child attached to the launching console --
+            # Windows sends CTRL_CLOSE_EVENT to every process attached to
+            # a closing console, killing it the moment that terminal
+            # window closes, unlike the POSIX path's `start_new_session`
+            # (a real new session, survives the launching terminal
+            # closing by construction). DETACHED_PROCESS is what actually
+            # detaches it from the console, same intent as `start_new_
+            # session` on POSIX.
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                           if os.name == "nt" else 0),
             start_new_session=(os.name != "nt"),
         )
     finally:

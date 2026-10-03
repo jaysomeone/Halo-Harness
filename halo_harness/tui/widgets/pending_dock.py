@@ -64,10 +64,22 @@ class PendingDock(VerticalScroll):
         self.display = False
 
     def action_open_pager(self) -> None:
+        """Parity gap: this used to show only the card's own `summary`/
+        `reason` (a PermissionCard) or "(no further detail)" (a
+        QuestionCard) -- the full tool input (every question and its
+        options, for a QuestionCard) is now shown whenever the card
+        carries one (`input_data`, PermissionCard/QuestionCard only; a
+        PlanReviewCard has no tool call to show at all, so it keeps the
+        old plan_text/reason/summary fallback chain unchanged)."""
         if self.card is None:
             return
+        import json
         from halo_harness.tui.widgets.cards import PagerScreen
         title = getattr(self.card, "summary", None) or type(self.card).__name__
-        body = (getattr(self.card, "plan_text", None) or getattr(self.card, "reason", None)
-                or getattr(self.card, "summary", None) or "(no further detail)")
+        input_data = getattr(self.card, "input_data", None)
+        if input_data:
+            body = json.dumps(input_data, indent=2, ensure_ascii=False, default=str)
+        else:
+            body = (getattr(self.card, "plan_text", None) or getattr(self.card, "reason", None)
+                    or getattr(self.card, "summary", None) or "(no further detail)")
         self.app.push_screen(PagerScreen(str(title), str(body)))

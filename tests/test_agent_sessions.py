@@ -28,7 +28,7 @@ def _fresh_cwd() -> Path:
     # `bridge_home()`) fell through to the REAL `~/.halo/sessions`
     # whenever this module happened to run before anything else in the
     # process had set the seam -- exactly how real session files leaked
-    # into rolo's real session history under `agent-sessions-cwd-*`
+    # into the owner's real session history under `agent-sessions-cwd-*`
     # project slugs (H10b report, caught by tests/run_all.py's own real-
     # sessions guard). One fix here covers every caller in this file.
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="agent-sessions-home-")))

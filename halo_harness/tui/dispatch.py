@@ -238,7 +238,7 @@ async def _show_permission_card(app, data: dict, *, agent_id: "str | None" = Non
         app.resolve_permission_decision(request_id, decision, suggested_rule=suggested)
         app.clear_pending_card()
 
-    card = PermissionCard(request_id=request_id, summary=summary,
+    card = PermissionCard(request_id=request_id, summary=summary, input_data=input_data,
                            reason=data.get("reason", ""), suggested_rule=suggested, on_decide=on_decide)
     # Halo 2.0.1 W3a (finding 16 / PendingDock): queued, never mounted
     # straight into the transcript any more -- a second concurrent ask no

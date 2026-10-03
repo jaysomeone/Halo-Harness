@@ -256,7 +256,7 @@ def test_pre_h10_shape_tool_and_model_attribution(ctx: Ctx):
     """H10b defect 1+3: a session log written in the PRE-H10 shape (no
     `tool` on a `tool_result`, no `model`/`provider`/`route` on `usage`, no
     `tool_meta` on `assistant`, no `error_class` even on an `is_error`
-    result -- exactly what every one of rolo's real pre-H10 sessions looks
+    result -- exactly what every one of the owner's real pre-H10 sessions looks
     like) must still attribute every tool call to its real tool (joining
     `tool_use_id` against the preceding assistant node's own `tool_use`
     blocks) and every usage node to its real model (from the session's

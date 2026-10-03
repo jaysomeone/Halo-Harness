@@ -289,7 +289,7 @@ def _write_claude_json_raw(data: dict, indent: int, *, trailing_newline: bool = 
     (dict insertion order == source JSON order) -- only the one path
     `add`/`add-json`/`remove` mutated actually changes.
 
-    finding 8 fixes, all verified against rolo's real 66837-byte
+    finding 8 fixes, all verified against the owner's real 66837-byte
     `~/.claude.json`: `ensure_ascii=False` (the old `ensure_ascii=True`
     default re-escaped all 40+ non-ASCII characters in that file to
     `\\uXXXX`, starting at the first U+2014); `trailing_newline`/`bom`

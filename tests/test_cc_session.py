@@ -48,6 +48,15 @@ os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="cc-session-scratchhome
 # failure is still exercised turn-time, inside cc_runtime's own
 # `_preflight_cc`, exactly as these tests were written to check.
 ensure_default_provider_credentials()
+# W6b section E: that call now also defaults BRIDGE_TEST_CC_AUTH_STATUS
+# (closes a WSL hang in an unrelated module that never managed it at all,
+# tests/test_doctor_mcp_config_cli.py) -- popped right back off here, once,
+# to preserve the "deliberately NOT a blanket default" contract documented
+# just above: the two tests it names need the REAL absence of this var to
+# exercise the actual claude-binary-missing/not-logged-in code paths
+# turn-time, not a default masking them underneath `enable("claude_
+# subscription")`'s own auto-detection bypass.
+os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
 
 test, TESTS = new_registry()
 
@@ -660,6 +669,39 @@ def test_ask_user_question_shows_card_and_answer_becomes_tool_result(ctx: Ctx):
         t.join(timeout=10)
         results = [e for e in collected if e.kind == "tool_result"]
         ctx.check(f"answer became the tool result, got {results}",
+                   results and results[0].data["ok"] is True and "a" in results[0].data.get("content", ""))
+        session.close_cc()
+
+
+@test
+def test_ask_user_question_for_a_cc_subagent_uses_the_namespaced_request_id(ctx: Ctx):
+    """Release review finding 22: for a `cc:` SUB-AGENT (agent_id set),
+    `_resolve_tool_call` parks the question under `question_request_id`
+    (`f"{agent_id}:{tool_id}"`, namespaced -- same reasoning as the
+    `ask_request_id` permission branch right above it in cc_runtime.py) and
+    registers the waiter dict under THAT key. Before the fix, cc_runtime.py
+    emitted and awaited the bare tool_use_id instead, so the waiter it
+    looked up was never the one actually registered: `resolve_question`
+    with the id the card itself reported would silently fail (no such
+    waiter), and the tool returned "did not answer" on its own, with no
+    way for the answer to ever reach it."""
+    with _fake_claude_env():
+        session, _ = _new_cc_session(interactive=True)
+        session.agent_id = "child-1"  # makes this a cc: SUB-agent, not top-level
+        question_input = {"questions": [{"question": "pick one", "options": [{"label": "a"}, {"label": "b"}]}]}
+        collected = []
+        t = threading.Thread(target=lambda: collected.extend(
+            session.turn("TOOL:AskUserQuestion:" + json.dumps(question_input))))
+        t.start()
+        q = _wait_for_event_kind(collected, "question")
+        ctx.check("question card shown", q is not None)
+        ctx.check(f"the event's own id is namespaced with the agent_id, got {q.data.get('id') if q else None}",
+                   q is not None and q.data.get("id", "").startswith("child-1:"))
+        ok = session.resolve_question(q.data["id"], "a") if q else False
+        ctx.check("resolve_question finds the waiter registered under that SAME namespaced id", ok)
+        t.join(timeout=10)
+        results = [e for e in collected if e.kind == "tool_result"]
+        ctx.check(f"the real answer reached the tool result (not 'did not answer'), got {results}",
                    results and results[0].data["ok"] is True and "a" in results[0].data.get("content", ""))
         session.close_cc()
 

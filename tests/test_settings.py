@@ -175,13 +175,13 @@ def test_env_merge_per_key_highest_wins(ctx: Ctx):
 
 @test
 def test_the_19_real_rules_round_trip_losslessly(ctx: Ctx):
-    """rolo's real settings.local.json (copied verbatim by fake_home) has 19
+    """the owner's real settings.local.json (copied verbatim by fake_home) has 19
     allow rules with escaped parens/doubled backslashes -- confirm JSON
     round-trips them without mangling (the actual unescaping into a Rule is
     permissions.py's job, U0/H1 -- this only proves settings.py hands the
-    raw strings through unmodified). Both rolo's real file AND this fixture
+    raw strings through unmodified). Both the owner's real file AND this fixture
     put it at the HOME level (~/.claude/settings.local.json) -- resolve
-    against cwd=home, matching rolo's own usual cwd==home usage (finding B),
+    against cwd=home, matching the owner's own usual cwd==home usage (finding B),
     not the separate `proj/` fixture (which has its own synthetic
     settings.local.json for the unrelated defaultMode-filtering tests)."""
     fh = build_fake_home()

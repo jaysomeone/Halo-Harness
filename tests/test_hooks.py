@@ -254,7 +254,7 @@ def test_host_allowlist_merges_pin_and_forces_require_parameters(ctx: Ctx):
     # the ingestion script merges the row's informal fallback_order into
     # order (with allow_fallbacks forced true) -- see
     # tools/ingest_model_table.py's compile_openrouter_pin, verified live
-    # against rolo's own OpenRouter account (Guardrails/ZDR settings
+    # against the owner's own OpenRouter account (Guardrails/ZDR settings
     # otherwise hard-fail the primary-only, no-fallback pin outright).
     pin_order = profile.openrouter_pin.get("order")
     ctx.check(f"row has a pin, primary first, got {pin_order}", pin_order[0] == "deepseek" and len(pin_order) > 1)

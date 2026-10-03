@@ -178,6 +178,50 @@ def test_build_session_disabled_provider_fallthrough_prints_one_notice(ctx: Ctx)
 
 
 @test
+def test_build_session_last_model_with_no_credentials_falls_through_with_a_notice(ctx: Ctx):
+    """Release review finding 35: the remembered ref was validated only
+    with `parse_model_ref`, which rejects only an explicitly DISABLED
+    provider -- a model whose provider is merely "not set up" (no
+    credentials at all, e.g. a global last model chosen on another box)
+    used to be accepted silently and built with creds=None, failing every
+    turn. Deliberately no DATABRICKS_HOST/DATABRICKS_TOKEN at all here,
+    and the provider itself is NOT disabled -- parse_model_ref alone
+    would have accepted this before the fix."""
+    import io
+    import contextlib
+    from halo_harness import launch_state
+    from halo_harness.model import DEFAULT_MODEL_REF
+    with _Env() as env, tempfile.TemporaryDirectory() as cwd:
+        os.environ["OPENROUTER_API_KEY"] = "test-key-not-real"
+        launch_state.record_last_model("dbx:databricks-glm-5-3", cwd=Path(cwd))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            build = _build(Path(cwd))
+        notice = stderr.getvalue()
+        ctx.check(f"falls through to the hardcoded default instead of using creds=None, got {build.model_ref.raw}",
+                  build.model_ref.raw == DEFAULT_MODEL_REF)
+        ctx.check(f"a real, usable creds object backs the fallback, got {build.creds}", build.creds is not None)
+        ctx.check(f"exactly one notice line naming the stale model, got {notice!r}",
+                  "dbx:databricks-glm-5-3" in notice and "no credentials" in notice)
+
+
+@test
+def test_build_session_last_model_cc_route_is_never_rejected_for_missing_creds(ctx: Ctx):
+    """A remembered cc: (Claude Code subscription) model needs no
+    ProviderCreds at all -- `_resolve_creds` doesn't model that route and
+    returns None for it unconditionally, so the new credentials check
+    must never apply to it (creds=None is the CORRECT, expected value for
+    a cc: session, not a sign it's unusable)."""
+    from halo_harness import launch_state
+    with _Env() as env, tempfile.TemporaryDirectory() as cwd:
+        os.environ["OPENROUTER_API_KEY"] = "test-key-not-real"
+        launch_state.record_last_model("cc:fable", cwd=Path(cwd))
+        build = _build(Path(cwd))
+        ctx.check(f"the remembered cc: ref is used as-is, got {build.model_ref.raw}",
+                  build.model_ref.raw == "cc:fable")
+
+
+@test
 def test_build_session_last_effort_beats_config_json_beats_settings(ctx: Ctx):
     from halo_harness import launch_state
     from halo_harness.theme import set_config_value

@@ -208,18 +208,40 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         bare=spec.skips_claude_md(), tool_registry=child_registry, mcp_servers=None,
     )
     ctx.system_prompt = spec.body or spec.description
-    if spec.memory:
-        # W4a misc: agent frontmatter `memory:` honoured -- a per-agent
-        # persistent directory under `~/.halo/agents/<name>/` (never the
-        # project's own auto-memory, which `includes_memory()` already
-        # gates to general-purpose alone). THIN: no new storage subsystem --
-        # the agent reads it back as an ordinary snapshot (same "model
-        # writes notes, harness replays them next time" shape the main
-        # session's own CLAUDE.md/memory already uses) and writes to it
-        # itself via its own Write/Edit tools (unless restricted away),
-        # pointed at the path named in its own system prompt below.
-        memory_dir = Path(parent.state_dir) / "agents" / spec.name
+    # Parity gap: agent frontmatter `memory:` used to be a bare truthy
+    # gate -- ANY non-empty value always resolved to the SAME global
+    # `~/.halo/agents/<name>/` directory, never created it, and (for that
+    # global directory specifically) left it OUTSIDE the child's own
+    # permission working dirs (asked for in default mode, flatly denied
+    # in -p/background, for every Read/Write/Edit the agent made against
+    # the exact path its own system prompt told it to use). Now honours
+    # the actual scope value -- "user" (global, unchanged path; also the
+    # fallback for a bare truthy non-string value like YAML `memory:
+    # true`, or any unrecognized string, so nothing that used to work
+    # silently stops), "project" (inside THIS project's own cwd, so it is
+    # already a working dir with no extra_dirs change needed at all) or
+    # "local" (this project only, but kept out of the project tree
+    # itself, under state_dir keyed by a project slug) -- a PLAUSIBLE
+    # mirror of Claude Code's own user|project|local agent-memory scopes,
+    # never verified against a real Claude Code agent definition.
+    memory_scope = spec.memory if isinstance(spec.memory, str) and spec.memory.strip() else (
+        "user" if spec.memory else None)
+    memory_extra_dir: Optional[Path] = None
+    if memory_scope:
+        if memory_scope == "project":
+            memory_dir = Path(parent.cwd) / ".halo" / "agents" / spec.name
+        elif memory_scope == "local":
+            from halo_harness.config.paths import project_slug
+            memory_dir = Path(parent.state_dir) / "agents-local" / project_slug(parent.cwd) / spec.name
+            memory_extra_dir = memory_dir
+        else:  # "user", or any other/unrecognized value -- the original, global default
+            memory_dir = Path(parent.state_dir) / "agents" / spec.name
+            memory_extra_dir = memory_dir
         memory_file = memory_dir / "MEMORY.md"
+        try:
+            memory_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         ctx.system_prompt = (
             f"{ctx.system_prompt}\n\nYour persistent memory directory is {memory_dir} -- write notes there "
             f"(e.g. {memory_file.name}) that you want available to your NEXT invocation; its current "
@@ -255,12 +277,35 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     # own working directory: asked for in default/acceptEdits mode, and
     # flatly denied in print/background mode, no matter what the child
     # actually did.
+    # Parity gap: the "user"/"local" memory scopes above resolve OUTSIDE
+    # `child_cwd` (by design -- global or state-dir-rooted) -- added here
+    # so Read/Write/Edit against the agent's own documented memory path
+    # never has to ask (default mode) or get flatly denied (-p/
+    # background) just because it is not literally inside the cwd.
+    # `PermissionEngine.__init__` already copies this into its OWN new
+    # list, so appending here never mutates the PARENT's own extra_dirs.
+    child_extra_dirs = list(parent.permission_engine.extra_dirs)
+    if memory_extra_dir is not None:
+        child_extra_dirs.append(memory_extra_dir)
     child_engine = PermissionEngine(
         deny_rules=parent.permission_engine.deny_rules, ask_rules=parent.permission_engine.ask_rules,
         allow_rules=list(parent.permission_engine.allow_rules), mode=permission_mode,
-        cwd=child_cwd, extra_dirs=parent.permission_engine.extra_dirs,
+        cwd=child_cwd, extra_dirs=child_extra_dirs,
         print_mode=parent.permission_engine.print_mode,
     )
+
+    # Parity gap: `Session.plugin_roots` reads `cli_flags["resolved_
+    # plugin_roots"]` -- a child's own `cli_flags` dict below used to
+    # carry only the worktree key, so `self.plugin_roots` was always `[]`
+    # for every sub-agent regardless of what the PARENT session's own
+    # `--plugin-dir`/`--plugin-url` roots were, and a model-invoked Skill
+    # tool call inside that sub-agent could never find one of those
+    # skills at all (`tools/skill.py` reads `ctx.plugin_roots`, itself
+    # read from `Session.plugin_roots`). Every OTHER cli_flags-driven
+    # behavior still stays off for a child, unchanged.
+    _child_cli_flags: dict = {}
+    if parent.plugin_roots:
+        _child_cli_flags["resolved_plugin_roots"] = parent.plugin_roots
 
     hook_runner = None
     if parent.hook_runner is not None:
@@ -328,8 +373,8 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         # worktree_created` fires for THIS child too -- it reads exactly
         # this key and no other (a child never gets cli_flags otherwise;
         # every OTHER cli_flags-driven behavior stays off, unchanged).
-        cli_flags=({"_worktree_created_path": str(isolation_worktree_path)}
-                    if isolation_worktree_path is not None else None),
+        cli_flags=({**_child_cli_flags, "_worktree_created_path": str(isolation_worktree_path)}
+                    if isolation_worktree_path is not None else (_child_cli_flags or None)),
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
@@ -572,7 +617,14 @@ def _finalize_child_isolation_worktree(child) -> "Optional[str]":
         return f"(this sub-agent's isolated worktree at {wt_path} was kept -- its status could not be checked)"
     try:
         from halo_harness.worktree import remove_worktree
-        removed = remove_worktree(wt_path, repo_root_hint=repo_root)
+        # review finding 28: `remove_worktree` now deletes the worktree's
+        # own branch itself, right after a successful removal -- the
+        # separate `git branch -D` this used to run again here (after
+        # already passing its OWN upfront dirty check above, before
+        # `remove_worktree` grew the identical check internally) is gone;
+        # `_reason` is only ever "dirty"/"failed" when `removed` is False,
+        # already covered above/below.
+        removed, _reason = remove_worktree(wt_path, repo_root_hint=repo_root)
     except Exception:
         removed = False
     if removed:
@@ -580,12 +632,6 @@ def _finalize_child_isolation_worktree(child) -> "Optional[str]":
             child._fire_worktree_removed(wt_path)
         except Exception:
             pass
-        if branch:
-            try:
-                subprocess.run(["git", "-C", str(repo_root), "branch", "-D", branch],
-                                capture_output=True, text=True, timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
     return None
 
 
@@ -837,6 +883,23 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # flagged here, not just an abort/denial (the two cases
                 # `child.abort.is_set()`/`permission_denials` already covered).
                 is_error, abnormal_reason = _child_turn_outcome(child_events)
+                # review finding 20: the foreground path always emits
+                # `subagent_end` (see the mirror-image `end_ev` below the
+                # foreground `try/finally`); `_bg_run` never did, so a live
+                # TUI's SubAgentCard (mounted on `subagent_start`, which DOES
+                # reach the dock via `bg_sink`) never got `card.finish()`
+                # and kept ticking "thinking Ns" forever, even after the
+                # completion notice landed right below. Reuses the same
+                # `bg_sink` the live-ask forwarder above already resolved --
+                # None for a `-p`/bare-Session run, exactly like start_ev's
+                # own live forwarding, so headless callers see no behavior
+                # change at all.
+                end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": spec.name,
+                                                          "parent_tool_use_id": tool_id,
+                                                          "task_id": new_task_id, "is_error": is_error})
+                end_ev.agent_id = agent_id
+                if bg_sink is not None:
+                    bg_sink(end_ev)
                 if abnormal_reason and abnormal_reason not in ("interrupted",):
                     status_bits.append(abnormal_reason)
                 status_suffix = f" [{'; '.join(status_bits)}]" if status_bits else ""

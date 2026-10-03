@@ -56,10 +56,27 @@ def load_tokens(server_name: str) -> Optional[dict]:
 def save_tokens(server_name: str, tokens: dict) -> Path:
     path = token_path(server_name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # review finding 26: an OAuth access/refresh token pair used to land
+    # under the default umask (0644 on a typical Linux box) -- readable by
+    # every other local user. `os.name != "nt"` guard (and best-effort,
+    # like `providers/config.py::ensure_token`'s own identical pattern) --
+    # Windows has no POSIX mode bits to set here, and `os.chmod` there can
+    # only toggle the read-only attribute, which this would rather not
+    # touch at all.
+    if os.name != "nt":
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
     data = dict(tokens)
     data["saved_at"] = time.time()
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    if os.name != "nt":
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
     os.replace(tmp, path)
     return path
 

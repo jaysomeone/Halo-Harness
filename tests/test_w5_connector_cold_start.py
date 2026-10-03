@@ -34,6 +34,13 @@ class _Env:
 
     def __enter__(self):
         self._snap = {k: os.environ.get(k) for k in self.KEYS}
+        # W6b section E fallout: tests/run_all.py's own whole-run default
+        # (closing a WSL hang in an unrelated module) now leaves this set
+        # ambiently for every module -- this file's own cold-start tests
+        # need it genuinely ABSENT to exercise "discovery actually ran",
+        # so it is cleared here; a test that wants it set does so itself,
+        # same as it always has.
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
         return self
 
     def __exit__(self, *exc):
@@ -155,6 +162,12 @@ def test_halo_mcp_list_without_refresh_shows_a_cold_started_connector(ctx: Ctx):
     for k in [k for k in env if k.startswith("HALO_")]:
         env.pop(k, None)
     env.pop("BRIDGE_STATE_DIR", None)
+    # W6b section E fallout: tests/run_all.py's own whole-run default
+    # (closing a WSL hang in an unrelated module) now leaves this set
+    # ambiently in the PARENT process -- this child needs it genuinely
+    # ABSENT to actually run the synchronous cold-start discovery this
+    # test is checking for.
+    env.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
     env.update({
         "BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
         "HALO_CLAUDE_EXE": FAKE_CLAUDE,

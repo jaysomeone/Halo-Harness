@@ -5,7 +5,7 @@ their own MCP servers, same as a user's own .mcp.json/~/.claude.json
 entries -- none of that was wired into this harness before this module.
 
 u2-h3b finding 11: the FIRST version of this module invented a layout that
-never matched 2.1.281's real one -- verified against rolo's own
+never matched 2.1.281's real one -- verified against the owner's own
 `claude-plugins-official` marketplace clone (`~/.claude/plugins/
 marketplaces/claude-plugins-official/`, no plugin actually INSTALLED
 there, only cloned, as of 2026-09-24) and the review's own binary-derived
@@ -227,7 +227,7 @@ def _plugin_roots(manifest: dict, settings_raw: Optional[dict] = None, *, cwd: O
 def _coerce_mcp_servers_map(data) -> dict:
     """finding 11: accepts EITHER Claude Code's wrapped `{"mcpServers":
     {...}}` shape OR a BARE `{server_name: entry, ...}` map -- verified
-    against rolo's real `claude-plugins-official` marketplace clone: 9 of
+    against the owner's real `claude-plugins-official` marketplace clone: 9 of
     14 `.mcp.json` files (including github and playwright) use the bare
     form. A bare map is recognised by every one of its top-level values
     looking like a server entry (a dict) -- guards against misreading an

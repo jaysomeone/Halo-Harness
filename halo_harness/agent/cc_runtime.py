@@ -274,7 +274,7 @@ def _drain_pending_context(session, state: CcState) -> None:
 
 
 def _cc_system_addendum(session) -> str:
-    """H11b finding 5: rolo's own prompt pieces, ADDED to claude's default
+    """H11b finding 5: the owner's own prompt pieces, ADDED to claude's default
     system prompt via `--append-system-prompt` -- never replacing it.
     Claude Code still loads CLAUDE.md/memory/its own skill descriptions
     itself (brief's binding v1 behaviour: rolo does NOT inject instruction
@@ -756,9 +756,18 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
         session._timeline.record_permission_wait(wait_start_ms, session._timeline.elapsed_ms(), decision_label)
         session._apply_permission_decision(item, decision)
     if item.get("pending_question"):
-        _emit(session, events.Event("question", {"id": tool_use_id, "name": name, "input": item["input"]},
+        # review finding 22: for a `cc:` sub-agent (agent_id set, live asks
+        # on), `_resolve_tool_call` parks this under `question_request_id`
+        # (`f"{agent_id}:{tool_id}"`, namespaced exactly like
+        # `ask_request_id` just above already is here) and registers the
+        # waiter dict under THAT key -- awaiting on the bare `tool_use_id`
+        # instead looked up a waiter that was never registered, so the tool
+        # returned "The user did not answer" immediately and the card's
+        # real answer went nowhere.
+        question_request_id = item.get("question_request_id", tool_use_id)
+        _emit(session, events.Event("question", {"id": question_request_id, "name": name, "input": item["input"]},
                                       turn=turn_no))
-        answer = session._await_reply(session._question_waiters, tool_use_id)
+        answer = session._await_reply(session._question_waiters, question_request_id)
         item.pop("pending_question", None)
         if answer is None:
             item["text"] = "The user did not answer (the question was dismissed or the turn interrupted)."

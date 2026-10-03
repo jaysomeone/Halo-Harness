@@ -203,12 +203,12 @@ def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
 def cc_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
     stripped = tool_child_env(env, env_file_path=env_file_path)
     # `CLAUDE*` (not just `CLAUDE_CODE_*`) also catches CLAUDECODE and
-    # rolo's OWN hook/skill template vars (CLAUDE_EFFORT, CLAUDE_PROJECT_
+    # the owner's OWN hook/skill template vars (CLAUDE_EFFORT, CLAUDE_PROJECT_
     # DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_ENV_FILE, ...) -- verified live from
     # INSIDE an actual nested launch: CLAUDE_EFFORT alone survived a
     # narrower `CLAUDE_CODE_`-only prefix check because it has no "_CODE_"
     # in it, yet is explicitly named in finding 2's own repro. None of
-    # rolo's own `CLAUDE*` namespace means anything to the real `claude`
+    # the owner's own `CLAUDE*` namespace means anything to the real `claude`
     # binary, so the broader prefix costs nothing.
     return {k: v for k, v in stripped.items() if not k.startswith("CLAUDE") and not k.startswith("ANTHROPIC_")}
 
@@ -447,7 +447,7 @@ class AntConfig:
     `api.anthropic.com` directly. Deliberately never reads bare
     `os.environ`'s own `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` --
     those are Databricks' (or another gateway's) own Claude-Code-
-    compatible env vars at rolo's work box, and conflating them here
+    compatible env vars at the owner's work box, and conflating them here
     would silently point `ant:` at the wrong host for whoever has that
     pair set in their shell. finding 5 (W6a): a trusted project/user
     settings.json `env` block's own (bare-named) `ANTHROPIC_BASE_URL` is

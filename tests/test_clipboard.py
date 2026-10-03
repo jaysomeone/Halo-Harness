@@ -55,15 +55,37 @@ def test_strip_chrome_glyphs_removes_the_exact_set_and_the_leading_space_after_i
     from halo_harness.tui.clipboard import strip_chrome_glyphs
 
     bullet, arrow, spinner = "⏺", "❯", "✻"
-    vbar, hbar, tl, bl = "│", "─", "╭", "╰"
     ctx.check("bullet prefix stripped with its space", strip_chrome_glyphs(f"{bullet} Bash(ls)") == "Bash(ls)")
     ctx.check("prompt arrow prefix stripped with its space", strip_chrome_glyphs(f"{arrow} hello") == "hello")
     ctx.check("spinner prefix stripped with its space", strip_chrome_glyphs(f"{spinner} Thinking...") == "Thinking...")
-    box = f"{tl}-----\n{vbar} hi\n{bl}-----"
-    ctx.check(f"box-drawing border characters removed, got {strip_chrome_glyphs(box)!r}",
-              strip_chrome_glyphs(box) == "-----\nhi\n-----")
-    ctx.check(f"a mid-line stray glyph is deleted in place, got {strip_chrome_glyphs('a'+hbar+'b')!r}",
-              strip_chrome_glyphs("a" + hbar + "b") == "ab")
+    ctx.check("only line 0's leading glyph is touched, a second leading-glyph line is untouched",
+              strip_chrome_glyphs(f"{bullet} Bash(tree)\n{bullet} not real chrome, just content")
+              == f"Bash(tree)\n{bullet} not real chrome, just content")
+
+
+@test
+def test_strip_chrome_glyphs_never_touches_the_body_review_finding_24(ctx: Ctx):
+    """Release review finding 24: before the fix, `clean_copy_text`
+    deleted `│ ─ ╭ ╰ ⏺ ❯ ✻` ANYWHERE in the copied text, not just a
+    leading bullet/arrow/spinner on the widget's own header line -- a
+    `tree` command's own box-drawing output, a table's borders, or a
+    captured zsh `❯` prompt line inside a Bash tool's output were all
+    mangled mid-character. Only the very first line (where a real call
+    site's own chrome, if any, always and only lives) may ever be
+    touched now; this is the review's own literal repro."""
+    from halo_harness.tui.clipboard import strip_chrome_glyphs
+
+    tool_card_copy_text = "⏺ Bash(tree)\n\n.\n├── src\n│   └── main.py"
+    ctx.check(f"box-drawing in the BODY survives untouched, got {strip_chrome_glyphs(tool_card_copy_text)!r}",
+              strip_chrome_glyphs(tool_card_copy_text) == "Bash(tree)\n\n.\n├── src\n│   └── main.py")
+
+    bash_output_with_a_zsh_prompt = "⏺ Bash(cat script.sh)\n\n❯ echo hi\nhi"
+    ctx.check(f"a zsh prompt line INSIDE the output survives untouched, got "
+              f"{strip_chrome_glyphs(bash_output_with_a_zsh_prompt)!r}",
+              strip_chrome_glyphs(bash_output_with_a_zsh_prompt) == "Bash(cat script.sh)\n\n❯ echo hi\nhi")
+
+    ctx.check("a mid-line stray glyph (not at the very start of line 0) is left alone, never deleted in place",
+              strip_chrome_glyphs("a─b") == "a─b")
 
 
 @test
@@ -276,6 +298,66 @@ def test_copy_via_external_tool_linux_seam_no_tool_found_returns_false(ctx: Ctx)
         ctx.check("no tool on PATH -> False, never raises", ok is False)
     finally:
         clipboard_mod.find_clipboard_tool = old_find
+
+
+# ---------------------------------------------------------------------------
+# read_via_external_tool: the Ctrl+V/bugreport paste direction (finding 25).
+# ---------------------------------------------------------------------------
+
+@test
+def test_read_via_external_tool_windows_seam_decodes_utf8_and_strips_one_trailing_newline(ctx: Ctx):
+    """Release review finding 25: `Get-Clipboard` was decoded with
+    `text=True` (the locale's default encoding, cp1252 on this host),
+    mangling non-ASCII clipboard content, and its own trailing newline was
+    pasted along with it. The fix forces PowerShell's own stdout encoding
+    to UTF-8 and decodes the raw bytes explicitly, stripping exactly the
+    ONE trailing newline PowerShell's own console output adds
+    (`Get-Clipboard -Raw` itself adds none)."""
+    import halo_harness.tui.clipboard as clipboard_mod
+
+    calls = []
+
+    def _fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        class _Result:
+            returncode = 0
+            stdout = "café — non-ascii\r\n".encode("utf-8")
+        return _Result()
+
+    old_run = clipboard_mod.subprocess.run
+    clipboard_mod.subprocess.run = _fake_run
+    try:
+        text = clipboard_mod.read_via_external_tool(platform="win32")
+        ctx.check(f"decoded correctly, with the trailing newline stripped, got {text!r}",
+                  text == "café — non-ascii")
+        command = calls[0][0][-1] if calls else ""
+        ctx.check(f"PowerShell's own stdout encoding is forced to UTF-8 first, got {command!r}",
+                  "OutputEncoding" in command and "UTF8" in command)
+        ctx.check(f"uses Get-Clipboard -Raw (never the default, which splits/rejoins lines), got {command!r}",
+                  "Get-Clipboard -Raw" in command)
+        ctx.check(f"never passes text=True for the win32 path (that's the locale-decode bug), got {calls}",
+                  calls and "text" not in calls[0][1])
+    finally:
+        clipboard_mod.subprocess.run = old_run
+
+
+@test
+def test_read_via_external_tool_windows_seam_empty_clipboard_is_none(ctx: Ctx):
+    import halo_harness.tui.clipboard as clipboard_mod
+
+    def _fake_run(argv, **kwargs):
+        class _Result:
+            returncode = 0
+            stdout = b""
+        return _Result()
+
+    old_run = clipboard_mod.subprocess.run
+    clipboard_mod.subprocess.run = _fake_run
+    try:
+        ctx.check("an empty clipboard reads back as None, not ''",
+                  clipboard_mod.read_via_external_tool(platform="win32") is None)
+    finally:
+        clipboard_mod.subprocess.run = old_run
 
 
 # ---------------------------------------------------------------------------

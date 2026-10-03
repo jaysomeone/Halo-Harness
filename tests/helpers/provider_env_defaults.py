@@ -22,6 +22,7 @@ those need the real absence, not a default that would mask it.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -52,6 +53,19 @@ def ensure_default_provider_credentials() -> None:
     # -- contradicting headless.py's own documented contract that building
     # a session never triggers first-time catalog discovery.
     os.environ.setdefault("BRIDGE_TEST_NO_BACKGROUND_NET", "1")
+    # W6b section E: a module that never sets `BRIDGE_TEST_CC_AUTH_STATUS`
+    # itself (most don't -- only the ones that deliberately exercise the
+    # claude.ai/cc: auth path do) left `claude_auth_status()`/connector
+    # discovery free to spawn a REAL `claude auth status` and `claude mcp
+    # list` against whatever `claude` happens to be on PATH. Harmless when
+    # nothing is installed (a fast ClaudeCodeNotFoundError), but on a box
+    # with a logged-in native `claude` (verified on WSL) that is a real,
+    # slow (~22s) network-touching subprocess tree per module/child process
+    # -- exactly the kind of non-hermetic dependency this file exists to
+    # close off. `setdefault` so a test that wants the logged-in path (or
+    # any other shape) by setting this var itself, before or after import,
+    # is never overridden by this default.
+    os.environ.setdefault("BRIDGE_TEST_CC_AUTH_STATUS", json.dumps({"loggedIn": False}))
 
 
 def ensure_scoped_state_dir_once() -> None:

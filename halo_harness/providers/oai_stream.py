@@ -123,21 +123,34 @@ class OpenAIStreamToAnthropic:
             id_to_key=self._id_to_key, next_auto=self._next_auto_box, last_key=self._last_key_box,
         )
 
-    def _note_reasoning_chunk(self) -> bool:
-        """Halo 2.0.1 W2a: called once per `feed_chunk` invocation that
-        carried NEW, non-empty reasoning content (any of the three wire
-        shapes) -- `reasoning_chunk_count` counts how many SEPARATE chunks
-        contributed, and `first_reasoning_wall` stamps the first one, both
-        read back by `agent/loop.py::Session._step` after the stream ends
-        (`_finalize`'s own `harness_meta`, below). Returns True iff this is
-        the FIRST reasoning chunk this stream has ever seen -- each call
-        site uses that to append a one-time `{"type": "reasoning_started"}`
-        marker to `feed_chunk`'s own `events` list, the REAL-TIME signal
-        `agent/loop.py::Session._step` needs (this module never emits an
-        Anthropic-shaped event for the reasoning CONTENT itself -- see
-        `feed_chunk`'s own comment -- so without this marker the harness
-        would have no way to know reasoning started until the whole stream
-        finishes)."""
+    def _note_reasoning_chunk(self, *, already_noted_this_chunk: bool) -> bool:
+        """Halo 2.0.1 W2a: meant to be called AT MOST once per `feed_chunk`
+        invocation that carried NEW, non-empty reasoning content (any of
+        the three wire shapes) -- `reasoning_chunk_count` counts how many
+        SEPARATE chunks contributed, and `first_reasoning_wall` stamps the
+        first one, both read back by `agent/loop.py::Session._step` after
+        the stream ends (`_finalize`'s own `harness_meta`, below).
+
+        Review finding 32: `already_noted_this_chunk` (each of `feed_
+        chunk`'s three call sites passes its own per-call local flag,
+        never shared state) is the actual enforcement of "at most once" --
+        this used to count once per REASONING FIELD instead of once per
+        CHUNK: OpenRouter's normal shape carries both `reasoning` and
+        `reasoning_details` in the SAME chunk, so a single-lump reply
+        counted as two chunks, inflating `reasoning_streamed`'s ">1 means
+        streamed incrementally" signal (`stats --models`' reasoning%,
+        the exact metric this telemetry was added to answer).
+
+        Returns True iff this is the FIRST reasoning chunk this stream has
+        ever seen -- each call site uses that to append a one-time
+        `{"type": "reasoning_started"}` marker to `feed_chunk`'s own
+        `events` list, the REAL-TIME signal `agent/loop.py::Session._step`
+        needs (this module never emits an Anthropic-shaped event for the
+        reasoning CONTENT itself -- see `feed_chunk`'s own comment -- so
+        without this marker the harness would have no way to know
+        reasoning started until the whole stream finishes)."""
+        if already_noted_this_chunk:
+            return False
         is_first = self.reasoning_chunk_count == 0
         self.reasoning_chunk_count += 1
         if self.first_reasoning_wall is None:
@@ -197,6 +210,11 @@ class OpenAIStreamToAnthropic:
             return {"kind": "error", "events": [self.error_event(msg)]}
 
         events = []
+        # review finding 32: shared across all three reasoning shapes
+        # below -- a chunk carrying more than one (OpenRouter's normal
+        # shape: `reasoning` AND `reasoning_details` together) must still
+        # count as ONE chunk, not one per field.
+        reasoning_noted_this_chunk = False
         if chunk.get("choices"):
             choice = chunk["choices"][0]
             delta = choice.get("delta") or {}
@@ -212,8 +230,9 @@ class OpenAIStreamToAnthropic:
                     parts_reasoning = _extract_reasoning_from_parts(content)
                     if parts_reasoning:
                         self.reasoning_text += parts_reasoning
-                        if self._note_reasoning_chunk():
+                        if self._note_reasoning_chunk(already_noted_this_chunk=reasoning_noted_this_chunk):
                             events.append({"type": "reasoning_started"})
+                        reasoning_noted_this_chunk = True
                 content = flatten_content_parts(content)
             if content:
                 if not self.text_open:
@@ -235,8 +254,9 @@ class OpenAIStreamToAnthropic:
             if reasoning:
                 if self.capture_reasoning:
                     self.reasoning_text += reasoning
-                    if self._note_reasoning_chunk():
+                    if self._note_reasoning_chunk(already_noted_this_chunk=reasoning_noted_this_chunk):
                         events.append({"type": "reasoning_started"})
+                    reasoning_noted_this_chunk = True
                 else:
                     log.debug("reasoning delta (not emitted), length=%d", len(reasoning))
             details = delta.get("reasoning_details")
@@ -248,8 +268,9 @@ class OpenAIStreamToAnthropic:
                 # (type, index): concatenate text/summary/data, keep the
                 # latest non-null id/format/signature.
                 self._merge_reasoning_details_delta(details)
-                if self._note_reasoning_chunk():
+                if self._note_reasoning_chunk(already_noted_this_chunk=reasoning_noted_this_chunk):
                     events.append({"type": "reasoning_started"})
+                reasoning_noted_this_chunk = True
 
             # Tool calls
             for tc in delta.get("tool_calls") or []:

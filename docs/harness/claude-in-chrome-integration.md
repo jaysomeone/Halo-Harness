@@ -1,6 +1,6 @@
 # Claude in Chrome — how Claude Code wires it, and how halo reuses it (verified 2026-09-23)
 
-Verified read-only on rolo's box: Claude Code 2.1.281, Claude in Chrome extension 1.0.94
+Verified read-only on the owner's box: Claude Code 2.1.281, Claude in Chrome extension 1.0.94
 (id `fcoeoabgfenejglbffodgkkbkcdhcgfn`). Nothing modified.
 
 ## The chain Claude Code uses

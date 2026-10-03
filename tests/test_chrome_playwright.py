@@ -88,7 +88,7 @@ def test_chrome_server_config_missing_exe(ctx: Ctx):
     (find_claude_exe's own `~/.local/bin/claude` fallback) -- without the
     home isolation this leaked on a real machine that happens to have a
     genuine `claude` binary installed under its actual home directory
-    (verified: WSL/Kali, where rolo's own daily-driver `claude` lives)."""
+    (verified: WSL/Kali, where the owner's own daily-driver `claude` lives)."""
     old = os.environ.pop("BRIDGE_CLAUDE_EXE", None)
     old_path = os.environ.get("PATH")
     old_home = os.environ.get("BRIDGE_TEST_HOME")

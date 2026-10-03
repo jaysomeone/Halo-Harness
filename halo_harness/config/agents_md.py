@@ -63,7 +63,7 @@ class AgentSpec:
     skills: Optional[list] = None
     mcp_servers: Optional[object] = None
     hooks: Optional[dict] = None
-    memory: Optional[str] = None          # accepted, ignored in v1 [D-CFG]
+    memory: Optional[str] = None          # "user"|"project"|"local" scope; see agent/subagent.py's own memory_scope
     background: bool = False
     omit_claude_md: bool = False
     effort: Optional[str] = None

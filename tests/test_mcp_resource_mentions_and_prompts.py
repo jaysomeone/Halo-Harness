@@ -57,6 +57,42 @@ def test_extract_server_resource_mentions_none_manager_is_empty(ctx: Ctx):
               extract_server_resource_mentions("@fake:fake://note", mcp_manager=None) == [])
 
 
+# ---- unresolved @server:uri mentions (review finding 23) -------------------
+
+@test
+def test_unresolved_server_mentions_ignores_git_clone_urls_and_ssh_targets(ctx: Ctx):
+    """`git@github.com:org/repo.git` and `user@host:22` both contain an
+    `@name:rest` shape, but the `@` is never at the start of a word -- must
+    never be read as a (bogus) @mention naming an unconnected MCP server
+    "github.com"/"host"."""
+    from halo_harness.mcp.mentions import unresolved_server_mentions
+    with running_manager(_fake_config()) as mgr:
+        text = "clone git@github.com:org/repo.git then ssh user@host:22 and check @fake:fake://note"
+        found = unresolved_server_mentions(text, mcp_manager=mgr)
+        ctx.check(f"neither look-alike is flagged, got {found}", found == [])
+
+
+@test
+def test_unresolved_server_mentions_flags_a_real_unconnected_server_name(ctx: Ctx):
+    from halo_harness.mcp.mentions import unresolved_server_mentions
+    with running_manager(_fake_config()) as mgr:
+        found = unresolved_server_mentions("please read @nosuchserver:fake://note", mcp_manager=mgr)
+        ctx.check(f"the mistyped/unconnected server name is named, got {found}", found == ["nosuchserver"])
+
+
+@test
+def test_unresolved_server_mentions_does_not_flag_a_connected_server_with_no_resources(ctx: Ctx):
+    """Before the fix this checked membership in `_known_resources_cached`'s
+    own keys, which only ever contains a server that lists at least one
+    resource -- a perfectly real, connected, TOOLS-ONLY server (most MCP
+    servers) was wrongly reported as "not connected"."""
+    from halo_harness.mcp.mentions import unresolved_server_mentions
+    from types import SimpleNamespace
+    mgr = SimpleNamespace(handles={"toolsonly": SimpleNamespace(state="connected")})
+    found = unresolved_server_mentions("use @toolsonly:whatever please", mcp_manager=mgr)
+    ctx.check(f"a connected, resource-less server is never flagged, got {found}", found == [])
+
+
 @test
 def test_read_server_resource_snapshots_reads_the_real_content(ctx: Ctx):
     from halo_harness.mcp.mentions import read_server_resource_snapshots
@@ -138,6 +174,66 @@ def test_ingest_at_mentions_and_headless_append_wire_resource_snapshots(ctx: Ctx
                 time.sleep(0.05)
             ctx.check(f"Controller.ingest_at_mentions ALSO appended one (now 2 total), got {len(snapshot_nodes2)}",
                       len(snapshot_nodes2) == 2)
+    finally:
+        if old_state_dir is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir
+
+
+@test
+def test_unresolved_mention_warns_the_user_not_just_the_model(ctx: Ctx):
+    """Release review finding 23 / parity gap: the commit that added this
+    warning said it "warns visibly", but the snapshot it appended was
+    model-only context (same "never inlined" rule every @mention here
+    follows) -- the user never actually saw it. Print mode now gets a
+    stderr line (headless.py's `_append_at_mention_snapshots`); a live TUI
+    session gets a `notification` event through `Session._event_sink`
+    (`Controller.ingest_at_mentions`)."""
+    import contextlib
+    import io
+    import os
+    import queue
+    import tempfile
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+
+    old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(Path(tempfile.mkdtemp(prefix="mcp-mentions-warn-state-env-")))
+    try:
+        with running_manager(_fake_config()) as mgr:
+            cwd = Path(tempfile.mkdtemp(prefix="mcp-mentions-warn-"))
+            session_ctx = SessionContext(cwd=cwd, model_label="or:mock/model")
+            model_ref = parse_model_ref("or:mock/model")
+            session = Session(cwd=cwd, model_ref=model_ref, model_profile=ModelProfile(), creds=None,
+                               state_dir=Path(tempfile.mkdtemp(prefix="mcp-mentions-warn-state-")),
+                               model_label="or:mock/model", session_context=session_ctx, mcp_manager=mgr)
+
+            from halo_harness.headless import _append_at_mention_snapshots
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                _append_at_mention_snapshots(session, "look at @nosuchserver:whatever please", cwd)
+            ctx.check(f"print mode prints a stderr line naming the server, got {captured.getvalue()!r}",
+                      "nosuchserver" in captured.getvalue())
+
+            from halo_harness.controller import Controller
+            q: "queue.Queue" = queue.Queue()
+            session._event_sink = q.put
+            controller = Controller(session=session, cwd=cwd)
+            controller.ingest_at_mentions("also @nosuchserver:whatever")
+            deadline = time.monotonic() + 10.0
+            notice = None
+            while time.monotonic() < deadline:
+                try:
+                    ev = q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if ev.kind == "notification":
+                    notice = ev
+                    break
+            ctx.check(f"a live TUI notification was pushed too, got {notice}",
+                      notice is not None and "nosuchserver" in notice.data.get("text", ""))
     finally:
         if old_state_dir is None:
             os.environ.pop("BRIDGE_STATE_DIR", None)

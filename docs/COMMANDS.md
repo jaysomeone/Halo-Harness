@@ -534,10 +534,12 @@ before. `host` consults `--permission-prompt-tool` when one is given.
 
 #### `--plugin-dir PATH`
 What: loads a plugin's agent definitions from `PATH` for this session only
-(repeatable). v1 scope: wired into agent discovery; a plugin's own
-skills/hooks/MCP servers from a CLI-supplied directory are a follow-up (an
-*installed* plugin's skills/hooks/MCP servers, via `config/plugins.py`,
-already work independently of this flag).
+(repeatable). Also wired into skill, hook and MCP server discovery for
+this session (`commands/registry.py`, `hooks.load_plugin_hooks`,
+`mcp_setup.build_manager`), plus a model-invoked `Skill` tool call via
+`Session.plugin_roots`/`ToolContext.plugin_roots` -- the same sources an
+*installed* plugin's skills/hooks/MCP servers (`config/plugins.py`) already
+read from, now extended to cover a CLI-supplied directory too.
 
 #### `--plugin-url URL`
 What: like `--plugin-dir`, but `URL` is a git URL, shallow-cloned once into

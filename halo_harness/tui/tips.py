@@ -1,9 +1,9 @@
 """halo_harness.tui.tips -- Halo 2.0.1 W2b (HALO-2.0.1-liveness-tips-brief.md
 Part B): rotating tips in the input placeholder, replacing the single
-hardcoded 'Try "read README.md and summarise it"' text (rolo: "instead of
-the same ... background in the chat box, have it give short info on how to
-use different slash commands or features in halo because we have lots of
-amazing features").
+hardcoded 'Try "read README.md and summarise it"' text (a user report:
+"instead of the same ... background in the chat box, have it give short
+info on how to use different slash commands or features in halo because
+we have lots of amazing features").
 
 Every curated tip below was checked against the REAL command/key/flag it
 names (`commands/builtins.py`'s `_BUILTIN_SPECS`, `tui/slash.py`'s own
@@ -55,7 +55,15 @@ TIPS: "tuple[Tip, ...]" = (
     Tip('--effort high on the command line sets the starting effort for the session'),
     Tip('Shift+Tab cycles permission modes: default, acceptEdits, plan, auto'),
     Tip('Type while a turn runs to steer it; the model picks it up at the next chunk'),
-    Tip('Esc interrupts the current step; Ctrl+C twice quits'),
+    # Parity gap: this used to be one unconditional tip, wrong half the
+    # time -- with `quit_on_double_ctrl_c: false` (tui/app.py's own
+    # on_key handler) Ctrl+C never quits at all, double-pressed or not;
+    # only /exit, Ctrl+D and Ctrl+Q do. Gated like every other
+    # conditionally-true tip above, on a new `needs` flag `detect_
+    # enabled_needs` below sets from that same config value.
+    Tip('Esc interrupts the current step; Ctrl+C twice quits', needs=("double_ctrl_c",)),
+    Tip('Esc interrupts the current step; Ctrl+C never quits here, use /exit, Ctrl+D or Ctrl+Q',
+        needs=("single_ctrl_c",)),
     Tip('Ctrl+Q force-quits immediately, skipping the ordinary quit path'),
     Tip('@path mentions a file in your prompt; Tab completes the path'),
     Tip('@path#L10-20 attaches only those line numbers from the file'),
@@ -182,6 +190,14 @@ def detect_enabled_needs(*, facade=None, controller=None) -> "frozenset[str]":
         mcp_servers = getattr(facade, "mcp_servers", None)
         if mcp_servers:
             needs.add("mcp")
+    # Parity gap: gates the Esc/Ctrl+C tip pair above on the SAME config
+    # value `tui/app.py`'s own on_key handler reads, so whichever one is
+    # actually shown always describes what Ctrl+C really does right now.
+    try:
+        from halo_harness.theme import get_config_value
+        needs.add("double_ctrl_c" if bool(get_config_value("quit_on_double_ctrl_c", True)) else "single_ctrl_c")
+    except Exception:
+        pass
     return frozenset(needs)
 
 

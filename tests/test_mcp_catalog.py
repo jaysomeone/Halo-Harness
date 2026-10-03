@@ -405,17 +405,18 @@ def test_registry_add_and_remove_tool(ctx: Ctx):
 # ---- finding 12: golden ToolSearch ranking on a real-shaped catalog -------
 # Names below are shaped like a real, large deferred-tool catalog from a
 # home music-production MCP setup (anonymized -- not one real session's
-# verbatim tool list), spanning 15 differently-themed MCP servers (ableton,
-# codriver, devices, expanded-models, gui, hardware, hear, jam, kb, max,
-# mix, play, plugins, samples, sd3 -- excludes claude-in-chrome/claude_ai_*
-# connectors, which aren't this kind of server). Descriptions are plausible
-# reconstructions in this codebase's own terse MCP-tool style, sized to
-# match the finding's own repro shape: most are one short sentence,
-# `moog_set` and `hw_synth_cc` are deliberately long and mention "midi"
-# many times INCIDENTALLY (hardware-synth CC parameter dumps), recreating
-# the exact regression ("19 midi hits in 2,510 characters" outscoring
-# hw_ports' own short, on-topic one under the OLD raw-substring-count
-# algorithm).
+# verbatim tool list, and every server/tool name is a generic stand-in,
+# never a real product name), spanning 15 differently-themed MCP servers
+# (daw, codriver, devices, expanded-models, gui, hardware, hear, jam, kb,
+# max, mix, play, plugins, samples, drums -- excludes claude-in-chrome/
+# claude_ai_* connectors, which aren't this kind of server). Descriptions
+# are plausible reconstructions in this codebase's own terse MCP-tool
+# style, sized to match the finding's own repro shape: most are one short
+# sentence, `synth_set` and `hw_synth_cc` are deliberately long and
+# mention "midi" many times INCIDENTALLY (hardware-synth CC parameter
+# dumps), recreating the exact regression ("19 midi hits in 2,510
+# characters" outscoring hw_ports' own short, on-topic one under the OLD
+# raw-substring-count algorithm).
 
 def _midi_heavy_description(subject: str) -> str:
     """~2,500 characters, ~19 incidental "midi" mentions -- same shape as
@@ -462,19 +463,19 @@ _LARGE_TOOL_CATALOG = [
     ("hardware", "ekit_detect", "Detect a connected electronic drum kit module."),
     ("hardware", "ekit_profile", "Read one electronic kit's stored pad-mapping profile."),
     ("hardware", "ekit_profiles_list", "List stored electronic kit profiles."),
-    ("hardware", "ekit_drum_rack_map", "Map an electronic kit's pads onto an Ableton drum rack."),
+    ("hardware", "ekit_drum_rack_map", "Map an electronic kit's pads onto a DAW drum rack."),
     ("hardware", "ekit_jam_map", "Map an electronic kit for a jam session."),
-    ("hardware", "ekit_sd3_setup", "Configure the drum sampler library for a detected electronic kit."),
-    ("ableton", "moog_set", _midi_heavy_description("the hardware synth")),
-    ("ableton", "transport", "Start, stop, or query Live's transport."),
-    ("ableton", "midi_send", "Send a raw MIDI message to a track's input."),
-    ("ableton", "capture_midi", "Capture the last few bars of incoming MIDI as a clip."),
-    ("ableton", "tuning_system", "Set or query the current microtuning system."),
-    ("ableton", "scale", "Set or query the current musical scale."),
-    ("ableton", "set_mixer", "Set a track's volume/pan/sends."),
-    ("ableton", "create_track", "Create a new audio or MIDI track."),
-    ("ableton", "fire", "Fire a clip or scene."),
-    ("ableton", "get_session", "Read the current Live session's track/clip layout."),
+    ("hardware", "ekit_sampler_setup", "Configure the drum sampler library for a detected electronic kit."),
+    ("daw", "synth_set", _midi_heavy_description("the hardware synth")),
+    ("daw", "transport", "Start, stop, or query the DAW's transport."),
+    ("daw", "midi_send", "Send a raw MIDI message to a track's input."),
+    ("daw", "capture_midi", "Capture the last few bars of incoming MIDI as a clip."),
+    ("daw", "tuning_system", "Set or query the current microtuning system."),
+    ("daw", "scale", "Set or query the current musical scale."),
+    ("daw", "set_mixer", "Set a track's volume/pan/sends."),
+    ("daw", "create_track", "Create a new audio or MIDI track."),
+    ("daw", "fire", "Fire a clip or scene."),
+    ("daw", "get_session", "Read the current session's track/clip layout."),
     ("codriver", "desktop_screenshot", "Take a screenshot of the desktop."),
     ("codriver", "desktop_click", "Click at a screen coordinate."),
     ("codriver", "desktop_find", "Find a UI element on screen by description."),
@@ -483,7 +484,7 @@ _LARGE_TOOL_CATALOG = [
     ("devices", "device_new", "Scaffold a new M4L device project."),
     ("expanded-models", "ask_local", "Ask a locally-hosted model a question."),
     ("expanded-models", "ask_openrouter", "Ask an OpenRouter-hosted model a question."),
-    ("gui", "doctor", "Check the Live/Ableton install's health."),
+    ("gui", "doctor", "Check the DAW install's health."),
     ("gui", "export_audio", "Export the current selection as audio."),
     ("hear", "analyze_file", "Analyze an audio file's spectral content."),
     ("hear", "ab_compare", "A/B compare two audio renders."),
@@ -503,8 +504,8 @@ _LARGE_TOOL_CATALOG = [
     ("plugins", "preset_recall", "Recall a saved plugin preset."),
     ("samples", "samples_search", "Search the sample library by description."),
     ("samples", "samples_similar", "Find samples similar to a given one."),
-    ("sd3", "sd3_search_instruments", "Search the drum sampler library's instrument library."),
-    ("sd3", "sd3_search_grooves", "Search the drum sampler library's MIDI groove library."),
+    ("drums", "drums_search_instruments", "Search the drum sampler library's instrument library."),
+    ("drums", "drums_search_grooves", "Search the drum sampler library's MIDI groove library."),
 ]
 
 
@@ -518,7 +519,7 @@ def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx
     """The exact regression repro from the finding: on a real ~100-tool
     catalog shape spanning 15 differently-themed MCP servers,
     "list MIDI ports" must rank `mcp__hardware__hw_ports` FIRST -- not
-    14th behind a long, MIDI-word-stuffed description (moog_set/
+    14th behind a long, MIDI-word-stuffed description (synth_set/
     hw_synth_cc, both deliberately built to recreate that exact
     regression here)."""
     from halo_harness.mcp.manager import mcp_tool_name
@@ -534,8 +535,8 @@ def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx
     ranked_names = [d["name"] for d in results]
     ctx.check(f"mcp__hardware__hw_ports ranks FIRST, got top 5={ranked_names}",
               ranked_names and ranked_names[0] == "mcp__hardware__hw_ports")
-    ctx.check("the long MIDI-word-stuffed moog_set does NOT outrank it",
-              "mcp__ableton__moog_set" not in ranked_names or ranked_names[0] != "mcp__ableton__moog_set")
+    ctx.check("the long MIDI-word-stuffed synth_set does NOT outrank it",
+              "mcp__daw__synth_set" not in ranked_names or ranked_names[0] != "mcp__daw__synth_set")
 
 
 @test

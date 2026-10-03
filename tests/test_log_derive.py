@@ -7,7 +7,7 @@ finding 16: every `@test` here is transparently wrapped in an isolated,
 per-test `BRIDGE_STATE_DIR` (SessionLog's storage root is ALWAYS
 bridge_home(), which without this fell back to the real
 `~/.halo/sessions` -- 39 `derive-test-*` dirs accumulated there on
-rolo's own box) with the prior value restored afterward, so a LATER test
+the owner's own box) with the prior value restored afterward, so a LATER test
 module in the same `run_all.py` process (which runs every tests/test_*.py
 file in one interpreter) never inherits it.
 """

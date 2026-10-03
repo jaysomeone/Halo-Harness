@@ -99,7 +99,7 @@ alias notices below -- every 1.0.1 fix ships exactly as it was.
    Windows' 260-character limit under a long home or cwd, which git itself
    refuses without this setting.
 
-## [2.0.1] - 2026-10-01
+## [2.0.1] - 2026-10-03
 
 The "run from any directory" release: `halo` already discovered a
 directory's `CLAUDE.md` chain, `.claude/rules`, settings, `.mcp.json`,
@@ -312,9 +312,187 @@ claim with tests, rather than changing that discovery behavior itself.
      instead of slicing a path mid-word.
 10. **Deprecation notice**: the legacy env file `~/.config/vibes-hacker/env`
     (still read as a fallback behind the new `~/.config/halo/env`, see the
-    2.0.0 entry above) stops being read starting in 2.0.3 -- move any
-    credential that still lives only in the old file into the new one
-    (`halo init`, or hand-edit) before upgrading past 2.0.2.
+    2.0.0 entry above) stops being read starting in 2.0.4 (the hardening
+    release) -- move any credential that still lives only in the old file
+    into the new one (`halo init`, or hand-edit) before upgrading past 2.0.3.
+11. **MCP "explain the zero"**: `/mcp`, `halo mcp list` and `doctor` now
+    name every scope they actually searched -- user scope, this
+    directory's project-local scope, this directory's own `.mcp.json`,
+    plugins, managed -- with the count found in each, and name another
+    directory's `.mcp.json` the user's own history remembers (never a
+    bare "0 servers" with no indication where it looked). A server that
+    fails to connect now says why instead of a bare "Failed to connect":
+    command not found on PATH, connection refused on `host:port`, or a
+    disabled transport's own reason.
+12. **claude.ai connectors reachable from any model**: when `claude` is
+    installed and logged into claude.ai, each account-side connector
+    becomes a `connector__<slug>` tool any model can call
+    (`{request, tool, args}`) -- it runs a headless `claude -p` scoped to
+    just that connector's own tools and returns the result through the
+    usual MCP caps, so a connector is no longer usable only from inside a
+    real `claude` session. Discovery runs in the background from `claude
+    mcp list` and the stream-json init line, cached under `~/.halo/mcp/
+    connectors.json`; `/mcp` shows each connector's status and the
+    re-auth step; config `connectors.bridge` and a per-connector
+    `enabled`/`alwaysLoad`; a settings rule written for the Claude Code
+    tool name applies to the bridge tool too.
+    - **Cold start**: with an empty cache, `claude` on PATH and a claude.ai
+      login, `halo mcp list` discovers synchronously (a 20s cap) and shows
+      the connectors without `--refresh`; a print-mode run does the same
+      before its tool catalog freezes only when a connector is actually
+      wanted (`--tools` naming one, a ToolSearch that asks for one, or
+      `connectors.discover_on_start: true`), so a plain `-p` call is never
+      held up by a login probe it did not need.
+    - **Landing live in a running TUI**: when the cache was cold at
+      startup, the background kick used to run before any claude.ai auth
+      status was even cached, so eligibility refused it and a cold-cache
+      TUI never learned its connectors at all for the whole session (no
+      note, 0/0 connectors). The startup worker that primes the auth
+      cache now re-kicks the same once-per-process discovery the moment
+      its own refresh says claude.ai login, and the connector tools join
+      the catalog with one transcript note saying how many arrived,
+      typically within 8s of a cold start. The auth-cache priming `halo
+      mcp list`/`halo providers` do is skipped once the cache is already
+      fresh, so repeated CLI calls stop re-running the `claude` probe
+      every time.
+13. **`halo mcp serve`, importing from Claude Desktop, and a real OAuth
+    login**: no `mcp` subcommand is a stub any more. `halo mcp serve` runs
+    Halo's own built-in tools as a stdio MCP server (driven by a real MCP
+    client in the tests); `add-from-claude-desktop` imports Claude
+    Desktop's own server config; `reset-project-choices` clears a
+    project's remembered `.mcp.json` approvals. `halo mcp login`/`logout`
+    run a generic OAuth 2.0 authorization-code flow with PKCE, endpoint
+    discovery and a local callback, naming no vendor, with tokens under
+    `~/.halo/mcp/oauth/`; the tokens are now actually used -- http/sse
+    servers send `Authorization: Bearer <access_token>`, a 401 refreshes
+    the token once, and otherwise says to run `halo mcp login <name>`
+    (tested against a local fake authorization server, never a real one).
+14. **14 more hook events, and the flag list finished**: Setup,
+    UserPromptExpansion, MessageDisplay, TaskCreated/TaskCompleted
+    (sub-agents), StopFailure, InstructionsLoaded, ConfigChange,
+    CwdChanged, DirectoryAdded, FileChanged, WorktreeCreated,
+    PreModelSwitch and PostModelSwitch now fire from their natural
+    trigger points with documented payloads; only WorktreeRemoved
+    (nothing removed a worktree yet -- fixed two parts later, see below)
+    and the two MCP elicitation events (no elicitation protocol in this
+    build) stayed accepted-and-ignored, and the README/handbook/
+    architecture doc say exactly that. No CLI flag is left "not yet": 21
+    are real (`--restricted`, `--brief`, `--environment`, `--autocompact`,
+    `--include-hook-events`, `--permission-prompt-tool`,
+    `--permission-prompts`, `--plugin-dir`/`--plugin-url`, `--betas`,
+    `--tmux`, `--worktree`, `--ax-screen-reader`, `--bg`,
+    `--no-session-persistence`, `--prompt-suggestions`,
+    `--fallback-model`, `--forward-subagent-text`,
+    `--exclude-dynamic-system-prompt-sections`, `--system-prompt-
+    snapshot`) and 7 cloud/IDE flags are declared not applicable with a
+    one-line reason each (`--cloud`, `--teleport`, `--remote-control` and
+    its prefix, `--from-pr`, `--ide`, `--safe-mode`, accepted with no
+    effect); `docs/COMMANDS.md` documents each one.
+15. **Skills inside sub-agents, their asks reach the dock, `/rewind`
+    covers files a step touched**: a skill with `context: fork` or
+    `agent` runs in a general-purpose sub-agent instead of reporting "not
+    implemented"; AskUserQuestion and permission asks from a child --
+    including a background one -- reach the parent's own pending dock
+    tagged with the agent's name and are answered there. `/rewind`/
+    `/undo`/`/redo` now cover more than the logged conversation: a step's
+    own new files are deleted on undo and recreated on redo, NotebookEdit
+    changes are shadow-copied, and a Bash command's new files in a git
+    repo are captured through a status diff; a Bash shadow also captures
+    TRACKED files a command modified, not just new ones, so rewinding
+    past an edit a command itself made restores them too (a file already
+    dirty before the command ran is a documented limit either way).
+16. **Clipboard quality, and Ctrl+C says what it does**: copying from the
+    transcript or a tool card now copies the widget's own SOURCE text,
+    never the screen cells -- trailing spaces gone, soft wraps intact,
+    the transcript's own glyphs/borders removed, a multi-widget selection
+    joined in document order, a code block kept exactly as written, `\n`
+    line endings everywhere (`clipboard.crlf` for CRLF). New copy actions
+    need no mouse: `/copy` (last reply), `/copy code`/`/copy code N`
+    (fenced blocks), `/copy tool` (last tool output), `y` on a focused
+    tool card or in the pager (its full content), `Y` (the whole current
+    turn); every copy ends with a toast naming what was copied and how
+    many characters. OSC 52 is trusted only where the terminal actually
+    relays it (Windows Terminal yes, a plain conhost window no); a real
+    `clip.exe` fallback (UTF-16 input) exists on Windows and `pbcopy` on
+    macOS, and `doctor` names the mechanism actually in use. Ctrl+C's
+    toast reads "Press Ctrl+C again to exit halo (your terminal stays
+    open)"; config `quit_on_double_ctrl_c: false` turns the double-press
+    exit off entirely, so only `/exit`, Ctrl+D or Ctrl+Q leave, and the F1
+    help, TROUBLESHOOTING.md and the input placeholder's own rotating tip
+    all say so.
+17. **Fallback models, background-job hooks, plugin skills/hooks/MCP,
+    worktree removal, and more flags wired for real**: `--fallback-model`
+    is wired into the retry ladder -- when a retryable provider failure
+    exhausts its retries, the session swaps to the next fallback model
+    for the rest of the turn with one notice naming both. Background
+    Bash jobs now fire TaskCreated/TaskCompleted with the job id,
+    command, status and exit code, the way sub-agents already did.
+    `--plugin-dir`/`--plugin-url` load a plugin's skills, hooks and MCP
+    servers as well as its agents, following Claude Code's own plugin
+    layout; plugin skills are namespaced `<plugin>:<skill>` and reachable
+    by the Skill tool, not only from the slash menu. `halo worktree rm
+    <path>` and config `worktree.remove_on_exit` fire WorktreeRemoved --
+    removal itself had never worked at all before this: it ran `git` from
+    a directory that was not a working tree, and on Windows from inside
+    the very directory being deleted. `--betas` sends the
+    `anthropic-beta` header only on Anthropic-family routes (it had been
+    leaking to OpenRouter and Databricks chat requests); `--prompt-
+    suggestions` also works in the stream-json multi-turn loop; `halo bg
+    list|logs|stop|rm` manage a detached `--bg` run.
+18. **Process-group kills can no longer hit the harness itself**: `halo bg
+    stop`, the Bash tool's timeout kill and the `cc:` child's interrupt/
+    kill now signal a child's own process group only when that group is
+    not the harness's own, and a PID sharing our group is killed alone;
+    killed children are reaped, so a zombie no longer counts as "still
+    alive". Found because a new `halo bg stop` test spawned a plain child
+    inside the suite runner's own process group and, on Linux, killed the
+    runner, its wrapper shell and the whole SSH session every time the
+    suite reached that test. The suite runner is now line-buffered too,
+    so a run killed mid-way still leaves its true last line on disk
+    instead of a stale module header stuck in a block buffer.
+19. **A runbook for the checks that need a real terminal or login,
+    steadier suites, and a privacy scan test**: `docs/harness/
+    LIVE-CHECKS.md` lists exactly what to run and look for the checks a
+    mock upstream can't stand in for (a real terminal, a real `claude`
+    login, a real MCP server), gated behind `HALO_LIVE=1` in
+    `tests/live/`. The `cc:` session, CLI-flag and chrome/playwright smoke
+    tests now poll with a bounded deadline instead of a fixed sleep, so a
+    loaded machine makes them slower, never red; the flaky first-run
+    `cc:` session case on Linux is covered by three standalone repeats in
+    the Kali run. Fixture homes, example paths and sample MCP server
+    names across tests and docs are synthetic now, never a real machine/
+    project/hobby-gear name; `tests/test_privacy_scan.py` fails the suite
+    outright if one of those comes back, or a real LAN address, home path
+    or key-shaped string does (`tests/privacy_scan_allowlist.txt` holds
+    the deliberate test fakes) -- it walks the tree directly rather than
+    erroring out on a copy with no `.git` (the Kali suite runs from a tar
+    copy).
+20. **Two rounds of release review, before the tag**: a full read of the
+    whole 2.0.1 diff against every part's own commit message. Round A
+    found 2 critical and 16 major defects -- among them a
+    `--no-session-persistence` run with `-c`/`--resume` that deleted the
+    very conversation it resumed, the TUI silently ignoring
+    `--restricted`/`--fallback-model`/`--plugin-dir`/`--betas`/`--brief`/
+    `-w`, a cross-provider `--fallback-model` that sent the fallback's
+    request with the PRIMARY provider's key, and `isolation: worktree`
+    sub-agents whose edits landed outside their own permission scope --
+    each fixed with its own pinning test, alongside the
+    `--restricted`/`--betas`/`--brief` parity gaps above. Round B found 20
+    more minors and the remaining 7 parity gaps: a background sub-agent's
+    own dock card that never finalized once it actually finished; a
+    steer-restart that silently inflated the next real retry's backoff; a
+    `git worktree remove --force` fallback that discarded a session's own
+    uncommitted edits on exit; `@server:uri`/`git@host:path` false
+    positives in the unresolved-mention warning (and that warning finally
+    reaching the user, not just the model, as documented); Windows
+    Ctrl+V/`clip.exe` mangling non-ASCII paste/copy text; a connector call
+    missing `--no-session-persistence` and running in the wrong cwd; an
+    `--autocompact` flag a settings.json `env` block could silently
+    outrank; and several telemetry, doctor and timeline-text fixes.
+    Docstrings that quoted the owner by name or a private project
+    directory were reworded, and the privacy scan above now also checks,
+    case-insensitively, for the owner's hobby-gear tool names and the
+    owner's own name.
 
 ## [1.0.1] - 2026-09-30
 

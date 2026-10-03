@@ -13,9 +13,9 @@ to learn each connector's own tool names from its `system/init` line) and
 caches the result under `~/.halo/mcp/connectors.json`.
 
 Generic by design: no connector name is special-cased anywhere here -- the
-the vendor connectors rolo dropped from this release (2026-10-01: "you
-can drop that completely") are just more rows of the same shape, and
-nothing below would need to change if they came back.
+vendor connectors dropped from this release (2026-10-01, per the owner's
+own call: "you can drop that completely") are just more rows of the same
+shape, and nothing below would need to change if they came back.
 """
 
 from __future__ import annotations

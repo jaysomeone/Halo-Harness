@@ -593,7 +593,7 @@ class _StepResult:
         # KIND (None for a kind that never streamed this call);
         # `reasoning_streamed` is True iff reasoning arrived over MULTIPLE
         # separate wire chunks (vs. one lump, early or -- Databricks GLM,
-        # per the brief's own open question -- at the very end) so rolo's
+        # per the brief's own open question -- at the very end) so the owner's
         # real session logs can answer which gateways actually stream it.
         self.ttfb_ms = ttfb_ms
         self.first_reasoning_ms = first_reasoning_ms
@@ -922,7 +922,7 @@ class Session:
         # from [effective_env]" -- same `raw_env` precedence chain (shell <
         # user < trusted project/local < flag < policy) everything else on
         # this line already uses, not a bare os.environ re-read.
-        self._compaction_knobs = resolve_knobs(settings, raw_env)
+        self._compaction_knobs = resolve_knobs(settings, raw_env, cli_autocompact=self.cli_flags.get("autocompact"))
         # Updated by `_account_usage` from each reply's real `input_tokens`;
         # None until the first reply lands, in which case the auto-compact
         # check falls back to a rough estimate of the about-to-be-sent
@@ -1478,7 +1478,15 @@ class Session:
         """W4a: InstructionsLoaded -- "CLAUDE.md chain loaded" (removed from
         NOT_EMITTED_V1). Fires every time the chain is (re)loaded into the
         log as a snapshot -- startup, resume, and after a compaction -- same
-        set of call sites `kind="claude_md"` itself already has."""
+        set of call sites `kind="claude_md"` itself already has.
+
+        Review finding 36: a sub-agent (`self.agent_id is not None`) NEVER
+        fires the user's own lifecycle hooks at all -- same rule, same
+        reasoning, as `_fire_session_start`'s own identical guard just
+        above (spawning N sub-agents used to re-fire this N extra times,
+        once per child, same InstructionsLoaded payload every time)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("InstructionsLoaded"):
             return
         payload = self.hook_runner.payload("InstructionsLoaded", extra={"char_count": len(claude_md_text)})
@@ -1509,7 +1517,17 @@ class Session:
         "startup" path -- never on resume, never again on a later launch.
         `halo init`'s own wizard is a SEPARATE, optional setup flow a user
         may never run at all; this is the one trigger guaranteed to exist
-        for every box."""
+        for every box.
+
+        Review finding 36: same sub-agent guard as `_fire_session_start`
+        -- a child Session's own `__init__` used to attempt this too,
+        once per sub-agent spawned (the `.setup_done` marker limited the
+        actual hook run to once ever regardless, but still tagged to
+        whichever session -- main or child -- happened to start first on
+        a fresh box, and paid the marker-file stat on every single spawn
+        after that)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("Setup"):
             return
         marker = Path(self.state_dir) / ".setup_done"
@@ -1574,7 +1592,13 @@ class Session:
         settings `permissions.additionalDirectories`, already merged into
         `self.permission_engine.extra_dirs` by the time this runs) -- fired
         once per directory, at both startup and resume (an unchanged set on
-        resume is a harmless re-announcement, never tracked as a diff)."""
+        resume is a harmless re-announcement, never tracked as a diff).
+
+        Review finding 36: same sub-agent guard as `_fire_session_start`
+        -- InstructionsLoaded/Setup's own sibling fix (once per extra
+        directory, it fired again on every sub-agent spawn)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("DirectoryAdded"):
             return
         for d in self.permission_engine.extra_dirs:
@@ -1823,7 +1847,7 @@ class Session:
         other route -- `notify_catalog_changed` itself no-ops with no
         `_cc_state`) so its child sends Claude Code a real
         `notifications/tools/list_changed` -- without this, a tool
-        ToolSearch loads mid-session enters rolo's own catalog but
+        ToolSearch loads mid-session enters the owner's own catalog but
         Claude Code, which only ever listed tools once at startup, never
         learns it exists and can never call it."""
         self.log.append_meta(tools=self.tool_registry.definitions_for(names))
@@ -2252,6 +2276,14 @@ class Session:
                 # fires while `chunk_started[0]` is still False, i.e. before
                 # any of the three could have been set.
                 ttfb_ms = None
+                # review finding 19: this `continue` re-enters the loop
+                # through `attempts += 1` at its top, but a steer-restart is
+                # explicitly "never counted against ... any retry-ladder
+                # cap" (comment above) -- undo that increment here so a
+                # restart is free, exactly as documented, instead of
+                # silently lengthening the next real 429/5xx backoff and
+                # eventually starving MAX_RETRIES or the fallback trigger.
+                attempts -= 1
                 continue
 
             if self.abort.is_set():
@@ -2617,7 +2649,7 @@ class Session:
         # multiple real native `thinking_delta` events both mean "this
         # gateway genuinely streamed reasoning incrementally" -- see
         # `OpenAIStreamToAnthropic._note_reasoning_chunk`'s own docstring
-        # for why rolo's real session logs need this to answer GLM-brief.md
+        # for why the owner's real session logs need this to answer GLM-brief.md
         # item 6's open question (does Databricks stream GLM's reasoning?).
         reasoning_streamed = (native_thinking_delta_count > 1) or (
             (harness_meta.get("reasoning_chunk_count") or 0) > 1)

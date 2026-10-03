@@ -199,7 +199,7 @@ _MODEL_COLUMNS = [
     ("overflow", lambda r: str(r["overflows"])),
     ("interrupt", lambda r: str(r["interrupts"])),
     # Halo 2.0.1 W2a (GLM-brief.md item 6 / liveness-tips-brief Part A6):
-    # wide-only -- the FAMILY-BASELINE doc and rolo's own GLM-pause
+    # wide-only -- the FAMILY-BASELINE doc and the owner's own GLM-pause
     # investigation read these from `--wide`/`--json`, never the compact
     # default's first 14 columns.
     ("ttft p50", lambda r: _ms_str(r["ttft_p50_ms"])),

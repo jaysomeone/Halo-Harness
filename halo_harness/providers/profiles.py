@@ -372,7 +372,7 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         # `reasoning_effort`; "max" is the GATEWAY's own SILENT fallback for
         # anything else (medium/minimal/xhigh/none -- never a 400), which is
         # why a harness-level "medium" used to run as an undocumented "max"
-        # with no error at all (rolo's "it pauses" report: a thinking phase
+        # with no error at all (a user report, "it pauses": a thinking phase
         # at the model's MOST expensive setting, not a harness hang). A
         # row's own explicit `reasoning_default_effort`/
         # `effort_values_supported`/`effort_clamp_map` still wins via

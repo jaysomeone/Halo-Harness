@@ -57,7 +57,7 @@ def _new_session(*, mock, model, interactive=False, permission_mode="plan", cwd=
     # H10b: NONE of this file's 9 callers ever set BRIDGE_TEST_HOME, so
     # every `or:mock/h6-plan-*` Session built here fell through to the REAL
     # `~/.halo/sessions` -- exactly how those sessions leaked into
-    # rolo's real session history (H10b report). One fix here covers every
+    # the owner's real session history (H10b report). One fix here covers every
     # caller.
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="rc-plan-e2e-home-")))
     cwd = cwd or Path(tempfile.mkdtemp(prefix="rc-plan-e2e-"))

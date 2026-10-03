@@ -66,8 +66,8 @@ def scope_summary_line(*, cwd: Path, claude_json: dict, settings=None) -> str:
 def other_project_mcp_jsons(*, cwd: Path, claude_json: dict, limit: int = 5) -> "list[str]":
     """Directories OTHER than this one that the user's own `~/.claude.json`
     "projects" history remembers and that still have their own `.mcp.json`
-    on disk right now (gap-list brief's own example: "~/Documents/
-    serverMode/.mcp.json: loads only when halo runs there")."""
+    on disk right now (gap-list brief's own example: "~/other-project/
+    .mcp.json: loads only when halo runs there")."""
     if not isinstance(claude_json, dict):
         return []
     projects = claude_json.get("projects")

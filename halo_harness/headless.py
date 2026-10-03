@@ -275,6 +275,11 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
     for server in unresolved_server_mentions(text, mcp_manager=session.mcp_manager):
         warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
         session.log.append_snapshot([{"type": "text", "text": warning}], kind="at_mention")
+        # review finding 23 / parity gap: the snapshot above is model-only
+        # context; there is no live UI to notice here (print/headless
+        # mode -- controller.py's own identical call site pushes a TUI
+        # notice instead), so the user's only view of it is this line.
+        print(f"halo: {warning}", file=sys.stderr)
 
 
 def _resolve_local_file_spec(raw: str, *, cwd: Path) -> "Optional[Path]":
@@ -707,11 +712,26 @@ def build_session(
         last_model_raw = launch_state.resolve_last_model(cwd, memory=model_memory)
         if last_model_raw:
             try:
-                parse_model_ref(last_model_raw, routes)  # validate only -- parsed for real just below
-                model_raw = last_model_raw
+                last_ref = parse_model_ref(last_model_raw, routes)  # validate only -- parsed for real just below
             except InvalidModelError as e:
                 print(f"halo: the last-used model {last_model_raw!r} is no longer available ({e}) -- "
                       f"using the configured default instead", file=sys.stderr)
+            else:
+                # review finding 35: `parse_model_ref` only ever rejects an
+                # explicitly DISABLED provider -- a model whose provider is
+                # merely "not set up" (no credentials at all, e.g. a global
+                # last model remembered from a DIFFERENT box) used to be
+                # accepted silently and built with `creds=None`, failing
+                # every turn with no notice at all. `cc:` (and anything
+                # else `_resolve_creds` doesn't model) needs no
+                # `ProviderCreds` at all -- that is not this check's
+                # business, so it is skipped entirely for those.
+                if (last_ref.provider in ("openrouter", "databricks", "anthropic")
+                        and _resolve_creds(last_ref, settings) is None):
+                    print(f"halo: the last-used model {last_model_raw!r} has no credentials configured on "
+                          f"this box -- using the configured default instead", file=sys.stderr)
+                else:
+                    model_raw = last_model_raw
     if model_raw is None:
         model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
@@ -965,6 +985,11 @@ def build_session(
             session_catalog = SessionCatalog(
                 registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
                 vision=model_profile.vision, audio=model_profile.audio, family=family, names=frozen_registry.names(),
+                # review finding 30: so a connector `add_connector_tools`
+                # loads LATER (background discovery, or a mid-session
+                # ToolSearch hit) is filtered the same way the warm-cache
+                # loop just above already filtered every OTHER connector.
+                tools_subset=tools_subset, bare_denied_names=bare_denied_names,
             )
             mcp_servers_for_prompt = [
                 {"name": name, "instructions": h.instructions}
@@ -1207,7 +1232,16 @@ def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
         return False
     try:
         from halo_harness.worktree import remove_worktree
-        if not remove_worktree(Path(wt_created_path)):
+        removed, reason = remove_worktree(Path(wt_created_path))
+        if not removed:
+            # review finding 28: a dirty worktree is kept, never force-
+            # removed (its uncommitted edits are this -p -w run's own
+            # output) -- said plainly instead of a silent no-op, so it is
+            # never simply stranded with no indication it is still there.
+            if reason == "dirty":
+                print(f"halo: kept the worktree at {wt_created_path} -- it has uncommitted changes "
+                      f"(remove it yourself with `halo worktree rm {wt_created_path}` once you're "
+                      f"done with it)", file=sys.stderr)
             return False
         session._fire_worktree_removed(wt_created_path)
         return True

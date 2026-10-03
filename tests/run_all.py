@@ -9,6 +9,7 @@ Run:
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -109,6 +110,33 @@ def _ensure_whole_run_state_dir() -> None:
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="run-all-wholerun-home-")))
 
 
+def _ensure_whole_run_test_seams() -> None:
+    """W6b section E: a module that never sets `BRIDGE_TEST_NO_BACKGROUND_
+    NET`/`BRIDGE_TEST_CC_AUTH_STATUS` itself -- most don't; only the ones
+    that deliberately exercise the claude.ai/cc: auth path do, see
+    `tests/helpers/provider_env_defaults.ensure_default_provider_
+    credentials` -- used to leave `claude_auth_status()` and claude.ai
+    connector discovery free to spawn a REAL `claude auth status`/`claude
+    mcp list` against whatever `claude` happens to be on this box's PATH.
+    Found on a WSL box with a logged-in native `claude`: `tests/
+    test_doctor_mcp_config_cli.py::test_mcp_list_no_servers` (a module that
+    never calls `ensure_default_provider_credentials`) took 22s instead of
+    ~1s, because its own `_hermetic_child_env()` forwards a plain copy of
+    `os.environ` to the `halo mcp list` child it spawns, and neither var
+    was set anywhere in that process tree. Setting both here, once, before
+    the FIRST module is even imported, closes this for every module
+    (compliant or not) and every child any of them spawns through a plain
+    `dict(os.environ)` copy -- `setdefault` so a module/test that wants the
+    logged-in path by setting `BRIDGE_TEST_CC_AUTH_STATUS` itself (`tests/
+    test_w5b_connector_cold_start.py::_make_eligible`) is never overridden,
+    and the Kali real-`claude`-binary interop tests (`tests/
+    test_mcp_compat_matrix.py` items 6-8) are unaffected -- the real
+    `claude` binary never reads either var, and nothing those tests check
+    depends on claude.ai connector auth."""
+    os.environ.setdefault("BRIDGE_TEST_NO_BACKGROUND_NET", "1")
+    os.environ.setdefault("BRIDGE_TEST_CC_AUTH_STATUS", json.dumps({"loggedIn": False}))
+
+
 def _real_state_dir_snapshot() -> dict:
     """2.0.0 fixpass finding 2 / the fixpass brief's own safety rule: the
     REAL (literal `Path.home()`, never a test-scoped one) `~/.rolo-claude`
@@ -150,7 +178,7 @@ def _real_sessions_snapshot() -> "set[str]":
     did (H10b report: two fuzz-harness engines and three test files built a
     real in-process Session without ever setting the seam, leaking
     `or:mock/page-forever`/`ant:claude-h9fuzz-ant-*`/etc. sessions into
-    rolo's actual session history) -- this is the suite-level guard against
+    the owner's actual session history) -- this is the suite-level guard against
     that ever happening again unnoticed, independent of any one test's own
     hygiene.
 
@@ -205,6 +233,7 @@ def main() -> int:
     _clear_halo_env_vars()
     _pop_stray_bridge_state_dir()
     _ensure_whole_run_state_dir()
+    _ensure_whole_run_test_seams()
     real_state_before = _real_state_dir_snapshot()
     real_sessions_before = _real_sessions_snapshot()
     module_names = discover_test_modules()

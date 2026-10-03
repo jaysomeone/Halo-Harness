@@ -19,7 +19,7 @@ from urllib.request import urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.fake_oauth_server import FakeOAuthServer
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from halo_harness.mcp import oauth
 
 test, TESTS = new_registry()
@@ -187,6 +187,27 @@ def test_tokens_persist_under_halo_mcp_oauth_never_claude_files(ctx: Ctx):
         ctx.check("clear_tokens reports success", oauth.clear_tokens("my-remote") is True)
         ctx.check("now gone", oauth.load_tokens("my-remote") is None)
         ctx.check("a second clear reports nothing to clear", oauth.clear_tokens("my-remote") is False)
+    _with_scoped_home(_run)
+
+
+@test
+def test_save_tokens_restricts_file_and_directory_permissions(ctx: Ctx):
+    """Release review finding 26: OAuth access/refresh tokens were written
+    with the default umask (0644 on a typical Linux box, under `~/.halo/
+    mcp/oauth/`) -- readable by every other local user on that box.
+    POSIX-only (Windows has no equivalent mode bits; `save_tokens` skips
+    the chmod calls there entirely, same as `providers/config.py::
+    ensure_token`'s own identical convention)."""
+    import stat
+    if os.name == "nt":
+        raise SkipTest("POSIX file permission bits only")
+
+    def _run(home: Path):
+        path = oauth.save_tokens("perm-check", {"access_token": "abc"})
+        file_mode = stat.S_IMODE(path.stat().st_mode)
+        ctx.check(f"token file is 0600, got {oct(file_mode)}", file_mode == 0o600)
+        dir_mode = stat.S_IMODE(path.parent.stat().st_mode)
+        ctx.check(f"oauth dir is 0700, got {oct(dir_mode)}", dir_mode == 0o700)
     _with_scoped_home(_run)
 
 

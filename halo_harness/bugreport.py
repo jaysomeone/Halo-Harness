@@ -238,6 +238,26 @@ def _recent_log_lines(state_dir: Path, n: int = 50) -> list:
         return ["(bridge.log not found)"]
 
 
+def _text_excerpt(content, *, cap: int = 300) -> str:
+    """review finding 33: the real prompt/output text `--include-content`
+    is documented to add -- plain text blocks only (never a tool_use/
+    tool_result's own structured content, already summarised separately
+    above), capped so one huge message can't balloon the report. Goes
+    through the SAME final `redact_for_bugreport` pass every other
+    section of this report does (`build_bugreport_text`'s own last line),
+    never a second, separate redaction here."""
+    parts = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    text = " ".join(parts).strip()
+    if not text:
+        return ""
+    if len(text) > cap:
+        text = text[:cap] + "... (truncated)"
+    return text
+
+
 def _session_events_lines(log, n: int, *, include_content: bool) -> list:
     if log is None:
         return ["Last session events: (no session found)"]
@@ -262,10 +282,17 @@ def _session_events_lines(log, n: int, *, include_content: bool) -> list:
                     status = "error" if block.get("is_error") else "ok"
                     bits.append(f"tool_result={status}")
         lines.append("  " + " ".join(bits))
+        # review finding 33: --include-content is documented as "adding
+        # prompt and output text", but only ever appended tool_result=
+        # ok|error above -- the actual excerpt now appears too.
+        if include_content and kind in ("user", "assistant"):
+            excerpt = _text_excerpt(node.get("content"))
+            if excerpt:
+                lines.append(f"    {excerpt}")
     return lines
 
 
-def _timeline_lines(session) -> list:
+def _timeline_lines(session, *, include_content: bool = False) -> list:
     """W3b item 11: reads the LAST `timeline` meta node straight from
     `session.log` (the same persisted record `halo timeline`/`bugreport_
     timeline_cli.read_timeline_records` already read back from a DIFFERENT
@@ -290,6 +317,13 @@ def _timeline_lines(session) -> list:
     if not timeline_nodes:
         return ["Last turn's timeline: (none recorded yet)"]
     record = timeline_nodes[-1]
+    if not include_content and record.get("steers"):
+        # review finding 33: the user's own real steer TEXT used to be
+        # dumped here unconditionally -- every other piece of real
+        # content in this report already respects --include-content,
+        # this is the one place that didn't.
+        record = {**record, "steers": [f"({len(record['steers'])} steer(s) omitted -- rerun with "
+                                         f"--include-content to include their text)"]}
     return ["Last turn's timeline:", f"  {json.dumps(record, default=str, sort_keys=True)}"]
 
 
@@ -345,7 +379,7 @@ def build_bugreport_text(*, facade=None, session=None, settings=None, state_dir:
     lines.append("")
     lines += _learned_rules_lines(session)
     lines.append("")
-    lines += _timeline_lines(session)
+    lines += _timeline_lines(session, include_content=include_content)
     lines.append("")
     log = getattr(session, "log", None) if session is not None else None
     lines += _session_events_lines(log, last, include_content=include_content)
@@ -369,22 +403,16 @@ def write_bugreport(text: str, state_dir: Path) -> Path:
 def copy_to_clipboard(text: str) -> bool:
     """Best-effort, whatever exists: `clip` on Windows, `pbcopy` on macOS,
     `wl-copy` or `xclip` on Linux; False (caller just shows the path) when
-    none is found."""
-    import shutil
-    if sys.platform == "win32":
-        candidates = [["clip"]]
-    elif sys.platform == "darwin":
-        candidates = [["pbcopy"]]
-    else:
-        candidates = [["wl-copy"], ["xclip", "-selection", "clipboard"]]
-    for argv in candidates:
-        if shutil.which(argv[0]):
-            try:
-                subprocess.run(argv, input=text.encode("utf-8"), timeout=5)
-                return True
-            except (OSError, subprocess.SubprocessError):
-                continue
-    return False
+    none is found.
+
+    Review finding 25: this used to pipe raw UTF-8 bytes straight into
+    `clip` with no BOM/UTF-16LE re-encoding, so Windows' `clip.exe` (which
+    reads stdin as the console's current, possibly lossy, codepage unless
+    told otherwise) mangled any non-ASCII text -- the exact bug part 9
+    already fixed for the TUI's own copy path. Reuses that SAME, already-
+    correct implementation instead of a second, divergent one."""
+    from halo_harness.tui.clipboard import copy_via_external_tool
+    return copy_via_external_tool(text)
 
 
 def _resolve_headless_session_log(cwd: Path, session_arg: "Optional[str]"):

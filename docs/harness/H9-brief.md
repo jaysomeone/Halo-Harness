@@ -5,7 +5,7 @@ primary platform**). Baseline = the H8 commit on master with all suites green on
 every earlier review's findings closed. Do not commit (Fable commits and tags).
 
 ## Read first
-1. `~/.claude/plans/typed-tickling-squirrel.md` → "Closing milestone H9" (rolo's exit criteria),
+1. `~/.claude/plans/typed-tickling-squirrel.md` → "Closing milestone H9" (the owner's exit criteria),
    "Primary use case", "Auto mode = uninterrupted + steering", "Decisions" (no safety heuristics).
 2. Every `docs/harness/review-findings-*.md` (confirm each finding is closed; reopen anything that is
    not) and every `docs/harness/*-brief.md` "Acceptance" section (this is the acceptance table).
@@ -20,7 +20,7 @@ every earlier review's findings closed. Do not commit (Fable commits and tags).
   `uv tool install --editable .` AND `pip install --user -e .` (PEP 668 note), `halo --version`,
   `halo doctor`, `halo models`, `halo mcp list` with that box's real `~/.claude`
   (if the VM has none, create a realistic one from `tests/helpers/fake_home.py` under a temp HOME and
-  ALSO run against the WSL user's real `~/.claude` copy of rolo's Windows config: rsync
+  ALSO run against the WSL user's real `~/.claude` copy of the owner's Windows config: rsync
   `~/.claude` and `.claude.json` into a temp HOME with paths rewritten — the MCP
   commands will fail to start because they point at Windows venvs; that is expected, statuses must be
   honest, nothing may crash).
@@ -34,7 +34,7 @@ every earlier review's findings closed. Do not commit (Fable commits and tags).
 - rg present vs absent parity (WSL has no rg; install `ripgrep` via apt in a second run if possible).
 - Everything must also stay green on Windows (secondary): run the three suites there once at the end.
 
-## Part B — MCP compatibility matrix (rolo's parity promise)
+## Part B — MCP compatibility matrix (the owner's parity promise)
 Build fixtures + live checks proving: user-scope servers from `~/.claude.json` work; a project
 `.mcp.json` server works after approval (and shows `⏸ Pending approval` before); local
 `projects[cwd].mcpServers` (both key forms); `--mcp-config` file + inline JSON; a plugin-provided

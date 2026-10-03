@@ -974,6 +974,22 @@ class Controller:
                 warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
                 self.session.queue_log_write(
                     "snapshot", {"blocks": [{"type": "text", "text": warning}], "snapshot_kind": "at_mention"})
+                # review finding 23 / parity gap: the snapshot above is
+                # model-only context (same "never inlined, separate block"
+                # rule every @mention here follows) -- the commit this
+                # shipped in says the warning itself "warns visibly", which
+                # only ever happened to the MODEL. A live TUI session gets
+                # an actual notice too, the same sink a background sub-
+                # agent's own live asks use (`_event_sink`, set by `run()`;
+                # None for -p/a bare Session, where there is no live UI to
+                # notice at all -- headless.py's own identical call site
+                # prints a stderr line instead for that case).
+                sink = getattr(self.session, "_event_sink", None)
+                if sink is not None:
+                    try:
+                        sink(events.notification(warning))
+                    except Exception:
+                        pass
         except Exception:
             pass
 

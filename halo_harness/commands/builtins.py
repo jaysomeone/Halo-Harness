@@ -541,7 +541,7 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     Before this fix, `/effort <anything>` was pure decoration: the
     registration was `kind=None` (show-only) and this function ignored
     `args` completely, so typing `/effort medium` printed whatever
-    `facade.effort` was snapshotted as at session start (rolo's own report:
+    `facade.effort` was snapshotted as at session start (the owner's own report:
     "every time I change the effort level it only selects xhigh") --
     `facade.effort` is a one-time snapshot (see the class docstring), never
     updated, which is exactly why the live `facade.session` reference is

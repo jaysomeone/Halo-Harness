@@ -65,12 +65,20 @@ class _EnvKeys:
 
     _CRED_VARS = ("OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "BRIDGE_OPENROUTER_BASE_URL",
                   "ANTHROPIC_API_KEY", "DATABRICKS_HOST", "DATABRICKS_TOKEN", "TYPESAFE_API_KEY")
-    _VARS = _CRED_VARS + ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_TEST_OPENROUTER_HOST_OVERRIDE")
+    _VARS = _CRED_VARS + ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_TEST_OPENROUTER_HOST_OVERRIDE",
+                           "BRIDGE_TEST_NO_BACKGROUND_NET")
 
     def __enter__(self):
         self._saved = {k: os.environ.get(k) for k in self._VARS}
         for k in self._CRED_VARS:
             os.environ.pop(k, None)
+        # W6b section E fallout: tests/run_all.py's own whole-run default
+        # (closing a WSL hang in an unrelated module) now leaves this set
+        # ambiently for every module -- this file's own worker tests need
+        # it genuinely ABSENT to exercise "the background worker actually
+        # ran", so it is cleared here rather than left to whatever
+        # happened to be ambient before this scope.
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
         d = Path(tempfile.mkdtemp(prefix="h15-or-balance-env-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
         os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")

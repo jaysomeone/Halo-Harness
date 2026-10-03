@@ -36,6 +36,11 @@ def read_timeline_records(cwd: Path, session_arg: "str | None" = None) -> list:
 
 
 def format_timeline_record(record: dict) -> str:
+    """Parity gap: the hooks/permission-waits/compactions W3b item 11
+    actually recorded (`debug_timeline.TurnTimeline.start_turn`'s own
+    `_current` dict) only ever showed up in `--json`/the bugreport's own
+    `json.dumps(record, ...)` dump -- this text form (`/timeline` and
+    `halo timeline` without `--json`) never rendered any of the three."""
     lines = [f"Turn {record.get('turn')}:"]
     for key in ("request_sent_ms", "headers_ms", "first_reasoning_ms", "first_text_ms",
                 "first_tool_call_ms", "message_end_ms"):
@@ -49,6 +54,20 @@ def format_timeline_record(record: dict) -> str:
         lines.append(f"  steer: {steer!r}")
     for retry in record.get("retries") or []:
         lines.append(f"  error: {retry.get('status')} {retry.get('error')} (+{retry.get('ms')}ms)")
+    for hook in record.get("hooks") or []:
+        lines.append(f"  hook {hook.get('event')}: +{hook.get('ms')}ms ({hook.get('duration_ms')}ms)")
+    for wait in record.get("permission_waits") or []:
+        lines.append(f"  permission_wait: {wait.get('decision')} "
+                     f"(+{wait.get('start_ms')}ms -> +{wait.get('end_ms')}ms)")
+    for compaction in record.get("compactions") or []:
+        bits = [f"compaction {compaction.get('phase')}: +{compaction.get('ms')}ms"]
+        if compaction.get("trigger"):
+            bits.append(f"trigger={compaction.get('trigger')}")
+        if compaction.get("phase") == "done":
+            bits.append(f"{compaction.get('tokens_before')}->{compaction.get('tokens_after')} tokens")
+        elif compaction.get("phase") == "failed":
+            bits.append(f"reason={compaction.get('reason')}")
+        lines.append(f"  {' '.join(bits)}")
     return "\n".join(lines)
 
 

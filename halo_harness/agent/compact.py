@@ -51,7 +51,7 @@ OPENCODE_RESERVED_CAP = 20_000
 # entirely and subtract models.json's raw, often-enormous
 # `max_output_tokens` (OpenRouter's advertised max COMPLETION, which for
 # many DeepSeek/Kimi/GLM/Qwen/MiniMax rows sits close to the whole context
-# window) straight from `context_tokens` -- verified against rolo's real
+# window) straight from `context_tokens` -- verified against the owner's real
 # ~/.halo/models.json: 29 of 105 rows collapsed to a trigger of 0
 # (Kimi K2.5/K2.6/K2.7-code, Qwen3-Coder-next, Qwen3.5-397B, MiniMax-M2)
 # and 21 more sat under 40k, so a two-step turn triggered TWO full
@@ -202,21 +202,46 @@ def _truthy_env(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() not in ("", "0", "false", "no")
 
 
-def resolve_knobs(settings, env: Optional[dict] = None) -> CompactionKnobs:
+def _parse_autocompact_tokens(raw: Optional[str]) -> Optional[int]:
+    """`--autocompact <auto|tokens>` -- "auto" (or anything non-numeric)
+    means "no override from the flag", a token count (an optional
+    trailing k/K means thousands) returns the parsed count. `None` either
+    way means `resolve_knobs` falls through to its next-lower-precedence
+    source instead, never that this disables compaction outright."""
+    if not raw or raw.strip().lower() == "auto":
+        return None
+    raw = raw.strip()
+    try:
+        return int(raw[:-1]) * 1000 if raw[-1:].lower() == "k" and raw[:-1].isdigit() else int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_knobs(settings, env: Optional[dict] = None, *, cli_autocompact: Optional[str] = None) -> CompactionKnobs:
     """`env` defaults to `os.environ`; a caller resolving from
     `settings.effective_env` (must-do 6's real precedence chain) passes that
-    dict explicitly instead. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` "wins over
-    everything" (D-CFG) -- checked before `settings.autoCompactWindow`."""
+    dict explicitly instead.
+
+    Review finding 34: `cli_autocompact` (the raw `--autocompact` CLI
+    value, `cli_flags["autocompact"]`) now wins over EVERYTHING, checked
+    before `CLAUDE_CODE_AUTO_COMPACT_WINDOW` -- that env var used to be
+    written by `cli.py` itself (`os.environ["CLAUDE_CODE_AUTO_COMPACT_
+    WINDOW"] = ...`), the LOWEST (shell) layer of `effective_env`, so a
+    settings.json `env` block setting the SAME name silently outranked
+    the explicit flag the user just typed. `CLAUDE_CODE_AUTO_COMPACT_
+    WINDOW` itself still "wins over everything else" (D-CFG) -- checked
+    before `settings.autoCompactWindow`, exactly as before."""
     env = env if env is not None else os.environ
     disabled = _truthy_env(env.get("DISABLE_COMPACT"))
 
-    window_override = None
-    raw_window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
-    if raw_window is not None:
-        try:
-            window_override = int(raw_window)
-        except (TypeError, ValueError):
-            window_override = None
+    window_override = _parse_autocompact_tokens(cli_autocompact)
+    if window_override is None:
+        raw_window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        if raw_window is not None:
+            try:
+                window_override = int(raw_window)
+            except (TypeError, ValueError):
+                window_override = None
     if window_override is None and settings is not None:
         setting_window = getattr(settings, "auto_compact_window", None)
         if isinstance(setting_window, int):

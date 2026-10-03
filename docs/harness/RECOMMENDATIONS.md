@@ -79,7 +79,7 @@ sessions were removed:
   no live volume yet. Run each for a week of real work, then set `edit_format`, output budgets and
   effort per family from the telemetry rather than from the papers. Temperature stays untouched
   for Kimi and DeepSeek thinking modes, where the API ignores or rejects it.
-- **Provider pins**: rolo's OpenRouter account settings exclude DeepSeek's first-party endpoint,
+- **Provider pins**: the owner's OpenRouter account settings exclude DeepSeek's first-party endpoint,
   so the pins keep fallbacks enabled; `doctor` should say which provider actually answered last.
 - **Model-level behaviour varies**: DeepSeek V4.1 Flash declined to echo a token-shaped string
   during acceptance. The harness adds no refusal logic of its own; pick the model for the task.

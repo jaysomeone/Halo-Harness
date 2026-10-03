@@ -1131,7 +1131,7 @@ class BridgeApp(App):
         card = PermissionCard(request_id=request_id, summary=f"Bash({command})",
                                reason=getattr(decision, "reason", "") or "runs now, outside the model turn (! prefix)",
                                suggested_rule=getattr(decision, "suggested_rule", None), on_decide=on_decide,
-                               on_resolved_externally=on_decide)
+                               on_resolved_externally=on_decide, input_data={"command": command})
         # Halo 2.0.1 W3a (finding 16 / PendingDock): same queued path every
         # other permission/question/plan ask goes through now.
         await self.enqueue_pending_card(card, marker_text=f"⏸ permission needed for Bash({command}), see below")
@@ -1681,7 +1681,7 @@ class BridgeApp(App):
         blocked in `Session._await_permission_decision` is untouched by it,
         so without this it sits there forever even once `auto`/
         `bypassPermissions` would have allowed it. Root-cause match for
-        rolo's report: he pressed Shift+Tab to `auto`, the status bar
+        the owner's report: he pressed Shift+Tab to `auto`, the status bar
         updated, but the turn never continued -- the pending ask underneath
         was never re-decided.
 
@@ -1700,15 +1700,42 @@ class BridgeApp(App):
         whatever card was ACTUALLY pending by then instead)."""
         from halo_harness.tui.widgets.cards import PermissionCard
         card = self.pending_card
-        if not isinstance(card, PermissionCard) or card.done or card.awaiting_feedback:
+        if isinstance(card, PermissionCard) and not card.done and not card.awaiting_feedback:
+            action = self.controller.reevaluate_pending_permission(card.request_id)
+            if action in ("allow", "deny"):  # else still "ask" under the new mode -- leave it up
+                card.resolve_externally(action)
+                if self._borrowing_card is card:
+                    self._borrowing_card = None
+                self.clear_pending_card()
+        # review finding 21: the ACTIVE card is handled above; anything still
+        # parked in `_pending_queue` (Halo 2.0.1 W3a's PendingDock FIFO -- a
+        # second, third, ... ask that arrived while an earlier one was still
+        # up) used to keep asking under the new mode no matter how many of
+        # them auto/bypassPermissions now decides outright -- each had to be
+        # answered by hand regardless of the mode switch that just resolved
+        # the one on top. Re-evaluate every queued card the same way,
+        # dropping (and resolving) the ones the new mode actually decides; a
+        # card still "ask" is left exactly where it was, in the same order.
+        if not self._pending_queue:
             return
-        action = self.controller.reevaluate_pending_permission(card.request_id)
-        if action not in ("allow", "deny"):
-            return  # still "ask" under the new mode (or nothing pending any more) -- leave it up
-        card.resolve_externally(action)
-        if self._borrowing_card is card:
-            self._borrowing_card = None
-        self.clear_pending_card()
+        still_queued = []
+        dropped_any = False
+        for queued in self._pending_queue:
+            if not isinstance(queued, PermissionCard) or queued.done or queued.awaiting_feedback:
+                still_queued.append(queued)
+                continue
+            action = self.controller.reevaluate_pending_permission(queued.request_id)
+            if action not in ("allow", "deny"):
+                still_queued.append(queued)
+                continue
+            queued.resolve_externally(action)
+            marker = self._pending_markers.pop(id(queued), None)
+            if marker is not None:
+                marker.set_text(getattr(queued, "decision_line", None) or "(resolved)")
+            dropped_any = True
+        if dropped_any:
+            self._pending_queue = still_queued
+            self._refresh_needs_you_tag()
 
     def action_scroll_transcript_end(self) -> None:
         """1.0.1 hotfix 16: End/Ctrl+End (bound above) and a click on the
@@ -1931,9 +1958,9 @@ class BridgeApp(App):
             else:
                 self.controller.interrupt()
         if quit_on_double:
-            # W4c item 4: the exact wording rolo asked for -- "I worry that
-            # doing ctrl c in a windows operating system will close the
-            # terminal" -- Ctrl+C here only ever closes HALO, never the
+            # W4c item 4: the exact wording the owner asked for -- "I worry
+            # that doing ctrl c in a windows operating system will close
+            # the terminal" -- Ctrl+C here only ever closes HALO, never the
             # terminal it's running in.
             self.notify("Press Ctrl+C again to exit halo (your terminal stays open)",
                         timeout=DOUBLE_CTRL_C_WINDOW_S)

@@ -411,22 +411,14 @@ def main(argv: Optional[list] = None) -> int:
     if _flag_was_set(getattr(args, "debug", None)) or getattr(args, "debug_file", None):
         _enable_debug_logging(getattr(args, "debug_file", None))
 
-    # W4a: `--autocompact <auto|tokens>` -- "auto" (or anything non-numeric)
-    # leaves the existing default alone; a token count reuses the SAME
-    # `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var `agent/compact.resolve_knobs`
-    # already reads (settings.effective_env falls back to real os.environ,
-    # so a real process-env var set here reaches it either way, TUI or -p)
-    # -- no new compaction-trigger plumbing needed at all.
-    autocompact_raw = getattr(args, "autocompact", None)
-    if autocompact_raw and autocompact_raw.strip().lower() != "auto":
-        try:
-            int(autocompact_raw.rstrip("kK")) if autocompact_raw.rstrip("kK").isdigit() else int(autocompact_raw)
-        except ValueError:
-            pass
-        else:
-            raw = autocompact_raw.strip()
-            tokens = int(raw[:-1]) * 1000 if raw[-1:].lower() == "k" else int(raw)
-            os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(tokens)
+    # review finding 34: `--autocompact <auto|tokens>` used to write
+    # straight into `os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]`, the
+    # LOWEST (shell) layer of `settings.effective_env` -- a settings.json
+    # `env` block setting the SAME name silently outranked this explicit
+    # flag. The raw value already reaches `cli_flags["autocompact"]`
+    # (`cli_flags_from_args`) unconditionally; `agent/compact.resolve_
+    # knobs` now parses it itself and gives it top precedence, so nothing
+    # needs doing here at all any more.
 
     if getattr(args, "role", None):
         # V2c (H15): validated ONCE, here, before either run_print_mode or

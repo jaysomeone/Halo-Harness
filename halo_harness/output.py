@@ -647,4 +647,12 @@ class StreamJsonSink:
             prompt_suggestion=self._prompt_suggestion,
         )
         self._write(result)
+        # review finding 31: neither was ever reset at the end of a turn --
+        # a LATER turn whose own prompt-suggestion call failed (or simply
+        # never ran yet) re-emitted the PREVIOUS turn's suggestion, and
+        # `duration_ms` (meant to be per-turn, see its own field docstring)
+        # kept accumulating across every turn in this multi-turn
+        # stream-json loop instead of measuring just this one.
+        self._prompt_suggestion = None
+        self._start_monotonic = time.monotonic()
         return 1 if is_error else 0

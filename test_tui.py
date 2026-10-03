@@ -498,7 +498,7 @@ def test_permission_card_deny_with_feedback_message(ctx: Ctx):
 def test_free_text_while_permission_card_pending_answers_it_directly(ctx: Ctx):
     """Before this fix, typing feedback WITHOUT first pressing "4" was a
     silent steer on the turn underneath -- the pending ask itself was never
-    answered, matching rolo's report ("I am unable to type anything and get
+    answered, matching the owner's report ("I am unable to type anything and get
     a response") once the card had scrolled out of view."""
     async def body():
         fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
@@ -782,6 +782,54 @@ def test_shift_tab_while_awaiting_feedback_does_not_hijack_the_borrowed_input(ct
             ctx.check(f"the feedback was delivered normally, got {fake.permission_replies}",
                       fake.permission_replies == [("tu1", {"action": "deny", "reason": "", "rule": None,
                                                              "message": "use a safer command"})])
+    asyncio.run(body())
+
+
+@test
+def test_shift_tab_to_auto_also_resolves_a_queued_second_card(ctx: Ctx):
+    """Release review finding 21: `_reevaluate_pending_permission_for_mode`
+    only ever re-decided `app.pending_card` -- anything already parked in
+    `app._pending_queue` (Halo 2.0.1 W3a's PendingDock FIFO, finding 16)
+    kept asking under the new mode regardless, and had to be answered by
+    hand even after a Shift+Tab switch that auto/bypassPermissions should
+    have resolved outright. The ACTIVE card here carries an explicit ask:
+    rule (via still_ask_request_ids, same stand-in finding 4's own test
+    above uses) so it stays pending and untouched; the QUEUED one behind
+    it has no such rule and must be dropped/resolved the moment the mode
+    reaches auto."""
+    async def body():
+        fake = FakeController(turns=_two_permission_asks_turn())
+        fake.still_ask_request_ids.add("tu1")
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do two things")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=10)
+
+            active_card = app.pending_card
+            ctx.check("the FIRST ask is active", "tmp/x" in (getattr(active_card, "summary", "") or ""))
+            ctx.check("exactly one card queued behind it", len(app._pending_queue) == 1)
+            queued_card = app._pending_queue[0]
+            ctx.check("the queued card is the SECOND ask", "tmp/y" in queued_card.summary)
+
+            for _ in range(3):
+                await pilot.press("shift+tab")
+                await pilot.pause(0.02)
+                if fake.permission_mode == "auto":
+                    break
+            ctx.check(f"mode reached auto, got {fake.permission_mode!r}", fake.permission_mode == "auto")
+
+            ctx.check("the ACTIVE card (explicit ask: rule) is untouched: still pending, not done",
+                      app.pending_card is active_card and not active_card.done)
+            ctx.check("the QUEUED card was dropped from the queue", app._pending_queue == [])
+            ctx.check(f"the queued card was actually resolved (done), got done={queued_card.done}",
+                      queued_card.done is True)
+            ctx.check(f"tu2 was answered through the real reevaluate path, got {fake.permission_replies}",
+                      ("tu2", {"action": "allow", "reason": "", "rule": None, "message": ""})
+                      in fake.permission_replies)
+            ctx.check(f"needs-you count dropped from 2 to 1 (one resolved, one still pending), got "
+                      f"{app.status_bar.needs_you_count}", app.status_bar.needs_you_count == 1)
     asyncio.run(body())
 
 
@@ -5794,6 +5842,39 @@ def test_tip_needs_filtering_hides_a_cc_tip_when_cc_is_not_enabled(ctx: Ctx):
 
 
 @test
+def test_esc_ctrl_c_tip_matches_the_real_quit_on_double_ctrl_c_setting(ctx: Ctx):
+    """Parity gap: "Esc interrupts the current step; Ctrl+C twice quits"
+    was wrong when `quit_on_double_ctrl_c: false` (tui/app.py's own
+    on_key handler: Ctrl+C never quits at all then, double-pressed or
+    not) -- the right one of the two gated variants must be the one
+    `detect_enabled_needs`'s own "double_ctrl_c"/"single_ctrl_c" flag
+    selects."""
+    from halo_harness.theme import get_config_value, set_config_value
+    from halo_harness.tui import tips as tips_mod
+
+    double_tip = next(t for t in tips_mod.TIPS if "double_ctrl_c" in t.needs)
+    single_tip = next(t for t in tips_mod.TIPS if "single_ctrl_c" in t.needs)
+    old = get_config_value("quit_on_double_ctrl_c", True)
+    try:
+        set_config_value("quit_on_double_ctrl_c", True)
+        needs_true = tips_mod.detect_enabled_needs()
+        ctx.check(f"double_ctrl_c is in the needs set, got {needs_true}", "double_ctrl_c" in needs_true)
+        ctx.check(f"single_ctrl_c is NOT, got {needs_true}", "single_ctrl_c" not in needs_true)
+        ctx.check("only the double-press tip is shown",
+                  tips_mod.applicable_tips([double_tip, single_tip], needs_true) == [double_tip])
+
+        set_config_value("quit_on_double_ctrl_c", False)
+        needs_false = tips_mod.detect_enabled_needs()
+        ctx.check(f"single_ctrl_c is in the needs set, got {needs_false}", "single_ctrl_c" in needs_false)
+        ctx.check(f"double_ctrl_c is NOT, got {needs_false}", "double_ctrl_c" not in needs_false)
+        ctx.check("only the never-quits tip is shown, and names /exit, Ctrl+D, Ctrl+Q",
+                  tips_mod.applicable_tips([double_tip, single_tip], needs_false) == [single_tip]
+                  and "/exit" in single_tip.text and "Ctrl+D" in single_tip.text and "Ctrl+Q" in single_tip.text)
+    finally:
+        set_config_value("quit_on_double_ctrl_c", old)
+
+
+@test
 def test_format_tip_placeholder_fits_the_width_minus_6_with_an_ellipsis(ctx: Ctx):
     from halo_harness.tui import tips as tips_mod
     fitted = tips_mod.format_tip_placeholder("x" * 50, 30)
@@ -6195,7 +6276,7 @@ def test_svg_snapshots_phase_line_and_tips_placeholder(ctx: Ctx):
 
 
 # ============================================================================
-# W2c item 1: prompt history recall -- rolo live, "using the up arrow ...
+# W2c item 1: prompt history recall -- a user report, live, "using the up arrow ...
 # does not bring up the last message to edit if something happened". The
 # mixed-ms/seconds-timestamp sort fix itself lives in tests/test_history.py
 # (pure, no textual); these are the TUI-layer pieces: the prefix filter,
@@ -6307,7 +6388,7 @@ def test_down_past_the_newest_restores_the_unsent_draft(ctx: Ctx):
 
 @test
 def test_submit_then_up_recalls_the_exact_prompt_just_sent(ctx: Ctx):
-    """End-to-end: rolo's own report -- submit a real prompt through the
+    """End-to-end: the owner's own report -- submit a real prompt through the
     pilot's own keyboard path (never history.append_history_entry called
     directly), then Up must hand back that EXACT text."""
     tmp, restore = _scoped_history_home()
@@ -6900,6 +6981,31 @@ def test_pending_dock_o_opens_a_pager_with_the_full_content(ctx: Ctx):
 
 
 @test
+def test_pending_dock_o_shows_the_full_tool_input_not_just_the_reason(ctx: Ctx):
+    """Parity gap: PendingDock's `o` pager used to show only the card's
+    summary and reason (a short, one-line rationale) for a permission
+    card, and "(no further detail)" for a question card -- never the
+    full tool input (the real command/file path/etc the model actually
+    asked to run, or the real question(s)/options)."""
+    async def body():
+        fake = FakeController(turns=_permission_turn("Bash(rm:*)"))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "do something")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            await pilot.press("o")
+            await pilot.pause(0.1)
+            from halo_harness.tui.widgets.cards import PagerScreen
+            ctx.check(f"'o' opened the pager, got {type(app.screen).__name__}", isinstance(app.screen, PagerScreen))
+            full_text = app.screen.copy_text()
+            ctx.check(f"the full tool input (the real command) is shown, got {full_text!r}",
+                      "rm -rf /tmp/x" in full_text)
+    asyncio.run(body())
+
+
+@test
 def test_svg_snapshot_pending_dock_with_two_queued_asks(ctx: Ctx):
     async def body():
         fake = FakeController(turns=_two_permission_asks_turn())
@@ -6925,7 +7031,7 @@ def test_svg_snapshot_pending_dock_with_two_queued_asks(ctx: Ctx):
 
 
 # ============================================================================
-# 2.0.1 W4c: clipboard quality and Ctrl+C reassurance (rolo live, 2026-10-02
+# 2.0.1 W4c: clipboard quality and Ctrl+C reassurance (a user report, live, 2026-10-02
 # ~03:30). Item 1: copy the SOURCE text, not screen cells -- each widget's
 # own `copy_text()`, never `screen.get_selected_text()`'s cell-by-cell walk.
 # Glyph/border stripping and "soft-wrap joining" are covered as PURE checks

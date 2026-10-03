@@ -155,21 +155,32 @@ def test_environment_flag_reaches_the_bash_tool_env(ctx: Ctx):
 
 
 @test
-def test_autocompact_sets_the_auto_compact_window_env_var(ctx: Ctx):
-    """In-process (no subprocess/network needed): `--autocompact <tokens>`
-    is handled entirely in `cli.py main()`, before either run_print_mode or
-    the TUI ever starts -- `--demo -p` is a cheap way to drive argument
-    parsing through to that point without a real model call."""
-    from halo_harness.cli import main
+def test_autocompact_reaches_cli_flags_and_never_touches_the_env_var(ctx: Ctx):
+    """Release review finding 34: `--autocompact <tokens>` used to write
+    straight into `os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]`, the
+    LOWEST (shell) layer of `settings.effective_env` -- a settings.json
+    `env` block setting the SAME name silently outranked this explicit
+    flag. It now flows through `cli_flags["autocompact"]` only (see
+    `agent.compact.resolve_knobs`'s own precedence test in
+    test_compact.py); `cli.py` must never set the env var at all any
+    more, whatever the value. In-process (no subprocess/network needed):
+    handled entirely in `cli.py main()` before either run_print_mode or
+    the TUI starts -- `--demo -p` drives argument parsing through to that
+    point without a real model call."""
+    from halo_harness.cli import _build_parser, main
+    from halo_harness.cli_flags import cli_flags_from_args
+
+    args = _build_parser().parse_args(["--autocompact", "123000", "--demo", "-p"])
+    ctx.check(f"the raw value reaches cli_flags unchanged, got {cli_flags_from_args(args).get('autocompact')!r}",
+              cli_flags_from_args(args).get("autocompact") == "123000")
+
     old = os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
     try:
         main(["--autocompact", "123000", "--demo", "-p"])
-        ctx.check(f"env var set from --autocompact, got {os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')!r}",
-                  os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "123000")
+        ctx.check("cli.py never sets the env var any more, whatever the value",
+                  "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in os.environ)
     finally:
-        if old is None:
-            os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
-        else:
+        if old is not None:
             os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = old
 
 

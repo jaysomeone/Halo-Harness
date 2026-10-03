@@ -146,7 +146,7 @@ def test_build_entry_http_shape_with_headers(ctx: Ctx):
 
 @test
 def test_claude_json_add_remove_byte_identical_on_non_ascii_no_trailing_newline_fixture(ctx: Ctx):
-    """finding 8, verified against rolo's real 66837-byte ~/.claude.json
+    """finding 8, verified against the owner's real 66837-byte ~/.claude.json
     (non-ASCII text, no trailing newline): ensure_ascii=False, the
     source's own trailing-newline state is reproduced, and add+remove of
     the SAME entry restores the file byte for byte (byte compare, not

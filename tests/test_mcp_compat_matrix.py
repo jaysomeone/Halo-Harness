@@ -1,5 +1,5 @@
 """tests.test_mcp_compat_matrix -- H9 Part B: the MCP compatibility matrix
-(rolo's parity promise: "every server configured for Claude Code must work
+(the owner's parity promise: "every server configured for Claude Code must work
 unchanged in halo"). One section per numbered item in the H9 brief's
 Part B; each proves that item with a REAL connection through tests/helpers/
 fake_mcp_server.py wherever practical, the real `claude` binary for items
@@ -236,10 +236,10 @@ def test_item2_dot_mcp_json_pending_before_and_connects_after_approval(ctx: Ctx)
         # in-process calls below touch mcp_setup.{load,record}_mcp_approval,
         # which resolve bridge_home() from os.environ -- isolated the same
         # way the subprocess calls above were, via a save/restore of THIS
-        # process's own env (never rolo's real ~/.halo/mcp-
+        # process's own env (never the owner's real ~/.halo/mcp-
         # approvals.json). Discovered the hard way: an earlier draft of
         # this test skipped this and wrote a real approval entry into
-        # rolo's own state file.
+        # the owner's own state file.
         old_home = os.environ.get("BRIDGE_TEST_HOME")
         os.environ["BRIDGE_TEST_HOME"] = str(home)
         try:
@@ -275,7 +275,7 @@ def test_item2_dot_mcp_json_pending_before_and_connects_after_approval(ctx: Ctx)
 
 
 # ============================================================================
-# Item 3 -- local projects[cwd].mcpServers, BOTH key forms rolo's real file
+# Item 3 -- local projects[cwd].mcpServers, BOTH key forms the owner's real file
 # uses (Windows backslash key AND forward-slash key for the SAME dir) as
 # separate dict keys. build_fake_home() already builds exactly this shape
 # (finding B's own fixture) -- first test proves it resolves/merges as-is,
@@ -471,7 +471,7 @@ def test_item5_v2_manifest_plugin_server_live_connect_and_naming(ctx: Ctx):
 
 # ============================================================================
 # Items 6/7/8 -- cross-binary interop with the REAL `claude` binary, against
-# a temp CLAUDE_CONFIG_DIR (never rolo's real ~/.claude.json). Skipped
+# a temp CLAUDE_CONFIG_DIR (never the owner's real ~/.claude.json). Skipped
 # (SkipTest, never FAIL) if `claude` isn't on PATH. Manually verified once
 # by hand before writing this (see the report) -- these encode that exact,
 # fully-working round trip as automated tests.
@@ -1030,7 +1030,7 @@ def test_item11_reconnect_picks_up_a_brand_new_server_name(ctx: Ctx):
 # ============================================================================
 # Item 12 -- http and sse transports via a REAL fake server (never a fake
 # server before this file: http_sse.py's own docstring says "none of
-# rolo's real 15 configured servers use http/sse", and the only existing
+# the owner's real 15 configured servers use http/sse", and the only existing
 # coverage in test_mcp_manager.py monkeypatches connect_http/connect_sse
 # directly). BUG (c), FIXED: file:line halo_harness/mcp/http_sse.py:96-97
 # (connect_http) unpacked 3 values from streamable_http_client(...)'s

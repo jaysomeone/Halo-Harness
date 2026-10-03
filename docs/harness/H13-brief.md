@@ -69,7 +69,7 @@ addresses, usernames or key fragments in anything you add (docs, tests, fixtures
 Linux); tests leave /tmp unchanged and never write the real sessions dir.
 
 ## Acceptance (Fable re-runs)
-On this box with rolo's real config: a fresh session starts with "MCP 0/N" and no server
+On this box with the owner's real config: a fresh session starts with "MCP 0/N" and no server
 processes until a tool is used, then "MCP 1/N"; `/mcp` shows cached servers; a DeepSeek session
 calls an MCP tool of a lazy server and it connects and answers; a Playwright screenshot renders
 inline in kitty/WezTerm (or a pilot proves the encoder path) and captions elsewhere; `/resume`

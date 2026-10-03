@@ -73,6 +73,109 @@ def test_cmd_worktree_rm_removes_a_real_worktree_and_fires_the_hook(ctx: Ctx):
 
 
 @test
+def test_create_worktree_with_no_git_on_path_returns_a_clean_error_never_raises(ctx: Ctx):
+    """Release review finding 27: `FileNotFoundError` used to escape
+    `create_worktree` as a bare traceback when `git` isn't on PATH at
+    all, instead of this module's own documented `(None, reason)`
+    contract. Same repro technique the review itself verified with on
+    this host."""
+    from halo_harness.worktree import create_worktree
+    old_path = os.environ.get("PATH")
+    os.environ["PATH"] = ""
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="w6b-no-git-"))
+        path, err = create_worktree(tmp, "x", state_dir=tmp)
+        ctx.check(f"no worktree created, never raises, got path={path}", path is None)
+        ctx.check(f"a clean, specific error message naming git, got {err!r}",
+                  err is not None and "git" in err.lower())
+    finally:
+        if old_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = old_path
+
+
+@test
+def test_git_helper_never_raises_on_a_subprocess_timeout(ctx: Ctx):
+    """Release review finding 27: `subprocess.TimeoutExpired` (a hung git
+    process) must route through the same non-raising contract, for every
+    caller of the shared `_git` helper (`repo_root`, `create_worktree`,
+    `remove_worktree` alike)."""
+    import subprocess
+    import halo_harness.worktree as worktree_mod
+
+    def _fake_run(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    old_run = worktree_mod.subprocess.run
+    worktree_mod.subprocess.run = _fake_run
+    try:
+        result = worktree_mod._git(["status"], Path.cwd())
+        ctx.check(f"never raises, a synthetic failed result instead, got {result}", result.returncode != 0)
+        ctx.check(f"root_root() built on top of it degrades to None, never raises",
+                  worktree_mod.repo_root(Path.cwd()) is None)
+    finally:
+        worktree_mod.subprocess.run = old_run
+
+
+@test
+def test_cmd_worktree_rm_refuses_a_dirty_worktree_and_keeps_it(ctx: Ctx):
+    """Release review finding 28: `git worktree remove --force` used to
+    discard a session's own uncommitted edits on exit -- a dirty worktree
+    must now be kept, reported, never force-removed."""
+    import io
+    import contextlib
+    import halo_harness.worktree_cli as worktree_cli_mod
+
+    repo, wt_path = _real_worktree()
+    (wt_path / "uncommitted.txt").write_text("real work, not yet committed\n", encoding="utf-8")
+
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        code = worktree_cli_mod.cmd_worktree(["rm", str(wt_path)])
+    ctx.check(f"exit 1 (kept, not removed), got {code}", code == 1)
+    ctx.check("the worktree directory still exists", wt_path.is_dir())
+    ctx.check("the uncommitted file itself survives", (wt_path / "uncommitted.txt").exists())
+    ctx.check(f"stderr explains it was kept for uncommitted changes, got {captured.getvalue()!r}",
+              "uncommitted changes" in captured.getvalue())
+
+
+@test
+def test_cmd_worktree_rm_deletes_the_branch_after_a_successful_removal(ctx: Ctx):
+    """Release review finding 28: `halo-worktree-*` used to be left behind
+    forever after every successful removal."""
+    import subprocess as sp
+    import halo_harness.worktree_cli as worktree_cli_mod
+
+    repo, wt_path = _real_worktree()
+    branch = sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(wt_path),
+                     capture_output=True, text=True, check=True).stdout.strip()
+    ctx.check(f"fixture sanity: it's a real halo-worktree-* branch, got {branch!r}",
+              branch.startswith("halo-worktree-"))
+
+    code = worktree_cli_mod.cmd_worktree(["rm", str(wt_path)])
+    ctx.check(f"exit 0 on a successful (clean) removal, got {code}", code == 0)
+
+    listed = sp.run(["git", "branch", "--list", branch], cwd=str(repo), capture_output=True, text=True)
+    ctx.check(f"the branch is gone too, got {listed.stdout!r}", listed.stdout.strip() == "")
+
+
+@test
+def test_maybe_remove_worktree_on_exit_keeps_a_dirty_worktree_and_reports_false(ctx: Ctx):
+    from halo_harness.headless import maybe_remove_worktree_on_exit
+    repo, wt_path = _real_worktree()
+    (wt_path / "uncommitted.txt").write_text("real work\n", encoding="utf-8")
+    session = _FakeSession()
+
+    def _run():
+        return maybe_remove_worktree_on_exit({"_worktree_created_path": str(wt_path)}, session)
+
+    did = _with_config(True, _run)
+    ctx.check("dirty -> not removed even though opted in", did is False and session.removed_calls == [])
+    ctx.check("the worktree (and its uncommitted file) still exists", (wt_path / "uncommitted.txt").exists())
+
+
+@test
 def test_fire_worktree_removed_builds_a_hook_runner_and_fires_when_configured(ctx: Ctx):
     """The actual hook-firing glue (`worktree_cli._fire_worktree_removed`),
     isolated from the git mechanics above: a `Settings` with a real

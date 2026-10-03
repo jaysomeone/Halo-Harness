@@ -241,6 +241,23 @@ def ensure_discovered_synchronously_if_cold(*, timeout: float = 20.0) -> bool:
     return True
 
 
+def already_discovered_or_warm() -> bool:
+    """Review finding 30: a cheap, no-subprocess check for a caller that
+    wants to skip STRAIGHT PAST `prime_auth_cache_if_stale()` (a real
+    `claude auth status` spawn, up to 10s, once the 30s auth TTL has
+    lapsed) when there is nothing it could usefully change -- either the
+    cache already has something real (the common case, once discovery
+    has run even once this process), or this session already ran, or is
+    running, its own discovery round (the same once-per-session flag
+    `ensure_discovered_synchronously_if_cold`/`ensure_discovered_in_
+    background` share)."""
+    connectors, _fetched_at = load_cache()
+    if connectors:
+        return True
+    with _session_lock:
+        return _session_discovered
+
+
 def refresh_now(*, timeout: float = 20.0) -> "list[ConnectorInfo]":
     """Synchronous, forced refresh (`halo mcp list --refresh`, `/mcp`
     reconnect) -- ignores the once-per-session gate and any existing cache."""

@@ -160,6 +160,39 @@ def test_finding_2_reasoning_details_merge_by_type_and_index(ctx: Ctx):
 
 
 @test
+def test_review_finding_32_one_chunk_with_both_reasoning_shapes_counts_once(ctx: Ctx):
+    """Release review finding 32: `_note_reasoning_chunk` counted once per
+    REASONING FIELD, not once per CHUNK -- OpenRouter's normal chunk shape
+    carries BOTH `reasoning` and `reasoning_details` together, so a single
+    lump reply counted as two chunks, inflating `reasoning_streamed`'s
+    ">1 means streamed incrementally" signal (the metric `stats --models`'
+    reasoning% exists to answer)."""
+    sm = OpenAIStreamToAnthropic("m", 10, capture_reasoning=True)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {
+        "reasoning": "thinking",
+        "reasoning_details": [{"type": "reasoning.text", "index": 0, "text": "thinking"}],
+    }}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"content": "ok"}}]})
+    sm.on_eof()
+    ctx.check(f"ONE wire chunk -> reasoning_chunk_count == 1, got {sm.reasoning_chunk_count}",
+              sm.reasoning_chunk_count == 1)
+
+
+@test
+def test_review_finding_32_two_real_chunks_still_count_as_two(ctx: Ctx):
+    """The fix must not break the genuinely-incremental case -- two
+    SEPARATE wire chunks, each carrying new reasoning content, still each
+    count."""
+    sm = OpenAIStreamToAnthropic("m", 10, capture_reasoning=True)
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"reasoning": "thinking "}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"reasoning": "more"}}]})
+    sm.feed_chunk({"choices": [{"index": 0, "delta": {"content": "ok"}}]})
+    sm.on_eof()
+    ctx.check(f"two real chunks -> reasoning_chunk_count == 2, got {sm.reasoning_chunk_count}",
+              sm.reasoning_chunk_count == 2)
+
+
+@test
 def test_finding_11_explicit_null_name_and_arguments_handled(ctx: Ctx):
     """finding 16 required test #7 / finding 11 rules 1-2: explicit-null
     continuation deltas must never overwrite a captured name, and must

@@ -15,7 +15,7 @@ guidance line per tool (name-sorted, from the live registry) -> a short
 per-model-family tool-notation reminder -> an MCP server instructions
 placeholder (real list in H3) -> "Your working directory is {cwd}."
 
-NO safety/refusal/"cyber"/"sensitive" language anywhere -- rolo's "no cyber
+NO safety/refusal/"cyber"/"sensitive" language anywhere -- the owner's "no cyber
 blocks" decision. Covered by tests/test_prompt.py's regex assertion.
 """
 

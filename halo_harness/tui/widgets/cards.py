@@ -317,12 +317,19 @@ class PermissionCard(Static, can_focus=True):
 
     def __init__(self, *, request_id: str, summary: str, reason: str,
                  suggested_rule: Optional[str], on_decide: Callable,
-                 on_resolved_externally: Optional[Callable] = None) -> None:
+                 on_resolved_externally: Optional[Callable] = None,
+                 input_data: Optional[dict] = None) -> None:
         super().__init__("", markup=False, classes="permission-card")
         self.request_id = request_id
         self.summary = summary
         self.reason = reason
         self.suggested_rule = suggested_rule
+        # parity gap: PendingDock's own `o` pager used to show only
+        # `reason` (a short, one-line rationale), never the full tool
+        # call it's actually asking about -- kept here so the pager can
+        # render it in full (`input_data=None`, the default, for any
+        # caller that predates this -- `_refresh` below never needed it).
+        self.input_data = input_data
         self._on_decide = on_decide
         # H15 Part D2.3: for a card resolved OUTSIDE the model loop (the
         # `!cmd` inline-shell ask has no worker thread of its own to wake
@@ -467,6 +474,10 @@ class QuestionCard(Static, can_focus=True):
         super().__init__(classes="question-card")
         self.request_id = request_id
         self._on_answer = on_answer
+        # parity gap: PendingDock's own `o` pager showed "(no further
+        # detail)" for a question card -- the raw input (every question
+        # and its options) is kept so the pager can render it in full.
+        self.input_data = input_data
         questions = input_data.get("questions") if isinstance(input_data.get("questions"), list) else None
         if questions:
             self.questions = [(q.get("question", "?"), _option_texts(q.get("options"))) for q in questions

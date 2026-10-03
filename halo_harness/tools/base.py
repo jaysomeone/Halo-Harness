@@ -4,7 +4,7 @@ AskUserQuestion/Skill on top of this same small shape.
 
 `is_read_only`/`is_destructive` are INFORMATIONAL ONLY (used for the
 read-only concurrency pool in tools/registry.py and for a tool card's
-display) -- rolo's "no cyber blocks" decision means neither one is ever
+display) -- the owner's "no cyber blocks" decision means neither one is ever
 consulted by the permission engine (halo_harness/permissions.py) to gate or
 auto-deny anything; only the user's own rules and modes do that.
 """

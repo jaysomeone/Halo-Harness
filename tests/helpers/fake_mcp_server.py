@@ -293,7 +293,7 @@ def main() -> None:
     app = build_app()
     # H9 Part B item 12: http/sse transports via a REAL fake server (never
     # exercised for real anywhere else in this suite -- see http_sse.py's
-    # own module docstring: "none of rolo's real 15 configured servers use
+    # own module docstring: "none of the owner's real 15 configured servers use
     # http/sse"). `FAKE_MCP_TRANSPORT` (default "stdio") selects the
     # transport; `FAKE_MCP_PORT` (required for "http"/"sse") is the port to
     # bind on 127.0.0.1 -- the caller picks a free one and polls it, same

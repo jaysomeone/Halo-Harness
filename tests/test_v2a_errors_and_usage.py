@@ -238,7 +238,7 @@ def test_v2a_databricks_cost_computed_when_price_known(ctx: Ctx):
     changed that: `resolve_model_profile` now resolves a real price for a
     Databricks endpoint whose name matches a models.dev `databricks` entry,
     and that price flows into this same meter's own `price_in`/`price_out`
-    at session start (agent/loop.py). rolo's own ask ("all of the fields
+    at session start (agent/loop.py). the owner's own ask ("all of the fields
     need to be populated too like the ctx and $ price too") means a
     Databricks turn with a KNOWN price must now compute a real running
     cost, same formula as every other provider -- so this is a deliberate

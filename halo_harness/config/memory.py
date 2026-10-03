@@ -32,7 +32,7 @@ def render_memory_content(*, name: str, description: str, type: str, body: str,
     an UPDATE to an already-provenanced memory file would look like) can
     render the exact same bytes without touching the filesystem. Returns
     `(content, safe_description)` -- Claude Code's exact frontmatter shape,
-    verified against rolo's own real `~/.claude/projects/*/memory/*.md`
+    verified against the owner's own real `~/.claude/projects/*/memory/*.md`
     files."""
     import datetime
 
@@ -147,7 +147,7 @@ class MemoryStore:
                 description = frontmatter_dict.get("description", "")
 
                 # Finding 11: the documented shape is a TOP-LEVEL `type:`/
-                # `modified:` (rolo's real project_vids_1080_reencode.md is
+                # `modified:` (the owner's real project_vids_1080_reencode.md is
                 # like this); some files instead nest them under `metadata:`
                 # -- read the top-level pair as the base and let a DICT
                 # `metadata` override per-key if present, guarding against a
@@ -192,7 +192,7 @@ class MemoryStore:
         """H10 Part B: the real implementation this stub was waiting on --
         `/improve`'s own memory candidates are the first caller. Writes a
         NEW topic file at `<memory_dir>/<filename>` with Claude Code's
-        EXACT frontmatter shape (verified against rolo's own real
+        EXACT frontmatter shape (verified against the owner's own real
         `~/.claude/projects/*/memory/*.md` files):
 
             ---
@@ -230,7 +230,7 @@ class MemoryStore:
 
     def update_index(self, *, filename: str, title: str, description: str) -> Path:
         """Append one line to MEMORY.md: `- [title](filename) -- description`
-        (the exact shape rolo's own real MEMORY.md index uses). Creates
+        (the exact shape the owner's own real MEMORY.md index uses). Creates
         MEMORY.md if it doesn't exist yet. H10 Part B: an existing line
         that already links `(filename)` is REPLACED in place, never
         duplicated -- `/improve` re-applying an update to an

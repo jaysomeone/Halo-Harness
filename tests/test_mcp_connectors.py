@@ -4,7 +4,7 @@ connectors bridge"): parsing/naming, discovery against the fake `claude`
 (tests/helpers/fake_claude_cc.py), caching, eligibility (never spawns
 during a test -- see connectors_bridge.discovery_eligible's own docstring),
 status text, and permission-rule translation. Generic only -- no connector
-name here is Google (rolo dropped that 2026-10-01); "Claude Docs" and two
+name here is Google (the owner dropped that 2026-10-01); "Claude Docs" and two
 made-up names stand in for the three claude.ai connector states.
 """
 from __future__ import annotations
@@ -35,6 +35,14 @@ class _Env:
 
     def __enter__(self):
         self._snap = {k: os.environ.get(k) for k in self.KEYS}
+        # W6b section E fallout: tests/run_all.py's own whole-run default
+        # (closing a WSL hang in an unrelated module) now leaves this set
+        # ambiently for every module -- this file's own discovery tests
+        # need it genuinely ABSENT to exercise "a worker actually
+        # started", so it is cleared here; a test that wants it set
+        # (test_background_net_disabled_flag_suppresses_discovery) does
+        # so itself, same as it always has.
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
         return self
 
     def __exit__(self, *exc):

@@ -10,7 +10,7 @@ skill/agent frontmatter loaders), and `HookRunner` (matcher + `if` +
 dedup/once filtering, parallel execution across 5 handler types, and the
 Stop-cap/SessionEnd-budget special cases).
 
-No safety heuristics live here either (rolo's "no cyber blocks" decision,
+No safety heuristics live here either (the owner's "no cyber blocks" decision,
 same as permissions.py) -- a hook is entirely the USER's own gate; this
 module only implements the PROTOCOL Claude Code defines for running one.
 

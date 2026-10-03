@@ -8,7 +8,7 @@ Windows and WSL. Do not commit.
 1. `~/.claude/plans/typed-tickling-squirrel.md` → "Research-driven revisions" points 4 (frozen catalog,
    Databricks 32-tool cap, lazy load), 5, 13; "D-CFG" → **MCP** paragraph (SDK, transports, scopes,
    approval keys, naming, timeouts, output caps, content conversion) and "B. Claude Code config on this
-   box" (rolo's 15 stdio servers in `~/.claude.json`, mixed-separator project keys, no `.mcp.json`);
+   box" (the owner's 15 stdio servers in `~/.claude.json`, mixed-separator project keys, no `.mcp.json`);
    "D5" deferred-tool strategy; "Decisions" (no safety heuristics).
 2. `docs/harness/claude-code-2.1.281-binary-facts.md` §9 (MCP name sanitising `[^a-zA-Z0-9_-]→_`,
    `headersHelper` contract, `MCP_TIMEOUT` 30 000 / `MCP_CONNECT_TIMEOUT_MS` 5 000 / tool timeout
@@ -89,7 +89,7 @@ server's echo tool"` through the mock upstream with `ScriptedTurns`.
 
 ## Acceptance
 Both suites green on Windows and WSL (four RESULT lines). Live at home (default model):
-`python -m halo_harness mcp list` shows rolo's real 15 servers with health; `python -m halo_harness -p
+`python -m halo_harness mcp list` shows the owner's real 15 servers with health; `python -m halo_harness -p
 "use the expanded-models MCP server's list_available_models tool and summarise the roles in one line"`
 → a real answer through `mcp__expanded-models__list_available_models` (visible with `--verbose`);
 `python -m halo_harness --chrome -p "list my open browser tabs"` → either the real tab list (Chrome +

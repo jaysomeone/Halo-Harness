@@ -676,7 +676,7 @@ def test_plugin_json_mcp_servers_string_path(ctx: Ctx):
 
 
 # ---- finding 11: a COPY of a real marketplace plugin (github) -------------
-# Verbatim content read from rolo's own claude-plugins-official marketplace
+# Verbatim content read from the owner's own claude-plugins-official marketplace
 # clone (~/.claude/plugins/marketplaces/claude-plugins-official/
 # external_plugins/github/) on 2026-09-24 -- embedded here (rather than
 # read from that Windows-specific path at test time) so this test is
@@ -743,7 +743,7 @@ def test_real_github_plugin_copy_is_discovered_and_named_correctly(ctx: Ctx):
 
 @test
 def test_real_marketplace_clone_on_this_machine_if_present(ctx: Ctx):
-    """Bonus, best-effort: when THIS machine actually has rolo's real
+    """Bonus, best-effort: when THIS machine actually has the owner's real
     claude-plugins-official marketplace clone on disk (true on the
     Windows build host as of 2026-09-24; never assumed elsewhere), read
     github's REAL files directly and confirm `_read_plugin_mcp_servers`

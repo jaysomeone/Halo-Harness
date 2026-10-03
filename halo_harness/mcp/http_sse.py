@@ -3,7 +3,7 @@
 contract (binary-facts sec.9: shell:true, 10s timeout, maxBuffer 1e6, exit 0
 + stdout that parses as a JSON object of strings, else one of
 `exec_failed|parse_failed|non_object|non_string_value`). Imports `mcp`
-lazily; `manager.py` is the only caller. None of rolo's real 15 configured
+lazily; `manager.py` is the only caller. None of the owner's real 15 configured
 servers use http/sse (plan finding B: "15 stdio servers... no http/sse") so
 this path is exercised by the fake-server unit tests, not the live
 acceptance run.
