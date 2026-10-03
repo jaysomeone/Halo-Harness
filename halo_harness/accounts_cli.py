@@ -5,7 +5,7 @@ import argparse
 import sys
 from typing import Optional
 
-from halo_harness.accounts import AccountSetupError, add_codex_account, format_accounts
+from halo_harness.accounts import AccountSetupError, add_codex_account, format_accounts, set_active_account
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -15,6 +15,9 @@ def _parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add", help="Add a subscription account")
     add.add_argument("provider", choices=["codex"])
     add.add_argument("--name", default=None, help="Friendly account name, such as personal or work")
+    use = sub.add_parser("use", help="Select the active subscription account")
+    use.add_argument("provider", choices=["codex"])
+    use.add_argument("--name", required=True, help="Friendly account name")
     return parser
 
 
@@ -22,6 +25,14 @@ def cmd_accounts(argv: Optional[list] = None) -> int:
     args = _parser().parse_args(list(argv or []))
     if args.command in (None, "list"):
         print(format_accounts())
+        return 0
+    if args.command == "use":
+        try:
+            set_active_account(args.provider, args.name)
+        except AccountSetupError as exc:
+            print(f"halo accounts: {exc}", file=sys.stderr)
+            return 1
+        print(f"Active Codex account: {args.name}")
         return 0
     name = args.name
     if not name:

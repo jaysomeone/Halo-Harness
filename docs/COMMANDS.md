@@ -788,6 +788,7 @@ user. The first supported provider is Codex:
 halo accounts list
 halo accounts add codex --name personal
 halo accounts add codex --name work
+halo accounts use codex --name personal
 ```
 
 `add codex` creates a private profile under
@@ -796,8 +797,15 @@ store inside that directory, and runs the official `codex login` browser flow.
 Halo confirms the result with `codex login status`; it does not read or print
 the profile's `auth.json`. Account names may contain letters, numbers, dots,
 dashes, and underscores. Run the command once per account, selecting the
-matching ChatGPT account in the browser each time. The equivalent TUI command
-is `/accounts add codex <name>`.
+matching ChatGPT account in the browser each time. The first profile becomes
+active; `accounts use` changes which isolated profile the next Codex app-server
+uses. When that account reports a confirmed usage limit, Halo looks for
+another logged-in Codex profile whose cached limit has not been reached. A
+turn with no tool calls continues automatically on the replacement account;
+if the interrupted turn already ran a tool, Halo switches accounts but asks
+you to send `continue` so a write or command cannot be repeated accidentally.
+The equivalent TUI commands are `/accounts add codex <name>` and `/accounts
+use codex <name>`.
 
 ## `halo providers`
 

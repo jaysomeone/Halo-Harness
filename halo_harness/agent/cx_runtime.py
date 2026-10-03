@@ -31,6 +31,7 @@ import threading
 import time
 import uuid as _uuid_mod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from halo_harness import events
@@ -75,6 +76,8 @@ class CxState:
     bridge: ToolBridgeServer
     thread_id: str
     model: str
+    account_name: Optional[str] = None
+    cache_dir: Optional[Path] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     cond: "Optional[threading.Condition]" = None
     active_queue: "Optional[queue.Queue]" = None
@@ -87,6 +90,8 @@ class CxState:
     delta_items: set = field(default_factory=set)            # agentMessage item ids that streamed deltas
     turn_usage: dict = field(default_factory=dict)            # summed `last` usage of this turn's responses
     turn_error: Optional[str] = None
+    limit_reached: Optional[str] = None
+    tool_calls_this_turn: bool = False
     pending_context: list = field(default_factory=list)      # texts to send ahead of the next turn
 
     def __post_init__(self) -> None:
@@ -115,28 +120,43 @@ def _maybe_warn_version_outside_tested_range() -> None:
         pass
 
 
-def preflight_cx() -> Optional[str]:
+def preflight_cx(*, env: Optional[dict] = None, account_name: Optional[str] = None) -> Optional[str]:
     """None when `cx:` is usable now; else one line saying what to do."""
-    from halo_harness.providers.cx_models import codex_installed, refresh_cached_codex_login_status
+    from halo_harness.providers.cx_models import (codex_installed, codex_login_status,
+                                                   refresh_cached_codex_login_status)
     if not codex_installed():
         return ("cx: models need the Codex CLI installed (`npm install -g @openai/codex`), then "
                 "`codex login` with your ChatGPT account.")
-    status = refresh_cached_codex_login_status()
+    status = codex_login_status(env=env) if env is not None else refresh_cached_codex_login_status()
+    label = f"Codex account {account_name!r}" if account_name else "cx:"
     if status is None:
-        return "cx: could not run `codex login status` -- check the codex binary and try again."
+        return f"{label} could not run `codex login status` -- check the codex binary and try again."
     if status.timed_out:
-        return "cx: `codex login status` timed out -- check the codex binary and try again."
+        return f"{label} `codex login status` timed out -- check the codex binary and try again."
     if not status.logged_in:
+        if account_name:
+            return f"Codex account {account_name!r} is not logged in -- run `halo accounts add codex --name {account_name}`."
         return "cx: models need a ChatGPT login -- run `codex login` and choose Sign in with ChatGPT."
     if status.method != "chatgpt":
-        return ("cx: codex is logged in with an API key, not a ChatGPT subscription -- run `codex logout`, "
-                "then `codex login` and choose Sign in with ChatGPT.")
+        return (f"{label} is logged in with an API key, not a ChatGPT subscription -- "
+                "sign in again and choose Sign in with ChatGPT.")
     return None
 
 
-def _child_env(session) -> dict:
+def _managed_profile(session):
+    if session is None:
+        return None
+    from halo_harness.accounts import active_codex_profile
+    return active_codex_profile(state_dir=getattr(session, "state_dir", None))
+
+
+def _child_env(session, profile=None) -> dict:
+    base = getattr(session, "tool_env", None) or dict(os.environ)
+    if profile is not None:
+        from halo_harness.accounts import codex_profile_env
+        return codex_profile_env(profile, base)
     from halo_harness.providers.cx_models import cx_child_env
-    return cx_child_env(getattr(session, "tool_env", None) or dict(os.environ))
+    return cx_child_env(base)
 
 
 def _server_args() -> list:
@@ -192,9 +212,15 @@ def developer_instructions(session) -> str:
     return text[:_INSTRUCTIONS_CHARS]
 
 
-def _last_cx_thread_id(session_log) -> Optional[str]:
+def _last_cx_thread_id(session_log, account_name: Optional[str] = None) -> Optional[str]:
     for node in reversed(session_log.nodes()):
-        if node.get("type") == "meta" and node.get("cx_thread_id"):
+        if node.get("type") != "meta" or not node.get("cx_thread_id"):
+            continue
+        recorded = node.get("cx_account")
+        if account_name is None:
+            if recorded in (None, "default"):
+                return node["cx_thread_id"]
+        elif recorded == account_name:
             return node["cx_thread_id"]
     return None
 
@@ -211,7 +237,11 @@ def ensure_cx_state(session) -> CxState:
         _shutdown(state)
         session._cx_state = None
 
-    err = preflight_cx()
+    profile = _managed_profile(session)
+    child_env = _child_env(session, profile)
+    account_name = profile.name if profile is not None else None
+    cache_dir = profile.profile_dir if profile is not None else getattr(session, "state_dir", None)
+    err = preflight_cx(env=child_env if profile is not None else None, account_name=account_name)
     if err:
         raise CodexUnavailable(err)
     _maybe_warn_version_outside_tested_range()
@@ -221,7 +251,7 @@ def ensure_cx_state(session) -> CxState:
                               call_tool_fn=lambda name, arguments: bridge_call_tool_cx(session, name, arguments))
     bridge.start()
     try:
-        server = CodexAppServer.start(cwd=session.cwd, env=_child_env(session), extra_args=_server_args())
+        server = CodexAppServer.start(cwd=session.cwd, env=child_env, extra_args=_server_args())
     except (CodexNotFoundError, OSError, CodexRpcError) as e:
         bridge.close()
         raise CodexUnavailable(f"cx: could not start `codex app-server`: {e}") from e
@@ -232,7 +262,7 @@ def ensure_cx_state(session) -> CxState:
               "developerInstructions": developer_instructions(session)}
     fork = bool(getattr(session, "_cx_fork_session", False))
     session._cx_fork_session = False
-    prior = _last_cx_thread_id(session.log)
+    prior = _last_cx_thread_id(session.log, account_name)
     thread, primed = None, False
     try:
         if prior:
@@ -250,12 +280,14 @@ def ensure_cx_state(session) -> CxState:
         bridge.close()
         raise CodexUnavailable(f"cx: Codex refused to start a conversation: {e}") from e
 
-    state = CxState(server=server, bridge=bridge, thread_id=thread["id"], model=model)
+    state = CxState(server=server, bridge=bridge, thread_id=thread["id"], model=model,
+                    account_name=account_name, cache_dir=cache_dir)
     server.on_notification = lambda method, p: _on_notification(session, state, method, p)
     server.on_server_request = lambda rid, method, p: _on_server_request(session, state, rid, method, p)
     server.on_exit = lambda: _put(state, "EOF")
     if thread["id"] != prior:
-        session.log.append_meta(cx_thread_id=thread["id"], cx_model=model)
+        session.log.append_meta(cx_thread_id=thread["id"], cx_model=model,
+                                cx_account=account_name or "default")
     if primed or getattr(session, "_cx_pending_context", None):
         from halo_harness.agent.cc_runtime import _render_conversation_so_far
         text = getattr(session, "_cx_pending_context", None) or _render_conversation_so_far(session)
@@ -300,6 +332,21 @@ def close_cx(session) -> None:
         return
     session._cx_state = None
     _shutdown(state)
+
+
+def _switch_to_next_codex_account(session, state: CxState, *,
+                                  excluded_names: Optional[set[str]] = None) -> Optional[str]:
+    """Select another usable managed Codex login and stop the old app-server."""
+    from halo_harness.accounts import next_codex_profile, set_active_account
+    profile = next_codex_profile(state.account_name, state_dir=getattr(session, "state_dir", None),
+                                 base_env=getattr(session, "tool_env", None), excluded_names=excluded_names)
+    if profile is None:
+        return None
+    set_active_account("codex", profile.name, state_dir=getattr(session, "state_dir", None))
+    if getattr(session, "_cx_state", None) is state:
+        session._cx_state = None
+    _shutdown(state)
+    return profile.name
 
 
 def prepare_conversation_so_far(session) -> None:
@@ -363,14 +410,15 @@ def _on_notification(session, state: CxState, method: str, p: dict) -> None:
         window = usage.get("modelContextWindow")
         if isinstance(window, int) and window > 0:
             from halo_harness.providers.cx_models import record_context_window
-            record_context_window(state.model, window)
+            record_context_window(state.model, window, state.cache_dir)
     elif method == "account/rateLimits/updated":
         from halo_harness.providers.cx_models import record_rate_limits
         rl = p.get("rateLimits") or {}
-        record_rate_limits(rl)
+        record_rate_limits(rl, state.cache_dir)
         if rl.get("rateLimitReachedType"):
+            state.limit_reached = str(rl["rateLimitReachedType"])
             _put(state, events.notification(f"Codex usage limit reached ({rl['rateLimitReachedType']}) -- "
-                                            f"see /providers for when it resets", level="error"))
+                                            f"looking for another Codex account", level="error"))
     elif method == "error":
         err = p.get("error") or {}
         msg = err.get("message") or "Codex reported an error"
@@ -436,6 +484,7 @@ def _native_decision(session, state: CxState, item_id: str, name: str, tool_inpu
     (Write/Edit/Bash) and logs it like any tool call. True = allowed."""
     from halo_harness.agent.cc_runtime import resolve_bridged_call
     tool_use_id = f"cx_{item_id}_{_uuid_mod.uuid4().hex[:6]}"
+    state.tool_calls_this_turn = True
     turn_no, emit = state.turn_no, _emit_for(state)
     session.log.append_assistant(content=[{"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}])
     emit(events.Event("tool_use_ready", {"id": tool_use_id, "name": name, "input": tool_input, "repaired": False},
@@ -537,6 +586,7 @@ def bridge_call_tool_cx(session, name: str, arguments: dict) -> dict:
     if state is None:
         return _wire_result("cx: no active Codex session", True)
     tool_input = arguments or {}
+    state.tool_calls_this_turn = True
     tool_use_id = _take_tool_use_id(state, name, tool_input)
     turn_no, emit = state.turn_no, _emit_for(state)
     session.log.append_assistant(content=[{"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}])
@@ -621,8 +671,11 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
 
     q: "queue.Queue" = queue.Queue()
     state.active_queue, state.turn_no, state.turn_error = q, turn_no, None
+    state.limit_reached = None
+    state.tool_calls_this_turn = False
     state.delta_items.clear()
     reason = "end_turn"
+    attempted_accounts = {state.account_name} if state.account_name else set()
     try:
         inputs = [{"type": "text", "text": t} for t in state.pending_context if t]
         state.pending_context.clear()
@@ -645,8 +698,43 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
                 reason = "error"
                 break
             reason, turn = yield from _drain_turn(session, state, q, turn_no)
-            if turn is not None:
+            if turn is not None and reason != "rate_limited":
                 yield _log_turn_usage(session, state, turn_no, turn)
+            if reason == "rate_limited":
+                had_tools = state.tool_calls_this_turn
+                next_name = _switch_to_next_codex_account(session, state, excluded_names=attempted_accounts)
+                if next_name is None:
+                    yield events.error("Codex usage is exhausted and no other logged-in Codex account is available.",
+                                       turn=turn_no, err_type="cx_usage_exhausted")
+                    reason = "error"
+                    break
+                attempted_accounts.add(next_name)
+                yield events.notification(f"Switched to Codex account {next_name!r} after the previous account reached its limit.")
+                if had_tools:
+                    yield events.error(
+                        "Halo did not repeat this turn automatically because it already ran a tool. "
+                        "Send `continue` to resume safely on the new account.",
+                        turn=turn_no, err_type="cx_failover_needs_continue")
+                    reason = "error"
+                    break
+                from halo_harness.agent.cc_runtime import _render_conversation_so_far
+                carried = _render_conversation_so_far(session)
+                try:
+                    state = ensure_cx_state(session)
+                except CodexUnavailable as exc:
+                    yield events.error(str(exc), turn=turn_no, err_type="cx_unavailable")
+                    reason = "error"
+                    break
+                q = queue.Queue()
+                state.active_queue, state.turn_no, state.turn_error = q, turn_no, None
+                state.limit_reached = None
+                state.tool_calls_this_turn = False
+                state.delta_items.clear()
+                state.pending_context.clear()
+                inputs = ([{"type": "text", "text": carried}] if carried else []) + [
+                    {"type": "text", "text": "Continue the interrupted task from the conversation above."}]
+                reason = "end_turn"
+                continue
             if reason != "end_turn" or session.hook_runner is None or not session.hook_runner.has_hooks("Stop"):
                 break
             from halo_harness.agent.cc_runtime import _last_assistant_text
@@ -711,6 +799,10 @@ def _drain_turn(session, state: CxState, q: "queue.Queue", turn_no: int):
                 return "interrupted", turn
             if status == "failed" or state.turn_error:
                 err = (turn.get("error") or {}).get("message") or state.turn_error or "Codex reported an error"
+                low = str(err).lower()
+                if state.limit_reached or ("rate limit" in low and "reached" in low):
+                    state.limit_reached = state.limit_reached or "reported"
+                    return "rate_limited", turn
                 yield events.error(str(err), turn=turn_no, err_type="cx_turn_failed")
                 return "error", turn
             return "end_turn", turn

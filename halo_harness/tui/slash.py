@@ -607,9 +607,21 @@ async def _handle_accounts(app, args: str) -> None:
         state_dir = getattr(app.controller, "state_dir", None)
         await app.transcript.add_note(format_accounts(state_dir=state_dir), kind="command")
         return
+    if action == "use" and len(tokens) == 3 and tokens[1].lower() == "codex":
+        from halo_harness.accounts import set_active_account
+        try:
+            name = validate_account_name(tokens[2])
+            set_active_account("codex", name, state_dir=getattr(app.controller, "state_dir", None))
+        except AccountSetupError as exc:
+            await app.transcript.add_note(f"/accounts: {exc}", kind="error")
+            return
+        await app.transcript.add_note(
+            f"Codex account {name!r} will be used when the next Codex app-server starts.", kind="command")
+        return
     if action != "add" or len(tokens) != 3 or tokens[1].lower() != "codex":
         await app.transcript.add_note(
-            "Usage: /accounts [list|add codex <name>]\nExample: /accounts add codex personal",
+            "Usage: /accounts [list|add codex <name>|use codex <name>]\n"
+            "Example: /accounts add codex personal",
             kind="command")
         return
     try:

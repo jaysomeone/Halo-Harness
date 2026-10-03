@@ -13,8 +13,10 @@ BUILD
 - Added private, isolated Codex account profiles under `~/.halo/accounts/codex/<name>/codex-home/`.
 - Added guided official Codex browser login through `halo accounts add codex --name <name>` and `/accounts add codex <name>`.
 - Forced file-based Codex credential storage for new profiles; Halo checks login status without reading or printing credential contents.
-- Added account listing, name/path validation, duplicate-login protection, documentation, and focused tests.
-- Verified 24 focused tests, Python compilation, and whitespace checks.
+- Added account listing, active-account selection, name/path validation, duplicate-login protection, documentation, and focused tests.
+- Made Codex app-server launch, conversation-thread resume, and usage caches account-aware.
+- Added confirmed-limit failover to another logged-in Codex account. Tool-free turns continue automatically; turns that already executed a tool require an explicit `continue` to prevent duplicate side effects.
+- Verified focused account, command, documentation, compilation, and whitespace checks.
 
 ## Known baseline issue
 
@@ -22,4 +24,4 @@ BUILD
 
 ## Next action
 
-Make Codex session startup account-aware, track account availability independently, and add same-provider selection before implementing exhaustion-triggered failover.
+Add isolated Claude subscription profiles, then implement cross-provider fallback after all accounts on the active provider are unavailable.

@@ -810,14 +810,25 @@ def _cmd_keybindings(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_accounts(args: str, facade: HeadlessFacade) -> str:
-    """List profiles everywhere; guided login is handled by the TUI."""
-    from halo_harness.accounts import format_accounts
+    """List/select profiles everywhere; guided login is handled by the TUI."""
+    import shlex
+    from halo_harness.accounts import AccountSetupError, format_accounts, set_active_account
     session = getattr(facade, "session", None)
     state_dir = getattr(session, "state_dir", None)
-    if args.strip() and args.strip() not in ("list",):
-        return ("Use /accounts add codex <name> in the interactive Halo interface, or run "
-                "`halo accounts add codex --name <name>` in a terminal.")
-    return format_accounts(state_dir=state_dir)
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError as exc:
+        return f"/accounts: {exc}"
+    if not tokens or tokens == ["list"]:
+        return format_accounts(state_dir=state_dir)
+    if len(tokens) == 3 and tokens[:2] == ["use", "codex"]:
+        try:
+            set_active_account("codex", tokens[2], state_dir=state_dir)
+        except AccountSetupError as exc:
+            return f"/accounts: {exc}"
+        return f"Codex account {tokens[2]!r} will be used when the next Codex app-server starts."
+    return ("Use /accounts add codex <name> in the interactive Halo interface, or run "
+            "`halo accounts add codex --name <name>` in a terminal.")
 
 
 # name -> (kind, description, argument_hint, run)
@@ -842,7 +853,7 @@ _BUILTIN_SPECS = {
     "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:/cx:)", "[list|enable|disable <name>]",
                   _cmd_providers),
-    "accounts": ("core", "List or add subscription accounts", "[list|add codex <name>]", _cmd_accounts),
+    "accounts": ("core", "List or add subscription accounts", "[list|add codex <name>|use codex <name>]", _cmd_accounts),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
