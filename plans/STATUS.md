@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~09:55)
+# Status board (updated 2026-10-03 ~12:00)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -33,8 +33,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.2 (`2.0.2-brief.md`)
 
-- [~] F + A (round 1 RUNNING, `2.0.2-round1-brief.md`): terminal title; roles v2 (planner, judge, tester, compaction, subagent_default), per-role effort, custom role names, tab completion, shell completion, role templates with editor
-- [ ] B: organizations (trees, editor, `/org run`), built-in `solo`, `release-flow`, `company`
+- [x] F + A (c46fcd3, round 1): tab title `halo` (root cause: Textual never sets the OS title; claude children do), roles v2 (10 roles, per-role effort, custom names, Tab completion, `halo completion`, templates + editor, bare `halo roles` table); three platforms green (2667/0), live Kali title check
+- [~] B (round 2 RUNNING, `2.0.2-round2-orgs-brief.md`): organizations (trees, editor, `/org run`), built-in `solo`, `release-flow`, `company`
 - [ ] C: `/tasks` panel with live sub-agent transcripts, configurable concurrency and depth, `count`/`batch` spawning, shared task board
 - [ ] D: MCP repair actions in `/mcp`, `halo mcp fix`
 - [ ] E: Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
