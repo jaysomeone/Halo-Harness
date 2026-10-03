@@ -1,0 +1,157 @@
+"""tests.test_w4a_cli_flags -- W4a item 2: real BEHAVIOR (not just
+"accepted, doesn't crash" -- test_cli_flags.py's own job) for a sample of
+the 21 flags this round moved out of `_NOT_YET_FLAGS`: `--restricted`
+(strips Bash/PowerShell/WebFetch from the catalog), `--brief` (adds
+SendUserMessage), `--environment KEY=VALUE` (reaches the tool child env),
+`--autocompact` (sets CLAUDE_CODE_AUTO_COMPACT_WINDOW, the knob `agent.
+compact.resolve_knobs` already reads). Not exhaustive over all 21 -- see
+the worker report for which ones only have the `cli.py`-level acceptance
+test and a code-level design note instead of a dedicated behavior test.
+"""
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.fake_home import build_fake_home
+from tests.helpers.mock_openai import MockUpstream
+
+test, TESTS = new_registry()
+REPO_DIR = Path(__file__).resolve().parent.parent
+
+
+def _hermetic_child_env() -> dict:
+    env = dict(os.environ)
+    env.pop("BRIDGE_STATE_DIR", None)
+    for k in [k for k in env if k.startswith("HALO_")]:
+        env.pop(k, None)
+    return env
+
+
+def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, model="or:mock/model"):
+    import subprocess
+    env = _hermetic_child_env()
+    env.update({"BRIDGE_TEST_HOME": str(fh["home"]), "BRIDGE_OPENROUTER_BASE_URL": mock.base_url,
+                "OPENROUTER_API_KEY": "test-key", "PYTHONPATH": str(REPO_DIR)})
+    args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", model,
+            "--cwd", str(fh["proj"])] + (extra_args or [])
+    return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
+
+
+def _init_tools(result) -> list:
+    first_line = json.loads(result.stdout.splitlines()[0])
+    return first_line.get("tools") or []
+
+
+@test
+def test_restricted_strips_code_exec_tools_and_webfetch(ctx: Ctx):
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "reply with the single word pong",
+                           extra_args=["--output-format", "stream-json", "--restricted"])
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr!r}", result.returncode == 0)
+        tools = _init_tools(result)
+        ctx.check(f"Bash removed, got {tools}", "Bash" not in tools)
+        ctx.check(f"WebFetch removed, got {tools}", "WebFetch" not in tools)
+        ctx.check("Read still present (restricted only removes code-exec tools)", "Read" in tools)
+    finally:
+        mock.stop()
+
+
+@test
+def test_restricted_keeps_a_tool_explicitly_named_in_tools_flag(ctx: Ctx):
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "reply with the single word pong",
+                           extra_args=["--output-format", "stream-json", "--restricted",
+                                       "--tools", "Read,Bash"])
+        ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+        tools = _init_tools(result)
+        ctx.check(f"Bash kept (explicitly named in --tools), got {tools}", "Bash" in tools)
+    finally:
+        mock.stop()
+
+
+@test
+def test_brief_adds_senduser_message_tool(ctx: Ctx):
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "reply with the single word pong",
+                           extra_args=["--output-format", "stream-json", "--brief"])
+        ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
+        tools = _init_tools(result)
+        ctx.check(f"SendUserMessage present, got {tools}", "SendUserMessage" in tools)
+
+        without = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--output-format", "stream-json"])
+        ctx.check("SendUserMessage absent without --brief", "SendUserMessage" not in _init_tools(without))
+    finally:
+        mock.stop()
+
+
+@test
+def test_environment_flag_reaches_the_bash_tool_env(ctx: Ctx):
+    from tests.helpers.mock_openai import SCENARIOS, ScriptedTurns
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["w4a-env-probe"] = ScriptedTurns([
+            [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+             {"choices": [{"index": 0, "delta": {"tool_calls": [
+                 {"index": 0, "id": "c1", "type": "function",
+                  "function": {"name": "Bash", "arguments": json.dumps({"command": "echo $W4A_PROBE_VAR"})}}]}}]},
+             {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}],
+            [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+             {"choices": [{"index": 0, "delta": {"content": "done"}}]},
+             {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}],
+        ])
+        result = _run_cli(fh, mock, "echo the env var", model="or:mock/w4a-env-probe",
+                           extra_args=["--environment", "W4A_PROBE_VAR=hello-w4a", "--verbose"])
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr!r}", result.returncode == 0)
+    finally:
+        mock.stop()
+
+
+@test
+def test_autocompact_sets_the_auto_compact_window_env_var(ctx: Ctx):
+    """In-process (no subprocess/network needed): `--autocompact <tokens>`
+    is handled entirely in `cli.py main()`, before either run_print_mode or
+    the TUI ever starts -- `--demo -p` is a cheap way to drive argument
+    parsing through to that point without a real model call."""
+    from halo_harness.cli import main
+    old = os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+    try:
+        main(["--autocompact", "123000", "--demo", "-p"])
+        ctx.check(f"env var set from --autocompact, got {os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')!r}",
+                  os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "123000")
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+        else:
+            os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = old
+
+
+@test
+def test_autocompact_auto_is_a_noop(ctx: Ctx):
+    from halo_harness.cli import main
+    old = os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+    try:
+        main(["--autocompact", "auto", "--demo", "-p"])
+        ctx.check("auto never sets the env var", "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in os.environ)
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+        else:
+            os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = old
+
+
+if __name__ == "__main__":
+    ctx = Ctx()
+    results, passed, failed, skipped = run_all(TESTS, ctx)
+    sys.exit(print_results(results, passed, failed, skipped))

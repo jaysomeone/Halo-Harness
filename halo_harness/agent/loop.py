@@ -659,6 +659,7 @@ class Session:
         agent_type_restriction: Optional[set] = None, abort: Optional[threading.Event] = None,
         agent_id: Optional[str] = None, job_registry: Optional[JobRegistry] = None,
         roles: Optional[dict] = None, cli_roles: Optional[dict] = None,
+        cli_flags: Optional[dict] = None,
     ):
         # H9: identifies THIS session as a particular sub-agent (passed by
         # `agent/subagent.py`'s `_build_child_session`; the parent/main
@@ -845,6 +846,13 @@ class Session:
         self.permission_engine = permission_engine or PermissionEngine(mode="auto", cwd=cwd)
         self._read_cache: dict = {}
         self._bash_state: dict = {"cwd": cwd}
+        # W4a CwdChanged: compared against `self._bash_state["cwd"]` after
+        # every finalized Bash call (`_fire_cwd_changed`, called from
+        # `_finalize_tool_result` alongside FileChanged) -- `tools/bash.py`
+        # owns the actual `cd`-persistence logic and has no hook_runner of
+        # its own to fire from, so the SESSION notices the change instead,
+        # right after the call that caused it finishes.
+        self._last_known_bash_cwd = cwd
         # finding 10 / H3 must-do: Bash/PowerShell/MCP CHILD PROCESSES get
         # `settings.effective_env` (shell < user < trusted project/local <
         # flag < policy -- so a settings.json `env` block, e.g. a PATH or
@@ -858,10 +866,44 @@ class Session:
         settings = getattr(session_context, "settings", None)
         raw_env = settings.effective_env if settings is not None else dict(os.environ)
         self.tool_env: dict = tool_child_env(raw_env)
+        # W4a: `cli_flags` -- the plain dict `cli_flags.cli_flags_from_args`
+        # builds from argv, shared verbatim by -p and the TUI (headless.
+        # build_session/tui.bootstrap.build_controller both thread it
+        # through unchanged) so a flag's meaning can never drift between the
+        # two launch paths. Every consumer below defaults safely when the
+        # key is absent -- an old caller that never passes `cli_flags` at
+        # all (every pre-W4a test) behaves byte-for-byte as before.
+        self.cli_flags: dict = dict(cli_flags or {})
+        if self.cli_flags.get("environment"):
+            # `--environment KEY=VALUE` (repurposed for a standalone harness
+            # -- see cli.py's own flag-table comment): merged in last, so it
+            # wins over whatever the settings-env chain already resolved.
+            self.tool_env = {**self.tool_env, **self.cli_flags["environment"]}
+        self.fallback_models: list = list(self.cli_flags.get("fallback_models") or [])
+        self.forward_subagent_text: bool = bool(self.cli_flags.get("forward_subagent_text"))
+        self.include_hook_events: bool = bool(self.cli_flags.get("include_hook_events"))
+        self.permission_prompt_tool: Optional[str] = self.cli_flags.get("permission_prompt_tool")
+        self.permission_prompts: Optional[str] = self.cli_flags.get("permission_prompts")
+        self._system_prompt_snapshot_mode: str = self.cli_flags.get("system_prompt_snapshot") or "off"
+        self._snapshotted_system_prompt: Optional[str] = None
+        # W4a `--include-hook-events`: every `_run_hook`/`_run_hook_stop`
+        # call appends one entry here when enabled -- drained by `output.
+        # StreamJsonSink` (stream-json's own `hook_event` lines) after each
+        # turn event, never polled any other way.
+        self._hook_event_log: list = []
         # H5 scope B: kept for re-injection after compaction
         # (claude_md_text()/memory_snapshot_text()) -- session_context was
         # a constructor-only local before this milestone.
         self.session_context = session_context
+        # W4a ConfigChange: one mtime per settings LAYER that has a real
+        # file (`SettingsLayer.path` -- None for managed/policy-default
+        # layers with no file on disk), snapshotted now (AFTER `self.
+        # session_context` is assigned just above -- `_snapshot_config_
+        # mtimes` reads it); `_check_config_change` (called once per turn,
+        # the natural "check for drift" cadence a long-lived session has)
+        # compares against this and fires per CHANGED path, never a
+        # background filesystem watcher.
+        self._config_mtimes: dict = self._snapshot_config_mtimes()
         # D-CFG: "the harness reads ... CLAUDE_CODE_AUTO_COMPACT_WINDOW ...
         # from [effective_env]" -- same `raw_env` precedence chain (shell <
         # user < trusted project/local < flag < policy) everything else on
@@ -908,6 +950,14 @@ class Session:
         # U2: the AskUserQuestion round trip parks here, keyed by tool_use
         # id, exactly like `_permission_waiters`.
         self._question_waiters: dict = {}
+        # W4a: the Controller's own `events.put` (set by `run()`, the
+        # worker-thread command pump -- None for a `-p`/test Session that
+        # never calls `run()` at all) -- `agent/subagent.py`'s `_bg_run`
+        # uses this to forward a BACKGROUND child's live permission/
+        # question/plan asks into the SAME dock a foreground child's
+        # already do, since a background child's own `turn()` is never
+        # drained by anything else that could relay them.
+        self._event_sink = None
         # U2: the Controller installs one before `run()`; a bare Session
         # (a unit test, print mode) reports 0/0 in its status events.
         self.mcp_status_fn = None
@@ -1055,6 +1105,7 @@ class Session:
             claude_md = session_context.claude_md_text()
             if claude_md:
                 self.log.append_snapshot([{"type": "text", "text": claude_md}], kind="claude_md")
+                self._fire_instructions_loaded(claude_md)
             memory_text = session_context.memory_snapshot_text()
             if memory_text:
                 self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
@@ -1081,6 +1132,9 @@ class Session:
                 )
                 self.log.append_snapshot([{"type": "text", "text": reminder}], kind="deferred_tools")
             self._fire_session_start("startup")
+            self._fire_directory_added_at_start()
+            self._fire_setup_if_first_run()
+            self._fire_worktree_created()
         else:
             # finding 4: RESUMING an existing log -- NEVER re-append
             # meta/system/snapshots (a second system node makes
@@ -1121,6 +1175,7 @@ class Session:
                     if isinstance(ids, list):
                         self._prune_committed_stub_ids |= {i for i in ids if isinstance(i, str)}
             self._fire_session_start("resume")
+            self._fire_directory_added_at_start()
 
     def _run_hook(self, event: str, payload: dict, **kwargs):
         """W3b item 11: every `self.hook_runner.run(...)` call site in this
@@ -1138,7 +1193,32 @@ class Session:
         t0 = time.monotonic()
         outcome = self.hook_runner.run(event, payload, **kwargs)
         self._timeline.record_hook(event, (time.monotonic() - t0) * 1000.0)
+        self._record_hook_event(event, outcome)
         return outcome
+
+    def apply_next_fallback_model(self) -> bool:
+        """W4a `--fallback-model`: pops the next untried model off
+        `self._fallback_remaining` (seeded from `self.fallback_models` at
+        the start of each turn -- see `_turn_inner`'s own reset of it,
+        matching claude's own "re-tries the primary at the start of each
+        user turn") and switches this session onto it via the SAME
+        `set_model` path `/model` itself uses, so the route/profile/
+        provider_profile stay consistent with a live model switch rather
+        than a half-updated `self.model_ref`. Returns False (a no-op) when
+        the list is empty -- the caller's own exhausted-retries error path
+        is unaffected either way."""
+        if not getattr(self, "_fallback_remaining", None):
+            return False
+        from halo_harness.model import parse_model_ref, resolve_model_profile
+        next_raw = self._fallback_remaining.pop(0)
+        routes = self.agent_runtime.routes if self.agent_runtime is not None else {}
+        try:
+            ref = parse_model_ref(next_raw, routes)
+            profile = resolve_model_profile(ref, self.state_dir, routes)
+        except Exception:
+            return self.apply_next_fallback_model()  # an unresolvable entry is skipped, not fatal
+        self.set_model(ref, profile, self.creds)
+        return True
 
     def _run_hook_stop(self, event: str, **kwargs):
         """W3b item 11: the `run_stop(...)` counterpart to `_run_hook`
@@ -1150,7 +1230,30 @@ class Session:
         t0 = time.monotonic()
         outcome = self.hook_runner.run_stop(event, **kwargs)
         self._timeline.record_hook(event, (time.monotonic() - t0) * 1000.0)
+        self._record_hook_event(event, outcome)
         return outcome
+
+    def _record_hook_event(self, event: str, outcome) -> None:
+        """W4a `--include-hook-events`: a tiny, JSON-safe record of this ONE
+        hook invocation's outcome -- stream-json's own `hook_event` line
+        shape (`output.py::StreamJsonSink`). A no-op (not even a list
+        append) when the flag is off, so this costs nothing for every other
+        caller/test."""
+        if not getattr(self, "include_hook_events", False):
+            return
+        self._hook_event_log.append({
+            "hook_event_name": event, "blocked": bool(outcome.blocked),
+            "permission_decision": outcome.permission_decision,
+            "continue": outcome.continue_,
+        })
+
+    def drain_hook_events(self) -> list:
+        """Pops and returns every hook-event record queued since the last
+        call -- `output.StreamJsonSink` drains this after each turn event it
+        emits, so hook lines interleave with the turn's own output in the
+        order they actually happened."""
+        events_out, self._hook_event_log = self._hook_event_log, []
+        return events_out
 
     def _fire_session_start(self, source: str) -> None:
         """H4 scope B: SessionStart(startup|resume|clear|compact) -- `resume`
@@ -1202,6 +1305,173 @@ class Session:
         exports = read_env_file_exports(env_file_path(self.log.session_id), base_env=self.tool_env)
         if exports:
             self.tool_env = {**self.tool_env, **exports}
+
+    def _snapshot_config_mtimes(self) -> dict:
+        out: dict = {}
+        settings = getattr(self.session_context, "settings", None)
+        for layer in (getattr(settings, "layers", None) or []):
+            path = getattr(layer, "path", None)
+            if path is None:
+                continue
+            try:
+                out[str(path)] = Path(path).stat().st_mtime
+            except OSError:
+                pass
+        return out
+
+    def _check_config_change(self) -> None:
+        """W4a: ConfigChange -- "settings file changed on disk" (removed
+        from NOT_EMITTED_V1). Checked once per turn (see `_config_mtimes`'s
+        own comment) -- a session that never starts another turn never
+        checks again, same honest "no background watcher" scope every other
+        best-effort mechanism in this file already has."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("ConfigChange"):
+            return
+        current = self._snapshot_config_mtimes()
+        for path, mtime in current.items():
+            if self._config_mtimes.get(path) != mtime:
+                payload = self.hook_runner.payload("ConfigChange", extra={"path": path})
+                try:
+                    self._run_hook("ConfigChange", payload, matched=path)
+                except Exception:
+                    pass
+        self._config_mtimes = current
+
+    def fire_user_prompt_expansion(self, original_text: str, expanded_text: str) -> Optional[str]:
+        """W4a: UserPromptExpansion -- "after @-mention and `!cmd` expansion"
+        (removed from NOT_EMITTED_V1). Called by the TWO callers that
+        actually DO this expansion (`controller.py`'s prompt-kind slash-
+        command path, `headless.py`'s equivalent) right after `commands.
+        registry.expand_command_body` substitutes `$ARGUMENTS`/`@path`/
+        `` !`cmd` `` -- a plain typed prompt's own `@mention`s are never
+        INLINED into the text itself (they become separate snapshot blocks,
+        several docstrings in this codebase are explicit about that), so
+        there is nothing textual to call "expansion" on for that path; this
+        is scoped to the one case where the text really does change.
+        Returns hook-added `additionalContext` (one of this event's own
+        `_CONTEXT_ONLY_EVENTS`) so the caller can fold it in as a snapshot,
+        or None when nothing fired/nothing to add."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("UserPromptExpansion"):
+            return None
+        if expanded_text == original_text:
+            return None
+        payload = self.hook_runner.payload("UserPromptExpansion",
+                                            extra={"original_prompt": original_text, "prompt": expanded_text})
+        try:
+            outcome = self._run_hook("UserPromptExpansion", payload, matched="")
+        except Exception:
+            return None
+        return outcome.additional_context or None
+
+    def _fire_message_display(self, blocks: list) -> None:
+        """W4a: MessageDisplay -- "each assistant message shown" (removed
+        from NOT_EMITTED_V1). Fires at the main streaming completion's own
+        log-append point (the overwhelming common case); an interrupted/
+        plan/compaction-replay/cc: bridge message does not ALSO fire this
+        -- a documented scope cut, not an oversight (see the worker report).
+        Text-only (a tool_use-only reply with no text block is skipped --
+        there is nothing to "display")."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("MessageDisplay"):
+            return
+        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+        if not text:
+            return
+        payload = self.hook_runner.payload("MessageDisplay", extra={"message": text})
+        try:
+            self._run_hook("MessageDisplay", payload, matched="")
+        except Exception:
+            pass
+
+    def _fire_instructions_loaded(self, claude_md_text: str) -> None:
+        """W4a: InstructionsLoaded -- "CLAUDE.md chain loaded" (removed from
+        NOT_EMITTED_V1). Fires every time the chain is (re)loaded into the
+        log as a snapshot -- startup, resume, and after a compaction -- same
+        set of call sites `kind="claude_md"` itself already has."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("InstructionsLoaded"):
+            return
+        payload = self.hook_runner.payload("InstructionsLoaded", extra={"char_count": len(claude_md_text)})
+        try:
+            self._run_hook("InstructionsLoaded", payload, matched="")
+        except Exception:
+            pass
+
+    def _fire_stop_failure(self, turn_no: int, reason_text: str) -> None:
+        """W4a: StopFailure -- "a turn that ends in error" (removed from
+        NOT_EMITTED_V1). Fired ALONGSIDE (never instead of) the ordinary
+        `turn_done(reason="error")` the caller still yields right after --
+        observational, like PermissionDenied; nothing it returns changes an
+        already-decided outcome."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("StopFailure"):
+            return
+        payload = self.hook_runner.payload("StopFailure", prompt_id=f"turn_{turn_no}", extra={"reason": reason_text})
+        try:
+            self._run_hook("StopFailure", payload, matched="error")
+        except Exception:
+            pass
+
+    def _fire_setup_if_first_run(self) -> None:
+        """W4a: Setup -- "first run / init" (removed from NOT_EMITTED_V1).
+        Fires exactly ONCE ever on this machine (a `<state>/.setup_done`
+        marker, created right after, same directory every other first-run
+        state already lives under), on the first brand-new session's own
+        "startup" path -- never on resume, never again on a later launch.
+        `halo init`'s own wizard is a SEPARATE, optional setup flow a user
+        may never run at all; this is the one trigger guaranteed to exist
+        for every box."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("Setup"):
+            return
+        marker = Path(self.state_dir) / ".setup_done"
+        if marker.exists():
+            return
+        payload = self.hook_runner.payload("Setup", extra={})
+        try:
+            self._run_hook("Setup", payload, matched="")
+        except Exception:
+            pass
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _fire_worktree_created(self) -> None:
+        """W4a: WorktreeCreated -- "with `--worktree`" (removed from
+        NOT_EMITTED_V1). `headless.run_print_mode` creates the worktree
+        itself, before this Session (and its hook_runner) exists -- the
+        path rides through `cli_flags["_worktree_created_path"]` so this
+        fires from the session that actually lives in it. WorktreeRemoved's
+        own trigger (an explicit `claude rm`-equivalent cleanup command)
+        is not built in this round -- see the worker report; `halo_harness.
+        worktree.remove_worktree` exists and is tested standalone, ready
+        for whatever command ends up calling it."""
+        path = self.cli_flags.get("_worktree_created_path")
+        if not path or self.hook_runner is None or not self.hook_runner.has_hooks("WorktreeCreated"):
+            return
+        payload = self.hook_runner.payload("WorktreeCreated", extra={"path": path})
+        try:
+            self._run_hook("WorktreeCreated", payload, matched=path)
+        except Exception:
+            pass
+
+    def _fire_directory_added_at_start(self) -> None:
+        """W4a: DirectoryAdded -- "`--add-dir`, `/add-dir`" (removed from
+        NOT_EMITTED_V1). `/add-dir` itself is a pre-existing stub in this
+        build (`commands/builtins.py::_cmd_add_dir`: "needs a running
+        session to extend" -- a SEPARATE, not-yet-built capability, out of
+        this hook's own scope to add), so the only real trigger today is
+        every directory this session actually started with (`--add-dir` /
+        settings `permissions.additionalDirectories`, already merged into
+        `self.permission_engine.extra_dirs` by the time this runs) -- fired
+        once per directory, at both startup and resume (an unchanged set on
+        resume is a harmless re-announcement, never tracked as a diff)."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("DirectoryAdded"):
+            return
+        for d in self.permission_engine.extra_dirs:
+            payload = self.hook_runner.payload("DirectoryAdded", extra={"path": str(d)})
+            try:
+                self._run_hook("DirectoryAdded", payload, matched=str(d))
+            except Exception:
+                pass
 
     def _fire_session_end(self, reason: str) -> None:
         """H4 scope B: SessionEnd(quit, /clear). Best-effort/observational
@@ -1291,6 +1561,7 @@ class Session:
         claude_md = self.session_context.claude_md_text()
         if claude_md:
             self.log.append_snapshot([{"type": "text", "text": claude_md}], kind="claude_md")
+            self._fire_instructions_loaded(claude_md)
         memory_text = self.session_context.memory_snapshot_text()
         if memory_text:
             self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
@@ -2803,6 +3074,7 @@ class Session:
         claude_md = ctx_obj.claude_md_text() if ctx_obj is not None else ""
         if claude_md:
             self.log.append_snapshot([{"type": "text", "text": claude_md}], kind="claude_md")
+            self._fire_instructions_loaded(claude_md)
         memory_text = ctx_obj.memory_snapshot_text() if ctx_obj is not None else ""
         if memory_text:
             self.log.append_snapshot([{"type": "text", "text": memory_text}], kind="memory_index")
@@ -2912,6 +3184,15 @@ class Session:
         yielding a `turn_done` event."""
         self.turn_count += 1
         turn_no = self.turn_count
+        # W4a `--fallback-model`: "re-tries the primary at the start of each
+        # user turn" -- reset here so a fallback used (if ever) by a PRIOR
+        # turn never sticks around; `apply_next_fallback_model` consumes
+        # this list from the front as retries are exhausted within a turn.
+        # (The swap itself is not yet wired into the model-call retry loop
+        # -- see the worker report -- so this seeds the list correctly but
+        # a fallback is not automatically applied yet.)
+        self._fallback_remaining = list(self.fallback_models)
+        self._check_config_change()
         self._loop_breaker = {}
         self._loop_breaker_history = []
         self._loop_breaker_period2 = {}
@@ -3129,6 +3410,7 @@ class Session:
                         "try `/compact <instructions>` to focus the summary, or start a new session",
                         turn=turn_no, err_type="context_overflow", category=CONTEXT_WINDOW_EXCEEDED,
                     )
+                    self._fire_stop_failure(turn_no, "context window overflow and compaction could not free enough room")
                     yield events.turn_done(turn=turn_no, reason="error")
                     return
                 result = yield from self._step(turn_no, overflow_handled=True)
@@ -3141,6 +3423,7 @@ class Session:
                                          cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
                     yield events.turn_done(turn=turn_no, reason="interrupted")
                     return
+                self._fire_stop_failure(turn_no, "the model call failed")
                 yield events.turn_done(turn=turn_no, reason="error")
                 return
             self._account_usage(result)
@@ -3237,6 +3520,7 @@ class Session:
                     content=result.assistant_blocks, reasoning=result.reasoning,
                     stop_reason=result.stop_reason, request_hash=req_hash, tool_meta=tool_meta,
                 )
+                self._fire_message_display(result.assistant_blocks)
             prompt_tokens = _total_prompt_tokens(result.usage)
             context_pct = None
             if prompt_tokens is not None and self.model_profile.context_tokens:
@@ -3605,6 +3889,29 @@ class Session:
                 # parent's live stream (and therefore the TUI) BEFORE the
                 # child's own thread blocks on the waiter below.
                 if not (self.interactive or self._subagent_live_asks):
+                    # W4a `--permission-prompt-tool`/`--permission-prompts`:
+                    # consulted BEFORE the immediate-denial fallback below --
+                    # "host" (the default once a tool is configured) routes
+                    # the ask to it; "none" (or no tool configured) skips
+                    # straight to the existing denial, matching claude's own
+                    # "none: nobody, anything that would prompt is denied
+                    # automatically" wording exactly.
+                    if self.permission_prompt_tool and self.permission_prompts != "none":
+                        ppt_result = self._ask_permission_prompt_tool(name, tool_input, decision.reason)
+                        if ppt_result == "allow":
+                            item["ready"] = True
+                            return item
+                        if ppt_result == "deny":
+                            item["text"] = f"Permission denied by --permission-prompt-tool: {decision.reason}"
+                            item["permission_denial"] = {
+                                "tool_name": name, "tool_input": tool_input,
+                                "reason": decision.reason, "suggested_rule": decision.suggested_rule,
+                            }
+                            self._fire_permission_denied(name, tool_input, decision.reason)
+                            return item
+                        # None (tool missing/unreachable/inconclusive reply):
+                        # falls through to the ordinary denial below, same
+                        # as claude's own "none" target.
                     # no UI is attached (print mode / a bare Session in a
                     # test), OR a BACKGROUND sub-agent (its events are never
                     # forwarded to any live stream, so a live card for it
@@ -3671,7 +3978,7 @@ class Session:
             # returned for every path that could produce it, including a
             # PreToolUse hook's own reassignment, which runs before it.)
 
-        if name == "AskUserQuestion" and self.interactive:
+        if name == "AskUserQuestion" and (self.interactive or self._subagent_live_asks):
             # U2 + finding "AskUserQuestion dontAsk gap": reached only once
             # decide() (and any PreToolUse hook) has already confirmed this
             # ISN'T dontAsk mode -- permissions.py's own mode table denies
@@ -3684,12 +3991,92 @@ class Session:
             # call on the UI's reply instead of dispatching to the tool's
             # own run() (which stays print mode's error path -- this
             # branch only runs when a UI is actually attached).
+            #
+            # W4a: `self._subagent_live_asks` (same flag/sharing `_build_
+            # child_session` already sets up for `_permission_waiters`, see
+            # that module's own docstring) extends this to a sub-agent of an
+            # interactive parent -- foreground OR background, now that
+            # `_question_waiters` is ALSO shared with the parent (agent/
+            # subagent.py) and namespaced by agent_id here exactly like the
+            # permission-ask branch above already is, for the same reason
+            # (two parallel/sequential children's own tool_use ids can
+            # collide).
+            request_id = f"{self.agent_id}:{tool_id}" if self.agent_id else tool_id
             item["pending_question"] = True
-            self._question_waiters[tool_id] = {"event": threading.Event(), "answer": None}
+            item["question_request_id"] = request_id
+            self._question_waiters[request_id] = {"event": threading.Event(), "answer": None}
             return item
 
         item["ready"] = True
         return item
+
+    def _fire_cwd_changed_if_moved(self) -> None:
+        """W4a: CwdChanged -- "the persistent Bash cd moved the cwd"
+        (removed from NOT_EMITTED_V1). `self._bash_state["cwd"]` is the SAME
+        dict `tools/bash.py` updates in place after a `cd` (scope A: "cd
+        persistence per session") -- compared against the last value this
+        method itself saw, so only a REAL move fires, never every Bash call."""
+        current = self._bash_state.get("cwd")
+        if current is None or str(current) == str(self._last_known_bash_cwd):
+            return
+        previous = self._last_known_bash_cwd
+        self._last_known_bash_cwd = current
+        if self.hook_runner is None or not self.hook_runner.has_hooks("CwdChanged"):
+            return
+        payload = self.hook_runner.payload("CwdChanged", extra={"cwd": str(current), "previous_cwd": str(previous)})
+        try:
+            self._run_hook("CwdChanged", payload, matched=str(current))
+        except Exception:
+            pass
+
+    def _fire_file_changed(self, name: str, tool_input: dict) -> None:
+        """W4a: FileChanged -- "an Edit/Write/NotebookEdit landed" (removed
+        from NOT_EMITTED_V1). Observational only, fired AFTER the tool
+        already succeeded (same timing as PostToolUse, right next to it) --
+        nothing it returns changes anything, there is nothing left to
+        un-write."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("FileChanged"):
+            return
+        file_path = tool_input.get("notebook_path") if name == "NotebookEdit" else tool_input.get("file_path")
+        payload = self.hook_runner.payload("FileChanged", extra={"tool_name": name, "file_path": file_path})
+        try:
+            self._run_hook("FileChanged", payload, matched=name)
+        except Exception:
+            pass
+
+    def _ask_permission_prompt_tool(self, name: str, tool_input: dict, reason: str) -> Optional[str]:
+        """W4a `--permission-prompt-tool <tool>`: `<tool>` is an MCP tool's
+        full catalog name (`mcp__<server>__<tool>`, exactly as it appears in
+        `/mcp`/the wire catalog); called with `{tool_name, tool_input,
+        reason}` and expected to reply with `{"behavior": "allow"|"deny"}`
+        JSON (a bare `allow`/`deny` text reply is also accepted). Returns
+        None -- never raises -- for anything else (malformed name, no MCP
+        manager, the call itself erroring, an inconclusive reply): the
+        caller's own existing denial fallback is what the user actually
+        sees for that case, same as having no --permission-prompt-tool at
+        all."""
+        tool_name = self.permission_prompt_tool or ""
+        parts = tool_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp" or self.mcp_manager is None:
+            return None
+        _prefix, server, mcp_tool = parts
+        try:
+            result = self.mcp_manager.call(server, mcp_tool,
+                                            {"tool_name": name, "tool_input": tool_input, "reason": reason},
+                                            timeout=30)
+        except Exception:
+            return None
+        if bool(getattr(result, "isError", False) or getattr(result, "is_error", False)):
+            return None
+        text = "\n".join(b.text for b in (getattr(result, "content", None) or []) if isinstance(getattr(b, "text", None), str)).strip()
+        parsed = None
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+        behavior = parsed.get("behavior") if isinstance(parsed, dict) else text.lower()
+        return behavior if behavior in ("allow", "deny") else None
 
     def _fire_permission_denied(self, name: str, tool_input: dict, reason: str) -> None:
         """H4 scope B: PermissionDenied -- observational only (nothing it
@@ -3805,6 +4192,10 @@ class Session:
         tr, hook_system_messages = self._apply_post_tool_use_hooks(name, tool_id, item["input"], tr)
         for msg in hook_system_messages:
             yield events.notification(msg)
+        if name in ("Edit", "Write", "NotebookEdit") and not tr.is_error:
+            self._fire_file_changed(name, item["input"])
+        if name == "Bash":
+            self._fire_cwd_changed_if_moved()
         if isinstance(tr.content, list):
             # finding 5/H4 must-do: logged AS BLOCKS (vision images stay
             # real image blocks; tool_reference stripped) and capped HERE,
@@ -4400,8 +4791,12 @@ class Session:
             if item.get("pending_question"):
                 # U2: the AskUserQuestion round trip -- never dispatched to
                 # the tool itself; the UI's answer becomes its result.
-                yield events.Event("question", {"id": tool_id, "name": name, "input": item["input"]}, turn=turn_no)
-                answer = self._await_reply(self._question_waiters, tool_id)
+                # W4a: "id" is the (possibly agent_id-namespaced) request_id
+                # `_resolve_tool_call` parked the waiter under, never a bare
+                # tool_id -- see that branch's own comment.
+                q_request_id = item.get("question_request_id", tool_id)
+                yield events.Event("question", {"id": q_request_id, "name": name, "input": item["input"]}, turn=turn_no)
+                answer = self._await_reply(self._question_waiters, q_request_id)
                 item.pop("pending_question", None)
                 if answer is None:
                     item["text"] = "The user did not answer (the question was dismissed or the turn interrupted)."
@@ -4588,6 +4983,8 @@ class Session:
         conversation_so_far` alone would leave its own `<conversation-so-
         far>` stashed but unsent forever -- `ensure_cc_state`'s reuse path
         now drains it (capped) before returning, see that function."""
+        old_model_raw = self.model_ref.raw
+        self._fire_model_switch("PreModelSwitch", old_model=old_model_raw, new_model=model_ref.raw)
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
             from halo_harness.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
@@ -4675,6 +5072,23 @@ class Session:
                                   tools=self.tool_registry.definitions_for(self.session_catalog.names))
         else:
             self.log.append_meta(model=model_ref.raw, tools=self.tool_registry.definitions())
+        self._fire_model_switch("PostModelSwitch", old_model=old_model_raw, new_model=model_ref.raw)
+
+    def _fire_model_switch(self, event: str, *, old_model: str, new_model: str) -> None:
+        """W4a: PreModelSwitch/PostModelSwitch -- "`/model`" (removed from
+        NOT_EMITTED_V1). `PostModelSwitch` is one of hooks.py's own
+        `_CONTEXT_ONLY_EVENTS` -- a plain-stdout reply becomes
+        `additionalContext`, logged as a snapshot exactly like SessionStart's
+        own already does, so a hook can brief the model on what changed."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks(event):
+            return
+        payload = self.hook_runner.payload(event, extra={"old_model": old_model, "new_model": new_model})
+        try:
+            outcome = self._run_hook(event, payload, matched=new_model)
+        except Exception:
+            return
+        if outcome.additional_context:
+            self.log.append_snapshot([{"type": "text", "text": outcome.additional_context}], kind="hook_context")
 
     def status_event(self, *, phase: str = "idle", context_tokens=None, turn: Optional[int] = None) -> events.Event:
         """The D-Contract `status` payload as THIS session knows it --
@@ -4898,6 +5312,7 @@ class Session:
         except BaseException as e:  # never let a worker thread die silently, the UI would just hang
             log.exception("turn failed")
             out(events.error(f"{type(e).__name__}: {e}", turn=self.turn_count))
+            self._fire_stop_failure(self.turn_count, f"{type(e).__name__}: {e}")
             out(events.turn_done(turn=self.turn_count, reason="error"))
             return
 
@@ -4965,6 +5380,7 @@ class Session:
         affect a turn already in flight, since this loop is parked inside
         that turn's generator while it runs (and inside the reply wait)."""
         self.mcp_status_fn = mcp_status_fn
+        self._event_sink = out
         out(self.status_event(phase="idle"))
         while True:
             cmd = commands.get()

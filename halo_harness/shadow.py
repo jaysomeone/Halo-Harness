@@ -121,12 +121,23 @@ class ShadowStore:
 
     # ---- recording ---------------------------------------------------
 
-    def record_step(self, files: "dict[str, str]", *, label: str, trigger: str = "tool") -> dict:
+    def record_step(self, files: "dict[str, str]", *, label: str, trigger: str = "tool",
+                     created: "Optional[list]" = None) -> dict:
         """`files`: `{absolute_path_str: resulting_content}` -- the content
         of every file this step touched, AFTER the change. Writes each into
         the shadow repo, commits, and appends one step to the index.
         `{}`/no real change -> returns `{}` and records nothing (a no-op
-        step is never worth a rewind target)."""
+        step is never worth a rewind target).
+
+        `created` (U5 scope B / W4a: "steps record files CREATED so undo
+        deletes them"): the subset of `files` that did NOT exist on disk
+        before this step ran (the caller knows this -- Write creates a file
+        that didn't exist, Edit/NotebookEdit-on-an-existing-notebook never
+        do). Recorded on the step so `rewind_to` can delete them when the
+        cursor moves back past this step -- restoring an EARLIER commit's
+        tree, which never had these paths, must also remove them from the
+        REAL working tree, not just leave the content of files it DOES
+        track stale."""
         if not files:
             return {}
         mangled: "list[str]" = []
@@ -146,9 +157,11 @@ class ShadowStore:
         commit_hash = self._git("rev-parse", "HEAD").stdout.strip()
         if not commit_hash:
             return {}
+        created_set = set(created or ()) & set(files)
         step = {
             "id": commit_hash[:12], "hash": commit_hash, "ts": time.time(),
             "label": label or "snapshot", "trigger": trigger, "files": sorted(files),
+            "created": sorted(created_set),
         }
         self.steps.append(step)
         self.cursor = len(self.steps) - 1
@@ -180,14 +193,39 @@ class ShadowStore:
 
     def rewind_to(self, step_id: str) -> "Optional[dict]":
         """Restore the working tree to the step whose `id` (or full
-        `hash`) is `step_id`. Returns `{"step": step, "files": [...]}`, or
-        `None` if no step matches."""
+        `hash`) is `step_id`. Returns `{"step": step, "files": [...],
+        "deleted": [...]}`, or `None` if no step matches.
+
+        W4a ("steps record files CREATED so undo deletes them"): every
+        step AFTER the target (`steps[target_index + 1:]`) that CREATED a
+        path -- one neither this nor any earlier step ever tracked before --
+        has that real file deleted, since the target commit's own tree
+        (just restored above) never had it either; redoing forward past
+        that step naturally re-creates it again (`_restore_commit` already
+        writes back everything the LATER target's own tree lists). A path
+        also written by an earlier-or-equal step is never deleted even if
+        it's (wrongly) listed as `created` somewhere -- belt-and-suspenders,
+        though `record_step` itself only ever marks true first-appearances."""
         step = self._find(step_id)
         if step is None:
             return None
+        target_index = self.steps.index(step)
         restored = self._restore_commit(step["hash"])
-        self.cursor = self.steps.index(step)
-        return {"step": step, "files": restored}
+        restored_set = {str(Path(p)) for p in restored}
+        deleted: "list[str]" = []
+        for later_step in self.steps[target_index + 1:]:
+            for real_path in later_step.get("created") or []:
+                if real_path in restored_set:
+                    continue  # also written at/before the target -- never delete
+                try:
+                    p = Path(real_path)
+                    if p.is_file():
+                        p.unlink()
+                        deleted.append(real_path)
+                except OSError:
+                    continue
+        self.cursor = target_index
+        return {"step": step, "files": restored, "deleted": deleted}
 
     def undo(self) -> "Optional[dict]":
         """Move the cursor one step back and restore to it. `None` if
@@ -223,6 +261,46 @@ class ShadowStore:
         if self.cursor < 0 or self.cursor >= len(self.steps) - 1:
             return None
         return self.steps[self.cursor + 1]
+
+
+def git_status_untracked_paths(cwd) -> "Optional[set]":
+    """W4a: the Bash half of "Bash and NotebookEdit changes are shadow-
+    copied via a git status diff before and after the command when the cwd
+    is a git repo". Pure and synchronous -- the CALLER (`tui/dispatch.py`,
+    via a `run_worker(..., thread=True)`) is responsible for keeping this
+    off the UI thread, exactly like `_git_branch`'s own subprocess call.
+
+    Returns the set of absolute paths `git status --porcelain=v1` reports
+    as untracked ('??') right now, or `None` when `cwd` isn't a git repo,
+    `git` itself isn't reachable, or the call times out -- the documented
+    limit for a non-git directory (no shadow-copy for Bash there at all).
+
+    Scoped to UNTRACKED files only (v1): a brand-new file is unambiguous
+    evidence "this command created it"; detecting a MODIFIED pre-existing
+    TRACKED file needs the status code read more carefully (was it already
+    dirty before this command ran?) than this bounded first pass covers --
+    a documented scope cut, see the worker report."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out: set = set()
+    for entry in (result.stdout or "").split("\x00"):
+        if not entry.startswith("??"):
+            continue
+        rel = entry[3:]
+        if not rel:
+            continue
+        try:
+            out.add(str((Path(cwd) / rel).resolve()))
+        except OSError:
+            continue
+    return out
 
 
 def store_for_controller(controller) -> "Optional[ShadowStore]":

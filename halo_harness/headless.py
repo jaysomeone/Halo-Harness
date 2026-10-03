@@ -258,9 +258,15 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
     # H8 scope E (deferred by H3): `@server:resource` mentions, the MCP
     # sibling of the `@path` handling just above -- same "separate context
     # block, never inlined" rule.
-    from halo_harness.mcp.mentions import read_server_resource_snapshots
+    from halo_harness.mcp.mentions import read_server_resource_snapshots, unresolved_server_mentions
     for label, content in read_server_resource_snapshots(text, mcp_manager=session.mcp_manager):
         session.log.append_snapshot([{"type": "text", "text": f"@{label}\n{content}"}], kind="at_mention")
+    # W4a misc: see controller.py's own identical comment -- a visible
+    # warning naming the server, never a silent no-op, for an `@name:uri`
+    # whose server isn't connected at all.
+    for server in unresolved_server_mentions(text, mcp_manager=session.mcp_manager):
+        warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
+        session.log.append_snapshot([{"type": "text", "text": warning}], kind="at_mention")
 
 
 def _resolve_local_file_spec(raw: str, *, cwd: Path) -> "Optional[Path]":
@@ -362,6 +368,42 @@ def _events_for_direct_output(output: str, *, turn_no: int = 1):
 _BACKGROUND_JOB_WAIT_S = 120.0  # matches Bash's own default foreground timeout
 
 
+def _maybe_add_prompt_suggestion(session, sink, cli_flags: dict) -> None:
+    """W4a `--prompt-suggestions`: one extra small-model call predicting the
+    user's likely next message, ONLY when the flag was given (never a
+    default-on cost -- see MEMORY.md's token-thrift rule) -- scoped to the
+    single-turn text-input path (`run_print_mode`'s own `finish=False`
+    sequencing point is what makes "compute the suggestion, THEN let
+    `_drain_background_jobs_for_print_mode` call `sink.finish()`" possible);
+    the `--input-format stream-json` multi-turn loop calls `sink.consume()`
+    with its OWN internal `finish()` per turn, with no equivalent gap to
+    slot this into -- left for a follow-up, see the worker report. Never
+    raises: a prediction failure must never affect the real turn's result."""
+    if not cli_flags.get("prompt_suggestions"):
+        return
+    try:
+        last_assistant_text = ""
+        for node in reversed(session.log.nodes()):
+            if node.get("type") == "assistant":
+                parts = [b.get("text", "") for b in (node.get("content") or [])
+                         if isinstance(b, dict) and b.get("type") == "text"]
+                last_assistant_text = "".join(parts).strip()
+                if last_assistant_text:
+                    break
+        if not last_assistant_text:
+            return
+        suggestion = session.call_small_model(
+            system_text=("Given the assistant's last message in a coding-assistant conversation, predict the "
+                         "user's most likely next message. Reply with ONLY that predicted message text, nothing else."),
+            user_text=last_assistant_text, max_tokens=200, timeout_s=20.0,
+        )
+        suggestion = (suggestion or "").strip()
+        if suggestion:
+            sink.add_prompt_suggestion(suggestion)
+    except Exception:
+        pass
+
+
 def _drain_background_jobs_for_print_mode(session, sink) -> int:
     """H8 scope A must-do (acceptance: "line count first, completion notice
     later"): dsh's "background jobs ... report completion as a user-role
@@ -451,6 +493,7 @@ def build_session(
     mcp_config: Optional[list] = None, strict_mcp_config: bool = False, print_mode: bool = True,
     continue_: bool = False, resume: Optional[str] = None, fork_session_flag: bool = False,
     agent: Optional[str] = None, agents_flag: Optional[str] = None, roles_flag: Optional[list] = None,
+    cli_flags: Optional[dict] = None,
 ) -> SessionBuild:
     """The ONE shared builder (finding 9). `print_mode` (True for `-p`,
     False for the TUI) is the single knob that decides `PermissionEngine.
@@ -467,6 +510,7 @@ def build_session(
     `--tools Read,Bash`-style TUI launch used to leave the whole deferred
     MCP pool unreachable while the prompt still said "call ToolSearch"."""
     from halo_harness import debug_timeline
+    cli_flags = dict(cli_flags or {})
     claude_json = load_claude_json()
     trusted = is_trusted(cwd, claude_json)
     settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
@@ -547,9 +591,36 @@ def build_session(
     else:
         resolved_mode = "default"
 
+    # W4a `--restricted`: claude's own "refuses bypassPermissions" -- an
+    # explicit --dangerously-skip-permissions alongside --restricted falls
+    # back to "default" (asks) rather than silently granting bypass anyway.
+    if cli_flags.get("restricted") and resolved_mode == "bypassPermissions":
+        print("halo: --restricted is read-only, so --dangerously-skip-permissions is ignored -- the default permission mode applies",
+              file=sys.stderr)
+        resolved_mode = "default"
+
+    base_tools = None
+    if cli_flags.get("brief"):
+        # claude's own --brief: "Enable SendUserMessage tool for
+        # agent-to-user communication" -- added to the catalog BEFORE
+        # freeze_tool_registry so --tools/deny-rule filtering still applies
+        # to it exactly like any other built-in tool.
+        from halo_harness.tools.registry import default_tools
+        from halo_harness.tools.send_user_message import SendUserMessageTool
+        base_tools = default_tools() + [SendUserMessageTool()]
+
     frozen_registry = freeze_tool_registry(
-        ToolRegistry(), tools_flag=tools, disallowed_tools=cli_disallow, deny_rules=deny_rules,
+        ToolRegistry(base_tools), tools_flag=tools, disallowed_tools=cli_disallow, deny_rules=deny_rules,
     )
+    if cli_flags.get("restricted"):
+        # claude's own --restricted: "removes the built-in tools that run
+        # commands or code (Bash, PowerShell, ...) and WebFetch unless
+        # --tools names them". `tools` (the raw --tools string, not yet
+        # catalog-filtered) is the one signal for "named them explicitly".
+        named = set(split_tool_rule_list(tools)) if tools else set()
+        restricted_deny = {"Bash", "PowerShell", "WebFetch"} - named
+        if restricted_deny:
+            frozen_registry = frozen_registry.without(restricted_deny)
     extra_dirs = [Path(d) for d in settings.permissions_additional_directories] + [Path(d) for d in (add_dir or [])]
     permission_engine = PermissionEngine(
         deny_rules=deny_rules, ask_rules=ask_rules, allow_rules=allow_rules, mode=resolved_mode,
@@ -833,7 +904,13 @@ def build_session(
     # resolved against the FULLY assembled catalog (built-ins + MCP +
     # WebSearch, all already added to `frozen_registry` above) so
     # `spec.resolved_tools()` can actually see everything it might keep.
-    discovered_agents = {} if bare else discover_agents(cwd, settings=settings, agents_flag=agents_flag)
+    plugin_roots = None
+    if cli_flags.get("plugin_dir") or cli_flags.get("plugin_url"):
+        from halo_harness.plugin_fetch import resolve_plugin_roots
+        plugin_roots = resolve_plugin_roots(cli_flags.get("plugin_dir"), cli_flags.get("plugin_url"),
+                                             state_dir=bridge_home())
+    discovered_agents = {} if bare else discover_agents(cwd, settings=settings, agents_flag=agents_flag,
+                                                          plugin_roots=plugin_roots)
     agent_spec = discovered_agents.get(agent) if agent else None
     agent_type_restriction = None
     if agent_spec is not None:
@@ -870,6 +947,14 @@ def build_session(
         from halo_harness.providers.config import merge_databricks_headers
         dbx_cfg = _resolve_dbx_config_for_headers(settings)
         extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
+    if cli_flags.get("betas"):
+        # W4a `--betas`: "Beta headers to include in API requests (API key
+        # users only)" -- a comma-joined `anthropic-beta` header, the real
+        # wire name every Anthropic-family route (ant:/cc:'s own passthrough,
+        # Databricks Claude foundation) already knows to merge in as a
+        # normal extra header; inert (never sent) on a chat-dialect route
+        # that has no such header to merge into its own request builder.
+        extra_headers = {**(extra_headers or {}), "anthropic-beta": ",".join(cli_flags["betas"])}
 
     # H6 scope D: --continue/--resume/--fork-session all resolve to a
     # concrete session_id BEFORE the log is opened -- an explicit
@@ -911,7 +996,7 @@ def build_session(
         extra_headers=extra_headers, permission_engine=permission_engine,
         session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
         agents=discovered_agents, routes=routes, agent_type_restriction=agent_type_restriction,
-        roles=persisted_roles, cli_roles=cli_roles,
+        roles=persisted_roles, cli_roles=cli_roles, cli_flags=cli_flags,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = session._call_model_for_hook
@@ -1003,11 +1088,34 @@ def run_print_mode(
     roles_flag: Optional[list] = None,
     name: Optional[str] = None,
     file_specs: Optional[list] = None,
+    cli_flags: Optional[dict] = None,
 ) -> int:
     """Run one turn (`input_format="text"`) or several (`"stream-json"`,
     one turn per entry of `stdin_lines`) in print mode; returns the
     process's exit code (the LAST turn's, for stream-json input)."""
     cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    cli_flags = dict(cli_flags or {})
+    if cli_flags.get("worktree") is not None:
+        # W4a `-w/--worktree [name]`: the session runs in a FRESH git
+        # worktree instead of the real working tree -- created here, before
+        # anything else touches `cwd`, so settings/CLAUDE.md/instructions/
+        # tool access are all resolved against the worktree from the very
+        # first line. Falls back to the original cwd (one stderr notice,
+        # never a hard failure) when this isn't a git repo or `git worktree
+        # add` itself fails for any reason.
+        from halo_harness.config.paths import bridge_home
+        from halo_harness.worktree import create_worktree
+        wt_path, wt_error = create_worktree(cwd, cli_flags.get("worktree") or None, state_dir=bridge_home())
+        if wt_path is not None:
+            print(f"halo: --worktree -> {wt_path}", file=sys.stderr)
+            cwd = wt_path
+            # W4a WorktreeCreated: fired once Session (and its hook_runner)
+            # exists -- the worktree itself is created before build_session
+            # ever runs, so this just carries the path through cli_flags.
+            cli_flags["_worktree_created_path"] = str(wt_path)
+        else:
+            print(f"halo: --worktree could not create a worktree ({wt_error}) -- "
+                  f"continuing in the current directory", file=sys.stderr)
 
     # must-do: validated FIRST, before anything (incl. MCP) starts -- the
     # old position (right before `Session(...)`, well after `build_manager`
@@ -1054,7 +1162,7 @@ def run_print_mode(
         playwright=playwright, playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
         mcp_config=mcp_config, strict_mcp_config=strict_mcp_config, print_mode=True,
         continue_=continue_, resume=resume, fork_session_flag=fork_session_flag,
-        agent=agent, agents_flag=agents_flag, roles_flag=roles_flag,
+        agent=agent, agents_flag=agents_flag, roles_flag=roles_flag, cli_flags=cli_flags,
     )
     session, frozen_registry, model_ref = (build.session, build.tool_registry, build.model_ref)
     mcp_manager, resolved_mode, session_log = build.mcp_manager, build.resolved_mode, build.session_log
@@ -1120,6 +1228,7 @@ def run_print_mode(
                     slash_commands=slash_names, include_partial_messages=include_partial_messages,
                     max_budget_usd=max_budget_usd, permission_denials=session.permission_denials,
                     json_schema=json_schema, effort=session.effort_requested, effort_sent=effort_sent,
+                    hook_events_fn=(session.drain_hook_events if cli_flags.get("include_hook_events") else None),
                 )
             return PrintModeSink(output_format=output_format, session_id=session_log.session_id, model=model_ref.raw,
                                   verbose=verbose, permission_denials=session.permission_denials, json_schema=json_schema,
@@ -1186,6 +1295,10 @@ def run_print_mode(
                 else:
                     _append_at_mention_snapshots(session, final_prompt, cwd)
                     _append_agent_mention_snapshot(session, final_prompt or turn_text, build.agents)
+                    if final_prompt is not None:
+                        extra_ctx = session.fire_user_prompt_expansion(turn_text, final_prompt)
+                        if extra_ctx:
+                            session.log.append_snapshot([{"type": "text", "text": extra_ctx}], kind="hook_context")
                     exit_code = sink.consume(session.turn(final_prompt or turn_text))
                     # finding 5/10: a steer that landed after the turn's
                     # very last checkpoint (session.turn()'s own `finally`
@@ -1226,6 +1339,10 @@ def run_print_mode(
             return sink.consume(_events_for_direct_output(direct_output))
         _append_at_mention_snapshots(session, final_prompt, cwd)
         _append_agent_mention_snapshot(session, final_prompt or prompt_text, build.agents)
+        if final_prompt is not None:
+            extra_ctx = session.fire_user_prompt_expansion(prompt_text, final_prompt)
+            if extra_ctx:
+                session.log.append_snapshot([{"type": "text", "text": extra_ctx}], kind="hook_context")
         try:
             # H9 whole-tree review finding 9: `finish=False` -- the turn's
             # events are drained into `sink` but nothing is printed and no
@@ -1234,6 +1351,7 @@ def run_print_mode(
             # calls `sink.finish()` for this whole process (see its own
             # docstring for the multi-JSON-object/exit-code bug this closes).
             sink.consume(session.turn(final_prompt or prompt_text), finish=False)
+            _maybe_add_prompt_suggestion(session, sink, cli_flags)
             # H8 scope A must-do: a single -p text-input call has no later
             # turn to deliver a background job's completion notice through
             # (see `_drain_background_jobs_for_print_mode`'s own docstring)
@@ -1265,3 +1383,21 @@ def run_print_mode(
             pass
         if mcp_manager is not None:
             mcp_manager.close_all()
+        if cli_flags.get("no_session_persistence"):
+            # W4a `--no-session-persistence`: "sessions will not be saved to
+            # disk and cannot be resumed" -- the session still runs/logs
+            # normally (SessionLog's own write path is deeply embedded
+            # elsewhere; bypassing it is a bigger change than this flag is
+            # worth), but nothing it wrote survives past this process's own
+            # exit: the log file/directory and its index entry are removed
+            # here, last, after every other finally-block cleanup above.
+            try:
+                import shutil as _shutil
+                agent_sessions.forget_session(cwd, session_log.session_id)
+                if session_log.path.exists():
+                    session_log.path.unlink()
+                session_dir = session_log.dir / session_log.session_id
+                if session_dir.is_dir():
+                    _shutil.rmtree(session_dir, ignore_errors=True)
+            except Exception:
+                pass

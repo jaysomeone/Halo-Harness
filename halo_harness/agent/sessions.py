@@ -265,6 +265,23 @@ def update_index_entry(cwd, session_id: str, **fields) -> None:
         pass
 
 
+def forget_session(cwd, session_id: str) -> None:
+    """W4a `--no-session-persistence`: removes `session_id`'s own
+    `index.json` entry, if any. Best-effort, like every other write here --
+    a leftover index row for a log file that no longer exists is harmless
+    (every reader already tolerates a missing `.jsonl`), so a failure here
+    is never worth raising over."""
+    path = index_path(cwd)
+    data = load_index(cwd)
+    if session_id not in data:
+        return
+    data.pop(session_id, None)
+    try:
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def record_session_start(cwd, session_id: str, first_prompt: str) -> None:
     update_index_entry(cwd, session_id, first_prompt=(first_prompt or "")[:200],
                         started=time.time(), last=time.time(), turns=0)

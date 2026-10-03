@@ -139,7 +139,9 @@ def _fake_model_row(model="or:test/model", **overrides) -> dict:
     formatter reads a specific key directly, so a partial fake would
     KeyError."""
     row = {
-        "model": model, "provider": "TestProv", "route": "or", "sessions": 3, "turns": None,
+        # W4a misc: "turns" is a real int now (distinct turns that used this
+        # model) -- see telemetry.aggregate_by_model's own docstring update.
+        "model": model, "provider": "TestProv", "route": "or", "sessions": 3, "turns": 7,
         "calls": 10, "tokens_in": 1000, "tokens_out": 200, "tokens_cached": 50, "cost_usd": 0.1234,
         "avg_ttft_ms": 120.0, "avg_latency_ms": 800.0, "finish_length_pct": 5.0, "retries": 1,
         "status_counts": {}, "overflows": 0, "tool_calls": 8, "tool_error_pct": 12.5,

@@ -116,6 +116,32 @@ def test_aggregate_by_model_known_counts(ctx: Ctx):
 
 
 @test
+def test_w4a_per_model_turns_counts_distinct_turns_not_calls(ctx: Ctx):
+    """W4a misc ("stats --models per-model turns real"): a turn with two
+    model calls to the SAME model (a retry/tool-loop) must count as ONE
+    turn for that model, not two -- `calls` still counts both. Built
+    directly against `_summarize_nodes` (no on-disk fixture needed) so the
+    exact turn/call shape is unambiguous."""
+    nodes = [
+        {"type": "meta", "model": "or:test/model-x"},
+        {"type": "user", "kind": None},  # turn 1
+        {"type": "usage", "model": "or:test/model-x", "provider": "TestProv", "usage": {}},
+        {"type": "usage", "model": "or:test/model-x", "provider": "TestProv", "usage": {}},  # same turn, 2nd call (retry)
+        {"type": "user", "kind": None},  # turn 2
+        {"type": "usage", "model": "or:test/model-x", "provider": "TestProv", "usage": {}},
+        {"type": "user", "kind": "steer"},  # never increments s.turns -- must not look like a 3rd turn
+        {"type": "usage", "model": "or:test/model-x", "provider": "TestProv", "usage": {}},
+    ]
+    summary = telemetry._summarize_nodes(session_id="s1", slug="sl", path="p", mtime=0.0, size=0,
+                                          nodes=nodes, corrupt_lines=0)
+    rows = telemetry.aggregate_by_model([summary])
+    row = next(r for r in rows if r["model"] == "or:test/model-x")
+    ctx.check(f"4 calls total, got {row['calls']}", row["calls"] == 4)
+    ctx.check(f"only 2 distinct turns (the steer's own call doesn't start a 3rd), got {row['turns']}",
+              row["turns"] == 2)
+
+
+@test
 def test_aggregate_by_tool_known_counts(ctx: Ctx):
     d = _fresh_sessions_dir()
     summaries = telemetry.scan(d, since="all", all_projects=True, use_cache=False)

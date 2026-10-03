@@ -53,7 +53,7 @@ _SINCE_DAYS = {"7d": 7, "30d": 30, "all": None}
 
 def _new_model_counters() -> dict:
     return {
-        "route": "", "calls": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0, "cost_usd": 0.0,
+        "route": "", "calls": 0, "turns": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0, "cost_usd": 0.0,
         "ttft_sum_ms": 0.0, "ttft_n": 0, "latency_sum_ms": 0.0, "latency_n": 0,
         "finish_length": 0, "retries": 0, "status_counts": {s: 0 for s in STATUS_VALUES},
         "tool_calls": 0, "tool_errors": 0, "tool_use_total": 0,
@@ -229,6 +229,14 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
     # own "(model, '')" row, keeps `aggregate_by_model` from splitting one
     # model's stats across two rows just because one of its calls failed.
     last_key_for_model: dict = {}
+    # W4a misc ("stats --models per-model turns real"): per (model,
+    # provider) key, the set of `s.turns` values already counted -- `s.
+    # turns` itself increments on each real user-prompt node (see the
+    # "user" branch below), so its CURRENT value at the moment a usage node
+    # is processed is exactly "which turn this call belongs to"; a multi-
+    # call turn (retries/a tool loop) touches the same key several times
+    # but must only count as ONE turn for that model.
+    turns_seen_per_key: dict = {}
 
     def model_bucket() -> Optional[dict]:
         if current_key is None:
@@ -293,6 +301,10 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                     b["route"] = route
                 usage = node.get("usage") or {}
                 b["calls"] += 1
+                turns_for_key = turns_seen_per_key.setdefault(current_key, set())
+                if s.turns not in turns_for_key:
+                    turns_for_key.add(s.turns)
+                    b["turns"] += 1
                 b["tokens_in"] += int(usage.get("input_tokens") or 0)
                 b["tokens_out"] += int(usage.get("output_tokens") or 0) + int(usage.get("reasoning_tokens") or 0)
                 b["tokens_cached"] += (int(usage.get("cache_read_input_tokens") or 0)
@@ -603,7 +615,7 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
             dest = merged.setdefault(key, _new_model_counters())
             sessions_per_key.setdefault(key, set()).add(s.session_id)
             dest["route"] = b.get("route") or dest["route"]
-            for field_name in ("calls", "tokens_in", "tokens_out", "tokens_cached", "cost_usd",
+            for field_name in ("calls", "turns", "tokens_in", "tokens_out", "tokens_cached", "cost_usd",
                                 "ttft_sum_ms", "ttft_n", "latency_sum_ms", "latency_n", "finish_length",
                                 "retries", "tool_calls", "tool_errors", "tool_use_total",
                                 "edit_calls", "edit_failures", "steers", "interrupts", "compactions", "overflows",
@@ -623,7 +635,12 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
         c = merged[key]
         rows.append({
             "model": model, "provider": provider or None, "route": c["route"] or None,
-            "sessions": len(sessions_per_key.get(key, ())), "turns": None,  # turns is session-scoped, not model-scoped
+            "sessions": len(sessions_per_key.get(key, ())),
+            # W4a misc ("stats --models per-model turns real"): the number
+            # of DISTINCT turns that used this model (never conflated with
+            # `calls`, which counts every individual model API call --
+            # several per turn on a retry/tool-loop-heavy session).
+            "turns": c["turns"],
             "calls": c["calls"], "tokens_in": c["tokens_in"], "tokens_out": c["tokens_out"],
             "tokens_cached": c["tokens_cached"], "cost_usd": round(c["cost_usd"], 4),
             "avg_ttft_ms": _avg(c["ttft_sum_ms"], c["ttft_n"]), "avg_latency_ms": _avg(c["latency_sum_ms"], c["latency_n"]),
@@ -643,11 +660,6 @@ def aggregate_by_model(summaries: "list[SessionSummary]") -> "list[dict]":
             "waits_over_20s": c["waits_over_20s"], "reasoning_calls": c["reasoning_calls"],
             "reasoning_streamed_pct": _pct(c["reasoning_streamed_calls"], c["reasoning_calls"]),
         })
-    # `turns` is a session-level counter (one session may talk to several
-    # models); reported once per model as "sessions this model was used in"
-    # already covers the useful cross-session signal, so `turns` above is
-    # intentionally left as a per-model placeholder (None) rather than
-    # double-counting a session's turns once per model it happened to use.
     return rows
 
 

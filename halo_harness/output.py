@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json as json_module
 import sys
+import time
+import uuid as uuid_module
 from typing import Iterator, Optional
 
 from halo_harness import events as ev
@@ -70,10 +72,12 @@ def build_result_object(
     permission_denials: Optional[list] = None,
     structured_output=None,
     background_notices: Optional[list] = None,
+    duration_ms: Optional[int] = None,
+    uuid: Optional[str] = None,
+    prompt_suggestion: Optional[str] = None,
 ) -> dict:
     """The `-p --output-format json` result object -- a subset of plan
-    D-TUI's full shape (duration_ms/uuid are TUI/hook concerns that don't
-    exist yet in this build). H2 scope D: `permission_denials` is a list of
+    D-TUI's full shape. H2 scope D: `permission_denials` is a list of
     `{"tool_name","tool_input","reason"}` -- one entry per `ask`-turned-
     deny outcome print mode hit this turn (D6: "an `ask` outcome -> deny
     with an error tool_result naming the suggested rule" -- this is the
@@ -81,7 +85,14 @@ def build_result_object(
     caller, empty when nothing was denied for that reason). `structured_output`
     (U0 scope F, `--json-schema`) is the final text re-parsed as JSON, or
     None when `--json-schema` wasn't used or the model's reply wasn't valid
-    JSON."""
+    JSON.
+
+    W4a: `duration_ms` (wall-clock from the sink's own construction to this
+    call -- the whole run, not just the last model call) and `uuid` (a
+    fresh id for THIS result message, Claude Code's own stream-json/json
+    result-line convention) are real now -- both sinks' `finish()` supply
+    them. `prompt_suggestion` (`--prompt-suggestions`) is the predicted next
+    user message, or None when the flag wasn't given."""
     return {
         "type": "result",
         "subtype": subtype,
@@ -102,6 +113,9 @@ def build_result_object(
         # --output-format json` run with a still-running background job at
         # the end of its turn prints exactly ONE JSON object, always.
         "background_notices": background_notices or [],
+        "duration_ms": duration_ms,
+        "uuid": uuid,
+        "prompt_suggestion": prompt_suggestion,
     }
 
 
@@ -146,6 +160,15 @@ class PrintModeSink:
         self._total_cost_usd: Optional[float] = None
         self._num_turns = 0
         self._saw_any_message = False
+        # W4a: `duration_ms`/`uuid` on the eventual result object -- see
+        # `build_result_object`'s own docstring.
+        self._start_monotonic = time.monotonic()
+        self._prompt_suggestion: Optional[str] = None
+
+    def add_prompt_suggestion(self, text: str) -> None:
+        """W4a `--prompt-suggestions`: folded into the one result object,
+        same reasoning as `add_background_notice`."""
+        self._prompt_suggestion = text
 
     def consume(self, event_iter: Iterator[ev.Event], *, finish: bool = True) -> Optional[int]:
         """Safe to call again on the SAME sink for a later turn
@@ -306,7 +329,9 @@ class PrintModeSink:
                 self.stream.write(("\n" if notice.startswith("\n") else "\n\n") + notice)
                 if not notice.endswith("\n"):
                     self.stream.write("\n")
-            if self._background_notices:
+            if self._prompt_suggestion:
+                self.stream.write(f"\n[next: {self._prompt_suggestion}]\n")
+            if self._background_notices or self._prompt_suggestion:
                 self.stream.flush()
         else:
             if self._budget_exceeded:
@@ -328,6 +353,9 @@ class PrintModeSink:
                 permission_denials=self._permission_denials,
                 structured_output=_try_structured_output(self._final_text, self.json_schema),
                 background_notices=self._background_notices,
+                duration_ms=int((time.monotonic() - self._start_monotonic) * 1000),
+                uuid=str(uuid_module.uuid4()),
+                prompt_suggestion=self._prompt_suggestion,
             )
             # write to self.stream (defaults to sys.stdout, same as a bare
             # print() would have -- but this way a caller that passed its
@@ -358,7 +386,8 @@ class StreamJsonSink:
                  slash_commands: Optional[list] = None, include_partial_messages: bool = False,
                  max_budget_usd: Optional[float] = None, stream=None,
                  permission_denials: Optional[list] = None, json_schema: Optional[str] = None,
-                 effort: Optional[str] = None, effort_sent: Optional[str] = None):
+                 effort: Optional[str] = None, effort_sent: Optional[str] = None,
+                 hook_events_fn=None):
         # Halo 2.0.1 W2a (GLM-brief.md item 1 / HALO-2.0.1-liveness-tips-
         # brief.md Part C): `effort` is whatever was last explicitly
         # requested (None when nothing was); `effort_sent` is the value
@@ -402,6 +431,17 @@ class StreamJsonSink:
         # H9 whole-tree review finding 9: same role as PrintModeSink's own
         # field -- see its docstring.
         self._background_notices: list = []
+        # W4a `--include-hook-events`: `Session.drain_hook_events`, only
+        # when headless.py's caller actually asked for this -- None means
+        # "never check" (the cheap, overwhelmingly common default path).
+        self.hook_events_fn = hook_events_fn
+        # W4a: `duration_ms`/`uuid`/`--prompt-suggestions` on the final
+        # result line -- see `build_result_object`'s own docstring.
+        self._start_monotonic = time.monotonic()
+        self._prompt_suggestion: Optional[str] = None
+
+    def add_prompt_suggestion(self, text: str) -> None:
+        self._prompt_suggestion = text
 
     def _write(self, obj: dict) -> None:
         self.stream.write(json_module.dumps(obj) + "\n")
@@ -466,7 +506,14 @@ class StreamJsonSink:
             })
             buf["tool_results"] = []
 
+    def _emit_pending_hook_events(self) -> None:
+        if self.hook_events_fn is None:
+            return
+        for record in self.hook_events_fn():
+            self._write({"type": "system", "subtype": "hook_event", "session_id": self.session_id, **record})
+
     def _handle(self, event: ev.Event) -> None:
+        self._emit_pending_hook_events()
         kind = event.kind
         agent_id = event.agent_id
         parent_tool_use_id = event.data.get("parent_tool_use_id") if isinstance(event.data, dict) else None
@@ -561,6 +608,13 @@ class StreamJsonSink:
             subtype, is_error = "error_during_execution", True
         else:
             subtype, is_error = "success", False
+        if self._prompt_suggestion:
+            # claude's own wording: "emits a prompt_suggestion message" --
+            # its own line, distinct from the result line below (which ALSO
+            # carries it in `prompt_suggestion`, for a plain `json` caller
+            # that never sees stream-json's extra message types at all).
+            self._write({"type": "prompt_suggestion", "session_id": self.session_id,
+                         "suggestion": self._prompt_suggestion})
         result = build_result_object(
             session_id=self.session_id, model=self.model, num_turns=self._num_turns,
             stop_reason=self._stop_reason, usage=self._usage, total_cost_usd=self._total_cost_usd,
@@ -568,6 +622,9 @@ class StreamJsonSink:
             is_error=is_error, subtype=subtype, permission_denials=self._permission_denials,
             structured_output=_try_structured_output(self._final_text, self.json_schema),
             background_notices=self._background_notices,
+            duration_ms=int((time.monotonic() - self._start_monotonic) * 1000),
+            uuid=str(uuid_module.uuid4()),
+            prompt_suggestion=self._prompt_suggestion,
         )
         self._write(result)
         return 1 if is_error else 0

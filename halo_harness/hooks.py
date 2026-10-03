@@ -54,11 +54,23 @@ ADDITIONAL_CONTEXT_CAP = 8000
 # a settings.json/hooks.json entry for one of these parses fine (normalize_
 # hooks doesn't special-case the event name at all) but no call site in
 # agent/loop.py ever calls HookRunner.run() for it yet.
+#
+# W4a: 14 of the original 17 now fire for real (agent/loop.py's own
+# `_fire_*`/`fire_user_prompt_expansion` methods, `agent/subagent.py`'s
+# `_fire_task_hook` -- see each one's docstring for its exact trigger point
+# and any documented partial-scope note). Three remain:
+# - WorktreeRemoved: WorktreeCreated is real (`-w/--worktree`, sub-agent
+#   `isolation: worktree`), but nothing in this build ever REMOVES a
+#   worktree yet (no `claude rm`-equivalent command exists) -- `halo_
+#   harness.worktree.remove_worktree` is written and tested standalone,
+#   ready for whatever command ends up calling it.
+# - ElicitationRequest/ElicitationResponse: MCP elicitation (a server
+#   asking the CLIENT a structured question mid-call) is not implemented
+#   as a protocol feature in this build at all yet -- a bigger, separate
+#   piece of work than wiring a hook at an existing call site; see the
+#   worker report.
 NOT_EMITTED_V1 = frozenset({
-    "Setup", "UserPromptExpansion", "MessageDisplay", "TaskCreated", "TaskCompleted",
-    "StopFailure", "InstructionsLoaded", "ConfigChange", "CwdChanged", "DirectoryAdded",
-    "FileChanged", "WorktreeCreated", "WorktreeRemoved", "PreModelSwitch", "PostModelSwitch",
-    "ElicitationRequest", "ElicitationResponse",
+    "WorktreeRemoved", "ElicitationRequest", "ElicitationResponse",
 })
 
 

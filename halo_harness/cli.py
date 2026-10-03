@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 from pathlib import Path
 from typing import Optional
 
 from halo_harness import __version__
-from halo_harness.not_yet import print_not_yet
+from halo_harness.cli_flags import cli_flags_from_args
+from halo_harness.not_yet import print_not_applicable, print_not_yet
 from halo_harness.providers.routing import InvalidModelError
 
 _STDIN_CAP_BYTES = 10 * 1024 * 1024  # 10 MB, matches Claude Code's own -p stdin cap
@@ -67,7 +69,12 @@ _REAL_FLAGS = [
     (["--disallowedTools", "--disallowed-tools"], dict(dest="disallowed_tools", default=None, metavar="TOOLS")),
     (["--permission-mode"], dict(dest="permission_mode", default=None,
         choices=["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "manual"])),
-    (["--dangerously-skip-permissions"], dict(dest="dangerously_skip_permissions", action="store_true")),
+    # W4a: `--allow-dangerously-skip-permissions` is Claude Code's own alias
+    # for this same flag ("as an option, without it being enabled by
+    # default" -- this harness has always treated the two identically, so
+    # the second flag string is the whole fix).
+    (["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"],
+        dict(dest="dangerously_skip_permissions", action="store_true")),
     (["--tools"], dict(dest="tools", default=None, metavar="TOOLS")),
     (["--max-budget-usd"], dict(dest="max_budget_usd", type=float, default=None)),
     (["--json-schema"], dict(dest="json_schema", default=None, metavar="SCHEMA")),
@@ -126,43 +133,70 @@ _REAL_FLAGS = [
     # and ignored (everything is logged).
     (["-d", "--debug"], dict(dest="debug", nargs="?", const="", default=None)),
     (["--debug-file"], dict(dest="debug_file", default=None, metavar="PATH")),
+    # W4a: real now -- the 21 flags the 2.0.1 gap list named as
+    # implementable in a standalone harness (plans/2.0.1-w4-plan.md W4a
+    # item 2). Each one's actual behaviour is wired in `_cli_flags_from_
+    # args` below plus `headless.build_session`/`agent/loop.Session`; a few
+    # reuse an existing knob outright (`--autocompact` is `CLAUDE_CODE_
+    # AUTO_COMPACT_WINDOW`, already read by `agent/compact.resolve_knobs`).
+    (["--autocompact"], dict(dest="autocompact", default=None, metavar="AUTO_OR_TOKENS")),
+    (["--ax-screen-reader"], dict(dest="ax_screen_reader", action="store_true")),
+    (["--bg", "--background"], dict(dest="background", action="store_true")),
+    (["--betas"], dict(dest="betas", nargs="+", default=None, metavar="BETA")),
+    (["--brief"], dict(dest="brief", action="store_true")),
+    # W4a: repurposed for a standalone harness (no cloud sessions exist to
+    # run "on a self-hosted environment") -- one or more KEY=VALUE pairs
+    # merged into the tool child env, the one piece of claude's own
+    # `--environment` that still means something here.
+    (["--environment"], dict(dest="environment", action="append", default=None, metavar="KEY=VALUE")),
+    (["--exclude-dynamic-system-prompt-sections"], dict(dest="exclude_dynamic_system_prompt_sections", action="store_true")),
+    (["--fallback-model"], dict(dest="fallback_model", default=None, metavar="MODEL")),
+    (["--forward-subagent-text"], dict(dest="forward_subagent_text", action="store_true")),
+    (["--include-hook-events"], dict(dest="include_hook_events", action="store_true")),
+    (["--no-session-persistence"], dict(dest="no_session_persistence", action="store_true")),
+    (["--permission-prompt-tool"], dict(dest="permission_prompt_tool", default=None, metavar="TOOL")),
+    (["--permission-prompts"], dict(dest="permission_prompts", choices=["host", "none"], default=None)),
+    (["--plugin-dir"], dict(dest="plugin_dir", action="append", default=None, metavar="PATH")),
+    (["--plugin-url"], dict(dest="plugin_url", action="append", default=None, metavar="URL")),
+    (["--prompt-suggestions"], dict(dest="prompt_suggestions", nargs="?", const="true", default=None,
+        choices=["true", "false", "1", "0", "yes", "no", "on", "off"])),
+    (["--restricted"], dict(dest="restricted", action="store_true")),
+    (["--system-prompt-snapshot"], dict(dest="system_prompt_snapshot", choices=["on", "off"], default=None)),
+    (["--tmux"], dict(dest="tmux", nargs="?", const="default", default=None)),
+    (["-w", "--worktree"], dict(dest="worktree", nargs="?", const="", default=None)),
 ]
 
-_NOT_YET_FLAGS = [
-    (["--allow-dangerously-skip-permissions"], dict(dest="allow_dangerously_skip_permissions", action="store_true"),
-        "--allow-dangerously-skip-permissions", "H4"),
-    (["--autocompact"], dict(dest="autocompact", default=None, metavar="AUTO_OR_TOKENS"), "--autocompact", "H5"),
-    (["--ax-screen-reader"], dict(dest="ax_screen_reader", action="store_true"), "--ax-screen-reader", "U2"),
-    (["--bg", "--background"], dict(dest="background", action="store_true"), "--bg", "H8"),
-    (["--betas"], dict(dest="betas", nargs="+", default=None, metavar="BETA"), "--betas", "H8"),
-    (["--brief"], dict(dest="brief", action="store_true"), "--brief", "H4"),
-    (["--cloud"], dict(dest="cloud", nargs="?", const="", default=None), "--cloud", "H8"),
-    (["--environment"], dict(dest="environment_id", default=None, metavar="ENVIRONMENT_ID"), "--environment", "H8"),
-    (["--exclude-dynamic-system-prompt-sections"], dict(dest="exclude_dynamic_system_prompt_sections", action="store_true"),
-        "--exclude-dynamic-system-prompt-sections", "H5"),
-    (["--fallback-model"], dict(dest="fallback_model", default=None, metavar="MODEL"), "--fallback-model", "H6"),
-    (["--forward-subagent-text"], dict(dest="forward_subagent_text", action="store_true"), "--forward-subagent-text", "H6"),
-    (["--from-pr"], dict(dest="from_pr", nargs="?", const="", default=None), "--from-pr", "H8"),
-    (["--ide"], dict(dest="ide", action="store_true"), "--ide", "H8"),
-    (["--include-hook-events"], dict(dest="include_hook_events", action="store_true"), "--include-hook-events", "H4"),
-    (["--no-session-persistence"], dict(dest="no_session_persistence", action="store_true"), "--no-session-persistence", "H6"),
-    (["--permission-prompt-tool"], dict(dest="permission_prompt_tool", default=None, metavar="TOOL"), "--permission-prompt-tool", "H4"),
-    (["--permission-prompts"], dict(dest="permission_prompts", choices=["host", "none"], default=None), "--permission-prompts", "H4"),
-    (["--plugin-dir"], dict(dest="plugin_dir", action="append", default=None, metavar="PATH"), "--plugin-dir", "H4"),
-    (["--plugin-url"], dict(dest="plugin_url", action="append", default=None, metavar="URL"), "--plugin-url", "H4"),
-    (["--prompt-suggestions"], dict(dest="prompt_suggestions", nargs="?", const="true", default=None,
-        choices=["true", "false", "1", "0", "yes", "no", "on", "off"]), "--prompt-suggestions", "U3"),
-    (["--remote-control"], dict(dest="remote_control", nargs="?", const="", default=None), "--remote-control", "H8"),
+# W4a: the 7 flags whose Claude Code feature is a cloud/IDE concept with no
+# standalone-harness equivalent -- parsed and answered with one `not_
+# applicable_line` (never "planned", since there is no future milestone
+# that would change this), both here and in docs/COMMANDS.md.
+_NOT_APPLICABLE_FLAGS = [
+    (["--cloud"], dict(dest="cloud", nargs="?", const="", default=None),
+        "--cloud", "halo has no cloud session service -- every session runs on this machine"),
+    (["--teleport"], dict(dest="teleport", nargs="?", const="", default=None),
+        "--teleport", "teleport sessions are a claude.ai cloud feature halo has no equivalent of"),
+    (["--remote-control"], dict(dest="remote_control", nargs="?", const="", default=None),
+        "--remote-control", "Remote Control pairs a session with the claude.ai mobile/web app, which halo does not integrate with"),
     (["--remote-control-session-name-prefix"], dict(dest="remote_control_session_name_prefix", default=None),
-        "--remote-control-session-name-prefix", "H8"),
-    (["--restricted"], dict(dest="restricted", action="store_true"), "--restricted", "H4"),
-    (["--safe-mode"], dict(dest="safe_mode", action="store_true"), "--safe-mode", "H4"),
-    (["--system-prompt-snapshot"], dict(dest="system_prompt_snapshot", choices=["on", "off"], default=None),
-        "--system-prompt-snapshot", "H5"),
-    (["--teleport"], dict(dest="teleport", nargs="?", const="", default=None), "--teleport", "H8"),
-    (["--tmux"], dict(dest="tmux", nargs="?", const="default", default=None), "--tmux", "H8"),
-    (["-w", "--worktree"], dict(dest="worktree", nargs="?", const="", default=None), "--worktree", "H8"),
+        "--remote-control-session-name-prefix", "only meaningful alongside --remote-control, which is not applicable here"),
+    (["--from-pr"], dict(dest="from_pr", nargs="?", const="", default=None),
+        "--from-pr", "resuming a session linked to a PR is a claude.ai cloud-session feature halo does not have"),
+    (["--ide"], dict(dest="ide", action="store_true"),
+        "--ide", "needs Anthropic's IDE extension protocol, which halo does not implement"),
+    # D-CFG/no-cyber-blocks: Halo has no safety/refusal heuristics to
+    # disable by design -- accepted for CLI compatibility, no effect
+    # whatsoever (never gated, never even inspected past this point).
+    (["--safe-mode"], dict(dest="safe_mode", action="store_true"),
+        "--safe-mode", "halo has no safety heuristics to disable by design -- accepted for compatibility, no effect"),
 ]
+
+# Kept as an empty list rather than removed outright: `_build_parser`/`main`
+# below still iterate it uniformly alongside `_NOT_APPLICABLE_FLAGS`, so a
+# FUTURE flag that is genuinely not-yet-built again (a new Claude Code
+# release) has a ready home and a test (`test_cli_flags.py`) already
+# asserting the invariant "every entry here really does print the not-yet
+# line, never an argparse error" without needing to reinvent the mechanism.
+_NOT_YET_FLAGS = []
 
 
 def _enable_debug_logging(debug_file: Optional[str]) -> None:
@@ -232,6 +266,8 @@ def _build_parser() -> argparse.ArgumentParser:
     for flags, kwargs in _REAL_FLAGS:
         parser.add_argument(*flags, **kwargs)
     for flags, kwargs, _label, _milestone in _NOT_YET_FLAGS:
+        parser.add_argument(*flags, **kwargs)
+    for flags, kwargs, _label, _reason in _NOT_APPLICABLE_FLAGS:
         parser.add_argument(*flags, **kwargs)
     return parser
 
@@ -362,9 +398,29 @@ def main(argv: Optional[list] = None) -> int:
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
         if _flag_was_set(getattr(args, kwargs["dest"])):
             print_not_yet(label, milestone)
+    for _flags, kwargs, label, reason in _NOT_APPLICABLE_FLAGS:
+        if _flag_was_set(getattr(args, kwargs["dest"])):
+            print_not_applicable(label, reason)
 
     if _flag_was_set(getattr(args, "debug", None)) or getattr(args, "debug_file", None):
         _enable_debug_logging(getattr(args, "debug_file", None))
+
+    # W4a: `--autocompact <auto|tokens>` -- "auto" (or anything non-numeric)
+    # leaves the existing default alone; a token count reuses the SAME
+    # `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var `agent/compact.resolve_knobs`
+    # already reads (settings.effective_env falls back to real os.environ,
+    # so a real process-env var set here reaches it either way, TUI or -p)
+    # -- no new compaction-trigger plumbing needed at all.
+    autocompact_raw = getattr(args, "autocompact", None)
+    if autocompact_raw and autocompact_raw.strip().lower() != "auto":
+        try:
+            int(autocompact_raw.rstrip("kK")) if autocompact_raw.rstrip("kK").isdigit() else int(autocompact_raw)
+        except ValueError:
+            pass
+        else:
+            raw = autocompact_raw.strip()
+            tokens = int(raw[:-1]) * 1000 if raw[-1:].lower() == "k" else int(raw)
+            os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(tokens)
 
     if getattr(args, "role", None):
         # V2c (H15): validated ONCE, here, before either run_print_mode or
@@ -382,6 +438,21 @@ def main(argv: Optional[list] = None) -> int:
         demo_format = args.output_format if args.output_format in ("text", "json") else "text"
         return run_demo(output_format=demo_format, stress=args.stress)
 
+    # W4a: `--bg`/`--background` -- spawn THIS SAME invocation (minus the
+    # flag itself, and forced to -p since a detached child has no terminal
+    # a TUI could render into) as a detached background process, print its
+    # id + log path, and return immediately. A scoped-down v1 of Claude
+    # Code's own `--bg` (no `attach`/`logs`/`stop`/`rm` subcommands yet --
+    # the log file and the OS's own process tools cover the same ground
+    # for this round; see the worker report for what's left).
+    if _flag_was_set(getattr(args, "background", False)):
+        from halo_harness.bg_run import start_background_run
+        filtered = [a for a in argv if a not in ("--bg", "--background")]
+        info = start_background_run(filtered)
+        print(f"halo: started in the background, id={info['id']}", file=sys.stderr)
+        print(f"halo: log -> {info['log_path']}", file=sys.stderr)
+        return 0
+
     if not args.print_mode:
         # U2: bare `halo [PROMPT]` and `halo --demo` (without
         # -p) both open the full-screen TUI; textual/rich become real
@@ -397,6 +468,24 @@ def main(argv: Optional[list] = None) -> int:
                   "(stdin is not a tty) -- use -p/--print for a non-interactive run",
                   file=sys.stderr)
             return 2
+        # W4a: `--tmux` -- a simpler, tmux-only reading of Claude Code's own
+        # version (no iTerm2 native-pane backend here): re-exec this same
+        # launch inside a new tmux window when tmux exists and we are not
+        # ALREADY inside one (`$TMUX` set) -- never an error when tmux is
+        # missing, just a notice and the ordinary in-process launch.
+        if _flag_was_set(getattr(args, "tmux", None)) and "TMUX" not in os.environ:
+            from halo_harness.bg_run import run_in_tmux
+            tmux_argv = [a for a in argv if a != "--tmux" and not a.startswith("--tmux=")]
+            code = run_in_tmux(tmux_argv)
+            if code is not None:
+                return code
+            print("halo: --tmux requires the `tmux` binary on PATH -- continuing without it",
+                  file=sys.stderr)
+        # W4a: `--ax-screen-reader` -- plain, line-oriented output instead
+        # of the full Textual UI (flat text, no borders/animations/spinners).
+        if _flag_was_set(getattr(args, "ax_screen_reader", False)):
+            from halo_harness.ax_mode import run_ax_screen_reader_mode
+            return run_ax_screen_reader_mode(args)
         from halo_harness.tui.launch import run_tui
         return run_tui(args)
 
@@ -479,6 +568,7 @@ def main(argv: Optional[list] = None) -> int:
             agent=getattr(args, "agent", None), agents_flag=getattr(args, "agents", None),
             roles_flag=getattr(args, "role", None),
             name=getattr(args, "name", None), file_specs=getattr(args, "file", None),
+            cli_flags=cli_flags_from_args(args),
         )
     except InvalidModelError as e:
         # a bad --model/alias must be a clean config error (exit 2), not an

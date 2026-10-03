@@ -327,10 +327,9 @@ its own: a hook is entirely the user's own gate.
   `PostToolBatch`, `PermissionRequest`/`PermissionDenied`,
   `Stop`/`SubagentStart`/`SubagentStop`, `PreCompact`/`PostCompact`. A
   configured hook for an event Claude Code also defines but this build
-  doesn't fire yet (`Setup`, `TaskCreated`/`TaskCompleted`,
-  `PreModelSwitch`/`PostModelSwitch`, the worktree lifecycle events, and a
-  few others -- `hooks.NOT_EMITTED_V1`'s full set) parses fine and is
-  silently never triggered, rather than erroring.
+  doesn't fire yet (`WorktreeRemoved`, `ElicitationRequest`,
+  `ElicitationResponse` -- `hooks.NOT_EMITTED_V1`'s full set) parses fine
+  and is silently never triggered, rather than erroring.
 - **Combining outcomes**: several hooks matching the same event run
   concurrently; their outcomes combine as `deny > defer > ask > allow` for
   the permission decision, `additional_context` concatenated, the *last*

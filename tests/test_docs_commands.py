@@ -137,19 +137,25 @@ def test_no_documented_flag_is_fictional(ctx: Ctx):
 
 @test
 def test_not_yet_flags_are_listed_honestly(ctx: Ctx):
-    """The brief: '"not supported yet" flags listed honestly'. Spot-check a
-    handful of `cli._NOT_YET_FLAGS` entries (the ones a Claude Code user is
-    most likely to reach for) actually appear, near language admitting
-    they're unimplemented."""
-    from halo_harness.cli import _NOT_YET_FLAGS
+    """The brief: '"not supported yet" flags listed honestly'. W4a moved
+    every flag that used to be in `_NOT_YET_FLAGS` into either `_REAL_FLAGS`
+    (21 of them, including `--worktree`) or `_NOT_APPLICABLE_FLAGS` (7,
+    including `--ide`/`--teleport`) -- the table itself is now empty BY
+    DESIGN (kept, never removed, for whatever a future Claude Code release
+    adds that genuinely isn't built yet; see cli.py's own comment), so this
+    test's OWN sanity checks moved with them rather than asserting on an
+    empty set forever."""
+    from halo_harness.cli import _NOT_APPLICABLE_FLAGS, _NOT_YET_FLAGS
     text = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8").lower()
-    not_yet_names = {flags[-1] for flags, _kw, _label, _milestone in _NOT_YET_FLAGS}
-    ctx.check("cli._NOT_YET_FLAGS is non-empty (sanity)", not_yet_names)
-    for sample in ("--worktree", "--ide", "--teleport"):
-        ctx.check(f"{sample!r} is in cli._NOT_YET_FLAGS (sanity)", sample in not_yet_names)
+    ctx.check("cli._NOT_YET_FLAGS is empty by design after W4a", _NOT_YET_FLAGS == [])
+    not_applicable_names = {flags[-1] for flags, _kw, _label, _reason in _NOT_APPLICABLE_FLAGS}
+    for sample in ("--ide", "--teleport", "--safe-mode"):
+        ctx.check(f"{sample!r} is in cli._NOT_APPLICABLE_FLAGS (sanity)", sample in not_applicable_names)
         ctx.check(f"COMMANDS.md mentions {sample!r}", sample in text)
-    ctx.check("COMMANDS.md says 'not supported yet' (or 'not yet') at least once",
-              "not supported yet" in text or "not yet" in text)
+    ctx.check("COMMANDS.md documents --worktree as a real flag (moved out of not-yet in W4a)",
+              "-w`, `--worktree" in text or "--worktree [name]" in text or "--worktree [worktree]" in text)
+    ctx.check("COMMANDS.md says 'not applicable' at least once (the W4a notice wording)",
+              "not applicable" in text)
 
 
 if __name__ == "__main__":

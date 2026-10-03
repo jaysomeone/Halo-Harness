@@ -111,7 +111,14 @@ def test_skill_tool_disable_model_invocation_hides_from_tool_not_registry(ctx: C
 
 
 @test
-def test_skill_tool_context_fork_is_deferred_error(ctx: Ctx):
+def test_skill_tool_context_fork_without_agent_runtime_is_a_clean_error(ctx: Ctx):
+    """W4a: `context: fork`/`agent` now runs the skill through the existing
+    sub-agent machinery (agent/subagent.py::run_agent_call) instead of the
+    old honest "not implemented" error -- see tests/test_w4a_rewind_and_
+    skill_fork.py for the real dispatch path. A bare `ToolContext(cwd=proj)`
+    here has no `agent_runtime` at all (every pre-H6 call shape), so the
+    one HONEST error left for this surface is "sub-agents aren't available
+    in THIS session", never a generic "not implemented" claim."""
     proj, home = _project_skills_setup(name="forked", frontmatter_extra={"context": "fork"})
     tool = SkillTool()
     import os
@@ -120,7 +127,8 @@ def test_skill_tool_context_fork_is_deferred_error(ctx: Ctx):
         result = tool.run({"skill": "forked"}, ToolContext(cwd=proj))
     finally:
         os.environ.pop("BRIDGE_TEST_HOME", None)
-    ctx.check(f"deferred error, got {result.content!r}", result.is_error and "deferred" in result.content.lower())
+    ctx.check(f"clean 'not available' error, got {result.content!r}",
+              result.is_error and "not available" in result.content.lower())
 
 
 @test

@@ -8,8 +8,9 @@ pre-execution applied via `commands/registry.py::expand_command_body` --
 reused, never duplicated) plus a listing of any sibling files the skill
 ships alongside SKILL.md. `disable-model-invocation` hides a skill from
 THIS tool only (a user can still type `/name` directly); `context: fork`/
-`agent` returns an honest "deferred" error -- sub-agent runs aren't built
-yet (finding 14's "never claim a capability this build doesn't have" rule).
+`agent` (W4a) runs the skill through the existing sub-agent machinery
+(agent/subagent.py::run_agent_call) instead of the old "not implemented"
+error.
 """
 
 from __future__ import annotations
@@ -69,14 +70,6 @@ class SkillTool(Tool):
                 f"/{cmd.name}).",
                 is_error=True,
             )
-        if cmd.context_mode in ("fork", "agent"):
-            return ToolResult(
-                f"Skill {skill_name!r} declares context: {cmd.context_mode} (it expects to run in "
-                f"its own forked/sub-agent context) -- sub-agent runs are not implemented in this "
-                f"build yet (deferred to a later milestone). Invoke it as a plain /{cmd.name} slash "
-                f"command instead if its instructions still work without an isolated context.",
-                is_error=True,
-            )
         if cmd.run is None or cmd.path is None:
             return ToolResult(f"Skill {skill_name!r} has no runnable body.", is_error=True)
 
@@ -113,6 +106,34 @@ class SkillTool(Tool):
                                       permission_engine=ctx.permission_engine, env=ctx.env, claude_vars=claude_vars)
         if result.error:
             return ToolResult(f"Skill {skill_name!r}: {result.error}", is_error=True)
+
+        if cmd.context_mode in ("fork", "agent"):
+            # W4a: `context: fork`/`agent` run the skill THROUGH the
+            # existing sub-agent machinery (agent/subagent.py::
+            # run_agent_call) instead of the old honest "not implemented"
+            # error -- the fully-expanded body (already past $ARGUMENTS/
+            # `@path`/`` !`cmd` `` substitution, exactly what a direct
+            # invocation would have returned as ITS OWN result) becomes the
+            # sub-agent's prompt. "fork" and "agent" are treated identically
+            # here: a true conversation-forking execution mode (the Agent
+            # tool's own `subagent_type: "fork"` convention, which inherits
+            # the CALLER's full context) is a materially bigger feature than
+            # this round's "unbuilt surfaces" scope -- both run as an
+            # ordinary fresh general-purpose sub-agent task today; see the
+            # worker report.
+            if ctx.agent_runtime is None:
+                return ToolResult(
+                    f"Skill {skill_name!r} declares context: {cmd.context_mode} but sub-agents are not "
+                    f"available in this session.", is_error=True,
+                )
+            from halo_harness.agent.subagent import run_agent_call
+            _events, agent_result = run_agent_call(
+                runtime=ctx.agent_runtime, tool_id=ctx.tool_use_id or "",
+                tool_input={"description": f"Skill: {skill_name}"[:60], "prompt": result.text,
+                            "subagent_type": "general-purpose"},
+                tool_name=self.name,
+            )
+            return agent_result
 
         # D-CFG: "allowed-tools -> session rules until the next user
         # message" -- a REAL grant (Session.turn() clears everything

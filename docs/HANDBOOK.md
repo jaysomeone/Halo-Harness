@@ -333,17 +333,20 @@ flight.
 ## Hooks, skills, commands, MCP, browser
 
 **Hooks**: the events this harness actually fires are `SessionStart`/
-`SessionEnd`, `UserPromptSubmit`, `PreToolUse`/`PostToolUse`(`Failure`),
-`PostToolBatch`, `PermissionRequest`/`PermissionDenied`, `Stop`/
-`SubagentStart`/`SubagentStop`, and `PreCompact`/`PostCompact` -- and every
-handler type a hook definition can invoke for them -- `command` (shell),
-`prompt` (inject text), `agent` (run a sub-agent), `http` (call a URL),
-`mcp_tool` (call a tool on a configured MCP server) -- is wired. A settings.
-json/hooks.json entry for a name Claude Code also recognizes but this
-build doesn't fire yet (`TaskCreated`/`TaskCompleted`,
-`PreModelSwitch`/`PostModelSwitch`, the worktree lifecycle events, and a
-few others -- see `hooks.py`'s own `NOT_EMITTED_V1`) parses fine and is
-silently never triggered, rather than erroring.
+`SessionEnd`, `UserPromptSubmit`/`UserPromptExpansion`, `PreToolUse`/
+`PostToolUse`(`Failure`), `PostToolBatch`, `PermissionRequest`/
+`PermissionDenied`, `Stop`/`SubagentStart`/`SubagentStop`/`StopFailure`,
+`PreCompact`/`PostCompact`, `PreModelSwitch`/`PostModelSwitch`,
+`TaskCreated`/`TaskCompleted`, `FileChanged`, `CwdChanged`,
+`DirectoryAdded`, `ConfigChange`, `InstructionsLoaded`, `MessageDisplay`,
+`Setup` and `WorktreeCreated` -- and every handler type a hook definition
+can invoke for them -- `command` (shell), `prompt` (inject text), `agent`
+(run a sub-agent), `http` (call a URL), `mcp_tool` (call a tool on a
+configured MCP server) -- is wired. A settings.json/hooks.json entry for a
+name Claude Code also recognizes but this build doesn't fire yet
+(`WorktreeRemoved`, `ElicitationRequest`, `ElicitationResponse` -- see
+`hooks.py`'s own `NOT_EMITTED_V1`) parses fine and is silently never
+triggered, rather than erroring.
 
 **Skills and custom commands**: discovered from both user and project
 directories exactly like `claude`; a skill's/command's body can reference

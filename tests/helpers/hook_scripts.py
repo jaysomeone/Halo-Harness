@@ -41,6 +41,9 @@ Modes (argv[1], or the HOOK_SCRIPT_MODE env var):
                       HOOK_ONCE_COUNTER_FILE each time it actually runs
                       (counting REAL invocations is the only reliable way
                       to prove a hook did or didn't run twice) -- exit 0.
+  dump_payload     -- appends the full stdin payload as one JSON line to
+                      the file named by HOOK_DUMP_FILE each time it runs --
+                      exit 0 (W4a end-to-end Session hook-firing tests).
   permission_request_allow_setmode_addrules -- exit 0, PermissionRequest-
                       shaped JSON: behavior=allow + updatedPermissions as
                       the REAL 2.1.281 list shape (a setMode entry and an
@@ -189,6 +192,20 @@ def main(argv=None) -> int:
         if counter_file:
             with open(counter_file, "a", encoding="utf-8") as f:
                 f.write("1\n")
+        return 0
+
+    if mode == "dump_payload":
+        # W4a: appends the FULL parsed stdin payload as one JSON line to
+        # the file named by HOOK_DUMP_FILE -- for an end-to-end Session
+        # test (agent/loop.py's own `_fire_*` call sites) that needs to
+        # see the REAL payload fields a live trigger point built, not just
+        # "did it run" (once_counter) or a single captured stdout
+        # (echo_stdin, only usable one call at a time via run_command_hook
+        # directly). Exit 0 always -- never blocks the session under test.
+        dump_file = os.environ.get("HOOK_DUMP_FILE")
+        if dump_file:
+            with open(dump_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         return 0
 
     if mode == "permission_request_allow_setmode_addrules":

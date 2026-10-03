@@ -50,6 +50,7 @@ itself.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -58,6 +59,8 @@ from pathlib import Path
 from typing import Optional
 
 from halo_harness import events
+
+log = logging.getLogger("bridge")
 from halo_harness.config.agents_md import AgentSpec, resolve_agent_model
 
 MAX_CONCURRENT_AGENTS = 4
@@ -159,17 +162,58 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     parent = runtime.parent
     child_log, meta_path = _child_log_paths(parent, agent_id)
 
+    # W4a misc: `isolation: worktree` frontmatter -- "shared with
+    # --worktree" (the same helper `headless.run_print_mode` uses for the
+    # CLI flag). Falls back to the parent's own cwd (one log line, never a
+    # hard failure) when this isn't a git repo or the worktree creation
+    # itself fails -- a sub-agent must still run even when isolation isn't
+    # available.
+    child_cwd = parent.cwd
+    if spec.isolation == "worktree":
+        from halo_harness.worktree import create_worktree
+        wt_path, wt_error = create_worktree(parent.cwd, f"agent-{agent_id}", state_dir=parent.state_dir)
+        if wt_path is not None:
+            child_cwd = wt_path
+        else:
+            log.warning("sub-agent %s isolation:worktree could not create a worktree (%s) -- "
+                        "running in the parent's own cwd instead", spec.name, wt_error)
+
     catalog_names = (parent.session_catalog.names if parent.session_catalog is not None
                       else parent.tool_registry.names())
     tool_names = spec.resolved_tools(catalog_names)
     child_registry = parent.tool_registry.filtered(tool_names)
 
     ctx = SessionContext(
-        cwd=parent.cwd, model_label=parent.model_label, model_family="generic",
+        cwd=child_cwd, model_label=parent.model_label, model_family="generic",
         bare=spec.skips_claude_md(), tool_registry=child_registry, mcp_servers=None,
     )
     ctx.system_prompt = spec.body or spec.description
-    if not spec.includes_memory():
+    if spec.memory:
+        # W4a misc: agent frontmatter `memory:` honoured -- a per-agent
+        # persistent directory under `~/.halo/agents/<name>/` (never the
+        # project's own auto-memory, which `includes_memory()` already
+        # gates to general-purpose alone). THIN: no new storage subsystem --
+        # the agent reads it back as an ordinary snapshot (same "model
+        # writes notes, harness replays them next time" shape the main
+        # session's own CLAUDE.md/memory already uses) and writes to it
+        # itself via its own Write/Edit tools (unless restricted away),
+        # pointed at the path named in its own system prompt below.
+        memory_dir = Path(parent.state_dir) / "agents" / spec.name
+        memory_file = memory_dir / "MEMORY.md"
+        ctx.system_prompt = (
+            f"{ctx.system_prompt}\n\nYour persistent memory directory is {memory_dir} -- write notes there "
+            f"(e.g. {memory_file.name}) that you want available to your NEXT invocation; its current "
+            f"contents, if any, are included below as a snapshot."
+        )
+
+        def _read_agent_memory(path=memory_file) -> str:
+            try:
+                return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+            except OSError:
+                return ""
+
+        ctx.memory_snapshot_text = _read_agent_memory
+    elif not spec.includes_memory():
         ctx.memory_snapshot_text = lambda: ""  # D-CFG: "no memory index unless general-purpose"
 
     # V2c (H15): the Agent-tool-call's own `role=` argument, when given,
@@ -203,7 +247,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         )
 
     child = Session(
-        cwd=parent.cwd, model_ref=model_ref, model_profile=model_profile, creds=parent.creds,
+        cwd=child_cwd, model_ref=model_ref, model_profile=model_profile, creds=parent.creds,
         state_dir=parent.state_dir, model_label=model_ref.raw, session_context=ctx,
         small_model_ref=parent.small_model_ref, session_log=child_log,
         max_turns=(spec.max_turns or parent.max_turns), effort=(spec.effort or parent.effort),
@@ -256,11 +300,20 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
-    child.interactive = False  # deliberately NEVER True -- see module docstring (AskUserQuestion/ExitPlanMode stay out of scope)
-    # H5c finding 8: a live, answerable permission card, only for a
-    # FOREGROUND child of an interactive parent -- see module docstring.
-    child._subagent_live_asks = bool(parent.interactive) and not background
+    child.interactive = False  # deliberately NEVER True -- ExitPlanMode stays out of scope (see module docstring)
+    # H5c finding 8 / W4a: a live, answerable permission card (and, as of
+    # W4a, AskUserQuestion too) for ANY child of an interactive parent,
+    # foreground OR background -- `_run_child_to_completion`'s `on_event`
+    # forwards a foreground child's events into the parent's own live `turn()`
+    # stream; `_bg_run` below forwards a BACKGROUND child's through `parent.
+    # _event_sink` directly instead (there is no live `turn()` consumer for
+    # it to ride along with). `_question_waiters` is shared exactly like
+    # `_permission_waiters` already was -- both namespaced by agent_id in
+    # `_resolve_tool_call` for the same reason (parallel/sequential children's
+    # own tool_use ids can collide).
+    child._subagent_live_asks = bool(parent.interactive)
     child._permission_waiters = parent._permission_waiters
+    child._question_waiters = parent._question_waiters
     child.agent_runtime = AgentRuntime(parent=child, agents=runtime.agents, routes=runtime.routes,
                                         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides,
                                         depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock)
@@ -270,6 +323,25 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         "started": time.time(), "status": "running", "session_id": child_log.session_id,
     })
     return child, meta_path
+
+
+def _fire_task_hook(parent, event_name: str, *, task_id: str, spec_name: str, description: str) -> None:
+    """W4a: TaskCreated/TaskCompleted -- "background jobs and sub-agents"
+    (removed from NOT_EMITTED_V1). Fires on the PARENT's own hook_runner
+    (never the child's, unlike SubagentStart/Stop) -- a task_id is the
+    PARENT's own bookkeeping concept (`runtime.tasks`), so this is the
+    session whose hooks should see it created/completed. `agent/jobs.py`'s
+    background Bash jobs fire the SAME two events from their own call
+    sites for the other half of "background jobs and sub-agents"."""
+    if parent.hook_runner is None or not parent.hook_runner.has_hooks(event_name):
+        return
+    payload = parent.hook_runner.payload(event_name, extra={
+        "task_id": task_id, "subagent_type": spec_name, "description": description,
+    })
+    try:
+        parent._run_hook(event_name, payload, matched=spec_name)
+    except Exception:
+        pass
 
 
 def _fire_subagent_hook(child, event_name: str) -> None:
@@ -596,6 +668,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                                                  "parent_tool_use_id": tool_id, "task_id": new_task_id})
     start_ev.agent_id = agent_id
     _fire_subagent_hook(child, "SubagentStart")
+    _fire_task_hook(parent, "TaskCreated", task_id=new_task_id, spec_name=spec.name, description=description)
     if on_event is not None:
         # H5c finding 8: emitted LIVE too (not just in the returned list),
         # so a streaming caller's UI shows "sub-agent started" before the
@@ -614,9 +687,25 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
             # permanently refuse any future resume of this task_id, a worse
             # outcome than the race this flag exists to prevent.
             try:
-                child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id)
+                # W4a: forwards ONLY this BACKGROUND child's live ASKS
+                # (permission/question/plan) straight into the parent's own
+                # live event queue (`Session._event_sink`, set by `run()` --
+                # the TUI's worker-thread command pump; None for a `-p`/
+                # bare-Session run, where this is exactly the old no-
+                # forwarding behaviour) -- the SAME dock a foreground
+                # child's asks already reach. Deliberately narrower than a
+                # foreground child's own full `on_event` forwarding: the
+                # brief asks for "live permission asks", not making a
+                # background task's whole output stream suddenly live (it
+                # still reports via the existing completion notice).
+                bg_sink = getattr(parent, "_event_sink", None)
+                on_event = ((lambda ev: bg_sink(ev) if ev.kind in ("permission_request", "question", "plan_review")
+                             else None) if bg_sink is not None else None)
+                child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
+                                                         on_event=on_event)
                 text = _final_text_from_log(child)
                 _fire_subagent_hook(child, "SubagentStop")
+                _fire_task_hook(parent, "TaskCompleted", task_id=new_task_id, spec_name=spec.name, description=description)
                 _write_meta(meta_path, {"status": "completed"})
                 # H9 whole-tree review finding 13: roll this background child's
                 # own usage/cost into the parent BEFORE the completion notice
@@ -694,6 +783,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # was logged last with no signal it wasn't a real, complete answer.
     is_error, abnormal_reason = _child_turn_outcome(child_events)
     _fire_subagent_hook(child, "SubagentStop")
+    _fire_task_hook(parent, "TaskCompleted", task_id=new_task_id, spec_name=spec.name, description=description)
     _write_meta(meta_path, {"status": "completed"})
     # H9 whole-tree review finding 13: see the background path's own
     # comment above -- a FOREGROUND child's usage/cost gets the same

@@ -16,9 +16,14 @@ from halo_harness.tui.widgets.diffview import DiffView
 
 log = logging.getLogger("bridge")
 _SEVERITY = {"error": "error", "warning": "warning"}
-# U5 scope B: git-shadow snapshots are recorded for these tools only -- see
-# `_maybe_record_shadow_step`'s own docstring for why Bash is excluded.
-_SHADOW_TOOLS = frozenset({"Write", "Edit"})
+# U5 scope B / W4a: git-shadow snapshots are recorded directly (a single
+# `{path: content}` read, no diffing needed) for these tools -- NotebookEdit
+# added in W4a (same single-known-path shape as Write/Edit, just a
+# different input field name, see `_SHADOW_PATH_FIELD`). Bash is handled
+# separately (`_maybe_record_bash_shadow_step`) via a git-status diff,
+# since a shell command's own target file(s) are not knowable up front.
+_SHADOW_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
+_SHADOW_PATH_FIELD = {"Write": "file_path", "Edit": "file_path", "NotebookEdit": "notebook_path"}
 
 
 def _phase_word_for(state: "str | None", kind: "str | None") -> "str | None":
@@ -63,7 +68,22 @@ async def _mount_tool_card(app, data: dict) -> None:
     # decide whether/what to shadow-snapshot; see `_maybe_record_shadow_step`.
     if not hasattr(app, "_pending_tool_inputs"):
         app._pending_tool_inputs = {}
-    app._pending_tool_inputs[tool_id] = (name, input_data)
+    # W4a ("steps record files CREATED so undo deletes them"): pre-existence
+    # is only knowable NOW, before the call actually runs -- by the time
+    # `_maybe_record_shadow_step` sees the `tool_result`, Write/NotebookEdit
+    # have already (possibly) created the file.
+    pre_exists = None
+    field = _SHADOW_PATH_FIELD.get(name)
+    if field and isinstance(input_data, dict):
+        path_val = input_data.get(field)
+        if isinstance(path_val, str) and path_val:
+            try:
+                pre_exists = Path(path_val).is_file()
+            except OSError:
+                pre_exists = None
+    app._pending_tool_inputs[tool_id] = (name, input_data, pre_exists)
+    if name == "Bash" and isinstance(input_data, dict):
+        _start_bash_shadow_before(app, tool_id)
     # review finding 5: repair can hand a REJECTED tool_use through to
     # `tool_use_ready` with its raw, un-coerced input (e.g. `old_string:
     # null`) -- DiffView's `.splitlines()` on a non-str kills the whole
@@ -90,26 +110,30 @@ def _as_text(value) -> str:
 
 
 def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
-    """U5 scope B: every successful Write/Edit records a git-shadow
-    snapshot of the file's RESULTING (post-edit) content, keyed to this
-    step, so `/rewind`/`/undo`/`/redo` has something to restore to.
-    Deliberately NOT done for Bash: detecting which files a shell command
-    touched would need a `git status` subprocess call right here, on the
-    UI thread (this function runs inside `apply_event`, the drain loop's
-    own call) -- exactly the kind of blocking call this same U5 pass is
-    elsewhere REMOVING (`list_sessions`/`_git_branch` off-thread). A
-    documented scope cut, not an oversight. Best-effort throughout: no
-    real session attached (FakeController), an unreadable file, ... all
-    silently skip -- a shadow snapshot is a convenience, never part of
-    the conversation itself, so it must never turn into an error note."""
+    """U5 scope B / W4a: every successful Write/Edit/NotebookEdit records a
+    git-shadow snapshot of the file's RESULTING (post-edit) content, keyed
+    to this step, so `/rewind`/`/undo`/`/redo` has something to restore to
+    -- `created=[path]` when `_mount_tool_card` saw it did NOT exist before
+    this call (so undo past this step deletes it, W4a). Bash is handled
+    separately by `_maybe_record_bash_shadow_step` (a git-status diff
+    around the call, off the UI thread). Best-effort throughout: no real
+    session attached (FakeController), an unreadable file, ... all silently
+    skip -- a shadow snapshot is a convenience, never part of the
+    conversation itself, so it must never turn into an error note."""
     pending = getattr(app, "_pending_tool_inputs", None)
     info = pending.pop(tool_id, None) if pending else None
-    if not ok or info is None:
+    if info is None:
         return
-    name, input_data = info
+    name, input_data, pre_exists = info
+    if name == "Bash":
+        _maybe_record_bash_shadow_step(app, tool_id, name, input_data, ok)
+        return
+    if not ok:
+        return
     if name not in _SHADOW_TOOLS or not isinstance(input_data, dict):
         return
-    file_path = input_data.get("file_path")
+    field = _SHADOW_PATH_FIELD.get(name, "file_path")
+    file_path = input_data.get(field)
     if not isinstance(file_path, str) or not file_path:
         return
     try:
@@ -119,7 +143,61 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
         if store is None:
             return
         content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-        store.record_step({file_path: content}, label=f"{name}({Path(file_path).name})", trigger="tool")
+        created = [file_path] if pre_exists is False else []
+        store.record_step({file_path: content}, label=f"{name}({Path(file_path).name})", trigger="tool",
+                           created=created)
+    except Exception:
+        pass
+
+
+def _start_bash_shadow_before(app, tool_id) -> None:
+    """W4a: Bash's own shadow-copy half -- the BEFORE snapshot, taken off
+    the UI thread (same `run_worker(..., thread=True)` convention as
+    `_git_branch`; this function itself runs inside `apply_event`, the
+    drain loop's own call, which must never block on a subprocess). A
+    repo-less cwd (not a git repo) or a timeout leaves nothing stashed,
+    which `_maybe_record_bash_shadow_step` reads as "no diff available"
+    and silently skips -- the documented limit for non-git directories."""
+    if not hasattr(app, "_pending_bash_shadow_before"):
+        app._pending_bash_shadow_before = {}
+    app.run_worker(lambda: _bash_shadow_before_worker(app, tool_id), thread=True, name="shadow-bash-before")
+
+
+def _bash_shadow_before_worker(app, tool_id) -> None:
+    from halo_harness.shadow import git_status_untracked_paths
+    before = git_status_untracked_paths(app.cwd)
+    store = getattr(app, "_pending_bash_shadow_before", None)
+    if store is not None and before is not None:
+        store[tool_id] = before
+
+
+def _maybe_record_bash_shadow_step(app, tool_id, name, input_data, ok: bool) -> None:
+    before = (getattr(app, "_pending_bash_shadow_before", None) or {}).pop(tool_id, None)
+    if not ok or before is None:
+        return
+    app.run_worker(lambda: _bash_shadow_after_worker(app, before), thread=True, name="shadow-bash-after")
+
+
+def _bash_shadow_after_worker(app, before: set) -> None:
+    from halo_harness.shadow import git_status_untracked_paths, store_for_controller
+    after = git_status_untracked_paths(app.cwd)
+    if after is None:
+        return
+    new_paths = sorted(after - before)
+    if not new_paths:
+        return
+    try:
+        store = store_for_controller(app.controller)
+        if store is None:
+            return
+        files = {}
+        for p in new_paths:
+            try:
+                files[p] = Path(p).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        if files:
+            store.record_step(files, label="Bash(new file(s))", trigger="tool", created=list(files))
     except Exception:
         pass
 
@@ -154,9 +232,28 @@ async def _show_permission_card(app, data: dict, *, agent_id: "str | None" = Non
     await app.enqueue_pending_card(card, marker_text=f"⏸ permission needed for {summary}, see below")
 
 
-async def _show_question_card(app, data: dict) -> None:
+def _tag_question_input(input_data: dict, agent_id: "str | None") -> dict:
+    """W4a: a sub-agent's own AskUserQuestion, tagged with its agent name --
+    same spirit as `_show_permission_card`'s own `[sub-agent {id}] {summary}`
+    prefix, applied to EACH question's own text (single- or multi-question
+    shape alike, see tools/ask_user_question.py's own `_questions_from`)."""
+    if not agent_id or not isinstance(input_data, dict):
+        return input_data
+    tagged = dict(input_data)
+    prefix = f"[sub-agent {agent_id}] "
+    if isinstance(tagged.get("questions"), list):
+        tagged["questions"] = [
+            {**q, "question": prefix + q.get("question", "")} if isinstance(q, dict) else q
+            for q in tagged["questions"]
+        ]
+    elif tagged.get("question"):
+        tagged["question"] = prefix + tagged["question"]
+    return tagged
+
+
+async def _show_question_card(app, data: dict, *, agent_id: "str | None" = None) -> None:
     request_id = data.get("id")
-    input_data = data.get("input") or {}
+    input_data = _tag_question_input(data.get("input") or {}, agent_id)
 
     def on_answer(answer) -> None:
         ok = app.controller.answer_question(request_id, answer)
@@ -169,15 +266,21 @@ async def _show_question_card(app, data: dict) -> None:
     await app.enqueue_pending_card(card, marker_text="⏸ question asked, see below")
 
 
-async def _show_plan_card(app, data: dict) -> None:
+async def _show_plan_card(app, data: dict, *, agent_id: "str | None" = None) -> None:
     request_id = data.get("id", "")
+    card_data = data
+    if agent_id:
+        # W4a: same tagging spirit as the question card above -- a plan
+        # REVIEW only ever comes from ExitPlanMode, one per child at a time
+        # (mirrors the main session's own one-at-a-time plan-mode rule).
+        card_data = {**data, "plan": f"[sub-agent {agent_id}]\n{data.get('plan', '')}"}
 
     def on_reply(decision: dict) -> None:
         app.controller.answer_plan(decision["approved"], feedback=decision.get("feedback", ""),
                                     mode_after=decision.get("mode_after"))
         app.clear_pending_card()
 
-    card = PlanCard(request_id=request_id, input_data=data, on_reply=on_reply)
+    card = PlanCard(request_id=request_id, input_data=card_data, on_reply=on_reply)
     await app.enqueue_pending_card(card, marker_text="⏸ plan ready for review, see below")
 
 
@@ -323,9 +426,18 @@ async def _apply_event_inner(app, event) -> None:
         # of ever yielding this event.
         await _show_permission_card(app, data, agent_id=event.agent_id)
     elif kind == "question":
-        await _show_question_card(app, data)
+        # W4a: a sub-agent's own AskUserQuestion is now live/answerable too
+        # (see agent/loop.py's own widened gate) -- tagged with its agent
+        # name exactly like a sub-agent's permission card already is.
+        await _show_question_card(app, data, agent_id=agent_id)
     elif kind == "plan_review":
-        await _show_plan_card(app, data)
+        # ExitPlanMode is NOT widened the same way (W4a scope note): `Session.
+        # resolve_plan`/`_pending_plan_id` are single-slot by design (one
+        # plan review at a time, no request_id) -- safely routing a CHILD's
+        # own review through it needs a bigger change than this round's
+        # "wire the existing queue" scope; `agent_id` is always None here
+        # today (a child never reaches this event while non-interactive).
+        await _show_plan_card(app, data, agent_id=agent_id)
     elif kind == "todos":
         await app.transcript.add_note(_format_todos(data), kind="todos")
     elif kind == "status":

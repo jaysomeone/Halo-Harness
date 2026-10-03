@@ -121,6 +121,31 @@ def _resource_result_text(result) -> "Optional[str]":
     return joined
 
 
+def unresolved_server_mentions(text: str, *, mcp_manager) -> "list[str]":
+    """W4a misc: "unresolved `@server:uri` mentions warn visibly naming the
+    server" -- every `@name:uri`-SHAPED candidate in `text` whose `name`
+    does NOT name a currently-connected MCP server at all (a URI that looks
+    right but doesn't match any of that server's listed resources is left
+    alone here -- that's `extract_server_resource_mentions`'s own silent-
+    by-design case, a server typo is the one worth a visible word since the
+    user almost certainly meant a real server and mistyped or forgot to
+    connect it). Returns the distinct, first-seen-order server names named
+    this way; `[]` when there are none or `mcp_manager` is None (no MCP
+    client this session)."""
+    if mcp_manager is None or not text:
+        return []
+    candidates = list(_AT_SERVER_RESOURCE_RE.finditer(text))
+    if not candidates:
+        return []
+    known = _known_resources_cached(mcp_manager)
+    seen: list = []
+    for m in candidates:
+        server = m.group(1)
+        if server not in known and server not in seen:
+            seen.append(server)
+    return seen
+
+
 def read_server_resource_snapshots(text: str, *, mcp_manager) -> "list[tuple[str, str]]":
     """`[(label, content_text), ...]` -- one per matched `@server:resource`
     mention in `text`, actually read via `McpManager.read_resource`. Never

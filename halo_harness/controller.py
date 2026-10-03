@@ -352,9 +352,15 @@ class Controller:
         `compaction` events stream through the normal event pipe, so
         `tui/dispatch.py`'s new handler renders live progress instead of
         the UI just hanging."""
-        if self.session.busy:
-            return "A turn is already running -- /compact will need to wait until it finishes."
+        # W4a misc: "`/compact` typed mid-turn is queued and runs when the
+        # turn ends" -- queued onto the SAME worker Command queue either
+        # way (it's already thread-safe FIFO); `run()`'s own pump loop only
+        # ever reaches the NEXT Command once `_pump_turn` returns, so a busy
+        # session naturally defers this to right after the current turn
+        # ends, with no retyping needed. Only the returned NOTICE differs.
         self.commands.put(events.Command("run_compact", {"instructions": instructions.strip() or None}))
+        if self.session.busy:
+            return "A turn is already running -- /compact is queued and will run once it finishes."
         return ""
 
     def clear_session(self) -> str:
@@ -423,6 +429,14 @@ class Controller:
                 self.session.queue_log_write(
                     "snapshot", {"blocks": [{"type": "text", "text": f"@{label}\n{content}"}],
                                  "snapshot_kind": "at_mention"})
+            # W4a: UserPromptExpansion -- see Session.fire_user_prompt_
+            # expansion's own docstring for why THIS is the real expansion
+            # point (never a plain typed prompt's own @mentions).
+            if hasattr(self.session, "fire_user_prompt_expansion"):
+                extra_ctx = self.session.fire_user_prompt_expansion(body, result.text)
+                if extra_ctx:
+                    self.session.queue_log_write(
+                        "snapshot", {"blocks": [{"type": "text", "text": extra_ctx}], "snapshot_kind": "hook_context"})
             self.submit(result.text)
             return ""
         if cmd.run is None:
@@ -937,11 +951,11 @@ class Controller:
         immediately to well after `ingest_at_mentions` itself already
         returned and the turn is already under way -- the snapshot lands
         in the log at the next safe point either way."""
-        from halo_harness.mcp.mentions import read_server_resource_snapshots
+        from halo_harness.mcp.mentions import read_server_resource_snapshots, unresolved_server_mentions
         try:
             snapshots = read_server_resource_snapshots(text, mcp_manager=mcp_manager)
         except Exception:
-            return
+            snapshots = []
         for res_label, res_content in snapshots:
             try:
                 self.session.queue_log_write(
@@ -949,6 +963,19 @@ class Controller:
                                  "snapshot_kind": "at_mention"})
             except Exception:
                 pass
+        # W4a misc: an `@name:uri` naming a server that ISN'T connected at
+        # all (never the "server is fine, that exact uri just isn't listed"
+        # case `read_server_resource_snapshots` already treats as silent)
+        # gets a visible warning, naming the server -- queued the SAME
+        # thread-safe way as the snapshots above so it lands in the
+        # transcript regardless of whether a turn is already running.
+        try:
+            for server in unresolved_server_mentions(text, mcp_manager=mcp_manager):
+                warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
+                self.session.queue_log_write(
+                    "snapshot", {"blocks": [{"type": "text", "text": warning}], "snapshot_kind": "at_mention"})
+        except Exception:
+            pass
 
     # ---- U5 scope A: `!cmd` inline shell -- through the Bash tool + the
     # SAME permission rules a model-issued call would get, but never

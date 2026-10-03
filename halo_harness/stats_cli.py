@@ -176,6 +176,10 @@ _MODEL_COLUMNS = [
     ("provider", lambda r: r["provider"] or "-"),
     ("sessions", lambda r: str(r["sessions"])),
     ("calls", lambda r: str(r["calls"])),
+    # W4a misc ("stats --models per-model turns real"): distinct turns that
+    # used this model, never conflated with "calls" (every individual model
+    # API call -- several per turn on a retry/tool-loop-heavy session).
+    ("turns", lambda r: str(r["turns"])),
     ("tok in/out", lambda r: f"{r['tokens_in']}/{r['tokens_out']}"),
     ("cost", lambda r: f"${r['cost_usd']:.4f}"),
     ("avg lat", lambda r: _ms_str(r["avg_latency_ms"])),
@@ -203,7 +207,7 @@ _MODEL_COLUMNS = [
     ("waits>20s", lambda r: str(r["waits_over_20s"])),
     ("reasoning%", lambda r: f"{r['reasoning_streamed_pct']:.0f}%" if r["reasoning_calls"] else "-"),
 ]
-_MODEL_COLUMNS_COMPACT_N = 14
+_MODEL_COLUMNS_COMPACT_N = 15  # W4a: bumped from 14 to keep every pre-existing compact column plus the new "turns"
 
 _ROLE_COLUMNS = [
     ("role", lambda r: r["role"]),

@@ -1653,21 +1653,28 @@ def test_shift_tab_shows_a_toast_describing_the_new_mode(ctx: Ctx):
             # on_mount's own startup workers (auth-status/catalog/balance)
             # can post their OWN notify (e.g. "Claude subscription
             # detected...") asynchronously, racing this test's own capture
-            # -- let them settle first so `notified` below holds only this
-            # test's own Shift+Tab toasts.
+            # -- a fixed settle pause here is exactly the "timing-sensitive
+            # pilot, fixed sleep" pattern the 2.0.1 hygiene round calls out
+            # (it can still lose the race under load, W4a found live): the
+            # capture itself filters to only mode-change toasts (`"<mode>: "`
+            # for a KNOWN mode) instead, which is correct regardless of
+            # whether unrelated startup noise lands before, during or after
+            # this test's own three key presses.
             await pilot.pause(0.3)
             notified = []
             app.notify = lambda msg, **kw: notified.append(msg)
             await pilot.press("shift+tab")  # default -> acceptEdits
             await pilot.press("shift+tab")  # acceptEdits -> plan
             await pilot.press("shift+tab")  # plan -> auto
-            ctx.check(f"one toast per Shift+Tab, got {notified}", len(notified) == 3)
+            mode_toasts = [m for m in notified if m.split(": ", 1)[0] in MODE_DESCRIPTIONS]
+            ctx.check(f"one toast per Shift+Tab (startup noise filtered out), got {notified}",
+                      len(mode_toasts) == 3)
             ctx.check(f"each names mode and plain description, got {notified}",
-                      notified == [f"acceptEdits: {MODE_DESCRIPTIONS['acceptEdits']}",
-                                   f"plan: {MODE_DESCRIPTIONS['plan']}",
-                                   f"auto: {MODE_DESCRIPTIONS['auto']}"])
-            ctx.check(f"the auto toast describes behaviour plainly, got {notified[-1]!r}",
-                      notified[-1] == "auto: no prompts")
+                      mode_toasts == [f"acceptEdits: {MODE_DESCRIPTIONS['acceptEdits']}",
+                                      f"plan: {MODE_DESCRIPTIONS['plan']}",
+                                      f"auto: {MODE_DESCRIPTIONS['auto']}"])
+            ctx.check(f"the auto toast describes behaviour plainly, got {mode_toasts[-1]!r}",
+                      mode_toasts[-1] == "auto: no prompts")
     asyncio.run(body())
 
 
@@ -2837,24 +2844,29 @@ def test_h5b_f11_compact_is_queued_off_the_ui_thread_not_run_synchronously(ctx: 
 
 
 @test
-def test_h5b_f11_compact_refused_while_a_turn_is_already_running(ctx: Ctx):
-    """finding 11: a compaction and an ordinary turn must never race over
-    the same log -- /compact while `session.busy` is True is refused
-    outright (D-TUI: "reject or defer it while busy"), not queued to run
-    concurrently."""
+def test_h5b_f11_compact_queued_while_a_turn_is_already_running(ctx: Ctx):
+    """finding 11 / W4a misc ("/compact typed mid-turn is queued and runs
+    when the turn ends"): a compaction and an ordinary turn must never race
+    over the same log, so /compact while `session.busy` is True is never
+    run immediately -- but it IS queued now (the same thread-safe FIFO
+    `commands` queue `run()`'s own pump loop only ever reaches the NEXT
+    entry of once the current turn's `_pump_turn` returns), so it runs
+    automatically once the turn ends instead of being silently dropped and
+    needing a retype."""
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
         controller = _real_controller(cwd)
         controller.session.busy = True
         result = controller.run_compact("")
-        ctx.check(f"refused with an explanatory message, got {result!r}", "already running" in result)
+        ctx.check(f"a notice explaining it's queued, got {result!r}", "queued" in result)
         queued = []
         while True:
             try:
                 queued.append(controller.commands.get_nowait())
             except Exception:
                 break
-        ctx.check(f"nothing was queued, got {[c.kind for c in queued]}", queued == [])
+        ctx.check(f"run_compact WAS queued (runs once the turn ends), got {[c.kind for c in queued]}",
+                  len(queued) == 1 and queued[0].kind == "run_compact")
 
 
 @test

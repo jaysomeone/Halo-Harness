@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
 from tests.helpers.mock_openai import MockUpstream
-from halo_harness.cli import _build_parser, _NOT_YET_FLAGS
+from halo_harness.cli import _build_parser, _NOT_APPLICABLE_FLAGS, _NOT_YET_FLAGS
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 HELP_CAPTURE = REPO_DIR / "docs" / "harness" / "claude-help-2.1.281.txt"
@@ -214,20 +214,34 @@ def test_playwright_flag_real_and_prompt_still_runs(ctx: Ctx):
 
 
 @test
-def test_every_not_yet_flag_prints_its_line_and_never_crashes(ctx: Ctx):
-    """A cheap, boolean-only-flag sample across the whole not-yet table
-    (skipping ones that need a specific value shape) -- proves the generic
-    detection loop actually fires for a WIDE variety of flags, not just the
-    two the acceptance list names."""
+def test_w4a_not_yet_flags_table_is_empty_by_design(ctx: Ctx):
+    """W4a: every flag that was in `_NOT_YET_FLAGS` before this round is now
+    either real (`_REAL_FLAGS`) or declared not applicable to a standalone
+    harness (`_NOT_APPLICABLE_FLAGS`) -- the brief's own "a test asserts no
+    flag remains in the not-yet list except by design". The list/mechanism
+    itself stays (see cli.py's own comment on why) for whatever Claude Code
+    adds next that genuinely needs it."""
+    ctx.check(f"_NOT_YET_FLAGS is empty, got {[l for _f, _k, l, _m in _NOT_YET_FLAGS]}", _NOT_YET_FLAGS == [])
+
+
+@test
+def test_every_not_applicable_flag_prints_its_line_and_never_crashes(ctx: Ctx):
+    """W4a: the 7 cloud/IDE/safe-mode flags print ONE `not applicable`
+    stderr line (never "not supported yet", never an argparse error) and
+    the prompt still runs -- a cheap, boolean-only-flag sample across the
+    whole table (skipping ones that need a specific value shape) proves the
+    generic detection loop fires for a WIDE variety, not just one flag."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
-        sample = [label for flags, kwargs, label, _m in _NOT_YET_FLAGS if kwargs.get("action") == "store_true"]
-        ctx.check("a healthy sample of boolean not-yet flags exists", len(sample) >= 10)
-        for label in sample[:10]:
+        sample = [(label, reason) for flags, kwargs, label, reason in _NOT_APPLICABLE_FLAGS
+                  if kwargs.get("action") == "store_true"]
+        ctx.check(f"a sample of boolean not-applicable flags exists, got {len(sample)}", len(sample) >= 1)
+        for label, reason in sample:
             result = _run_cli(fh, mock, "reply with the single word pong", extra_args=[label])
             ctx.check(f"{label}: exit 0, got {result.returncode}", result.returncode == 0)
-            ctx.check(f"{label}: not-yet line printed", f"halo: {label} is not supported yet" in result.stderr)
+            ctx.check(f"{label}: not-applicable line printed naming the reason",
+                      f"halo: {label} is not applicable to a standalone harness ({reason})" in result.stderr)
             ctx.check(f"{label}: prompt still ran", "pong" in result.stdout)
     finally:
         mock.stop()
