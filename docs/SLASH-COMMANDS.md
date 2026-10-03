@@ -177,6 +177,15 @@ of half-implementing it. See `docs/MODELS.md`'s "Provider enablement"
 section for the full prefix/label table and the exact per-provider
 detection rule.
 
+### `/accounts [list|add codex <name>]`
+Lists subscription accounts managed in isolated Halo profiles. In the TUI,
+`/accounts add codex <name>` creates a private `CODEX_HOME`, forces Codex's
+file credential store inside it, and opens the official browser login in a
+background worker. Halo checks `codex login status` afterward but never reads
+or prints `auth.json`. Account names accept letters, numbers, dots, dashes,
+and underscores. Outside the TUI, use
+`halo accounts add codex --name <name>` for the same guided flow.
+
 ### `/effort [level]`
 1.0.1 hotfix 19/20. Bare `/effort` shows the effective level, its source
 (`flag`/`settings`/`default`/`session`), and the accepted levels for the

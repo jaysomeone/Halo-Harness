@@ -43,7 +43,7 @@ async def handle_slash(app, name: str, args: str) -> None:
         # configured host PLUS a `claude auth status` spawn, and `doctor`
         # shells out even more; both now build their result in a
         # `thread=True` worker and post it back with `call_from_thread`.
-        "providers": _handle_providers, "doctor": _handle_doctor,
+        "providers": _handle_providers, "doctor": _handle_doctor, "accounts": _handle_accounts,
         "resume": _handle_resume, "permissions": _handle_permissions,
         "exit": _handle_exit, "quit": _handle_exit, "theme": _handle_theme,
         # U5 scope C: sessions UX.
@@ -590,6 +590,56 @@ def _providers_list_worker(app) -> None:
     from halo_harness.providers_cli import format_providers_table, provider_rows
     text = format_providers_table(provider_rows())
     app.call_from_thread(app.transcript.add_note, text, kind="command")
+
+
+async def _handle_accounts(app, args: str) -> None:
+    """Guided, browser-based login without exposing credentials to Halo."""
+    import shlex
+    from halo_harness.accounts import AccountSetupError, format_accounts, validate_account_name
+
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError as exc:
+        await app.transcript.add_note(f"/accounts: {exc}", kind="error")
+        return
+    action = tokens[0].lower() if tokens else "list"
+    if action == "list":
+        state_dir = getattr(app.controller, "state_dir", None)
+        await app.transcript.add_note(format_accounts(state_dir=state_dir), kind="command")
+        return
+    if action != "add" or len(tokens) != 3 or tokens[1].lower() != "codex":
+        await app.transcript.add_note(
+            "Usage: /accounts [list|add codex <name>]\nExample: /accounts add codex personal",
+            kind="command")
+        return
+    try:
+        name = validate_account_name(tokens[2])
+    except AccountSetupError as exc:
+        await app.transcript.add_note(f"/accounts: {exc}", kind="error")
+        return
+    await app.transcript.add_note(
+        f"Opening the official Codex browser login for {name!r}. Finish signing in there; "
+        "Halo never sees your password.", kind="command")
+    app.run_worker(lambda: _accounts_add_worker(app, name), thread=True,
+                   name=f"accounts-add-{name}", group="accounts-add")
+
+
+def _accounts_add_worker(app, name: str) -> None:
+    import subprocess
+    from halo_harness.accounts import AccountSetupError, add_codex_account
+
+    def quiet_run(argv, **kwargs):
+        return subprocess.run(argv, capture_output=True, text=True, **kwargs)
+
+    state_dir = getattr(app.controller, "state_dir", None)
+    try:
+        profile, status = add_codex_account(name, state_dir=state_dir, run=quiet_run)
+        text = f"Added Codex subscription {profile.name!r}: {status}"
+        kind = "command"
+    except AccountSetupError as exc:
+        text = f"Could not add Codex account {name!r}: {exc}"
+        kind = "error"
+    app.call_from_thread(app.transcript.add_note, text, kind=kind)
 
 
 async def _handle_doctor(app, _args: str) -> None:

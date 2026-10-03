@@ -346,6 +346,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "models":
         from halo_harness.catalog_cli import cmd_models
         return cmd_models(argv[1:])
+    if argv and argv[0] == "accounts":
+        from halo_harness.accounts_cli import cmd_accounts
+        return cmd_accounts(argv[1:])
     if argv and argv[0] == "mcp":
         from halo_harness.mcp_cli import cmd_mcp
         return cmd_mcp(argv[1:])

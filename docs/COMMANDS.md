@@ -779,6 +779,26 @@ for what each WARN/MISSING line means)
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
 
+## `halo accounts`
+
+Creates and lists isolated subscription-login profiles owned by the current
+user. The first supported provider is Codex:
+
+```sh
+halo accounts list
+halo accounts add codex --name personal
+halo accounts add codex --name work
+```
+
+`add codex` creates a private profile under
+`~/.halo/accounts/codex/<name>/codex-home/`, forces Codex's file credential
+store inside that directory, and runs the official `codex login` browser flow.
+Halo confirms the result with `codex login status`; it does not read or print
+the profile's `auth.json`. Account names may contain letters, numbers, dots,
+dashes, and underscores. Run the command once per account, selecting the
+matching ChatGPT account in the browser each time. The equivalent TUI command
+is `/accounts add codex <name>`.
+
 ## `halo providers`
 
 ```

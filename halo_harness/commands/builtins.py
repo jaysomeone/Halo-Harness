@@ -809,6 +809,17 @@ def _cmd_keybindings(args: str, facade: HeadlessFacade) -> str:
     return "\n".join(lines)
 
 
+def _cmd_accounts(args: str, facade: HeadlessFacade) -> str:
+    """List profiles everywhere; guided login is handled by the TUI."""
+    from halo_harness.accounts import format_accounts
+    session = getattr(facade, "session", None)
+    state_dir = getattr(session, "state_dir", None)
+    if args.strip() and args.strip() not in ("list",):
+        return ("Use /accounts add codex <name> in the interactive Halo interface, or run "
+                "`halo accounts add codex --name <name>` in a terminal.")
+    return format_accounts(state_dir=state_dir)
+
+
 # name -> (kind, description, argument_hint, run)
 _BUILTIN_SPECS = {
     "help": ("core", "Show available commands", None, _cmd_help),
@@ -831,6 +842,7 @@ _BUILTIN_SPECS = {
     "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:/cx:)", "[list|enable|disable <name>]",
                   _cmd_providers),
+    "accounts": ("core", "List or add subscription accounts", "[list|add codex <name>]", _cmd_accounts),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
