@@ -75,6 +75,11 @@ async def handle_slash(app, name: str, args: str) -> None:
         "org": _handle_org,
         # Halo 2.0.2 round 3 (brief C item 1): same toggle Ctrl+T uses.
         "tasks": _handle_tasks,
+        # Halo 2.0.2 round 6: /update -- the check (git/network) runs on a
+        # worker, never the UI thread; the dialog's own Enter is what
+        # actually requests the quit-update-relaunch handoff (see
+        # `_on_update_dialog_result`).
+        "update": _handle_update,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -801,6 +806,76 @@ def _doctor_worker(app) -> None:
     from halo_harness.doctor import run_checks
     lines, _ok = run_checks(cwd=app.cwd)
     app.call_from_thread(app.transcript.add_note, "\n".join(lines), kind="command")
+
+
+async def _handle_update(app, _args: str) -> None:
+    app.run_worker(lambda: _update_worker(app), thread=True, name="update", group="update")
+
+
+def _update_worker(app) -> None:
+    """Halo 2.0.2 round 6: the check itself (installed_build/
+    latest_available/commits_between -- a git/network call) off the UI
+    thread; the dialog only ever gets built, pushed and read from the UI
+    thread via `call_from_thread`, same `_palette_worker`/`_on_palette_
+    pick` shape `tui/app.py`'s own Ctrl+P already uses."""
+    from pathlib import Path
+    from halo_harness import update as upd
+    from halo_harness.tui.dialogs.update_dialog import UpdateDialog
+    build = upd.installed_build()
+    avail = upd.latest_available(upd.default_channel(build))
+    kind = upd.install_kind()
+    checkout = Path(build["checkout"]) if build.get("checkout") else None
+    lines, _count = upd.commits_between(build.get("commit"), avail.get("commit"), checkout=checkout)
+    up_to_date = bool(build.get("commit") and avail.get("commit") and build["commit"] == avail["commit"])
+    installed_line = upd.format_version_line(build)[len("halo "):]
+    if avail.get("commit"):
+        ref = f", {avail['ref']}" if avail.get("ref") else ""
+        available_line = f"{avail['commit']}{ref}"
+    else:
+        available_line = f"unknown ({avail.get('reason') or 'no reason given'})"
+    dialog = UpdateDialog(installed_line, available_line, lines, kind.get("reinstall_cmd"), up_to_date=up_to_date)
+    app.call_from_thread(app.push_screen, dialog, lambda result: _on_update_dialog_result(app, result))
+
+
+def _on_update_dialog_result(app, result) -> None:
+    """Enter ("update"): the ONLY thing this does is exit the TUI itself
+    with `update.RESTART_EXIT_CODE` -- `cli.main` (past `run_tui()`,
+    Textual already torn down) is what actually runs the reinstall and
+    relaunches with `--continue`; see `cli._apply_update_and_relaunch`.
+    Esc (`None`): nothing happens at all."""
+    if result == "update":
+        from halo_harness.update import RESTART_EXIT_CODE
+        app.exit(return_code=RESTART_EXIT_CODE)
+
+
+def update_check_startup_worker(app) -> None:
+    """Halo 2.0.2 round 6: the SAME "stale -> background refresh" shape
+    `catalog_auto_refresh_worker` uses, called once at TUI launch
+    (`tui/app.py`'s own `on_mount`) -- a one-line transcript note, at most
+    once a day, ONLY when the (cache-first, 24h TTL) check already knows
+    an update is available; never a fresh forced check, never on the UI
+    thread. Off entirely with `update.check: false`/`update.notify:
+    false`, or `BRIDGE_TEST_NO_BACKGROUND_NET=1` (never touch the network
+    from a test)."""
+    from halo_harness.config.paths import background_net_disabled
+    if background_net_disabled():
+        return
+    from halo_harness.theme import get_config_value
+    if get_config_value("update.check", True) is False or get_config_value("update.notify", True) is False:
+        return
+    state_dir = getattr(app.controller, "state_dir", None)
+    if state_dir is None:
+        return
+    from halo_harness import update as upd
+    build = upd.installed_build()
+    avail = upd.latest_available(upd.default_channel(build), state_dir=state_dir)
+    if not avail.get("commit") or not build.get("commit") or avail["commit"] == build["commit"]:
+        return
+    if not upd.note_due_today(state_dir):
+        return
+    new_version = avail["ref"][1:] if (avail.get("ref") or "").startswith("v") else build["version"]
+    text = f"update available: {build['version']} {build['commit']} -> {new_version} {avail['commit']}, /update"
+    app.call_from_thread(app.transcript.add_note, text, kind="note")
 
 
 async def _handle_mcp(app, _args: str) -> None:

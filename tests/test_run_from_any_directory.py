@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -66,8 +67,14 @@ def test_version_from_a_scratch_directory_outside_the_repo(ctx: Ctx):
     result = subprocess.run([sys.executable, "-m", "halo_harness", "--version"],
                              cwd=str(scratch), env=env, capture_output=True, text=True, timeout=30)
     ctx.check(f"exit 0, got {result.returncode} (stderr: {result.stderr[-400:]!r})", result.returncode == 0)
-    ctx.check(f"prints 'halo {__version__}', got {result.stdout!r}",
-              result.stdout.strip() == f"halo {__version__}")
+    # Halo 2.0.2 round 6: `(commit, branch)` is appended once known --
+    # this subprocess's cwd is the scratch dir, but PYTHONPATH still
+    # points at this real checkout, so update.installed_build's own
+    # PYTHONPATH-checkout fallback (keyed off __file__, never cwd) still
+    # finds a real commit/branch -- proof this stays cwd-independent too.
+    ctx.check(f"prints 'halo {__version__}', optionally with (commit, branch), got {result.stdout!r}",
+              re.match(rf"^halo {re.escape(__version__)}( \([0-9a-f]{{7}}(, \S+)?\))?\s*$",
+                        result.stdout) is not None)
 
 
 @test

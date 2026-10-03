@@ -784,6 +784,59 @@ for what each WARN/MISSING line means)
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
 
+## `halo update`
+
+Checks the installed build (PEP 610 `direct_url.json`, or `git` in a live
+checkout) against what's available upstream (cached 24h in
+`~/.halo/update-check.json`), and, unless `--check`, applies it. See
+"Update" in `docs/INSTALL.md` for the full walkthrough; `/update` inside
+the TUI is the same check with an update-and-restart dialog.
+
+```sh
+halo update --help
+```
+```
+usage: halo update [-h] [--check] [--to TAG_OR_BRANCH_OR_COMMIT]
+                   [--channel {stable,main}] [--force] [--refresh]
+
+Check for, or apply, a halo update.
+
+options:
+  -h, --help            show this help message and exit
+  --check               Report only -- never reinstalls
+  --to TAG_OR_BRANCH_OR_COMMIT
+                        Pick an exact revision instead of the channel's latest
+  --channel {stable,main}
+                        stable tracks the newest v* tag, main tracks the
+                        branch halo came from
+  --force               Reinstall even if another halo process looks like it's
+                        running
+  --refresh             Ignore the 24h cache, always check live
+```
+
+`halo update --check` prints installed vs. available, up to 15 commits
+between them, and the exact reinstall command this box would run, then
+exits 0 (up to date), 10 (an update is available), or 1 (couldn't tell --
+offline, no git, rate-limited). Without `--check`, it refuses (exit 1) if
+another `halo` process looks like it's running on this machine (excluding
+itself) unless `--force` is also given -- a reinstall under a running TUI
+has broken the install on Windows before; close other sessions first, or
+pass `--force` once you're sure none is actually using the install. On
+success it runs the reinstall command live (output visible) and reports
+the before/after commit by re-running `halo --version` as a fresh process.
+
+```sh
+halo update --check
+```
+```
+installed: halo 2.0.2 (c93480d, master)
+available (main): e1f2a3b (master)
+3 commit(s):
+  e1f2a3b fix: ...
+  ...
+update command: uv tool install --reinstall git+https://github.com/roloVibes/Halo-Harness
+```
+
 ## `halo providers`
 
 ```

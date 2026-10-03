@@ -449,6 +449,11 @@ class BridgeApp(App):
         # the FIRST time `/model` is opened, not only after.
         self.run_worker(self._catalog_startup_refresh_worker, thread=True, name="catalog-startup-refresh",
                          group="catalog-startup-refresh")
+        # Halo 2.0.2 round 6: a one-line transcript note, at most once a
+        # day, when the CACHED update check already knows one is
+        # available -- see tui/slash.py::update_check_startup_worker.
+        self.run_worker(self._update_check_startup_worker, thread=True, name="update-check-startup",
+                         group="update-check-startup")
         # H15 part 2 addendum 4: the OpenRouter balance status-bar segment --
         # one fetch now (force=True, the launch case), then again every
         # BALANCE_REFRESH_INTERVAL_S (5 minutes) for as long as the app runs;
@@ -591,6 +596,17 @@ class BridgeApp(App):
         try:
             from halo_harness.tui.slash import catalog_auto_refresh_worker
             catalog_auto_refresh_worker(self)
+        except Exception:
+            pass
+
+    def _update_check_startup_worker(self) -> None:
+        """Halo 2.0.2 round 6: see `tui/slash.py::update_check_startup_
+        worker`'s own docstring -- best-effort, same "a failure here just
+        leaves things as they were" contract as the catalog refresh just
+        above."""
+        try:
+            from halo_harness.tui.slash import update_check_startup_worker
+            update_check_startup_worker(self)
         except Exception:
             pass
 

@@ -189,12 +189,37 @@ Things people hit in Claude Code that Halo does differently.
 
 ## Install
 
-Everything you need is in the Quick start above; the full walkthrough, the
+Three ways in, one line each, then `cd anywhere && halo`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.sh | bash   # Linux/macOS
+uv tool install git+https://github.com/roloVibes/Halo-Harness                                               # any OS, needs uv
+pipx install git+https://github.com/roloVibes/Halo-Harness                                                  # any OS, needs pipx
+```
+
+Windows: see the Quick start above, or `scripts/install-halo.ps1`'s own
+one-liner in [docs/INSTALL.md](docs/INSTALL.md). The full walkthrough, the
 offline work-box recipe, PEP 668 notes and reproducible installs via
 `requirements.lock` are in [docs/INSTALL.md](docs/INSTALL.md) and
-[docs/harness/INSTALL.md](docs/harness/INSTALL.md). Updating is `git pull`
-in the clone followed by the same `uv tool install --reinstall .`;
-`halo doctor` names which copy of `halo` is on PATH and the fix if it drifts.
+[docs/harness/INSTALL.md](docs/harness/INSTALL.md).
+
+## Update
+
+```sh
+halo update            # or /update inside halo -- same check, then updates and restarts
+```
+
+Prints installed vs. available and the exact reinstall command for
+however `halo` was installed, then (unless `--check`) runs it and reports
+the before/after commit. Inside the TUI, `/update` shows the same report
+in a dialog -- `Enter` quits, updates (output visible) and relaunches with
+`--continue` so the session resumes; `Esc` leaves everything untouched.
+That quit-then-update-then-relaunch order is the only safe one on
+Windows, where the install can't be replaced while any `halo` process
+(this one included) still has it open -- `halo update` on its own refuses
+with the same reason if another session is running; `--force` overrides.
+`halo --version`/`halo doctor` show what you have now; see "Update" in
+[docs/INSTALL.md](docs/INSTALL.md) for the manual command per install kind.
 
 ## Models and providers
 

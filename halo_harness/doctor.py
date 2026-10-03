@@ -650,6 +650,24 @@ def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, p
     return f"{OK} halo command: {resolved} (installed console script)"
 
 
+def _check_install() -> str:
+    """Halo 2.0.2 round 6: a purely informative line (never WARN/MISSING --
+    `check_command_on_path` right below is what flags a PROBLEM) naming
+    HOW this running `halo` was installed, from where, and which commit --
+    `halo update`'s own `update.installed_build`/`install_kind`."""
+    from halo_harness import update as upd
+    label = {"uv_tool": "uv tool", "pipx": "pipx", "pip": "pip",
+             "editable_checkout": "editable checkout", "bare_checkout": "checkout on PYTHONPATH",
+             "unknown": "unknown"}
+    try:
+        build = upd.installed_build()
+        kind = upd.install_kind()
+        where = kind.get("spec") or build.get("checkout") or "?"
+        return f"{OK} install: {label.get(kind['kind'], kind['kind'])} ({where}) -- {upd.format_version_line(build)}"
+    except Exception as e:
+        return f"{OK} install: could not be determined ({type(e).__name__}: {e})"
+
+
 def _check_old_rolo_claude_leftover(*, resolved=_UNSET, uv_found: Optional[bool] = None,
                                      pipx_found: Optional[bool] = None,
                                      externally_managed: Optional[bool] = None) -> Optional[str]:
@@ -1379,6 +1397,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))
+    entries.append(("install", _check_install()))
     entries.append(("command_on_path", check_command_on_path()))
     entries.append(("old_rolo_claude_on_path", _check_old_rolo_claude_leftover()))
     return [(cid, line) for cid, line in entries if line is not None]

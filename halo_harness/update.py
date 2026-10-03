@@ -1,0 +1,476 @@
+"""halo_harness.update -- Halo 2.0.2 round 6: what is installed (PEP 610
+`direct_url.json` plus a live checkout's own git HEAD) and what is available
+upstream (git ls-remote / GitHub API, cached 24h in `~/.halo/update-check.json`).
+Read by `halo --version`, `halo doctor`'s "install" line, `halo update`
+(`update_cli.py`), and `/update` (`tui/slash.py`). Every subprocess and HTTP
+call goes through `run()`/`http_get_json()` below -- nothing else in this
+module (or its callers) shells out or opens a socket directly, so a test can
+fake both seams and never touch the real network or install anything.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+REPO_URL = "https://github.com/roloVibes/Halo-Harness"
+API_BASE = "https://api.github.com/repos/roloVibes/Halo-Harness"
+DIST_NAME = "halo-harness"
+DEFAULT_BRANCH = "master"
+CACHE_TTL_S = 24 * 3600
+# TUI -> cli.main: run_tui() returning this exact int means "the user chose
+# Enter: update and restart halo" -- cli.main runs the update (now past the
+# TUI, output visible in the plain terminal) and relaunches with --continue.
+# The Windows order is always quit (this), then update, then relaunch --
+# never update while any halo process (this one included) still has the
+# install open; see update_cli.apply_update/other_halo_pids.
+RESTART_EXIT_CODE = 91
+
+_UNSET = object()
+_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def run(cmd, **kwargs):
+    """The one subprocess seam this module uses -- tests monkeypatch
+    `halo_harness.update.run`, never `subprocess.run` directly."""
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    kwargs.setdefault("timeout", 10)
+    return subprocess.run(cmd, **kwargs)
+
+
+def http_get_json(url: str, *, timeout: float = 5.0) -> Optional[dict]:
+    """The one network seam this module uses -- the GitHub REST API, no
+    auth. Never raises; `None` on any failure (offline, rate-limited, a
+    malformed body). Tests monkeypatch this, never urllib."""
+    try:
+        import urllib.request
+        from halo_harness.providers.http import urlopen_tls
+        req = urllib.request.Request(url, headers={"User-Agent": "halo",
+                                                     "Accept": "application/vnd.github+json"})
+        with urlopen_tls(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 1. What is installed
+# ---------------------------------------------------------------------------
+
+def _direct_url() -> Optional[dict]:
+    try:
+        import importlib.metadata as im
+        text = im.distribution(DIST_NAME).read_text("direct_url.json")
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _checkout_root_on_pythonpath() -> Optional[Path]:
+    """The checkout this very source file lives in, when it looks like a
+    real git repo -- true for a bare PYTHONPATH run (`bin/halo`'s own
+    fallback, this repo's test suite) AND for most editable installs
+    (their `__file__` already resolves straight back to the checkout);
+    `installed_build`'s editable branch prefers direct_url.json's own
+    checkout URL first and only falls back to this."""
+    root = Path(__file__).resolve().parent.parent
+    return root if (root / ".git").exists() else None
+
+
+def _git_head(checkout: Path, run_fn) -> "tuple[Optional[str], Optional[str]]":
+    commit = branch = None
+    try:
+        r = run_fn(["git", "rev-parse", "--short", "HEAD"], cwd=str(checkout),
+                   capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            commit = r.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        r = run_fn(["git", "branch", "--show-current"], cwd=str(checkout),
+                   capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            branch = r.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return commit, branch
+
+
+def _url_to_path(url: Optional[str]) -> Optional[Path]:
+    if not url or not url.startswith("file:"):
+        return None
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+    parsed = urlparse(url)
+    path = url2pathname(parsed.path)
+    return Path(path) if path else None
+
+
+def installed_build(*, direct_url: "object" = _UNSET, run_fn=None) -> dict:
+    """{"version", "commit", "requested_revision", "checkout", "branch",
+    "editable"}. `commit`/`branch` are short/plain strings or None --
+    None everywhere means "could not be determined", never a crash
+    (`halo --version`/`doctor` must still print something). `commit` is
+    always the short (7-char) form so it compares equal to
+    `latest_available()`'s own commits."""
+    from halo_harness import __version__
+    run_fn = run_fn or run
+    info = {"version": __version__, "commit": None, "requested_revision": None,
+            "checkout": None, "branch": None, "editable": False}
+    d = _direct_url() if direct_url is _UNSET else direct_url
+    if d is None:
+        checkout = _checkout_root_on_pythonpath()
+        if checkout is not None:
+            info["checkout"] = str(checkout)
+            info["commit"], info["branch"] = _git_head(checkout, run_fn)
+        return info
+    vcs_info = d.get("vcs_info") if isinstance(d, dict) else None
+    dir_info = d.get("dir_info") if isinstance(d, dict) else None
+    if isinstance(vcs_info, dict) and vcs_info.get("vcs") == "git":
+        commit = vcs_info.get("commit_id")
+        info["commit"] = commit[:7] if commit else None
+        info["requested_revision"] = vcs_info.get("requested_revision")
+    elif isinstance(dir_info, dict) and dir_info.get("editable"):
+        info["editable"] = True
+        checkout = _url_to_path(d.get("url")) or _checkout_root_on_pythonpath()
+        if checkout is not None:
+            info["checkout"] = str(checkout)
+            info["commit"], info["branch"] = _git_head(checkout, run_fn)
+    return info
+
+
+def format_version_line(build: dict) -> str:
+    """`halo 2.0.2 (c93480d, master)` -- the branch/revision parenthetical
+    only appears once the commit itself is known; branch falls back to the
+    git-vcs install's own `requested_revision` when there is no live
+    checkout to ask `git branch --show-current`, and is left off entirely
+    when NEITHER is known (a `git+URL` install with no explicit ref asked
+    for -- true of this very box's own real install)."""
+    from halo_harness import __version__
+    version = build.get("version") or __version__
+    commit = build.get("commit")
+    if not commit:
+        return f"halo {version}"
+    branch = build.get("branch") or build.get("requested_revision")
+    return f"halo {version} ({commit}, {branch})" if branch else f"halo {version} ({commit})"
+
+
+def _uv_tool_has(name: str, run_fn) -> bool:
+    if not shutil.which("uv"):
+        return False
+    try:
+        r = run_fn(["uv", "tool", "list"], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and name in (r.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _pipx_has(name: str, run_fn) -> bool:
+    if not shutil.which("pipx"):
+        return False
+    try:
+        r = run_fn(["pipx", "list"], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and f"package {name}" in (r.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _spec_from_direct_url(d: dict) -> str:
+    """`<spec>` for a reinstall command, kept exactly as the box's own
+    install would resolve it: `git+<url>[@<requested_revision>]` for a
+    git-vcs install, else the plain checkout path it was installed from."""
+    vcs_info = d.get("vcs_info") if isinstance(d, dict) else None
+    url = d.get("url") if isinstance(d, dict) else None
+    if isinstance(vcs_info, dict) and vcs_info.get("vcs") == "git":
+        base = f"git+{url}" if url else f"git+{REPO_URL}"
+        rev = vcs_info.get("requested_revision")
+        return f"{base}@{rev}" if rev else base
+    return url or REPO_URL
+
+
+def _tool_reinstall_cmd(prefix: str, run_fn, *, editable: bool, path: str = ".") -> str:
+    """Which of the three installers THIS install actually used, by the
+    same two signals every branch below checks: the tool's own marker file
+    sitting right next to the running venv (no TOML/JSON parsing needed --
+    existence alone is the uv-tool/pipx tell), or (if that venv isn't the
+    one we're even running from right now) `uv tool list`/`pipx list`
+    naming this distribution. Falls back to plain pip."""
+    if Path(prefix, "uv-receipt.toml").exists() or _uv_tool_has(DIST_NAME, run_fn):
+        return f"uv tool install --reinstall{' --editable' if editable else ''} {path}"
+    if Path(prefix, "pipx_metadata.json").exists() or _pipx_has(DIST_NAME, run_fn):
+        return f"pipx install --force{' -e' if editable else ''} {path}"
+    return f"python -m pip install --upgrade{' -e' if editable else ''} {path}"
+
+
+def install_kind(*, direct_url: "object" = _UNSET, prefix: Optional[str] = None, run_fn=None) -> dict:
+    """{"kind", "spec", "reinstall_cmd"} -- `kind` is one of "uv_tool",
+    "pipx", "pip", "editable_checkout", "bare_checkout", "unknown".
+    `reinstall_cmd` is the exact command `halo update`/doctor's fix line
+    runs or prints; always a plain string meant to be run with a shell
+    (it may contain `&&`), never argv split for you."""
+    run_fn = run_fn or run
+    prefix = sys.prefix if prefix is None else prefix
+    d = _direct_url() if direct_url is _UNSET else direct_url
+    if d is None:
+        checkout = _checkout_root_on_pythonpath()
+        if checkout is None:
+            return {"kind": "unknown", "spec": None, "reinstall_cmd": None}
+        return {"kind": "bare_checkout", "spec": str(checkout), "reinstall_cmd": "git pull"}
+    dir_info = d.get("dir_info") if isinstance(d, dict) else None
+    if isinstance(dir_info, dict) and dir_info.get("editable"):
+        checkout = _url_to_path(d.get("url")) or _checkout_root_on_pythonpath()
+        tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=True)
+        return {"kind": "editable_checkout", "spec": str(checkout) if checkout else ".",
+                "reinstall_cmd": f"git pull && {tool_cmd}"}
+    spec = _spec_from_direct_url(d)
+    tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=False, path=spec)
+    kind = "uv_tool" if tool_cmd.startswith("uv ") else ("pipx" if tool_cmd.startswith("pipx") else "pip")
+    return {"kind": kind, "spec": spec, "reinstall_cmd": tool_cmd}
+
+
+# ---------------------------------------------------------------------------
+# 2. What is available
+# ---------------------------------------------------------------------------
+
+def default_channel(build: Optional[dict] = None) -> str:
+    """A config `update.channel` (written by `halo update --channel ...`,
+    "remembers it in config" per the brief) always wins first. Otherwise:
+    "stable" when the install was pinned to a `v*` tag (`--to v2.0.3`, or
+    a release wheel's own `requested_revision`), else "main" (tracks
+    whatever branch the install came from, `master` by default)."""
+    from halo_harness.theme import get_config_value
+    remembered = get_config_value("update.channel", None)
+    if remembered in ("stable", "main"):
+        return remembered
+    build = build if build is not None else installed_build()
+    rev = build.get("requested_revision") or build.get("branch") or ""
+    return "stable" if _TAG_RE.match(rev) else "main"
+
+
+def _cache_path(state_dir: Path) -> Path:
+    return Path(state_dir) / "update-check.json"
+
+
+def _load_cache(state_dir: Path) -> dict:
+    try:
+        data = json.loads(_cache_path(state_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cache(state_dir: Path, cache: dict) -> None:
+    path = _cache_path(state_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _newest_tag(names) -> Optional[str]:
+    best = None
+    for name in names or []:
+        m = _TAG_RE.match(name or "")
+        if not m:
+            continue
+        key = tuple(int(x) for x in m.groups())
+        if best is None or key > best[0]:
+            best = (key, name)
+    return best[1] if best else None
+
+
+def _parse_ls_remote(output: str, channel: str) -> Optional[dict]:
+    heads, tags = {}, {}
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if not line or "\t" not in line:
+            continue
+        sha, ref = line.split("\t", 1)
+        if ref.endswith("^{}"):  # an annotated tag's own dereferenced-commit line
+            ref = ref[:-3]
+        if ref.startswith("refs/heads/"):
+            heads[ref[len("refs/heads/"):]] = sha
+        elif ref.startswith("refs/tags/"):
+            tags[ref[len("refs/tags/"):]] = sha
+    if channel == "stable":
+        tag = _newest_tag(list(tags.keys()))
+        return {"channel": channel, "commit": tags[tag][:7], "ref": tag, "reason": None} if tag else None
+    sha = heads.get(DEFAULT_BRANCH)
+    return {"channel": channel, "commit": sha[:7], "ref": DEFAULT_BRANCH, "reason": None} if sha else None
+
+
+def _fetch_latest(channel: str, *, run_fn, fetch_json) -> dict:
+    if shutil.which("git"):
+        try:
+            r = run_fn(["git", "ls-remote", "--heads", "--tags", REPO_URL],
+                       capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                parsed = _parse_ls_remote(r.stdout, channel)
+                if parsed:
+                    return parsed
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if channel == "stable":
+        data = fetch_json(f"{API_BASE}/tags", timeout=5)
+        names = [t.get("name") for t in data if isinstance(t, dict)] if isinstance(data, list) else []
+        tag = _newest_tag(names)
+        if tag:
+            sha = next((t.get("commit", {}).get("sha") for t in data if t.get("name") == tag), None)
+            if sha:
+                return {"channel": channel, "commit": sha[:7], "ref": tag, "reason": None}
+        return {"channel": channel, "commit": None, "ref": None, "reason": "no tags found"}
+    data = fetch_json(f"{API_BASE}/commits/{DEFAULT_BRANCH}", timeout=5)
+    if isinstance(data, dict) and data.get("sha"):
+        return {"channel": channel, "commit": data["sha"][:7], "ref": DEFAULT_BRANCH, "reason": None}
+    return {"channel": channel, "commit": None, "ref": None, "reason": "network unavailable"}
+
+
+def latest_available(channel: Optional[str] = None, *, refresh: bool = False,
+                      state_dir: Optional[Path] = None, build: Optional[dict] = None,
+                      run_fn=None, fetch_json=None) -> dict:
+    """{"channel", "commit", "ref", "reason", "source"} -- never raises,
+    `commit` is None with a `reason` when nothing could be determined
+    (offline, no git, rate-limited). Cached 24h per channel in
+    `~/.halo/update-check.json`; `refresh=True` ignores that cache.
+    Honours `BRIDGE_TEST_NO_BACKGROUND_NET=1` and config `update.check:
+    false` -- both return the LAST cached answer (or "unknown") rather
+    than ever touching the network from a test."""
+    from halo_harness.config.paths import bridge_home, background_net_disabled
+    from halo_harness.theme import get_config_value
+    run_fn = run_fn or run
+    fetch_json = fetch_json or http_get_json
+    state_dir = state_dir if state_dir is not None else bridge_home()
+    if channel is None:
+        channel = default_channel(build)
+    cache = _load_cache(state_dir)
+    cached = cache.get(channel) if isinstance(cache, dict) else None
+    now = time.time()
+    if not refresh and isinstance(cached, dict) and (now - cached.get("checked_at", 0)) < CACHE_TTL_S:
+        return {**cached, "source": "cache"}
+    checking_disabled = get_config_value("update.check", True) is False
+    if checking_disabled or background_net_disabled():
+        if isinstance(cached, dict):
+            return {**cached, "source": "cache"}
+        reason = "update.check is off" if checking_disabled else "background network disabled"
+        return {"channel": channel, "commit": None, "ref": None, "reason": reason, "source": "disabled"}
+    result = _fetch_latest(channel, run_fn=run_fn, fetch_json=fetch_json)
+    result["checked_at"] = now
+    cache[channel] = result
+    _save_cache(state_dir, cache)
+    return {**result, "source": "live"}
+
+
+def commits_between(old_commit: Optional[str], new_commit: Optional[str], *, checkout: Optional[Path] = None,
+                     limit: int = 15, run_fn=None, fetch_json=None) -> "tuple[list, Optional[int]]":
+    """(lines, count) -- up to `limit` `git log --oneline` lines (newest
+    first) from a real local checkout when one is available, else an empty
+    list with just the ahead-by `count` from the GitHub compare API.
+    `(None, None)`-shaped as `([], None)` when neither source can answer
+    (no checkout, no network, or either commit unknown)."""
+    run_fn = run_fn or run
+    if checkout is None:
+        checkout = _checkout_root_on_pythonpath()
+    if checkout is not None and old_commit and new_commit:
+        try:
+            r = run_fn(["git", "log", "--oneline", f"-{limit}", f"{old_commit}..{new_commit}"],
+                       cwd=str(checkout), capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+                return lines, len(lines)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if old_commit and new_commit:
+        fetch_json = fetch_json or http_get_json
+        data = fetch_json(f"{API_BASE}/compare/{old_commit}...{new_commit}", timeout=5)
+        if isinstance(data, dict) and isinstance(data.get("ahead_by"), int):
+            return [], data["ahead_by"]
+    return [], None
+
+
+def note_due_today(state_dir: Path) -> bool:
+    """True at most once per calendar day (UTC) -- flips the cache's own
+    `notified_date` immediately, so a second call the same day (another
+    launch, a concurrent worker) returns False without showing the note
+    twice."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    cache = _load_cache(state_dir)
+    if cache.get("notified_date") == today:
+        return False
+    cache["notified_date"] = today
+    _save_cache(state_dir, cache)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 3. Applying an update: another halo process, and the relaunch itself
+# ---------------------------------------------------------------------------
+
+def _is_halo_cmdline(cmdline: str) -> bool:
+    return "halo" in (cmdline or "").lower()
+
+
+def other_halo_pids(*, run_fn=None) -> "list[int]":
+    """Every OTHER process on this machine that looks like a `halo`
+    invocation (by command line), this process itself always excluded --
+    `update_cli.apply_update`'s own refusal check. Best-effort: any
+    failure to even list processes returns `[]` (the brief's refusal is a
+    courtesy, never a hard guarantee this can't still race)."""
+    run_fn = run_fn or run
+    this_pid = os.getpid()
+    pids: "list[int]" = []
+    try:
+        if os.name == "nt":
+            r = run_fn(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | "
+                        "ConvertTo-Json -Compress"], capture_output=True, text=True, timeout=10)
+            rows = json.loads(r.stdout) if (r.stdout or "").strip() else []
+            rows = [rows] if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
+            for row in rows:
+                pid = row.get("ProcessId") if isinstance(row, dict) else None
+                if pid and int(pid) != this_pid and _is_halo_cmdline(row.get("CommandLine")):
+                    pids.append(int(pid))
+        else:
+            r = run_fn(["ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=10)
+            for line in (r.stdout or "").splitlines()[1:]:
+                line = line.strip()
+                pid_str, _, rest = line.partition(" ")
+                if pid_str.isdigit() and int(pid_str) != this_pid and _is_halo_cmdline(rest):
+                    pids.append(int(pid_str))
+    except Exception:
+        return []
+    return pids
+
+
+def relaunch_halo(extra_args: "list[str]", *, exec_fn: Optional[Callable] = None) -> int:
+    """Replaces THIS process with a fresh `halo <extra_args>` (`--continue`
+    is always one of them, from the caller) -- never returns on a real
+    `exec_fn` (the default, `os.execv`). `exec_fn` is the test seam: a
+    fake records the call and returns instead of truly exec'ing, which is
+    why this still has a (dead-code-in-production) `return` for it to see."""
+    exec_fn = exec_fn or os.execv
+    halo_path = shutil.which("halo") or shutil.which("halo.exe")
+    if halo_path:
+        argv = [halo_path, *extra_args]
+    else:
+        halo_path = sys.executable
+        argv = [halo_path, "-m", "halo_harness", *extra_args]
+    exec_fn(halo_path, argv)
+    return 0

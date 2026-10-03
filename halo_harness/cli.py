@@ -254,7 +254,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="halo", add_help=True,
         description="halo - starts an interactive session by default, use -p/--print for non-interactive output",
-        epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export, "
+        epilog="Commands: init, proxy, mcp, models, config, doctor, update, stats, improve, export, "
                "roles, completion "
                "(run `halo <command> --help`; `halo init` sets up a fresh box in one go)",
     )
@@ -320,6 +320,26 @@ def _parse_stream_json_lines(raw: str) -> list:
     return out
 
 
+def _apply_update_and_relaunch(argv: list) -> int:
+    """Halo 2.0.2 round 6 `/update`: `run_tui(args)` just returned
+    `update.RESTART_EXIT_CODE` -- the TUI's own Textual app has already
+    exited (screen torn down, terminal restored) by the time `run_tui`
+    returns at all, so only NOW is it safe to run the reinstall: the
+    Windows order is always quit, then update, then relaunch, never
+    update while any halo process (this one included) still has the
+    install open. A failed update still relaunches the OLD halo with
+    `--continue`, same as a successful one -- the session must resume
+    either way, never strand the user at a dead prompt."""
+    from halo_harness.update import relaunch_halo
+    from halo_harness.update_cli import apply_update
+    try:
+        apply_update()
+    except Exception as e:
+        print(f"halo: update failed: {e}", file=sys.stderr)
+    relaunch_args = [a for a in argv if a not in ("--continue", "-c")]
+    return relaunch_halo(["--continue", *relaunch_args])
+
+
 def main(argv: Optional[list] = None) -> int:
     _make_streams_utf8_safe()
     try:  # best-effort: SIGTERM -> exit 143 (not available on every platform/thread)
@@ -357,6 +377,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "doctor":
         from halo_harness.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
+    if argv and argv[0] == "update":
+        from halo_harness.update_cli import cmd_update
+        return cmd_update(argv[1:])
     if argv and argv[0] == "work-matrix":
         from halo_harness.work_matrix import cmd_work_matrix
         return cmd_work_matrix(argv[1:])
@@ -409,7 +432,14 @@ def main(argv: Optional[list] = None) -> int:
         args, _ = parser.parse_known_args(argv)
 
     if args.version:
-        print(f"halo {__version__}")
+        # Halo 2.0.2 round 6: `(commit, branch)` once the install's own
+        # commit is known (PEP 610 direct_url.json, or git in a live
+        # checkout) -- see update.installed_build/format_version_line.
+        try:
+            from halo_harness.update import format_version_line, installed_build
+            print(format_version_line(installed_build()))
+        except Exception:
+            print(f"halo {__version__}")
         return 0
 
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
@@ -496,7 +526,11 @@ def main(argv: Optional[list] = None) -> int:
             from halo_harness.ax_mode import run_ax_screen_reader_mode
             return run_ax_screen_reader_mode(args)
         from halo_harness.tui.launch import run_tui
-        return run_tui(args)
+        code = run_tui(args)
+        from halo_harness.update import RESTART_EXIT_CODE
+        if code == RESTART_EXIT_CODE:
+            return _apply_update_and_relaunch(argv)
+        return code
 
     system_prompt_text = args.system_prompt
     if args.system_prompt_file and system_prompt_text is None:

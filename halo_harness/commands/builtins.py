@@ -808,6 +808,31 @@ def _cmd_doctor(args: str, facade: HeadlessFacade) -> str:
     return "\n".join(lines)
 
 
+def _cmd_update(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 6: the plain-text fallback (`-p`, or the TUI
+    falling through to `Controller.run_slash` for any reason) -- reports
+    exactly like `halo update --check`, but never applies anything; only
+    the TUI's own `/update` (`tui/slash.py::_handle_update`) can actually
+    offer the update-and-restart dialog."""
+    from halo_harness import update as upd
+    build = upd.installed_build()
+    avail = upd.latest_available(upd.default_channel(build))
+    kind = upd.install_kind()
+    lines = [f"installed: {upd.format_version_line(build)}"]
+    if avail.get("commit"):
+        ref = f", {avail['ref']}" if avail.get("ref") else ""
+        lines.append(f"available ({avail.get('channel')}): {avail['commit']}{ref}")
+    else:
+        lines.append(f"available ({avail.get('channel')}): unknown ({avail.get('reason') or 'no reason given'})")
+    lines.append(f"update command: {kind.get('reinstall_cmd') or '(unknown)'}")
+    if build.get("commit") and avail.get("commit") and build["commit"] == avail["commit"]:
+        lines.append("Already up to date.")
+    else:
+        lines.append("Run `halo update` from a shell, or open the full-screen TUI and use /update there "
+                      "to update and restart in place.")
+    return "\n".join(lines)
+
+
 def _cmd_export(args: str, facade: HeadlessFacade) -> str:
     return "Export needs the interactive TUI's file picker; nothing to export from a single -p turn."
 
@@ -1056,6 +1081,8 @@ _BUILTIN_SPECS = {
     "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
     "tips": ("core", "List tips for using halo's features", None, _cmd_tips),
     "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
+    "update": ("ui", "Check for a halo update (the TUI can also update and restart in place)",
+               None, _cmd_update),
 }
 
 

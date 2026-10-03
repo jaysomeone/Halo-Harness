@@ -68,6 +68,27 @@ Nothing to `cd` into first -- good for a box that only ever needs to RUN
 pull` (there is no local clone); re-run the same command to pick up a new
 release instead.
 
+### Windows
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.ps1 | iex"
+```
+
+Mirrors `install-halo.sh` exactly: installs `uv` if missing, offers to
+uninstall an old `rolo-claude` (uv, pipx or pip), clones to
+`%USERPROFILE%\Halo-Harness` (or pulls an existing clone), runs `uv tool
+install --reinstall .`, checks PATH, and finishes with `halo doctor`.
+Same options too: `-Yes`, `-NoClone`, `-DryRun`, `-CloneDir <path>`. By
+hand, from PowerShell:
+
+```powershell
+git clone https://github.com/roloVibes/Halo-Harness.git
+cd Halo-Harness
+uv tool install --reinstall .
+cd ~
+halo init
+```
+
 ## Then: cd anywhere, type `halo`
 
 ```sh
@@ -107,6 +128,39 @@ cd ~                                # done -- back to running `halo` from anywhe
 The exact same reinstall command as the first install, every time --
 `halo doctor`/`halo init`'s PATH check names this command for your box if
 you ever forget and the installed copy drifts out of date.
+
+## Update
+
+```sh
+halo update            # or /update inside halo
+```
+
+`halo update --check` prints installed vs. available and the exact
+command for however `halo` was installed, then (unless `--check`) runs
+it and reports the before/after commit by re-running `halo --version`.
+The manual command, per install kind: `uv tool install --reinstall
+<spec>` (uv tool), `pipx install --force <spec>` (pipx), `python -m pip
+install --upgrade <spec>` (pip), `git pull` then the same reinstall
+(editable checkout), or plain `git pull` (bare checkout on PYTHONPATH).
+
+**Windows note:** close other `halo` sessions first -- the install can't
+be replaced while any of them still has it open. `/update` inside the
+TUI does this for you: `Enter` quits, updates (output visible in the
+terminal), and relaunches with `--continue` so the session resumes;
+`halo update` run on its own refuses with the same reason when another
+session is running (`--force` overrides once you're sure none is
+actually using the install).
+
+## Uninstall
+
+```sh
+uv tool uninstall halo-harness      # or: pipx uninstall halo-harness
+                                     # or: pip uninstall halo-harness
+rm -rf ~/.halo                      # optional -- state, sessions, cached catalogs
+```
+
+A clone made for `git pull` (not needed to RUN `halo`, see above) can
+just be deleted too.
 
 ## Upgrading from rolo-claude 1.0.1
 

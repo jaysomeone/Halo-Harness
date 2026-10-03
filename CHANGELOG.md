@@ -181,6 +181,34 @@ repair actions, and Qwen tool calling at work.
    tool-bearing call, and whether `tools` were present on the first
    failing turn or a later one.
 
+7. **`halo update` and `/update`**: `halo_harness/update.py` (new) knows
+   what's installed (PEP 610 `direct_url.json` -- commit and requested
+   revision for a git install, `git rev-parse`/`git branch` in the
+   checkout for an editable install or a bare PYTHONPATH run) and what's
+   available upstream (`git ls-remote` against GitHub, or the REST API
+   with no git on PATH; cached 24h in `~/.halo/update-check.json`,
+   honouring `update.check: false` and `BRIDGE_TEST_NO_BACKGROUND_NET`).
+   `halo --version` now prints `halo 2.0.2 (c93480d, master)` once the
+   commit is known; `halo doctor` gains an "install" line naming how,
+   from where, and which commit. `halo update --check` reports installed
+   vs. available, the commits between them, and the exact reinstall
+   command, exiting 0/10/1 (up to date/available/unknown); `halo update`
+   (apply, `update_cli.py`) refuses while another halo process looks like
+   it's running on this machine (excluding itself) unless `--force` --
+   a reinstall under a running TUI has broken the install on Windows
+   before -- then runs the command live and reports the before/after
+   commit from a fresh `halo --version`. `/update` in the TUI runs the
+   same check on a worker and opens a dialog with `Enter: update and
+   restart halo` / `Esc: not now`; Enter exits the TUI with a sentinel
+   return code, and `cli.main` -- only now past the TUI, which has
+   already torn down -- runs the update with its output visible and
+   relaunches with `--continue`, the only safe order on Windows (quit,
+   then update, then relaunch). A cached "update available" note shows
+   once a day at TUI startup, off with `update.check`/`update.notify:
+   false`. `scripts/install-halo.ps1` (new) mirrors `install-halo.sh` for
+   Windows PowerShell. README/docs/INSTALL.md gain matching Install and
+   Update sections; docs/INSTALL.md also gains an Uninstall section.
+
 ## [2.0.0] - 2026-10-01
 
 The rename release: `rolo-claude` 1.0.1 continues unchanged, as its own

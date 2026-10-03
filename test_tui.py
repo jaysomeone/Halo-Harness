@@ -1150,6 +1150,209 @@ def test_model_picker_opens_on_bare_slash_model_and_esc_dismisses(ctx: Ctx):
 
 
 # ============================================================================
+# Halo 2.0.2 round 6: /update's confirm dialog (tui/dialogs/update_dialog.py)
+# and the once-a-day startup note (tui/slash.py::update_check_startup_worker).
+# Every real git/network call is replaced with a canned lambda -- these
+# tests exercise the DIALOG/WORKER wiring only, never halo_harness.update's
+# own git-ls-remote/GitHub-API internals (see tests/test_update.py for those).
+# ============================================================================
+
+def _patch_update_module(*, installed: dict, available: dict, kind: Optional[dict] = None,
+                          commits=None):
+    from halo_harness import update as upd
+    orig = (upd.installed_build, upd.latest_available, upd.install_kind, upd.commits_between)
+    upd.installed_build = lambda **kw: dict(installed)
+    upd.latest_available = lambda *a, **kw: dict(available)
+    upd.install_kind = lambda **kw: dict(kind or {
+        "kind": "uv_tool", "spec": "git+https://github.com/roloVibes/Halo-Harness",
+        "reinstall_cmd": "uv tool install --reinstall git+https://github.com/roloVibes/Halo-Harness"})
+    upd.commits_between = lambda *a, **kw: (commits if commits is not None else ([], None))
+    return orig
+
+
+def _unpatch_update_module(orig) -> None:
+    from halo_harness import update as upd
+    upd.installed_build, upd.latest_available, upd.install_kind, upd.commits_between = orig
+
+
+@test
+def test_update_dialog_opens_and_esc_dismisses_without_exiting(ctx: Ctx):
+    from halo_harness.tui.dialogs.update_dialog import UpdateDialog
+    orig = _patch_update_module(
+        installed={"version": "2.0.2", "commit": "aaaaaaa", "requested_revision": None,
+                   "checkout": None, "branch": "master", "editable": False},
+        available={"channel": "main", "commit": "bbbbbbb", "ref": "master", "reason": None, "source": "cache"},
+        commits=(["bbbbbbb fix: something"], 1))
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/update")
+                await pilot.press("enter")
+                opened = False
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, UpdateDialog):
+                        opened = True
+                        break
+                ctx.check(f"UpdateDialog opened, got {type(app.screen).__name__}", opened)
+                ctx.check("shows the installed commit", "aaaaaaa" in app.screen.installed_line)
+                ctx.check("shows the available commit", "bbbbbbb" in app.screen.available_line)
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                ctx.check("Esc dismisses the dialog", not isinstance(app.screen, UpdateDialog))
+                ctx.check(f"the app is still running (no exit), got {app.return_code!r}",
+                          app.return_code is None)
+        asyncio.run(body())
+    finally:
+        _unpatch_update_module(orig)
+
+
+@test
+def test_update_dialog_enter_requests_restart_exit_code(ctx: Ctx):
+    from halo_harness import update as upd
+    from halo_harness.tui.dialogs.update_dialog import UpdateDialog
+    orig = _patch_update_module(
+        installed={"version": "2.0.2", "commit": "aaaaaaa", "requested_revision": None,
+                   "checkout": None, "branch": "master", "editable": False},
+        available={"channel": "main", "commit": "bbbbbbb", "ref": "master", "reason": None, "source": "cache"})
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/update")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, UpdateDialog):
+                        break
+                ctx.check(f"UpdateDialog opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, UpdateDialog))
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+            ctx.check(f"app exited with update.RESTART_EXIT_CODE, got {app.return_code}",
+                      app.return_code == upd.RESTART_EXIT_CODE)
+        asyncio.run(body())
+    finally:
+        _unpatch_update_module(orig)
+
+
+@test
+def test_update_dialog_already_up_to_date_enter_does_not_restart(ctx: Ctx):
+    from halo_harness.tui.dialogs.update_dialog import UpdateDialog
+    orig = _patch_update_module(
+        installed={"version": "2.0.2", "commit": "ccccccc", "requested_revision": None,
+                   "checkout": None, "branch": "master", "editable": False},
+        available={"channel": "main", "commit": "ccccccc", "ref": "master", "reason": None, "source": "cache"},
+        commits=([], 0))
+    try:
+        async def body():
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/update")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, UpdateDialog):
+                        break
+                ctx.check("dialog reports up to date", app.screen.up_to_date is True)
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check("Enter just closes it (already up to date) -- no restart",
+                          not isinstance(app.screen, UpdateDialog))
+                ctx.check(f"the app is still running (no exit), got {app.return_code!r}",
+                          app.return_code is None)
+        asyncio.run(body())
+    finally:
+        _unpatch_update_module(orig)
+
+
+@test
+def test_update_check_startup_note_shows_once_when_available(ctx: Ctx):
+    from halo_harness import update as upd
+    orig = _patch_update_module(
+        installed={"version": "2.0.2", "commit": "aaaaaaa", "requested_revision": None,
+                   "checkout": None, "branch": "master", "editable": False},
+        available={"channel": "main", "commit": "bbbbbbb", "ref": "master", "reason": None, "source": "cache"})
+    old_no_bg_net = os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET")
+    try:
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)  # the gate this worker itself checks
+        state_dir = Path(tempfile.mkdtemp(prefix="h2026-update-note-"))
+
+        async def body():
+            fake = FakeController()
+            fake.state_dir = state_dir
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                notes = []
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+                    if any("update available" in n for n in notes):
+                        break
+                ctx.check(f"a one-line update note appears, names /update, got {notes}",
+                          any("update available" in n and "/update" in n for n in notes))
+        asyncio.run(body())
+        ctx.check("note_due_today flips to False right away (same day, same cache)",
+                  upd.note_due_today(state_dir) is False)
+    finally:
+        _unpatch_update_module(orig)
+        if old_no_bg_net is None:
+            os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
+        else:
+            os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = old_no_bg_net
+
+
+@test
+def test_update_check_startup_note_off_with_config_notify_false(ctx: Ctx):
+    orig = _patch_update_module(
+        installed={"version": "2.0.2", "commit": "aaaaaaa", "requested_revision": None,
+                   "checkout": None, "branch": "master", "editable": False},
+        available={"channel": "main", "commit": "bbbbbbb", "ref": "master", "reason": None, "source": "cache"})
+    old_no_bg_net = os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET")
+    old_state_dir_env = os.environ.get("BRIDGE_STATE_DIR")
+    try:
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
+        state_dir = Path(tempfile.mkdtemp(prefix="h2026-update-note-off-"))
+        os.environ["BRIDGE_STATE_DIR"] = str(state_dir)  # theme.get_config_value reads bridge_home()
+        from halo_harness.theme import set_config_value
+        set_config_value("update.notify", False)
+
+        async def body():
+            fake = FakeController()
+            fake.state_dir = state_dir
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                for _ in range(20):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+                ctx.check(f"no update note with update.notify: false, got {notes}",
+                          not any("update available" in n for n in notes))
+        asyncio.run(body())
+    finally:
+        _unpatch_update_module(orig)
+        if old_no_bg_net is None:
+            os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
+        else:
+            os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = old_no_bg_net
+        if old_state_dir_env is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir_env
+
+
+# ============================================================================
 # 1.0.1 hotfix 1: the `/`/`@` completion popup's own Up/Down/Tab/Enter/Esc --
 # the TextArea must never swallow Up/Down while it's open (before this fix,
 # Down/Up on row 0 of a single-line prompt always fired history-nav instead,

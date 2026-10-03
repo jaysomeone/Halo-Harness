@@ -298,6 +298,42 @@ def test_install_md_top_level_exists_is_linked_from_readme_and_leads_with_one_li
               "harness/INSTALL.md" in install)
 
 
+@test
+def test_round6_update_docs_are_in_place(ctx: Ctx):
+    """Halo 2.0.2 round 6: clear install/update steps -- README's Install
+    (three one-liners) and new Update section, docs/INSTALL.md's Windows
+    PowerShell/Uninstall/Update sections, HANDBOOK/COMMANDS naming `halo
+    update`/`/update`, and the CHANGELOG [2.0.2] entry."""
+    readme = (REPO_DIR / "README.md").read_text(encoding="utf-8")
+    ctx.check("README has an ## Update section", "## Update" in readme)
+    ctx.check("README's Install section names all three one-liners",
+              "install-halo.sh" in readme and "uv tool install git+" in readme and "pipx install git+" in readme)
+    ctx.check("README's Update section names halo update and /update",
+              "halo update" in readme and "/update" in readme)
+
+    install = (REPO_DIR / "docs" / "INSTALL.md").read_text(encoding="utf-8")
+    ctx.check("docs/INSTALL.md has a Windows PowerShell one-liner naming install-halo.ps1",
+              "install-halo.ps1" in install and "### Windows" in install)
+    ctx.check("docs/INSTALL.md has its own ## Update section", "## Update" in install)
+    ctx.check("docs/INSTALL.md has an ## Uninstall section", "## Uninstall" in install)
+    ctx.check("docs/INSTALL.md's Update section names halo --force and the Windows order",
+              "--force" in install.split("## Update", 1)[1].split("## ", 1)[0])
+
+    handbook = (REPO_DIR / "docs" / "HANDBOOK.md").read_text(encoding="utf-8")
+    ctx.check("HANDBOOK.md documents halo update and /update",
+              "halo update" in handbook and "/update" in handbook)
+
+    commands = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8")
+    ctx.check("COMMANDS.md has a ## `halo update` heading", "## `halo update`" in commands)
+
+    slash = (REPO_DIR / "docs" / "SLASH-COMMANDS.md").read_text(encoding="utf-8")
+    ctx.check("SLASH-COMMANDS.md has a ### `/update` heading", "### `/update`" in slash)
+
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = changelog.split("## [2.0.2]", 1)[1].split("\n## [", 1)[0]
+    ctx.check("the [2.0.2] entry mentions halo update and /update", "halo update" in entry and "/update" in entry)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

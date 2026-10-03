@@ -105,6 +105,42 @@ Bare `halo` (no `-p`) checks `stdin.isatty()` before importing
 instead of hanging -- expected, use `-p` for anything non-interactive
 (cron, CI, a subprocess).
 
+## Updating
+
+```sh
+halo update --check    # report only: installed vs. available, the exact command
+halo update             # apply it -- or /update inside the TUI
+```
+
+`halo update --check` prints what's installed (version, commit, branch --
+`halo --version`/`halo doctor` show the same), what's available (cached up
+to 24h; `--channel stable` tracks the newest `v*` tag instead of the
+branch halo came from), the commits between them, and the exact reinstall
+command for however this install was made (uv tool, pipx, pip, an
+editable checkout, or a bare checkout on PYTHONPATH). Exit 0 up to date,
+10 an update is available, 1 unknown (offline, no git, rate-limited).
+
+`halo update` (no `--check`) runs that command live and reports the
+before/after commit from a fresh `halo --version`. It refuses (exit 1) if
+another `halo` process looks like it's running on this machine, excluding
+itself -- a reinstall under a running TUI has broken the install on
+Windows before, since the venv can't be replaced while a process still
+has it open; `--force` overrides once you're sure nothing else is
+actually using it. `--to <tag|branch|commit>` picks an exact revision
+instead of the channel's latest.
+
+`/update` in the TUI runs the same check off the UI thread and opens a
+dialog with the report plus `Enter: update and restart halo` / `Esc: not
+now`. Enter quits the TUI, runs the update with its output visible, and
+relaunches with `--continue` so the session resumes on the new code --
+the only safe order on Windows (quit, then update, then relaunch; never
+while the TUI itself is still holding the install open). A background
+check also adds a one-line "update available" note at startup, at most
+once a day, when one is already known to be available -- off with
+`update.check: false` or `update.notify: false` in `~/.halo/config.json`.
+See "Update" in [docs/INSTALL.md](INSTALL.md) for the manual command per
+install kind.
+
 ## Config reuse from Claude Code
 
 The whole point is that a box already set up for `claude` needs nothing

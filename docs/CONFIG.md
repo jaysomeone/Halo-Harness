@@ -201,6 +201,9 @@ directly by the features that own them:
 | `quit_on_double_ctrl_c` | `true` | `halo config set quit_on_double_ctrl_c false` turns off the second-Ctrl+C quit (only `/exit`/`Ctrl+D`/`Ctrl+Q` leave) |
 | `clipboard.crlf` | `false` | hand-edited; `true` makes a copy use `\r\n` line endings instead of `\n` |
 | `worktree.remove_on_exit` | `false` | `halo config set worktree.remove_on_exit true`; a `-w/--worktree` session removes its OWN worktree (fires `WorktreeRemoved`) when it ends instead of leaving it on disk |
+| `update.check` | `true` | `halo config set update.check false` turns off `halo update`/`/update`'s own check entirely (never shells out, never touches the network) |
+| `update.notify` | `true` | `halo config set update.notify false` turns off just the once-a-day "update available" startup note (the check itself, and `/update`'s own dialog, still work) |
+| `update.channel` | unset (derived from the install: `stable` when pinned to a `v*` tag, else `main`) | `halo update --channel stable\|main` |
 
 ## Every environment variable
 
