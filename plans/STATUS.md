@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-02 ~22:30)
+# Status board (updated 2026-10-02 ~23:55)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -14,8 +14,9 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] Part 6 (5df3502): credential chain for every provider, `--cwd`/`--settings` on listings, lint clean, settings.local.json indent, vendored models fallback, docs drift, Edit hint, timeline completeness, installer `--dry-run`
 - [x] Part 7 (ef4351b): MCP explain-the-zero and failure reasons, claude.ai connectors bridge, `mcp serve`, import, generic `mcp login`, websocket groundwork
 - [x] Part 8 (b4d53b7): 14 hook events, all 28 flags resolved, skills in sub-agents, sub-agent asks in the dock, rewind for created files, misc
-- [~] W4c: source-text copy, `/copy` forms, `y`/`Y`, clip.exe fallback check, Ctrl+C toast and `quit_on_double_ctrl_c`
-- [ ] W5: live-checks runbook and `--live` tests; Claude Code interop, rg and Playwright on Kali; Linux determinism of the cc-session tests; connector cold start in print mode; W4a follow-ups (fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved); identifying-content scrub of fixtures and docs with a scan test
+- [x] Part 9 (3343f27, W4c): source-text copy, `/copy` forms, `y`/`Y`, clip.exe and pbcopy fallbacks, OSC 52 trust gate, Ctrl+C toast and `quit_on_double_ctrl_c`
+- [~] W5a (code follow-ups): fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved, connector cold start, --betas gating, --prompt-suggestions in stream-json, `halo bg` subcommands
+- [ ] W5b: live-checks runbook and `--live` tests; Claude Code interop, rg and Playwright on Kali; Linux determinism of the cc-session tests; connector cold start in print mode; W4a follow-ups (fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved); identifying-content scrub of fixtures and docs with a scan test
 - [ ] Release: Opus review, fix pass, CHANGELOG consolidation, three-platform suites, Kali live checks, tag v2.0.1, push
 
 ## Side work done this session
