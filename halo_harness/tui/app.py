@@ -392,6 +392,21 @@ class BridgeApp(App):
         self.pending_dock = self.query_one(PendingDock)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
+        # Halo 2.0.2 W7 round 1 (brief F): `TITLE`/`self.title` above is
+        # only ever this app's OWN in-app Header widget text -- Textual
+        # never touches the REAL terminal/console title on its own (see
+        # halo_harness.termtitle's own docstring). Asserted once here, at
+        # TUI start, so a `claude` child that ran and left ITS OWN title
+        # behind BEFORE this app even launched (e.g. a `claude auth
+        # status` probe from a previous `halo doctor` run in the same
+        # window) is corrected immediately rather than only after the
+        # first child this session itself spawns exits.
+        from halo_harness.termtitle import activate_tui_mode, set_terminal_title
+        set_terminal_title("halo")
+        # From here on, spawn-site hooks on worker threads only record a
+        # claude child's exit; `_drain` re-asserts the title on this (UI)
+        # thread, the one that also owns Textual's terminal writes.
+        activate_tui_mode()
         # B2: the compose()-time placeholder was fitted against a guessed
         # width (prompt_input.size isn't real until after the first layout
         # pass) -- recompute now that it is, and start the 15s idle-
@@ -470,6 +485,13 @@ class BridgeApp(App):
             from halo_harness.tui.slash import _resume_list_worker
             self.run_worker(lambda: _resume_list_worker(self, self._initial_resume_filter),
                              thread=True, name="list-sessions-startup")
+
+    def on_unmount(self) -> None:
+        # Leaving the TUI: spawn-site hooks go back to re-asserting the
+        # title synchronously (print mode and one-shot probes have no
+        # drain tick to do it for them).
+        from halo_harness.termtitle import deactivate_tui_mode
+        deactivate_tui_mode()
 
     def _git_branch(self) -> str:
         try:
@@ -826,6 +848,18 @@ class BridgeApp(App):
         self.transcript.tick_phase_lines()
         self.transcript.tick_tool_cards()
         self.transcript.tick_subagent_cards()
+        # Halo 2.0.2 W7 round 1 (brief F): re-assert `halo` on the drain
+        # tick that FOLLOWS a `claude` child's exit -- the child itself
+        # (agent/cc_process.py, providers/cc_models.py, mcp/connectors.py)
+        # already re-asserts synchronously the moment it observes the
+        # exit; this is additional insurance for a title write that lands
+        # on the real console slightly after that point (observed on a
+        # slow legacy conhost). `consume_claude_child_exit()` is cheap
+        # (two int compares) and returns True at most once per exit, so
+        # this costs nothing extra on an idle drain tick.
+        from halo_harness.termtitle import consume_claude_child_exit, set_terminal_title
+        if consume_claude_child_exit():
+            set_terminal_title("halo")
 
     def on_turn_done(self, reason: str) -> None:
         if reason == "interrupted":
@@ -1396,6 +1430,8 @@ class BridgeApp(App):
         self._completion_kind = event.kind
         if event.kind == "slash":
             self._completion_items = [inv for inv, _desc in complete_slash(event.token, self.registry)]
+        elif event.kind == "arg":
+            self._completion_items = self._complete_role_command_arg(event.token)
         else:
             self._completion_items = complete_at_path(event.token, str(self.cwd))
         self.completion_popup.show(self._completion_items)
@@ -1404,6 +1440,64 @@ class BridgeApp(App):
         # itself sets `display = bool(items)`, so an empty result (nothing
         # matches the filter) correctly falls back to ordinary Up/Down.
         self.prompt_input.set_completion_open(bool(self._completion_items))
+
+    def _complete_role_command_arg(self, token: str) -> "list":
+        """Halo 2.0.2 brief A.4: ranks candidates for `/role <name>
+        <model> [effort]` / `/roles set <name> <model> [effort]`'s
+        CURRENT argument -- role names first, then model refs (the same
+        enumerated catalog `/model`'s own picker uses, via `controller.
+        list_models()`), then the effort levels valid for whichever
+        model was typed into the PREVIOUS argument. Which argument this
+        even is comes from the live prompt's own full first line +
+        cursor column (`current_token`'s own parameters) -- read directly
+        off the widget here rather than widening `CompletionQuery` (kept
+        a plain 2-field message, unchanged for "slash"/"at")."""
+        from halo_harness.tui.completion import filter_items, role_command_arg_index
+
+        row, col = self.prompt_input.cursor_location
+        line = self.prompt_input.document.get_line(row)
+        arg_index = role_command_arg_index(line, col)
+        if arg_index is None:
+            return []
+        if arg_index == 0:
+            from halo_harness.roles import known_role_names
+            runtime = getattr(getattr(self.controller, "session", None), "agent_runtime", None)
+            candidates = list(known_role_names(getattr(runtime, "role_table", None),
+                                                getattr(runtime, "cli_role_overrides", None)))
+            return filter_items(candidates, token)
+        if arg_index == 1:
+            try:
+                rows = self.controller.list_models()
+            except Exception:
+                rows = []
+            # Real `Controller.list_models()` rows are dicts with a "ref"
+            # key; `testing.fake_controller.FakeController`'s own (a
+            # TUI-pilot-test stand-in, never the real thing) are bare
+            # strings -- both accepted so this never crashes under either.
+            candidates = [r.get("ref") for r in rows if isinstance(r, dict) and r.get("ref")]
+            candidates += [r for r in rows if isinstance(r, str) and r]
+            return filter_items(candidates, token)
+        pieces = re.split(r"[ \t]+", line.strip())
+        model_text = pieces[1] if len(pieces) > 1 else ""
+        return filter_items(self._effort_levels_for(model_text), token)
+
+    def _effort_levels_for(self, model_text: str) -> "list":
+        """The effort words a just-typed (possibly partial/invalid) model
+        ref's own route accepts -- every harness-wide level when
+        `model_text` is empty/unresolvable, never raises."""
+        from halo_harness.providers.profiles import EFFORT_LEVELS
+        if not model_text:
+            return list(EFFORT_LEVELS)
+        try:
+            from halo_harness.model import parse_model_ref
+            from halo_harness.providers.effort import effort_set
+            from halo_harness.providers.routing import Route
+            ref = parse_model_ref(model_text, getattr(self.controller, "routes", None))
+            route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
+            allowed = effort_set(route, state_dir=getattr(self.controller, "state_dir", None)).allowed
+            return list(allowed) if allowed else list(EFFORT_LEVELS)
+        except Exception:
+            return list(EFFORT_LEVELS)
 
     def on_prompt_input_completion_dismissed(self, _event: PromptInput.CompletionDismissed) -> None:
         self.completion_popup.hide()

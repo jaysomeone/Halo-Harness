@@ -744,7 +744,14 @@ class Controller:
         the Session's own log is reopened on it (see
         `halo_harness.tui.app` for the swap)."""
         from halo_harness.agent.log import SessionLog
+        from halo_harness.termtitle import set_terminal_title
 
+        # Halo 2.0.2 W7 round 1 (brief F): "set it ... on resume" -- this
+        # is the one method both the command palette's session pick
+        # (tui/app.py's own `_on_palette_pick`) and the `/resume` picker
+        # (tui/slash.py's `_open_resume_picker`) call, so hooking it here
+        # covers both triggers with no duplication.
+        set_terminal_title("halo")
         log = SessionLog(self.cwd, session_id=session_id)
         self.replay_messages = _messages_from_nodes(log.nodes())
         if self.replay_messages:

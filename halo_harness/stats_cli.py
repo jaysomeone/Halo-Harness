@@ -211,12 +211,38 @@ _MODEL_COLUMNS_COMPACT_N = 15  # W4a: bumped from 14 to keep every pre-existing 
 
 _ROLE_COLUMNS = [
     ("role", lambda r: r["role"]),
+    # Halo 2.0.2 brief A.2: "`halo stats --roles` show model, effort ...
+    # and price" -- model/effort are the CURRENTLY CONFIGURED values for
+    # this role (`roles.configured_role_table()`, no live session needed),
+    # "-" when nothing is configured for it (same meaning as `/roles`'s
+    # own "session model" row). Price is deliberately NOT repeated here:
+    # resolving a real per-role price needs a parent model/profile to
+    # fall back to (what `/roles` has, from a live session, and this
+    # standalone CLI command does not) -- see docs/ROLES.md's `/roles`
+    # section for that.
+    ("model", lambda r: r.get("model") or "-"),
+    ("effort", lambda r: r.get("effort") or "-"),
     ("sessions", lambda r: str(r["sessions"])),
     ("calls", lambda r: str(r["calls"])),
     ("tok in/out", lambda r: f"{r['tokens_in']}/{r['tokens_out']}"),
     ("tok cached", lambda r: str(r["tokens_cached"])),
     ("cost", lambda r: f"${r['cost_usd']:.4f}"),
 ]
+
+
+def _enrich_role_rows_with_configured_model(role_rows: "list[dict]") -> "list[dict]":
+    """Merges each row's CURRENTLY CONFIGURED model/effort
+    (`roles.configured_role_table()`) in by role name -- a role with
+    spend in the scanned logs but nothing configured today (it was
+    reconfigured since, or it's always meant the session model) just
+    gets "-"/`None` for both, same as `/roles`'s own "session model" row."""
+    from halo_harness.roles import configured_role_table, role_value_parts
+    table = configured_role_table()
+    out = []
+    for r in role_rows:
+        model, effort = role_value_parts(table.get(r["role"]))
+        out.append({**r, "model": model, "effort": effort})
+    return out
 
 _TOOL_COLUMNS = [
     ("tool", lambda r: r["tool"]),
@@ -330,9 +356,13 @@ def _cmd_stats_telemetry(args) -> int:
                                 session_id=args.session)
     model_rows = telemetry.aggregate_by_model(summaries) if args.models else []
     tool_rows = telemetry.aggregate_by_tool(summaries) if args.tools else []
-    # V2c (H15): sub-agent spend per role (roles.py's ROLE_NAMES) -- summed
-    # from each session's own rolled-up-usage-node `role` tags.
-    role_rows = telemetry.aggregate_by_role(summaries) if args.roles else []
+    # V2c (H15): sub-agent spend per role -- summed from each session's own
+    # rolled-up-usage-node `role` tags; no longer limited to a fixed list
+    # of names (brief A.3). Halo 2.0.2 brief A.2: each row also carries
+    # its CURRENTLY CONFIGURED model/effort, merged in right here so both
+    # the table and the --json shape below include them with no separate
+    # code path.
+    role_rows = _enrich_role_rows_with_configured_model(telemetry.aggregate_by_role(summaries)) if args.roles else []
 
     if args.json:
         print(json.dumps({
@@ -372,7 +402,8 @@ def cmd_stats(argv: list) -> int:
                          help="Show the richer per-(model,provider) telemetry table (repairs, edit failures, ttft/latency, ...)")
     parser.add_argument("--tools", action="store_true", help="Show the per-tool telemetry table")
     parser.add_argument("--roles", action="store_true",
-                         help="Show sub-agent spend per role (orchestrator/coder/reviewer/researcher/small)")
+                         help="Show sub-agent spend per role (orchestrator/planner/coder/reviewer/judge/"
+                              "researcher/tester/compaction/small/subagent_default, plus any custom role)")
     parser.add_argument("--wide", action="store_true",
                          help="Show every --models column instead of the terminal-fit compact default")
     parser.add_argument("--since", default="7d", type=_since_arg,

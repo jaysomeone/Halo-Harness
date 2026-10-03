@@ -18,6 +18,18 @@ PATH check now names which of the three copies of `halo` it found, and
 every vendored data file (model table, catalogs, the TCSS stylesheet) is
 proven, by test, to load the same way regardless of which directory `halo`
 is started from.
+
+2.0.2 (W7 round 1): the real OS/terminal-emulator title is re-asserted to
+`halo` at TUI start/resume, after every `claude` child exits, and
+(print mode) restored at exit -- see `halo_harness.termtitle`, the fix for
+a `claude` child leaving the tab/window reading "claude". Roles v2: five
+new built-in roles (`planner`, `judge`, `tester`, `compaction`,
+`subagent_default`), a role's value may now carry its own reasoning effort
+alongside its model, any syntactically-valid custom name a team.json/
+template defines is a valid role everywhere, TUI tab completion and shell
+completion (`halo completion bash|zsh|powershell`) for role names and
+model refs, and named, reusable role templates (`~/.halo/roles/<name>.json`
+-- `/roles`/`halo roles template ...`, a TUI editor form or `$EDITOR`).
 """
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"

@@ -450,12 +450,94 @@ def _cmd_agents(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
-    """V2c (H15): the role table (`orchestrator`/`coder`/`reviewer`/
-    `researcher`/`small`) -- model, endpoint/path type, and price per role,
+    """V2c (H15), extended Halo 2.0.2 (brief A.2/A.5): bare `/roles` --
+    the role table (model, effort, endpoint/path type, price per role),
     read from the LIVE session's own `agent_runtime.role_table`/
     `.cli_role_overrides` (the SAME table `Agent(role=...)`/a role-bearing
     agent actually resolves against) when one is running, exactly like
-    `/agents` above."""
+    `/agents` above. `/roles templates|save <name>|load <name>|new <name>|
+    show <name>` manage `~/.halo/roles/<name>.json` templates; `/roles set
+    <name> <model> [effort]` is the long form of `/role` (below) -- both
+    set ONE role for THIS session only, mutating the live `session.roles`
+    dict in place (the SAME object `session.agent_runtime.role_table`
+    already points at). `/roles edit <name>` has no headless/print-mode
+    form (the TUI form, `tui/dialogs/roles_editor.py`, intercepts it
+    first); here it just names that."""
+    session = getattr(facade, "session", None)
+    state_dir = getattr(session, "state_dir", None) if session is not None else None
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "templates":
+        from halo_harness.roles import list_role_templates
+        names = list_role_templates(state_dir=state_dir)
+        if not names:
+            return "No role templates saved yet. /roles save <name> saves the current table as one."
+        return "Role templates:\n" + "\n".join(f"  {n}" for n in names)
+
+    if sub == "save":
+        if not rest:
+            return "Usage: /roles save <name>"
+        from halo_harness.roles import save_role_template
+        runtime = getattr(session, "agent_runtime", None) if session is not None else None
+        role_table = getattr(runtime, "role_table", None) or getattr(session, "roles", None) or {}
+        ok, problems = save_role_template(rest, {"roles": role_table}, state_dir=state_dir)
+        return (f"Saved the current role table as template {rest!r}." if ok
+                else "Could not save: " + "; ".join(problems))
+
+    if sub == "new":
+        if not rest:
+            return "Usage: /roles new <name>"
+        from halo_harness.roles import save_role_template
+        ok, problems = save_role_template(rest, {"roles": {}}, state_dir=state_dir)
+        return f"Created an empty role template {rest!r}." if ok else "Could not create: " + "; ".join(problems)
+
+    if sub == "show":
+        if not rest:
+            return "Usage: /roles show <name>"
+        from halo_harness.roles import load_role_template, role_value_parts
+        template = load_role_template(rest, state_dir=state_dir)
+        if template is None:
+            return f"No such role template: {rest!r} (or it failed validation)"
+        lines = [f"{template['name']} -- {template['description'] or '(no description)'}"]
+        for role_name, value in sorted(template["roles"].items()):
+            model, effort = role_value_parts(value)
+            lines.append(f"  {role_name}: {model}" + (f" ({effort})" if effort else ""))
+        return "\n".join(lines)
+
+    if sub == "load":
+        if not rest:
+            return "Usage: /roles load <name>"
+        from halo_harness.roles import apply_role_template, load_role_template
+        ok, problems = apply_role_template(rest, state_dir=state_dir)
+        if not ok:
+            return "Could not load: " + "; ".join(problems)
+        # Takes effect immediately for THIS live session too -- without
+        # this, a running session would only pick up the template after
+        # the next full restart (config.json is re-read at session start,
+        # never mid-session).
+        if session is not None:
+            template = load_role_template(rest, state_dir=state_dir)
+            runtime = getattr(session, "agent_runtime", None)
+            role_table = getattr(runtime, "role_table", None)
+            if template and isinstance(role_table, dict):
+                role_table.update(template["roles"])
+            elif template and hasattr(session, "roles"):
+                session.roles.update(template["roles"])
+        return f"Loaded role template {rest!r}."
+
+    if sub == "edit":
+        return ("/roles edit opens the roles editor form in the TUI only -- "
+                "use /roles set <name> <model> [effort] here instead.")
+
+    if sub == "set":
+        return _set_one_role(rest, facade)
+
+    return _render_roles_table(facade)
+
+
+def _render_roles_table(facade: HeadlessFacade) -> str:
     from halo_harness.roles import format_roles_table, resolve_all_roles, resolve_role_table
     session = getattr(facade, "session", None)
     if session is None:
@@ -471,6 +553,43 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
         routes=getattr(runtime, "routes", None),
     )
     return format_roles_table(rows)
+
+
+def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 brief A.4: `/role <name> <model> [effort]` and `/roles
+    set <name> <model> [effort]` are the same operation -- sets ONE role
+    for THIS session only (never persisted; `/roles save <name>` is the
+    explicit "keep this" action), the same live-mutation pattern
+    `_cmd_effort` above uses for `session.effort`."""
+    from halo_harness.roles import known_role_names
+    session = getattr(facade, "session", None)
+    if session is None:
+        return "Roles can only be set once a session is running."
+    parts = rest.split()
+    if len(parts) < 2:
+        return "Usage: /role <name> <model> [effort]"
+    name, model = parts[0], parts[1]
+    effort = parts[2] if len(parts) > 2 else None
+    runtime = getattr(session, "agent_runtime", None)
+    role_table = getattr(runtime, "role_table", None)
+    if not isinstance(role_table, dict):
+        if not hasattr(session, "roles") or not isinstance(session.roles, dict):
+            session.roles = {}
+        role_table = session.roles
+    known = known_role_names(role_table, getattr(runtime, "cli_role_overrides", None))
+    if name not in known:
+        return f"Unknown role {name!r} (expected one of {', '.join(known)})"
+    role_table[name] = {"model": model, "effort": effort} if effort else model
+    effort_note = f" (effort: {effort})" if effort else ""
+    return f"Role {name!r} set to {model!r}{effort_note} for this session."
+
+
+def _cmd_role(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 brief A.4: `/role <name> <model> [effort]` -- the short
+    form of `/roles set` (see `_set_one_role`'s own docstring)."""
+    if not (args or "").strip():
+        return "Usage: /role <name> <model> [effort]"
+    return _set_one_role(args.strip(), facade)
 
 
 def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
@@ -822,7 +941,9 @@ _BUILTIN_SPECS = {
     "config": ("core", "Show or set a config value", "[key=value]", _cmd_config),
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
-    "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
+    "roles": ("core", "Show the role table, or manage role templates/set a role",
+              "[templates|save|load|new|edit|show <name>|set <name> <model> [effort]]", _cmd_roles),
+    "role": ("core", "Set one role's model/effort for this session", "<name> <model> [effort]", _cmd_role),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),

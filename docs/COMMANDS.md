@@ -153,18 +153,21 @@ JSON file holding `{name: {description, prompt, tools, model, ...}}`. See
 `docs/CONFIG.md`'s agents section for the full discovery precedence these
 sit on top of.
 
-#### `--role NAME=MODEL`
+#### `--role NAME=MODEL[:EFFORT]`
 
-What: overrides one of the five roles (`orchestrator`, `coder`, `reviewer`,
-`researcher`, `small`) for this run only -- a built-in/custom sub-agent whose
-own role resolves to `NAME` uses `MODEL` instead of whatever `~/.halo/
-config.json`/`team.json`'s own `roles` table (or the cost-aware default) says,
-even beating that agent's own file `model:` (a freshly-typed, run-only
-override the user gets to trump a shared/managed agent file with). Repeatable
-(`--role coder=... --role researcher=...`); a later repeat of the SAME role
-wins. A bad `NAME=MODEL` (missing `=`, an unrecognized role name, an empty
-model) is a clean exit-2 usage error before any Session is built. See
-`docs/ROLES.md` for the full precedence chain, `/roles`, and `stats --roles`.
+What: overrides one of the ten built-in roles (`orchestrator`, `planner`,
+`coder`, `reviewer`, `judge`, `researcher`, `tester`, `compaction`, `small`,
+`subagent_default`) -- or any custom name a team.json/loaded template
+already defines -- for this run only -- a built-in/custom sub-agent whose
+own role resolves to `NAME` uses `MODEL` (and `EFFORT`, if given) instead of
+whatever `~/.halo/config.json`/`team.json`'s own `roles` table (or the
+cost-aware default) says, even beating that agent's own file `model:` (a
+freshly-typed, run-only override the user gets to trump a shared/managed
+agent file with). Repeatable (`--role coder=... --role researcher=...`); a
+later repeat of the SAME role wins. A bad `NAME=MODEL` (missing `=`, an
+unrecognized role name, an empty model) is a clean exit-2 usage error before
+any Session is built. See `docs/ROLES.md` for the full precedence chain,
+`/role`/`/roles`, role templates, and `stats --roles`.
 ```sh
 halo -p --role researcher=or:deepseek/deepseek-v4.1-flash "use the Researcher agent to summarize this repo"
 ```
@@ -1402,6 +1405,48 @@ command; `logs` prints the captured stdout+stderr (`-n` for just the tail);
 `stop` kills the process tree by pid (same Windows orphan-grandchild-aware
 kill background Bash jobs already use); `rm` deletes the run's directory,
 refusing a still-running one unless `--force` (which stops it first).
+
+## `halo roles`
+
+```sh
+halo roles template list
+halo roles template show <name>
+halo roles template save <name> [--description TEXT]
+halo roles template new <name> [--description TEXT]
+halo roles template load <name>
+halo roles template edit <name>
+```
+
+Halo 2.0.2: manages `~/.halo/roles/<name>.json` role templates (`{"name",
+"description", "roles": {role: model_or_{"model","effort"}}}`). `save`
+captures the CURRENT `~/.halo/config.json` role table under a name; `new`
+starts an empty one; `load` writes every role the template defines back
+into config.json, overwriting a stale local value for that role (the one
+deliberately non-idempotent write in this whole table -- see
+[ROLES.md](ROLES.md)'s own precedence section); `edit` opens `$EDITOR`/
+`$VISUAL` on the raw JSON file (creating it first if it doesn't exist),
+re-validating on save. The TUI's own `/roles edit <name>` opens a form
+instead (`tui/dialogs/roles_editor.py`) unless `roles.editor: "external"`
+is configured, in which case it uses the same `$EDITOR` flow as this CLI
+command. See [ROLES.md](ROLES.md) for the full picture: the role table
+itself, per-role effort, custom role names, and `/role`/`/roles` in the
+TUI and print mode.
+
+## `halo completion`
+
+```sh
+halo completion bash
+halo completion zsh
+halo completion powershell
+```
+
+Halo 2.0.2: prints a shell-completion script for the `halo` command
+itself -- every top-level subcommand, every known role name
+([ROLES.md](ROLES.md)), and every model ref already cached under
+`~/.halo` (`models.json`/`dbx-endpoints.json` -- read as plain files, no
+network call of its own). `eval "$(halo completion bash)"` (or `zsh`) in
+your shell's rc file, or dot-source the `powershell` form from your
+`$PROFILE`.
 
 ## `halo proxy`
 

@@ -289,17 +289,28 @@ stays the general harness across all four routes above.
 
 ### Roles
 
-`orchestrator`/`coder`/`reviewer`/`researcher`/`small` (V2c) let a team
-point different kinds of work at different models -- cheap for exploration,
-strong for planning/review -- without hand-editing every agent file.
-`~/.halo/config.json`'s (or a shared `team.json`'s) `roles` table
-sets a model per role; built-in agents (`general-purpose`, `Explore`,
-`Researcher`, `Plan`, `Reviewer`, `Coder`) each carry a fixed default role, a
-custom `.claude/agents/*.md` sets one with a `role:` frontmatter key, and
-`--role NAME=MODEL`/`Agent(role=...)` override one for a single run/call.
-`/roles` shows the resolved table (model, endpoint/path type, price) per
-role; `halo stats --roles` sums sub-agent spend per role. See
-[docs/ROLES.md](../docs/ROLES.md) for the full resolution precedence and the
+Ten built-in roles (V2c, widened in Halo 2.0.2 --
+`orchestrator`/`planner`/`coder`/`reviewer`/`judge`/`researcher`/`tester`/
+`compaction`/`small`/`subagent_default`) let a team point different kinds of
+work at different models -- cheap for exploration, strong for planning/
+review -- without hand-editing every agent file; a role VALUE is a bare
+model string or `{"model", "effort"}` (Halo 2.0.2), so a role can also pin
+its own reasoning effort, not just its model. `~/.halo/config.json`'s (or a
+shared `team.json`'s, or a loaded `~/.halo/roles/<name>.json` template's)
+`roles` table sets this per role; built-in agents (`general-purpose`,
+`Explore`, `Researcher`, `Plan`, `Reviewer`, `Coder`, `Judge`, `Tester`) each
+carry a fixed default role, a custom `.claude/agents/*.md` sets one with a
+`role:` frontmatter key, and `--role NAME=MODEL[:EFFORT]`/`Agent(role=...)`/
+`/role NAME MODEL [EFFORT]` override one for a single run/call/session. Any
+OTHER syntactically-valid name (`[a-z][a-z0-9_]*`) a team.json or a loaded
+template actually defines is an equally valid role name everywhere above.
+`/roles` shows the resolved table (model, effort, endpoint/path type, price)
+per role and manages templates (`templates`/`save`/`load`/`new`/`edit`/
+`show`); `halo roles template ...` is the CLI equivalent; `halo stats
+--roles` sums sub-agent spend per role; `halo completion bash|zsh|
+powershell` completes role names and cached model refs too. See
+[docs/ROLES.md](../docs/ROLES.md) for the full resolution precedence
+(including the new `compaction`/`subagent_default` rungs) and the
 (documented, never automatic beyond one specific case) cost-aware defaults.
 
 ## Permissions and auto mode

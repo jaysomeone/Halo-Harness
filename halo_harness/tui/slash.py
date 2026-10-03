@@ -62,6 +62,11 @@ async def handle_slash(app, name: str, args: str) -> None:
         "intro": _handle_intro,
         # W4c item 2: /copy, /copy code [N], /copy tool.
         "copy": _handle_copy,
+        # Halo 2.0.2 brief A.5: only `/roles edit <name>` needs real
+        # interactive behavior (a form, or $EDITOR) -- every other /roles
+        # subcommand (and /role, and the bare table) stays on the generic
+        # headless-text fallback below.
+        "roles": _handle_roles,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -149,6 +154,94 @@ def _open_model_picker(app, models) -> None:
     last_used = launch_state.resolve_last_model(app.cwd, memory=get_config_value("model_memory", default="cwd")) or ""
     app.push_screen(ModelPicker(models, current=app.status_bar.model, last_used=last_used),
                      lambda ref: _apply_model(app, ref))
+
+
+async def _handle_roles(app, args: str) -> None:
+    """Halo 2.0.2 brief A.5: `/roles edit <name>` opens a real form
+    (`tui/dialogs/roles_editor.py`), or shells to `$EDITOR` when
+    `roles.editor: "external"` is configured -- every other `/roles`
+    subcommand (`templates`/`save`/`load`/`new`/`show`/`set`, or the bare
+    table) still goes through the SAME headless-text fallback every other
+    command uses (`commands/builtins.py::_cmd_roles`, off the UI thread,
+    exactly like `/effort`'s own bare case)."""
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    if sub != "edit":
+        app.run_worker(lambda: _run_slash_worker(app, "roles", args), thread=True, name="run-slash", group="run-slash")
+        return
+    name = parts[1].strip() if len(parts) > 1 else ""
+    if not name:
+        await app.transcript.add_note("Usage: /roles edit <name>", kind="command")
+        return
+    from halo_harness.theme import get_config_value
+    if get_config_value("roles.editor", default="") == "external":
+        _edit_role_template_externally(app, name)
+        return
+    app.run_worker(lambda: _roles_edit_form_worker(app, name), thread=True, name="roles-edit-form",
+                    group="roles-edit-form")
+
+
+def _edit_role_template_externally(app, name: str) -> None:
+    """`roles.editor: "external"` -- the SAME `app.suspend()` dance
+    `action_open_editor` (Ctrl+E, `tui/app.py`) uses: `$EDITOR` needs the
+    REAL terminal, not Textual's own screen buffer, so this runs
+    synchronously on the UI thread like that one does (`suspend()`'s own
+    contract), never inside a `thread=True` worker."""
+    import json
+    import os
+    import subprocess as sp
+
+    from halo_harness.roles import load_role_template, role_templates_dir, save_role_template, validate_role_template
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        app.notify("No $VISUAL/$EDITOR set.", severity="warning", title="/roles edit")
+        return
+    if load_role_template(name) is None:
+        ok, problems = save_role_template(name, {"roles": {}})
+        if not ok:
+            app.notify(f"Could not create {name!r}: " + "; ".join(problems), severity="error", title="/roles edit")
+            return
+    path = role_templates_dir() / f"{name}.json"
+    app._enter_suspend_for_editor()
+    try:
+        with app.suspend():
+            sp.run(f'{editor} "{path}"', shell=True)
+    finally:
+        app._exit_suspend_for_editor()
+    try:
+        problems = validate_role_template(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as e:
+        app.notify(f"Could not re-read role template {name!r}: {e}", severity="error", title="/roles edit")
+        return
+    if problems:
+        app.notify(f"Role template {name!r} is now invalid: " + "; ".join(problems),
+                    severity="error", title="/roles edit")
+    else:
+        app.notify(f"Saved role template {name!r}.", title="/roles edit")
+
+
+def _roles_edit_form_worker(app, name: str) -> None:
+    """A brand-new (not-yet-on-disk) template is only ever built IN
+    MEMORY here -- never written until the user actually presses ctrl+s
+    inside `RolesEditor.action_save` -- so pressing Esc on a template
+    that never existed before leaves nothing on disk at all."""
+    from halo_harness.roles import load_role_template
+    template = load_role_template(name) or {"name": name, "description": "", "roles": {}}
+    models = app.controller.list_models()
+    app.call_from_thread(_open_roles_editor, app, name, template, models)
+
+
+def _open_roles_editor(app, name: str, template: dict, models: list) -> None:
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    def _after(saved) -> None:
+        if saved:
+            app.notify(f"Saved role template {name!r}.", title="/roles edit")
+        else:
+            app.notify("Role template edit cancelled.", title="/roles edit")
+
+    app.push_screen(RolesEditor(name, template["roles"], models, description=template.get("description", "")), _after)
 
 
 def catalog_auto_refresh_worker(app) -> None:

@@ -377,12 +377,19 @@ def claude_auth_status(*, timeout: float = 10.0, env: Optional[dict] = None) -> 
     if env is None:
         from halo_harness.providers.config import cc_child_env
         env = cc_child_env(dict(os.environ))
+    from halo_harness.termtitle import reassert_after_claude_child
     try:
         proc = subprocess.run(argv + ["auth", "status"], capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
+        # Halo 2.0.2 W7 round 1 (brief F): a real `claude` child DID start
+        # here (subprocess.run's own timeout handling kills it, it didn't
+        # just fail to launch) -- re-assert halo's own title in case it
+        # scribbled the console/terminal title before being killed.
+        reassert_after_claude_child()
         return ClaudeAuthStatus(logged_in=False, timed_out=True)
     except OSError:
         return None
+    reassert_after_claude_child()
     return _parse_auth_status_json(proc.stdout)
 
 
@@ -629,6 +636,10 @@ def refresh_cc_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.
                         "reply with the single word pong"],
                 capture_output=True, text=True, timeout=timeout, env=env,
             )
+            # Halo 2.0.2 W7 round 1 (brief F): re-assert halo's own title
+            # right after this probe's `claude` child exits.
+            from halo_harness.termtitle import reassert_after_claude_child
+            reassert_after_claude_child()
             data = json.loads(proc.stdout)
             model_usage = data.get("modelUsage") or {}
             if model_usage:
@@ -714,4 +725,8 @@ def installed_claude_version() -> "Optional[str]":
         proc = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=10.0)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    # Halo 2.0.2 W7 round 1 (brief F): re-assert halo's own title right
+    # after this probe's `claude` child exits.
+    from halo_harness.termtitle import reassert_after_claude_child
+    reassert_after_claude_child()
     return (proc.stdout or "").strip().split(" ")[0] or None

@@ -278,13 +278,16 @@ class PromptInput(TextArea):
         """Replace the `/`- or `@`-prefixed token under the cursor (on the
         first line only, matching `_maybe_query_completion`) with
         `replacement` -- called by app.py after the user accepts a
-        completion candidate."""
+        completion candidate. Halo 2.0.2 brief A.4: `kind == "arg"` (a
+        `/role`/`/roles set` ARGUMENT -- role name, model ref, or effort
+        level) carries no prefix character of its own, unlike "slash"
+        (`/`) and "at" (`@`)."""
         from halo_harness.tui.completion import current_token
 
         row, col = self.cursor_location
         line = self.document.get_line(row)
         _kind, start, _token = current_token(line, col)
-        prefix_char = "/" if kind == "slash" else "@"
+        prefix_char = "/" if kind == "slash" else ("@" if kind == "at" else "")
         self.replace(f"{prefix_char}{replacement}", (row, start), (row, col))
         self._auto_grow()
 

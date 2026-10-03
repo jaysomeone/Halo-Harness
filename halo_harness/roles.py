@@ -1,27 +1,63 @@
-"""halo_harness.roles -- V2c (H15): the `roles` table (`orchestrator`,
-`coder`, `reviewer`, `researcher`, `small`) a built-in/custom sub-agent's own
-role (a frontmatter `role:` key, an `Agent(role=...)` call-time override, or
-a built-in's own fixed default) resolves a MODEL from, `--role name=model`
-CLI overrides, `team.json`'s own `roles` map seeded into `~/.halo/
-config.json` (the exact idiom `team_config.apply_gateway_preference` already
-uses for `gateway_preference`), and `/roles`'s own table rendering (model,
-endpoint/path type, price per role). See `docs/ROLES.md`.
+"""halo_harness.roles -- Halo 2.0.2 (W7 round 1, brief A "roles v2"),
+carrying forward V2c (H15): the `roles` table a built-in/custom sub-agent's
+own role (a frontmatter `role:` key, an `Agent(role=...)` call-time
+override, or a built-in's own fixed default) resolves a MODEL (and now an
+EFFORT) from, `--role NAME=MODEL[:EFFORT]` CLI overrides, `team.json`'s own
+`roles` map seeded into `~/.halo/config.json` (the exact idiom `team_config.
+apply_gateway_preference` already uses for `gateway_preference`), a loaded
+`~/.halo/roles/<name>.json` TEMPLATE (new this round), and `/roles`'s own
+table rendering (model, effort, endpoint/path type, price per role). See
+`docs/ROLES.md`.
 
 Precedence a role-aware agent's model actually resolves through (full chain,
 `config/agents_md.py::resolve_agent_model`): invocation `model=` > a CLI
 `--role` override for THIS agent's own role > the agent file's own `model:`
-> this module's role table (persisted config.json/team.json, or the cost-
-aware default below) for that role > `CLAUDE_CODE_SUBAGENT_MODEL`/
-`settings.subagentModel` > the parent/session model. `orchestrator` needs no
-entry at all to mean "the session model" -- that IS what an absent/empty
-role-table lookup already falls through to.
+> this module's role table (persisted config.json -- itself already layered
+CLI-template-over-team.json-over-local by whoever builds the session, or the
+cost-aware default below) for that role > `CLAUDE_CODE_SUBAGENT_MODEL`/
+`settings.subagentModel` > `role_table["subagent_default"]` (new this round,
+ONLY for a sub-agent with no role name at all) > the parent/session model.
+`orchestrator` needs no entry at all to mean "the session model" -- that IS
+what an absent/empty role-table lookup already falls through to.
+
+A role table VALUE (config.json/team.json/template/`--role`) is either a
+bare model-reference string, or `{"model": "...", "effort": "..."}` --
+`_role_value_parts` below is the one place every caller unpacks either shape
+into a plain `(model, effort)` pair; nothing else in this module (or
+anywhere that reads a role table) should pattern-match the raw value itself.
+
+Role NAMES are no longer a closed set: `ROLE_NAMES` below are the built-ins
+(every one wired to a built-in agent, a system subsystem, or both -- see
+`docs/ROLES.md`), but any OTHER syntactically-valid name (`[a-z][a-z0-9_]*`)
+that a team.json or a loaded roles template actually defines a value for is
+an equally valid role for `Agent(role=...)`, `--role`, and frontmatter
+`role:` -- `known_role_names()` is the live "what's valid right now" set
+every validation point checks a name against.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from typing import Iterable, Optional
 
-ROLE_NAMES = ("orchestrator", "coder", "reviewer", "researcher", "small")
+# Halo 2.0.2 brief A.1: the screenshot's three additions (`planner`,
+# `tester`, `compaction`) plus `judge` and `subagent_default` --
+# `config/agents_md.py`'s own `_builtin_specs()` wires `Plan` to `planner`
+# and adds `Judge`/`Tester`; `compaction` and `subagent_default` are
+# consulted directly by `agent/loop.py` (see each one's own docstring
+# there) rather than through a built-in AgentSpec -- neither is ever a
+# sub-agent's own `role:`, so neither appears in `config/agents_md.py`.
+ROLE_NAMES = ("orchestrator", "planner", "coder", "reviewer", "judge", "researcher",
+              "tester", "compaction", "small", "subagent_default")
+
+_ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def is_role_name_syntax(name: str) -> bool:
+    """Brief A.3: "any `[a-z][a-z0-9_]*`" -- the syntax check alone, with
+    no opinion on whether `name` is actually DEFINED anywhere; see
+    `known_role_names` for that."""
+    return bool(name) and bool(_ROLE_NAME_RE.match(name))
 
 # Cost-aware defaults (brief: "cheap model for exploration, strong model for
 # planning and review"), DOCUMENTED here and in docs/ROLES.md -- applied
@@ -41,14 +77,79 @@ _COST_AWARE_DATABRICKS_MODEL = "dbx:databricks-deepseek-v4-1-flash"
 COST_AWARE_DEFAULTS = {"researcher": _COST_AWARE_DATABRICKS_MODEL, "small": _COST_AWARE_DATABRICKS_MODEL}
 
 
+def _normalize_role_value(value) -> "Optional[object]":
+    """A raw role-table VALUE, cleaned to either a non-empty model string
+    or a `{"model": ..., "effort": ...}` dict with a non-empty `model`
+    (brief A.2) -- `None` for anything else (an empty string, a dict with
+    no usable `model`, a list, ...). The `effort` key is dropped (not
+    just left as-is) when it isn't a non-empty string, so a caller never
+    has to re-check its type."""
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if isinstance(value, dict):
+        model = value.get("model")
+        if not isinstance(model, str) or not model.strip():
+            return None
+        effort = value.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            return {"model": model, "effort": effort.strip()}
+        return {"model": model}
+    return None
+
+
+def role_value_parts(value) -> "tuple[Optional[str], Optional[str]]":
+    """Unpacks ANY role-table value shape into a plain `(model, effort)`
+    pair -- the ONE place every caller (CLI override, config.json/team.json
+    table, template, `resolve_role_ref`, `agents_md.resolve_agent_model`,
+    `/roles`, `stats --roles`) reads a role's model/effort apart, so
+    nothing else needs to know there are two shapes at all."""
+    normalized = _normalize_role_value(value)
+    if normalized is None:
+        return None, None
+    if isinstance(normalized, dict):
+        return normalized.get("model"), normalized.get("effort")
+    return normalized, None
+
+
 def configured_role_table() -> dict:
-    """`~/.halo/config.json`'s own `roles` map, filtered to known
-    role names holding a non-empty string value. Never raises."""
+    """`~/.halo/config.json`'s own `roles` map, filtered to SYNTACTICALLY
+    valid role names (brief A.3: built-in OR custom, `[a-z][a-z0-9_]*` --
+    no longer restricted to `ROLE_NAMES`) holding a usable value (a
+    non-empty model string, or a `{"model", "effort"}` dict -- brief
+    A.2). Never raises."""
     from halo_harness.theme import get_config_value
     raw = get_config_value("roles", default={})
     if not isinstance(raw, dict):
         return {}
-    return {k: v for k, v in raw.items() if k in ROLE_NAMES and isinstance(v, str) and v.strip()}
+    out: dict = {}
+    for k, v in raw.items():
+        if not is_role_name_syntax(k):
+            continue
+        normalized = _normalize_role_value(v)
+        if normalized is not None:
+            out[k] = normalized
+    return out
+
+
+def known_role_names(*extra_tables: "Optional[dict]") -> "tuple[str, ...]":
+    """`ROLE_NAMES` plus every syntactically-valid custom key found in
+    `extra_tables` (role-table dicts -- CLI overrides, a session's own
+    resolved table, a loaded template's `roles` map, ...) and in the
+    persisted `configured_role_table()` -- the live "what's a valid role
+    name right now" set (brief A.3) every validation point (CLI `--role`,
+    `Agent(role=...)`, frontmatter `role:`) checks a name against, and
+    every "unknown role" error message lists. Order: the built-ins first
+    (their documented order), then every extra name first-seen, so the
+    error message/completion list is stable rather than dict-order-
+    dependent."""
+    seen = list(ROLE_NAMES)
+    seen_set = set(seen)
+    for table in (list(extra_tables) + [configured_role_table()]):
+        for name in (table or {}):
+            if is_role_name_syntax(name) and name not in seen_set:
+                seen.append(name)
+                seen_set.add(name)
+    return tuple(seen)
 
 
 def resolve_role_table(*, provider: Optional[str] = None) -> dict:
@@ -66,19 +167,43 @@ def resolve_role_table(*, provider: Optional[str] = None) -> dict:
     return {}
 
 
-def parse_role_flag(raw: str) -> "tuple[str, str]":
-    """`--role name=model` -> `(name, model)`. Raises ValueError (cli.py
-    turns this into a clean exit-2 usage error, never a traceback) on a bad
-    shape or an unrecognized role name."""
+def _split_model_and_effort(rest: str) -> "tuple[str, Optional[str]]":
+    """`MODEL[:EFFORT]` -> `(model, effort_or_None)` -- splits on the
+    LAST `:` only when that tail is one of the harness's own accepted
+    effort words (`providers.profiles.EFFORT_LEVELS`, the exact set
+    `--effort` itself accepts). Safe against a model ref that legitimately
+    contains colons (`or:vendor/model`, `dbx:endpoint`, `cc:fable[1m]`,
+    ...) -- none of those ever end in a bare "low"/"medium"/"high"/
+    "xhigh"/"max" segment, so there is no real ambiguity in practice."""
+    from halo_harness.providers.profiles import EFFORT_LEVELS
+    if ":" in rest:
+        head, _, tail = rest.rpartition(":")
+        if head and tail in EFFORT_LEVELS:
+            return head, tail
+    return rest, None
+
+
+def parse_role_flag(raw: str) -> "tuple[str, object]":
+    """`--role NAME=MODEL[:EFFORT]` -> `(name, value)`, `value` a bare
+    model string or `{"model", "effort"}` (brief A.2) -- whichever shape
+    `role_value_parts`/every other reader already expects. Raises
+    ValueError (cli.py turns this into a clean exit-2 usage error, never a
+    traceback) on a bad shape or a name `known_role_names()` doesn't
+    recognize (brief A.3: "an unknown name errors with the list of known
+    names")."""
     if not isinstance(raw, str) or "=" not in raw:
-        raise ValueError(f"--role must be NAME=MODEL, got {raw!r}")
-    name, _, model = raw.partition("=")
-    name, model = name.strip(), model.strip()
-    if name not in ROLE_NAMES:
-        raise ValueError(f"--role: unknown role {name!r} (expected one of {', '.join(ROLE_NAMES)})")
+        raise ValueError(f"--role must be NAME=MODEL[:EFFORT], got {raw!r}")
+    name, _, rest = raw.partition("=")
+    name, rest = name.strip(), rest.strip()
+    known = known_role_names()
+    if name not in known:
+        raise ValueError(f"--role: unknown role {name!r} (expected one of {', '.join(known)})")
+    if not rest:
+        raise ValueError(f"--role {name}=... needs a model reference")
+    model, effort = _split_model_and_effort(rest)
     if not model:
         raise ValueError(f"--role {name}=... needs a model reference")
-    return name, model
+    return name, ({"model": model, "effort": effort} if effort else model)
 
 
 def parse_role_flags(values: Optional[list]) -> dict:
@@ -86,47 +211,80 @@ def parse_role_flags(values: Optional[list]) -> dict:
     (plain last-one-wins). `{}` for `None`/empty -- never raises for that."""
     out: dict = {}
     for raw in (values or []):
-        name, model = parse_role_flag(raw)
-        out[name] = model
+        name, value = parse_role_flag(raw)
+        out[name] = value
     return out
 
 
 def apply_role_preference(roles: dict) -> None:
-    """`team.json`'s own `roles` map seeded into `~/.halo/config.json`
-    -- the SAME idiom `team_config.apply_gateway_preference` uses for
-    `gateway_preference`: idempotent, never overwrites a role the user
-    already configured locally (a personal config.json value always wins
-    over the shared team default). An unrecognized role name is silently
-    skipped (team.json is shared/committed; a typo there should not clutter
-    config.json with a key nothing ever reads)."""
+    """`team.json`'s own `roles` map (or a loaded template's) seeded into
+    `~/.halo/config.json` -- the SAME idiom `team_config.apply_gateway_
+    preference` uses for `gateway_preference`: idempotent, never overwrites
+    a role the user already configured locally (a personal config.json
+    value always wins over the shared team/template default). brief A.3:
+    any syntactically-valid name is accepted, not only `ROLE_NAMES` -- an
+    actually-malformed name/value is silently skipped (team.json is
+    shared/committed; a typo there should not clutter config.json with a
+    key nothing reads, and must never crash `init`/`roles load`)."""
     from halo_harness.theme import get_config_value, set_config_value
-    for name, model in (roles or {}).items():
-        if name not in ROLE_NAMES or not isinstance(model, str) or not model.strip():
+    for name, value in (roles or {}).items():
+        if not is_role_name_syntax(name):
+            continue
+        normalized = _normalize_role_value(value)
+        if normalized is None:
             continue
         key = f"roles.{name}"
         if get_config_value(key, default=None) is None:
-            set_config_value(key, model)
+            set_config_value(key, normalized)
 
 
 def resolve_role_ref(name: str, *, role_table: Optional[dict] = None, cli_overrides: Optional[dict] = None,
                       parent_ref, parent_profile, state_dir, routes: Optional[dict] = None):
-    """`(ModelRef, ModelProfile, source)` for role `name` RIGHT NOW --
-    `source` is one of "CLI --role" / "role table" / "session model", for
-    `/roles`'s own display. A CLI override wins over the (already cost-
-    aware-defaulted where applicable) persisted table; neither present ->
-    the session's own model/profile OBJECTS, unchanged (matches `resolve_
-    agent_model`'s own "nothing resolved -> reuse parent objects" contract)."""
+    """`(ModelRef, ModelProfile, effort_requested, source)` for role
+    `name` RIGHT NOW -- `source` is one of "CLI --role" / "role table" /
+    "session model", for `/roles`'s own display. A CLI override wins over
+    the (already cost-aware-defaulted where applicable) persisted table;
+    neither present -> the session's own model/profile OBJECTS, unchanged
+    (matches `resolve_agent_model`'s own "nothing resolved -> reuse parent
+    objects" contract). `effort_requested` (brief A.2, new this round) is
+    whichever of the two role values actually won carries as its own
+    `effort` -- `None` when it didn't ask for one (the route's own
+    default effort applies, same as an agent with no `effort:` override)."""
     from halo_harness.model import parse_model_ref, resolve_model_profile
     cli_overrides = cli_overrides or {}
     role_table = role_table or {}
     cli_raw = cli_overrides.get(name)
     table_raw = role_table.get(name)
-    raw = cli_raw or table_raw
-    if not raw:
-        return parent_ref, parent_profile, "session model"
-    ref = parse_model_ref(raw, routes)
+    raw = cli_raw if cli_raw is not None else table_raw
+    model, effort = role_value_parts(raw)
+    if not model:
+        return parent_ref, parent_profile, None, "session model"
+    ref = parse_model_ref(model, routes)
     profile = resolve_model_profile(ref, state_dir, routes)
-    return ref, profile, ("CLI --role" if cli_raw else "role table")
+    return ref, profile, effort, ("CLI --role" if cli_raw is not None else "role table")
+
+
+def role_effort_for(role_name: Optional[str], *, role_table: Optional[dict] = None,
+                     cli_overrides: Optional[dict] = None) -> Optional[str]:
+    """Just the EFFORT half of a role's resolved value (brief A.2),
+    CLI-override-beats-role-table (same precedence as the model side) --
+    used ALONGSIDE `config/agents_md.py::resolve_agent_model` (which
+    stays model-only, a stable 2-tuple, so this round never ripples a
+    return-shape change through every existing caller/test of that
+    function) wherever a sub-agent's own effort needs to pick up a
+    role's `{"model","effort"}` entry -- see `agent/subagent.py`'s own
+    call site. `None` for no role name, or a role with no effort of its
+    own (the route's/parent's own default effort then applies, exactly
+    as before this existed)."""
+    if not role_name:
+        return None
+    cli_overrides = cli_overrides or {}
+    role_table = role_table or {}
+    raw = cli_overrides.get(role_name)
+    if raw is None:
+        raw = role_table.get(role_name)
+    _model, effort = role_value_parts(raw)
+    return effort
 
 
 def _price_str(profile) -> str:
@@ -166,15 +324,43 @@ def describe_role_ref(ref, profile, state_dir) -> dict:
 
 def resolve_all_roles(*, role_table: Optional[dict] = None, cli_overrides: Optional[dict] = None,
                        parent_ref, parent_profile, state_dir, routes: Optional[dict] = None) -> "list[dict]":
-    """One row per `ROLE_NAMES` entry -- `/roles`'s own data source."""
+    """One row per known role name -- `ROLE_NAMES` plus any custom name
+    actually defined in `role_table`/`cli_overrides` (brief A.3) -- in
+    `known_role_names`'s stable order. `/roles`'s own data source. Each
+    row's `"effort"` is formatted like `providers/effort.py::format_
+    requested_vs_sent`: the plain sent value, or `"X (sent as Y)"` when a
+    role asked for a level its own route maps to a different one (brief
+    A.2's "`requested (sent as X)` when they differ")."""
+    from halo_harness.providers.effort import sent_effort
+    from halo_harness.providers.profiles import resolve_profile
+    from halo_harness.providers.routing import Route
+    names = known_role_names(role_table, cli_overrides)
     rows = []
-    for name in ROLE_NAMES:
-        ref, profile, source = resolve_role_ref(
+    for name in names:
+        ref, profile, effort_requested, source = resolve_role_ref(
             name, role_table=role_table, cli_overrides=cli_overrides, parent_ref=parent_ref,
             parent_profile=parent_profile, state_dir=state_dir, routes=routes,
         )
         info = describe_role_ref(ref, profile, state_dir)
-        rows.append({"role": name, "model": ref.raw, "source": source, **info})
+        # `profile` above is a `model.ModelProfile` (pricing/display) --
+        # `sent_effort` needs the SEPARATE `providers.profiles.
+        # ProviderProfile` (request-building) `effort_set`/`request.py`
+        # use, resolved the same way `agent/loop.py`'s own compaction-
+        # model-override does. Best-effort: an unresolvable route (a
+        # malformed custom role, a provider this box can't reach right
+        # now) just shows the requested effort as-is rather than raising
+        # out of `/roles`.
+        try:
+            route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
+            provider_profile = resolve_profile(route, state_dir=state_dir)
+            effort_sent = sent_effort(effort_requested, provider_profile)
+        except Exception:
+            effort_sent = effort_requested
+        if effort_requested and effort_requested != effort_sent:
+            effort_display = f"{effort_requested} (sent as {effort_sent})"
+        else:
+            effort_display = effort_sent or "-"
+        rows.append({"role": name, "model": ref.raw, "effort": effort_display, "source": source, **info})
     return rows
 
 
@@ -183,10 +369,137 @@ def format_roles_table(rows: "list[dict]") -> str:
         return "No roles resolved."
     w_role = max(len(r["role"]) for r in rows)
     w_model = max(len(r["model"]) for r in rows)
+    w_effort = max(len(r.get("effort", "-")) for r in rows)
     w_path = max(len(r["path_type"]) for r in rows)
     w_price = max(len(r["price"]) for r in rows)
-    lines = ["Role table (endpoint/path type/price per role):"]
+    lines = ["Role table (model/effort/endpoint/path type/price per role):"]
     for r in rows:
         lines.append(f"  {r['role'].ljust(w_role)}  {r['model'].ljust(w_model)}  "
-                      f"{r['path_type'].ljust(w_path)}  {r['price'].ljust(w_price)}  ({r['source']})")
+                      f"{r.get('effort', '-').ljust(w_effort)}  {r['path_type'].ljust(w_path)}  "
+                      f"{r['price'].ljust(w_price)}  ({r['source']})")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Brief A.5: role TEMPLATES -- `~/.halo/roles/<name>.json`
+# `{"name", "description", "roles": {role: {"model", "effort"}}}`.
+# ---------------------------------------------------------------------------
+
+def role_templates_dir(state_dir=None):
+    """`~/.halo/roles/` -- created on first write, never required to
+    already exist for a read (`list_role_templates` on a fresh box just
+    returns `[]`)."""
+    from halo_harness.config.paths import bridge_home
+    base = state_dir if state_dir is not None else bridge_home()
+    from pathlib import Path
+    return Path(base) / "roles"
+
+
+_TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def is_valid_template_name(name: str) -> bool:
+    """Deliberately more permissive than a ROLE name (brief A.5 gives no
+    syntax of its own for a template's file-stem) -- just "a safe, single
+    path segment," so `role_templates_dir() / f"{name}.json"` can never
+    escape that directory or collide with a dotfile."""
+    return bool(name) and bool(_TEMPLATE_NAME_RE.match(name)) and ".." not in name
+
+
+def list_role_templates(state_dir=None) -> "list[str]":
+    """Every `<name>.json` in `role_templates_dir()`, name only, sorted
+    -- `[]` on a fresh box with no directory yet. Never raises."""
+    try:
+        return sorted(p.stem for p in role_templates_dir(state_dir).glob("*.json") if p.is_file())
+    except OSError:
+        return []
+
+
+def validate_role_template(data) -> "list[str]":
+    """Every problem with a template's SHAPE (brief A.5: `{"name",
+    "description", "roles": {role: model_or_{"model","effort"}}}`) --
+    `[]` means valid. Never raises; a caller (CLI/TUI) reports these as
+    plain lines rather than a traceback."""
+    if not isinstance(data, dict):
+        return ["template must be a JSON object"]
+    problems = []
+    if "name" in data and not isinstance(data.get("name"), str):
+        problems.append('"name" must be a string')
+    if "description" in data and not isinstance(data.get("description"), str):
+        problems.append('"description" must be a string')
+    roles = data.get("roles", {})
+    if not isinstance(roles, dict):
+        return problems + ['"roles" must be an object of {role_name: model_or_{"model","effort"}}']
+    for name, value in roles.items():
+        if not is_role_name_syntax(name):
+            problems.append(f"invalid role name {name!r} (expected [a-z][a-z0-9_]*)")
+        elif _normalize_role_value(value) is None:
+            problems.append(f'role {name!r}: value must be a model string or {{"model", "effort"}}')
+    return problems
+
+
+def load_role_template(name: str, state_dir=None) -> "Optional[dict]":
+    """The parsed, VALIDATED contents of template `name` -- bad JSON, a
+    missing file, or a shape `validate_role_template` rejects all return
+    `None` (never raises). `{"name", "description", "roles"}`, `roles`
+    values already normalized (`role_value_parts`-ready)."""
+    import json
+    path = role_templates_dir(state_dir) / f"{name}.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if validate_role_template(raw):
+        return None
+    roles = {k: _normalize_role_value(v) for k, v in (raw.get("roles") or {}).items() if is_role_name_syntax(k)}
+    return {"name": raw.get("name") or name, "description": raw.get("description") or "",
+            "roles": {k: v for k, v in roles.items() if v is not None}}
+
+
+def save_role_template(name: str, data: dict, state_dir=None) -> "tuple[bool, list[str]]":
+    """Writes `~/.halo/roles/<name>.json` (brief A.5: `/roles save
+    <name>`, `halo roles template save <name>`). `(True, [])` on success,
+    `(False, problems)` on a bad `name` or a `data` shape `validate_role_
+    template` rejects -- never raises, never writes a partial file."""
+    import json
+    if not is_valid_template_name(name):
+        return False, [f"invalid template name {name!r}"]
+    problems = validate_role_template(data)
+    if problems:
+        return False, problems
+    d = role_templates_dir(state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    payload = {"name": data.get("name") or name, "description": data.get("description") or "",
+               "roles": data.get("roles") or {}}
+    (d / f"{name}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True, []
+
+
+def delete_role_template(name: str, state_dir=None) -> bool:
+    """Best-effort remove; True iff a file actually existed and was
+    removed. Never raises."""
+    try:
+        (role_templates_dir(state_dir) / f"{name}.json").unlink()
+        return True
+    except OSError:
+        return False
+
+
+def apply_role_template(name: str, state_dir=None) -> "tuple[bool, list[str]]":
+    """`/roles load <name>` / `halo roles template load <name>` (brief
+    A.5): persists EVERY role the template defines straight into `~/.halo/
+    config.json` -- unlike `apply_role_preference`'s idempotent team.json
+    seed (which only ever fills a gap), loading a template is a
+    deliberate, explicit user action and OVERWRITES whatever was there
+    (brief's own precedence list: "loaded template > team.json > config
+    roles" -- a template the user just asked to load outranks a stale
+    local value exactly the way a fresh `--role`/`/role` override would).
+    `(True, [])` on success; `(False, [reason])` for an unknown/invalid
+    template name -- never raises."""
+    from halo_harness.theme import set_config_value
+    template = load_role_template(name, state_dir=state_dir)
+    if template is None:
+        return False, [f"no such role template: {name!r} (or it failed validation)"]
+    for role_name, value in template["roles"].items():
+        set_config_value(f"roles.{role_name}", value)
+    return True, []

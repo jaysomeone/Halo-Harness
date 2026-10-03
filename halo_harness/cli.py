@@ -110,11 +110,12 @@ _REAL_FLAGS = [
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
     (["--agents"], dict(dest="agents", default=None, metavar="JSON_OR_FILE")),
-    # V2c (H15): repeatable NAME=MODEL override for one of the five roles
+    # V2c (H15), widened Halo 2.0.2: repeatable NAME=MODEL[:EFFORT] override
+    # for one of the ten built-in roles (or a currently-known custom one)
     # (orchestrator|coder|reviewer|researcher|small) -- validated in main()
     # right after parsing, so a bad NAME=MODEL is a clean exit-2 usage error
     # before either run_print_mode or the TUI ever starts building a Session.
-    (["--role"], dict(dest="role", action="append", default=None, metavar="NAME=MODEL")),
+    (["--role"], dict(dest="role", action="append", default=None, metavar="NAME=MODEL[:EFFORT]")),
     (["-c", "--continue"], dict(dest="continue_", action="store_true")),
     (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None)),
     (["--fork-session"], dict(dest="fork_session", action="store_true")),
@@ -253,7 +254,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="halo", add_help=True,
         description="halo - starts an interactive session by default, use -p/--print for non-interactive output",
-        epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export "
+        epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export, "
+               "roles, completion "
                "(run `halo <command> --help`; `halo init` sets up a fresh box in one go)",
     )
     try:
@@ -385,6 +387,12 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "bg":
         from halo_harness.bg_cli import cmd_bg
         return cmd_bg(argv[1:])
+    if argv and argv[0] == "roles":
+        from halo_harness.roles_cli import cmd_roles
+        return cmd_roles(argv[1:])
+    if argv and argv[0] == "completion":
+        from halo_harness.completion_cli import cmd_completion
+        return cmd_completion(argv[1:])
 
     parser = _build_parser()
     try:

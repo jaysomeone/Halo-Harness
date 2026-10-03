@@ -118,8 +118,32 @@ def test_resolve_role_table_any_configured_entry_skips_the_cost_aware_default_en
 @test
 def test_parse_role_flag_valid(ctx: Ctx):
     from halo_harness.roles import parse_role_flag
-    ctx.check("parses cleanly", parse_role_flag("coder=dbx:databricks-claude-opus-4-6")
-              == ("coder", "dbx:databricks-claude-opus-4-6"))
+    _fresh_state_dir("roles-parse-valid-")
+    try:
+        ctx.check("parses cleanly (no effort suffix -> bare model string)",
+                  parse_role_flag("coder=dbx:databricks-claude-opus-4-6")
+                  == ("coder", "dbx:databricks-claude-opus-4-6"))
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_parse_role_flag_with_effort_suffix(ctx: Ctx):
+    """Halo 2.0.2 brief A.2: `--role NAME=MODEL[:EFFORT]`."""
+    from halo_harness.roles import parse_role_flag
+    _fresh_state_dir("roles-parse-effort-")
+    try:
+        name, value = parse_role_flag("coder=or:vendor/deepseek-v4.1-flash:high")
+        ctx.check(f"name parsed, got {name!r}", name == "coder")
+        ctx.check(f"model+effort dict, got {value!r}",
+                  value == {"model": "or:vendor/deepseek-v4.1-flash", "effort": "high"})
+        # A model ref that legitimately ends in a provider:model pair but
+        # no recognized effort word must NOT be mis-split.
+        name2, value2 = parse_role_flag("small=dbx:databricks-deepseek-v4-1-flash")
+        ctx.check(f"a colon-bearing model with no real effort suffix stays a bare string, got {value2!r}",
+                  value2 == "dbx:databricks-deepseek-v4-1-flash")
+    finally:
+        _clear_state_dir_env()
 
 
 @test
@@ -135,11 +159,39 @@ def test_parse_role_flag_bad_shape_raises(ctx: Ctx):
 @test
 def test_parse_role_flag_unknown_role_raises(ctx: Ctx):
     from halo_harness.roles import parse_role_flag
+    _fresh_state_dir("roles-parse-unknown-")
     try:
         parse_role_flag("not-a-role=or:vendor/x")
         ctx.check("should have raised", False)
     except ValueError as e:
         ctx.check(f"names the bad role, got {e}", "not-a-role" in str(e))
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_parse_role_flag_accepts_a_custom_name_once_configured(ctx: Ctx):
+    """Halo 2.0.2 brief A.3: "any [a-z][a-z0-9_]* defined in a template or
+    team.json is a valid role" -- proxied here via a plain config.json
+    entry (what `apply_role_preference`/`apply_role_template` both
+    ultimately write to), since that's the one place every source
+    (team.json, a loaded template, a hand `halo config set`) converges."""
+    from halo_harness.roles import parse_role_flag
+    from halo_harness.theme import set_config_value
+    _fresh_state_dir("roles-parse-custom-")
+    try:
+        set_config_value("roles.release_captain", "or:vendor/x")
+        name, value = parse_role_flag("release_captain=or:vendor/y")
+        ctx.check(f"a defined custom name is accepted, got {(name, value)!r}",
+                  (name, value) == ("release_captain", "or:vendor/y"))
+        try:
+            parse_role_flag("still_unknown=or:vendor/z")
+            ctx.check("an UNDEFINED custom name still raises", False)
+        except ValueError as e:
+            ctx.check(f"the error lists the known names including the custom one, got {e}",
+                      "still_unknown" in str(e) and "release_captain" in str(e) and "coder" in str(e))
+    finally:
+        _clear_state_dir_env()
 
 
 @test
@@ -159,6 +211,77 @@ def test_parse_role_flags_last_one_wins_and_none_is_empty(ctx: Ctx):
     ctx.check("[] -> {}", parse_role_flags([]) == {})
     out = parse_role_flags(["coder=or:vendor/first", "coder=or:vendor/second", "reviewer=or:vendor/r"])
     ctx.check(f"later repeat wins, got {out}", out == {"coder": "or:vendor/second", "reviewer": "or:vendor/r"})
+
+
+# ---- per-role effort (brief A.2) -------------------------------------------
+
+@test
+def test_role_effort_for_cli_beats_table_same_as_model(ctx: Ctx):
+    from halo_harness.roles import role_effort_for
+    ctx.check("no role name -> None", role_effort_for(None, role_table={"coder": {"model": "m", "effort": "x"}})
+              is None)
+    ctx.check("a bare-string role value -> no effort",
+              role_effort_for("coder", role_table={"coder": "or:vendor/m"}) is None)
+    ctx.check("role table's own effort", role_effort_for(
+        "coder", role_table={"coder": {"model": "or:vendor/m", "effort": "high"}}) == "high")
+    ctx.check("CLI override's effort wins over the table's", role_effort_for(
+        "coder", role_table={"coder": {"model": "or:vendor/m", "effort": "high"}},
+        cli_overrides={"coder": {"model": "or:vendor/m2", "effort": "low"}}) == "low")
+    ctx.check("a CLI override with no effort of its own suppresses the table's (same precedence slot as model)",
+              role_effort_for("coder", role_table={"coder": {"model": "or:vendor/m", "effort": "high"}},
+                               cli_overrides={"coder": "or:vendor/m2"}) is None)
+
+
+# ---- role templates (~/.halo/roles/<name>.json) ----------------------------
+
+@test
+def test_role_template_save_load_round_trip(ctx: Ctx):
+    from halo_harness.roles import list_role_templates, load_role_template, save_role_template
+    d = _fresh_state_dir("roles-template-roundtrip-")
+    try:
+        ok, problems = save_role_template(
+            "release-flow", {"description": "release flow roles",
+                              "roles": {"coder": "or:vendor/coder", "judge": {"model": "or:vendor/j", "effort": "high"}}},
+            state_dir=d)
+        ctx.check(f"save succeeds, got {problems}", ok is True and problems == [])
+        ctx.check("the saved file shows up in the listing", list_role_templates(state_dir=d) == ["release-flow"])
+        loaded = load_role_template("release-flow", state_dir=d)
+        ctx.check(f"round-tripped roles, got {loaded}", loaded == {
+            "name": "release-flow", "description": "release flow roles",
+            "roles": {"coder": "or:vendor/coder", "judge": {"model": "or:vendor/j", "effort": "high"}},
+        })
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_role_template_rejects_a_bad_shape(ctx: Ctx):
+    from halo_harness.roles import save_role_template
+    d = _fresh_state_dir("roles-template-bad-")
+    try:
+        ok, problems = save_role_template("bad", {"roles": {"Not-Valid": "or:x"}}, state_dir=d)
+        ctx.check(f"a syntactically-bad role name is rejected, got {problems}", ok is False and problems)
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_apply_role_template_overwrites_a_stale_local_value(ctx: Ctx):
+    """brief A.5's own precedence note: "loaded template > ... > config
+    roles" -- unlike the idempotent team.json seed, loading a template is
+    a deliberate action and wins over whatever was already configured."""
+    from halo_harness.roles import apply_role_template, configured_role_table, save_role_template
+    from halo_harness.theme import set_config_value
+    d = _fresh_state_dir("roles-template-apply-")
+    try:
+        set_config_value("roles.coder", "or:vendor/stale")
+        save_role_template("fresh", {"roles": {"coder": "or:vendor/fresh"}}, state_dir=d)
+        ok, problems = apply_role_template("fresh", state_dir=d)
+        ctx.check(f"apply succeeds, got {problems}", ok is True)
+        ctx.check(f"the stale local value was overwritten, got {configured_role_table()}",
+                  configured_role_table()["coder"] == "or:vendor/fresh")
+    finally:
+        _clear_state_dir_env()
 
 
 if __name__ == "__main__":

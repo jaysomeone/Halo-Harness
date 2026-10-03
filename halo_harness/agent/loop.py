@@ -2954,8 +2954,22 @@ class Session:
         `self.creds` is a single set for the whole Session, same documented
         limitation as `_call_model_for_hook`'s own `small_model_ref` (true
         cross-provider routing needs separate credential resolution, a
-        follow-up refinement, not this one-liner)."""
+        follow-up refinement, not this one-liner).
+
+        Halo 2.0.2 (brief A.1): "`compaction` is the rung after
+        `compactionModel`" -- the `roles.<compaction>` table entry (config.
+        json/team.json/a loaded template) is consulted ONLY when
+        `compactionModel` itself resolved to nothing (`resolve_knobs`
+        already checked config.json's bare `compactionModel` key and
+        Claude Code's own settings chain; this is strictly the next,
+        lower-precedence rung, never a competitor to either)."""
         raw = self._compaction_knobs.compaction_model
+        if not raw:
+            from halo_harness.roles import role_value_parts
+            role_raw = (self.cli_roles or {}).get("compaction")
+            if role_raw is None:
+                role_raw = (self.roles or {}).get("compaction")
+            raw, _compaction_effort = role_value_parts(role_raw)
         if not raw or raw == self.model_ref.raw:
             return None
         try:

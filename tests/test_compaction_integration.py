@@ -860,6 +860,60 @@ def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
 
 
+@test
+def test_h202_compaction_role_is_the_rung_after_compaction_model(ctx: Ctx):
+    """Halo 2.0.2 brief A.1: "`compaction` is the rung after
+    `compactionModel`" -- consulted ONLY when `compactionModel` itself
+    resolved to nothing."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model=None)  # nothing set at the compactionModel rung
+        session.roles = {"compaction": "or:mock/compaction-from-role"}
+
+        list(session._run_compaction(1, trigger="manual"))
+        models_called = {r.get("body", {}).get("model") for r in mock.requests}
+        ctx.check(f"the summarisation call used the compaction ROLE's model, got {models_called}",
+                  "mock/compaction-from-role" in models_called)
+        ctx.check("the session's own model_ref is restored after the summary call",
+                  session.model_ref.raw == "or:mock/model")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h202_compaction_model_still_beats_the_compaction_role(ctx: Ctx):
+    """`compactionModel` stays the higher-precedence rung -- a configured
+    `compaction` role must never override it."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model="or:mock/compaction-good-summary")
+        session.roles = {"compaction": "or:mock/compaction-from-role"}
+
+        list(session._run_compaction(1, trigger="manual"))
+        models_called = {r.get("body", {}).get("model") for r in mock.requests}
+        ctx.check(f"compactionModel still wins, got {models_called}",
+                  "mock/compaction-good-summary" in models_called
+                  and "mock/compaction-from-role" not in models_called)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

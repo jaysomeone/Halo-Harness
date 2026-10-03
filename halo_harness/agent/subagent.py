@@ -261,14 +261,24 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     # V2c (H15): the Agent-tool-call's own `role=` argument, when given,
     # overrides this agent's own file/built-in `role:` for just this one
     # call -- see `resolve_agent_model`'s own docstring for the full chain.
+    _effective_role_name = role_override or spec.role
     model_ref, model_profile = resolve_agent_model(
         invocation_model=model_override, frontmatter_model=spec.model,
-        role_name=(role_override or spec.role), role_table=runtime.role_table,
+        role_name=_effective_role_name, role_table=runtime.role_table,
         cli_role_overrides=runtime.cli_role_overrides,
         env=parent.tool_env, settings=getattr(parent.session_context, "settings", None),
         parent_ref=parent.model_ref, parent_profile=parent.model_profile,
         parent_small_ref=parent.small_model_ref, state_dir=parent.state_dir, routes=runtime.routes,
     )
+    # Halo 2.0.2 (brief A.2): "sub-agent runs apply the role's effort
+    # through the same path the session uses" -- resolved alongside (not
+    # inside) `resolve_agent_model` so that function's return shape never
+    # changes; applied below exactly where `spec.effort` already was,
+    # one rung below it (an agent file's own explicit `effort:` still
+    # wins) and one rung above blindly inheriting the parent's.
+    from halo_harness.roles import role_effort_for
+    _role_effort = role_effort_for(_effective_role_name, role_table=runtime.role_table,
+                                    cli_overrides=runtime.cli_role_overrides)
 
     permission_mode = spec.permission_mode or parent.permission_engine.mode
     # finding 14 (W6a): both of these used to root at `parent.cwd`
@@ -312,7 +322,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         hook_runner = HookRunner(
             parent.hook_runner.hooks_by_event, cwd=child_cwd, session_id=child_log.session_id,
             transcript_path=str(child_log.path), effective_env=parent.hook_runner.effective_env,
-            permission_mode=permission_mode, effort=(spec.effort or parent.effort),
+            permission_mode=permission_mode, effort=(spec.effort or _role_effort or parent.effort),
             mcp_manager=parent.mcp_manager, prompt_caller=parent.hook_runner.prompt_caller,
             enabled=parent.hook_runner.enabled, agent_id=agent_id, agent_type=spec.name,
         )
@@ -321,7 +331,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         cwd=child_cwd, model_ref=model_ref, model_profile=model_profile, creds=parent.creds,
         state_dir=parent.state_dir, model_label=model_ref.raw, session_context=ctx,
         small_model_ref=parent.small_model_ref, session_log=child_log,
-        max_turns=(spec.max_turns or parent.max_turns), effort=(spec.effort or parent.effort),
+        max_turns=(spec.max_turns or parent.max_turns), effort=(spec.effort or _role_effort or parent.effort),
         permission_engine=child_engine, session_catalog=None, mcp_manager=parent.mcp_manager,
         hook_runner=hook_runner,
         # bug fix: without these, a child ignores whatever custom routing

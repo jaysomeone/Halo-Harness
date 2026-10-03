@@ -192,15 +192,30 @@ def test_version_bumped_to_2_0_0_and_changelog_has_an_entry(ctx: Ctx):
 def test_version_bumped_to_2_0_1_and_changelog_has_an_entry(ctx: Ctx):
     """Halo Harness 2.0.1: the "run from any directory" release -- makes
     the install unmistakable and proves (by test) that no behavior
-    depends on `halo` being started from inside the checkout. THIS
-    release's own version-bump pin."""
-    from halo_harness import __version__
-    ctx.check(f"__version__ is 2.0.1, got {__version__!r}", __version__ == "2.0.1")
+    depends on `halo` being started from inside the checkout. H14c's own
+    pinning shape, kept exact (checked against the CHANGELOG's own
+    still-present [2.0.1] entry, not the CURRENT version) now that 2.0.2
+    has bumped past it; see `test_version_bumped_to_2_0_2_and_changelog_
+    has_an_entry` below for THIS release's own version-bump pin."""
     changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
     ctx.check("CHANGELOG.md has a [2.0.1] entry", "[2.0.1]" in changelog)
     entry = changelog.split("[2.0.1]", 1)[1].split("\n## [", 1)[0]
     for phrase in ("install.md", "pythonpath fallback", "scratch", "unique sentence"):
         ctx.check(f"the [2.0.1] entry mentions {phrase!r}", phrase in entry.lower())
+
+
+@test
+def test_version_bumped_to_2_0_2_and_changelog_has_an_entry(ctx: Ctx):
+    """Halo Harness 2.0.2 (W7 round 1): terminal tab title re-assertion
+    and roles v2 (per-role effort, custom role names, tab/shell
+    completion, role templates). THIS release's own version-bump pin."""
+    from halo_harness import __version__
+    ctx.check(f"__version__ is 2.0.2, got {__version__!r}", __version__ == "2.0.2")
+    changelog = (REPO_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+    ctx.check("CHANGELOG.md has a [2.0.2] entry", "[2.0.2]" in changelog)
+    entry = changelog.split("[2.0.2]", 1)[1].split("\n## [", 1)[0]
+    for phrase in ("terminal", "role"):
+        ctx.check(f"the [2.0.2] entry mentions {phrase!r}", phrase in entry.lower())
 
 
 @test

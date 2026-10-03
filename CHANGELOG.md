@@ -8,6 +8,54 @@ across the 0.3.x line -- each 0.3.0 milestone below was a working
 checkpoint toward the single 0.3.0 release, not a separate published
 version.
 
+## [2.0.2] - unreleased
+
+W7 round 1 (F + A of the 2.0.2 brief): the terminal tab title fix, and
+roles v2.
+
+1. **Terminal tab title stays `halo`**: root cause confirmed by reading
+   every `claude`-spawning call site -- each one pipes the child's stdout/
+   stderr for its own parsing but never detaches it from the shared
+   console/tty, and a real `claude` binary sets the console/terminal title
+   itself at startup through a side channel independent of those redirected
+   handles (Windows: the console title is a property of the console object
+   any attached process can set, regardless of its own stdout; POSIX: an
+   OSC 2 write most terminals honour however it arrives) and never restores
+   it -- while Textual's own `BridgeApp.TITLE` has never touched the real
+   terminal at all (it's only ever the in-app Header widget's text).
+   `halo_harness.termtitle` (new) re-asserts `halo` via OSC 2 plus, on
+   Windows, a `SetConsoleTitleW` fallback for legacy `conhost`: at TUI
+   start and on `/resume`, after every `claude` child exits
+   (`agent/cc_process.py`, `providers/cc_models.py`'s probes, `mcp/
+   connectors.py`'s discovery), and once more on the drain tick that
+   follows one, as insurance. Print mode (`-p`) saves whatever title was
+   there at start and restores it at exit; the OSC 2 write itself is
+   skipped on a non-interactive default stdout (never spliced into a
+   `--output-format json/stream-json` consumer's own piped output).
+2. **Roles v2**: `ROLE_NAMES` grows from five to ten -- `planner` (the
+   `Plan` agent's own role now, moved off `reviewer`), `judge` and `tester`
+   (two new built-in agents with matching roles), `compaction` (a rung
+   between `compactionModel` and the session's main model), and
+   `subagent_default` (the last rung before the session model, for a
+   sub-agent with no role at all). A role's table value may now be
+   `{"model", "effort"}` instead of a bare string, applied through the same
+   path the session's own effort takes; `/roles` and the role resolver show
+   `requested (sent as X)` when a role's effort maps to a different one on
+   its route. Any syntactically-valid custom role name (`[a-z][a-z0-9_]*`)
+   a team.json or a loaded template defines is now a valid role everywhere
+   a built-in one is -- `--role NAME=MODEL[:EFFORT]`, `/role <name> <model>
+   [effort]` (new) and `/roles set` all validate against the live set of
+   known names. TUI tab completion for `/role`/`/roles set`'s arguments
+   (role name, then model ref, then effort -- ranked prefix-then-substring,
+   `tui/completion.py::filter_items`) and shell completion (`halo
+   completion bash|zsh|powershell`, reading the cached model catalog with
+   no network call) are both new. Role TEMPLATES
+   (`~/.halo/roles/<name>.json`) are a new named, reusable role table:
+   `/roles templates|save|load|new|edit|show` in the TUI (`edit` opens a
+   form, `tui/dialogs/roles_editor.py`, or `$EDITOR` when `roles.editor:
+   "external"` is configured) and `halo roles template list|save|load|new|
+   edit|show` from the CLI.
+
 ## [2.0.0] - 2026-10-01
 
 The rename release: `rolo-claude` 1.0.1 continues unchanged, as its own

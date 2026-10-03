@@ -148,13 +148,23 @@ Lists every discovered sub-agent definition (built-ins plus
 the live session's own agent runtime when one is attached so it never
 drifts from what an `Agent(subagent_type=...)` call would actually see.
 
-### `/roles`
-V2c (H15): shows the resolved role table (`orchestrator`/`coder`/`reviewer`/
-`researcher`/`small`) -- model, endpoint/path type, and price per role,
-pulled from the live session's own `agent_runtime.role_table`/
-`.cli_role_overrides` (the SAME table a role-bearing `Agent`/`Task` call
-actually resolves against) so it never drifts from real behavior. See
-`docs/ROLES.md`.
+### `/roles [templates|save <name>|load <name>|new <name>|edit <name>|show <name>|set <name> <model> [effort]]`
+V2c (H15), extended Halo 2.0.2: bare `/roles` shows the resolved role table
+(model, effort, endpoint/path type, price per role), pulled from the live
+session's own `agent_runtime.role_table`/`.cli_role_overrides` (the SAME
+table a role-bearing `Agent`/`Task` call actually resolves against) so it
+never drifts from real behavior. `templates`/`save`/`load`/`new`/`show`
+manage `~/.halo/roles/<name>.json` templates; `edit` opens a form in the TUI
+only (print mode names that instead); `set` is the long form of `/role`
+below. See `docs/ROLES.md`.
+
+### `/role <name> <model> [effort]`
+Halo 2.0.2: sets ONE role for THIS session only -- mutates the live
+session's own role table directly (never persisted; `/roles save <name>`
+is the explicit "keep this" action), so the very next `Agent`/`Task` call
+that resolves this role picks it up. `<name>` must already be a known role
+(a built-in, or a custom name a team.json/loaded template actually defined)
+-- an unknown name errors with the list of known ones. See `docs/ROLES.md`.
 
 ### `/providers [list|enable <name>|disable <name>|setup <name>]`
 H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-

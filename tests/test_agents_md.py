@@ -115,8 +115,9 @@ def test_resolved_tools_general_purpose_excludes_agent(ctx: Ctx):
 
 @test
 def test_builtin_names_constant(ctx: Ctx):
+    # Halo 2.0.2 brief A.1: Judge/Tester join the built-in agent map.
     ctx.check("BUILTIN_NAMES", set(BUILTIN_NAMES) == {
-        "general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher",
+        "general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher", "Judge", "Tester",
     })
 
 
@@ -131,12 +132,26 @@ def test_coder_reviewer_researcher_always_present(ctx: Ctx):
 
 
 @test
+def test_judge_and_tester_always_present(ctx: Ctx):
+    """Halo 2.0.2 brief A.1: new built-ins on the matching new roles."""
+    cwd = Path(tempfile.mkdtemp(prefix="rc-202-judge-tester-"))
+    agents = discover_agents(cwd)
+    for name in ("Judge", "Tester"):
+        ctx.check(f"{name} discovered", name in agents)
+    ctx.check("Judge is read-only (no Edit/Write)", "Edit" not in (agents["Judge"].tools or []))
+    ctx.check("Tester has Bash", "Bash" in (agents["Tester"].tools or []))
+
+
+@test
 def test_builtin_roles_assigned(ctx: Ctx):
+    # Halo 2.0.2 brief A.1: Plan moves to its own "planner" role (was
+    # "reviewer"); Judge/Tester are new built-ins on matching new roles.
     cwd = Path(tempfile.mkdtemp(prefix="rc-v2c-roles-"))
     agents = discover_agents(cwd)
     expected = {
-        "general-purpose": "orchestrator", "Explore": "researcher", "Plan": "reviewer",
+        "general-purpose": "orchestrator", "Explore": "researcher", "Plan": "planner",
         "Coder": "coder", "Reviewer": "reviewer", "Researcher": "researcher",
+        "Judge": "judge", "Tester": "tester",
     }
     for name, role in expected.items():
         ctx.check(f"{name}.role == {role!r}, got {agents[name].role!r}", agents[name].role == role)
@@ -497,6 +512,55 @@ def test_resolve_agent_model_haiku_falls_back_to_parent_without_small(ctx: Ctx):
     )
     ctx.check("haiku with no small ref -> parent ref", ref is parent_ref)
     ctx.check("haiku with no small ref -> parent profile", profile is parent_profile)
+
+
+# ---- Halo 2.0.2 brief A.2/A.1: dict-shaped role values, subagent_default ---
+
+@test
+def test_resolve_agent_model_dict_shaped_role_table_value(ctx: Ctx):
+    """A role-table entry of `{"model", "effort"}` (brief A.2) must still
+    resolve a plain model ref here -- the effort half is read separately
+    by `roles.role_effort_for` (see `agent/subagent.py`); this function's
+    own job is only ever to pick the right MODEL string out of either
+    shape."""
+    ref, _profile = resolve_agent_model(
+        role_name="coder", role_table={"coder": {"model": "or:vendor/fromtable-dict", "effort": "high"}},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check(f"dict-shaped table value resolves cleanly, got {ref.model!r}", ref.model == "vendor/fromtable-dict")
+
+
+@test
+def test_resolve_agent_model_dict_shaped_cli_role_override(ctx: Ctx):
+    ref, _profile = resolve_agent_model(
+        role_name="coder", cli_role_overrides={"coder": {"model": "or:vendor/fromcli-dict", "effort": "low"}},
+        parent_ref=_FakeRef("or:vendor/parent"), parent_profile=_FakeProfile(),
+        state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check(f"dict-shaped CLI override resolves cleanly, got {ref.model!r}", ref.model == "vendor/fromcli-dict")
+
+
+@test
+def test_resolve_agent_model_subagent_default_applies_only_with_no_role(ctx: Ctx):
+    """Brief A.1: "subagent_default is the last rung before the session
+    model for any sub-agent with no role" -- a role-LESS agent picks it
+    up; a role-bearing agent with nothing configured for ITS OWN role
+    must NOT (that still means "the session model", unchanged)."""
+    parent_ref, parent_profile = _FakeRef("or:vendor/parent"), _FakeProfile()
+    roleless_ref, _p1 = resolve_agent_model(
+        role_name=None, role_table={"subagent_default": "or:vendor/fallback"},
+        parent_ref=parent_ref, parent_profile=parent_profile, state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check(f"a role-less agent picks up subagent_default, got {roleless_ref.model!r}",
+              roleless_ref.model == "vendor/fallback")
+
+    role_bearing_ref, _p2 = resolve_agent_model(
+        role_name="researcher", role_table={"subagent_default": "or:vendor/fallback"},
+        parent_ref=parent_ref, parent_profile=parent_profile, state_dir=Path(tempfile.mkdtemp()), routes={},
+    )
+    ctx.check("a role-bearing agent with nothing configured for ITS role stays on the parent",
+              role_bearing_ref is parent_ref)
 
 
 # ---- V2c (H15) role resolution precedence: CLI > agent file > role table > session model ----

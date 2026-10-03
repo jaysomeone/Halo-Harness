@@ -147,9 +147,17 @@ def run_claude_mcp_list(*, timeout: float = DISCOVERY_TIMEOUT_S) -> "tuple[str, 
         proc = subprocess.run(argv + ["mcp", "list"], capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=timeout, env=_claude_subprocess_env())
     except subprocess.TimeoutExpired:
+        # Halo 2.0.2 W7 round 1 (brief F): a real `claude` child DID
+        # start (subprocess.run's timeout path kills it after launch) --
+        # re-assert halo's own title in case it scribbled the console/
+        # terminal title before being killed.
+        from halo_harness.termtitle import reassert_after_claude_child
+        reassert_after_claude_child()
         return "", f"claude mcp list timed out after {timeout:.0f}s"
     except OSError as e:
         return "", f"{type(e).__name__}: {e}"
+    from halo_harness.termtitle import reassert_after_claude_child
+    reassert_after_claude_child()
     return proc.stdout, proc.stderr
 
 

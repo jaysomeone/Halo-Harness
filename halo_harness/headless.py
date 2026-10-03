@@ -1302,6 +1302,25 @@ def run_print_mode(
     cli_flags = dict(cli_flags or {})
     cwd = maybe_create_worktree(cwd, cli_flags)
 
+    # Halo 2.0.2 W7 round 1 (brief F): "set halo at start and restore the
+    # previous title at exit" -- captured/set as early as possible (before
+    # even the --session-id/--resume validation below, which can exit
+    # this function in just a few lines), restored on EVERY exit path:
+    # each early `return 2` below calls `_pm_title_exit`, and the existing
+    # outer `finally` further down (already the one place guaranteed to
+    # run on every OTHER exit -- a normal return or an exception) restores
+    # it last, after every other cleanup. `_pm_prev_title` is None on a
+    # platform/terminal this process can't read a title back from (POSIX)
+    # -- `restore()` is then a no-op, i.e. "otherwise leave it" (brief).
+    from halo_harness.termtitle import get_terminal_title, set_terminal_title
+    _pm_prev_title = get_terminal_title()
+    set_terminal_title("halo")
+
+    def _pm_title_exit(code: int) -> int:
+        if _pm_prev_title is not None:
+            set_terminal_title(_pm_prev_title)
+        return code
+
     # must-do: validated FIRST, before anything (incl. MCP) starts -- the
     # old position (right before `Session(...)`, well after `build_manager`
     # already spawned real MCP subprocesses) meant a bad --session-id
@@ -1310,7 +1329,7 @@ def run_print_mode(
     # rather than starting-then-cleaning-up.
     if session_id and not agent_sessions.is_valid_session_id(session_id):
         print(f"halo: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
-        return 2
+        return _pm_title_exit(2)
     if resume is not None and resume != "" and not continue_:
         # H13 Part C ("--resume <text> picks the unique match or opens the
         # picker filtered"): print mode has no picker to open, so a genuine
@@ -1328,11 +1347,11 @@ def run_print_mode(
             for m in matches[:8]:
                 label = m.get("title") or m.get("summary") or "(no summary)"
                 print(f"  {m['id']}  {label}", file=sys.stderr)
-            return 2
+            return _pm_title_exit(2)
         _resolved_probe, resume_err = agent_sessions.resolve_resume(cwd, resume)
         if _resolved_probe is None and resume_err:
             print(f"halo: --resume: {resume_err}", file=sys.stderr)
-            return 2
+            return _pm_title_exit(2)
 
     # u2-h3b finding 9: everything through a ready-to-drive Session is now
     # the ONE shared builder both -p and the TUI call -- see
@@ -1617,3 +1636,10 @@ def run_print_mode(
         # in. Pulled into its own function (below) so the decision itself
         # is unit-testable without driving a whole print-mode session.
         maybe_remove_worktree_on_exit(cli_flags, session)
+        # Halo 2.0.2 W7 round 1 (brief F): restores whatever title was
+        # there before this run started (a no-op when nothing was
+        # captured) -- last, after every other cleanup above, on every
+        # exit path this outer `finally` already covers (a normal
+        # return, an early stream-json `return 2`, or an exception).
+        if _pm_prev_title is not None:
+            set_terminal_title(_pm_prev_title)

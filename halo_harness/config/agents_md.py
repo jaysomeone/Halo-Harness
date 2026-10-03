@@ -25,7 +25,7 @@ from typing import Optional
 from halo_harness.config.frontmatter import parse as parse_frontmatter
 from halo_harness.config.paths import find_git_root, home, managed_dir
 
-BUILTIN_NAMES = ("general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher")
+BUILTIN_NAMES = ("general-purpose", "Explore", "Plan", "Coder", "Reviewer", "Researcher", "Judge", "Tester")
 
 
 def _split_tools(value) -> Optional[list]:
@@ -128,17 +128,17 @@ class AgentSpec:
 def _builtin_specs() -> "dict[str, AgentSpec]":
     explore_tools = ["Read", "Glob", "Grep", "Bash", "WebFetch", "ToolSearch"]
     research_tools = explore_tools + ["WebSearch"]
-    # V2c (H15): every built-in gets a `role=` so it resolves its model from
-    # `roles.py`'s table (config.json/team.json, or the cost-aware default)
-    # unless its OWN file sets `model:` (none of these do) -- brief: "Built-
-    # in agents general-purpose, Explore, Plan plus new Coder, Reviewer,
-    # Researcher resolve their model from the role table". `general-purpose`
-    # gets "orchestrator" (an absent/empty table entry for it just means
-    # "the session model", its documented default anyway); `Explore` and the
-    # new `Researcher` share "researcher" (cheap/exploration); `Plan` and
-    # the new `Reviewer` share "reviewer" (strong/planning+review, per the
-    # brief's own "strong model for planning and review" pairing); `Coder`
-    # gets its own "coder" role.
+    # V2c (H15)/Halo 2.0.2 (brief A.1): every built-in gets a `role=` so it
+    # resolves its model from `roles.py`'s table (config.json/team.json, or
+    # the cost-aware default) unless its OWN file sets `model:` (none of
+    # these do). `general-purpose` gets "orchestrator" (an absent/empty
+    # table entry for it just means "the session model", its documented
+    # default anyway); `Explore` and `Researcher` share "researcher"
+    # (cheap/exploration); `Coder` gets its own "coder" role; `Reviewer`
+    # keeps "reviewer" (strong/review). 2.0.2: `Plan` moves to its OWN new
+    # "planner" role (was "reviewer") -- brief A.1 "the Plan agent type
+    # resolves through planner"; `Judge` and `Tester` are new built-ins on
+    # the two new matching roles.
     return {
         "general-purpose": AgentSpec(
             name="general-purpose",
@@ -176,7 +176,7 @@ def _builtin_specs() -> "dict[str, AgentSpec]":
                 "critical files, architectural trade-offs. Read-only (Explore's tool set) and skips "
                 "CLAUDE.md."
             ),
-            tools=list(explore_tools), omit_claude_md=True, role="reviewer",
+            tools=list(explore_tools), omit_claude_md=True, role="planner",
             body=(
                 "You are a planning sub-agent. Research using Read/Glob/Grep/Bash/WebFetch/ToolSearch, "
                 "then report a concrete, step-by-step implementation plan in your final answer -- "
@@ -227,6 +227,43 @@ def _builtin_specs() -> "dict[str, AgentSpec]":
                 "investigate the question thoroughly -- never edit or write anything. Report a clear, "
                 "self-contained answer; when the task asks for a specific fact (a count, a file path, a "
                 "yes/no), lead with exactly that."
+            ),
+            source="built-in",
+        ),
+        # Halo 2.0.2 brief A.1: "`Judge` and `Tester` join the built-in
+        # agent map with one-paragraph system prompts" -- judge adjudicates
+        # candidate outputs or verifies results against acceptance
+        # criteria (organization flows in a later round, and a direct
+        # `Agent(role="judge")`/`Agent(subagent_type="Judge")` call today);
+        # tester runs the named suites/live checks and reports verbatim.
+        "Judge": AgentSpec(
+            name="Judge",
+            description=(
+                "Adjudication agent: given one or more candidate outputs (or a result plus acceptance "
+                "criteria), decides pass/fail with reasons. Read-only (Explore's tool set) and skips "
+                "CLAUDE.md."
+            ),
+            tools=list(explore_tools), omit_claude_md=True, role="judge",
+            body=(
+                "You are a judging sub-agent. Adjudicate the candidate outputs you were given, or verify "
+                "the result you were given against the stated acceptance criteria -- use Read/Glob/Grep/"
+                "Bash/WebFetch/ToolSearch to check any claim you are not already certain of, never edit or "
+                "write anything. Report a clear pass/fail (or which candidate wins) and your reasons."
+            ),
+            source="built-in",
+        ),
+        "Tester": AgentSpec(
+            name="Tester",
+            description=(
+                "Verification agent: runs the named test suite(s) and any live checks asked for, and "
+                "reports the results. Has Bash plus Explore's read-only tools; skips CLAUDE.md."
+            ),
+            tools=list(explore_tools), omit_claude_md=True, role="tester",
+            body=(
+                "You are a testing sub-agent. Run exactly the suites and live checks you were asked to run "
+                "(Bash), and report their results verbatim -- pass/fail counts, the first failure's output "
+                "in full, and anything that errored before producing a result. Never edit or write "
+                "anything, and never soften or summarize away a failure."
             ),
             source="built-in",
         ),
@@ -389,15 +426,34 @@ def resolve_agent_model(*, invocation_model: Optional[str] = None, frontmatter_m
     defaults to None/{}, so an old caller that passes none of them behaves
     byte-for-byte as before)."""
     from halo_harness.model import ModelRef, parse_model_ref, resolve_model_profile
+    from halo_harness.roles import role_value_parts
 
     env = env or {}
     role_table = role_table or {}
     cli_role_overrides = cli_role_overrides or {}
-    role_cli_raw = cli_role_overrides.get(role_name) if role_name else None
-    role_table_raw = role_table.get(role_name) if role_name else None
-    raw = (invocation_model or role_cli_raw or frontmatter_model or role_table_raw
+    # Halo 2.0.2 (brief A.2): a role-table/CLI-override VALUE may now be
+    # `{"model", "effort"}` rather than a bare string -- `role_value_parts`
+    # is the one place that unpacks either shape; only the model half
+    # belongs in this function's own chain (the effort half is applied
+    # separately, alongside this call, by `agent/subagent.py`'s own
+    # `roles.role_effort_for` -- keeping this function's return shape a
+    # stable 2-tuple for every existing caller).
+    role_cli_model, _cli_effort = role_value_parts(cli_role_overrides.get(role_name) if role_name else None)
+    role_table_model, _table_effort = role_value_parts(role_table.get(role_name) if role_name else None)
+    # Halo 2.0.2 (brief A.1): `subagent_default` is the last rung before
+    # the parent/session model, and ONLY for a sub-agent with NO role
+    # name at all (`role_name` falsy) -- a role-bearing agent with
+    # nothing configured for ITS OWN role still means "the session
+    # model" unchanged; `subagent_default` is deliberately never consulted
+    # for it (that would blur "this role has no override" with "no role
+    # at all").
+    subagent_default_cli, _ = role_value_parts(cli_role_overrides.get("subagent_default"))
+    subagent_default_table, _ = role_value_parts(role_table.get("subagent_default"))
+    subagent_default_model = subagent_default_cli or subagent_default_table
+    raw = (invocation_model or role_cli_model or frontmatter_model or role_table_model
            or env.get("CLAUDE_CODE_SUBAGENT_MODEL")
-           or (settings.subagent_model if settings is not None else None))
+           or (settings.subagent_model if settings is not None else None)
+           or (subagent_default_model if not role_name else None))
     if not raw or raw == "inherit":
         return parent_ref, parent_profile
     if raw == "haiku":

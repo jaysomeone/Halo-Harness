@@ -1301,6 +1301,211 @@ def test_completion_popup_tab_still_accepts_the_highlighted_entry(ctx: Ctx):
 
 
 @test
+def test_role_command_arg_completion_tab_inserts_the_matching_role_name(ctx: Ctx):
+    """Halo 2.0.2 brief A.4: `/role <name> ...` tab-completes the role
+    NAME argument (not just the command name itself) -- "cod" ranks
+    "coder" (the only built-in role starting with it) and Tab inserts it
+    with no leading "/" (unlike ordinary slash-command completion)."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/role cod")
+            await pilot.pause(0.1)
+            ctx.check("the popup is open for the role-name argument", app.completion_popup.display)
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            ctx.check(f"'coder' inserted with no leading slash, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "/role coder ")
+    asyncio.run(body())
+
+
+@test
+def test_role_command_arg_completion_model_then_effort_slots(ctx: Ctx):
+    """The SECOND argument completes against `controller.list_models()`
+    (here, `FakeController`'s own bare-string list); the THIRD completes
+    against effort levels. Both via the SAME `/role` line, proving the
+    argument index advances correctly as the user keeps typing."""
+    async def body():
+        fake = FakeController(model="or:vendor/my-model")
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/role coder or:vendor/my-m")
+            await pilot.pause(0.1)
+            ctx.check(f"model argument completion is open, got items={app._completion_items!r}",
+                      app.completion_popup.display and "or:vendor/my-model" in app._completion_items)
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            ctx.check(f"the model ref was inserted, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "/role coder or:vendor/my-model ")
+            await _type(pilot, "hi")
+            await pilot.pause(0.1)
+            ctx.check(f"effort argument completion is open, got items={app._completion_items!r}",
+                      app.completion_popup.display and "high" in app._completion_items)
+    asyncio.run(body())
+
+
+def _scoped_state_dir_env(prefix: str) -> "tuple[dict, Path]":
+    """Snapshot the two state-dir env vars, set both to a fresh scratch
+    dir, and return `(old_values, scratch_home)` for the caller's own
+    `finally` block to restore -- the exact pattern the pre-existing
+    `/model` persistence pilot above already uses, factored out so the
+    roles-editor pilots below don't repeat it three times."""
+    scratch_home = Path(tempfile.mkdtemp(prefix=prefix))
+    old = {"BRIDGE_TEST_HOME": os.environ.get("BRIDGE_TEST_HOME"), "BRIDGE_STATE_DIR": os.environ.get("BRIDGE_STATE_DIR")}
+    os.environ["BRIDGE_TEST_HOME"] = str(scratch_home)
+    os.environ["BRIDGE_STATE_DIR"] = str(scratch_home / ".halo")
+    return old, scratch_home
+
+
+def _restore_state_dir_env(old: dict) -> None:
+    for k, v in old.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+@test
+def test_roles_edit_opens_the_form_with_one_row_per_role(ctx: Ctx):
+    """Halo 2.0.2 brief A.5: `/roles edit <name>` on a template that
+    doesn't exist yet creates an empty one and opens the form -- every
+    built-in role gets its own row, shown as unset."""
+    from halo_harness.roles import ROLE_NAMES
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("roles-editor-open-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/roles edit demo-profile")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, RolesEditor):
+                        break
+                ctx.check(f"RolesEditor opened, got {type(app.screen).__name__}", isinstance(app.screen, RolesEditor))
+                option_ids = [str(o.id) for o in app.screen.query_one("#roles-list").options]
+                ctx.check(f"one row per built-in role, got {option_ids}", set(ROLE_NAMES) <= set(option_ids))
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_roles_edit_pick_model_set_effort_then_save_persists_to_disk(ctx: Ctx):
+    """Picking a model for a row (via the SAME ModelPicker /model uses),
+    then an effort, then ctrl+s -- the template file on disk reflects it."""
+    from halo_harness.roles import load_role_template
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("roles-editor-save-")
+        try:
+            fake = FakeController(model="or:vendor/pickable-model")
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/roles edit demo-profile")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, RolesEditor):
+                        break
+                editor = app.screen
+                editor.query_one("#roles-list").highlighted = 0  # "orchestrator", the first built-in row
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"the nested ModelPicker opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, ModelPicker))
+                await pilot.press("enter")  # accepts the (only) filtered model
+                await pilot.pause(0.1)
+                ctx.check("back on the RolesEditor after picking", app.screen is editor)
+                await _type(pilot, "high")
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                ctx.check(f"the row now shows the picked model+effort, got {editor.roles.get('orchestrator')}",
+                          editor.roles.get("orchestrator") == {"model": "or:vendor/pickable-model", "effort": "high"})
+                await pilot.press("ctrl+s")
+                await pilot.pause(0.05)
+                saved = load_role_template("demo-profile")
+                ctx.check(f"persisted to disk, got {saved}",
+                          saved is not None
+                          and saved["roles"].get("orchestrator") == {"model": "or:vendor/pickable-model", "effort": "high"})
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_roles_edit_escape_cancels_without_saving(ctx: Ctx):
+    from halo_harness.roles import list_role_templates
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("roles-editor-cancel-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/roles edit never-saved")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, RolesEditor):
+                        break
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+                ctx.check("the editor screen closed", not isinstance(app.screen, RolesEditor))
+                ctx.check(f"nothing was ever written to disk, got {list_role_templates()}",
+                          list_role_templates() == [])
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_roles_edit_routes_to_external_editor_when_configured(ctx: Ctx):
+    """Halo 2.0.2 brief A.5: `roles.editor: "external"` -- routing only
+    (never drives a real `$EDITOR`/`app.suspend()` under the headless
+    pilot harness, which has no real terminal to suspend to)."""
+    from halo_harness.tui import slash as slash_mod
+
+    async def body():
+        old, _home = _scoped_state_dir_env("roles-editor-external-")
+        try:
+            from halo_harness.theme import set_config_value
+            set_config_value("roles.editor", "external")
+            calls = []
+            orig = slash_mod._edit_role_template_externally
+            slash_mod._edit_role_template_externally = lambda app, name: calls.append(name)
+            try:
+                fake = FakeController()
+                app = await _mounted(fake)
+                async with app.run_test(size=(100, 40)) as pilot:
+                    await pilot.click("#prompt-input")
+                    await _type(pilot, "/roles edit demo-profile")
+                    await pilot.press("enter")
+                    await pilot.pause(0.1)
+                    ctx.check(f"routed to the external-editor path, got {calls}", calls == ["demo-profile"])
+            finally:
+                slash_mod._edit_role_template_externally = orig
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
 def test_at_path_completion_down_down_enter_inserts_third_entry(ctx: Ctx):
     from halo_harness.tui.widgets.input import CompletionPopup
 
@@ -3212,6 +3417,101 @@ def test_cc_route_permission_card_in_default_mode_runs_after_allow(ctx: Ctx):
                         break
                 ctx.check("the bridged Write ran after allow", target.exists() and target.read_text(encoding="utf-8") == "hi\n")
         finally:
+            if controller is not None:
+                try:
+                    controller.quit()
+                except Exception:
+                    pass
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
+@test
+def test_terminal_title_reasserted_after_a_fake_claude_child_exits(ctx: Ctx):
+    """Halo 2.0.2 W7 round 1 (brief F): a real TUI pilot on a `cc:`
+    session (same real-Controller/real-Session/fake-`claude`-binary setup
+    as the permission-card pilot above) -- `halo_harness.termtitle.
+    set_terminal_title` is monkeypatched to record calls instead of
+    touching the real console, cleared right after the app mounts (its
+    own `on_mount` already asserts "halo" once, at startup -- not what
+    this test is about), and the real assertion is that quitting the
+    controller (which closes the cc: subprocess -- `ClaudeCodeProcess.
+    wait()` -- the moment this fake `claude` child is confirmed exited)
+    re-asserts "halo" again, proving the spawn-site hook actually fires."""
+    import argparse
+
+    from halo_harness import termtitle
+
+    async def body():
+        fh = build_fake_home()
+        fake = Path(__file__).resolve().parent / "tests" / "helpers" / "fake_claude_cc.py"
+        env_keys = ("BRIDGE_TEST_HOME", "BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS")
+        old_env = {k: os.environ.get(k) for k in env_keys}
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_CLAUDE_EXE"] = '"' + sys.executable + '" "' + str(fake) + '"'
+        os.environ["FAKE_CLAUDE_CC_LOGGED_IN"] = "1"
+        os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
+        controller = None
+        titles_set: list = []
+        orig_set_terminal_title = termtitle.set_terminal_title
+        termtitle.set_terminal_title = lambda title, stream=None: titles_set.append(title)
+        # H202: these two module-level counters are process-wide (by
+        # design -- see termtitle.py's own docstring) -- an EARLIER test
+        # in this same `python test_tui.py` process run (any other cc:
+        # pilot that closes a real ClaudeCodeProcess) can leave a pending,
+        # not-yet-consumed exit signal that this test's own first drain
+        # tick would otherwise pick up, adding a spurious extra "halo"
+        # before this test ever sends a prompt. Reset to a clean, synced
+        # state here so this test's own startup assertion below is
+        # deterministic regardless of what ran before it in this process.
+        old_exit_counters = (termtitle._claude_child_exit_seen, termtitle._claude_child_exit_handled)
+        termtitle._claude_child_exit_seen = termtitle._claude_child_exit_handled = 0
+        try:
+            from halo_harness.tui.bootstrap import build_controller
+
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="default", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="cc:fable", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause(0.05)
+                # At least once: on Linux the startup worker's own fake
+                # `claude` probe can already have exited by now, adding a
+                # second, equally correct "halo" (seen on the Kali VM).
+                ctx.check(f"on_mount asserted halo at startup, got {titles_set!r}",
+                          bool(titles_set) and set(titles_set) == {"halo"})
+                titles_set.clear()  # this test is about the POST-CHILD re-assert, not startup's own
+                await pilot.click("#prompt-input")
+                await _type(pilot, "pong")
+                await pilot.press("enter")
+                for _ in range(400):  # the fake claude's first start (mcp SDK import) can take a few seconds
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if not app._turn_running:
+                        break
+                ctx.check("the turn actually finished", not app._turn_running)
+            # Closing the controller tears down the cc: subprocess
+            # (session.close_cc() -> ClaudeCodeProcess.wait()), the exact
+            # moment halo_harness.termtitle.reassert_after_claude_child
+            # fires (see agent/cc_process.py's own hook).
+            controller.quit()
+            controller = None
+            ctx.check(f"'halo' was re-asserted after the claude child exited, got {titles_set!r}",
+                      "halo" in titles_set)
+        finally:
+            termtitle.set_terminal_title = orig_set_terminal_title
+            termtitle._claude_child_exit_seen, termtitle._claude_child_exit_handled = old_exit_counters
             if controller is not None:
                 try:
                     controller.quit()
