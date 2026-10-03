@@ -120,4 +120,12 @@ the authority for the order after 2.0.2.
   editors embedded, skip for later) and `halo setup roles|orgs` plus
   `/setup` to reopen those screens from the CLI or inside halo. Brief:
   `2.0.2-round7-init-wizard-brief.md`.
+- Round 7 additions (rolo 2026-10-03): a Theme step, roles/orgs mode
+  switches, and the org features borrowed from Paperclip (templates with
+  preview and install, budgets with warning and hard stop, goals on the
+  task board, approval gates per position, export/import, `/org resume`).
+  Later, from the same source: scheduled routines and heartbeats (cron,
+  webhook, API triggers), other agent runtimes as positions (after the
+  2.0.4 Codex route), a web dashboard; its private LAN/Tailscale mode
+  feeds the 3.0.1.1 research.
 

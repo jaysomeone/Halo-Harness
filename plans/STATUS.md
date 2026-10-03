@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~16:25)
+# Status board (updated 2026-10-03 ~16:40)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -39,7 +39,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] D (c93480d, round 4): `/mcp` keys r/R/a/l/L/e/i/d/t with legend, reasons and fix lines, per-server logs, reconnect backoff ladder, `halo mcp fix|test`, inline entry form; three platforms green (2744 tests; install-hint path split fixed for Linux), live Kali dialog + CLI on a scratch home with failing servers
 - [~] E (round 5 RUNNING, `2.0.2-round5-qwen-brief.md`): Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
 - [ ] Round 6 (rolo 2026-10-03, `2.0.2-round6-update-brief.md`): `halo update` (check/apply, install kind detection, other-session guard), `/update` with update-and-restart, `halo --version` shows the commit, startup update note, `scripts/install-halo.ps1`, README + docs/INSTALL.md rewritten as clear fresh-install and update steps
-- [ ] Round 7 (rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), roles step with template presets and the editor, organizations step with default org and the editor, `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
+- [ ] Round 7 (rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
 - [ ] Release 2.0.2
 
 ## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
