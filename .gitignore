@@ -7,6 +7,14 @@ __pycache__/
 *.pyc
 .DS_Store
 routes.json
+
+# Local credentials and provider login state must never be published.
+.env
+.env.*
+!.env.example
+auth.json
+.credentials.json
+
 *.egg-info/
 requirements.lock.tmp
 .playwright-mcp/
