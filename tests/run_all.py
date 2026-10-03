@@ -184,6 +184,14 @@ def _real_sessions_snapshot() -> "set[str]":
 
 
 def main() -> int:
+    # Line-buffered output even when redirected to a file: a run that is
+    # killed mid-way must leave its last real line on disk, not a stale
+    # module header from a block buffer (that misled a Kali investigation).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     # NEW (post-H9 acceptance): see runner.py's own docstring on this pair
     # -- every tempfile.mkdtemp() call for the rest of this process (every
     # test module this run imports/executes) is tracked and swept up once,

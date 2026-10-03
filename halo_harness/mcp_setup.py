@@ -219,6 +219,7 @@ def build_manager(
     chrome: bool = False, playwright: bool = False,
     playwright_cdp: Optional[str] = None, playwright_headless: bool = False,
     bypass_mode: bool = False, start: bool = True, trusted: bool = True,
+    extra_plugin_roots: Optional[list] = None,
 ):
     """`(manager_or_None, notices)`. `manager` is None ONLY when the `mcp`
     package itself isn't installed (`halo_harness.mcp.available()` False)
@@ -258,8 +259,12 @@ def build_manager(
     from halo_harness.config.plugins import discover_plugin_mcp_servers
     # finding 8: `cwd` threaded through so a V2 project/local-scoped
     # plugin record (`projectPath`) is matched against THIS session's own
-    # working directory, not silently dropped.
-    plugin_servers, plugin_notices = discover_plugin_mcp_servers(env=base_env, settings=settings, cwd=cwd)
+    # working directory, not silently dropped. `extra_plugin_roots` (W5,
+    # carried from W4a) is `--plugin-dir`/`--plugin-url`'s own resolved
+    # directories -- merged in exactly like an installed plugin's servers.
+    plugin_servers, plugin_notices = discover_plugin_mcp_servers(
+        env=base_env, settings=settings, cwd=cwd, extra_roots=extra_plugin_roots,
+    )
     notices.extend(plugin_notices)
 
     configs, resolve_notices = resolve_server_configs(

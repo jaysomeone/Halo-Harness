@@ -344,9 +344,9 @@ can invoke for them -- `command` (shell), `prompt` (inject text), `agent`
 (run a sub-agent), `http` (call a URL), `mcp_tool` (call a tool on a
 configured MCP server) -- is wired. A settings.json/hooks.json entry for a
 name Claude Code also recognizes but this build doesn't fire yet
-(`WorktreeRemoved`, `ElicitationRequest`, `ElicitationResponse` -- see
-`hooks.py`'s own `NOT_EMITTED_V1`) parses fine and is silently never
-triggered, rather than erroring.
+(`ElicitationRequest`, `ElicitationResponse` -- see `hooks.py`'s own
+`NOT_EMITTED_V1`) parses fine and is silently never triggered, rather than
+erroring.
 
 **Skills and custom commands**: discovered from both user and project
 directories exactly like `claude`; a skill's/command's body can reference
@@ -419,11 +419,13 @@ matches, or (print mode) lists the ambiguous candidates instead of
 silently guessing, or (interactive) opens that same picker pre-filtered by
 `<text>`; `--fork-session` continues from one without overwriting it;
 `-n`/`--name` labels a session. `/rewind` (and the TUI's undo) restores both the
-conversation log and any file a Write/Edit touched, via a shadow-copy
-mechanism scoped to those two tools by design -- a Bash- or NotebookEdit-
-made change is not shadow-copied and `/rewind` won't undo it (detecting
-which files a shell command touched would need a blocking `git status`
-call; see `tui/dispatch.py`'s `_maybe_record_shadow_step`). Auto-compaction
+conversation log and any file a Write/Edit/NotebookEdit touched, via a
+shadow-copy mechanism, plus a Bash command's own file changes in a git repo
+cwd (a `git status` diff before and after the command catches both a
+brand-new file and a pre-existing tracked file the command modified; a
+non-git cwd, a file already dirty before the command, and a rename/copy are
+the documented limits -- see `tui/dispatch.py`'s `_maybe_record_shadow_step`/
+`_bash_shadow_after_worker`). Auto-compaction
 triggers well before the model's real context ceiling (an 80%-of-usable
 default, floored so a small-context open-weight model still gets a
 sensible trigger point instead of ~0), summarizing older turns while

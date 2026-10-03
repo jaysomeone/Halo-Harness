@@ -263,6 +263,60 @@ class ShadowStore:
         return self.steps[self.cursor + 1]
 
 
+#  Porcelain v1 status codes meaning "this path has real, uncommitted
+# CONTENT on disk right now" for a previously-TRACKED file -- used by
+# `git_status_dirty_paths` below. Deliberately excludes a bare delete
+# ("D", no resulting content to shadow-copy at all) and a rename/copy
+# ("R"/"C" -- the NUL-delimited porcelain format emits the OLD path as a
+# second token with no inline marker, which `git_status_dirty_paths`'s
+# single-token-per-entry parse below does not attempt to disambiguate; the
+# same "documented limit" the untracked-only v1 parse already carried for
+# anything past its own narrow `??` filter).
+_MODIFIED_TRACKED_CODES = frozenset({"M ", " M", "MM", "A ", "AM"})
+
+
+def git_status_dirty_paths(cwd) -> "Optional[dict]":
+    """W5 (carried from W4a): the FULL picture `git_status_untracked_paths`
+    (below) only ever gave half of -- `{absolute_path_str: status_code}`
+    for every `git status --porcelain=v1` entry that means "this path has
+    real, uncommitted content on disk right now": untracked (`??`) AND a
+    pre-existing TRACKED file with real worktree/index changes
+    (`_MODIFIED_TRACKED_CODES`). `None` under the exact same conditions
+    `git_status_untracked_paths` already documents (not a git repo, `git`
+    itself unreachable, or the call times out).
+
+    `tui/dispatch.py`'s own before/after Bash-shadow workers call this
+    once on each side of a command and diff the two dicts BY KEY (a path
+    present after but not before) -- this is what finally captures "a
+    command modified an already-tracked file" (W4a's own documented scope
+    cut): a path that was ALREADY dirty before the command ran is excluded
+    either way (same key in both dicts), the one residual limitation this
+    bounded before/after diff still carries (it cannot tell a file that was
+    modified, then modified AGAIN by this command, from one left alone --
+    both show the same status code on both sides)."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out: dict = {}
+    for entry in (result.stdout or "").split("\x00"):
+        if len(entry) < 4:
+            continue
+        code, rel = entry[:2], entry[3:]
+        if not rel or (code != "??" and code not in _MODIFIED_TRACKED_CODES):
+            continue
+        try:
+            out[str((Path(cwd) / rel).resolve())] = code
+        except OSError:
+            continue
+    return out
+
+
 def git_status_untracked_paths(cwd) -> "Optional[set]":
     """W4a: the Bash half of "Bash and NotebookEdit changes are shadow-
     copied via a git status diff before and after the command when the cwd
@@ -275,32 +329,16 @@ def git_status_untracked_paths(cwd) -> "Optional[set]":
     `git` itself isn't reachable, or the call times out -- the documented
     limit for a non-git directory (no shadow-copy for Bash there at all).
 
-    Scoped to UNTRACKED files only (v1): a brand-new file is unambiguous
-    evidence "this command created it"; detecting a MODIFIED pre-existing
-    TRACKED file needs the status code read more carefully (was it already
-    dirty before this command ran?) than this bounded first pass covers --
-    a documented scope cut, see the worker report."""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            cwd=str(cwd), capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+    W5: implemented via `git_status_dirty_paths` now (one subprocess call/
+    parse shared with the tracked-modified case below) -- the public
+    contract here (a bare set of untracked-only paths, `None` outside a
+    repo) is UNCHANGED, so every existing caller/test keeps working byte-
+    for-byte; `tui/dispatch.py`'s own Bash-shadow workers call
+    `git_status_dirty_paths` directly now for the fuller picture."""
+    dirty = git_status_dirty_paths(cwd)
+    if dirty is None:
         return None
-    if result.returncode != 0:
-        return None
-    out: set = set()
-    for entry in (result.stdout or "").split("\x00"):
-        if not entry.startswith("??"):
-            continue
-        rel = entry[3:]
-        if not rel:
-            continue
-        try:
-            out.add(str((Path(cwd) / rel).resolve()))
-        except OSError:
-            continue
-    return out
+    return {p for p, code in dirty.items() if code == "??"}
 
 
 def store_for_controller(controller) -> "Optional[ShadowStore]":

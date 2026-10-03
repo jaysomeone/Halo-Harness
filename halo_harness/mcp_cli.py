@@ -152,9 +152,25 @@ def _cmd_list(rest: list) -> int:
     # servers configured." with no context. Never allowed to crash `mcp
     # list` itself (same contract as the health check below).
     try:
+        from halo_harness.mcp import connectors_bridge
         if args.refresh:
-            from halo_harness.mcp import connectors_bridge
             connectors_bridge.refresh_now()
+        else:
+            # W5 ("connector cold start"): without --refresh, still do ONE
+            # bounded synchronous discovery when the cache is genuinely
+            # empty (a no-op otherwise -- see the function's own gating),
+            # so a fresh box's first `halo mcp list` shows the real
+            # connectors instead of needing --refresh once first. Eligibility
+            # reads the cached claude.ai login, and a fresh process has no
+            # cache yet, so prime it first the way `halo providers` does
+            # (gateway-driven `claude` is never spawned by that refresh).
+            try:
+                from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+                if cached_auth_status_is_stale():
+                    refresh_cached_claude_auth_status()
+            except Exception:
+                pass
+            connectors_bridge.ensure_discovered_synchronously_if_cold()
         from halo_harness.mcp import explain
         for line in explain.explain_lines(cwd=cwd, claude_json=claude_json, settings=settings):
             print(line)

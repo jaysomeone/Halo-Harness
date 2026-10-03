@@ -175,6 +175,44 @@ def ensure_discovered_in_background(*, timeout: float = 20.0, on_done: "Optional
     return True
 
 
+def ensure_discovered_synchronously_if_cold(*, timeout: float = 20.0) -> bool:
+    """W5 (carried from W4b): "connector cold start" -- live on the Kali VM,
+    a FRESH print-mode call with an empty connectors cache had no
+    `connector__*` tools at all, because discovery only ever ran in the
+    BACKGROUND (`ensure_discovered_in_background`) and the session catalog
+    is frozen moments later, long before that thread could realistically
+    finish. Called from `headless.build_session`, right before the
+    catalog-freezing `connectors_bridge.get_connectors()` loop (both -p and
+    the TUI's first build go through that one shared function) and from
+    `halo mcp list` (without `--refresh`) before it explains the scopes, so
+    either one's very first look at connectors is the REAL list, not an
+    empty cache a background thread hadn't gotten to yet.
+
+    A no-op (returns False) unless the cache is genuinely empty AND
+    discovery is eligible (same `discovery_eligible()` gate
+    `ensure_discovered_in_background` uses: `claude` on PATH, bridge
+    enabled, and the CACHED auth status already says claude.ai login --
+    never a fresh `claude auth status` spawn of its own). Shares the SAME
+    once-per-session flag `ensure_discovered_in_background` does, so
+    whichever of the two runs FIRST in a given process satisfies the
+    other -- a session that already paid for a synchronous cold-start
+    discovery never also kicks off a redundant background one right after,
+    and vice versa."""
+    global _session_discovered
+    if background_net_disabled() or not discovery_eligible():
+        return False
+    connectors, _fetched_at = load_cache()
+    if connectors:
+        return False  # something real is already cached -- never block on it again
+    with _session_lock:
+        if _session_discovered:
+            return False
+        _session_discovered = True
+    fresh = discover_connectors_now(timeout=timeout)
+    save_cache(fresh)
+    return True
+
+
 def refresh_now(*, timeout: float = 20.0) -> "list[ConnectorInfo]":
     """Synchronous, forced refresh (`halo mcp list --refresh`, `/mcp`
     reconnect) -- ignores the once-per-session gate and any existing cache."""

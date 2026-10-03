@@ -47,7 +47,11 @@ def _make_run(body: str, allowed_tools: list):
     return _run
 
 
-def _discover_dir(commands_dir: Path, *, source: str) -> list:
+def _discover_dir(commands_dir: Path, *, source: str, name_prefix: Optional[str] = None) -> list:
+    """`name_prefix` (W5, carried from W4a: a plugin root's own `commands/`
+    tree) renames each command `<name_prefix>:<rel-path-name>`, the same
+    `<plugin>:<name>` convention `commands/skills.py`'s own plugin skills
+    use (binary-facts sec.11)."""
     if not commands_dir.is_dir():
         return []
     out = []
@@ -61,6 +65,8 @@ def _discover_dir(commands_dir: Path, *, source: str) -> list:
         fm, body = parse_frontmatter(raw)
         fm = fm if isinstance(fm, dict) else {}
         name = _namespaced_name(commands_dir, path)
+        if name_prefix:
+            name = f"{name_prefix}:{name}"
         out.append(SlashCommand(
             name=name, description=fm.get("description", "") or "", kind="prompt",
             argument_hint=fm.get("argument-hint"), source="custom", path=path,
@@ -69,10 +75,15 @@ def _discover_dir(commands_dir: Path, *, source: str) -> list:
     return out
 
 
-def register_custom_commands(reg: Registry, *, cwd: Path, home: Optional[Path] = None) -> None:
+def register_custom_commands(reg: Registry, *, cwd: Path, home: Optional[Path] = None,
+                              plugin_roots: Optional[list] = None) -> None:
     """Project `.claude/commands/**/*.md` registered first, so it wins a
     same-namespaced collision against the user's own copy (`Registry.add`
-    never replaces an existing entry); then `~/.claude/commands/**/*.md`."""
+    never replaces an existing entry); then `~/.claude/commands/**/*.md`;
+    then each `plugin_roots` entry's own `commands/**/*.md` (W5, carried
+    from W4a: `--plugin-dir`/`--plugin-url`, Claude Code's plugin layout --
+    `<plugin_root>/commands/`, no `.claude/` wrapper, since the root itself
+    already IS the plugin's own directory)."""
     from halo_harness.config.paths import home as home_fn
 
     project_dir = Path(cwd) / ".claude" / "commands"
@@ -83,3 +94,10 @@ def register_custom_commands(reg: Registry, *, cwd: Path, home: Optional[Path] =
     user_dir = user_home / ".claude" / "commands"
     for cmd in _discover_dir(user_dir, source="user"):
         reg.add(cmd)
+
+    if plugin_roots:
+        from halo_harness.plugin_fetch import plugin_name_for_root
+        for root in plugin_roots:
+            prefix = plugin_name_for_root(root)
+            for cmd in _discover_dir(Path(root) / "commands", source="plugin", name_prefix=prefix):
+                reg.add(cmd)

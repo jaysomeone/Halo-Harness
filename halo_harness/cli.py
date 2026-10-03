@@ -379,6 +379,12 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "timeline":
         from halo_harness.bugreport_timeline_cli import cmd_timeline
         return cmd_timeline(argv[1:])
+    if argv and argv[0] == "worktree":
+        from halo_harness.worktree_cli import cmd_worktree
+        return cmd_worktree(argv[1:])
+    if argv and argv[0] == "bg":
+        from halo_harness.bg_cli import cmd_bg
+        return cmd_bg(argv[1:])
 
     parser = _build_parser()
     try:

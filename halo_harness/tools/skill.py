@@ -56,7 +56,7 @@ class SkillTool(Tool):
 
         from halo_harness.commands.skills import find_skill
 
-        cmd = find_skill(skill_name, Path(ctx.cwd))
+        cmd = find_skill(skill_name, Path(ctx.cwd), plugin_roots=getattr(ctx, "plugin_roots", None))
         if cmd is None:
             return ToolResult(
                 f"No skill named {skill_name!r} was found (checked project .claude/skills, "

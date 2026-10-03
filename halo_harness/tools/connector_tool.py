@@ -68,7 +68,15 @@ class ConnectorTool(Tool):
         self.info = info
         self.slug = info.slug
         self.name = f"connector__{info.slug}"
-        tool_list = ", ".join(sorted(info.tools)) if info.tools else "(tool list not yet discovered)"
+        # W5 (carried from W4b): seen live on the Kali VM -- the cached
+        # `tools` list was empty because the one-shot `claude -p
+        # --output-format stream-json` init-line discovery never captured
+        # any `mcp__claude_ai_<name>__<tool>` names for this connector (a
+        # slow/odd claude.ai response, or discovery simply hasn't run yet).
+        # Says WHEN they'll show up (the next real call, not some separate
+        # background step the user has to wait on or trigger) rather than
+        # leaving "not yet discovered" sounding like a stuck state.
+        tool_list = ", ".join(sorted(info.tools)) if info.tools else "(tool names are learned on first use)"
         self.description = (
             f'Proxy a request to the claude.ai "{info.name}" connector through Claude Code. '
             f"Describe what to do in plain words; `tool` optionally names one of this connector's "

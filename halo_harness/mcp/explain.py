@@ -90,15 +90,35 @@ def other_project_mcp_jsons(*, cwd: Path, claude_json: dict, limit: int = 5) -> 
 
 
 def connector_lines() -> "list[str]":
-    """claude.ai connectors `claude` itself reports -- cache-only (never
-    spawns anything from a display call); one `unavailable_reason()` line
-    instead of silence when there's nothing to show and a reason why."""
+    """claude.ai connectors `claude` itself reports. `explain_lines`'s own
+    caller (`halo mcp list` without `--refresh`) already ran `connectors_
+    bridge.ensure_discovered_synchronously_if_cold()` first, so by the time
+    THIS reads the cache it's real whenever discovery was eligible at all
+    -- this is cache-only and never spawns anything itself, for `/mcp`
+    (no cold-start call of its own; always cache-only) and any other
+    caller that skips that step.
+
+    W5 ("connector cold start" / `halo mcp list` without `--refresh`):
+    `unavailable_reason()` returns `None` whenever discovery LOOKS eligible
+    (bridge enabled, `claude` installed, not gateway-driven, no confirmed
+    "not a claude.ai login") -- including the exact moment right after a
+    fresh cache file is written with zero entries (a real claude.ai login
+    with genuinely no connectors configured, or a synchronous cold-start
+    discovery that just ran and found nothing). Never silence in that
+    state either -- mirrors doctor's own `_check_mcp_connectors` wording
+    exactly, so the three surfaces (`/mcp`, `halo mcp list`, doctor) never
+    disagree about what an empty-but-eligible cache means."""
     from halo_harness.mcp import connectors_bridge
     connectors = connectors_bridge.get_connectors()
     if connectors:
         return [connectors_bridge.status_line(c) for c in connectors]
     reason = connectors_bridge.unavailable_reason()
-    return [reason] if reason else []
+    if reason:
+        return [reason]
+    if connectors_bridge.bridge_enabled() and connectors_bridge.claude_binary_available():
+        return ["claude.ai connectors: bridge enabled, none discovered yet (discovery runs in the "
+                "background on the next launch, or `halo mcp list --refresh` now)."]
+    return []
 
 
 def explain_lines(*, cwd: Path, claude_json: dict, settings=None) -> "list[str]":

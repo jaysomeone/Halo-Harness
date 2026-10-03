@@ -239,6 +239,41 @@ def test_taskcreated_and_taskcompleted_fire_for_a_subagent(ctx: Ctx):
         mock.stop()
 
 
+@test
+def test_taskcreated_and_taskcompleted_fire_for_a_background_bash_job(ctx: Ctx):
+    """W5 (carried from W4a): the OTHER half of "background jobs and
+    sub-agents" -- agent/jobs.py's own `_fire_task_hook` fires the SAME two
+    events on the PARENT session's hook_runner for a `run_in_background`
+    Bash job, naming the job id/command (and, on TaskCompleted, the job's
+    own exit status/code) -- never the child's, there is no child here."""
+    mock = MockUpstream().start()
+    try:
+        dump = Path(tempfile.mkdtemp(prefix="w4a-dump-")) / "dump.jsonl"
+        SCENARIOS["w4a-bgjob"] = ScriptedTurns([
+            _tool_call_step("Bash", {"command": "echo hi-from-bg", "run_in_background": True}),
+            _text_step("started it"),
+        ])
+        session = _new_session(mock=mock, model="or:mock/w4a-bgjob",
+                                hooks_by_event=_dump_hook(dump, ["TaskCreated", "TaskCompleted"]),
+                                env=_dump_env(dump))
+        _drain(session, "run it in the background")
+        deadline = time.monotonic() + 10.0
+        lines = _dump_lines(dump)
+        while time.monotonic() < deadline and not _events_named(lines, "TaskCompleted"):
+            time.sleep(0.05)
+            lines = _dump_lines(dump)
+        created = _events_named(lines, "TaskCreated")
+        completed = _events_named(lines, "TaskCompleted")
+        ctx.check(f"TaskCreated fired once naming the job id and command, got {created}",
+                  created and created[0].get("job_id", "").startswith("bash_")
+                  and "echo hi-from-bg" in created[0].get("command", ""))
+        ctx.check(f"TaskCompleted fired with the SAME job_id and an exit status, got {completed}",
+                  completed and completed[0].get("job_id") == created[0].get("job_id")
+                  and completed[0].get("status") == "completed" and completed[0].get("exit_code") == 0)
+    finally:
+        mock.stop()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

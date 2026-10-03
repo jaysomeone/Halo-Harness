@@ -164,8 +164,8 @@ def _start_bash_shadow_before(app, tool_id) -> None:
 
 
 def _bash_shadow_before_worker(app, tool_id) -> None:
-    from halo_harness.shadow import git_status_untracked_paths
-    before = git_status_untracked_paths(app.cwd)
+    from halo_harness.shadow import git_status_dirty_paths
+    before = git_status_dirty_paths(app.cwd)
     store = getattr(app, "_pending_bash_shadow_before", None)
     if store is not None and before is not None:
         store[tool_id] = before
@@ -178,12 +178,20 @@ def _maybe_record_bash_shadow_step(app, tool_id, name, input_data, ok: bool) -> 
     app.run_worker(lambda: _bash_shadow_after_worker(app, before), thread=True, name="shadow-bash-after")
 
 
-def _bash_shadow_after_worker(app, before: set) -> None:
-    from halo_harness.shadow import git_status_untracked_paths, store_for_controller
-    after = git_status_untracked_paths(app.cwd)
+def _bash_shadow_after_worker(app, before: dict) -> None:
+    """W5 (carried from W4a): `before`/`after` are now `git_status_
+    dirty_paths`'s own `{path: status_code}` dicts (untracked AND
+    tracked-modified), not just the old untracked-only set -- a path
+    present in `after` but not `before` is something THIS command made
+    dirty, whichever kind. `created` (W4a: "steps record files CREATED so
+    undo deletes them") stays scoped to the `??` subset -- a tracked file
+    that went from clean to modified pre-existed, so undo past this step
+    must restore its PRIOR content, never delete it."""
+    from halo_harness.shadow import git_status_dirty_paths, store_for_controller
+    after = git_status_dirty_paths(app.cwd)
     if after is None:
         return
-    new_paths = sorted(after - before)
+    new_paths = sorted(p for p in after if p not in before)
     if not new_paths:
         return
     try:
@@ -191,13 +199,17 @@ def _bash_shadow_after_worker(app, before: set) -> None:
         if store is None:
             return
         files = {}
+        created = []
         for p in new_paths:
             try:
                 files[p] = Path(p).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            if after.get(p) == "??":
+                created.append(p)
         if files:
-            store.record_step(files, label="Bash(new file(s))", trigger="tool", created=list(files))
+            label = "Bash(new file(s))" if len(created) == len(files) else "Bash(file changes)"
+            store.record_step(files, label=label, trigger="tool", created=created)
     except Exception:
         pass
 

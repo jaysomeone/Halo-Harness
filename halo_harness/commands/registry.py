@@ -105,15 +105,15 @@ class Registry:
         return [self._commands[name] for name in sorted(self._commands)]
 
     @staticmethod
-    def discover(cwd, home=None) -> "Registry":
+    def discover(cwd, home=None, *, plugin_roots: Optional[list] = None) -> "Registry":
         from halo_harness.commands.builtins import register_builtins
         from halo_harness.commands.custom import register_custom_commands
         from halo_harness.commands.skills import register_skills
 
         reg = Registry()
         register_builtins(reg)
-        register_custom_commands(reg, cwd=Path(cwd), home=home)
-        register_skills(reg, cwd=Path(cwd), home=home)
+        register_custom_commands(reg, cwd=Path(cwd), home=home, plugin_roots=plugin_roots)
+        register_skills(reg, cwd=Path(cwd), home=home, plugin_roots=plugin_roots)
         return reg
 
 

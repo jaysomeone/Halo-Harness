@@ -460,16 +460,17 @@ separate, simpler renderer (`halo_harness/ax_mode.py`) driving the same
 #### `--bg`, `--background`
 What: spawns this same invocation (forced to `-p`, since a detached process
 has no terminal a TUI could render into) as a background process; prints
-its id and a log file path, then returns immediately. A scoped-down v1:
-Claude Code's own `attach`/`logs`/`stop`/`rm` subcommands for a backgrounded
-session are not built -- the log file and the OS's own process tools (`kill`,
-Task Manager, ...) cover the same ground this round.
+its id and a log file path, then returns immediately. Manage it afterward
+with `halo bg list|logs|stop|rm` (below) -- the OS's own process tools
+(`kill`, Task Manager, ...) still work too, nothing here is exclusive.
 
 #### `--betas BETA [BETA ...]`
 What: one or more Anthropic beta feature names, sent as a comma-joined
-`anthropic-beta` request header -- real on any Anthropic-family route
-(`ant:`, `cc:` passthrough, a Databricks Claude foundation model); inert
-(never sent, never an error) on a chat-dialect route with no such header.
+`anthropic-beta` request header -- only on an Anthropic-family route
+(`ant:`, or a Databricks Claude foundation model specifically, i.e. the
+`anthropic-passthrough` dialect); accepted but never sent (no error) on
+any other route, including an ordinary Databricks-hosted chat-dialect
+model and OpenRouter.
 
 #### `--brief`
 What: adds the `SendUserMessage` tool to the session's catalog -- lets the
@@ -491,10 +492,15 @@ describes behaviour halo already has by default.
 
 #### `--fallback-model MODEL`
 What: one or more comma-separated fallback models, tried when the primary
-is exhausted-by-retries within a turn; reset to the primary at the start of
-each new user turn. As of 2.0.1 the fallback LIST is tracked on the session
-(`Session.fallback_models`/`apply_next_fallback_model`) but not yet wired
-into the live retry loop that decides when to swap -- see the CHANGELOG.
+is exhausted-by-retries within a turn; reset to the primary fallback LIST at
+the start of each new user turn. Wired into the live model-call retry
+ladder (`agent/loop.py::Session._step`/`_try_fallback_after_exhaustion`): a
+provider failure (the primary's retry ladder exhausted on a retryable
+5xx/429-class error) swaps onto the next entry for the rest of the turn,
+with one `notification` event (visible in the transcript and in
+`--output-format stream-json`) naming the model that failed and the one
+switched to; an entry that fails to resolve, or whose tool catalog is too
+small for the session, is skipped in favour of the next one.
 
 #### `--forward-subagent-text`
 What: accepted; `--output-format stream-json` already forwards a
@@ -540,9 +546,10 @@ Claude Code's own `--plugin-url` fetches a `.zip`; halo takes the simpler,
 already-everywhere git clone instead.
 
 #### `--prompt-suggestions [true|false]`
-What: only the single-turn `-p TEXT` path (not `--input-format
-stream-json`'s multi-turn loop, a follow-up). After the turn, one extra
-small-model call predicts the user's likely next message; `text` output
+What: the single-turn `-p TEXT` path AND (W5, carried from W4a)
+`--input-format stream-json`'s own multi-turn loop, one suggestion per
+turn. After each turn, one extra small-model call predicts the user's
+likely next message; `text` output
 prints it as a trailing `[next: ...]` line, `json` adds a
 `prompt_suggestion` field, `stream-json` emits its own
 `{"type": "prompt_suggestion", ...}` line. Costs one extra model call --
@@ -576,7 +583,9 @@ instead of the real working tree -- isolates the session's own file edits
 from the repo you're actually looking at. Falls back to the current
 directory (one notice, never a hard failure) outside a git repo or if `git
 worktree add` itself fails. The same mechanism backs a sub-agent's own
-`isolation: worktree` frontmatter key.
+`isolation: worktree` frontmatter key. Fires `WorktreeCreated`; the tree is
+left on disk when the session ends unless `worktree.remove_on_exit` is set
+(see `halo worktree`, below) -- `rm` it yourself, or with `halo worktree rm`.
 
 ## `halo init`
 
@@ -945,7 +954,12 @@ every scope (user `~/.claude.json`, project-local, this directory's own
 `.mcp.json` when your own `~/.claude.json` history remembers one, and the
 claude.ai connectors `claude` itself reports (see below) -- never a bare
 "0 servers". `--refresh` forces a fresh connectors discovery first,
-ignoring the `~/.halo/mcp/connectors.json` cache.
+ignoring the `~/.halo/mcp/connectors.json` cache; without it, an EMPTY
+cache still gets one bounded (20s) synchronous discovery when eligible
+("connector cold start" -- a fresh box's first `mcp list` shows real
+connectors, not an empty cache a background worker hadn't gotten to yet),
+and an eligible-but-still-empty result says so explicitly rather than
+staying silent.
 ```sh
 halo mcp list
 ```
@@ -1032,7 +1046,14 @@ headless `claude -p --output-format stream-json` start, read only for its
 `system/init` line's tool names) runs once per session on a background
 worker -- never on the UI thread -- and is cached at
 `~/.halo/mcp/connectors.json`; `halo mcp list --refresh` and the `/mcp`
-dialog's `r` (reconnect) force a fresh one.
+dialog's `r` (reconnect) force a fresh one. "Connector cold start": when
+that cache is still genuinely empty, both the session build (`-p` and the
+TUI's first build alike) and a plain `halo mcp list` (no `--refresh`
+needed) instead run ONE bounded (20s) synchronous discovery inline before
+anything reads the cache, so the very first look at connectors on a fresh
+box is the real list, not an empty one a background worker hadn't reached
+yet; once anything real is cached, later launches go back to the
+background-only path above.
 
 Each connector becomes one halo tool, `connector__<slug>` (e.g.
 `connector__claude_docs`), schema `{request: string, tool?: string, args?:
@@ -1345,6 +1366,38 @@ ask that blocked the turn (start, end, resolved decision -- "allow"/"deny"/
 known -- auto-compaction only, a manual `/compact` runs outside any turn);
 steers; and retries/errors with status codes. `--json` prints the raw
 records instead of the formatted text.
+
+## `halo worktree`
+
+```sh
+halo worktree rm <path>
+```
+
+Removes a git worktree (`git worktree remove`, falling back to `--force`
+once over uncommitted changes -- a session's own scratch worktree is
+disposable by design) and fires `WorktreeRemoved`. The explicit counterpart
+to `-w/--worktree`'s own creation: that flag's tree is left on disk when the
+session ends by default (config `worktree.remove_on_exit`, default `false`
+-- set it `true` to have the session remove its OWN worktree automatically
+on exit instead, which fires the same event). No `list`/`add` subcommand
+yet -- `-w/--worktree` itself is how one gets added.
+
+## `halo bg`
+
+```sh
+halo bg list
+halo bg logs <id> [-n LINES]
+halo bg stop <id>
+halo bg rm <id> [--force]
+```
+
+The read/manage side of `--bg`/`--background`, over the detached run's own
+`~/.halo/bg/<id>/{output.log,meta.json}`: `list` shows each run's id, status
+(`running`/`exited`, checked live, never trusted stale), pid, age and
+command; `logs` prints the captured stdout+stderr (`-n` for just the tail);
+`stop` kills the process tree by pid (same Windows orphan-grandchild-aware
+kill background Bash jobs already use); `rm` deletes the run's directory,
+refusing a still-running one unless `--force` (which stops it first).
 
 ## `halo proxy`
 

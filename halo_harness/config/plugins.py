@@ -285,40 +285,59 @@ def plugin_server_name(plugin: str, server: str) -> str:
     return f"plugin_{sanitize_name(plugin)}_{sanitize_name(server)}"
 
 
-def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object = None,
-                                 cwd: Optional[Path] = None) -> "tuple[dict, list]":
-    """`(name -> McpServerConfig, notices)` for every MCP server every
-    installed, enabled plugin declares. `env` is the caller's own
-    effective env (settings-resolved) for `${VAR}` expansion, augmented
-    per-plugin with `CLAUDE_PLUGIN_ROOT`. `settings` (a `config.settings.
-    Settings`, or anything with a `.raw` dict, optional) is where a V2
-    manifest's `enabledPlugins` gate is read from. `cwd` (finding 8) is
-    matched against a V2 project/local-scoped record's own `projectPath`
-    -- omitted, only `scope == "user"` records are ever discovered. Never
-    raises -- a malformed plugin entry is skipped with a notice, not a
-    crashed session."""
+def _discover_one_plugin_root_mcp_servers(plugin_name: str, plugin_root: Path, *, env: Optional[dict],
+                                           resolved: dict, notices: list) -> None:
+    """One `(plugin_name, plugin_root)`'s own `.mcp.json`/`plugin.json`
+    servers, parsed/expanded/named exactly like every other one, appended
+    into the CALLER's `resolved`/`notices` (shared by the installed-plugin
+    loop and the CLI `--plugin-dir`/`--plugin-url` loop below, which differ
+    only in where their `(plugin_name, plugin_root)` pairs come from)."""
     from halo_harness.mcp.manager import expand_config, parse_server
 
+    servers = _read_plugin_mcp_servers(plugin_root)
+    if not servers:
+        return
+    plugin_env = dict(env or {})
+    plugin_env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+    for server_name, raw in servers.items():
+        wire_server_name = plugin_server_name(plugin_name, server_name)
+        cfg = parse_server(wire_server_name, raw, scope="plugin", source_path=str(plugin_root))
+        if cfg is None:
+            notices.append(f"plugin {plugin_name!r}: server {server_name!r} entry is malformed, skipped")
+            continue
+        cfg.plugin = plugin_name
+        expanded, warns = expand_config(cfg, plugin_env)
+        for w in warns:
+            notices.append(f"plugin {plugin_name!r} server {server_name!r}: {w}")
+        resolved[wire_server_name] = expanded
+
+
+def discover_plugin_mcp_servers(*, env: Optional[dict] = None, settings: object = None,
+                                 cwd: Optional[Path] = None, extra_roots: Optional[list] = None) -> "tuple[dict, list]":
+    """`(name -> McpServerConfig, notices)` for every MCP server every
+    installed, enabled plugin declares, PLUS every `extra_roots` entry (W5,
+    carried from W4a: `--plugin-dir`/`--plugin-url`'s own resolved
+    directories, named by `Path(root).name` since a CLI-supplied plugin has
+    no `installed_plugins.json` record to read a name from). `env` is the
+    caller's own effective env (settings-resolved) for `${VAR}` expansion,
+    augmented per-plugin with `CLAUDE_PLUGIN_ROOT`. `settings` (a
+    `config.settings.Settings`, or anything with a `.raw` dict, optional)
+    is where a V2 manifest's `enabledPlugins` gate is read from. `cwd`
+    (finding 8) is matched against a V2 project/local-scoped record's own
+    `projectPath` -- omitted, only `scope == "user"` records are ever
+    discovered. Never raises -- a malformed plugin entry is skipped with a
+    notice, not a crashed session."""
     notices: list = []
     resolved: dict = {}
     settings_raw = getattr(settings, "raw", None)
     settings_raw = settings_raw if isinstance(settings_raw, dict) else {}
     manifest = load_installed_plugins()
     for plugin_name, plugin_root in _plugin_roots(manifest, settings_raw, cwd=cwd):
-        servers = _read_plugin_mcp_servers(plugin_root)
-        if not servers:
-            continue
-        plugin_env = dict(env or {})
-        plugin_env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
-        for server_name, raw in servers.items():
-            wire_server_name = plugin_server_name(plugin_name, server_name)
-            cfg = parse_server(wire_server_name, raw, scope="plugin", source_path=str(plugin_root))
-            if cfg is None:
-                notices.append(f"plugin {plugin_name!r}: server {server_name!r} entry is malformed, skipped")
-                continue
-            cfg.plugin = plugin_name
-            expanded, warns = expand_config(cfg, plugin_env)
-            for w in warns:
-                notices.append(f"plugin {plugin_name!r} server {server_name!r}: {w}")
-            resolved[wire_server_name] = expanded
+        _discover_one_plugin_root_mcp_servers(plugin_name, plugin_root, env=env, resolved=resolved, notices=notices)
+    if extra_roots:
+        from halo_harness.plugin_fetch import plugin_name_for_root
+        for root in extra_roots:
+            root_path = Path(root)
+            _discover_one_plugin_root_mcp_servers(plugin_name_for_root(root_path), root_path,
+                                                   env=env, resolved=resolved, notices=notices)
     return resolved, notices

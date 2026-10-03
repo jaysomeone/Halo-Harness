@@ -99,7 +99,8 @@ def _resolve_dbx_config_for_headers(settings=None):
 
 
 def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: str,
-                       effort: Optional[str], permission_mode: str, mcp_manager, bare: bool):
+                       effort: Optional[str], permission_mode: str, mcp_manager, bare: bool,
+                       extra_plugin_roots: Optional[list] = None):
     """Shared by `run_print_mode` and `tui/bootstrap.py` (imported from
     there, same reuse pattern as `_resolve_creds`) -- one `HookRunner` per
     session, built from `settings.hooks` (already trust-filtered by
@@ -109,7 +110,12 @@ def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: 
     empty result -- every `HookRunner.has_hooks(...)` call site is then
     simply always False. `prompt_caller` is left unbound here (the CALLER
     binds it to the just-constructed Session's own `_call_model_for_hook`,
-    once one exists -- see the call site)."""
+    once one exists -- see the call site). `extra_plugin_roots` (W5,
+    carried from W4a) is `build_session`'s own `--plugin-dir`/`--plugin-url`
+    resolution -- merged in the SAME way as an installed plugin's own
+    `hooks/hooks.json` (last, so an installed plugin's hooks still run even
+    when a CLI-supplied plugin ALSO configures the same event -- both fire,
+    `merge_hook_maps` concatenates rather than replacing)."""
     from halo_harness.config.plugins import load_installed_plugins, _plugin_roots
     from halo_harness.hooks import HookRunner, load_plugin_hooks, merge_hook_maps, normalize_hooks
 
@@ -128,6 +134,8 @@ def build_hook_runner(*, settings, cwd: Path, session_id: str, transcript_path: 
         settings_raw = getattr(settings, "raw", None) if settings is not None else None
         manifest = load_installed_plugins()
         for _plugin_name, plugin_root in _plugin_roots(manifest, settings_raw, cwd=cwd):
+            hooks_by_event = merge_hook_maps(hooks_by_event, load_plugin_hooks(plugin_root))
+        for plugin_root in (extra_plugin_roots or []):
             hooks_by_event = merge_hook_maps(hooks_by_event, load_plugin_hooks(plugin_root))
     return HookRunner(
         hooks_by_event, cwd=cwd, session_id=session_id, transcript_path=transcript_path,
@@ -369,16 +377,16 @@ _BACKGROUND_JOB_WAIT_S = 120.0  # matches Bash's own default foreground timeout
 
 
 def _maybe_add_prompt_suggestion(session, sink, cli_flags: dict) -> None:
-    """W4a `--prompt-suggestions`: one extra small-model call predicting the
-    user's likely next message, ONLY when the flag was given (never a
-    default-on cost -- see MEMORY.md's token-thrift rule) -- scoped to the
-    single-turn text-input path (`run_print_mode`'s own `finish=False`
-    sequencing point is what makes "compute the suggestion, THEN let
-    `_drain_background_jobs_for_print_mode` call `sink.finish()`" possible);
-    the `--input-format stream-json` multi-turn loop calls `sink.consume()`
-    with its OWN internal `finish()` per turn, with no equivalent gap to
-    slot this into -- left for a follow-up, see the worker report. Never
-    raises: a prediction failure must never affect the real turn's result."""
+    """W4a/W5 `--prompt-suggestions`: one extra small-model call predicting
+    the user's likely next message, ONLY when the flag was given (never a
+    default-on cost -- see MEMORY.md's token-thrift rule). Both call sites
+    thread the SAME `finish=False`-then-`sink.finish()` gap through: the
+    single-turn text-input path (`_drain_background_jobs_for_print_mode` is
+    what actually calls `finish()` there, folding in any background-job
+    notice too) and (W5, carried from W4a) the `--input-format stream-json`
+    multi-turn loop's own per-turn `sink.consume(..., finish=False)` /
+    `sink.finish()` pair. Never raises: a prediction failure must never
+    affect the real turn's result."""
     if not cli_flags.get("prompt_suggestions"):
         return
     try:
@@ -511,6 +519,29 @@ def build_session(
     MCP pool unreachable while the prompt still said "call ToolSearch"."""
     from halo_harness import debug_timeline
     cli_flags = dict(cli_flags or {})
+    # W5 (carried from W4a): `--plugin-dir`/`--plugin-url` roots, resolved
+    # ONCE here (before `build_manager`/`build_hook_runner`/`Registry.
+    # discover` below, which previously had no access to this at all --
+    # only `discover_agents` did, further down) so a CLI-supplied plugin's
+    # MCP servers, hooks, skills and commands load alongside its agents,
+    # the same four precedence tiers `config/plugins.py` already covers for
+    # an INSTALLED plugin. Stashed back onto `cli_flags["resolved_plugin_
+    # roots"]` too (read by `Session.__init__` as `self.plugin_roots`) so
+    # tool-side discovery (`tools/skill.py`'s Skill tool) can see the same
+    # list a model-invoked skill call needs, not just the slash-command
+    # surface built below.
+    plugin_roots: list = []
+    if cli_flags.get("plugin_dir") or cli_flags.get("plugin_url"):
+        # `bridge_home` is already a module-level import (top of this file)
+        # -- NOT re-imported here on purpose: a local `from ... import
+        # bridge_home` inside this `if` would make Python treat the name as
+        # local to the WHOLE `build_session` function (even on the branch
+        # that skips this block), breaking the unconditional `state_dir =
+        # bridge_home()` call later in this same function.
+        from halo_harness.plugin_fetch import resolve_plugin_roots
+        plugin_roots = resolve_plugin_roots(cli_flags.get("plugin_dir"), cli_flags.get("plugin_url"),
+                                             state_dir=bridge_home())
+    cli_flags["resolved_plugin_roots"] = plugin_roots
     claude_json = load_claude_json()
     trusted = is_trusted(cwd, claude_json)
     settings = resolve_settings(cwd, settings_flag=settings_flag, setting_sources=setting_sources, trusted=trusted)
@@ -816,6 +847,7 @@ def build_session(
             chrome=chrome_enabled, playwright=playwright,
             playwright_cdp=playwright_cdp, playwright_headless=playwright_headless,
             bypass_mode=(resolved_mode in ("auto", "bypassPermissions")), start=True, trusted=trusted,
+            extra_plugin_roots=plugin_roots,
         )
         if mcp_manager is not None:
             from halo_harness.tools.mcp_tool import ListMcpResourcesTool, McpTool, ReadMcpResourceTool
@@ -861,8 +893,15 @@ def build_session(
             # itself is a background worker kicked off below, never inline
             # on a session build), gated by --tools/deny the same way a
             # built-in would be, preloaded or deferred same as any MCP tool.
+            # W5 ("connector cold start"): a genuinely EMPTY cache gets ONE
+            # bounded (20s) synchronous discovery HERE, before the loop
+            # below freezes the catalog -- the background worker kicked off
+            # further down is then a same-session no-op (shared gate), so
+            # this costs nothing extra on a warm cache, only fills the real
+            # first-ever gap.
             from halo_harness.mcp import connectors_bridge
             from halo_harness.tools.connector_tool import ConnectorTool
+            connectors_bridge.ensure_discovered_synchronously_if_cold()
             for info in connectors_bridge.get_connectors():
                 if not connectors_bridge.connector_enabled(info.slug):
                     continue
@@ -904,13 +943,11 @@ def build_session(
     # resolved against the FULLY assembled catalog (built-ins + MCP +
     # WebSearch, all already added to `frozen_registry` above) so
     # `spec.resolved_tools()` can actually see everything it might keep.
-    plugin_roots = None
-    if cli_flags.get("plugin_dir") or cli_flags.get("plugin_url"):
-        from halo_harness.plugin_fetch import resolve_plugin_roots
-        plugin_roots = resolve_plugin_roots(cli_flags.get("plugin_dir"), cli_flags.get("plugin_url"),
-                                             state_dir=bridge_home())
+    # `plugin_roots` itself was already resolved at the top of this
+    # function (shared with `build_manager`/`build_hook_runner` above and
+    # `Registry.discover` below).
     discovered_agents = {} if bare else discover_agents(cwd, settings=settings, agents_flag=agents_flag,
-                                                          plugin_roots=plugin_roots)
+                                                          plugin_roots=(plugin_roots or None))
     agent_spec = discovered_agents.get(agent) if agent else None
     agent_type_restriction = None
     if agent_spec is not None:
@@ -950,11 +987,29 @@ def build_session(
     if cli_flags.get("betas"):
         # W4a `--betas`: "Beta headers to include in API requests (API key
         # users only)" -- a comma-joined `anthropic-beta` header, the real
-        # wire name every Anthropic-family route (ant:/cc:'s own passthrough,
-        # Databricks Claude foundation) already knows to merge in as a
-        # normal extra header; inert (never sent) on a chat-dialect route
-        # that has no such header to merge into its own request builder.
-        extra_headers = {**(extra_headers or {}), "anthropic-beta": ",".join(cli_flags["betas"])}
+        # wire name an Anthropic-family route knows.
+        #
+        # W5 (carried from W4a, live bug found wiring this in): the OLD
+        # comment here claimed this was "inert (never sent) on a chat-
+        # dialect route that has no such header to merge into its own
+        # request builder" -- false. `providers/http.py::call_openai_chat`
+        # (the `or:`/Databricks-CHAT wire path) does `headers.update(
+        # extra_headers)` just like every other dialect's own call
+        # function -- it merges WHATEVER headers it's handed, unconditionally,
+        # with no per-header allowlist of its own. `extra_headers` was being
+        # set here regardless of route, so `--betas` was actually sending
+        # `anthropic-beta` to OpenRouter and Databricks-chat too. Gated
+        # here instead, at the one place that already knows the route:
+        # Anthropic-family means `ant:` (`model_ref.provider ==
+        # "anthropic"`) or Databricks Claude PASSTHROUGH specifically
+        # (`provider == "databricks" and dialect == "anthropic-passthrough"`
+        # -- excludes an ordinary Databricks-hosted non-Claude model, which
+        # is chat-dialect and goes through the exact same `call_openai_chat`
+        # an `or:` request does).
+        is_anthropic_family = model_ref.provider == "anthropic" or (
+            model_ref.provider == "databricks" and model_ref.dialect == "anthropic-passthrough")
+        if is_anthropic_family:
+            extra_headers = {**(extra_headers or {}), "anthropic-beta": ",".join(cli_flags["betas"])}
 
     # H6 scope D: --continue/--resume/--fork-session all resolve to a
     # concrete session_id BEFORE the log is opened -- an explicit
@@ -987,6 +1042,7 @@ def build_session(
     hook_runner = build_hook_runner(
         settings=settings, cwd=cwd, session_id=session_log.session_id, transcript_path=str(session_log.path),
         effort=effort, permission_mode=resolved_mode, mcp_manager=mcp_manager, bare=bare,
+        extra_plugin_roots=plugin_roots,
     )
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
@@ -1015,7 +1071,7 @@ def build_session(
     # cc: was never used.
     atexit.register(session.close_cc)
 
-    command_registry = Registry.discover(cwd, home())
+    command_registry = Registry.discover(cwd, home(), plugin_roots=plugin_roots)
     if not bare:
         # H8 scope E (deferred by H3): every connected MCP server's own
         # prompts become `/mcp__<server>__<prompt>` slash commands, in both
@@ -1042,6 +1098,39 @@ def build_session(
         model_ref=model_ref, model_profile=model_profile, creds=creds, ctx=ctx, session_log=session_log,
         hook_runner=hook_runner, resume_error=resume_error, agents=discovered_agents,
     )
+
+
+def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
+    """W5 (carried from W4a): the session-end half of `-w/--worktree`'s own
+    WorktreeRemoved trigger (the other half is the explicit `halo worktree
+    rm <path>` command, `worktree_cli.cmd_worktree`). A no-op unless BOTH
+    are true: THIS session actually created a worktree
+    (`cli_flags["_worktree_created_path"]`, stashed by `run_print_mode`
+    right after `create_worktree` succeeds) AND the user opted into
+    removing it (config `worktree.remove_on_exit`, default False -- Claude
+    Code's own `--worktree` leaves the tree behind by default too, so a
+    user can keep inspecting/committing from it after the session ends
+    unless they asked otherwise). Pulled out of `run_print_mode`'s own
+    `finally` block into this plain function so the decision itself is
+    unit-testable without driving a whole print-mode session end to end.
+    Returns whether a removal was actually attempted AND succeeded (for
+    the caller/a test to assert on; `run_print_mode` itself ignores the
+    return value, same as every other best-effort cleanup step there).
+    Never raises."""
+    wt_created_path = cli_flags.get("_worktree_created_path")
+    if not wt_created_path:
+        return False
+    from halo_harness.theme import get_config_value
+    if not get_config_value("worktree.remove_on_exit", default=False):
+        return False
+    try:
+        from halo_harness.worktree import remove_worktree
+        if not remove_worktree(Path(wt_created_path)):
+            return False
+        session._fire_worktree_removed(wt_created_path)
+        return True
+    except Exception:
+        return False
 
 
 def run_print_mode(
@@ -1299,7 +1388,18 @@ def run_print_mode(
                         extra_ctx = session.fire_user_prompt_expansion(turn_text, final_prompt)
                         if extra_ctx:
                             session.log.append_snapshot([{"type": "text", "text": extra_ctx}], kind="hook_context")
-                    exit_code = sink.consume(session.turn(final_prompt or turn_text))
+                    # W5 (carried from W4a): `finish=False` + an explicit
+                    # `sink.finish()` (byte-identical to the old single
+                    # `consume(...)` call when `--prompt-suggestions` is
+                    # off -- `consume`'s own `finish` kwarg does exactly
+                    # this split internally) opens the same gap the
+                    # single-turn `-p` path already has, so `--prompt-
+                    # suggestions` now also works per-turn in THIS loop
+                    # (previously left for a follow-up -- see the worker
+                    # report).
+                    sink.consume(session.turn(final_prompt or turn_text), finish=False)
+                    _maybe_add_prompt_suggestion(session, sink, cli_flags)
+                    exit_code = sink.finish()
                     # finding 5/10: a steer that landed after the turn's
                     # very last checkpoint (session.turn()'s own `finally`
                     # -- see agent/loop.py) is queued right back here as
@@ -1401,3 +1501,8 @@ def run_print_mode(
                     _shutil.rmtree(session_dir, ignore_errors=True)
             except Exception:
                 pass
+        # W5 (carried from W4a): `-w/--worktree` created a FRESH worktree
+        # for THIS session -- removed here, last, only when the user opted
+        # in. Pulled into its own function (below) so the decision itself
+        # is unit-testable without driving a whole print-mode session.
+        maybe_remove_worktree_on_exit(cli_flags, session)

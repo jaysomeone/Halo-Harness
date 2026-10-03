@@ -199,6 +199,7 @@ directly by the features that own them:
 | `connectors.<slug>.max_turns` | `4` | hand-edited; forwarded as the bridge's own `claude -p --max-turns` |
 | `quit_on_double_ctrl_c` | `true` | `halo config set quit_on_double_ctrl_c false` turns off the second-Ctrl+C quit (only `/exit`/`Ctrl+D`/`Ctrl+Q` leave) |
 | `clipboard.crlf` | `false` | hand-edited; `true` makes a copy use `\r\n` line endings instead of `\n` |
+| `worktree.remove_on_exit` | `false` | `halo config set worktree.remove_on_exit true`; a `-w/--worktree` session removes its OWN worktree (fires `WorktreeRemoved`) when it ends instead of leaving it on disk |
 
 ## Every environment variable
 

@@ -10,20 +10,54 @@ clone instead) is cloned ONCE per URL into a cache keyed by its own hash, so
 a repeat launch with the same URL reuses the existing checkout rather than
 re-cloning every single time.
 
-THIN, v1 scope: only the AGENTS precedence tier (`discover_agents`'s own
-`plugin_roots=`) is wired for a CLI-supplied plugin directory/URL this
-round -- a plugin's skills/hooks/MCP servers loading from `--plugin-dir`/
-`--plugin-url` specifically (as opposed to an INSTALLED plugin, which
-`config/plugins.py` already covers independently) is left for a follow-up;
-see the worker report.
-"""
+W5 (carried from W4a): `resolve_plugin_roots`'s own output is now threaded
+through ALL FIVE of Claude Code's plugin precedence tiers for a CLI-
+supplied plugin directory/URL, not just agents -- `headless.build_session`
+resolves it ONCE, near the top, and hands the same list to `discover_agents`
+(`plugin_roots=`), `mcp_setup.build_manager` (`extra_plugin_roots=`, via
+`config.plugins.discover_plugin_mcp_servers`'s own `extra_roots=`),
+`build_hook_runner` (`extra_plugin_roots=`, via `hooks.load_plugin_hooks`),
+and `commands.registry.Registry.discover` (`plugin_roots=`, which reaches
+both `commands/custom.py`'s own `commands/` scan and `commands/skills.py`'s
+own `skills/` scan) -- plus `Session.plugin_roots`/`ToolContext.
+plugin_roots` so a model-invoked `Skill` tool call sees a CLI plugin's
+skills too, not only the `/` slash-command surface. A CLI-supplied root has
+no `installed_plugins.json` record to read a NAME from (unlike an installed
+plugin, whose name is the manifest key) -- `plugin_name_for_root` below
+reads `.claude-plugin/plugin.json`'s own `name` field, falling back to the
+root directory's own basename, and that name is what every tier below uses:
+MCP servers as `plugin_<name>_<server>` (`config.plugins.plugin_server_
+name`, same as an installed plugin), skills/commands namespaced `<name>:
+<skill-or-command>` (binary-facts sec.11: "plugin skills are
+`<plugin>:<skill>`" -- commands follow the same convention)."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+
+def plugin_name_for_root(root) -> str:
+    """The plugin's own name, for a root that has no `installed_plugins.
+    json` manifest entry to read one from: `.claude-plugin/plugin.json`'s
+    `name` field when that file exists and sets one, else the root
+    directory's own basename (e.g. `--plugin-dir ../my-plugin` names it
+    `my-plugin`, same as a `git clone`d `--plugin-url`'s checkout directory
+    name would without a declared name either). Never raises -- a missing
+    or malformed `plugin.json` just falls back to the basename."""
+    root = Path(root)
+    plugin_json = root / ".claude-plugin" / "plugin.json"
+    try:
+        data = json.loads(plugin_json.read_text(encoding="utf-8-sig"))
+        name = data.get("name") if isinstance(data, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except (OSError, ValueError):
+        pass
+    return root.name
 
 
 def _clone_cache_dir(state_dir: Path) -> Path:

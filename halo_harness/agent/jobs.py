@@ -46,6 +46,42 @@ MAX_CONCURRENT_JOBS = 10
 _QUEUE_POLL_EMPTY = object()  # sentinel: "queue.Empty fired this poll", distinct from a real `None` EOF
 
 
+def _fire_task_hook(parent, event_name: str, *, job_id: str, command: str,
+                     status: Optional[str] = None, exit_code: Optional[int] = None) -> None:
+    """W5 (carried from W4a): TaskCreated/TaskCompleted for a background
+    Bash job -- the OTHER half of "background jobs and sub-agents"
+    (agent/subagent.py's own `_fire_task_hook` already fires these two
+    events for a sub-agent `Task`; this is the matching pair for THIS
+    module's own background jobs, whichever of the two ways one started --
+    explicit `run_in_background` (`start_background`) or a foreground
+    command handed off after its own timeout (`adopt_from_timeout`), both
+    of which converge on the SAME `_drain_and_finalize` completion point).
+    `job_id`/`command` are always present; `status`/`exit_code` (the job's
+    own `JobRecord.status`/`.exit_code`) are given only on TaskCompleted.
+
+    Reads `parent.hook_runner`/`parent._run_hook` via `getattr(...)`,
+    never a direct attribute access, on purpose: `JobRegistry.parent` is
+    untyped (the same reverse-import reason `ToolContext.job_registry` is
+    untyped) and several unit tests construct a JobRegistry with a bare
+    stand-in object that carries only `_pending_job_notices` -- exactly
+    the defensive style `_push_notice` already uses just below for the
+    same reason."""
+    hook_runner = getattr(parent, "hook_runner", None)
+    run_hook = getattr(parent, "_run_hook", None)
+    if hook_runner is None or run_hook is None or not hook_runner.has_hooks(event_name):
+        return
+    extra = {"job_id": job_id, "command": command}
+    if status is not None:
+        extra["status"] = status
+    if exit_code is not None:
+        extra["exit_code"] = exit_code
+    payload = hook_runner.payload(event_name, extra=extra)
+    try:
+        run_hook(event_name, payload)
+    except Exception:
+        pass
+
+
 @dataclasses.dataclass
 class JobRecord:
     job_id: str
@@ -124,6 +160,7 @@ class JobRegistry:
                             started_at=time.time(), proc=proc, collector=_CappedCollector(), origin="background")
         with self.lock:
             self.jobs[job_id] = record
+        _fire_task_hook(self.parent, "TaskCreated", job_id=job_id, command=command)
 
         q: "queue.Queue" = queue.Queue()
 
@@ -169,6 +206,7 @@ class JobRegistry:
         record.read_offset = collector.total_len
         with self.lock:
             self.jobs[job_id] = record
+        _fire_task_hook(self.parent, "TaskCreated", job_id=job_id, command=command)
         threading.Thread(target=self._drain_and_finalize, args=(record, q),
                           daemon=True, name=f"bashjob-{job_id}").start()
         return record
@@ -256,6 +294,9 @@ class JobRegistry:
             if record.status == "running":
                 record.status = "completed"
             record.exit_code = record._parsed_exit if record._parsed_exit is not None else record.proc.returncode
+            status, exit_code = record.status, record.exit_code
+        _fire_task_hook(self.parent, "TaskCompleted", job_id=record.job_id, command=record.command,
+                         status=status, exit_code=exit_code)
         self._push_notice(record)
 
     # H9 whole-tree review finding 7: a completion notice used to embed the

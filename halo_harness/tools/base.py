@@ -142,6 +142,16 @@ class ToolContext:
     # ${CLAUDE_EFFORT} substitution -- None (every pre-finding-12 test)
     # just means that variable is left unsubstituted in a skill body.
     effort: Optional[str] = None
+    # W5 (carried from W4a): `--plugin-dir`/`--plugin-url`'s own resolved
+    # directories (headless.build_session's `plugin_roots`, stashed onto
+    # `Session.plugin_roots`) -- the Skill tool reads this so a model-
+    # invoked `Skill(skill="<plugin-dir-name>:<name>")` call can find a
+    # CLI-supplied plugin's skill, the same roots the slash-command surface
+    # (commands/skills.py::register_skills) already sees. Empty (every
+    # pre-W5 test, a bare ToolContext, or a session with no --plugin-dir/
+    # --plugin-url) just means no plugin skills exist beyond the ordinary
+    # project/user/synced ones.
+    plugin_roots: list = field(default_factory=list)
 
 
 @dataclass

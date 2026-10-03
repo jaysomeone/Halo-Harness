@@ -90,11 +90,15 @@ def _read_skill_md(skill_dir: Path):
     return (fm if isinstance(fm, dict) else {}), body, md
 
 
-def _discover_skills_tree(skills_root: Path, *, exclude_synced: bool) -> list:
+def _discover_skills_tree(skills_root: Path, *, exclude_synced: bool, name_prefix: Optional[str] = None) -> list:
     """Every `<...>/SKILL.md` under `skills_root`; when `exclude_synced`,
     skips anything under a top-level `synced/` subdirectory (handled
     separately by `_discover_synced`, which needs the manifest for
-    metadata rather than a bare directory walk)."""
+    metadata rather than a bare directory walk). `name_prefix` (W5, carried
+    from W4a: a plugin root's own `skills/` tree) renames each skill
+    `<name_prefix>:<rel-path-name>` -- binary-facts sec.11: "plugin skills
+    are `<plugin>:<skill>`" -- instead of the bare `":".join(rel.parts)`
+    project/user skills use."""
     if not skills_root.is_dir():
         return []
     out = []
@@ -115,6 +119,8 @@ def _discover_skills_tree(skills_root: Path, *, exclude_synced: bool) -> list:
         name = ":".join(rel.parts)
         if not name:
             continue
+        if name_prefix:
+            name = f"{name_prefix}:{name}"
         description = fm.get("description", "") or fm.get("when_to_use", "") or ""
         allowed = tuple(_allowed_tools_list(fm))
         out.append(SlashCommand(
@@ -162,14 +168,20 @@ def _discover_synced(skills_root: Path) -> list:
     return out
 
 
-def discover_all_skills(cwd: Path, *, home: Optional[Path] = None) -> dict:
+def discover_all_skills(cwd: Path, *, home: Optional[Path] = None, plugin_roots: Optional[list] = None) -> dict:
     """`{name: SlashCommand}` for every skill visible from `cwd`, with the
     SAME internal precedence `register_skills` applies to the `/` surface
-    (closest project ancestor > user > synced) -- the ONE traversal both
-    `register_skills` (the slash-command surface) and `tools/skill.py`'s
-    real Skill TOOL (a by-name lookup, never through the shared Registry
-    object a Tool has no reference to) build on, so the two can never
-    disagree about which skill a name resolves to."""
+    (closest project ancestor > user > synced > plugin) -- the ONE
+    traversal both `register_skills` (the slash-command surface) and
+    `tools/skill.py`'s real Skill TOOL (a by-name lookup, never through the
+    shared Registry object a Tool has no reference to) build on, so the two
+    can never disagree about which skill a name resolves to. `plugin_roots`
+    (W5, carried from W4a: `--plugin-dir`/`--plugin-url`) adds each root's
+    own `skills/**/SKILL.md` (Claude Code's plugin layout), namespaced
+    `<plugin-dir-name>:<skill-name>` as usual (`_discover_skills_tree`'s own
+    `":".join(rel.parts)`) -- a plugin whose skill name collides with an
+    existing one loses (`collected.setdefault`, first writer wins, project
+    still beats everything)."""
     from halo_harness.config.paths import claude_config_dir as claude_config_dir_fn, home as home_fn
 
     user_home = Path(home) if home is not None else home_fn()
@@ -201,15 +213,23 @@ def discover_all_skills(cwd: Path, *, home: Optional[Path] = None) -> dict:
     for cmd in _discover_synced(skills_root):
         _collect(cmd)
 
+    if plugin_roots:
+        from halo_harness.plugin_fetch import plugin_name_for_root
+        for root in plugin_roots:
+            prefix = plugin_name_for_root(root)
+            for cmd in _discover_skills_tree(Path(root) / "skills", exclude_synced=False, name_prefix=prefix):
+                _collect(cmd)
+
     return collected
 
 
-def find_skill(name: str, cwd: Path, *, home: Optional[Path] = None) -> Optional[SlashCommand]:
+def find_skill(name: str, cwd: Path, *, home: Optional[Path] = None,
+               plugin_roots: Optional[list] = None) -> Optional[SlashCommand]:
     """By-name lookup for the Skill TOOL (`tools/skill.py`) -- also
     resolves a synced skill's bare alias (e.g. `docx` for `anthropic-
     skills:docx`) when it isn't itself a collision, same rule `Registry.
     resolve` applies to the `/` surface."""
-    skills = discover_all_skills(cwd, home=home)
+    skills = discover_all_skills(cwd, home=home, plugin_roots=plugin_roots)
     if name in skills:
         return skills[name]
     for cmd in skills.values():
@@ -218,9 +238,10 @@ def find_skill(name: str, cwd: Path, *, home: Optional[Path] = None) -> Optional
     return None
 
 
-def register_skills(reg: Registry, *, cwd: Path, home: Optional[Path] = None) -> None:
+def register_skills(reg: Registry, *, cwd: Path, home: Optional[Path] = None,
+                     plugin_roots: Optional[list] = None) -> None:
     """Register every skill `discover_all_skills` finds into `reg` exactly
     once via `add_skill` (skill beats a same-named command, never a
     builtin)."""
-    for cmd in discover_all_skills(cwd, home=home).values():
+    for cmd in discover_all_skills(cwd, home=home, plugin_roots=plugin_roots).values():
         reg.add_skill(cmd)

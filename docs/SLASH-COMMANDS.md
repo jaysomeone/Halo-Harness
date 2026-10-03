@@ -294,12 +294,17 @@ Lists every background Bash job started this session
 with status and a truncated command line.
 
 ### `/rewind [step-id]` `[TUI-only]`
-Restores the working tree (every file a Write/Edit touched, shadow-copied
-step by step) to a recorded point. In `-p`, this needs the interactive
+Restores the working tree (every file a Write/Edit/NotebookEdit touched,
+shadow-copied step by step, plus every file a Bash command created or
+modified in a git repo cwd -- a `git status` diff before and after the
+command, both newly-untracked files and a pre-existing tracked file the
+command changed) to a recorded point. In `-p`, this needs the interactive
 confirmation card and is refused with a note. With no `step-id` in the
 TUI, opens a picker; a `RewindCard` always confirms before touching real
-files. A Bash-made change is never shadow-copied and can't be rewound (see
-`docs/ARCHITECTURE.md`).
+files. Limits: a Bash command run outside a git repo isn't shadow-copied
+at all; a file already dirty before the command that the command modifies
+further isn't separately captured (the before/after diff can't tell "still
+dirty" from "dirtied again"); a rename/copy isn't tracked either.
 
 ### `/undo`, `/redo` `[TUI-only]`
 One step back/forward through the same shadow history `/rewind` uses.

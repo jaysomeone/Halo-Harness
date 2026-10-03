@@ -180,9 +180,8 @@ Things people hit in Claude Code that Halo does differently.
   your workspace's live behaviour into per-endpoint settings.
 - **Hooks.** Every Claude Code hook event this build fires is listed in
   `docs/COMMANDS.md`; a name Claude Code also recognizes but this build
-  doesn't fire yet (`WorktreeRemoved`, `ElicitationRequest`,
-  `ElicitationResponse`) is accepted and ignored with a debug line rather
-  than an error.
+  doesn't fire yet (`ElicitationRequest`, `ElicitationResponse`) is
+  accepted and ignored with a debug line rather than an error.
 
 <p align="center">
   <img src="docs/harness/tui-snapshots/phase-line-thinking.svg" alt="The live phase line while a model thinks" width="920">

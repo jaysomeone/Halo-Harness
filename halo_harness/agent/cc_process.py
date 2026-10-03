@@ -248,13 +248,27 @@ class ClaudeCodeProcess:
             except OSError:
                 pass
 
+    def _posix_signal_group(self, sig) -> None:
+        """Signal the child's own process group (it was started with
+        start_new_session), falling back to the bare pid if the child
+        somehow shares this process's group -- never signal our own group."""
+        pid = self._proc.pid
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, OSError):
+            return
+        if pgid != os.getpgid(0):
+            os.killpg(pgid, sig)
+        else:
+            os.kill(pid, sig)
+
     def interrupt(self) -> None:
         """Esc / quit / SIGHUP -- process-GROUP kill, no orphans."""
         try:
             if os.name == "nt":
                 self._proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+                self._posix_signal_group(signal.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
 
@@ -263,7 +277,7 @@ class ClaudeCodeProcess:
             if os.name == "nt":
                 self._proc.kill()
             else:
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                self._posix_signal_group(signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
 

@@ -75,6 +75,97 @@ def test_git_status_untracked_paths_none_outside_a_repo(ctx: Ctx):
     ctx.check("None (the documented limit) for a non-git directory", git_status_untracked_paths(not_a_repo) is None)
 
 
+# ---- W5 (carried from W4a): tracked files a command modified -------------
+
+@test
+def test_git_status_dirty_paths_reports_untracked_and_modified_tracked(ctx: Ctx):
+    from halo_harness.shadow import git_status_dirty_paths
+
+    repo = Path(tempfile.mkdtemp(prefix="w5-gitdirty-"))
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    clean = git_status_dirty_paths(repo)
+    ctx.check(f"freshly committed repo has nothing dirty, got {clean}", clean == {})
+
+    tracked.write_text("v2", encoding="utf-8")
+    (repo / "untracked.txt").write_text("new", encoding="utf-8")
+    dirty = git_status_dirty_paths(repo)
+    ctx.check(f"the modified TRACKED file is reported, got {dirty}",
+              dirty.get(str(tracked.resolve())) in ("M ", " M", "MM"))
+    ctx.check(f"the untracked file is ALSO reported, got {dirty}",
+              dirty.get(str((repo / "untracked.txt").resolve())) == "??")
+
+
+@test
+def test_bash_shadow_captures_both_a_new_file_and_a_modified_tracked_file(ctx: Ctx):
+    """The actual W5 fix, end to end through tui/dispatch.py's own Bash
+    shadow-copy pair: a command that both creates a file AND modifies an
+    already-tracked one gets BOTH captured into the same shadow step, but
+    only the brand-new one is marked `created` (so a later undo restores
+    the tracked file's PRIOR content instead of deleting it)."""
+    from halo_harness.shadow import ShadowStore
+    from halo_harness.tui.dispatch import _maybe_record_bash_shadow_step, _start_bash_shadow_before
+
+    class _FakeController:
+        pass
+
+    class _FakeApp:
+        def __init__(self, cwd, shadow_dir):
+            self.cwd = cwd
+            self.controller = _FakeController()
+            self.controller.shadow_dir = shadow_dir
+
+        def run_worker(self, fn, thread=False, name=None):
+            fn()  # synchronous in this test -- no real Textual event loop
+
+    repo = Path(tempfile.mkdtemp(prefix="w5-bashshadow-"))
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    shadow_dir = Path(tempfile.mkdtemp(prefix="w5-bashshadow-store-"))
+    app = _FakeApp(repo, shadow_dir)
+
+    _start_bash_shadow_before(app, "tool_1")
+    # The "Bash command" this step represents: modifies the tracked file
+    # AND creates a new one, exactly the combination v1 (untracked-only)
+    # could never fully capture.
+    tracked.write_text("v2", encoding="utf-8")
+    new_file = repo / "brand_new.txt"
+    new_file.write_text("hi", encoding="utf-8")
+    _maybe_record_bash_shadow_step(app, "tool_1", "Bash", {"command": "echo"}, True)
+
+    store = ShadowStore(shadow_dir)
+    ctx.check(f"exactly one shadow step was recorded, got {store.steps}", len(store.steps) == 1)
+    step = store.steps[0]
+    ctx.check(f"the MODIFIED tracked file is captured, got {step['files']}",
+              str(tracked.resolve()) in step["files"])
+    ctx.check(f"the brand-new file is ALSO captured, got {step['files']}",
+              str(new_file.resolve()) in step["files"])
+    ctx.check(f"only the brand-new file is marked created, got {step['created']}",
+              step["created"] == [str(new_file.resolve())])
+
+    # /rewind actually restores the tracked file's PRIOR content (v2, this
+    # step's own snapshot), not just deletes it -- the whole point of
+    # capturing it at all. `rewind_to` (not `undo`, which needs a step
+    # BEFORE the cursor and there's only this one) re-applies this exact
+    # step's tree directly.
+    tracked.write_text("v3 (further edited after the shadow step)", encoding="utf-8")
+    result = store.rewind_to(step["id"])
+    ctx.check(f"rewind restored tracked.txt's own v2 content, got {tracked.read_text(encoding='utf-8')!r}",
+              result is not None and tracked.read_text(encoding="utf-8") == "v2")
+
+
 @test
 def test_skill_tool_context_fork_runs_through_a_subagent(ctx: Ctx):
     from halo_harness.agent.subagent import AgentRuntime

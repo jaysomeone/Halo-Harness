@@ -880,6 +880,15 @@ class Session:
             # wins over whatever the settings-env chain already resolved.
             self.tool_env = {**self.tool_env, **self.cli_flags["environment"]}
         self.fallback_models: list = list(self.cli_flags.get("fallback_models") or [])
+        # W5 (carried from W4a): `--plugin-dir`/`--plugin-url`'s own
+        # resolved directories (`headless.build_session` stashes them onto
+        # `cli_flags["resolved_plugin_roots"]` before constructing this
+        # Session, since it already threads `cli_flags` through unchanged)
+        # -- read by `tools/skill.py`'s Skill tool via `ToolContext.
+        # plugin_roots` below, so a model-invoked call sees the SAME plugin
+        # skills the slash-command surface (built separately, straight from
+        # `build_session`'s own local) already does.
+        self.plugin_roots: list = list(self.cli_flags.get("resolved_plugin_roots") or [])
         self.forward_subagent_text: bool = bool(self.cli_flags.get("forward_subagent_text"))
         self.include_hook_events: bool = bool(self.cli_flags.get("include_hook_events"))
         self.permission_prompt_tool: Optional[str] = self.cli_flags.get("permission_prompt_tool")
@@ -1220,6 +1229,46 @@ class Session:
         self.set_model(ref, profile, self.creds)
         return True
 
+    def _try_fallback_after_exhaustion(self, tool_choice, no_tools):
+        """W5 (carried from W4a): the actual wiring point for
+        `apply_next_fallback_model` -- called from BOTH of `_step`'s own
+        retry ladders (the `UpstreamError` branch and the `wire_error`
+        branch) exactly when a retryable 5xx/429-class failure's ladder has
+        just been exhausted for the CURRENT model (`attempts > MAX_RETRIES`)
+        -- "a provider failure". Pops fallback entries one at a time via the
+        real `/model`-equivalent switch (`self.model_ref`/`route`/
+        `provider_profile` all move together); a fallback whose tool
+        catalog is too small for this session's already-loaded tools is
+        skipped the same way `apply_next_fallback_model` already skips an
+        unresolvable model string -- never fatal, just tried as a reason to
+        move on to the next one. Yields exactly ONE `notification` event
+        (shown in the transcript and in stream-json, same channel every
+        other in-session notice uses) naming the model that failed and the
+        one switched to, only once a usable replacement is actually found.
+        Returns `None` when no fallback is left at all (the caller then
+        falls through to its own, unchanged terminal-failure path) or the
+        `(body, req)` pair -- freshly rebuilt for the NEW model via
+        `_derive_and_build`/`_build_request`, never the old model's own
+        `body`/`req`, which may carry a dialect- or profile-specific shape
+        the new model doesn't accept -- for the caller to install before
+        `continue`-ing the ladder with a reset attempt count, so the
+        fallback gets its own full retry budget rather than inheriting the
+        exhausted one."""
+        old_model = self.model_ref.raw
+        while True:
+            if not self.apply_next_fallback_model():
+                return None
+            try:
+                _, _, _, body = self._derive_and_build(tool_choice=tool_choice, no_tools=no_tools)
+            except ToolCatalogTooLarge:
+                continue
+            req = self._build_request(body)
+            yield events.notification(
+                f"{old_model} failed after exhausting its retries -- switched to fallback model "
+                f"{self.model_ref.raw} for the rest of this turn"
+            )
+            return body, req
+
     def _run_hook_stop(self, event: str, **kwargs):
         """W3b item 11: the `run_stop(...)` counterpart to `_run_hook`
         above (Stop/SubagentStop's own consecutive-block-cap variant of
@@ -1450,6 +1499,25 @@ class Session:
         payload = self.hook_runner.payload("WorktreeCreated", extra={"path": path})
         try:
             self._run_hook("WorktreeCreated", payload, matched=path)
+        except Exception:
+            pass
+
+    def _fire_worktree_removed(self, path) -> None:
+        """W5 (carried from W4a): WorktreeRemoved -- removed from
+        NOT_EMITTED_V1. Called from `headless.run_print_mode`'s own
+        cleanup (config `worktree.remove_on_exit`, default False) right
+        after `halo_harness.worktree.remove_worktree` actually succeeds for
+        the tree THIS session created (`cli_flags["_worktree_created_
+        path"]`). The OTHER trigger -- an explicit `halo worktree rm
+        <path>` outside any session at all -- has no live Session to call
+        this method on, so `worktree_cli.cmd_worktree` builds its own
+        throwaway HookRunner via `headless.build_hook_runner` instead and
+        fires the SAME event name directly."""
+        if self.hook_runner is None or not self.hook_runner.has_hooks("WorktreeRemoved"):
+            return
+        payload = self.hook_runner.payload("WorktreeRemoved", extra={"path": str(path)})
+        try:
+            self._run_hook("WorktreeRemoved", payload, matched=str(path))
         except Exception:
             pass
 
@@ -2289,6 +2357,16 @@ class Session:
                 # per-source wire err_type, so it can react by KIND of
                 # failure without parsing vendor-specific strings itself.
                 self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
+                # W5 (carried from W4a): the ladder for THIS model is
+                # exhausted on a retryable (5xx/429-class) failure -- try
+                # the next `--fallback-model` entry (if any) before giving
+                # up on the step entirely.
+                if merged_retryable:
+                    fallback = yield from self._try_fallback_after_exhaustion(tool_choice, no_tools)
+                    if fallback is not None:
+                        body, req = fallback
+                        attempts = 0
+                        continue
                 yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=e.retryable,
                                     category=overflow_classifier(e.status, e.message))
                 return None
@@ -2339,6 +2417,15 @@ class Session:
                 # a wire error drops the partial reply -- never committed to the log
                 wire_status = _WIRE_ERROR_TYPE_TO_STATUS.get(wire_error.get("type"), 500)
                 self._log_call_failure(self._status_label(wire_status), retries=attempts - 1)
+                # W5 (carried from W4a): same fallback attempt as the
+                # UpstreamError branch above, for a retryable failure that
+                # arrived as a wire_error dict instead of a raised exception.
+                if merged_retryable:
+                    fallback = yield from self._try_fallback_after_exhaustion(tool_choice, no_tools)
+                    if fallback is not None:
+                        body, req = fallback
+                        attempts = 0
+                        continue
                 yield events.error(message, turn=turn_no, err_type=wire_error.get("type", "error"),
                                     category=overflow_classifier(wire_status, message))
                 return None
@@ -3188,9 +3275,10 @@ class Session:
         # user turn" -- reset here so a fallback used (if ever) by a PRIOR
         # turn never sticks around; `apply_next_fallback_model` consumes
         # this list from the front as retries are exhausted within a turn.
-        # (The swap itself is not yet wired into the model-call retry loop
-        # -- see the worker report -- so this seeds the list correctly but
-        # a fallback is not automatically applied yet.)
+        # W5: the swap is wired into `_step`'s own retry ladder via
+        # `_try_fallback_after_exhaustion` -- a provider failure (repeated
+        # 5xx/429 exhaustion) swaps to the next entry here for the rest of
+        # the turn, with one `notification` event marking the switch.
         self._fallback_remaining = list(self.fallback_models)
         self._check_config_change()
         self._loop_breaker = {}
@@ -4571,7 +4659,8 @@ class Session:
                            session_allow_rule=lambda rule_text: self.permission_engine.add_session_allow_rule(
                                rule_text, temporary=True),
                            env_file=env_file_path(self.log.session_id),
-                           permission_engine=self.permission_engine, effort=self.effort)
+                           permission_engine=self.permission_engine, effort=self.effort,
+                           plugin_roots=self.plugin_roots)
         # H10 Part A: `_turn_body` (this method's one real caller) now
         # computes this UP FRONT, so it can log `tool_meta` on the SAME
         # assistant node before this method ever runs, and passes it in --

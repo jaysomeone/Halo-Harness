@@ -206,8 +206,13 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
     else:
         try:
             import signal
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            return
+            pgid = os.getpgid(proc.pid)
+            # Our children are spawned with start_new_session, so their group
+            # is their own; never killpg a group this process is in (that
+            # would end the harness itself along with the child).
+            if pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGKILL)
+                return
         except Exception:
             pass
     try:
