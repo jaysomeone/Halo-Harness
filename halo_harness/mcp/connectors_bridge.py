@@ -289,14 +289,25 @@ def connector_status_entry(info: ConnectorInfo) -> dict:
             "status_text": info.status_text, "tool_count": len(info.tools)}
 
 
+def reauth_instructions(info: ConnectorInfo) -> Optional[str]:
+    """round4 brief item 1: the re-auth instructions line `/mcp`'s `l`
+    action shows verbatim for a claude.ai connector row (there is no
+    local OAuth flow for one of these -- the account-side login lives in
+    claude.ai/claude itself) -- factored out of `status_line` below so
+    there is exactly ONE copy of this wording, not two. `None` when the
+    connector isn't in `needs_auth` (nothing to show)."""
+    if info.status != "needs_auth":
+        return None
+    return ("authorize it at claude.ai or inside `claude` with /mcp, then run "
+            "`/mcp` reconnect (or `halo mcp list --refresh`) here; halo never reads "
+            "claude's own credentials file")
+
+
 def status_line(info: ConnectorInfo) -> str:
     from halo_harness.mcp_cli import format_mcp_list_line
     line = format_mcp_list_line(connector_status_entry(info))
-    if info.status == "needs_auth":
-        line += (" -- authorize it at claude.ai or inside `claude` with /mcp, then run "
-                 "`/mcp` reconnect (or `halo mcp list --refresh`) here; halo never reads "
-                 "claude's own credentials file")
-    return line
+    extra = reauth_instructions(info)
+    return f"{line} -- {extra}" if extra else line
 
 
 _CLAUDE_AI_RULE_RE = re.compile(r"^mcp__claude_ai_([A-Za-z0-9_]+?)(?:__(\*|[A-Za-z0-9_]+))?$")

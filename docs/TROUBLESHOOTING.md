@@ -107,10 +107,34 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
 
 ## MCP servers
 
-- **A server shows `✗ Failed to connect`** -- `halo mcp get <name>`
-  prints the real underlying error (a missing binary, a bad URL, ...);
-  `halo doctor`'s MCP line shows the eager/lazy split and each lazy
-  server's cache age.
+- **A server shows `✗ Failed to connect`** (or `! Needs authentication`/
+  `⏸ Pending approval`) -- the round4 walkthrough: open `/mcp`, highlight
+  the row. The line already names WHY (command not found on PATH,
+  connection refused on host:port, or the approval/auth state) and ends
+  with a `-> fix:` line naming the ONE thing to do -- the same text `halo
+  mcp fix <name>` prints from a script. From there:
+  - **command not found on PATH** -- press `i` for a copyable install
+    line (guessed from the missing command: `npx`/`node`/`uvx`/`uv`/
+    `pipx`/`pip`/`python`), or run `halo mcp fix <name>` to see it without
+    opening the dialog.
+  - **pending approval** (a `.mcp.json` project server) -- press `a`, or
+    `halo mcp fix <name> --apply`.
+  - **needs authentication** (a local `http`/`sse` server, or a claude.ai
+    connector row) -- press `l` (the 2.0.1 OAuth flow, or the connector
+    re-auth pointer), or `halo mcp fix <name> --apply`.
+  - **anything else** -- press `t` to re-test it (a timed `tools/list`
+    round trip) and `L` to read its log (`~/.halo/mcp/<name>.log`, stdio
+    stderr plus connect/transport errors, rotated at 1 MB); press `e` to
+    open its entry at the right line in `$EDITOR`, or fill in an inline
+    form with no `$EDITOR` set, if the command/args/url itself is wrong.
+  - If it died PARTWAY through the session (it was connected, then
+    wasn't) -- it reconnects on its own next use, backed off (1, 2, 4, 8s,
+    then every 30s, giving up after 10 minutes of failure); the row shows
+    the attempt count and next retry. `r`/`R` always reconnect right now
+    and reset that backoff, since asking by hand is itself the reset.
+  - `halo mcp get <name>`/`halo doctor`'s MCP line are the read-only,
+    non-interactive versions of the same information (status/error, and
+    the eager/lazy split with each lazy server's cache age).
 - **A tool isn't visible to the model** -- check whether it's a deferred
   tool from a *lazy* server that hasn't been called yet (`ToolSearch` finds
   it by name/description without connecting anything), or excluded by

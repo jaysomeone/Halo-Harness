@@ -8046,6 +8046,278 @@ def test_status_bar_shows_agents_running_count(ctx: Ctx):
     asyncio.run(body())
 
 
+# ============================================================================
+# Halo 2.0.2 round 4 (brief D): /mcp dialog repair actions. FakeController
+# fakes every Controller call (reconnects/approvals/logins/tests/disables
+# are plain recorded lists) -- no real McpManager/subprocess/file I/O here;
+# that side is covered end to end in tests/test_mcp_repair.py.
+# ============================================================================
+
+_FAKE_MCP_ROWS = [
+    {"name": "alpha", "type": "stdio", "command": "node", "args": ["x.js"], "state": "connected",
+     "error": None, "tool_count": 3, "scope": "user", "backoff_status": None},
+    {"name": "broken", "type": "stdio", "command": "ghost-cmd", "args": [], "state": "failed",
+     "error": "FileNotFoundError: [Errno 2] No such file or directory: 'ghost-cmd'", "tool_count": 0,
+     "scope": "local", "backoff_status": None},
+    {"name": "pending-srv", "type": "stdio", "command": "node", "args": [], "state": "pending_approval",
+     "error": None, "tool_count": 0, "scope": "project", "backoff_status": None},
+    {"name": "connector__demo", "type": "connector", "state": "needs_auth", "url": None,
+     "host": "example.com", "connector_name": "Demo", "tool_count": 2, "scope": None},
+]
+
+
+async def _open_mcp_dialog(pilot, app):
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
+    await pilot.click("#prompt-input")
+    await _type(pilot, "/mcp")
+    await pilot.press("enter")
+    for _ in range(30):
+        await app._drain()
+        await pilot.pause(0.02)
+        if isinstance(app.screen, McpStatus):
+            break
+    return app.screen
+
+
+def _highlight(screen, name: str) -> None:
+    from textual.widgets import OptionList
+    option_list = screen.query_one(OptionList)
+    option_list.highlighted = next(i for i, o in enumerate(option_list.options) if o.id == name)
+
+
+async def _wait_until(app, pilot, predicate, n: int = 40) -> None:
+    for _ in range(n):
+        await app._drain()
+        await pilot.pause(0.02)
+        if predicate():
+            return
+
+
+@test
+def test_mcp_dialog_opens_with_legend_and_every_row(ctx: Ctx):
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
+    from textual.widgets import OptionList, Static
+
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            ctx.check(f"McpStatus opened, got {type(app.screen).__name__}", isinstance(screen, McpStatus))
+            ids = {str(o.id) for o in screen.query_one(OptionList).options}
+            ctx.check(f"every configured row is shown, got {ids}",
+                      {"alpha", "broken", "pending-srv", "connector__demo"} <= ids)
+            legend = _static_text(screen.query_one("#mcp-legend", Static))
+            for key in ("reconnect", "approve", "login", "log", "edit", "install", "disable", "test"):
+                ctx.check(f"legend mentions {key!r}, got {legend!r}", key in legend)
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_r_reconnects_the_highlighted_row(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "broken")
+            await pilot.press("r")
+            await _wait_until(app, pilot, lambda: fake.reconnects > 0)
+            ctx.check(f"reconnect_mcp called once, got {fake.reconnects}", fake.reconnects == 1)
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_R_reconnects_every_server(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_mcp_dialog(pilot, app)
+            await pilot.press("R")
+            await _wait_until(app, pilot, lambda: fake.reconnect_all_calls > 0)
+            ctx.check(f"reconnect_all_mcp called once, got {fake.reconnect_all_calls}", fake.reconnect_all_calls == 1)
+            ctx.check(f"every row went through reconnect_mcp, got {fake.reconnects}",
+                      fake.reconnects == len(_FAKE_MCP_ROWS))
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_a_approves_the_pending_row(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "pending-srv")
+            await pilot.press("a")
+            await _wait_until(app, pilot, lambda: fake.approvals)
+            ctx.check(f"approve_mcp_server called with the right name, got {fake.approvals}",
+                      fake.approvals == ["pending-srv"])
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_l_logs_in_and_connector_row_too(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "broken")
+            await pilot.press("l")
+            await _wait_until(app, pilot, lambda: fake.logins)
+            ctx.check(f"login_mcp_server called for the local server, got {fake.logins}", fake.logins == ["broken"])
+
+            _highlight(screen, "connector__demo")
+            await pilot.press("l")
+            await _wait_until(app, pilot, lambda: len(fake.logins) > 1)
+            ctx.check(f"login_mcp_server called for the connector row too, got {fake.logins}",
+                      fake.logins == ["broken", "connector__demo"])
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_t_tests_the_highlighted_row(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "alpha")
+            await pilot.press("t")
+            await _wait_until(app, pilot, lambda: fake.tests)
+            ctx.check(f"test_mcp_server called with the right name, got {fake.tests}", fake.tests == ["alpha"])
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_d_toggles_disabled_then_enabled(ctx: Ctx):
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "alpha")
+            await pilot.press("d")
+            await _wait_until(app, pilot, lambda: fake.disables)
+            ctx.check(f"first press disables (was connected), got {fake.disables}", fake.disables == [("alpha", True)])
+
+            await pilot.press("d")
+            await _wait_until(app, pilot, lambda: len(fake.disables) > 1)
+            ctx.check(f"second press re-enables (now sees disabled), got {fake.disables}",
+                      fake.disables == [("alpha", True), ("alpha", False)])
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_i_shows_an_install_hint(ctx: Ctx):
+    from textual.widgets import Static
+
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "broken")
+            await pilot.press("i")
+            await pilot.pause(0.05)
+            hint = _static_text(screen.query_one("#mcp-hint", Static))
+            ctx.check(f"names the missing command, got {hint!r}", "ghost-cmd" in hint)
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_L_opens_the_log_viewer_and_escape_returns(ctx: Ctx):
+    from halo_harness.tui.dialogs.mcp_status import McpLogViewer, McpStatus
+
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "broken")
+            await pilot.press("L")
+            await pilot.pause(0.1)
+            ctx.check(f"the log viewer opened, got {type(app.screen).__name__}", isinstance(app.screen, McpLogViewer))
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check(f"escape goes back to McpStatus, got {type(app.screen).__name__}",
+                      isinstance(app.screen, McpStatus))
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_e_with_no_resolver_and_connector_row_are_clean_notes(ctx: Ctx):
+    """FakeController's `resolve_mcp_config` always returns `None`
+    (no real config to edit without a live McpManager) -- `e` must say
+    so rather than crash or push a half-built form/editor."""
+    from textual.widgets import Static
+
+    async def body():
+        fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = await _open_mcp_dialog(pilot, app)
+            _highlight(screen, "alpha")
+            await pilot.press("e")
+            await pilot.pause(0.05)
+            hint = _static_text(screen.query_one("#mcp-hint", Static))
+            ctx.check(f"could not resolve the config, got {hint!r}", "re-resolve" in hint)
+
+            _highlight(screen, "connector__demo")
+            await pilot.press("e")
+            await pilot.pause(0.05)
+            hint = _static_text(screen.query_one("#mcp-hint", Static))
+            ctx.check(f"connector rows point at claude.ai instead, got {hint!r}", "claude.ai" in hint)
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_e_opens_the_inline_form_and_saves(ctx: Ctx):
+    """With a resolvable config and no $VISUAL/$EDITOR, `e` opens
+    McpEntryForm (never the $EDITOR subprocess path -- real subprocess
+    editors are deliberately never spawned from this hermetic suite);
+    editing the command and ^S writes it back to the right scope file
+    and reconnects."""
+    from halo_harness.mcp.manager import McpServerConfig
+    from halo_harness.tui.dialogs.mcp_entry_form import McpEntryForm
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
+    from textual.widgets import Input
+
+    async def body():
+        old_editor, old_visual = os.environ.pop("EDITOR", None), os.environ.pop("VISUAL", None)
+        try:
+            fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+            fake.resolve_mcp_config = lambda name: McpServerConfig(
+                name="alpha", type="stdio", command="node", args=["old.js"], scope="user")
+            app = await _mounted(fake)
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _open_mcp_dialog(pilot, app)
+                _highlight(screen, "alpha")
+                await pilot.press("e")
+                await _wait_until(app, pilot, lambda: isinstance(app.screen, McpEntryForm))
+                ctx.check(f"the inline form opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, McpEntryForm))
+                app.screen.query_one("#mcp-field-command", Input).value = "node-renamed"
+                await pilot.press("ctrl+s")
+                await _wait_until(app, pilot, lambda: isinstance(app.screen, McpStatus) and fake.reconnects > 0)
+                ctx.check(f"back on McpStatus after saving, got {type(app.screen).__name__}",
+                          isinstance(app.screen, McpStatus))
+                ctx.check(f"the edit triggered a reconnect, got {fake.reconnects}", fake.reconnects == 1)
+
+                from halo_harness.config.claude_json import claude_json_path
+                saved = json.loads(claude_json_path().read_text(encoding="utf-8"))
+                ctx.check(f"the new command was actually written to ~/.claude.json, got {saved}",
+                          saved.get("mcpServers", {}).get("alpha", {}).get("command") == "node-renamed")
+        finally:
+            if old_editor is not None:
+                os.environ["EDITOR"] = old_editor
+            if old_visual is not None:
+                os.environ["VISUAL"] = old_visual
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

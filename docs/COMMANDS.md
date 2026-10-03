@@ -941,6 +941,8 @@ Commands:
   serve                   Expose halo's own built-in tools as an MCP server
   login <name>            OAuth-authenticate a remote MCP server
   logout <name>           Clear stored OAuth credentials for a server
+  fix <name> [--apply]    Diagnose (and, with --apply, fix) a failed server
+  test <name>             A tools/list round trip with timing
 ```
 
 ### `mcp list [--cwd DIR] [--refresh]`
@@ -1041,6 +1043,67 @@ one file. Tested only against a local fake OAuth server
 (`tests/helpers/fake_oauth_server.py`); this flow has not been verified
 against any specific vendor's real endpoints, and no vendor is named here
 or in the code.
+
+### `mcp fix <name> [--apply] [--cwd DIR]`
+Halo 2.0.2 round 4: the same diagnosis the `/mcp` dialog shows per row --
+prints the server's status, the WHY (`failure_reason`, the same text
+`mcp list` shows in parentheses) and the one fix line (`fix_line_for`,
+shared code, never duplicated between this command and the dialog).
+Without `--apply`, prints only. With it, actually runs the matching
+action: approves a pending `.mcp.json` server, runs the OAuth login for a
+`needs_auth` http/sse server, reconnects a server that's merely down, or
+-- for a command-not-found server -- prints the install hint (never runs
+it; that line is for you to run):
+```sh
+halo mcp fix my-server
+```
+```
+my-server: ✗ Failed to connect
+  reason: command not found on PATH: npx
+  fix: install Node.js (npx ships with it): https://nodejs.org/
+Re-run with --apply to run it.
+```
+
+### `mcp test <name> [--cwd DIR]`
+The `/mcp` dialog's `t` action from the CLI: connects (lazy servers
+connect on first use, same as any real tool call) and times a fresh
+`tools/list` round trip:
+```sh
+halo mcp test my-server
+```
+```
+halo mcp test: my-server: ok in 42ms -- 7 tool(s).
+```
+
+## `/mcp` (the repair dialog)
+
+Halo 2.0.2 round 4: lists every configured server and claude.ai connector
+with a status glyph, and -- for anything not healthy -- the WHY and the
+one fix line (`halo mcp fix`'s own `fix_line_for`, never duplicated) plus,
+for a server that died mid-session, its reconnect-backoff attempt count
+and next retry. The key legend is always shown at the bottom. All actions
+act on the highlighted row (`R` excepted) and run off the UI thread, so a
+hung/slow server never freezes the dialog -- Esc while one is in flight
+cancels the WAIT on it, never the app.
+
+| Key | Does |
+|---|---|
+| `r` | Reconnect the highlighted server (re-reads its config first, so an on-disk edit or a brand-new name takes effect without restarting halo). |
+| `R` | Reconnect every server, one at a time; also resets the backoff on each one. |
+| `a` | Approve a `pending_approval` project (`.mcp.json`) server, then reconnect it. |
+| `l` | For a local `http`/`sse` server: the 2.0.1 OAuth login flow (`halo mcp login`). For a claude.ai connector row: the re-auth instructions (there is no local OAuth flow for one of these -- the login lives in claude.ai/claude itself). |
+| `L` | A tail of `~/.halo/mcp/<server>.log` (stdio stderr + connect/transport errors, rotated at 1 MB) in a small viewer; Esc returns. |
+| `e` | Edit the entry: opens the source file at that server's own line in `$VISUAL`/`$EDITOR` (`+<line> <file>`), or, with neither set, an inline form (command/args/env, or url/headers) that writes back to the exact same scope file `mcp add` uses; reconnects after either path. |
+| `i` | An install hint for a command-not-found server, guessed from the missing command itself (`npx`/`node`/`uvx`/`uv`/`pipx`/`pip`/`python`) -- shown as a copyable line, never run for you. |
+| `d` | Disable (or re-enable) the server for THIS directory only -- Claude Code's own per-directory `disabledMcpServers` list, so its definition is untouched and every other project keeps seeing it. |
+| `t` | A `tools/list` round trip with timing, shown in the hint line. |
+| Esc | Cancel a busy action, or close the dialog. |
+
+**Reconnect backoff**: a server that dies mid-session reconnects on its
+next use, but not on every next use while it's still down -- 1, 2, 4, 8
+seconds, then every 30 seconds, giving up automatically after 10 minutes
+(the row then says so); `r`/`R`/`halo mcp fix --apply` always reset this,
+since asking by hand is itself the reset.
 
 ## claude.ai connectors bridge
 

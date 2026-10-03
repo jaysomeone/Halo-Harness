@@ -58,6 +58,52 @@ _PNG_1X1 = (
 
 
 @contextmanager
+def serve_http_401():
+    """round4 brief (tests, D item for `l`): a bare, non-MCP HTTP server
+    that answers 401 Unauthorized to every request -- for exercising a
+    REAL http connect failure end to end (`http_sse.looks_like_auth_
+    required`'s own unit test already covers the synthetic-exception
+    half; this is the live-server half). Verified: the installed SDK's
+    `streamable_http_client` does NOT surface this as a 401-shaped
+    exception (no "401"/"unauthorized" text, no `.response.status_code`)
+    -- it lands as a plain `McpServerHandle` 'failed' state with a generic
+    `MCPError`, not 'needs_auth'; `mcp_cli.fix_line_for` accounts for that
+    (an unrecognized http/sse failure suggests `l` too, not just a
+    correctly-classified needs_auth one). Yields the base URL."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _deny(self) -> None:
+            body = b'{"error": "unauthorized"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._deny()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._deny()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="fake-401-server")
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+@contextmanager
 def running_manager(configs: dict, **kwargs):
     """`McpManager(configs, **kwargs)`, `start_all()`-ed, yielded, and
     ALWAYS `close_all()`-ed on the way out -- including when the caller's

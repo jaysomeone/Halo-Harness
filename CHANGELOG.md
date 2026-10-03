@@ -115,6 +115,34 @@ fix, roles v2, and organizations.
    (nothing re-reads it once a slash command finishes outside the normal
    turn loop) -- it now pushes a fresh status refresh once the run
    completes. See [docs/SUBAGENTS.md](docs/SUBAGENTS.md).
+5. **MCP repair actions**: `/mcp` gains a key legend plus the rest of the
+   repair surface -- `R` reconnect every server, `l` login (the 2.0.1
+   OAuth flow for a local `http`/`sse` server, or the claude.ai connector
+   re-auth pointer), `L` a tail of `~/.halo/mcp/<server>.log` (stdio
+   stderr PLUS connect/transport errors, both appended to the one file
+   now, rotated at 1 MB instead of 5), `e` edit the entry at its own line
+   in `$EDITOR`, or an inline form with no `$EDITOR` set (`tui/dialogs/
+   mcp_entry_form.py`, new), `i` an install hint for a command-not-found
+   server guessed from the missing command (`npx`/`node`/`uvx`/`uv`/
+   `pipx`/`pip`/`python`), `d` disable/enable per directory (Claude
+   Code's own `disabledMcpServers`), and `t` a timed `tools/list` round
+   trip. Every failed/needs_auth/pending_approval/disabled row carries
+   its reason and one fix line (`mcp_cli.fix_line_for`, shared code --
+   `halo mcp fix <name> [--apply]` prints and, with `--apply`, runs the
+   exact same diagnosis from the CLI; `halo mcp test <name>` is `t` from
+   the CLI). A server that dies mid-session reconnects on its next use
+   with backoff (1, 2, 4, 8s, then every 30s, giving up after 10 minutes)
+   instead of retrying on every single call; the row shows the attempt
+   count and next retry, and a manual `r`/`R`/`--apply` always resets it.
+   `(McpManager.reconnect_manual`/`McpServerHandle` backoff fields, `mcp/
+   manager.py`.) Fixed along the way: approving a pending `.mcp.json`
+   server from `halo mcp fix --apply` left the live handle's own stale
+   `pending_approval` flag set, so the reconnect that's supposed to
+   follow silently no-op'd every time (the TUI's own `a` action already
+   cleared it; this CLI path now does too). See the `/mcp` section and
+   `halo mcp fix`/`test` in [docs/COMMANDS.md](docs/COMMANDS.md), and the
+   "a server shows failed" walkthrough in
+   [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## [2.0.0] - 2026-10-01
 

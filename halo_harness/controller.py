@@ -899,6 +899,114 @@ class Controller:
         handle.config.pending_approval = False
         return self.reconnect_mcp(name, abort=abort)
 
+    def reconnect_all_mcp(self, abort=None) -> list:
+        """round4 brief item 1: `R` in `/mcp` -- every configured server
+        AND cached connector row, each through `reconnect_mcp` (so a
+        connector name's own special handling, see `tui/bootstrap.py`'s
+        `_reconnect_fn`, and the manual-reconnect backoff reset, see
+        `McpManager.reconnect_manual`, both apply exactly as a single `r`
+        would). Sequential, not parallel -- simple, and each call is
+        already its own timeout-bounded, abortable wait; `abort` stops
+        the whole loop between servers, not mid-reconnect of the one in
+        flight (same "abandoned, not stopped" caveat as everywhere else)."""
+        lines: list = []
+        for row in self.list_mcp_servers():
+            name = row.get("name")
+            if not name:
+                continue
+            lines.extend(self.reconnect_mcp(name, abort=abort))
+            if abort is not None and abort.is_set():
+                lines.append("cancelled -- any remaining servers were left unchanged.")
+                break
+        if not lines:
+            lines.append("No MCP servers configured.")
+        return lines
+
+    def login_mcp_server(self, name: str, abort=None) -> list:
+        """round4 brief item 1: `l` in `/mcp` -- the 2.0.1 OAuth flow for
+        a local http/sse server (`mcp_cli.run_login`, the SAME helper
+        `halo mcp login` uses), or, for a claude.ai connector row, the
+        re-auth instructions line the bridge already produces (there is
+        no local OAuth flow for one of those -- the login lives in
+        claude.ai/claude itself)."""
+        if name.startswith("connector__"):
+            from halo_harness.mcp import connectors_bridge
+            slug = name[len("connector__"):]
+            info = next((c for c in connectors_bridge.get_connectors() if c.slug == slug), None)
+            if info is None:
+                return [f"{name}: no longer reported by `claude mcp list`."]
+            text = connectors_bridge.reauth_instructions(info)
+            return [text or f"{info.name}: already authorized -- nothing to do."]
+        from halo_harness.mcp_cli import run_login
+        lines, ok = run_login(name, self.cwd, settings=self.settings)
+        if ok:
+            lines += self.reconnect_mcp(name, abort=abort)
+        return lines
+
+    def test_mcp_server(self, name: str, abort=None) -> list:
+        """round4 brief item 1: `t` in `/mcp` -- a `tools/list` round
+        trip with timing, straight off `McpManager.test_server`."""
+        if name.startswith("connector__"):
+            return [f"{name}: claude.ai connectors are tested through `claude` itself, not halo's own manager."]
+        if self.mcp_manager is None:
+            return [f"MCP support is not connected in this build ({name} unchanged)."]
+        result = self.mcp_manager.test_server(name, abort=abort)
+        ms = result["elapsed_s"] * 1000
+        if result["ok"]:
+            return [f"{name}: tools/list ok in {ms:.0f}ms -- {result['tool_count']} tool(s)."]
+        return [f"{name}: tools/list failed after {ms:.0f}ms -- {result['error']}"]
+
+    def set_mcp_server_disabled(self, name: str, disabled: bool) -> list:
+        """round4 brief item 1: `d` in `/mcp` -- scope-aware disable/
+        enable (`mcp_cli.set_server_disabled_in_config`, Claude Code's own
+        per-directory `disabledMcpServers`), plus the matching LIVE effect
+        on this session's manager so the dialog reflects it immediately
+        rather than only after a restart."""
+        from halo_harness.mcp_cli import set_server_disabled_in_config
+        try:
+            where = set_server_disabled_in_config(name, cwd=self.cwd, disabled=disabled)
+        except (OSError, ValueError) as e:
+            return [f"{name}: could not update config: {type(e).__name__}: {e}"]
+        if self.mcp_manager is None:
+            return [f"{name}: {'disabled' if disabled else 'enabled'} ({where}); no live MCP session to update."]
+        if disabled:
+            handle = self.mcp_manager.handles.get(name)
+            if handle is not None:
+                handle.close(timeout=5.0)
+                handle.state = "disabled"
+                handle.error = "disabled by the user (`/mcp` d)"
+                handle.config.disabled_reason = handle.error
+            return [f"{name}: disabled ({where})."]
+        try:
+            from halo_harness.config.claude_json import load_claude_json
+            from halo_harness.mcp.manager import resolve_server_configs
+            fresh, _notices = resolve_server_configs(cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
+        except Exception:
+            fresh = {}
+        cfg = fresh.get(name)
+        if cfg is None:
+            return [f"{name}: enabled ({where}), but could not re-resolve its config -- restart halo to pick it up."]
+        self.mcp_manager.resync_from({name: cfg})
+        handle = self.mcp_manager.handles.get(name)
+        if handle is not None and handle.state == "pending":
+            handle.start()
+        return [f"{name}: enabled ({where})."]
+
+    def resolve_mcp_config(self, name: str):
+        """round4 brief item 1: `e` in `/mcp` -- the LIVE, freshly re-
+        resolved `McpServerConfig` for one server (scope/command/args/
+        env/url/headers), straight from the same `resolve_server_configs`
+        the session itself used, so the `$EDITOR` jump / inline form
+        always reflects what's on disk right now. `None` for an unknown
+        name (a connector row, or one no longer configured)."""
+        from halo_harness.config.claude_json import load_claude_json
+        from halo_harness.mcp.manager import resolve_server_configs
+        try:
+            resolved, _notices = resolve_server_configs(cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
+        except Exception:
+            return None
+        return resolved.get(name)
+
     def memory_path(self):
         from halo_harness.config.paths import memory_dir
         return memory_dir(str(self.cwd))

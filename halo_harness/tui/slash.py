@@ -808,8 +808,19 @@ async def _handle_mcp(app, _args: str) -> None:
 
     list_fn = getattr(app.controller, "list_mcp_servers", None)
     servers = list_fn() if list_fn is not None else []
-    app.push_screen(McpStatus(servers, reconnect=app.controller.reconnect_mcp,
-                               approve=app.controller.approve_mcp_server))
+    # round4 brief item 1: every new repair action is its own OPTIONAL
+    # Controller callable -- `getattr(..., None)` throughout so an older
+    # FakeController (or a future test double) missing one just disables
+    # that single key instead of making `/mcp` itself unusable.
+    app.push_screen(McpStatus(
+        servers, reconnect=app.controller.reconnect_mcp,
+        approve=app.controller.approve_mcp_server,
+        reconnect_all=getattr(app.controller, "reconnect_all_mcp", None),
+        login=getattr(app.controller, "login_mcp_server", None),
+        test=getattr(app.controller, "test_mcp_server", None),
+        disable=getattr(app.controller, "set_mcp_server_disabled", None),
+        resolve_config=getattr(app.controller, "resolve_mcp_config", None),
+    ))
 
 
 async def _handle_tasks(app, _args: str) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -114,6 +115,164 @@ def failure_reason(entry: dict) -> str:
         hostport = f"{parsed.hostname}:{parsed.port}" if parsed and parsed.hostname and parsed.port else (url or "?")
         return f"connection refused on {hostport}"
     return error[:200]
+
+
+def install_hint(entry: dict) -> Optional[str]:
+    """round4 brief item 1/3 (`i` / `halo mcp fix`): a copyable install
+    line guessed from a command-not-found server's own `command` --
+    recognizes `npx`/`node`/`uvx`/`uv`/`pipx`/`pip`/`python`'s own
+    launcher by basename (never the PACKAGE it was trying to run -- that
+    part already resolved fine; it's the launcher itself missing) and
+    names the one command that gets that launcher back onto PATH. A
+    custom/unrecognized command falls back to a plain generic line --
+    never fabricates a package name out of thin air. `None` for a
+    non-stdio entry (nothing to install for a url)."""
+    if entry.get("type") not in (None, "stdio"):
+        return None
+    command = (entry.get("command") or "").strip()
+    if not command:
+        return None
+    # Split on both separators by hand: a `.claude.json` written on Windows
+    # carries `C:\tools\npx.cmd`, and on Linux/WSL `os.path.basename` would
+    # keep the whole thing (seen on the Kali and WSL suite runs).
+    base = re.split(r"[\\/]", command)[-1].lower()
+    for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    if base == "npx":
+        return "install Node.js (npx ships with it): https://nodejs.org/"
+    if base == "node":
+        return "install Node.js: https://nodejs.org/"
+    if base in ("uvx", "uv"):
+        return "install uv (ships with uvx): pip install uv  (see https://docs.astral.sh/uv/)"
+    if base == "pipx":
+        return "install pipx: python -m pip install --user pipx && python -m pipx ensurepath"
+    if base in ("pip", "pip3"):
+        return "install pip: python -m ensurepip --upgrade"
+    if base in ("python", "python3"):
+        return "install Python: https://www.python.org/downloads/"
+    return f"install {command!r} and make sure it's on PATH"
+
+
+def fix_line_for(entry: dict) -> Optional[str]:
+    """round4 brief item 1/3: the ONE actionable fix line for a failed/
+    needs_auth/pending_approval/disabled row -- the `/mcp` dialog's own
+    per-row display and `halo mcp fix` both call THIS (never duplicated):
+    one function computes it, two surfaces render it. Mirrors doctor.
+    _fix's own "-> fix: <cmd>" convention, just keyed off an MCP server's
+    live status instead of a doctor check. `None` when there's nothing
+    actionable (healthy, tools-fetch-failed-but-connected, or an
+    unrecognized error shape)."""
+    state = entry.get("state")
+    name = entry.get("name", "?")
+    if state == "pending_approval":
+        return f"press `a` in /mcp (or `halo mcp fix {name} --apply`) to approve it"
+    if state == "needs_auth":
+        if entry.get("type") == "connector":
+            return "authorize it at claude.ai or inside `claude` with /mcp, then press `l`/`r` in /mcp here"
+        return f"halo mcp login {name} (or press `l` in /mcp)"
+    if state == "disabled":
+        reason = (entry.get("error") or "").lower()
+        if "websocket" in reason or "sdk" in reason:
+            return None  # nothing the user can fix locally -- see `halo doctor`
+        return "press `d` in /mcp to re-enable it, or `e` to check its entry"
+    if state != "failed":
+        return None
+    reason = failure_reason(entry).lower()
+    if reason.startswith("command not found on path"):
+        return install_hint(entry) or f"install {entry.get('command')!r} and ensure it's on PATH"
+    if reason.startswith("connection refused"):
+        return "check the server is running, or press `e` in /mcp to fix its url"
+    if entry.get("type") in ("http", "sse"):
+        # `http_sse.looks_like_auth_required`'s own detection is best-
+        # effort text/status sniffing -- verified live that a real bare
+        # 401 response can still surface as a generic MCPError with
+        # neither "401" nor a `.response.status_code` to catch, landing
+        # here as plain "failed" rather than "needs_auth" above. An http/
+        # sse connect failure that isn't a recognized refused/not-found
+        # shape is plausibly an auth problem either way, so `l` is worth
+        # suggesting here too, not just for the cases that got correctly
+        # classified `needs_auth`.
+        return "press `l` in /mcp to try OAuth login (this may be an auth problem), or `L` to read its log"
+    return "press `t` in /mcp to test it again, or `L` to read its log"
+
+
+def locate_server_source(cfg, *, name: str, cwd: Path) -> "tuple[Optional[Path], int]":
+    """`e` (`/mcp`)'s own `$EDITOR` jump: `(path, line_1_based)` for one
+    server's scope file -- best-effort, a plain text scan for the first
+    line containing this name's exact JSON-quoted key (never a full JSON-
+    to-line AST mapper); line 1 (still the right FILE) when the key can't
+    be found that way. `(None, 0)` for a scope with no single editable
+    file of its own (managed/flag/dynamic/plugin)."""
+    scope = getattr(cfg, "scope", None)
+    if scope == "project":
+        path = cwd / ".mcp.json"
+    elif scope in ("local", "user"):
+        path = claude_json_path()
+    else:
+        return None, 0
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return path, 1
+    needle = json.dumps(name)
+    for i, line in enumerate(text.splitlines(), start=1):
+        if needle in line:
+            return path, i
+    return path, 1
+
+
+def set_server_disabled_in_config(name: str, *, cwd: Path, disabled: bool) -> str:
+    """`d` (`/mcp`), per scope -- Claude Code's own `disabledMcpServers`
+    convention: a per-directory list under `~/.claude.json`'s
+    `projects[cwd]`, checked by `mcp.manager.resolve_server_configs`
+    AFTER every tier resolves, so it hides a server of ANY scope (local/
+    user/project/managed/plugin) for just this directory without ever
+    touching its own definition. Returns where it was written, for the
+    confirmation message."""
+    data, indent, trailing_newline, bom = _read_claude_json_raw()
+    data.setdefault("projects", {})
+    key = normalize_cwd(cwd)
+    proj = data["projects"].setdefault(key, {})
+    current = set(proj.get("disabledMcpServers") or [])
+    if disabled:
+        current.add(name)
+    else:
+        current.discard(name)
+    proj["disabledMcpServers"] = sorted(current)
+    _write_claude_json_raw(data, indent, trailing_newline=trailing_newline, bom=bom)
+    return f"{claude_json_path()} (projects[{key}].disabledMcpServers)"
+
+
+def run_login(name: str, cwd: Path, *, settings=None, open_browser: bool = True,
+               timeout: Optional[float] = None) -> "tuple[list, bool]":
+    """The OAuth login round trip shared by `_cmd_login` (`halo mcp
+    login`) and `Controller.login_mcp_server` (`/mcp` `l`) -- `(lines,
+    ok)`, never raises. Calls `oauth.run_authorization_flow` through the
+    MODULE (`from halo_harness.mcp import oauth; oauth.run_authorization_
+    flow(...)`), never a bound import of the function itself, so a test
+    that monkeypatches `halo_harness.mcp.oauth.run_authorization_flow`
+    (test_mcp_subcommands.py) still takes effect here. A claude.ai
+    connector (`name` starting `connector__`) has no local OAuth flow --
+    callers route those to the connectors-bridge re-auth instructions
+    instead; this only ever looks at locally configured http/sse servers."""
+    from halo_harness.config.claude_json import load_claude_json
+    from halo_harness.mcp.manager import resolve_server_configs
+    resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json(), settings=settings)
+    cfg = resolved.get(name)
+    if cfg is None:
+        return [f"no MCP server found with name: {name}"], False
+    if cfg.type not in ("http", "sse"):
+        return [f"{name!r} is a {cfg.type!r} server -- OAuth only applies to http/sse (remote) servers."], False
+    from halo_harness.mcp import oauth
+    kwargs = {"callback_timeout": timeout} if timeout is not None else {}
+    tokens, err = oauth.run_authorization_flow(server_name=name, server_url=cfg.url or "",
+                                                 oauth_cfg=cfg.oauth or {}, open_browser=open_browser, **kwargs)
+    if err:
+        return [f"{name}: {err}"], False
+    path = oauth.save_tokens(name, tokens)
+    return [f"{name}: authorized, tokens stored at {path}"], True
 
 
 def _session_inputs(cwd: Path):
@@ -690,28 +849,147 @@ def _cmd_login(rest: list) -> int:
     args = parser.parse_args(rest)
     cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
 
-    from halo_harness.config.claude_json import load_claude_json
-    from halo_harness.mcp.manager import resolve_server_configs
-    resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json())
-    cfg = resolved.get(args.name)
-    if cfg is None:
-        print(f"halo mcp login: no MCP server found with name: {args.name}", file=sys.stderr)
-        return 1
-    if cfg.type not in ("http", "sse"):
-        print(f"halo mcp login: {args.name!r} is a {cfg.type!r} server -- OAuth only applies to "
-              f"http/sse (remote) servers.", file=sys.stderr)
-        return 1
+    lines, ok = run_login(args.name, cwd, open_browser=not args.no_browser, timeout=args.timeout)
+    stream = sys.stdout if ok else sys.stderr
+    for line in lines:
+        print(f"halo mcp login: {line}", file=stream)
+    return 0 if ok else 1
 
-    from halo_harness.mcp import oauth
-    kwargs = {"callback_timeout": args.timeout} if args.timeout is not None else {}
-    tokens, err = oauth.run_authorization_flow(server_name=args.name, server_url=cfg.url or "",
-                                                oauth_cfg=cfg.oauth or {}, open_browser=not args.no_browser, **kwargs)
-    if err:
-        print(f"halo mcp login: {args.name}: {err}", file=sys.stderr)
+
+def _cmd_fix(rest: list) -> int:
+    """round4 brief item 3: `halo mcp fix <name> [--apply]` -- the SAME
+    diagnosis the `/mcp` dialog shows per row (`failure_reason`/
+    `fix_line_for`, never duplicated), from the CLI. Without `--apply`,
+    only prints the reason and the fix line; with it, actually runs the
+    matching action: approve a pending `.mcp.json` server, run the OAuth
+    login for a needs_auth http/sse server, print the install hint for a
+    command-not-found (never runs it -- that line is for the user to run),
+    or reconnect for anything else."""
+    parser = argparse.ArgumentParser(prog="halo mcp fix", add_help=True)
+    parser.add_argument("name")
+    parser.add_argument("--cwd", default=None)
+    parser.add_argument("--apply", action="store_true", help="run the matching fix action, not just print it")
+    args = parser.parse_args(rest)
+    cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+
+    try:
+        claude_json, settings = _session_inputs(cwd)
+    except Exception as e:
+        print(f"halo mcp fix: could not resolve settings ({type(e).__name__}: {e})", file=sys.stderr)
         return 1
-    path = oauth.save_tokens(args.name, tokens)
-    print(f"halo mcp login: {args.name}: authorized, tokens stored at {path}")
-    return 0
+    try:
+        from halo_harness.mcp_setup import build_manager
+        manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
+                                          print_mode=False, start=True)
+    except Exception as e:
+        print(f"halo mcp fix: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
+        return 1
+    for n in notices:
+        print(f"Note: {n}", file=sys.stderr)
+    if manager is None or args.name not in manager.handles:
+        print(f"halo mcp fix: no MCP server found with name: {args.name}", file=sys.stderr)
+        if manager is not None:
+            manager.close_all()
+        return 1
+    try:
+        entry = next(e for e in manager.status() if e.get("name") == args.name)
+        print(f"{args.name}: {status_label(entry)}")
+        reason = failure_reason(entry)
+        if reason:
+            print(f"  reason: {reason}")
+        fix = fix_line_for(entry)
+        print(f"  fix: {fix}" if fix else "  fix: nothing to do.")
+        if not args.apply:
+            if fix:
+                print("Re-run with --apply to run it.")
+            return 0
+        return _apply_fix(args.name, entry, manager=manager, cwd=cwd, settings=settings)
+    finally:
+        manager.close_all()
+
+
+def _apply_fix(name: str, entry: dict, *, manager, cwd: Path, settings) -> int:
+    state = entry.get("state")
+    if state == "pending_approval":
+        from halo_harness import mcp_setup
+        mcp_json_path = cwd / ".mcp.json"
+        try:
+            raw = json.loads(mcp_json_path.read_text(encoding="utf-8-sig"))
+            raw_entry = (raw.get("mcpServers") or {})[name]
+        except (OSError, ValueError, KeyError) as e:
+            print(f"halo mcp fix: could not read {name}'s .mcp.json entry to approve it: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        mcp_setup.record_mcp_approval(name, raw_entry)
+        # H3b/Controller.approve_mcp_server's own fix, reproduced here:
+        # `record_mcp_approval` only writes the PERSISTED ~/.halo/mcp-
+        # approvals.json -- it never touches this LIVE handle's config,
+        # so `McpServerHandle.start()`'s own `if self.state in
+        # ("disabled", "pending_approval"): return` guard would otherwise
+        # keep no-op'ing forever (reproduced live: `reconnect_manual`
+        # silently flipped straight back to pending_approval and never
+        # actually started the process). Clearing it here, BEFORE
+        # reconnecting, is what makes the approval actually take effect
+        # this same run, not just on halo's next launch.
+        handle = manager.handles.get(name)
+        if handle is not None:
+            handle.config.pending_approval = False
+        ok = manager.reconnect_manual(name)
+        print(f"halo mcp fix: {name}: approved{'' if ok else ' (reconnect still failed, see above)'}.")
+        return 0 if ok else 1
+    if state == "needs_auth":
+        lines, ok = run_login(name, cwd, settings=settings)
+        for line in lines:
+            print(f"halo mcp fix: {line}")
+        return 0 if ok else 1
+    reason = failure_reason(entry).lower()
+    if reason.startswith("command not found on path"):
+        hint = install_hint(entry)
+        print(f"halo mcp fix: {name}: {hint or 'install the missing command and ensure it is on PATH'}")
+        return 0
+    ok = manager.reconnect_manual(name)
+    print(f"halo mcp fix: {name}: {'reconnected' if ok else 'reconnect failed again, see the reason above'}.")
+    return 0 if ok else 1
+
+
+def _cmd_test(rest: list) -> int:
+    """round4 brief item 3: `halo mcp test <name>` -- the `t` action from
+    the CLI: a `tools/list` round trip with timing."""
+    parser = argparse.ArgumentParser(prog="halo mcp test", add_help=True)
+    parser.add_argument("name")
+    parser.add_argument("--cwd", default=None)
+    args = parser.parse_args(rest)
+    cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+
+    try:
+        claude_json, settings = _session_inputs(cwd)
+    except Exception as e:
+        print(f"halo mcp test: could not resolve settings ({type(e).__name__}: {e})", file=sys.stderr)
+        return 1
+    try:
+        from halo_harness.mcp_setup import build_manager
+        manager, notices = build_manager(cwd=cwd, claude_json=claude_json, settings=settings,
+                                          print_mode=False, start=True)
+    except Exception as e:
+        print(f"halo mcp test: could not check server health ({type(e).__name__}: {e})", file=sys.stderr)
+        return 1
+    for n in notices:
+        print(f"Note: {n}", file=sys.stderr)
+    if manager is None or args.name not in manager.handles:
+        print(f"halo mcp test: no MCP server found with name: {args.name}", file=sys.stderr)
+        if manager is not None:
+            manager.close_all()
+        return 1
+    try:
+        result = manager.test_server(args.name)
+        ms = result["elapsed_s"] * 1000
+        if result["ok"]:
+            print(f"halo mcp test: {args.name}: ok in {ms:.0f}ms -- {result['tool_count']} tool(s).")
+            return 0
+        print(f"halo mcp test: {args.name}: failed after {ms:.0f}ms -- {result['error']}", file=sys.stderr)
+        return 1
+    finally:
+        manager.close_all()
 
 
 def _cmd_logout(rest: list) -> int:
@@ -739,7 +1017,9 @@ def cmd_mcp(argv: list) -> int:
               "  reset-project-choices   Reset approved project-scoped (.mcp.json) servers\n"
               "  serve                   Expose halo's own built-in tools as an MCP server\n"
               "  login <name>            OAuth-authenticate a remote MCP server\n"
-              "  logout <name>           Clear stored OAuth credentials for a server")
+              "  logout <name>           Clear stored OAuth credentials for a server\n"
+              "  fix <name> [--apply]    Diagnose (and, with --apply, fix) a failed server\n"
+              "  test <name>             A tools/list round trip with timing")
         return 0
 
     sub, rest = argv[0], argv[1:]
@@ -747,6 +1027,10 @@ def cmd_mcp(argv: list) -> int:
         return _cmd_list(rest)
     if sub == "get":
         return _cmd_get(rest)
+    if sub == "fix":
+        return _cmd_fix(rest)
+    if sub == "test":
+        return _cmd_test(rest)
     if sub == "add":
         return _cmd_add(rest)
     if sub == "add-from-claude-desktop":

@@ -114,6 +114,74 @@ def tool_timeout_s(server_timeout_ms: Optional[float]) -> float:
     return min(int(1e8), _INT32_MAX) / 1000.0
 
 
+# ---- per-server log (round4 brief item 1) ----------------------------------
+# ONE rotating log per server at `~/.halo/mcp/<server>.log` -- `stdio.
+# open_errlog`/`stdio.errlog_path` already own the file (a stdio server's
+# raw child stderr, redirected at the OS level, rotated at 1 MB) since H3;
+# this module reuses that SAME path/rotation (never a second log-opening
+# implementation) to also append connect/transport errors for EVERY
+# transport (stdio, http, sse), so `L` in `/mcp` and `halo mcp fix` have one
+# place to look regardless of why a server is down.
+
+def _append_server_log(name: str, message: str) -> None:
+    """Best-effort: a logging failure must never break the connect/call
+    that triggered it."""
+    try:
+        import datetime
+        from halo_harness.mcp import stdio as stdio_mod
+        f = stdio_mod.open_errlog(name)
+        try:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{ts}] {message}\n")
+            f.flush()
+        finally:
+            f.close()
+    except Exception:
+        pass
+
+
+def server_log_path(name: str) -> Path:
+    from halo_harness.mcp import stdio as stdio_mod
+    return stdio_mod.errlog_path(name)
+
+
+def tail_server_log(name: str, max_lines: int = 60) -> "list[str]":
+    """`L` (`/mcp`) / `halo mcp fix`'s own tail -- the last `max_lines` of
+    this server's log (stdio stderr + connect/transport errors, see
+    `_append_server_log` above); `[]` when there is no log yet (never
+    connected, or a transport with nothing to say), never raises."""
+    try:
+        text = server_log_path(name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.splitlines()
+    return lines[-max_lines:] if max_lines > 0 else lines
+
+
+# ---- reconnect backoff (round4 brief item 2) -------------------------------
+# A server that dies mid-session reconnects on next use, but not on EVERY
+# next use while it's still down -- 1, 2, 4, 8s, then every 30s, giving up
+# automatically after 10 minutes of unbroken failure (a manual `r`/`R`/
+# `halo mcp fix --apply` always resets this, see `McpManager.reconnect_
+# manual`). All of `McpServerHandle`'s own backoff bookkeeping below takes
+# an optional `now` so tests can drive the schedule without a real sleep.
+
+_MCP_BACKOFF_RUNGS = (1.0, 2.0, 4.0, 8.0)
+_MCP_BACKOFF_STEADY_S = 30.0
+_MCP_BACKOFF_GIVE_UP_S = 600.0  # 10 minutes
+
+
+def mcp_backoff_delay_s(attempt: int) -> float:
+    """`attempt` is the 0-based count of retries ALREADY FAILED since the
+    server died: 0 -> the very first automatic retry (waits 1s), 1 -> 2s,
+    2 -> 4s, 3 -> 8s, 4+ -> the steady 30s rung forever after."""
+    if attempt < 0:
+        attempt = 0
+    if attempt < len(_MCP_BACKOFF_RUNGS):
+        return _MCP_BACKOFF_RUNGS[attempt]
+    return _MCP_BACKOFF_STEADY_S
+
+
 # ---- name sanitising (binary-facts sec.9) ----------------------------------
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")
@@ -718,6 +786,88 @@ class McpServerHandle:
         # nobody downstream ever waited for -- verified on Windows: without
         # this, the spawned child outlived `close_all()` and a 5s poll.
         self._connect_cleanup_future: "Optional[concurrent.futures.Future]" = None
+        # round4 brief item 2: reconnect backoff bookkeeping -- see the
+        # module-level "reconnect backoff" section above. `backoff_started_
+        # at`/`backoff_next_retry_at` are `None` whenever nothing is armed
+        # (healthy, or never connected yet).
+        self.backoff_attempts: int = 0
+        self.backoff_next_retry_at: Optional[float] = None
+        self.backoff_started_at: Optional[float] = None
+        self.backoff_exhausted: bool = False
+
+    def _arm_backoff(self, now: Optional[float] = None) -> None:
+        """A fresh death (or a failed MANUAL reconnect, see `McpManager.
+        reconnect_manual`) -- (re)starts the schedule at attempt 0 and
+        marks a reconnect as owed, due IMMEDIATELY (`backoff_next_retry_
+        at = now`, never `now + delay`): finding 6's own pre-round4
+        contract ("reconnect once on the NEXT call", no wait at all) is
+        pinned by test_mcp_compat_matrix.py::test_item13_dies_mid_call_
+        then_a_later_call_succeeds_via_auto_reconnect, which calls twice
+        back to back with zero sleep and expects the SECOND to already be
+        reconnected -- reproduced live: defaulting this to `now + 1.0`
+        broke that test (`RuntimeError: ... not connected (state=failed)`
+        on the second call). The 1/2/4/8s-then-30s schedule in `record_
+        backoff_failure` below applies to retries AFTER this first,
+        unconditional one -- round4 brief item 2's own gap is that NOTHING
+        used to retry again at all once that first automatic attempt also
+        failed, not that the first attempt itself was too eager."""
+        now = now if now is not None else time.monotonic()
+        self.backoff_attempts = 0
+        self.backoff_started_at = now
+        self.backoff_next_retry_at = now
+        self.backoff_exhausted = False
+        self._reconnect_on_next_call = True
+
+    def record_backoff_failure(self, now: Optional[float] = None) -> None:
+        """One more automatic retry just failed -- advance the schedule,
+        or give up (stop scheduling further automatic retries) once 10
+        minutes have passed since the ORIGINAL death. The delay for THIS
+        wait is read from `mcp_backoff_delay_s` BEFORE `backoff_attempts`
+        is incremented -- the immediate attempt `_arm_backoff` sets up is
+        attempt 0 (0 wait); if IT fails, this is the first call here, and
+        the wait before the next one must be rung 0 (1s), not rung 1
+        (2s). Reading the rung AFTER incrementing (the first-written
+        version of this method) silently skipped the 1s rung on every
+        death -- 2, 4, 8, 30s -- never 1."""
+        now = now if now is not None else time.monotonic()
+        if self.backoff_started_at is None:
+            self.backoff_started_at = now
+        delay = mcp_backoff_delay_s(self.backoff_attempts)
+        self.backoff_attempts += 1
+        if now - self.backoff_started_at >= _MCP_BACKOFF_GIVE_UP_S:
+            self.backoff_exhausted = True
+            self.backoff_next_retry_at = None
+        else:
+            self.backoff_next_retry_at = now + delay
+
+    def clear_backoff(self) -> None:
+        self.backoff_attempts = 0
+        self.backoff_next_retry_at = None
+        self.backoff_started_at = None
+        self.backoff_exhausted = False
+
+    def backoff_due(self, now: Optional[float] = None) -> bool:
+        """True iff an automatic reconnect-on-next-use attempt should
+        actually run right now -- never while exhausted, never before the
+        next scheduled rung."""
+        if self.backoff_exhausted:
+            return False
+        if self.backoff_next_retry_at is None:
+            return True
+        now = now if now is not None else time.monotonic()
+        return now >= self.backoff_next_retry_at
+
+    def backoff_status_text(self, now: Optional[float] = None) -> Optional[str]:
+        """The `/mcp` row's own "attempt count and next retry" -- `None`
+        when nothing is armed (nothing to show)."""
+        if self.backoff_started_at is None:
+            return None
+        now = now if now is not None else time.monotonic()
+        if self.backoff_exhausted:
+            minutes = int(_MCP_BACKOFF_GIVE_UP_S // 60)
+            return f"attempt {self.backoff_attempts}, gave up after {minutes} min of failures -- reconnect manually"
+        remaining = max(0.0, (self.backoff_next_retry_at or now) - now)
+        return f"attempt {self.backoff_attempts}, next retry in {remaining:.0f}s"
 
     async def _resolved_headers(self) -> dict:
         """H4 must-do: run the (optional) `headersHelper` off the event
@@ -1008,6 +1158,7 @@ class McpServerHandle:
         except Exception as e:
             self.state = "needs_auth" if http_sse_mod.looks_like_auth_required(e) else "failed"
             self.error = f"{type(e).__name__}: {e}"
+            _append_server_log(self.config.name, f"connect failed ({self.state}): {self.error}")
             return
         self.state = "connected"
 
@@ -1023,7 +1174,13 @@ class McpServerHandle:
         self.state = "failed"
         self.error = f"{type(exc).__name__}: {exc} (connection lost)"
         self._session = None
-        self._reconnect_on_next_call = True
+        _append_server_log(self.config.name, f"connection lost: {self.error}")
+        # round4 brief item 2: arms the reconnect backoff (replaces a bare
+        # `self._reconnect_on_next_call = True` -- see `_arm_backoff`'s own
+        # docstring) so the first automatic retry waits 1s rather than
+        # firing on the very next call, and every later one backs off
+        # further instead of hammering a server that just died.
+        self._arm_backoff()
 
     def _on_lifecycle_done(self, fut: "concurrent.futures.Future") -> None:
         """finding 6's other half: notice when the lifecycle task itself
@@ -1090,6 +1247,30 @@ class McpServerHandle:
             if _looks_like_dead_transport(e):
                 self._mark_dead(e)
             raise
+
+    def test_round_trip(self) -> dict:
+        """`t` (`/mcp`) / `halo mcp test`: an EXPLICIT, freshly-timed
+        `tools/list` round trip against the live session -- distinct from
+        whatever `self.tools` already holds from connect/cache-seed time,
+        so a user can confirm the connection answers RIGHT NOW, not just
+        that it once did. `{ok, elapsed_s, tool_count, error}`; never
+        raises. A dead transport discovered here is recorded the same way
+        an ordinary call would (`_mark_dead`), so the NEXT use reconnects
+        with backoff instead of hanging its own timeout against a session
+        that will never answer again."""
+        t0 = time.monotonic()
+        if self._session is None:
+            return {"ok": False, "elapsed_s": time.monotonic() - t0, "tool_count": 0,
+                     "error": f"not connected (state={self.state})"}
+        try:
+            result = self._loop.run(self._session.list_tools(), timeout=mcp_timeout_s())
+            tools = list(getattr(result, "tools", None) or [])
+            return {"ok": True, "elapsed_s": time.monotonic() - t0, "tool_count": len(tools), "error": None}
+        except Exception as e:
+            if _looks_like_dead_transport(e):
+                self._mark_dead(e)
+            return {"ok": False, "elapsed_s": time.monotonic() - t0, "tool_count": 0,
+                     "error": f"{type(e).__name__}: {e}"}
 
     def list_resources(self) -> list:
         if self._session is None:
@@ -1496,19 +1677,32 @@ class McpManager:
         if h is None:
             raise RuntimeError(f"unknown mcp server: {server!r}")
         self.ensure_started(server, abort=abort)
-        if h._reconnect_on_next_call:
+        if h._reconnect_on_next_call and h.backoff_due():
             # finding 6: a PREVIOUSLY-working connection died mid-session
-            # (_mark_dead set this) -- reconnect once, here, on its next
-            # use. A server that never connected in the first place never
-            # sets this flag, so it keeps failing fast as before.
+            # (_mark_dead set this) -- reconnect on its next use. A server
+            # that never connected in the first place never sets this
+            # flag, so it keeps failing fast as before.
             # u2-h3b finding 9: this reconnect used to be a PLAIN blocking
             # call, ignoring `abort` entirely -- a hung/slow server's
             # reconnect-on-next-call could hold the whole turn (Esc did
             # nothing) for up to `mcp_timeout_s()*2 + 9`s. Threading
             # `abort` through makes it honour Esc same as the tool call
             # that follows it.
-            h._reconnect_on_next_call = False
-            self.reconnect(server, abort=abort)
+            # round4 brief item 2: `backoff_due()` gates this now -- a
+            # dead server is NOT retried on literally every subsequent
+            # call (1, 2, 4, 8s then every 30s, giving up after 10
+            # minutes); when it's not due yet (or exhausted) this falls
+            # straight through to the fast "not connected" failure below,
+            # no wasted connect attempt.
+            ok = self.reconnect(server, abort=abort)
+            if ok:
+                h.clear_backoff()
+            else:
+                # still owed -- `reconnect()` itself always clears this
+                # flag before trying, win or lose; re-arm it so a LATER
+                # call checks again once the next backoff rung is due.
+                h.record_backoff_failure()
+                h._reconnect_on_next_call = True
         effective_timeout = timeout if timeout is not None else tool_timeout_s(h.config.timeout_ms)
         return h.call_tool(tool, arguments, timeout=effective_timeout, abort=abort)
 
@@ -1527,6 +1721,9 @@ class McpManager:
                 # connected -- reported the same as a real "connected" one.
                 "tool_count": len(h.tools) if h.state in ("connected", "cached") else 0,
                 "instructions": h.instructions, "scope": h.config.scope,
+                # round4 brief item 2: the `/mcp` row's own "attempt count
+                # and next retry" -- `None` whenever nothing is armed.
+                "backoff_status": h.backoff_status_text(),
             })
         return out
 
@@ -1568,6 +1765,34 @@ class McpManager:
         if ok:
             self._refresh_tools_cache(name, h, cached_tools_before)
         return ok
+
+    def reconnect_manual(self, name: str, abort=None) -> bool:
+        """round4 brief item 2: a user-INITIATED reconnect (`/mcp` `r`/
+        `R`, `halo mcp fix --apply`) -- unlike the automatic reconnect-on-
+        next-use in `call()` above, this ALWAYS clears any armed backoff
+        first ("R resets the backoff"; a single-server `r` does too,
+        since asking by hand IS the reset) and, if it fails anyway,
+        re-arms a FRESH one so the next automatic use still retries with
+        backoff instead of going silent forever."""
+        h = self.handles.get(name)
+        if h is not None:
+            h.clear_backoff()
+            h._reconnect_on_next_call = False
+        ok = self.reconnect(name, abort=abort)
+        h = self.handles.get(name)
+        if h is not None and not ok:
+            h._arm_backoff()
+        return ok
+
+    def test_server(self, name: str, abort=None) -> dict:
+        """`t` (`/mcp`) / `halo mcp test` -- connects a still-pending/
+        cached (lazy) server first, same as an ordinary tool call would,
+        then runs `McpServerHandle.test_round_trip()`."""
+        h = self.handles.get(name)
+        if h is None:
+            return {"ok": False, "elapsed_s": 0.0, "tool_count": 0, "error": f"unknown mcp server: {name!r}"}
+        self.ensure_started(name, abort=abort)
+        return h.test_round_trip()
 
     def close_all(self, timeout: float = 5.0) -> None:
         """Close every handle, then hard-stop the shared loop -- the WHOLE

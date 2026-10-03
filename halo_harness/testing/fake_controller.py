@@ -69,7 +69,7 @@ class FakeController:
 
     def __init__(self, turns: Optional[list] = None, *, model: str = DEFAULT_MODEL,
                  permission_mode: str = "default", agent_tasks: Optional[list] = None,
-                 task_board: Optional[list] = None):
+                 task_board: Optional[list] = None, mcp_servers: Optional[list] = None):
         self.turns = turns if turns is not None else default_demo_turns()
         self._next_turn_idx = 0
         self.model = model
@@ -105,6 +105,16 @@ class FakeController:
         # with no real Session/agent_runtime/sub-agent ever involved.
         self.agent_tasks: list = list(agent_tasks) if agent_tasks is not None else []
         self.task_board: list = list(task_board) if task_board is not None else []
+        # Halo 2.0.2 round 4 (brief D): `/mcp`'s own repair actions -- a
+        # test sets `mcp_servers` directly (or via the constructor) to
+        # render fake rows with no real McpManager/subprocess involved;
+        # every action is recorded the same way `reconnects` already is.
+        self.mcp_servers: list = list(mcp_servers) if mcp_servers is not None else []
+        self.approvals: list = []
+        self.reconnect_all_calls: int = 0
+        self.logins: list = []
+        self.tests: list = []
+        self.disables: list = []
 
     def submit(self, text: str, pasted=None, meta=None) -> Iterator[ev.Event]:
         self.submitted.append(text)
@@ -176,8 +186,45 @@ class FakeController:
     def mcp_status(self) -> dict:
         return {"connected": 0, "total": 0}
 
-    def reconnect_mcp(self, name: str, abort=None) -> None:
+    def reconnect_mcp(self, name: str, abort=None) -> list:
         self.reconnects += 1
+        for entry in self.mcp_servers:
+            if entry.get("name") == name:
+                entry["state"] = "connected"
+                entry["error"] = None
+        return [f"{name}: connected (fake)"]
+
+    def list_mcp_servers(self) -> list:
+        return list(self.mcp_servers)
+
+    def approve_mcp_server(self, name: str, abort=None) -> list:
+        self.approvals.append(name)
+        return self.reconnect_mcp(name, abort=abort)
+
+    def reconnect_all_mcp(self, abort=None) -> list:
+        self.reconnect_all_calls += 1
+        lines = []
+        for entry in self.mcp_servers:
+            lines.extend(self.reconnect_mcp(entry.get("name"), abort=abort))
+        return lines or ["No MCP servers configured."]
+
+    def login_mcp_server(self, name: str, abort=None) -> list:
+        self.logins.append(name)
+        return [f"{name}: authorized (fake)"]
+
+    def test_mcp_server(self, name: str, abort=None) -> list:
+        self.tests.append(name)
+        return [f"{name}: tools/list ok in 1ms -- 0 tool(s). (fake)"]
+
+    def set_mcp_server_disabled(self, name: str, disabled: bool) -> list:
+        self.disables.append((name, disabled))
+        for entry in self.mcp_servers:
+            if entry.get("name") == name:
+                entry["state"] = "disabled" if disabled else "pending"
+        return [f"{name}: {'disabled' if disabled else 'enabled'} (fake)"]
+
+    def resolve_mcp_config(self, name: str):
+        return None
 
     def list_agent_tasks(self) -> list:
         return list(self.agent_tasks)
