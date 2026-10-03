@@ -159,7 +159,8 @@ actually resolves against) so it never drifts from real behavior. See
 ### `/providers [list|enable <name>|disable <name>|setup <name>]`
 H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-
 enablement table -- status, reachable, cached model count -- for
-`databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`), and
+`databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`),
+`codex_subscription` (`cx:`, with the plan's usage windows under the table), and
 `typesafe` (stores `TYPESAFE_API_KEY` only, for a later feature; no routed
 models yet). Each row's status is `auto (detected from <source>)` once a
 real credential/login is found (no `init` step required), `disabled by

@@ -292,6 +292,17 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
     host_key = route.provider if route.provider in ("databricks", "openrouter") else None
     row = ((model_table.get(host_key) or {}).get(route.upstream_model) or {}) if host_key else {}
 
+    if route.provider == "cx":
+        # 2.0.2: the effort levels Codex's own model/list reports for this
+        # model (within Halo's vocabulary), so `/effort` offers exactly
+        # those; the cx: runtime clamps anything else before sending.
+        from halo_harness.providers.cx_models import profile_fields_for_cx_model
+        fields = profile_fields_for_cx_model(route.upstream_model, state_dir)
+        efforts = tuple(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS) or OPENAI_EFFORT_LEVELS
+        default = fields.get("default_effort") if fields.get("default_effort") in efforts else None
+        return ProviderProfile(family=family, reasoning_effort_supported=True, effort_values_supported=efforts,
+                               reasoning_default_effort=default)
+
     if route.dialect == "anthropic-passthrough":
         return ProviderProfile(
             system_vs_developer="system", thinking_format="anthropic_thinking",

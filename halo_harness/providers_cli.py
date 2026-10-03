@@ -25,7 +25,7 @@ def _model_count(name: str) -> "int | None":
         return None
     from halo_harness.config.paths import bridge_home
     from halo_harness.init_providers import model_entries_for_provider
-    picker_name = "claude" if name == "claude_subscription" else name
+    picker_name = {"claude_subscription": "claude", "codex_subscription": "codex"}.get(name, name)
     try:
         return len(model_entries_for_provider(picker_name, bridge_home()))
     except Exception:
@@ -89,6 +89,14 @@ def format_providers_table(rows: "list[dict]") -> str:
     if balance_line:
         lines.append("")
         lines.append(balance_line)
+    # 2.0.2: the Codex subscription's plan and usage windows, as last
+    # reported by codex (refreshed with every cx: response).
+    if any(r.get("name") == "codex_subscription" and r.get("enabled") for r in rows):
+        from halo_harness.providers.cx_models import cached_rate_limits_line
+        usage_line = cached_rate_limits_line()
+        if usage_line:
+            lines.append("")
+            lines.append(f"Codex subscription: {usage_line}")
     return "\n".join(lines)
 
 
@@ -135,6 +143,8 @@ def cmd_providers(argv: list) -> int:
             from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
             if cached_auth_status_is_stale():
                 refresh_cached_claude_auth_status()
+            from halo_harness.providers.cx_models import prime_codex_login_cache
+            prime_codex_login_cache()
         except Exception:
             pass
         print(format_providers_table(provider_rows(cwd=cwd, settings_flag=settings_flag)))
@@ -176,7 +186,7 @@ def cmd_providers(argv: list) -> int:
                   "(set TYPESAFE_API_KEY in the env file, then `halo providers enable typesafe`).",
                   file=sys.stderr)
             return 2
-        picker_name = "claude" if name == "claude_subscription" else name
+        picker_name = {"claude_subscription": "claude", "codex_subscription": "codex"}.get(name, name)
         from halo_harness.init_cli import cmd_init
         return cmd_init(["--provider", picker_name] + argv[2:])
     print(f"halo providers: unrecognized arguments: {' '.join(argv)}", file=sys.stderr)

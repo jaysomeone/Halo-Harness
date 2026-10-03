@@ -421,6 +421,10 @@ class BridgeApp(App):
         # now, never spawns the `claude auth status` subprocess itself.
         self.run_worker(self._prime_auth_status_worker, thread=True, name="auth-status-startup",
                          group="auth-status-startup")
+        # 2.0.2: the Codex subscription's own login check, in its own
+        # worker so it never delays the Claude check above.
+        self.run_worker(self._prime_codex_login, thread=True, name="codex-login-startup",
+                         group="codex-login-startup")
         # H15 part 2 addendum 3.2a: the SAME staleness-gated, every-
         # enabled-provider catalog refresh `/model` triggers on open also
         # runs once at launch -- a provider set up with just a key/token
@@ -554,6 +558,24 @@ class BridgeApp(App):
                 connectors_bridge.ensure_discovered_in_background(on_done=on_done)
             except Exception:
                 pass
+
+    def _prime_codex_login(self) -> None:
+        """2.0.2: the same once-per-launch check for the Codex subscription
+        (`codex login status`, ~0.3 s, this worker thread only), with the
+        same quiet one-line notice when it is usable."""
+        try:
+            from halo_harness.providers.cx_models import (
+                codex_installed, is_subscription_login, refresh_cached_codex_login_status,
+            )
+            if not codex_installed():
+                return
+            if is_subscription_login(refresh_cached_codex_login_status()):
+                self.call_from_thread(
+                    self.notify, "Codex subscription detected -- cx: models available (see /model).",
+                    title="providers", timeout=4,
+                )
+        except Exception:
+            pass
 
     def _catalog_startup_refresh_worker(self) -> None:
         """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see

@@ -230,6 +230,7 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `BRIDGE_STATE_DIR` | this harness's own state directory (default `~/.halo`; a test-only-style seam that keeps its bare `BRIDGE_` name for good -- see the note above) |
 | `BRIDGE_TEST_HOME` | test/scratch seam: overrides `home()` everywhere (`~/.claude`, `~/.halo`, ...) -- never set this for real use |
 | `HALO_CLAUDE_EXE` (legacy `BRIDGE_CLAUDE_EXE`) | override how the `claude` binary is launched (`cc:` route, `--chrome`) |
+| `HALO_CODEX_EXE` (legacy `BRIDGE_CODEX_EXE`) | override how the `codex` binary is launched (`cx:` route) |
 | `HALO_DUMP=1` (legacy `BRIDGE_DUMP=1`) | dump raw request/response JSON for debugging (proxy mode) |
 | `HALO_CA_BUNDLE` (legacy `BRIDGE_CA_BUNDLE`) | a custom CA bundle path, tried after `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE` |
 | `CLAUDE_CONFIG_DIR` | relocate `~/.claude` (and `~/.claude.json`, honoring a legacy `<dir>/.config.json`) |
@@ -261,6 +262,7 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 | `databricks` | `dbx:databricks-deepseek-v4-1-flash` | `DATABRICKS_HOST` + `DATABRICKS_TOKEN` (host often already known -- see `docs/DATABRICKS.md`) |
 | `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
+| `codex` | `cx:default` | none -- uses your existing `codex` ChatGPT login as-is |
 
 ### Default permission mode (1.0.1 hotfix 18)
 

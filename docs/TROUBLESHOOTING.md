@@ -240,6 +240,19 @@ corporate CA's PEM file.
   summary of prior turns rather than true native history; `/clear`/`/fork`
   each start a genuinely new Claude Code conversation instead.
 
+## The Codex subscription route (`cx:`)
+
+- **`doctor` says "codex not found"** -- install the Codex CLI
+  (`npm install -g @openai/codex`), then `codex login`.
+- **"codex found but not logged in"** -- run `codex login` and choose Sign
+  in with ChatGPT.
+- **"logged in with an API key"** -- `cx:` spends a ChatGPT subscription;
+  `codex logout`, then `codex login` with ChatGPT.
+- **"Codex usage limit reached"** -- the plan's 5-hour or weekly window is
+  used up; `/providers` shows when it resets.
+- **No `cx:` group in `/model`** -- the login is checked once at launch;
+  run `/providers` (or `halo doctor`) to re-check, then reopen `/model`.
+
 ## `Function tools with reasoning_effort are not supported for gpt-6-sol` (1.0.1)
 
 The gpt-6 family's own chat-completions route 400s when `reasoning_effort`

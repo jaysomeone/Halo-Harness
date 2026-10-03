@@ -16,6 +16,7 @@ from halo_harness.model_display import (
     format_elapsed_seconds, format_live_token_count, format_status_context, format_status_cost,
     truncate_label_left,
 )
+from halo_harness.providers.sub_usage import format_usage_segment
 from halo_harness.tui.theme import mode_glyph
 
 # Halo 2.0.1 W2b (liveness-tips-brief Part A3): phase words that get the
@@ -70,6 +71,11 @@ class StatusBar(Static):
         # `_refresh_display`'s own 10-minute dim threshold).
         self.or_balance_text: "str | None" = None
         self.or_balance_fetched_at: "float | None" = None
+        # The `cc:`/`cx:` subscription's 5 h / weekly usage
+        # (`{session_pct, weekly_pct}`, providers/sub_usage.py), right
+        # after the context bar -- None (segment omitted) on any other
+        # route or before the first reading.
+        self.subscription_usage: "dict | None" = None
         # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
         # already clamped to this model's own accepted set -- None for a
         # model with no adjustable effort at all (renders no tag).
@@ -130,6 +136,10 @@ class StatusBar(Static):
     def apply_status(self, data: dict) -> None:
         if data.get("model"):
             self.model = data["model"]
+        if "subscription_usage" in data:
+            # Present-but-None is a real "no usage on this route" (a model
+            # switch away from cc:/cx:), so it DOES clear the segment.
+            self.subscription_usage = data["subscription_usage"]
         if data.get("permission_mode"):
             self.mode = data["permission_mode"]
         if data.get("effort") is not None:
@@ -287,6 +297,15 @@ class StatusBar(Static):
             return "yellow"
         return "green"
 
+    def _usage_style(self) -> str:
+        usage = self.subscription_usage or {}
+        worst = max((v for v in (usage.get("session_pct"), usage.get("weekly_pct")) if v is not None), default=0)
+        if worst >= 90:
+            return "bold red"
+        if worst >= 70:
+            return "yellow"
+        return ""
+
     def _refresh_display(self) -> None:
         # Named to avoid shadowing `Widget._render()` (a REAL Textual
         # internal called during layout to get this widget's Visual --
@@ -300,6 +319,7 @@ class StatusBar(Static):
         # genuinely isn't known.
         ctx_str = format_status_context(self.context_tokens, self.context_limit)
         cost_str = format_status_cost(self.cost_usd, self.total_input_tokens, self.total_output_tokens)
+        usage_str = format_usage_segment(self.subscription_usage)
         # H15 part 2 addendum 4: "OR $12.40 left"/"OR $3.21 used" --
         # omitted entirely (blank, no segment at all, same convention as
         # effort_str/permission_str below) until a fetch has ever
@@ -371,7 +391,7 @@ class StatusBar(Static):
         or_balance_shown = bool(or_balance_str)
         if width and self.cwd:
             def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
-                bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
+                bits = [b for b in (ctx_str, usage_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
                                      permission_str, needs_you_str, mcp_on and mcp_str, spinner_str, new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
@@ -423,6 +443,9 @@ class StatusBar(Static):
             text.append(f"[{bar}] {ctx_str} ", style=self._context_style())
         else:
             text.append(f"{ctx_str} ", style="dim")
+        if usage_str:
+            text.append("│ ", style="dim")
+            text.append(f"{usage_str} ", style=self._usage_style())
         text.append("│ ", style="dim")
         text.append(f"{cost_str} ", style="dim")
         if or_balance_str:

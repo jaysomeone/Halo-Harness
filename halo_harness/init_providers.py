@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Optional
 
 # Order matters: this is the exact row order `init`'s provider picker shows.
-PROVIDERS = ("databricks", "openrouter", "anthropic", "claude")
+PROVIDERS = ("databricks", "openrouter", "anthropic", "claude", "codex")
+
+# Providers set up by logging in to an installed CLI (no key to paste): their
+# tab shows a "Check login" button instead of a Save form.
+LOGIN_PROVIDERS = ("claude", "codex")
 
 # H15 Part A: the tabbed init view's own 5 tabs -- PROVIDERS plus TypeSafe,
 # which has no model catalog/default-model concept of its own (it only
@@ -26,7 +30,7 @@ TAB_PROVIDERS = PROVIDERS + ("typesafe",)
 
 TAB_LABEL = {
     "databricks": "Databricks", "openrouter": "OpenRouter", "anthropic": "Anthropic API (key)",
-    "claude": "Claude Code subscription", "typesafe": "TypeSafe",
+    "claude": "Claude Code subscription", "codex": "Codex subscription (ChatGPT)", "typesafe": "TypeSafe",
 }
 
 PROVIDER_LABEL = {
@@ -34,6 +38,7 @@ PROVIDER_LABEL = {
     "openrouter": "OpenRouter -- API key, full catalog",
     "anthropic": "Anthropic API -- API key, ant: models",
     "claude": "Claude subscription -- uses your claude.ai login through the installed claude, cc: models",
+    "codex": "Codex subscription -- uses your ChatGPT login through the installed codex, cx: models",
 }
 
 PROVIDER_DEFAULT_MODEL = {
@@ -41,6 +46,7 @@ PROVIDER_DEFAULT_MODEL = {
     "openrouter": "or:deepseek/deepseek-v4.1-flash",
     "anthropic": "ant:sonnet",
     "claude": "cc:sonnet",
+    "codex": "cx:default",
 }
 
 # 1.0.1 hotfix 13 point 5: `--preset` stays accepted as a deprecated alias
@@ -80,6 +86,9 @@ def provider_status(name: str) -> str:
         return "configured" if resolve_anthropic() is not None else "not set up"
     if name == "claude":
         return "logged in" if claude_login_available() else "not set up"
+    if name == "codex":
+        from halo_harness.providers.cx_models import codex_login_available
+        return "logged in" if codex_login_available() else "not set up"
     return "not set up"
 
 
@@ -98,6 +107,9 @@ def detect_default_provider() -> str:
         return "anthropic"
     if claude_login_available():
         return "claude"
+    from halo_harness.providers.cx_models import codex_login_available
+    if codex_login_available():
+        return "codex"
     return "openrouter"
 
 
@@ -167,7 +179,26 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
     if provider == "claude":
         from halo_harness.providers.cc_models import CC_ALIASES
         return _cc_ant_entries("cc", CC_ALIASES)
+    if provider == "codex":
+        return cx_entries(state_dir)
     return []
+
+
+def cx_entries(state_dir: Optional[Path] = None) -> "list[dict]":
+    """`cx:` picker rows: the ChatGPT account's own models (hidden ones
+    left out), with the effort levels each accepts."""
+    from halo_harness.providers.cx_models import cx_models, profile_fields_for_cx_model
+    out = []
+    for m in cx_models(state_dir):
+        if m.get("hidden"):
+            continue
+        fields = profile_fields_for_cx_model(m["id"], state_dir)
+        from halo_harness.providers.profiles import EFFORT_LEVELS
+        efforts = "/".join(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS)
+        out.append({"ref": f"cx:{m['id']}", "context_tokens": fields.get("context_tokens"),
+                    "max_output_tokens": fields.get("max_output_tokens"), "price_in_per_m": None,
+                    "price_out_per_m": None, "detail": f"effort {efforts}" if efforts else ""})
+    return out
 
 
 def configured_providers() -> "list[str]":
@@ -266,6 +297,14 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
         available = claude_login_available()
         return {"configured": available, "source": "claude.ai login" if available else None,
                 "masked": "logged in" if available else None, "known_host": None, "fields": []}
+    if provider == "codex":
+        from halo_harness.providers.cx_models import cached_codex_login_status, cached_rate_limits_line
+        status = cached_codex_login_status()
+        available = bool(status and status.logged_in and status.method == "chatgpt")
+        masked = (cached_rate_limits_line() or "logged in") if available else (
+            "logged in with an API key -- cx: needs a ChatGPT login" if status and status.logged_in else None)
+        return {"configured": available, "source": "ChatGPT login (codex)" if available else None,
+                "masked": masked, "known_host": None, "fields": []}
     if provider == "typesafe":
         key = env.get("TYPESAFE_API_KEY")
         if key:
@@ -331,6 +370,10 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
         if claude_login_available():
             return True, "claude.ai login confirmed"
         return False, "no claude.ai login found -- run `claude` once to log in first"
+    if provider == "codex":
+        from halo_harness.agent.cx_runtime import preflight_cx
+        err = preflight_cx()  # refreshes the cached login status
+        return (False, err) if err else (True, "ChatGPT login confirmed")
     return False, f"unknown provider: {provider}"
 
 
@@ -363,4 +406,10 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
         root = derive_workspace_root(dbx.host)
         ok, _diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         return ok, (note if not ok else "catalog refreshed")
+    if provider == "codex":
+        from halo_harness.providers.cx_models import refresh_cx_catalog
+        data = refresh_cx_catalog(state_dir=state_dir)
+        models = [m for m in data.get("models") or [] if not m.get("hidden")]
+        return (True, f"{len(models)} model(s) on this ChatGPT plan") if models else (
+            False, "codex did not list any models")
     return True, ""  # claude / anthropic / typesafe: no catalog of their own to cache here

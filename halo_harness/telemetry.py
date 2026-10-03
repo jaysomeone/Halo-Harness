@@ -271,7 +271,8 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
                 # of their own (`_route_from_model` covers or:/dbx:/ant:
                 # reasonably, though those CAN legitimately fail over to a
                 # different responding provider than their own prefix).
-                guessed_provider = "cc" if current_model.startswith("cc:") else (_route_from_model(current_model) or "")
+                guessed_provider = ("cc" if current_model.startswith("cc:") else
+                                    "cx" if current_model.startswith("cx:") else (_route_from_model(current_model) or ""))
                 current_key = last_key_for_model.get(current_model, f"{current_model}\x1f{guessed_provider}")
         elif ntype == "user":
             kind = node.get("kind")

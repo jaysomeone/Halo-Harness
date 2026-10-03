@@ -133,10 +133,11 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
             context_limit: Optional[int] = None, cost_usd: Optional[float] = None, turn: int = 0,
             permission_mode: Optional[str] = None, mcp: Optional[dict] = None,
             session_id: Optional[str] = None, total_input_tokens: Optional[int] = None,
-            total_output_tokens: Optional[int] = None, effort: Optional[str] = None) -> Event:
+            total_output_tokens: Optional[int] = None, effort: Optional[str] = None,
+            subscription_usage: Optional[dict] = None) -> Event:
     """data: {phase, model, context_tokens, context_limit, cost_usd, turn,
     permission_mode, mcp: {connected, total}, session_id, total_input_tokens,
-    total_output_tokens, effort}. Emitted at session start, after every
+    total_output_tokens, effort, subscription_usage}. Emitted at session start, after every
     message_end, and on a mode/model change (D-Contract). The two token-
     total fields (1.0.1 hotfix 14) are the session's running input/output
     token counts, for a consumer (the status bar) to show `"in 12k out 3k"`
@@ -145,12 +146,15 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
     (`Session.effort`, already clamped to this route's own accepted set --
     see providers/profiles.py's `clamp_effort`), for the status bar's own
     short tag next to the mode glyph; None for a model with no adjustable
-    effort at all."""
+    effort at all. `subscription_usage` (`{session_pct, weekly_pct}`, see
+    providers/sub_usage.py) is the account's 5 h / weekly usage for a `cc:`
+    or `cx:` route; None for every other route or before the first reading."""
     return Event("status", {
         "phase": phase, "model": model, "context_tokens": context_tokens, "context_limit": context_limit,
         "cost_usd": cost_usd, "turn": turn, "permission_mode": permission_mode,
         "mcp": mcp or {"connected": 0, "total": 0}, "session_id": session_id,
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens, "effort": effort,
+        "subscription_usage": subscription_usage,
     }, turn=turn)
 
 

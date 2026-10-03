@@ -254,6 +254,43 @@ def _check_claude_subscription() -> str:
     return f"{OK} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available"
 
 
+def _check_codex_subscription() -> str:
+    """2.0.2: `cx:` availability -- `codex login status` only (never
+    `~/.codex/auth.json`), the installed version against cx_tested.json,
+    and the plan and usage windows from the cached catalog. Optional, like
+    the Claude subscription: never fails doctor's overall `ok`."""
+    from halo_harness.providers.cx_models import (
+        cached_rate_limits_line, codex_installed, codex_version_outside_tested_range, installed_codex_version,
+        load_cx_tested_range, refresh_cached_codex_login_status,
+    )
+    if not codex_installed():
+        return _fix(f"{WARN} Codex subscription: codex not found (cx: models unavailable -- install the Codex CLI)",
+                    cmd="npm install -g @openai/codex && codex login")
+    try:
+        status = refresh_cached_codex_login_status()
+    except Exception as e:
+        return _fix(f"{WARN} Codex subscription: could not check ({type(e).__name__}: {e})", cmd="halo doctor")
+    if status is None or status.timed_out:
+        return _fix(f"{WARN} Codex subscription: `codex login status` did not answer (cx: models unavailable "
+                    f"for now)", cmd="codex login status")
+    if not status.logged_in:
+        return _fix(f"{WARN} Codex subscription: codex found but not logged in (sign in with ChatGPT for cx: "
+                    f"models)", cmd="codex login")
+    version = installed_codex_version()
+    version_bit = f" via codex {version}" if version else ""
+    if status.method != "chatgpt":
+        return _fix(f"{WARN} Codex subscription: codex is logged in with an API key{version_bit} -- cx: uses "
+                    f"a ChatGPT subscription login", cmd="codex logout && codex login")
+    usage = cached_rate_limits_line()
+    usage_bit = f" ({usage})" if usage else ""
+    tested = load_cx_tested_range()
+    if codex_version_outside_tested_range(version, tested=tested):
+        return _fix(f"{WARN} Codex subscription: logged in (ChatGPT){version_bit} -- cx: models available, but "
+                    f"this is newer than the tested range ({tested.get('min')}-{tested.get('max')}, verified "
+                    f"{tested.get('date')}) -- watch for behavior changes", cmd="halo doctor")
+    return f"{OK} Codex subscription: logged in (ChatGPT){version_bit} -- cx: models available{usage_bit}"
+
+
 def _claude_version() -> Optional[str]:
     # 2.0.1 W3a: the real implementation moved to providers.cc_models
     # (`installed_claude_version`) so `agent/cc_runtime.py`'s own one-shot
@@ -798,6 +835,9 @@ def _provider_configured(ref) -> "tuple[bool, str]":
             status = claude_auth_status()
             ok = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
             return ok, "Claude subscription"
+        if ref.provider == "cx":
+            from halo_harness.providers.cx_models import codex_login_status, is_subscription_login
+            return is_subscription_login(codex_login_status()), "Codex subscription"
     except Exception as e:
         return False, f"could not check ({type(e).__name__}: {e})"
     return True, ref.provider
@@ -856,6 +896,7 @@ def _check_default_model() -> str:
             disabled_msg = is_provider_disabled_message(provider_guess)
             if disabled_msg:
                 provider_flag = {"databricks": "databricks", "claude_subscription": "claude",
+                                  "codex_subscription": "codex",
                                   "anthropic": "anthropic"}.get(provider_guess, "openrouter")
                 return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
                              cmd=f"halo init --provider {provider_flag}")
@@ -878,7 +919,7 @@ def _check_default_model() -> str:
     # 1.0.1 hotfix 13 (drive-by): this suggestion still said `--preset
     # work`/`--preset home` -- the deprecated alias still works, but every
     # OTHER user-facing spot already moved to `--provider` at item 13.
-    provider_flag = {"databricks": "databricks", "cc": "claude", "anthropic": "anthropic"}.get(
+    provider_flag = {"databricks": "databricks", "cc": "claude", "cx": "codex", "anthropic": "anthropic"}.get(
         ref.provider, "openrouter")
     return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
                  cmd=f"halo init --provider {provider_flag}")
@@ -1352,6 +1393,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("openrouter", _check_openrouter()))
     entries.append(("databricks", _check_databricks()))
     entries.append(("claude_subscription", _check_claude_subscription()))
+    entries.append(("codex_subscription", _check_codex_subscription()))
     entries.append(("chrome", _check_chrome()))
     entries.append(("playwright", _check_playwright()))
     entries.append(("ripgrep", _check_ripgrep()))

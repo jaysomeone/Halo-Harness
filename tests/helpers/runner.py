@@ -47,6 +47,14 @@ from typing import Callable
 # the very end of a suite run (tests/run_all.py, test_bridge.py,
 # test_tui.py's own `__main__` blocks) -- safe because nothing runs AFTER
 # that point that could still need one of them.
+# 2.0.2: the `cx:` route reads the real `codex login status`, so a logged-in
+# codex on the developer's box would make init's provider pick, doctor and
+# the /model picker differ from a box without one (and could start a real
+# Codex turn). Every test sees "not logged in" unless it sets up the fake
+# codex itself (`tests/test_cx_session.py`'s `_fake_codex_env` clears this);
+# subprocesses inherit it.
+os.environ.setdefault("BRIDGE_TEST_CX_LOGIN_STATUS", "Not logged in")
+
 _tracked_temp_dirs: "list[str]" = []
 _tracked_lock = threading.Lock()
 _real_mkdtemp = tempfile.mkdtemp

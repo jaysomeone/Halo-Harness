@@ -354,6 +354,9 @@ def _step_credentials(provider: str, args, console: Console) -> list:
         path = _ensure_databricks_creds(args, console)
     elif provider == "anthropic":
         path = _ensure_anthropic_key(args, console)
+    elif provider == "codex":
+        console.print("   codex: nothing stored -- your existing `codex` ChatGPT login is used as-is.")
+        path = None
     else:
         console.print("   claude: nothing stored -- your existing `claude` login is used as-is.")
         path = None
@@ -374,7 +377,8 @@ def _model_belongs_to_provider(model_ref_raw: str, provider: str) -> bool:
     every later launch -- targeted OpenRouter through a Databricks setup
     run, which the gate then refused outright (every later launch failed
     "invalid --model")."""
-    prefix = {"databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:", "claude": "cc:"}.get(provider)
+    prefix = {"databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:", "claude": "cc:",
+              "codex": "cx:"}.get(provider)
     if prefix and model_ref_raw.startswith(prefix):
         return True
     if provider == "databricks":
@@ -919,7 +923,7 @@ def _build_parser() -> argparse.ArgumentParser:
                      "Linux setup fixes. Repeat for another provider, then pick the overall default.",
     )
     parser.add_argument("--provider", action="append", choices=list(PROVIDERS), default=None,
-                         metavar="{databricks,openrouter,anthropic,claude}",
+                         metavar="{databricks,openrouter,anthropic,claude,codex}",
                          help="set up this provider non-interactively (repeatable, first-listed first); "
                               "omit for the interactive provider picker")
     parser.add_argument("--preset", choices=["home", "work", "claude"], default=None,
@@ -948,6 +952,12 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
         console.print("[red]Claude subscription needs a claude.ai login -- run `claude` once to log in, "
                        "or pick a different provider.[/red]")
         return None
+    if provider == "codex":
+        from halo_harness.agent.cx_runtime import preflight_cx
+        err = preflight_cx()
+        if err:
+            console.print(f"[red]{err}[/red]")
+            return None
     written = _step_credentials(provider, args, console)
     # H15 item 21.1: enabled as soon as credentials/a login actually
     # resolve -- BEFORE the catalog refresh/model-pick/live-pong steps
@@ -1103,8 +1113,10 @@ def cmd_init(argv: list) -> int:
     # every one of those reads accurate, exactly like before this fix,
     # instead of always seeing a cold cache.
     from halo_harness.providers.cc_models import refresh_cached_claude_auth_status
+    from halo_harness.providers.cx_models import refresh_cached_codex_login_status
     try:
         refresh_cached_claude_auth_status()
+        refresh_cached_codex_login_status()
     except Exception:
         pass
 

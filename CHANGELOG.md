@@ -8,6 +8,46 @@ across the 0.3.x line -- each 0.3.0 milestone below was a working
 checkpoint toward the single 0.3.0 release, not a separate published
 version.
 
+## [Unreleased] - Codex subscription route (`cx:`)
+
+The Codex half of the 2.0.3 brief's item C2.1 (`plans/2.0.3-brief.md`),
+shipped ahead of its round; the `oai:` OpenAI API route is still open.
+
+1. **`cx:<model>` runs a turn on your ChatGPT subscription** (Plus, Pro,
+   Team, Enterprise, Edu) through the installed `codex` binary, the way
+   `cc:` uses the Claude subscription. Halo drives `codex app-server` (the
+   JSON-RPC protocol the Codex IDE extension uses) instead of the brief's
+   `codex exec`: one process per session, real streaming, `turn/steer`
+   for steering, `turn/interrupt` for Esc, and `model/list` for the exact
+   models this account may use. Halo never reads `~/.codex/auth.json`;
+   it runs `codex login status`.
+2. **Halo's tools, Halo's rules**: Codex reaches Halo's tools through the
+   same `ccbridge` MCP bridge `cc:` uses (`mcp__halo__<Name>`), so
+   permission rules, hooks, plan mode, AskUserQuestion and sub-agents
+   behave as on every other route. Codex's own shell, browser, image and
+   plugin tools are switched off for the thread, as are the user's own
+   Codex MCP servers. The thread runs with approvals on and a read-only
+   sandbox, so a native `apply_patch` (kept by some models) arrives as an
+   approval request that Halo decides as a Write/Edit call first.
+3. **Where it shows up**: a "Codex subscription (ChatGPT)" group in
+   `/model`, a `codex` tab in `halo init`, a `codex_subscription` row in
+   `halo providers`/`/providers` with the plan's 5-hour and weekly usage
+   windows, and a live `5h N% · wk N%` status-bar segment on both `cx:` and
+   `cc:` subscription routes; `halo models --cx [--refresh]`, a doctor line
+   with the tested codex range (`providers/cx_tested.json`, 0.153.4), a tip, and
+   `/effort` offering each model's own levels. Auto-enabled only on a
+   ChatGPT login (an API-key login says so instead).
+4. **Conversation**: one Codex thread per session, resumed by id after a
+   restart, model switch or `halo --resume`; `/fork` forks it; a thread
+   Codex no longer has falls back to a fresh one carrying the conversation
+   so far. Titles, prompt hooks and `/improve` use a one-shot ephemeral
+   thread.
+5. **Tests**: `tests/test_cx_session.py` (18 tests) against
+   `tests/helpers/fake_codex_cx.py`, a fake app-server that is a real MCP
+   client of the real bridge. `cc_runtime`'s bridged dispatch now takes an
+   `emit` callback and exposes `resolve_bridged_call` and
+   `halo_context_parts` for reuse; `cc:` behaviour is unchanged.
+
 ## [2.0.0] - 2026-10-01
 
 The rename release: `rolo-claude` 1.0.1 continues unchanged, as its own

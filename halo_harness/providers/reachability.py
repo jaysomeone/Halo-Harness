@@ -91,8 +91,8 @@ def reachability_tag(name: str, *, detected: Optional[bool] = None, connect_time
     is_detected = credentials_present(canon) if detected is None else detected
     if not is_detected:
         return "not set up"
-    if canon == "claude_subscription":
-        return "reachable"  # credentials_present() already confirmed a real claude.ai login
+    if canon in ("claude_subscription", "codex_subscription"):
+        return "reachable"  # credentials_present() already confirmed a real subscription login
     if canon == "typesafe":
         return "not probed (stores a key only, for a later feature)"
     base_url = provider_base_url(canon)

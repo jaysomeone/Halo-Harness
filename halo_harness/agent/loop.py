@@ -1601,8 +1601,9 @@ class Session:
         session -- a safe no-op otherwise. Called from Controller.quit(),
         headless.py's own atexit/finally cleanup, and SIGTERM/SIGHUP (via
         the same paths that already call job_registry.kill_all())."""
-        from halo_harness.agent import cc_runtime
+        from halo_harness.agent import cc_runtime, cx_runtime
         cc_runtime.close_cc(self)
+        cx_runtime.close_cx(self)
 
     def clear(self) -> None:
         """U5 must-do: `/clear` starts a genuinely NEW session log --
@@ -1631,6 +1632,11 @@ class Session:
             from halo_harness.agent import cc_runtime
             cc_runtime.close_cc(self)
             self._cc_state = None
+        if getattr(self, "_cx_state", None) is not None:
+            # 2.0.2: same for a live Codex thread -- the fresh log has no
+            # `cx_thread_id`, so the next cx: turn starts a new thread.
+            from halo_harness.agent import cx_runtime
+            cx_runtime.close_cx(self)
         self._fire_session_end("clear")
         self._reset_prune_state()  # H5b finding 2: no old log left for these ids to refer to
         self.log = SessionLog(self.cwd)
@@ -1730,6 +1736,9 @@ class Session:
         if ref.provider == "cc":
             from halo_harness.agent.cc_runtime import one_shot_cc_call
             return one_shot_cc_call(ref.model, system_text, user_text, timeout_s=timeout_s)
+        if ref.provider == "cx":
+            from halo_harness.agent.cx_runtime import one_shot_cx_call
+            return one_shot_cx_call(ref.model, system_text, user_text, timeout_s=timeout_s)
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
@@ -1827,8 +1836,9 @@ class Session:
         Claude Code, which only ever listed tools once at startup, never
         learns it exists and can never call it."""
         self.log.append_meta(tools=self.tool_registry.definitions_for(names))
-        from halo_harness.agent import cc_runtime
+        from halo_harness.agent import cc_runtime, cx_runtime
         cc_runtime.notify_catalog_changed(self)
+        cx_runtime.notify_catalog_changed(self)
 
     # ---- request construction ------------------------------------------
 
@@ -3078,11 +3088,12 @@ class Session:
         THIS log would compact something the model never even sees.
         Claude Code auto-compacts its own context; this is the documented
         no-op (README: "`/compact` prints a note")."""
-        if self.model_ref.provider == "cc":
+        if self.model_ref.provider in ("cc", "cx"):
+            agent_name = "Claude Code" if self.model_ref.provider == "cc" else "Codex"
             yield events.compaction(
                 phase="failed", trigger=trigger, turn=turn_no,
-                reason="halo's own compaction is a no-op for cc: sessions -- Claude Code "
-                       "manages its own context/compaction internally.",
+                reason=f"halo's own compaction is a no-op for {self.model_ref.provider}: sessions -- "
+                       f"{agent_name} manages its own context/compaction internally.",
             )
             return False
         system_text, raw_messages, tools = derive_request(self.log, tools=None)
@@ -3415,6 +3426,13 @@ class Session:
                     # resume all keep working unchanged.
                     from halo_harness.agent import cc_runtime
                     yield from cc_runtime.turn_body_cc(self, turn_no, text, images=images,
+                                                        hook_context=hook_context_text)
+                elif self.model_ref.provider == "cx":
+                    # 2.0.2: the installed `codex` binary under the user's
+                    # ChatGPT subscription -- same contract as cc: above
+                    # (agent/cx_runtime.py logs its own nodes).
+                    from halo_harness.agent import cx_runtime
+                    yield from cx_runtime.turn_body_cx(self, turn_no, text, images=images,
                                                         hook_context=hook_context_text)
                 else:
                     yield from self._turn_body(turn_no)
@@ -5197,6 +5215,16 @@ class Session:
         now drains it (capped) before returning, see that function."""
         old_model_raw = self.model_ref.raw
         self._fire_model_switch("PreModelSwitch", old_model=old_model_raw, new_model=model_ref.raw)
+        if model_ref.provider == "cx" and self.model_ref.provider != "cx":
+            from halo_harness.agent import cx_runtime
+            cx_runtime.prepare_conversation_so_far(self)
+        elif self.model_ref.provider == "cx" and (
+            model_ref.provider != "cx" or model_ref.model != self.model_ref.model
+        ):
+            # 2.0.2: a Codex thread is bound to its model at start/resume;
+            # the next cx: turn resumes the same thread under the new one.
+            from halo_harness.agent import cx_runtime
+            cx_runtime.close_cx(self)
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
             from halo_harness.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
@@ -5356,6 +5384,8 @@ class Session:
         # would otherwise read as a lie the moment the next turn goes out.
         from halo_harness.providers.profiles import effort_display_override
         effort_tag = effort_display_override(self.provider_profile) or self.effort
+        from halo_harness.providers.sub_usage import maybe_refresh_cc_usage, subscription_usage
+        maybe_refresh_cc_usage(self.model_ref.provider)
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
             context_tokens=context_tokens if context_tokens is not None else (self._last_prompt_tokens or 0),
@@ -5365,6 +5395,7 @@ class Session:
             total_input_tokens=self.cost_meter.total_input_tokens,
             total_output_tokens=self.cost_meter.total_output_tokens,
             effort=effort_tag,
+            subscription_usage=subscription_usage(self.model_ref.provider),
         )
 
     @property
@@ -5407,6 +5438,10 @@ class Session:
             # safe point a cc: turn never runs.
             from halo_harness.agent import cc_runtime
             return cc_runtime.steer_cc(self, text)
+        if self.model_ref.provider == "cx":
+            # 2.0.2: `turn/steer` into Codex's running turn.
+            from halo_harness.agent import cx_runtime
+            return cx_runtime.steer_cx(self, text)
         with self._steer_lock:
             if not self._busy.is_set():
                 return False

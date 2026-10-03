@@ -50,7 +50,7 @@ def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, 
            if not k.startswith(("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_",
                                 "ROLO_CLAUDE_", "HALO_", "TYPESAFE_"))}
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
-                "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
+                "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN, "BRIDGE_TEST_CX_LOGIN_STATUS": "Not logged in"})
     env.update(extra_env or {})
     return subprocess.run([sys.executable, "-m", "halo_harness"] + argv, env=env, cwd=str(REPO_DIR),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",

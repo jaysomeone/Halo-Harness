@@ -306,7 +306,20 @@ def _cc_system_addendum(session) -> str:
         if body:
             parts.append(body[:_ADDENDUM_CHARS])
     parts.append(CC_APPEND_SYSTEM_PROMPT)
+    parts += halo_context_parts(session, name_desc_chars=_NAME_DESC_CHARS)
 
+    text = "\n\n".join(p for p in parts if p)
+    if len(text) > _ADDENDUM_CHARS:
+        text = text[:_ADDENDUM_CHARS] + "\n...(addendum truncated to stay well under the OS command-line limit)"
+    return text
+
+
+def halo_context_parts(session, *, name_desc_chars: int = 100) -> list:
+    """The prompt pieces a subprocess-driven model (`cc:` and `cx:`) has no
+    other way to learn: skill names, subagent_type values, MCP server
+    instructions, deferred tool names and the plan-mode note."""
+    _NAME_DESC_CHARS = name_desc_chars
+    parts = []
     try:
         from halo_harness.commands.skills import discover_all_skills
         skills = discover_all_skills(session.cwd)
@@ -343,11 +356,7 @@ def _cc_system_addendum(session) -> str:
     if session.permission_engine.mode == "plan":
         from halo_harness.agent.planmode import PLAN_MODE_NOTE
         parts.append(PLAN_MODE_NOTE)
-
-    text = "\n\n".join(p for p in parts if p)
-    if len(text) > _ADDENDUM_CHARS:
-        text = text[:_ADDENDUM_CHARS] + "\n...(addendum truncated to stay well under the OS command-line limit)"
-    return text
+    return parts
 
 
 def _start_cc_process(session, *, conversation_id: str, resume: bool, fork_session: bool) -> "tuple[CcState, bool]":
@@ -469,6 +478,14 @@ def _prime_with_context(state: CcState, text: str, session) -> None:
             typ = ev.get("type")
             if typ == "assistant":
                 _record_tool_use_announcements(state, ev)
+                continue
+            if typ == "rate_limit_event":
+                # claude emits this only on a process's FIRST turn (live-
+                # verified against 2.1.288) -- when that turn is this
+                # prime, dropping it would leave the status bar's 5 h /
+                # weekly usage blank for the life of the process.
+                from halo_harness.providers.sub_usage import record_cc_rate_limits
+                record_cc_rate_limits(ev.get("rate_limit_info") or {})
                 continue
             if typ == "result":
                 return
@@ -716,20 +733,15 @@ def bridge_call_tool(session, name: str, arguments: dict) -> dict:
             state.in_flight.discard(tool_use_id)
 
 
-def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, name: str, tool_input: dict) -> dict:
-    """H11b findings 3/13/17: the bridge's dispatch IS the loop's own
-    dispatch -- `Session._resolve_tool_call` runs UNCHANGED (permission
-    decide, PreToolUse/PermissionRequest/PermissionDenied hooks,
-    EnterPlanMode/ExitPlanMode/AskUserQuestion special-casing incl.
-    skipping decide() for the plan tools, the loop breaker, always-allow
-    via `_apply_permission_decision`) against a trivial "already valid"
-    RepairOutcome -- Claude Code's own MCP client already validated this
-    call against the schema `bridge_list_tools` told it about, so there
-    is nothing to repair, only to decide/dispatch. Mirrors `_dispatch_
-    tools`'s own post-resolve handling exactly, minus the read-only-
-    batch/agent-batch CONCURRENCY (bridged calls are already serial)."""
+def resolve_bridged_call(session, turn_no: int, tool_use_id: str, name: str, tool_input: dict, *, emit) -> dict:
+    """Everything up to (never including) dispatch for one bridged call:
+    `Session._resolve_tool_call` (permission decide, PreToolUse/
+    PermissionRequest/PermissionDenied hooks, the loop breaker), a blocking
+    permission ask or AskUserQuestion answered through the dock, and the
+    plan-mode tools. Returns the resolved item; `item["ready"]` means "go".
+    Shared by `cc:` and `cx:` -- the `cx:` route also runs Codex's own
+    native file-change approvals through it."""
     from halo_harness.agent.repair import RepairOutcome
-    from halo_harness.agent.subagent import run_agent_call
     from halo_harness.tools.base import ToolResult
 
     tu = {"id": tool_use_id, "name": name, "input": tool_input}
@@ -738,9 +750,9 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
     tool_input = item["input"]
 
     for msg in item.pop("hook_system_messages", None) or []:
-        _emit(session, events.notification(msg))
+        emit(events.notification(msg))
     if "ask_reason" in item:
-        _emit(session, events.Event("permission_request", {
+        emit(events.Event("permission_request", {
             "id": item.get("ask_request_id", tool_use_id), "name": name, "input": tool_input,
             "reason": item["ask_reason"], "suggested_rule": item.get("suggested_rule"),
         }, turn=turn_no))
@@ -756,8 +768,7 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
         session._timeline.record_permission_wait(wait_start_ms, session._timeline.elapsed_ms(), decision_label)
         session._apply_permission_decision(item, decision)
     if item.get("pending_question"):
-        _emit(session, events.Event("question", {"id": tool_use_id, "name": name, "input": item["input"]},
-                                      turn=turn_no))
+        emit(events.Event("question", {"id": tool_use_id, "name": name, "input": item["input"]}, turn=turn_no))
         answer = session._await_reply(session._question_waiters, tool_use_id)
         item.pop("pending_question", None)
         if answer is None:
@@ -770,10 +781,34 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
     special = item.get("special")
     if special == "EnterPlanMode":
         for ev in session._handle_enter_plan_mode(turn_no, item):
-            _emit(session, ev)
+            emit(ev)
     elif special == "ExitPlanMode":
         for ev in session._handle_exit_plan_mode(turn_no, item):
-            _emit(session, ev)
+            emit(ev)
+    return item
+
+
+def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, name: str, tool_input: dict,
+                                       emit=None) -> dict:
+    """H11b findings 3/13/17: the bridge's dispatch IS the loop's own
+    dispatch -- `Session._resolve_tool_call` runs UNCHANGED (permission
+    decide, PreToolUse/PermissionRequest/PermissionDenied hooks,
+    EnterPlanMode/ExitPlanMode/AskUserQuestion special-casing incl.
+    skipping decide() for the plan tools, the loop breaker, always-allow
+    via `_apply_permission_decision`) against a trivial "already valid"
+    RepairOutcome -- Claude Code's own MCP client already validated this
+    call against the schema `bridge_list_tools` told it about, so there
+    is nothing to repair, only to decide/dispatch. Mirrors `_dispatch_
+    tools`'s own post-resolve handling exactly, minus the read-only-
+    batch/agent-batch CONCURRENCY (bridged calls are already serial).
+
+    `emit` (2.0.2, the `cx:` route reuses this whole dispatch) receives
+    every UI event; it defaults to this module's own `cc:` turn queue."""
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.tools.base import ToolResult
+
+    emit = emit or (lambda ev: _emit(session, ev))
+    item = resolve_bridged_call(session, turn_no, tool_use_id, name, tool_input, emit=emit)
 
     if item["ready"] and name in ("Agent", "Task"):
         if session.abort.is_set():
@@ -781,7 +816,7 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
         else:
             try:
                 _, tr = run_agent_call(runtime=session.agent_runtime, tool_id=tool_use_id, tool_input=item["input"],
-                                         tool_name=name, on_event=lambda ev: _emit(session, ev))
+                                         tool_name=name, on_event=emit)
                 item["result"] = tr
             except Exception as e:  # run_agent_call is documented "never raises" -- defense in depth anyway
                 item["result"] = ToolResult(f"Sub-agent dispatch failed: {type(e).__name__}: {e}", is_error=True)
@@ -790,15 +825,16 @@ def _resolve_and_dispatch_bridged_call(session, turn_no: int, tool_use_id: str, 
         item["result"] = session.tool_registry.dispatch(name, item["input"], ctx)
 
     session_dir = session.log.dir / session.log.session_id
-    content, is_error = _drain_finalize(session, turn_no, item, session_dir)
+    content, is_error = _drain_finalize(session, turn_no, item, session_dir, emit=emit)
     return _wire_result_from_content(content, is_error)
 
 
-def _drain_finalize(session, turn_no: int, item: dict, session_dir) -> "tuple[object, bool]":
+def _drain_finalize(session, turn_no: int, item: dict, session_dir, emit=None) -> "tuple[object, bool]":
     """Drives `Session._finalize_tool_result` (log write + hooks + spill,
     shared verbatim with every other route) to completion, forwarding
     every event it yields, and returns its `(content, is_error)` return
     value -- see that method's own H11b docstring addition."""
+    emit = emit or (lambda ev: _emit(session, ev))
     gen = session._finalize_tool_result(turn_no, item, session_dir)
     content, is_error = "", True
     while True:
@@ -808,7 +844,7 @@ def _drain_finalize(session, turn_no: int, item: dict, session_dir) -> "tuple[ob
             if isinstance(stop.value, tuple) and len(stop.value) == 2:
                 content, is_error = stop.value
             return content, is_error
-        _emit(session, ev)
+        emit(ev)
 
 
 # ---- turn execution (runs on the Session's own worker thread) -----------
@@ -1126,8 +1162,16 @@ def _events_for_stdout_obj(session, turn_no: int, obj: dict, state: CcState) -> 
         out.append(session.status_event(phase="idle", turn=turn_no))
         return out
 
+    if typ == "rate_limit_event":
+        # The subscription's 5 h / weekly usage, cached for the status
+        # bar (providers/sub_usage.py) -- picked up by the next status
+        # event (this turn's idle one above), never logged.
+        from halo_harness.providers.sub_usage import record_cc_rate_limits
+        record_cc_rate_limits(obj.get("rate_limit_info") or {})
+        return out
+
     # "user" (our own tool_result echo -- already logged by
     # bridge_call_tool; a REAL isReplay echo is intercepted before this
-    # function is ever called), "rate_limit_event", anything future:
-    # observed, never logged/emitted -- forward-compatible by design.
+    # function is ever called), anything future: observed, never
+    # logged/emitted -- forward-compatible by design.
     return out

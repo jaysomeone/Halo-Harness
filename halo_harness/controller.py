@@ -588,6 +588,36 @@ class Controller:
         if cc_available and not is_enabled("claude_subscription", detected=cc_available):
             hints.append({"hint": f"{label_for('claude_subscription')} detected but not enabled -- "
                                    f"run `halo providers enable claude_subscription`"})
+        # 2.0.2: the "Codex subscription (ChatGPT)" group -- the models this
+        # ChatGPT account may use, from Codex's own model/list (cached by
+        # cx_models.refresh_cx_catalog; the seed list until the first
+        # refresh). Cache-only login read, same rule as cc: above.
+        from halo_harness.providers.cx_models import (
+            cached_codex_login_status, cx_models, is_subscription_login, profile_fields_for_cx_model,
+        )
+        try:
+            cx_available = is_subscription_login(cached_codex_login_status())
+        except Exception:
+            cx_available = False
+        if cx_available and is_enabled("codex_subscription", detected=cx_available):
+            for m in cx_models(self.state_dir):
+                ref = f"cx:{m['id']}"
+                if ref in seen or m.get("hidden"):
+                    continue
+                fields = profile_fields_for_cx_model(m["id"], self.state_dir)
+                from halo_harness.providers.profiles import EFFORT_LEVELS
+                efforts = "/".join(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS)
+                detail = (m.get("display_name") or m["id"]) + (" · default" if m.get("is_default") else "")
+                out.append({
+                    "ref": ref, "context_tokens": fields.get("context_tokens"),
+                    "max_output_tokens": fields.get("max_output_tokens"),
+                    "price_in_per_m": None, "price_out_per_m": None,
+                    "detail": f"{detail} · effort {efforts}" if efforts else detail,
+                    "provider": "cx", "group": label_for("codex_subscription"),
+                })
+        elif cx_available:
+            hints.append({"hint": f"{label_for('codex_subscription')} detected but not enabled -- "
+                                   f"run `halo providers enable codex_subscription`"})
         # H15 item 21: the `ant:` (direct Anthropic API key) group -- the
         # same nine subscription-model aliases as cc: above, resolved
         # against the real API instead of the installed `claude` binary.
@@ -1093,6 +1123,14 @@ class Controller:
             self.session.close_cc()
             self.session._cc_state = None
             self.session._cc_fork_session = True
+        # 2.0.2: a log that carries a Codex thread id branches it with
+        # `thread/fork` on the next cx: turn instead of resuming the thread
+        # the original session still owns.
+        from halo_harness.agent.cx_runtime import _last_cx_thread_id
+        if _last_cx_thread_id(new_log):
+            from halo_harness.agent import cx_runtime
+            cx_runtime.close_cx(self.session)
+            self.session._cx_fork_session = True
         return new_id
 
     def export_session(self, *, sanitize: bool = False, path: Optional[str] = None) -> str:

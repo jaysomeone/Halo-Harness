@@ -82,7 +82,7 @@ models --refresh`) and something close matches:
 halo -p --model not-a-real-model-ref "hi"
 ```
 ```
-halo: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
+halo: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, cx:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
 ```
 
 Exit codes across every route: `0` success, `1` the turn ran and ended in an
@@ -876,7 +876,7 @@ Lists (and refreshes) the OpenRouter and Databricks model catalogs.
 halo models --help
 ```
 ```
-usage: halo models [-h] [--refresh] [--cc] [--urls] [--json]
+usage: halo models [-h] [--refresh] [--cc] [--cx] [--urls] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -884,6 +884,9 @@ options:
   --cc        List the Claude subscription models (cc:/ant: aliases) instead
               of the OpenRouter/Databricks catalog; with --refresh, re-pings
               each alias to confirm its current canonical id
+  --cx        List the Codex subscription models (cx:) this ChatGPT account
+              may use, with effort levels and usage windows; with --refresh,
+              re-reads them from codex
   --urls      Databricks endpoints: also print the exact URL and path type
               each one resolves to
   --json      Machine-readable JSON output
@@ -894,6 +897,7 @@ options:
 | (bare) | reads `~/.halo/models.json`/`dbx-endpoints.json`; refreshes automatically the first time either cache is empty |
 | `--refresh` | live probe: OpenRouter `GET /api/v1/models` -> `models.json`; Databricks `GET /api/2.0/serving-endpoints` -> `dbx-endpoints.json`; models.dev's public `api.json` -> `models-dev.json` |
 | `--cc` | reads `claude auth status` + the `cc-models.json` cache; `--cc --refresh` also sends nine tiny `-p --max-turns 1` pings under your subscription |
+| `--cx` | reads `codex login status` + the `cx-models.json` cache: the models your ChatGPT plan may use through the installed `codex`, their effort levels, and the plan's usage windows; `--cx --refresh` re-reads them from codex's own app-server (`model/list`, `account/rateLimits/read`; no model call, nothing spent). A plain `--refresh` also refreshes this list when the Codex subscription is enabled |
 | `--urls` | Databricks rows only: adds the exact resolved URL + path type (`mlflow`/`cursor`/`anthropic`/`invocations`) per endpoint -- see `docs/DATABRICKS.md` |
 | `--json` | same data as machine-readable JSON |
 

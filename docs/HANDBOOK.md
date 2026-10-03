@@ -134,6 +134,7 @@ Model reference forms:
 | `dbx:system.ai.<name>` | `dbx:system.ai.my_model` | Databricks, OpenAI-chat dialect |
 | any of the above with `claude` in the name | `dbx:databricks-claude-sonnet` | Databricks, raw Anthropic passthrough |
 | `cc:<name>` | `cc:opus`, `cc:sonnet` | Your Claude subscription, via the installed `claude` binary |
+| `cx:<model>` | `cx:gpt-6-astra`, `cx:default` | Your ChatGPT subscription, via the installed `codex` binary |
 | `ant:<name>` | `ant:opus`, `ant:claude-3-5-haiku` | `api.anthropic.com`, pay-as-you-go (`ANTHROPIC_API_KEY`) |
 | a bare subscription-model name, no prefix | `opus`, `sonnet`, `fable` | `cc:` if logged in and no key is set, else `ant:` if a key is set, else an error |
 
@@ -173,6 +174,26 @@ permissions, hooks, session log and telemetry, exactly like every other
 route. `doctor` shows "Claude subscription: logged in ... -- cc: models
 available" when this is usable; `halo models --cc` lists all nine
 names with their current targets and pricing.
+
+### GPT models with your ChatGPT subscription (`cx:`)
+
+If you use Codex with a ChatGPT plan (Plus, Pro, Team, Enterprise, Edu),
+`cx:<model>` runs Halo on that plan instead of an API key. Install the
+Codex CLI (`npm install -g @openai/codex`), run `codex login` and choose
+Sign in with ChatGPT; Halo picks the login up on its own and a "Codex
+subscription (ChatGPT)" group appears in `/model` with exactly the models
+your plan offers (`halo models --cx` lists them with their effort levels;
+`cx:default` is the plan's default).
+
+It works the way `cc:` does: Halo drives the installed `codex` headlessly
+(`codex app-server`, one process per session) and never reads
+`~/.codex/auth.json`. Halo's tools reach Codex through the same local
+bridge, as an MCP server named `halo`, so permissions, hooks, plan mode
+and the session log behave exactly as on every other route; Codex's own
+shell and browser tools are switched off for the session, and a native
+`apply_patch` is decided by Halo as a Write/Edit before Codex applies it.
+Typing during a turn steers it, Esc interrupts it, and `/providers` shows
+the plan's 5-hour and weekly usage windows.
 
 **Limitations of this v1**: a steer sent mid-turn is forwarded to Claude
 Code immediately, which queues it on its own terms rather than halo

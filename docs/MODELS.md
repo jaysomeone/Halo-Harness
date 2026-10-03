@@ -17,6 +17,7 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | `dbx:<endpoint>@anthropic` | `dbx:databricks-kimi-k3@anthropic` | Databricks, forced onto the native Anthropic gateway for this one call |
 | bare `databricks-*`/`system.ai.*` | `databricks-claude-opus-5-5` | Databricks (same as the `dbx:` form) |
 | `cc:<name>` | `cc:opus`, `cc:sonnet` | your Claude subscription, via the installed `claude` binary |
+| `cx:<model>` | `cx:gpt-6-astra`, `cx:default` | your ChatGPT subscription (Plus, Pro, Team...), via the installed `codex` binary -- see "Codex subscription (`cx:`)" below |
 | `ant:<name>` | `ant:opus`, `ant:claude-3-5-haiku` | `api.anthropic.com` pay-as-you-go (`ANTHROPIC_API_KEY`) |
 | a bare subscription alias, no prefix | `opus`, `sonnet`, `fable`, `haiku` | at a Databricks work box: `dbx:<ANTHROPIC_DEFAULT_*_MODEL>`; else `cc:` if logged in and no key is set; else `ant:` if a key is set; else an error naming both |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
@@ -29,6 +30,37 @@ nothing raises a clean `InvalidModelError` naming every accepted form (exit
 
 A trailing `[1m]` suffix (a long-context variant marker) passes through
 unchanged on every full id/alias form.
+
+### Codex subscription (`cx:`)
+
+`cx:<model>` runs the turn through the installed `codex` binary (OpenAI's
+Codex CLI) under your own ChatGPT login, so it spends your Plus/Pro/Team
+plan's Codex usage instead of an API key. Halo drives `codex app-server`
+(the JSON-RPC protocol the Codex IDE extension uses) and never reads
+`~/.codex/auth.json`; it only runs `codex login status`.
+
+- **Models**: exactly the ones your plan offers, from codex's own
+  `model/list` -- `halo models --cx` lists them with their effort levels;
+  `cx:default` is the account's default model. Hidden models are left out
+  of the picker but can still be typed.
+- **Tools**: Halo's own tools reach Codex through one MCP server named
+  `halo` (the same bridge `cc:` uses), so permission rules, hooks, plan
+  mode, AskUserQuestion and sub-agents behave as on every other route.
+  Codex's own shell, browser, image and plugin tools are switched off for
+  the thread, as are any MCP servers in your own `~/.codex/config.toml`.
+  Models that carry Codex's native `apply_patch` keep it, but each native
+  file change arrives as an approval request that Halo decides as a
+  Write/Edit call before Codex may apply it.
+- **Conversation**: one Codex thread per Halo session, resumed by id after
+  an Esc, a crash, a model switch or `halo --resume`; `/fork` forks the
+  thread; steering uses `turn/steer` and Esc `turn/interrupt`.
+- **Effort**: `/effort` offers the levels the model reports; a level the
+  model lacks is clamped down to the nearest one it has.
+- **Usage**: there is no per-token price; `/providers`, `halo doctor` and
+  `halo models --cx` show the plan's 5-hour and weekly usage windows, as
+  codex reported them with the last response.
+- **Tested range**: `providers/cx_tested.json` (codex 0.153.4, 2026-10-02);
+  doctor and the first `cx:` turn note a newer codex once.
 
 ### `cc:`/`ant:` alias table
 
@@ -71,7 +103,9 @@ Databricks once a host AND token are found (same sources, plus
 `~/.databrickscfg`); Claude Code subscription (`cc:`) ONLY when `claude
 auth status` reports `loggedIn` with `authMethod` exactly `claude.ai` -- a
 `claude` driven by an API token or a custom base URL (a work box's own
-settings-driven login) never auto-enables it. `~/.halo/config.json`'s
+settings-driven login) never auto-enables it. Codex subscription (`cx:`)
+the same way: only when `codex login status` reports a ChatGPT login, never
+an API key. `~/.halo/config.json`'s
 `"providers"` block stores OVERRIDES only: `halo providers enable/
 disable <name>` (or `/providers enable/disable <name>`, or completing a
 tab in `halo init`) writes an explicit `true`/`false` there that
@@ -86,6 +120,7 @@ own tabs, `halo providers`/`/providers`, and `doctor`):
 | `or:` | OpenRouter | `openrouter` |
 | `ant:` | Anthropic API (key) | `anthropic` |
 | `cc:` | Claude Code subscription | `claude_subscription` |
+| `cx:` | Codex subscription (ChatGPT) | `codex_subscription` |
 | *(none yet)* | TypeSafe | `typesafe` -- stores `TYPESAFE_API_KEY` only, for a later feature |
 
 A hand-typed ref whose provider isn't enabled is refused with a one-line

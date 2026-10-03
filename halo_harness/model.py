@@ -27,6 +27,7 @@ _ANT_PREFIX = "ant:"
 _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
 _CC_PREFIX = "cc:"
+_CX_PREFIX = "cx:"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -182,6 +183,14 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         bare = resolved[len(_CC_PREFIX):]
         _refuse_if_disabled("claude_subscription")
         return ModelRef(raw=raw, provider="cc", model=resolve_cc_alias(bare), dialect="cc-subprocess")
+    if resolved.startswith(_CX_PREFIX):
+        # 2.0.2: the installed `codex` binary under the user's ChatGPT
+        # subscription (agent/cx_runtime.py); `cx:default` is the
+        # account's default model from Codex's own model/list.
+        from halo_harness.providers.cx_models import resolve_cx_alias
+        bare = resolved[len(_CX_PREFIX):]
+        _refuse_if_disabled("codex_subscription")
+        return ModelRef(raw=raw, provider="cx", model=resolve_cx_alias(bare), dialect="cx-appserver")
     if resolved.startswith(_ANT_PREFIX):
         from halo_harness.providers.cc_models import resolve_ant_alias
         bare = resolved[len(_ANT_PREFIX):]
@@ -241,7 +250,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
     hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, vendor/model, "
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, cx:, vendor/model, "
         f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 
@@ -362,6 +371,14 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
     # name is one of the nine known ones (anything else keeps falling
     # through to the plain 200000/8192 native-passthrough default below,
     # unchanged from before this milestone).
+    if ref.provider == "cx":
+        # 2.0.2: Codex reports the real context window with every turn
+        # (cached by cx_models.record_context_window); a subscription has
+        # no per-token price.
+        from halo_harness.providers.cx_models import profile_fields_for_cx_model
+        fields = profile_fields_for_cx_model(ref.model, state_dir)
+        return ModelProfile(context_tokens=fields["context_tokens"], max_output_tokens=fields["max_output_tokens"],
+                            vision=fields["vision"], reasoning="native")
     if ref.provider == "cc" or (ref.provider == "anthropic" and ref.dialect == "anthropic-passthrough"):
         from halo_harness.providers.cc_models import profile_fields_for_cc_model
         fields = profile_fields_for_cc_model(ref.model)

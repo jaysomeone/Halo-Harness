@@ -133,6 +133,8 @@ def _cc_auth_status_auto_refresh_worker(app) -> None:
         from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
         if cached_auth_status_is_stale():
             refresh_cached_claude_auth_status()
+        from halo_harness.providers.cx_models import prime_codex_login_cache
+        prime_codex_login_cache()
     except Exception:
         pass
 
@@ -184,6 +186,12 @@ def catalog_auto_refresh_worker(app) -> None:
         from halo_harness.providers.anthropic_catalog import load_ant_models_json, refresh_anthropic_catalog_if_stale
         if refresh_anthropic_catalog_if_stale(state_dir, env=env):
             notes.append(f"Anthropic ({len(load_ant_models_json(state_dir))} models)")
+    if is_enabled_with_env("codex_subscription", env):
+        # 2.0.2: the ChatGPT account's own model list (codex model/list,
+        # no model call) -- same 24 h rule as the other catalogs.
+        from halo_harness.providers.cx_models import cx_models, refresh_cx_catalog_if_stale
+        if refresh_cx_catalog_if_stale(state_dir):
+            notes.append(f"Codex subscription ({len([m for m in cx_models(state_dir) if not m.get('hidden')])} models)")
     if is_enabled_with_env("databricks", env):
         from halo_harness.providers.databricks import format_dbx_diff, refresh_dbx_catalog_if_stale
         result = refresh_dbx_catalog_if_stale(state_dir, env=env)
@@ -492,6 +500,10 @@ def _models_refresh_worker(app, do_refresh: bool, *, dbx_explicit: bool = False)
     elif dbx_explicit:
         sections.append("Databricks is not configured.")
         app.call_from_thread(app.notify, "Databricks is not configured.", severity="warning", title="/models")
+
+    if is_enabled("codex_subscription"):
+        from halo_harness.providers.cx_models import models_summary_line
+        sections.append(models_summary_line(state_dir, refresh=do_refresh))
 
     if is_enabled("openrouter"):
         if not do_refresh:

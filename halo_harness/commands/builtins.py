@@ -246,6 +246,10 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     elif dbx_enabled:
         lines.append("Databricks is not configured -- nothing to refresh (see `halo doctor --work`).")
 
+    if is_enabled("codex_subscription"):
+        from halo_harness.providers.cx_models import models_summary_line
+        lines.append(models_summary_line(state_dir, refresh=wants_refresh))
+
     if is_enabled("openrouter"):
         if wants_refresh:
             from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
@@ -496,6 +500,8 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
             from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
             if cached_auth_status_is_stale():
                 refresh_cached_claude_auth_status()
+            from halo_harness.providers.cx_models import prime_codex_login_cache
+            prime_codex_login_cache()
         except Exception:
             pass
         # Findings 22/23 (2.0.1): this session's OWN cwd, and (when a real
@@ -823,7 +829,7 @@ _BUILTIN_SPECS = {
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
     "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
-    "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
+    "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:/cx:)", "[list|enable|disable <name>]",
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),

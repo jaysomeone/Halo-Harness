@@ -16,7 +16,9 @@ AND token are found (same sources, plus `~/.databrickscfg`); Claude Code
 subscription (`cc:`) ONLY when `claude auth status` reports `loggedIn` with
 `authMethod` exactly `"claude.ai"` -- a `claude` driven by an API token or
 a custom base URL (a work box's own settings-driven login) never auto-
-enables it, loggedIn or not.
+enables it, loggedIn or not. Codex subscription (`cx:`, 2.0.2) the same
+way: only when `codex login status` reports a ChatGPT login, never an API
+key.
 
 Stored at `~/.halo/config.json`'s own `"providers"` key:
 `{"<name>": {"enabled": bool, ...non-secret settings}}` -- secrets stay in
@@ -32,13 +34,14 @@ from __future__ import annotations
 from typing import Optional
 
 # Order matters for display only (the `providers` table/`/providers`).
-PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe")
+PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "codex_subscription", "typesafe")
 
 LABELS = {
     "databricks": "Databricks",
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic API (key)",
     "claude_subscription": "Claude Code subscription",
+    "codex_subscription": "Codex subscription (ChatGPT)",
     "typesafe": "TypeSafe",
 }
 
@@ -47,7 +50,7 @@ LABELS = {
 # for a later feature"), so it has no prefix of its own.
 PREFIXES = {
     "databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:",
-    "claude_subscription": "cc:", "typesafe": None,
+    "claude_subscription": "cc:", "codex_subscription": "cx:", "typesafe": None,
 }
 
 # A caller naturally has `ModelRef.provider` ("cc"), `init_providers.py`'s
@@ -56,6 +59,7 @@ PREFIXES = {
 # one spelling.
 _ALIASES = {
     "cc": "claude_subscription", "claude": "claude_subscription",
+    "cx": "codex_subscription", "codex": "codex_subscription",
     "dbx": "databricks", "or": "openrouter", "ant": "anthropic",
 }
 
@@ -138,6 +142,11 @@ def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = 
         from halo_harness.providers.cc_models import is_claude_gateway_driven
         if is_claude_gateway_driven():
             return "not set up (claude is configured for a gateway)"
+    if name == "codex_subscription":
+        from halo_harness.providers.cx_models import cached_codex_login_status
+        status = cached_codex_login_status()
+        if status is not None and status.logged_in and status.method != "chatgpt":
+            return "not set up (codex is logged in with an API key, not ChatGPT)"
     return "not set up"
 
 
@@ -255,6 +264,9 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
     if name == "claude_subscription":
         from halo_harness.init_providers import claude_login_available
         return claude_login_available()
+    if name == "codex_subscription":
+        from halo_harness.providers.cx_models import codex_login_available
+        return codex_login_available()
     if name == "typesafe":
         import os
         e = env if env is not None else os.environ
@@ -288,6 +300,8 @@ def credentials_source(name: str, *, detected: Optional[bool] = None) -> Optiona
         return resolve_databricks_source() or "env"
     if name == "claude_subscription":
         return "claude.ai login"
+    if name == "codex_subscription":
+        return "ChatGPT login (codex)"
     if name == "typesafe":
         return "env"
     return "env file / shell env"

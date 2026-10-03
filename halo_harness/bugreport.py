@@ -445,6 +445,8 @@ def cmd_bugreport(argv: list) -> int:
         from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
         if cached_auth_status_is_stale():
             refresh_cached_claude_auth_status()
+        from halo_harness.providers.cx_models import prime_codex_login_cache
+        prime_codex_login_cache()
     except Exception:
         pass
 

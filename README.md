@@ -1,10 +1,11 @@
 # Halo Harness
 
 **A Claude Code-compatible agent harness that runs the models you choose.**
-Halo gives DeepSeek, GLM, Kimi, Qwen and Claude the same tools, the same
+Halo gives DeepSeek, GLM, Kimi, Qwen, GPT and Claude the same tools, the same
 configuration and the same working habits as Claude Code, over Databricks,
-OpenRouter, the Anthropic API or your Claude Code subscription, and it reads
-your existing Claude Code setup so nothing has to be configured twice.
+OpenRouter, the Anthropic API, your Claude Code subscription or your ChatGPT
+subscription through Codex, and it reads your existing Claude Code setup so
+nothing has to be configured twice.
 
 <p align="center">
   <img src="docs/harness/tui-snapshots/main-screen.svg" alt="Halo Harness in a terminal" width="920">
@@ -61,7 +62,7 @@ halo
 Halo is a standalone agent CLI with a full-screen TUI and a print mode. It
 has its own agent loop, built-in tools (Read, Write, Edit, Bash, Glob, Grep,
 WebFetch, sub-agents and more), an MCP client, hooks, skills, custom
-commands, sessions, compaction and plan mode, and it speaks to four kinds of
+commands, sessions, compaction and plan mode, and it speaks to five kinds of
 route:
 
 | Prefix | Route | Credential it finds on its own |
@@ -70,6 +71,7 @@ route:
 | `or:` | OpenRouter: DeepSeek, GLM, Kimi, Qwen and hundreds more | `OPENROUTER_API_KEY` in the shell, a settings `env` block, or the env file |
 | `ant:` | The Anthropic API | `ANTHROPIC_API_KEY` |
 | `cc:` | Your Claude Code subscription, through the installed `claude` | the claude.ai login `claude` already has |
+| `cx:` | Your ChatGPT subscription (Plus, Pro, Team...), through the installed `codex` | the ChatGPT login `codex` already has |
 
 Models that are not Claude get a system prompt written for them: what the
 harness is, how each tool works, how CLAUDE.md, memory, skills, MCP servers,
