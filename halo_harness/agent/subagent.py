@@ -69,6 +69,27 @@ MAX_DEPTH = 1
 RESULT_CAP = 30_000
 
 
+def effective_max_concurrent(runtime: "AgentRuntime") -> int:
+    """Halo 2.0.2 round 2 (brief B): "concurrency from `agents.max_
+    concurrent` (config, default 4) unless the org sets `max_concurrent`"
+    -- an org's own value (threaded onto its root `AgentRuntime` by
+    `run_org_call`, copied to every descendant by `_build_child_session`)
+    wins outright; otherwise the `agents.max_concurrent` config knob,
+    defaulting to the original hardcoded `MAX_CONCURRENT_AGENTS` so every
+    pre-2.0.2-round-2 session behaves exactly as before. Never raises: a
+    bad config/org value (not an int, <= 0) falls back to that same
+    default."""
+    candidate = runtime.max_concurrent
+    if candidate is None:
+        from halo_harness.theme import get_config_value
+        candidate = get_config_value("agents.max_concurrent", default=MAX_CONCURRENT_AGENTS)
+    try:
+        value = int(candidate)
+        return value if value > 0 else MAX_CONCURRENT_AGENTS
+    except (TypeError, ValueError):
+        return MAX_CONCURRENT_AGENTS
+
+
 @dataclass
 class AgentRuntime:
     """Held as `Session.agent_runtime` and threaded through every
@@ -88,6 +109,17 @@ class AgentRuntime:
     role_table: dict = field(default_factory=dict)
     cli_role_overrides: dict = field(default_factory=dict)
     depth: int = 0
+    # Halo 2.0.2 round 2 (brief B): an organization run's own depth cap
+    # ("depth comes from the tree" -- `orgs.org_tree_depth(org) + 1`, set
+    # by `run_org_call` below) and concurrency cap (the org's own `max_
+    # concurrent`, or left `None` to fall through to the `agents.max_
+    # concurrent` config knob -- `effective_max_concurrent` below). `None`
+    # for every non-org caller (unchanged: `MAX_DEPTH`/the config knob
+    # apply exactly as before this existed). `_build_child_session` copies
+    # both onto every descendant's own nested `AgentRuntime` so a WHOLE
+    # org tree -- not just its root -- shares the same two caps.
+    max_depth: Optional[int] = None
+    max_concurrent: Optional[int] = None
     tasks: dict = field(default_factory=dict)        # task_id -> {"child_session_id", "spec_name", "cwd"}
     lock: "threading.Lock" = field(default_factory=threading.Lock)
     # H9 whole-tree review finding 27 (task-map persistence half): flips
@@ -385,6 +417,15 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         # every OTHER cli_flags-driven behavior stays off, unchanged).
         cli_flags=({**_child_cli_flags, "_worktree_created_path": str(isolation_worktree_path)}
                     if isolation_worktree_path is not None else (_child_cli_flags or None)),
+        # Halo 2.0.2 round 2 (brief B): an organization position's own
+        # `reports` (`AgentSpec.delegate_restriction`) becomes THIS
+        # child's own `agent_type_restriction` -- the SAME check `run_
+        # agent_call` below already enforces for a `tools: ["Agent(name)"]`
+        # content-restricted agent file, now actually reaching a child
+        # (previously set only on the TOP-level session by headless.py;
+        # no in-tree caller ever passed it down before this). `None` for
+        # every non-org spec, unchanged.
+        agent_type_restriction=spec.delegate_restriction,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
@@ -410,7 +451,11 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     child._question_waiters = parent._question_waiters
     child.agent_runtime = AgentRuntime(parent=child, agents=runtime.agents, routes=runtime.routes,
                                         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides,
-                                        depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock)
+                                        depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock,
+                                        # Halo 2.0.2 round 2 (brief B): propagated to EVERY descendant, not
+                                        # just this one hop -- an org's depth/concurrency caps must survive
+                                        # the whole tree, not reset to the module defaults one level down.
+                                        max_depth=runtime.max_depth, max_concurrent=runtime.max_concurrent)
     _write_meta(meta_path, {
         "agent_id": agent_id, "type": spec.name, "description": spec.description,
         "model": model_ref.raw, "parent_tool_use_id": parent_tool_use_id,
@@ -718,7 +763,13 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     from halo_harness.tools.truncate import spill_and_truncate
 
     _hydrate_tasks_from_disk(runtime)
-    if runtime.depth >= MAX_DEPTH:
+    # Halo 2.0.2 round 2 (brief B): "depth comes from the tree" -- an org
+    # run's own `max_depth` (`org_tree_depth(org) + 1`, set by `run_org_
+    # call` and propagated to every descendant by `_build_child_session`)
+    # overrides the module-wide `MAX_DEPTH` when set; `None` for every
+    # non-org caller, so this is byte-for-byte the old check otherwise.
+    _max_depth = runtime.max_depth if runtime.max_depth is not None else MAX_DEPTH
+    if runtime.depth >= _max_depth:
         return [], ToolResult(
             "Sub-agents cannot spawn further sub-agents (depth limit reached) -- finish this task "
             "yourself instead of delegating further.", is_error=True,
@@ -821,7 +872,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # TaskStop call.
     _write_meta(meta_path, {"task_id": new_task_id, "background": background})
 
-    start_ev = events.Event("subagent_start", {"agent_id": agent_id, "name": spec.name, "description": description,
+    # Halo 2.0.2 round 2 (brief B): an org position's own `dock_label`
+    # ("<title> (<role>)") in place of the bare name on the dock -- `None`
+    # for every non-org spec, so this is just `spec.name` as before.
+    _dock_name = spec.dock_label or spec.name
+    start_ev = events.Event("subagent_start", {"agent_id": agent_id, "name": _dock_name, "description": description,
                                                  "parent_tool_use_id": tool_id, "task_id": new_task_id})
     start_ev.agent_id = agent_id
     _fire_subagent_hook(child, "SubagentStart")
@@ -904,7 +959,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # None for a `-p`/bare-Session run, exactly like start_ev's
                 # own live forwarding, so headless callers see no behavior
                 # change at all.
-                end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": spec.name,
+                end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": _dock_name,
                                                           "parent_tool_use_id": tool_id,
                                                           "task_id": new_task_id, "is_error": is_error})
                 end_ev.agent_id = agent_id
@@ -974,7 +1029,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # permission_denials`, the TOP session only) actually surfaces a
     # sub-agent's denied tool calls instead of silently losing them.
     parent.permission_denials.extend(child.permission_denials)
-    end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": spec.name, "parent_tool_use_id": tool_id,
+    end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": _dock_name, "parent_tool_use_id": tool_id,
                                              "task_id": new_task_id, "is_error": is_error})
     end_ev.agent_id = agent_id
     if on_event is not None:
@@ -989,6 +1044,59 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
     return [start_ev, *child_events, end_ev], ToolResult(capped, is_error=is_error)
+
+
+def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str,
+                  on_event=None) -> "tuple[list, object]":
+    """`Agent(org=<name>, prompt=<goal>)` / `/org run <name> "<goal>"`
+    (Halo 2.0.2 round 2, brief B): spawns the org's ROOT position as an
+    ORDINARY child of `runtime.parent`, through `run_agent_call` itself
+    ("results flow back up as ordinary sub-agent results"), against a
+    FRESH `AgentRuntime` that swaps in the org's own positions (one
+    `AgentSpec` per title, each with its own `reports` as its `delegate_
+    restriction` -- `orgs.position_agent_specs`) for `runtime.agents`,
+    and sets `max_depth` from the org's own tree shape ("depth comes
+    from the tree": one hop for THIS call, plus the longest root-to-leaf
+    path `orgs.org_tree_depth` finds in the org's own `reports` graph)
+    and `max_concurrent` from the org's own value (or `None`, falling
+    through to the `agents.max_concurrent` config knob via `effective_
+    max_concurrent`). Shares the CALLER's own `tasks`/`lock` so task_id
+    resume/`TaskStop` bookkeeping for whatever this spawns stays part of
+    the SAME session-wide map. Never raises, matching `run_agent_call`'s
+    own contract -- every failure becomes an `is_error` ToolResult."""
+    from halo_harness.orgs import list_orgs, load_org, org_tree_depth, position_agent_specs, root_position, \
+        validate_org
+    from halo_harness.tools.base import ToolResult
+
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    name = tool_input.get("org")
+    if not name:
+        return [], ToolResult("The org parameter is required", is_error=True)
+    goal = tool_input.get("prompt") or ""
+    if not goal:
+        return [], ToolResult("The prompt parameter is required", is_error=True)
+    state_dir = runtime.parent.state_dir
+    org = load_org(name, state_dir=state_dir)
+    if org is None:
+        known = ", ".join(list_orgs(state_dir=state_dir)) or "(none)"
+        return [], ToolResult(f"Unknown organization {name!r} (or it failed validation). "
+                               f"Known organizations: {known}", is_error=True)
+    problems = validate_org(org)
+    if problems:
+        return [], ToolResult(f"Organization {name!r} is invalid: {'; '.join(problems)}", is_error=True)
+    root = root_position(org)
+    if root is None:
+        return [], ToolResult(f"Organization {name!r} has no single root.", is_error=True)
+    org_runtime = AgentRuntime(
+        parent=runtime.parent, agents=position_agent_specs(org), routes=runtime.routes,
+        role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides, depth=runtime.depth,
+        tasks=runtime.tasks, lock=runtime.lock, max_depth=org_tree_depth(org) + 1,
+        max_concurrent=org.get("max_concurrent"),
+    )
+    inner_input = {"subagent_type": root["title"], "prompt": goal,
+                   "description": tool_input.get("description") or f"Run org {name}"}
+    return run_agent_call(runtime=org_runtime, tool_id=tool_id, tool_input=inner_input, tool_name=tool_name,
+                           on_event=on_event)
 
 
 def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str, *, on_event=None):

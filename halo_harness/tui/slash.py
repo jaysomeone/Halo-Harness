@@ -67,6 +67,12 @@ async def handle_slash(app, name: str, args: str) -> None:
         # subcommand (and /role, and the bare table) stays on the generic
         # headless-text fallback below.
         "roles": _handle_roles,
+        # Halo 2.0.2 round 2 (brief B): same split as /roles -- only
+        # `/org edit <name>` needs a real form; `/org run` (which can run
+        # a whole real sub-agent tree) also needs its OWN handler so it
+        # never blocks the UI thread, even though it stays on the plain
+        # headless-text fallback underneath.
+        "org": _handle_org,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -242,6 +248,50 @@ def _open_roles_editor(app, name: str, template: dict, models: list) -> None:
             app.notify("Role template edit cancelled.", title="/roles edit")
 
     app.push_screen(RolesEditor(name, template["roles"], models, description=template.get("description", "")), _after)
+
+
+async def _handle_org(app, args: str) -> None:
+    """Halo 2.0.2 round 2 (brief B): `/org edit <name>` opens a real form
+    (`tui/dialogs/org_editor.py`); every other subcommand (`list`/`show`/
+    `new`/`load`/`run`, or the bare list) goes through the SAME headless-
+    text fallback every other command uses (`commands/builtins.py::
+    _cmd_org`, off the UI thread -- `run` especially must never block it,
+    since it can run a whole real sub-agent tree to completion)."""
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    if sub != "edit":
+        app.run_worker(lambda: _run_slash_worker(app, "org", args), thread=True, name="run-slash", group="run-slash")
+        return
+    name = parts[1].strip() if len(parts) > 1 else ""
+    if not name:
+        await app.transcript.add_note("Usage: /org edit <name>", kind="command")
+        return
+    app.run_worker(lambda: _org_edit_form_worker(app, name), thread=True, name="org-edit-form",
+                    group="org-edit-form")
+
+
+def _org_edit_form_worker(app, name: str) -> None:
+    """A brand-new (not-yet-on-disk) org is only ever built IN MEMORY
+    here -- never written until the user actually saves inside the
+    editor -- so cancelling one that never existed before leaves nothing
+    on disk at all."""
+    from halo_harness.orgs import load_org
+    org = load_org(name) or {"name": name, "description": "", "positions": [
+        {"title": "Orchestrator", "role": "orchestrator", "reports": [], "instructions": ""}]}
+    models = app.controller.list_models()
+    app.call_from_thread(_open_org_editor, app, name, org, models)
+
+
+def _open_org_editor(app, name: str, org: dict, models: list) -> None:
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    def _after(saved) -> None:
+        if saved:
+            app.notify(f"Saved organization {name!r}.", title="/org edit")
+        else:
+            app.notify("Organization edit cancelled.", title="/org edit")
+
+    app.push_screen(OrgEditor(name, org, models), _after)
 
 
 def catalog_auto_refresh_worker(app) -> None:

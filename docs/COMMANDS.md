@@ -1432,6 +1432,32 @@ command. See [ROLES.md](ROLES.md) for the full picture: the role table
 itself, per-role effort, custom role names, and `/role`/`/roles` in the
 TUI and print mode.
 
+## `halo org`
+
+```sh
+halo org list
+halo org show <name>
+halo org new <name> [--description TEXT]
+halo org edit <name>
+halo org run <name> "<goal>" [--model REF]
+```
+
+Halo 2.0.2 round 2: manages `~/.halo/orgs/<name>.json` organizations -- a
+tree of positions (`halo org new` starts a one-position "Orchestrator"
+root); `show` prints the text tree; `edit` opens `$EDITOR`/`$VISUAL` on
+the raw JSON file (creating a starter first if it doesn't exist already),
+re-validating on save; `run` executes the org's root position on
+`<goal>`, delegating through the same sub-agent machinery an
+`Agent(org=...)` tool call uses, and prints its final answer. `--model`
+on `run` is only a fallback for a position with neither its own `role`
+nor `model` set (every built-in template's own positions always set
+one). The TUI's own `/org edit <name>` opens a form instead
+(`tui/dialogs/org_editor.py`); `/org load <name>` (TUI-only -- re-installs
+one of the three shipped built-ins, overwriting a local copy) has no CLI
+equivalent, since `edit`/`new` already cover the same ground from a
+script. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
+and how a run flows through the tree.
+
 ## `halo completion`
 
 ```sh

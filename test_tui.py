@@ -1506,6 +1506,121 @@ def test_roles_edit_routes_to_external_editor_when_configured(ctx: Ctx):
 
 
 @test
+def test_org_edit_opens_with_one_row_per_position(ctx: Ctx):
+    """Halo 2.0.2 round 2 (brief B): `/org edit company` opens the form
+    with one tree row per position, root first."""
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("org-editor-open-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org edit company")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, OrgEditor):
+                        break
+                ctx.check(f"OrgEditor opened, got {type(app.screen).__name__}", isinstance(app.screen, OrgEditor))
+                option_ids = [str(o.id) for o in app.screen.query_one("#org-tree-list").options]
+                expected = {"CEO", "VP Engineering", "VP Marketing", "VP Research", "Engineering Manager",
+                            "Marketing Manager", "Research Manager", "Engineer 1", "Engineer 2",
+                            "Marketing Associate 1", "Marketing Associate 2", "Research Analyst 1",
+                            "Research Analyst 2"}
+                ctx.check(f"one row per company position, got {option_ids}", set(option_ids) == expected)
+                ctx.check(f"root (CEO) listed first, got {option_ids}", option_ids[0] == "CEO")
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_org_edit_pick_model_then_save_persists_and_reloads(ctx: Ctx):
+    """Picking a model for the highlighted position (via the SAME
+    ModelPicker `/model`/`/roles edit` use), then ctrl+s -- the org file
+    on disk reflects it, and re-loading it shows the change (brief's own
+    pilot: "opening /org edit company, changing a model, saving, and
+    reloading")."""
+    from textual.widgets import Input, OptionList
+    from halo_harness.orgs import load_org
+    from halo_harness.tui.dialogs.model_picker import ModelPicker
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("org-editor-save-")
+        try:
+            fake = FakeController(model="or:vendor/pickable-org-model")
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org edit company")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, OrgEditor):
+                        break
+                editor = app.screen
+                editor.query_one("#org-tree-list", OptionList).highlighted = 0  # "CEO", the root
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"CEO's own fields loaded, got {editor._current_title!r}", editor._current_title == "CEO")
+                await pilot.press("ctrl+p")
+                await pilot.pause(0.1)
+                ctx.check(f"the nested ModelPicker opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, ModelPicker))
+                await pilot.press("enter")  # accepts the (only) filtered model
+                await pilot.pause(0.1)
+                ctx.check("back on the OrgEditor after picking", app.screen is editor)
+                role_field = editor.query_one("#org-field-role", Input).value
+                ctx.check(f"the role field now shows the picked model, got {role_field!r}",
+                          role_field == "or:vendor/pickable-org-model")
+                await pilot.press("ctrl+s")
+                await pilot.pause(0.1)
+                saved = load_org("company")
+                ceo = next(p for p in saved["positions"] if p["title"] == "CEO")
+                ctx.check(f"persisted to disk as a model (role cleared), got {ceo}",
+                          ceo.get("model") == "or:vendor/pickable-org-model" and "role" not in ceo)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_org_edit_escape_cancels_without_saving(ctx: Ctx):
+    from halo_harness.orgs import load_org
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("org-editor-cancel-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org edit solo")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, OrgEditor):
+                        break
+                before = load_org("solo")  # built-ins auto-seed on first use
+                await pilot.press("escape")
+                await pilot.pause(0.05)
+                ctx.check("the editor screen closed", not isinstance(app.screen, OrgEditor))
+                after = load_org("solo")
+                ctx.check(f"nothing was written to disk, got before={before} after={after}", after == before)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
 def test_at_path_completion_down_down_enter_inserts_third_entry(ctx: Ctx):
     from halo_harness.tui.widgets.input import CompletionPopup
 

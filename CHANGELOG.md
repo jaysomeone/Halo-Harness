@@ -10,8 +10,8 @@ version.
 
 ## [2.0.2] - unreleased
 
-W7 round 1 (F + A of the 2.0.2 brief): the terminal tab title fix, and
-roles v2.
+W7 rounds 1-2 (F + A, then B, of the 2.0.2 brief): the terminal tab title
+fix, roles v2, and organizations.
 
 1. **Terminal tab title stays `halo`**: root cause confirmed by reading
    every `claude`-spawning call site -- each one pipes the child's stdout/
@@ -55,6 +55,34 @@ roles v2.
    form, `tui/dialogs/roles_editor.py`, or `$EDITOR` when `roles.editor:
    "external"` is configured) and `halo roles template list|save|load|new|
    edit|show` from the CLI.
+3. **Organizations**: `halo_harness/orgs.py` (new) -- a named, reusable
+   TREE of sub-agent positions (`role`/`model`, `effort`, `instructions`,
+   a tool allowlist, and the OTHER positions it may itself delegate to)
+   saved as `~/.halo/orgs/<name>.json`, with exactly one root (the title
+   nobody else's own `reports` names). Three built-ins ship copied in on
+   first use and are never overwritten once present: `solo` (one
+   orchestrator), `release-flow` (the brief -> implement -> test -> review
+   -> fix -> retest -> report loop this project is itself built with --
+   `Fixer` delegates back to the SAME `Tester` position `Implementer`
+   delegated to earlier, a reused edge rather than a second copy), and
+   `company` (CEO -> three VPs -> one manager each -> two workers each).
+   Running one (`/org run <name> "<goal>"`, `Agent(org=<name>,
+   prompt=<goal>)`, or `halo org run <name> "<goal>"`) turns every position
+   into a real `AgentSpec` and spawns the root through the EXACT sub-agent
+   machinery an ordinary `Agent` call already uses -- each position's own
+   `reports` becomes its `agent_type_restriction` (a call outside it is
+   refused with a clear tool error, the same check a `tools:
+   ["Agent(name)"]`-restricted agent file already enforced, now actually
+   reaching a child for the first time), depth comes from the org's own
+   tree shape instead of the usual depth-1 cap, and concurrency is the new
+   `agents.max_concurrent` config knob (default 4, applies to every
+   session now, org or not) unless the org sets its own. The dock shows a
+   running position as `<title> (<role>)` instead of the bare title
+   (`AgentSpec.dock_label`). `/org list|show|new|load|edit|run` in the TUI
+   (`edit` opens a tree-view-left/fields-right form, `tui/dialogs/
+   org_editor.py`; `load` re-installs a built-in over a local copy) and
+   `halo org list|show|new|edit|run` from the CLI. See
+   [docs/ORGS.md](docs/ORGS.md).
 
 ## [2.0.0] - 2026-10-01
 

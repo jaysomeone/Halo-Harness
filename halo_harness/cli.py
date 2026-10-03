@@ -390,6 +390,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "roles":
         from halo_harness.roles_cli import cmd_roles
         return cmd_roles(argv[1:])
+    if argv and argv[0] == "org":
+        from halo_harness.org_cli import cmd_org
+        return cmd_org(argv[1:])
     if argv and argv[0] == "completion":
         from halo_harness.completion_cli import cmd_completion
         return cmd_completion(argv[1:])

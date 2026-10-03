@@ -69,6 +69,26 @@ class AgentSpec:
     effort: Optional[str] = None
     isolation: Optional[str] = None       # "worktree" accepted; v1 always runs in the same tree
     color: Optional[str] = None
+    # Halo 2.0.2 round 2 (brief B): an organization position's own
+    # `reports` -- when set, THIS agent's own Agent/Task calls may only
+    # use one of these subagent_types (`agent/subagent.py::
+    # _build_child_session` reads it and passes it as the child's own
+    # `agent_type_restriction`, the SAME check a `tools: ["Agent(name)"]`
+    # content-restricted agent file already enforces via `allowed_
+    # subagent_types()`). `None` (every built-in and `.claude/agents/
+    # *.md` file) means no extra restriction beyond the depth cap; an
+    # EMPTY set (an org leaf position with no `reports`) means this
+    # position may not spawn anything at all.
+    delegate_restriction: Optional[set] = None
+    # Halo 2.0.2 round 2 (brief B): "the dock shows each running position
+    # as `<title> (<role>)`" -- the label `agent/subagent.py::
+    # run_agent_call` puts on the `subagent_start`/`subagent_end` events
+    # (and therefore the TUI's own `SubAgentCard`) instead of the bare
+    # `name` above, when set. `None` (every built-in and `.claude/agents/
+    # *.md` file) keeps the dock showing the plain name, unchanged --
+    # this is purely a DISPLAY label; `name` itself stays the identity
+    # every lookup/task-resume/hook payload keys on.
+    dock_label: Optional[str] = None
     initial_prompt: Optional[str] = None
     body: str = ""
     source: str = ""                      # "managed" | "cli-agents" | "project:<dir>" | "user" | "plugin:<name>" | "built-in"

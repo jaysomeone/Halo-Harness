@@ -4845,7 +4845,7 @@ class Session:
             Each item's `tool_result` is finalized (in ORIGINAL order) only
             once every child in this batch has actually finished."""
             nonlocal end_turn
-            from halo_harness.agent.subagent import MAX_CONCURRENT_AGENTS, run_agent_call
+            from halo_harness.agent.subagent import effective_max_concurrent, run_agent_call, run_org_call
             from halo_harness.tools.base import ToolResult
 
             q: "queue.Queue" = queue.Queue()
@@ -4864,7 +4864,13 @@ class Session:
                     if self.abort.is_set():
                         it["result"] = ToolResult("Sub-agent not started: interrupted by the user.", is_error=True)
                         return
-                    _, tr = run_agent_call(
+                    # Halo 2.0.2 round 2 (brief B): `org=` in the tool_use's
+                    # own input picks the org-running path instead of a
+                    # single sub-agent -- same split as tools/agent.py's
+                    # direct-dispatch fallback.
+                    _input = it["input"] if isinstance(it["input"], dict) else {}
+                    _dispatch = run_org_call if _input.get("org") else run_agent_call
+                    _, tr = _dispatch(
                         runtime=self.agent_runtime, tool_id=it["tool_id"], tool_input=it["input"],
                         tool_name=it["name"], on_event=q.put,
                     )
@@ -4875,7 +4881,8 @@ class Session:
                 finally:
                     q.put((_DONE, it))
 
-            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_AGENTS, len(agent_batch))) as pool:
+            with ThreadPoolExecutor(max_workers=min(effective_max_concurrent(self.agent_runtime),
+                                                      len(agent_batch))) as pool:
                 for it in agent_batch:
                     pool.submit(_run_one, it)
                 remaining = len(agent_batch)

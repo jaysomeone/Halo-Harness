@@ -21,14 +21,17 @@ DESCRIPTION = (
     "overriding the agent's own default role for just this call; `run_in_background=true` starts it "
     "without blocking this turn -- its result is reported to you as a notice once it finishes. Pass "
     "`task_id` (from an earlier <task_result>) to resume that same sub-agent with more context instead "
-    "of starting a new one. Sub-agents cannot spawn further sub-agents."
+    "of starting a new one. Sub-agents cannot spawn further sub-agents. Pass `org` (an organization name "
+    "from `halo org list`) instead of `subagent_type` to run that organization's root position on "
+    "`prompt` as its goal -- it delegates through this same tool to its own positions, each restricted "
+    "to the positions it reports to; the final result flows back the same way a plain sub-agent's does."
 )
 
 INPUT_SCHEMA = {
     "type": "object",
     "properties": {
         "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
-        "prompt": {"type": "string", "description": "The task for the agent to perform"},
+        "prompt": {"type": "string", "description": "The task for the agent to perform, or an organization's goal"},
         "subagent_type": {"type": "string", "description": "The type of agent to use (default general-purpose)"},
         "model": {"type": "string", "description": "Optional model override for this agent"},
         "role": {"type": "string", "description": "Optional role override (orchestrator|coder|reviewer|"
@@ -36,6 +39,8 @@ INPUT_SCHEMA = {
         "run_in_background": {"type": "boolean", "description": "Run without blocking this turn"},
         "task_id": {"type": "string",
                      "description": "Resume a previously returned task_id instead of starting a new sub-agent"},
+        "org": {"type": "string", "description": "Run this organization's root position instead of a single "
+                                                    "sub-agent (see `halo org list`); `prompt` is its goal"},
     },
     "required": ["description", "prompt"],
 }
@@ -56,7 +61,7 @@ class AgentTool(Tool):
         return f"Agent({t}: {d[:60]})"
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
-        from halo_harness.agent.subagent import run_agent_call
+        from halo_harness.agent.subagent import run_agent_call, run_org_call
 
         runtime = ctx.agent_runtime
         if runtime is None:
@@ -66,7 +71,11 @@ class AgentTool(Tool):
             return ToolResult("The prompt parameter is required", is_error=True)
         if not input.get("description"):
             return ToolResult("The description parameter is required", is_error=True)
-        _events, result = run_agent_call(
+        # Halo 2.0.2 round 2 (brief B): `org=` picks the org-running path
+        # instead of a single sub-agent -- same dispatch split as the
+        # LIVE/parallel path in agent/loop.py's own `_run_agent_batch`.
+        dispatch = run_org_call if input.get("org") else run_agent_call
+        _events, result = dispatch(
             runtime=runtime, tool_id=ctx.tool_use_id or "", tool_input=input, tool_name=self.name,
         )
         return result

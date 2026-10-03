@@ -313,6 +313,24 @@ powershell` completes role names and cached model refs too. See
 (including the new `compaction`/`subagent_default` rungs) and the
 (documented, never automatic beyond one specific case) cost-aware defaults.
 
+### Organizations
+
+A tree of positions (each a role or a pinned model, plus effort,
+instructions and the titles it may itself delegate to) saved as
+`~/.halo/orgs/<name>.json`; three built-ins ship copied in on first use
+and are never overwritten once present -- `solo` (one orchestrator),
+`release-flow` (the brief -> implement -> test -> review -> fix -> retest
+-> report loop this project is itself built with), and `company` (CEO ->
+VPs -> managers -> workers). `/org run <name> "<goal>"` (or
+`Agent(org=<name>, prompt=<goal>)`) spawns the root position as an
+ordinary sub-agent that delegates through the SAME Agent-tool machinery
+roles/custom agents already use, each position restricted to only the
+positions it itself may call; depth comes from the org's own tree shape,
+concurrency from `agents.max_concurrent` (config, default 4) unless the
+org sets its own. `/org list|show|new|edit|load` manage them; `halo org
+list|show|new|edit|run` is the CLI equivalent. See
+[docs/ORGS.md](../docs/ORGS.md).
+
 ## Permissions and auto mode
 
 Seven modes, same names and mode-table semantics as Claude Code:

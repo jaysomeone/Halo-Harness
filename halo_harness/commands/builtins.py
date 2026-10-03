@@ -592,6 +592,82 @@ def _cmd_role(args: str, facade: HeadlessFacade) -> str:
     return _set_one_role(args.strip(), facade)
 
 
+def _cmd_org(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 2 (brief B): bare `/org` (and `/org list`) lists
+    saved organizations; `/org show <name>` prints its text tree; `/org
+    new <name>` creates a one-position starter; `/org load <name>`
+    re-installs a built-in's shipped definition over a local copy (a
+    plain file write -- unlike `/roles edit`, this never needs the TUI);
+    `/org run <name> "<goal>"` runs it for real against the LIVE session,
+    through the exact same `run_org_call` an `Agent(org=...)` tool call
+    uses. `/org edit <name>` has no headless/print-mode form (the TUI
+    form, `tui/dialogs/org_editor.py`, intercepts it first); here it just
+    names that, like `/roles edit` does."""
+    session = getattr(facade, "session", None)
+    state_dir = getattr(session, "state_dir", None) if session is not None else None
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("", "list"):
+        from halo_harness.orgs import list_orgs, load_org
+        names = list_orgs(state_dir=state_dir)
+        lines = ["Organizations (~/.halo/orgs/):"]
+        for n in names:
+            org = load_org(n, state_dir=state_dir)
+            desc = org.get("description") if org else None
+            lines.append(f"  {n}" + (f" -- {desc}" if desc else ""))
+        return "\n".join(lines)
+
+    if sub == "show":
+        if not rest:
+            return "Usage: /org show <name>"
+        from halo_harness.orgs import describe, load_org
+        org = load_org(rest, state_dir=state_dir)
+        if org is None:
+            return f"No such organization: {rest!r} (or it failed validation)"
+        return describe(org)
+
+    if sub == "new":
+        if not rest:
+            return "Usage: /org new <name>"
+        from halo_harness.orgs import save_org
+        ok, problems = save_org(rest, {"name": rest, "positions": [
+            {"title": "Orchestrator", "role": "orchestrator", "reports": [], "instructions": ""}]},
+            state_dir=state_dir)
+        return (f"Created organization {rest!r} with a single 'Orchestrator' root position." if ok
+                else "Could not create: " + "; ".join(problems))
+
+    if sub == "load":
+        if not rest:
+            return "Usage: /org load <name>"
+        from halo_harness.orgs import reload_builtin_org
+        ok, problems = reload_builtin_org(rest, state_dir=state_dir)
+        return f"Reloaded built-in organization {rest!r}." if ok else "Could not load: " + "; ".join(problems)
+
+    if sub == "edit":
+        return ("/org edit opens the organization editor form in the TUI only -- "
+                "use `halo org edit <name>` ($EDITOR) from the CLI instead.")
+
+    if sub == "run":
+        if not rest:
+            return 'Usage: /org run <name> "<goal>"'
+        name, _, goal = rest.partition(" ")
+        goal = goal.strip()
+        if not goal:
+            return 'Usage: /org run <name> "<goal>"'
+        if session is None or getattr(session, "agent_runtime", None) is None:
+            return "Organizations can only be run once a session is running."
+        from halo_harness.agent.subagent import run_org_call
+        _events, result = run_org_call(
+            runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
+            tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
+        )
+        return result.content
+
+    return f"/org: unknown subcommand {sub!r} (known: list, show, new, load, edit, run)"
+
+
 def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
     """H15 item 21.5: `/providers` -- the SAME table `halo providers`
     prints (`format_providers_table`/`provider_rows`, so the two surfaces
@@ -944,6 +1020,8 @@ _BUILTIN_SPECS = {
     "roles": ("core", "Show the role table, or manage role templates/set a role",
               "[templates|save|load|new|edit|show <name>|set <name> <model> [effort]]", _cmd_roles),
     "role": ("core", "Set one role's model/effort for this session", "<name> <model> [effort]", _cmd_role),
+    "org": ("core", "List/show/run organizations (trees of sub-agent positions)",
+             "[list|show|new|load|edit|run <name> [\"<goal>\"]]", _cmd_org),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
