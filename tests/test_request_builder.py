@@ -213,6 +213,31 @@ def test_schema_simplifier_caps_properties_and_strips_ref(ctx: Ctx):
 
 
 @test
+def test_schema_simplifier_rewrites_prefix_items_to_items_plus_description(ctx: Ctx):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 4): Databricks forbids
+    `prefixItems` outright (confirmed today, docs/harness/QWEN-RESEARCH.md
+    §2) -- a keyword the old strip-list missed entirely. Same-typed
+    positions collapse to that one shared `items` type; the original
+    per-position shape survives as a `description` note instead of being
+    silently lost."""
+    same_typed = {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}]}
+    simplified = simplify_schema_for_databricks(same_typed)
+    ctx.check("prefixItems keyword is gone", "prefixItems" not in simplified)
+    ctx.check(f"items takes over with the shared type, got {simplified.get('items')}",
+              simplified.get("items") == {"type": "string"})
+    ctx.check(f"a description note preserves the original tuple shape, got {simplified.get('description')!r}",
+              "fixed-length tuple" in (simplified.get("description") or ""))
+
+    mixed_typed = {"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}],
+                   "description": "existing note"}
+    simplified2 = simplify_schema_for_databricks(mixed_typed)
+    ctx.check(f"mixed positions fall back to a permissive object, got {simplified2.get('items')}",
+              simplified2.get("items") == {"type": "object"})
+    ctx.check("an existing description is kept, with the tuple note appended, not overwritten",
+              simplified2["description"].startswith("existing note") and "fixed-length tuple" in simplified2["description"])
+
+
+@test
 def test_finding_13_pattern_property_survives_schema_keyword_strip(ctx: Ctx):
     """finding 13's exact repro: a Grep/Glob-shaped schema has a PROPERTY
     literally named `pattern` -- the pre-H2 simplifier stripped every dict

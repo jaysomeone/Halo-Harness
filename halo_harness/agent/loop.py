@@ -59,7 +59,7 @@ from halo_harness.model import CostMeter, ModelProfile, ModelRef, parse_model_re
 from halo_harness.permissions import Decision, PermissionEngine
 from halo_harness.providers.errors import (
     CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_effort_rejected_message, is_effort_with_tools_rejected_message,
-    is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
+    is_reasoning_replay_bug, is_retryable_message, is_tools_rejected_message, retry_delay_ms,
 )
 from halo_harness.providers.http import is_connect_failure_message
 from halo_harness.providers.hooks import (
@@ -68,7 +68,9 @@ from halo_harness.providers.hooks import (
 )
 from halo_harness.providers.config import tool_child_env
 from halo_harness.providers.profiles import ProviderProfile, resolve_profile
-from halo_harness.providers.request import ToolCatalogTooLarge, build_anthropic_request_body, build_request_body
+from halo_harness.providers.request import (
+    ToolCatalogTooLarge, ToolsNotSupported, build_anthropic_request_body, build_request_body,
+)
 from halo_harness.providers.routing import InvalidModelError, Route
 from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
@@ -1303,7 +1305,11 @@ class Session:
                 return None
             try:
                 _, _, _, body = self._derive_and_build(tool_choice=tool_choice, no_tools=no_tools)
-            except ToolCatalogTooLarge:
+            except (ToolCatalogTooLarge, ToolsNotSupported):
+                # item 1/4: a fallback that can't take this session's tools
+                # at all (too many, or none-supported) is just as unusable
+                # as one `apply_next_fallback_model` already skips for an
+                # unresolvable model string -- move on to the next one.
                 continue
             req = self._build_request(body)
             yield events.notification(
@@ -1992,6 +1998,15 @@ class Session:
                 turn=turn_no, err_type="tool_catalog_too_large",
             )
             return None
+        except ToolsNotSupported as e:
+            # Halo 2.0.2 round 5 item 1/4: a decision-only/judge endpoint
+            # (e.g. databricks-openjev-qwen35-4b), or any endpoint a prior
+            # live request already proved rejects tools outright -- never
+            # retried and never silently sent tool-less (this session's
+            # whole premise is tool use); `str(e)` already names the model
+            # and points at the judge role (`request.ToolsNotSupported`).
+            yield events.error(str(e), turn=turn_no, err_type="tools_not_supported")
+            return None
         req = self._build_request(body)
 
         attempts = 0
@@ -2355,6 +2370,29 @@ class Session:
                     # ALWAYS means OUR OWN reasoning-replay logic has a bug.
                     yield events.error(f"reasoning-replay bug (never retried): {e.message}", turn=turn_no, err_type="reasoning_replay_bug")
                     return None
+                # Halo 2.0.2 round 5 item 1/4: same reasoning as the effort-
+                # field comment just below -- a non-2xx HTTP response
+                # (Databricks' own `unknown field "tools"`, OpenRouter's
+                # `no endpoints... support tool use`) is rejected before
+                # any SSE starts, so THIS is where it's actually caught for
+                # a request that genuinely went out with `tools` (the
+                # `wire_error` branch below keeps its own copy as the
+                # backstop for a dialect that surfaces it mid-stream
+                # instead). Learn it (Databricks only) so the NEXT request
+                # against this exact endpoint never pays for the round trip
+                # again, then end the turn with a clear, never-retried
+                # error -- never silently drop tools and keep going.
+                if is_tools_rejected_message(e.message) and body.get("tools"):
+                    if self.route.provider == "databricks":
+                        from halo_harness.providers.learned_rules import learn_tools_rejected
+                        learn_tools_rejected(self.state_dir, "databricks", self.model_ref.model)
+                    self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
+                    yield events.error(
+                        f"{self.model_ref.raw} does not accept tool calls ({e.message}) -- "
+                        "use the judge role instead of the session model",
+                        turn=turn_no, err_type="tools_not_supported",
+                    )
+                    return None
                 # 1.0.1 hotfix 19.3: an effort-field 400 is a phase-1
                 # failure too, not a phase-2 (mid-stream) wire_error -- a
                 # non-2xx HTTP response is rejected before any SSE ever
@@ -2450,6 +2488,29 @@ class Session:
                 message = wire_error.get("message", "unknown upstream error")
                 if is_reasoning_replay_bug(message):
                     yield events.error(f"reasoning-replay bug (never retried): {message}", turn=turn_no, err_type="reasoning_replay_bug")
+                    return None
+                if is_tools_rejected_message(message) and body.get("tools"):
+                    # Halo 2.0.2 round 5 item 1/4: the LIVE twin of
+                    # `request.ToolsNotSupported` -- this endpoint had no
+                    # row/pattern/learned-rule telling Halo up front, so
+                    # the request already went out with `tools` and got
+                    # refused at the wire (Databricks' own `unknown field
+                    # "tools"`, or OpenRouter's `no endpoints... support
+                    # tool use`). Learn it (Databricks only -- the same
+                    # per-endpoint cache `reasoning_effort_with_tools`
+                    # already uses) so the NEXT request against this exact
+                    # endpoint never pays for the round trip again, then
+                    # end the turn with a clear, never-retried error --
+                    # never silently drop tools and keep going, which would
+                    # break this session's whole tool-using premise.
+                    if self.route.provider == "databricks":
+                        from halo_harness.providers.learned_rules import learn_tools_rejected
+                        learn_tools_rejected(self.state_dir, "databricks", self.model_ref.model)
+                    yield events.error(
+                        f"{self.model_ref.raw} does not accept tool calls ({message}) -- "
+                        "use the judge role instead of the session model",
+                        turn=turn_no, err_type="tools_not_supported",
+                    )
                     return None
                 # 1.0.1 hotfix 19.3: a 400 naming the effort field itself
                 # (verified wording: `output_config.effort: Input should be

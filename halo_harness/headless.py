@@ -735,6 +735,24 @@ def build_session(
     if model_raw is None:
         model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
+    if model_ref.provider == "databricks":
+        # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-only/
+        # judge endpoint (databricks-openjev-qwen35-4b and any other
+        # `decision_only_info` match) is never the session model, however
+        # it was chosen (--model, the last-used model, or the configured
+        # default) -- routed to the `judge` role automatically instead
+        # (the same action `Controller.set_model` takes for a MID-session
+        # `/model` switch), falling this session back to the ordinary
+        # configured default so launch never just fails outright over it.
+        from halo_harness.providers.profiles import decision_only_notice
+        _decision_notice = decision_only_notice(model_ref.model)
+        if _decision_notice:
+            from halo_harness.theme import set_config_value
+            set_config_value("roles.judge", model_ref.raw)
+            print(f"halo: {_decision_notice}\n`judge` role set to {model_ref.raw} -- "
+                  f"using the configured default model for this session instead", file=sys.stderr)
+            model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
+            model_ref = parse_model_ref(model_raw, routes)
     explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
     small_raw = explicit_small_raw or routes.get("small") or model_raw
     try:

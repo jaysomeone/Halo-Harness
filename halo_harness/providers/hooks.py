@@ -189,6 +189,20 @@ _LEAK_PATTERNS = {
     # handful of concrete shapes cited by the review/report -- see
     # tool_leak_patterns in model_table.json for which row expects which.
     "hermes_tool_call": re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL),
+    # Halo 2.0.2 round 5 (Qwen-at-work brief, item 3): declared by every
+    # Qwen row (model_table.json's own `tool_leak_patterns`) but never
+    # implemented until now -- the documented Qwen3-Coder #475 shape: the
+    # model omits the OPENING `<tool_call>` tag after a prose lead-in, so
+    # only the closing `</tool_call>` survives to anchor on. Same single-
+    # group (\{.*?\}) shape as `hermes_tool_call` just above (the generic
+    # consumption branch in `leak_parser` below treats both identically --
+    # `args_repair(whole_json_blob)` then pull out its own "name"/
+    # "arguments" keys), so no new dispatch logic was needed, only the
+    # regex itself. Deliberately NOT anchored on "no `<tool_call>` present
+    # anywhere" -- `hermes_tool_call` is tried first for every row that
+    # lists both (model_table.json's own declared order), so this is only
+    # ever REACHED once the properly-opened shape already failed to match.
+    "missing_tool_call_opener": re.compile(r"(\{.*?\})\s*</tool_call>", re.DOTALL),
     "glm_arg_key": re.compile(r"<tool_call>\s*([A-Za-z0-9_.\-]+)\s*((?:<arg_key>.*?</arg_value>\s*)+)", re.DOTALL),
     "kimi_section_tokens": re.compile(
         r"<\|tool_call_begin\|>\s*([A-Za-z0-9_.\-]+):\d+\s*<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>",
@@ -274,6 +288,41 @@ def _extract_minimax_m1_tool_calls(text: str) -> Optional[tuple]:
     return None
 
 
+_BARE_DICT_RE = re.compile(r"(\{.*\})", re.DOTALL)
+
+
+def _extract_python_repr_args(text: str) -> Optional[tuple]:
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 3): declared by every
+    Qwen row but never implemented until now -- a BARE Python-dict-literal
+    tool call with no `<tool_call>`/fence wrapper at ALL: single-quoted
+    keys/strings, Python `True`/`False`/`None` (agno#10231's own cited
+    shape), e.g. `{'name': 'Read', 'arguments': {'file_path': 'x', 'ok':
+    True}}`. Reuses `args_repair`'s own `ast.literal_eval` path (a REAL
+    parser, not a regex guess) exactly the way `_extract_fenced_json`
+    below already does for a FENCED blob -- this is that function's fence-
+    less twin, registered under its own name since model_table.json's
+    `tool_leak_patterns` lists them separately. Greedy (`.*`, not `.*?`):
+    unlike a fenced block, there is no delimiter marking where the dict
+    ends, and `arguments` is itself normally a nested dict/list, so the
+    span must run from the first `{` to the LAST `}` in the text, not the
+    first closing brace found. Same "must carry one of the real argument-
+    carrying keys" guard as `_extract_fenced_json` -- rejects a bare
+    `{"name": "my-cli", "version": "1.0"}` that just happens to have a
+    "name" string but isn't a tool call at all."""
+    m = _BARE_DICT_RE.search(text)
+    if not m:
+        return None
+    parsed = args_repair(m.group(1))
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str):
+        return None
+    args = parsed.get("arguments")
+    if not isinstance(args, dict):
+        args = parsed.get("input") if isinstance(parsed.get("input"), dict) else parsed.get("parameters")
+    if not isinstance(args, dict):
+        return None
+    return {"name": parsed["name"], "arguments": args}, m.start(), m.end()
+
+
 def _extract_fenced_json(text: str) -> Optional[tuple]:
     for m in _FENCED_JSON_RE.finditer(text):
         parsed = args_repair(m.group(1))
@@ -298,6 +347,7 @@ def _extract_fenced_json(text: str) -> Optional[tuple]:
 _LEAK_EXTRACTORS = {
     "dsml": _extract_dsml,
     "qwen3_coder_xml": _extract_qwen3_coder_xml,
+    "python_repr_args": _extract_python_repr_args,
     "minimax_invoke_xml": _extract_minimax_invoke_xml,
     "minimax_m1_tool_calls": _extract_minimax_m1_tool_calls,
     # model_table.json uses both names for a fenced-JSON-with-name shape
@@ -356,17 +406,36 @@ def leak_parser(text: str, profile) -> Optional[dict]:
     return None
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# Halo 2.0.2 round 5 (Qwen-at-work brief, item 2/E-addendum): Qwen3-235B-
+# Thinking-2507 and QwQ's own model cards document that REPLAYED history
+# may contain only a closing `</think>` with NO opening tag (the opener
+# was in a PRIOR turn's own streamed output, stripped before logging the
+# same way every Qwen row's `reasoning_replay: "empty"` already strips the
+# paired case) -- the old regex above only matches a PAIRED block, so a
+# bare leading closer leaked straight into displayed text. Anchored to the
+# START only (`^`, with leading whitespace tolerated): a `</think>` found
+# mid-text is never this shape, just a stray literal token.
+_BARE_THINK_CLOSE_RE = re.compile(r"^\s*</think>\s*", re.DOTALL)
+_SENTINEL_RE = re.compile(r"<｜end▁of▁sentence｜>|<\|end_of_sentence\|>")
+
+
 def think_tag_strip(text: str) -> str:
-    """Strip a leading `<think>...</think>` block and stray
-    end-of-sentence sentinel tokens from DISPLAYED text (never from what's
-    logged). The canonical implementation lives here now; `oai_stream.
-    strip_display_artifacts` re-exports it so existing callers/imports are
-    unaffected. Called from `halo_harness/output.py` (finding 15)."""
+    """Strip a leading `<think>...</think>` block (or, failing that, a
+    bare unpaired leading `</think>`) and stray end-of-sentence sentinel
+    tokens from DISPLAYED text (never from what's logged). The canonical
+    implementation lives here now; `oai_stream.strip_display_artifacts`
+    re-exports it so existing callers/imports are unaffected. Called from
+    `halo_harness/output.py` (finding 15)."""
     if not text:
         return text
-    think_re = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
-    sentinel_re = re.compile(r"<｜end▁of▁sentence｜>|<\|end_of_sentence\|>")
-    return sentinel_re.sub("", think_re.sub("", text, count=1))
+    stripped = _THINK_RE.sub("", text, count=1)
+    if stripped == text:
+        # No paired block matched at all -- only then try the bare-closer
+        # shape, so a well-formed `<think>...</think>answer` never also
+        # gets its (already-consumed) closing tag "stripped" a second time.
+        stripped = _BARE_THINK_CLOSE_RE.sub("", stripped, count=1)
+    return _SENTINEL_RE.sub("", stripped)
 
 
 _JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')

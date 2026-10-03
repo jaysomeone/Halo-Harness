@@ -643,7 +643,47 @@ def _scn_phase_sequence(handler, body):
     _end_sse(handler)
 
 
+def _scn_openjev_not_chat_model(handler, body):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief): the research doc's own
+    stub for `databricks-openjev-qwen35-4b` (docs/harness/QWEN-RESEARCH.md
+    §4.3) -- "a 400 on receiving tools... is plausible here," picked over
+    the OTHER plausible shape (a 200 that silently ignores them) because
+    it is the one Halo can actually defend a user against proactively: a
+    body that still carries `tools` (profile.tools_supported should have
+    stopped this before it ever reached the wire; this scenario exists to
+    prove the LIVE-400 learning path in `agent/loop.py`'s `_step` for the
+    rare case it didn't, e.g. a test that bypasses `convert_tools`) gets
+    Databricks' own real strict-allowlist wording for a field it never
+    expected from THIS endpoint at all. A tools-less body -- a judge-role
+    prompt, the shape this endpoint actually wants -- gets a plain verdict
+    reply, same as any other model answering a yes/no/choice/score
+    question."""
+    if body.get("tools"):
+        _send_json(handler, 400, {"error_code": "BAD_REQUEST", "message": 'json: unknown field "tools"'})
+        return
+    _finish(handler, [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "yes"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ])
+
+
+def _scn_tools_rejected_400(handler, body):
+    """A generic, UNTABLED twin of `_scn_openjev_not_chat_model` above --
+    deliberately a plain `tools-rejected-400` name with no "openjev"/
+    "jev-judge" substring of its own, so a test model ending in this
+    suffix is NOT already caught by `decision_only_info`'s proactive
+    pattern net and genuinely reaches the wire the first time, exercising
+    `agent/loop.py`'s own LIVE-400 `is_tools_rejected_message` ->
+    `learn_tools_rejected` path in isolation from that classifier."""
+    if body.get("tools"):
+        _send_json(handler, 400, {"error_code": "BAD_REQUEST", "message": 'json: unknown field "tools"'})
+        return
+    _scn_ok(handler, body)
+
+
 SCENARIOS = {
+    "openjev-not-chat-model": _scn_openjev_not_chat_model,
+    "tools-rejected-400": _scn_tools_rejected_400,
     "reasoning-content-shape": _scn_reasoning_content_shape,
     "reasoning-blocks-shape": _scn_reasoning_blocks_shape,
     "reasoning-effort-tools-reject-unless-none": _scn_reasoning_effort_tools_reject_unless_none,

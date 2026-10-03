@@ -225,11 +225,28 @@ class Controller:
 
     def set_model(self, model: str) -> Optional[str]:
         """Resolve `model` and hand the swap to the worker. Returns an error
-        string (nothing sent) when the reference doesn't resolve."""
+        string (nothing sent) when the reference doesn't resolve.
+
+        Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-only/
+        judge endpoint (`databricks-openjev-qwen35-4b` and any other
+        `providers.profiles.decision_only_info` match) is NEVER installed
+        as the session model, from either `/model <ref>` or picking it in
+        the interactive picker (both funnel through this one method --
+        `tui/slash.py`'s `_apply_model`) -- it is routed to the `judge`
+        role automatically instead, and the returned string (shown the
+        same way an unresolvable ref's error already is) says so plainly
+        rather than silently doing nothing."""
         try:
             ref, profile, creds = self.model_resolver(model)
         except Exception as e:  # InvalidModelError and anything else a bad ref can raise
             return f"{e}"
+        if ref.provider == "databricks":
+            from halo_harness.providers.profiles import decision_only_notice
+            notice = decision_only_notice(ref.model)
+            if notice:
+                from halo_harness.theme import set_config_value
+                set_config_value("roles.judge", ref.raw)
+                return f"{notice}\n`judge` role set to {ref.raw} -- the session model is unchanged."
         self.commands.put(events.Command("set_model", {"model_ref": ref, "model_profile": profile, "creds": creds}))
         return None
 
@@ -678,7 +695,7 @@ class Controller:
         # picker never shows that wrong answer as if it were real data.
         old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
         from halo_harness.model_display import databricks_row_fields
-        from halo_harness.providers.profiles import load_model_table
+        from halo_harness.providers.profiles import decision_only_info, load_model_table
         model_table = load_model_table()
         # 1.0.1 fixpass finding 1: loaded ONCE for the whole loop below, not
         # once per endpoint (databricks_row_fields's own `live_models_dev`/
@@ -717,12 +734,23 @@ class Controller:
             except Exception:
                 fields = {}
             path_display = PATH_TYPE_DISPLAY.get(path_type, path_type)
+            # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-
+            # only/judge endpoint (databricks-openjev-qwen35-4b and any
+            # future one `decision_only_info`'s own table/pattern match
+            # recognizes) groups separately from its family's ordinary
+            # chat rows -- "the picker shows it under a 'judge / decision'
+            # group with that note" -- never silently listed as if it
+            # were just another qwen chat model.
+            decision = decision_only_info(name, model_table)
             out.append({
                 "ref": ref, "context_tokens": fields.get("context_tokens"),
                 "max_output_tokens": fields.get("max_output_tokens"),
                 "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
-                "provider": "databricks", "group": f"Databricks ({family})", "path_type": path_type,
-                "detail": f"{family} · {path_display}", "dbu": dbu if dbu != "?" else None,
+                "provider": "databricks",
+                "group": "Databricks (judge / decision)" if decision else f"Databricks ({family})",
+                "path_type": path_type,
+                "detail": decision["reason"] if decision else f"{family} · {path_display}",
+                "dbu": dbu if dbu != "?" else None,
                 "task": e.get("task"),
             })
         current = self.session.model_ref.raw

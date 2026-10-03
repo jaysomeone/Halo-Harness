@@ -1,4 +1,8 @@
 {
+  "decision_only_name_patterns": {
+    "patterns": ["openjev", "jev-judge"],
+    "comment": "Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): case-insensitive substrings of a BARE upstream model id that mark it decision-only (a judge/verdict endpoint -- yes/no, choice, or scoring answers, never tools) even with NO model_table.json row of its own. The owner's work-VM \"openjev qwen\" bugreport matched Databricks' own `databricks-openjev-qwen35-4b` (see its row below, and docs/harness/QWEN-RESEARCH.md). A wrong guess here is a ONE-LINE fix -- edit this list, never providers/profiles.py's code -- see providers.profiles.decision_only_info, the single reader of this key."
+  },
   "edit_hints": {
     "deepseek": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
     "kimi": "Include at least three lines of surrounding context in old_string so the match is unique; if the tool reports multiple matches, add more context rather than guessing.",
@@ -2672,6 +2676,38 @@
       "edit_format": "diff",
       "unverified": [
         "hosts.databricks.reasoning_replay_forwarding"
+      ]
+    },
+    "databricks-openjev-qwen35-4b": {
+      "family": "qwen",
+      "capabilities": {
+        "decision_only": true,
+        "description": "OpenJev (Qwen3.5 4B) evaluates yes/no, choice, and scoring questions about text or structured data -- a constrained classifier/judge model, not a general chat/tool-calling model (Databricks supported-models page, fetched 2026-10-02; see docs/harness/QWEN-RESEARCH.md's owner-bugreport section)."
+      },
+      "use_temperature": true,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "context_tokens": 32768,
+      "max_tokens_default": 256,
+      "max_tokens_cap": 1024,
+      "reasoning_replay": "empty",
+      "reasoning_dual_field": false,
+      "reasoning_effort_supported": false,
+      "reasoning_default_effort": null,
+      "reasoning_no_disable": false,
+      "reasoning_field": null,
+      "tool_choice_required_supported": false,
+      "tool_id_format": "preserve",
+      "tool_leak_patterns": [],
+      "system_placement": "first",
+      "rate_limits": null,
+      "sampling_unsupported_params": [],
+      "openrouter_pin": null,
+      "edit_format": "diff",
+      "unverified": [
+        "capabilities.decision_only: leading hypothesis from the owner's \"openjev qwen\" report plus Databricks' own one-line endpoint description -- not yet confirmed by a real `halo bugreport`; see docs/harness/QWEN-RESEARCH.md",
+        "models.databricks-openjev-qwen35-4b.sampling/context_tokens/max_tokens_default: no sampling-table citation found for this specific endpoint -- guessed from the general Qwen3.5 family row; Halo never actually sends these once a request is routed through the judge role instead of the session model (tools_supported=False short-circuits the tool-bearing path, but a tool-less judge prompt still uses them)"
       ]
     },
     "databricks-qwen3-next-80b-a3b-instruct": {

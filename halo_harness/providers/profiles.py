@@ -126,6 +126,60 @@ def model_family(model_id: str) -> str:
     return "generic"
 
 
+def decision_only_info(model_id: str, model_table: Optional[dict] = None) -> Optional[dict]:
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): `{"reason": str}`
+    when `model_id` is a DECISION-ONLY endpoint -- one that answers with a
+    verdict (yes/no, a choice, a score) and was never meant to receive
+    `tools`/`tool_choice` at all. `None` for every ordinary chat/tool-
+    calling model. The owner's work-VM "openjev qwen" bugreport is the
+    motivating case: Databricks documents `databricks-openjev-qwen35-4b`
+    as exactly this shape (docs/harness/QWEN-RESEARCH.md).
+
+    Checked two ways, either one enough -- deliberately DATA, not code, so
+    a wrong guess is a one-line model_table.json edit:
+    1. A specific row's own `capabilities.decision_only` (the confirmed,
+       tabled case) -- its `capabilities.description` is Databricks' own
+       one-line wording when present.
+    2. A case-insensitive substring match of the top-level
+       `decision_only_name_patterns.patterns` list against the bare
+       model id -- the untabled-endpoint net ("for endpoints matching
+       openjev/jev-judge names"), so a differently-named judge-style
+       endpoint Halo has never seen gets classified correctly from editing
+       that list alone, never this function.
+
+    Consulted by `resolve_profile` (`ProviderProfile.decision_only`/
+    `tools_supported`), `controller.list_models()` (the picker's "judge /
+    decision" group) and `Controller.set_model`/`headless.build_session`
+    (never the session model -- routed to the `judge` role instead)."""
+    model_table = model_table if model_table is not None else load_model_table()
+    low = (model_id or "").lower()
+    for host_key in ("databricks", "openrouter"):
+        row = (model_table.get(host_key) or {}).get(model_id)
+        caps = (row or {}).get("capabilities") if isinstance(row, dict) else None
+        if isinstance(caps, dict) and caps.get("decision_only"):
+            return {"reason": caps.get("description") or
+                    "this endpoint only answers yes/no, choice and scoring questions -- it does not take tools"}
+    patterns = (model_table.get("decision_only_name_patterns") or {}).get("patterns") or []
+    for pat in patterns:
+        if isinstance(pat, str) and pat and pat.lower() in low:
+            return {"reason": f"this endpoint's name matches the known decision-only/judge naming pattern {pat!r} "
+                               "-- it answers yes/no, choice and scoring questions, not tool calls"}
+    return None
+
+
+def decision_only_notice(model_id: str, model_table: Optional[dict] = None) -> Optional[str]:
+    """One line for a human -- the picker's note, the "never the session
+    model" refusal, and the clear tools-present request error all share
+    this EXACT wording (single source) rather than each phrasing it
+    separately. `None` when `model_id` isn't decision-only."""
+    info = decision_only_info(model_id, model_table)
+    if info is None:
+        return None
+    reason = info["reason"].rstrip(". ")
+    return (f"{model_id} {reason}. Use the judge role instead of the session model "
+            f"(`/roles set judge {model_id}`, or `Agent(role=\"judge\")`).")
+
+
 def edit_hint_for(provider: str, model_id: str, model_table: Optional[dict] = None) -> Optional[str]:
     """H12 Part C (RECOMMENDATIONS.md P0 #3 / §4 telemetry: DeepSeek V4.1
     Flash's 8% Edit "Found multiple matches" failure rate is almost
@@ -251,6 +305,28 @@ class ProviderProfile:
     # explicit `--effort`/`/effort` value still goes through the clamp map
     # exactly as written (so `xhigh` -> `max` stays a deliberate choice).
     default_effort_when_unset: bool = False
+    # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): True for a
+    # decision-only/judge endpoint (`decision_only_info` above) --
+    # `decision_only_reason` is its human-readable "why" (Databricks' own
+    # wording when tabled). `tools_supported` is the narrower, purely
+    # mechanical flag `providers/request.py::build_request_body` actually
+    # gates on before putting `tools` on the wire: False whenever
+    # `decision_only` is True, OR (Databricks only) a prior live request
+    # against this exact endpoint already proved it rejects tools
+    # (`providers.learned_rules.learned_tools_rejected` -- a model with NO
+    # row/pattern match at all can still end up here after one real 400).
+    # A decision-only row is therefore always `tools_supported=False`, but
+    # the reverse need not hold.
+    decision_only: bool = False
+    decision_only_reason: Optional[str] = None
+    tools_supported: bool = True
+    # The bare upstream model id this profile was resolved for
+    # (`route.upstream_model`) -- None only for a profile built by hand in
+    # a test, never for one `resolve_profile` returns. Exists so a clear
+    # error (`providers.request.ToolsNotSupported`) can name the actual
+    # model without `convert_tools`/`build_request_body` needing their own
+    # separate `route`/model-id parameter just for a message string.
+    model_id: Optional[str] = None
 
 
 def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
@@ -291,6 +367,13 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
     family = model_family(route.upstream_model)
     host_key = route.provider if route.provider in ("databricks", "openrouter") else None
     row = ((model_table.get(host_key) or {}).get(route.upstream_model) or {}) if host_key else {}
+    # Halo 2.0.2 round 5 item 1: computed ONCE, shared by every branch below
+    # (including the anthropic-passthrough early return -- a native Claude
+    # route is never decision-only, but this keeps every ProviderProfile
+    # this function can return carrying the same two fields regardless).
+    _decision = decision_only_info(route.upstream_model, model_table)
+    decision_only = _decision is not None
+    decision_only_reason = _decision.get("reason") if _decision else None
 
     if route.dialect == "anthropic-passthrough":
         return ProviderProfile(
@@ -298,6 +381,7 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             reasoning_replay="thinking", reasoning_effort_supported=True,
             family=family, edit_format=row.get("edit_format", "diff"),
             effort_values_supported=ANTHROPIC_EFFORT_LEVELS,
+            model_id=route.upstream_model,
         )
 
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
@@ -333,9 +417,22 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         databricks_rate_limits=row.get("rate_limits"),
         unverified=tuple(row.get("unverified") or ()),
         sampling_unsupported_params=tuple(row.get("sampling_unsupported_params") or ()),
+        decision_only=decision_only,
+        decision_only_reason=decision_only_reason,
     )
 
     if route.provider == "databricks":
+        # item 1/4: never sent to a decision-only endpoint; also learns
+        # False for an UNTABLED endpoint once a live request already
+        # proved it rejects tools (see agent/loop.py's `_step`, the
+        # `is_tools_rejected_message` branch that calls
+        # `learn_tools_rejected` -- the same shape `reasoning_effort_
+        # with_tools`'s own learned-rule lookup below already uses).
+        tools_supported = not decision_only
+        if tools_supported and state_dir is not None:
+            from halo_harness.providers.learned_rules import learned_tools_rejected
+            if learned_tools_rejected(state_dir, "databricks", route.upstream_model):
+                tools_supported = False
         default_use_temp = family not in ("deepseek", "kimi", "glm", "qwen", "qwen-coder")
         # 1.0.1 fixpass finding 12: this rule is Databricks-only (the
         # ORIGINAL hotfix 22 put it in the shared `hook_fields` dict above,
@@ -405,6 +502,8 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             effort_values_supported=databricks_effort_values,
             effort_clamp_map=databricks_effort_clamp_map,
             default_effort_when_unset=bool(row.get("default_effort_when_unset", family == "glm")),
+            tools_supported=tools_supported,
+            model_id=route.upstream_model,
             **hook_fields,
         )
 
@@ -440,6 +539,8 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         # "openrouter"."openai/gpt-6" row) ever sets this here.
         reasoning_effort_with_tools=row.get("reasoning_effort_with_tools"),
         effort_values_supported=effort_values_supported,
+        tools_supported=not decision_only,
+        model_id=route.upstream_model,
         **hook_fields,
     )
 

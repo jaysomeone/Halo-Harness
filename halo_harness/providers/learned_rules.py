@@ -55,13 +55,21 @@ def learn_reasoning_effort_with_tools(state_dir, provider: str, model: str, valu
     """Idempotent, best-effort (never raises -- a write failure just means
     the NEXT session re-learns the same fact live, same as before this
     feature existed)."""
+    _learn(state_dir, provider, model, "reasoning_effort_with_tools", value)
+
+
+def _learn(state_dir, provider: str, model: str, field: str, value) -> None:
+    """Shared by every learned-rule writer below: merge one field into
+    this endpoint's row and save, skipping the disk write when the value
+    is already what's cached (same idempotence every existing caller
+    already relied on)."""
     with _LOCK:
         rules = load_learned_rules(state_dir)
         key = _key(provider, model)
         row = dict(rules.get(key)) if isinstance(rules.get(key), dict) else {}
-        if row.get("reasoning_effort_with_tools") == value:
+        if row.get(field) == value:
             return  # already learned -- avoid a pointless disk write every step
-        row["reasoning_effort_with_tools"] = value
+        row[field] = value
         rules[key] = row
         path = _path(state_dir)
         try:
@@ -71,3 +79,23 @@ def learn_reasoning_effort_with_tools(state_dir, provider: str, model: str, valu
             os.replace(tmp_path, path)
         except OSError:
             pass
+
+
+def learned_tools_rejected(state_dir, provider: str, model: str) -> bool:
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 4): True once a prior
+    LIVE request against this exact endpoint already proved it rejects
+    `tools` outright (`providers.errors.is_tools_rejected_message` on a
+    real 400/404 -- see `agent/loop.py`'s `_step`, the call site that
+    writes this). `resolve_profile`'s `tools_supported` consults this for
+    any Databricks endpoint with no `model_table.json` row/name-pattern
+    classification at all, the same gap-filling role `learned_
+    reasoning_effort_with_tools` already plays for that field -- "the
+    mechanism 2.0.3 extends" per the round 5 brief."""
+    row = load_learned_rules(state_dir).get(_key(provider, model))
+    return bool(isinstance(row, dict) and row.get("tools_rejected"))
+
+
+def learn_tools_rejected(state_dir, provider: str, model: str) -> None:
+    """Idempotent, best-effort -- same contract as `learn_reasoning_
+    effort_with_tools`."""
+    _learn(state_dir, provider, model, "tools_rejected", True)

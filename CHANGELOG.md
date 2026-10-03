@@ -10,8 +10,9 @@ version.
 
 ## [2.0.2] - unreleased
 
-W7 rounds 1-2 (F + A, then B, of the 2.0.2 brief): the terminal tab title
-fix, roles v2, and organizations.
+W7 rounds 1-5 of the 2.0.2 brief (F, A, B, C, D, then E): the terminal tab
+title fix, roles v2, organizations, sub-agent visibility and scale, MCP
+repair actions, and Qwen tool calling at work.
 
 1. **Terminal tab title stays `halo`**: root cause confirmed by reading
    every `claude`-spawning call site -- each one pipes the child's stdout/
@@ -143,6 +144,42 @@ fix, roles v2, and organizations.
    `halo mcp fix`/`test` in [docs/COMMANDS.md](docs/COMMANDS.md), and the
    "a server shows failed" walkthrough in
    [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+6. **Qwen tool calling at work**: the owner's work-VM "openjev qwen"
+   report traced to `databricks-openjev-qwen35-4b`, Databricks' own
+   decision-only "evaluates yes/no, choice, and scoring questions"
+   endpoint -- never a chat/tool-calling model. Classified from DATA
+   (`model_table.json`'s top-level `decision_only_name_patterns` substring
+   net, plus the row's own `capabilities.decision_only`), never a
+   hardcoded id check: the `/model` picker now groups it under "Databricks
+   (judge / decision)" with that one-line description, `/model`/picking it
+   never installs it as the session model -- it's routed to the `judge`
+   role automatically instead, with a plain notice -- and a request that
+   still carries `tools` for it (or for ANY Databricks endpoint a live
+   request already proved rejects tools, learned per-endpoint in
+   `~/.halo/learned-rules.json`, even with no table row at all) gets one
+   clear error naming the model and the judge role instead of a wire 400
+   (`providers.request.ToolsNotSupported`; the live-400 twin lives in
+   `agent/loop.py` via the new `providers.errors.is_tools_rejected_
+   message`). Separately, two leak-repair patterns every Qwen row had
+   declared since H2 but `providers/hooks.py` never implemented are now
+   real: `python_repr_args` (a bare single-quoted Python-dict-literal tool
+   call, no wrapper at all) and `missing_tool_call_opener` (Qwen3-Coder
+   #475's own shape -- a `}</tool_call>` tail with no opening tag).
+   `think_tag_strip` now also strips a bare leading `</think>` with no
+   opener (Qwen3-235B-Thinking-2507/QwQ's documented replay shape), and
+   `providers/request.py`'s Databricks schema simplifier now rewrites a
+   forbidden `prefixItems` keyword to `items` plus a `description` note
+   instead of leaving it on the wire (the 16-key cap was already enforced
+   by the time this round started -- the research doc's claim otherwise
+   was stale, not a live defect). See
+   [docs/harness/QWEN-RESEARCH.md](docs/harness/QWEN-RESEARCH.md),
+   [docs/harness/FAMILY-BASELINE-qwen.md](docs/harness/FAMILY-BASELINE-qwen.md)
+   and the new "Qwen at work" section in
+   [docs/MODELS.md](docs/MODELS.md). Still unconfirmed until the owner
+   sends a real `halo bugreport`: the exact endpoint/HTTP body, whether a
+   400 or a silently-ignored 200 is what it actually returns for a
+   tool-bearing call, and whether `tools` were present on the first
+   failing turn or a later one.
 
 ## [2.0.0] - 2026-10-01
 

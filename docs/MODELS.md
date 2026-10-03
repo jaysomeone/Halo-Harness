@@ -169,6 +169,74 @@ matches" far more often than Claude/GPT do. A specific `(provider,
 model_id)` row's own `edit_hint` key (including an explicit empty string)
 overrides the family default for just that one model.
 
+## Qwen at work
+
+Halo 2.0.2 round 5: a Databricks work box exposes Qwen two different ways,
+and the model picker/`/model` no longer let you confuse them.
+
+**General chat/tool-calling Qwen** -- `dbx:databricks-qwen35-122b-a10b` and
+`dbx:databricks-qwen3-next-80b-a3b-instruct` (plus every OpenRouter
+`qwen/qwen3-*`/`qwen/qwen3.5-*` id): Hermes-style `<tool_call>{json}</tool_call>`
+tool calls, parallel calls on OpenRouter (Databricks sends/accepts one tool
+call per turn -- no `parallel_tool_calls` field exists on its strict body
+allowlist), `arguments` as a JSON-encoded string on the wire (decoded once
+into a real dict on the way in, re-encoded with real `json.dumps` -- never
+Python's `str()`/repr -- on replay), no `tool_choice: "required"`
+(`tool_choice_required_supported: false` on every row), and the Qwen3-Coder/
+Qwen3.5 XML shape (`<function=NAME><parameter=KEY>VALUE</parameter></function>`)
+on top of the plain Hermes JSON form. `providers/hooks.py::leak_parser`
+recovers a call that leaked into plain text under any of FOUR patterns a
+Qwen row declares (`hermes_tool_call`, `qwen3_coder_xml`, `python_repr_args`
+-- a bare single-quoted Python-dict-literal call with no wrapper at all,
+and `missing_tool_call_opener` -- the documented Qwen3-Coder #475 shape, a
+`}</tool_call>` tail with no opening tag); `think_tag_strip` also strips a
+bare leading `</think>` with no opening tag (Qwen3-235B-Thinking-2507/QwQ's
+own documented replay shape).
+
+**OpenJev -- a decision-only judge model, not a chat model.**
+`dbx:databricks-openjev-qwen35-4b` is Databricks' own "OpenJev (Qwen3.5 4B)
+evaluates yes/no, choice, and scoring questions" endpoint: a constrained
+classifier, never meant to receive `tools`/`tool_choice` at all. Halo
+classifies this from data, not a hardcoded model id --
+`providers/model_table.json`'s top-level `decision_only_name_patterns`
+(substrings like `"openjev"`/`"jev-judge"`, so a differently-named judge
+endpoint this box has never seen is still caught) and, for the tabled row
+above, its own `capabilities.decision_only` + `capabilities.description`.
+Effects, all driven by `providers.profiles.decision_only_info`/
+`ProviderProfile.decision_only`/`.tools_supported`:
+- The `/model` picker lists it under its own **"Databricks (judge /
+  decision)"** group with that one-line description as its detail, instead
+  of lumping it in with the ordinary `qwen` chat rows.
+- `/model dbx:databricks-openjev-qwen35-4b` (or picking it) never becomes
+  the session model -- it is written to the `judge` role instead
+  (`roles.judge` in `~/.halo/config.json`, the same thing `/roles set judge
+  <model>` does) and the command reports the redirect plainly. Launching
+  `halo` with `--model`/a remembered last-model pointed at it behaves the
+  same way, falling the session back to the ordinary configured default.
+- A request that still carries `tools` for this model (or for ANY
+  Databricks endpoint a live request previously proved rejects tools, even
+  with no table row at all -- see `~/.halo/learned-rules.json`'s
+  `tools_rejected` flag, `providers.learned_rules.learn_tools_rejected`)
+  never reaches the wire at all: `providers.request.ToolsNotSupported`
+  raises a clear, one-line error naming the model and the `judge` role.
+  `agent/loop.py` catches the same condition live, the first time an
+  UNTABLED endpoint's own 400 says so (Databricks' `json: unknown field
+  "tools"`, or OpenRouter's `no endpoints... support tool use`) -- that one
+  call teaches the per-endpoint cache so the next one never repeats it.
+
+**Reading the exact 400 from `halo bugreport`.** If a Databricks Qwen
+endpoint still errors on tool calls in a shape this round didn't already
+cover, run `halo bugreport` right after the failing turn: its route section
+names the resolved `provider`/endpoint, and the `bridge.log` tail it embeds
+usually carries the raw HTTP status and error body verbatim (Databricks'
+own shape is `{"error_code": "BAD_REQUEST", "message": "..."}`; the message
+text is what `providers.errors.is_tools_rejected_message`/
+`is_effort_with_tools_rejected_message`/`is_reasoning_replay_bug` each try
+to recognize). Quote that exact text in a new issue/brief rather than
+re-describing it -- see `docs/harness/QWEN-RESEARCH.md` for what was
+already confirmed from Databricks' and Qwen's own docs versus what still
+needs a real bug report to pin down.
+
 ## Reasoning effort
 
 `--effort`, `/effort <level>`, or `settings.json`'s `effortLevel`/
