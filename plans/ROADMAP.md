@@ -38,3 +38,19 @@ and upload to GitHub; no input needed to move forward.
   configurable base URL plus per-server context discovery. Brief to be
   written when 2.0.4 ships. Modular agents from other repos stay
   undesigned until rolo asks.
+
+## RENUMBERED 2026-10-02 (rolo, /plan): everything after 2.0.1 moves back by one
+
+- 2.0.2 (NEW): roles v2 (planner, judge, tester, compaction, subagent_default,
+  per-role effort, tab completion, templates), organizations (CEO / VPs /
+  managers / workers, the release-flow org), sub-agent visibility and scale
+  (/tasks, Ctrl+T, count/batch spawning, configurable concurrency and
+  depth), MCP repair actions, Qwen tool calling, terminal tab title.
+  Brief: `2.0.2-brief.md`.
+- 2.0.3 = the old 2.0.2 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`).
+- 2.0.4 = the old 2.0.3 hardening (`2.0.4-brief.md`).
+- 2.0.5 = the old 2.0.4 Ollama (`2.0.5-ollama-brief.md`).
+- 2.0.6 = the old 2.0.5 local embeddings + generic local: route.
+- 2.0.7 (NEW): DOOM theme (section G of `2.0.2-brief.md`).
+The version numbers inside the older brief files still say their old
+numbers; this section is the authority.

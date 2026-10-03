@@ -35,7 +35,7 @@ open. The remaining 2.0.1 rounds, in order:
    with a real `claude` login; a cloud session cannot do them, so leave a
    note in the PR for the owner to run them.
 
-After 2.0.1: `ROADMAP.md` lists 2.0.2 through 2.0.5 with their briefs here.
+After 2.0.1: `ROADMAP.md` (see its RENUMBERED section) lists 2.0.2 through 2.0.7 with their briefs here; 2.0.2 is `2.0.2-brief.md` (roles v2, organizations, sub-agent scale, MCP repair, Qwen, terminal title).
 
 ## How to work from a cold session
 
@@ -69,6 +69,7 @@ After 2.0.1: `ROADMAP.md` lists 2.0.2 through 2.0.5 with their briefs here.
 | `2.0.1-gap-list.md` | the complete 2.0.1 list: W3 and W4 sections, MCP additions, W5 coverage, release steps |
 | `2.0.1-glm.md`, `2.0.1-liveness-tips.md`, `2.0.1-w2c-history-clipboard.md`, `2.0.1-w3-plan.md` | rounds already shipped (reference) |
 | `2.0.1-w4-plan.md` | W4a (open) and W4b (shipped), plus carried items |
-| `2.0.2-brief.md`, `2.0.2-jev.md`, `2.0.2-research.md` | 2.0.2: picker columns, balances, enumeration, Codex and OpenAI, jev, learned rules |
-| `2.0.3-brief.md` | 2.0.3: model gym, soak test and watchdog, CI, invariants |
-| `2.0.4-ollama-brief.md` | 2.0.4: local and LAN Ollama models |
+| `2.0.2-brief.md` | 2.0.2: roles v2, organizations, sub-agent visibility and scale, MCP repair, Qwen tool calling, terminal title |
+| `2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md` | 2.0.3: picker columns, balances, enumeration, Codex and OpenAI, jev, learned rules |
+| `2.0.4-brief.md` | 2.0.4: model gym, soak test and watchdog, CI, invariants |
+| `2.0.5-ollama-brief.md` | 2.0.5: local and LAN Ollama models |
