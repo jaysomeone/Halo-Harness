@@ -174,6 +174,17 @@ class BridgeApp(App):
         # 1.0.1 hotfix 15.6: a hard exit that can't get stuck, unlike
         # double-Ctrl+C's own quit path (see action_force_quit's docstring).
         Binding("ctrl+q", "force_quit", "Force quit", priority=True, show=False),
+        # W4c item 2: "Y for the whole transcript of the current turn" --
+        # deliberately NOT priority=True (unlike the chord-prefix/quit keys
+        # above, which all need to win over a TextArea's own key handling):
+        # a bare capital "Y" must still just TYPE while the prompt input has
+        # focus (someone writing "Yes"/"Yesterday"/...). Non-priority
+        # bindings resolve from the focused widget up to the App, so
+        # PromptInput's own printable-character handling already wins
+        # whenever it has focus; `check_action` below additionally vetoes
+        # this ONE action in that case, as a second, explicit guard (belt-
+        # and-suspenders, same philosophy as the clipboard fallback).
+        Binding("Y", "copy_turn", "Copy turn", show=False),
     ]
 
     def __init__(self, controller, *, registry=None, facade=None, tool_registry=None,
@@ -354,6 +365,18 @@ class BridgeApp(App):
         variables = dict(super().get_css_variables())
         variables.update(tui_theme.variables_for(self.theme_name))
         return variables
+
+    def check_action(self, action: str, parameters: "tuple") -> "bool | None":
+        """W4c item 2: the explicit guard `Y`'s own BINDINGS comment above
+        promises -- `copy_turn` is disabled (never even attempted) while
+        the prompt input has focus, so Textual's own non-priority binding
+        resolution falls through to PromptInput's ordinary printable-
+        character handling instead (a capital "Y" is typed, not copied).
+        Every other action is unaffected (the default `True` every widget
+        already gets from `DOMNode.check_action`)."""
+        if action == "copy_turn" and self.screen.focused is self.prompt_input:
+            return False
+        return True
 
     async def on_mount(self) -> None:
         # 2.0.1 launch-hang investigation: scheduled FIRST (before any of
@@ -1217,13 +1240,12 @@ class BridgeApp(App):
         # instead (same priority Ctrl+C's own fix above gives copying over
         # the ordinary interrupt/quit path); `TextArea.action_cut` already
         # deletes the selection and copies it via `self.app.copy_to_
-        # clipboard` (OSC 52) on its own, so this only adds the belt-and-
-        # suspenders external-tool fallback and a friendly notice on top.
+        # clipboard` -- overridden above (W4c item 3) with the OSC-52-trust
+        # gate and the external-tool fallback, so nothing further is needed
+        # here beyond the friendly notice.
         if self.screen.focused is self.prompt_input and self.prompt_input.selected_text:
             selected = self.prompt_input.selected_text
             self.prompt_input.action_cut()
-            self.run_worker(lambda: self._clipboard_fallback_worker(selected), thread=True,
-                            name="clipboard-fallback")
             self.notify(f"Cut {len(selected)} characters", timeout=2)
             return
         self._begin_chord("ctrl+x")
@@ -1538,7 +1560,12 @@ class BridgeApp(App):
         finished = self.pending_card
         marker = self._pending_markers.pop(id(finished), None) if finished is not None else None
         if marker is not None:
-            marker.update(getattr(finished, "decision_line", None) or "(resolved)")
+            # W4c item 1: `set_text` (not a bare `.update()`) keeps the
+            # marker's own `copy_text()` -- what a transcript copy actually
+            # reads -- in sync with what's now on screen, so a selection
+            # that includes this marker after the ask is answered copies
+            # the DECISION line, never the stale "... needed, see below".
+            marker.set_text(getattr(finished, "decision_line", None) or "(resolved)")
         self.pending_card = None
         self.prompt_input.placeholder = self._current_placeholder_text()
         self.status_bar.set_pending_permission(False)
@@ -1746,57 +1773,157 @@ class BridgeApp(App):
             return  # the focused card's own Esc binding handles it
         self.controller.interrupt()
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """W4c item 3: OSC 52 is only EMITTED when this terminal is known to
+        relay it (`clipboard.osc52_trusted()` -- Windows Terminal yes, a
+        plain `conhost` console host no). Overridden at the APP level
+        (rather than gating each of our own call sites individually) so
+        Textual's OWN internal callers go through the exact same check --
+        `TextArea`/`Input`'s native cut/copy key bindings and `Screen.
+        action_copy_text` all call `self.app.copy_to_clipboard(...)`
+        directly, same as our own code below and in `tui/widgets/cards.py`.
+        The external-tool fallback (`clip.exe` on win32, xclip/wl-copy/xsel
+        on Linux, pbcopy on macOS) always ALSO runs, belt-and-suspenders,
+        regardless of whether OSC 52 itself was trusted -- see tui/
+        clipboard.py's own module docstring for why two mechanisms exist."""
+        from halo_harness.tui.clipboard import osc52_trusted
+        if self._driver is not None and osc52_trusted():
+            super().copy_to_clipboard(text)
+        else:
+            self._clipboard = text
+        self.run_worker(lambda: self._clipboard_fallback_worker(text), thread=True, name="clipboard-fallback")
+
+    def _clipboard_fallback_worker(self, text: str) -> None:
+        from halo_harness.tui.clipboard import copy_via_external_tool
+        copy_via_external_tool(text)
+
+    def perform_copy(self, text: "Optional[str]", *, label: str) -> bool:
+        """W4c item 2: the ONE place every EXPLICIT copy action (`/copy`,
+        `/copy code [N]`, `/copy tool`, `y`, `Y`) sends its already-cleaned
+        text to the clipboard and tells the user what happened -- `copy_to_
+        clipboard` above handles OSC 52 + the external-tool fallback; this
+        adds the "nothing to copy yet" / "Copied <label> (N characters)"
+        half of the contract (CRLF conversion, `clipboard.crlf`, is applied
+        here too -- the very last step, so the reported character count
+        matches what actually lands on the clipboard). Returns whether
+        anything was actually copied, so a caller with its own more
+        specific "nothing yet" wording (e.g. `/copy code`'s "no code
+        blocks") can show that instead of a generic one."""
+        if not text:
+            return False
+        from halo_harness.tui.clipboard import apply_crlf_if_configured
+        final_text = apply_crlf_if_configured(text)
+        self.copy_to_clipboard(final_text)
+        self.notify(f"Copied {label} ({len(final_text)} characters)", timeout=2)
+        return True
+
+    def _copy_text_for_widgets(self, widgets) -> "Optional[str]":
+        """W4c item 1: every widget's own `copy_text()` (its stored
+        source -- see each widget class for what that means to it), cleaned
+        (`clean_copy_text`) and concatenated in the given order
+        (`join_copied_texts`). A widget with no `copy_text` at all (a
+        permission/question/plan/effort/rewind/improve card -- none of
+        them ever the target of a transcript drag in practice) simply
+        contributes nothing; there is no cell-reading fallback."""
+        from halo_harness.tui.clipboard import clean_copy_text, join_copied_texts
+        parts = []
+        for widget in widgets:
+            get_text = getattr(widget, "copy_text", None)
+            if callable(get_text):
+                parts.append(clean_copy_text(get_text()))
+        return join_copied_texts(parts) or None
+
+    def _selected_transcript_text(self) -> "Optional[str]":
+        """W4c item 1: `screen.selections` is Textual's own PUBLIC
+        selection map (`{widget: Selection(start, end)}`, kept live by its
+        native mouse-drag handling) -- only the KEYS matter here (which
+        widgets the drag touched AT ALL, even just partially); the actual
+        text always comes from `_copy_text_for_widgets` above, never
+        `Selection.extract`/`widget.get_selection` (the screen-CELL path
+        this replaces, `Screen.get_selected_text`'s own mechanism). Ordered
+        by each widget's position in the transcript, not dict order (which
+        Textual gives no documented guarantee about)."""
+        selected = self.screen.selections
+        if not selected:
+            return None
+        order = self.transcript.widgets_in_order()
+        ordered = [w for w in order if w in selected]
+        ordered.extend(w for w in selected if w not in ordered)
+        return self._copy_text_for_widgets(ordered)
+
+    def _current_turn_text(self) -> "Optional[str]":
+        """W4c item 2 (`Y`): every transcript widget from the LAST
+        UserMessage onward (that prompt plus everything produced for it so
+        far -- the "current turn" even while still running), same
+        extraction pipeline as a multi-widget selection. No UserMessage at
+        all yet (a brand-new session) falls back to the whole transcript
+        so far rather than copying nothing."""
+        from halo_harness.tui.widgets.transcript import UserMessage
+        order = self.transcript.widgets_in_order()
+        start = 0
+        for i in range(len(order) - 1, -1, -1):
+            if isinstance(order[i], UserMessage):
+                start = i
+                break
+        return self._copy_text_for_widgets(order[start:])
+
+    def action_copy_turn(self) -> None:
+        if not self.perform_copy(self._current_turn_text(), label="this turn"):
+            self.notify("Nothing to copy yet.", severity="warning", title="Y")
+
     def action_interrupt_or_quit(self) -> None:
         # W2c item 2: a selection made INSIDE the prompt TextArea (mouse
         # drag or Shift+arrows) is `prompt_input.selected_text` -- a
-        # COMPLETELY different mechanism from `screen.get_selected_text()`
-        # just below (Textual's own screen-level drag-select, which never
-        # sees into a focused TextArea's own internal selection), so Ctrl+C
-        # in the chat box used to fall straight through to the double-
-        # press-quit arming below instead of copying. Checked FIRST, and
-        # only while the prompt genuinely has focus (a stale selection left
-        # over from before focus moved elsewhere must never be copied).
+        # COMPLETELY different mechanism from the transcript/screen-level
+        # drag-select just below, so Ctrl+C in the chat box used to fall
+        # straight through to the double-press-quit arming below instead of
+        # copying. Checked FIRST, and only while the prompt genuinely has
+        # focus (a stale selection left over from before focus moved
+        # elsewhere must never be copied). Wording kept EXACTLY as W2c left
+        # it (pinned by test_ctrl_c_with_input_selection_copies_and_does_
+        # not_arm_quit) -- only the mechanism it copies THROUGH changed
+        # (`copy_to_clipboard` above is now OSC-52-trust-gated).
         if self.screen.focused is self.prompt_input and self.prompt_input.selected_text:
             selected = self.prompt_input.selected_text
-            self.copy_to_clipboard(selected)  # OSC 52 -- primary mechanism, works over SSH
-            self.run_worker(lambda: self._clipboard_fallback_worker(selected), thread=True,
-                            name="clipboard-fallback")
+            self.copy_to_clipboard(selected)
             self.notify(f"Copied {len(selected)} characters", timeout=2)
             return
-        # review finding 16: the priority Ctrl+C binding shadowed
-        # Textual's own `screen.copy_text` (Screen binds ctrl+c to it) --
-        # a drag-selected transcript run then interrupted the turn and
-        # armed quit instead of copying. OSC 52 (what copy_to_clipboard
-        # uses) works over SSH, so this is the right default even
-        # headless/remote.
-        try:
-            selected = self.screen.get_selected_text()
-        except Exception:
-            selected = None
+        # W4c item 1: review finding 16's original fix here (priority
+        # Ctrl+C shadowing Textual's own screen-level copy) still applies,
+        # but the EXTRACTION is now `_selected_transcript_text` (each
+        # touched widget's own stored source, see its docstring) rather
+        # than `Screen.get_selected_text()`'s cell-by-cell walk.
+        selected = self._selected_transcript_text()
         if selected:
-            self.copy_to_clipboard(selected)  # OSC 52 -- primary mechanism, works over SSH
-            # U5 scope E: belt-and-suspenders fallback for a terminal/
-            # multiplexer that doesn't relay OSC 52 -- best-effort, off
-            # the UI thread (spawns a subprocess), never blocks the copy.
-            self.run_worker(lambda: self._clipboard_fallback_worker(selected), thread=True,
-                            name="clipboard-fallback")
-            self.notify("Copied selection to clipboard.", timeout=2)
+            self.copy_to_clipboard(selected)
+            self.notify(f"Copied selection ({len(selected)} characters)", timeout=2)
             return
+        from halo_harness.theme import get_config_value
+        # W4c item 4: "quit_on_double_ctrl_c (default true) turns the
+        # double-press exit off" -- `_ctrl_c_deadline` is simply never armed
+        # when it's false, so the `now < deadline` branch below can never
+        # fire from Ctrl+C again; only /exit, Ctrl+D and Ctrl+Q still quit.
+        quit_on_double = bool(get_config_value("quit_on_double_ctrl_c", True))
         now = time.monotonic()
-        if self._ctrl_c_deadline is not None and now < self._ctrl_c_deadline:
+        if quit_on_double and self._ctrl_c_deadline is not None and now < self._ctrl_c_deadline:
             self._begin_quit()
             return
-        self._ctrl_c_deadline = now + DOUBLE_CTRL_C_WINDOW_S
+        self._ctrl_c_deadline = now + DOUBLE_CTRL_C_WINDOW_S if quit_on_double else None
         if self._borrowing_card is None and self.pending_card is None:
             if self.prompt_input.text:
                 self.prompt_input.clear_submitted()
             else:
                 self.controller.interrupt()
-        self.notify("Press Ctrl+C again to exit", timeout=DOUBLE_CTRL_C_WINDOW_S)
-
-    def _clipboard_fallback_worker(self, text: str) -> None:
-        from halo_harness.tui.clipboard import copy_via_external_tool
-        copy_via_external_tool(text)
+        if quit_on_double:
+            # W4c item 4: the exact wording rolo asked for -- "I worry that
+            # doing ctrl c in a windows operating system will close the
+            # terminal" -- Ctrl+C here only ever closes HALO, never the
+            # terminal it's running in.
+            self.notify("Press Ctrl+C again to exit halo (your terminal stays open)",
+                        timeout=DOUBLE_CTRL_C_WINDOW_S)
+        else:
+            self.notify("Interrupted (Ctrl+C never exits halo here -- use /exit, Ctrl+D or Ctrl+Q)",
+                        timeout=2)
 
     # ---- Ctrl+V: a real system-clipboard paste (W2c item 3) --------------
     #

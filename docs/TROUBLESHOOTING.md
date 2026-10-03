@@ -61,7 +61,20 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
   selection from the keyboard there. A selection always wins over `Ctrl+C`'s
   other job (interrupt/quit) and `Ctrl+X`'s other job (the session-actions
   chord prefix) -- `Ctrl+X` on a chat-box selection cuts it instead of
-  opening the which-key overlay.
+  opening the which-key overlay. 2.0.1 (W4c): a transcript selection always
+  copies each touched widget's own SOURCE text (the assistant message's
+  markdown, a tool card's full output, ...), never whatever happens to be
+  on screen -- no box-drawing borders or `⏺`/`❯`/`✻` glyphs end up in the
+  copy, and a selection spanning several messages/cards concatenates them
+  in order.
+- **Copying without a mouse**: `/copy` copies the last assistant reply,
+  `/copy code` its last fenced code block (`/copy code 2` for the 2nd, in
+  order), `/copy tool` the last tool call's full output. `y` on a focused
+  tool card -- or inside its `o` pager -- copies that card's full output
+  directly; `Y` copies the whole current turn (the last prompt plus
+  everything produced for it so far), but only while the chat box does NOT
+  have focus (a bare `Y` there just types a capital Y as normal). Every one
+  of these shows a toast naming what was copied and how many characters.
 - **Pasting**: a terminal's own native paste (bracketed paste -- most
   reliable) always works in the chat box already: `Ctrl+Shift+V` on most
   Linux terminals, right-click or `Ctrl+V` in Windows Terminal, or
@@ -75,9 +88,22 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
   doing nothing. A paste of 4 or more lines becomes a `[Pasted text #1]`
   placeholder either way (the model still sees the full text).
 - **Why a selection sometimes doesn't copy** -- see "PATH, `rg`, clipboard
-  (Linux)" above: the primary mechanism (OSC 52) works over SSH with no
-  extra tooling, but a terminal/multiplexer that doesn't relay it needs
-  `xclip`/`xsel`/`wl-clipboard` on PATH as the fallback.
+  (Linux)" above and "Windows specifics" below: `doctor`'s "Clipboard
+  backend" line always names the mechanism actually in use. On Linux/macOS
+  the primary mechanism is OSC 52, which works over SSH with no extra
+  tooling, but a terminal/multiplexer that doesn't relay it needs
+  `xclip`/`xsel`/`wl-clipboard` (or `pbcopy`, already on every Mac) on PATH
+  as the fallback. Line endings in a copy are always `\n`, even on Windows
+  (every editor and terminal this has been checked against accepts it);
+  set `clipboard.crlf: true` in `~/.halo/config.json` if you specifically
+  need `\r\n`.
+- **Does Ctrl+C close my terminal?** No. Ctrl+C is captured entirely inside
+  halo -- the first press copies a selection if one exists, otherwise
+  interrupts the running turn; a second press within the countdown quits
+  HALO (never the terminal window itself, which stays open either way).
+  Set `quit_on_double_ctrl_c: false` in `~/.halo/config.json` to turn the
+  second-press quit off entirely, leaving `/exit`, `Ctrl+D` (on an empty
+  prompt) and `Ctrl+Q` as the only ways to leave.
 
 ## MCP servers
 
@@ -420,6 +446,15 @@ a guess when there is truly no existing value yet.
   or `CLAUDE_CODE_GIT_BASH_PATH` points somewhere wrong; `doctor` reports
   this as `[MISSING]` (not a soft warning) since the Bash tool, every
   `command`-type hook, and `` !`cmd` `` pre-execution all need it.
+- **A copy doesn't reach the clipboard in a plain `cmd.exe`/PowerShell
+  window** (2.0.1, W4c) -- OSC 52 (the primary mechanism everywhere else)
+  is only relayed by Windows Terminal, which sets `WT_SESSION`; a bare
+  `conhost.exe` console host (not inside Windows Terminal) doesn't relay it
+  at all, so halo skips that write there and uses `clip.exe` (bundled with
+  Windows) instead -- `doctor`'s "Clipboard backend" line names exactly
+  which of the two is active. Either way the copy still happens; open the
+  same session in Windows Terminal if you specifically want the OSC 52
+  path (works over SSH/tmux too).
 
 ## Resetting caches
 

@@ -105,6 +105,10 @@ TIPS: "tuple[Tip, ...]" = (
     # an in-box selection, not just a screen/transcript one.
     Tip('Ctrl+A selects all text in the chat box; Ctrl+C then copies it, Ctrl+X cuts it'),
     Tip('Ctrl+V pastes in the chat box when a clipboard tool is available, or use your terminal shortcut'),
+    # W4c item 5: two tips for the new explicit copy actions -- no mouse,
+    # no screen-cell reading, needed.
+    Tip('/copy copies the last reply; /copy code or /copy tool copies a code block or output'),
+    Tip('y on a focused tool card or in the pager copies its full output; Y copies this turn'),
 )
 
 

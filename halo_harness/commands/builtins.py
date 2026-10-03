@@ -638,6 +638,15 @@ def _cmd_exit(args: str, facade: HeadlessFacade) -> str:
     return "Nothing to exit: a single -p call already ends after this turn."
 
 
+def _cmd_copy(args: str, facade: HeadlessFacade) -> str:
+    """W4c item 2: a REAL, interactive-TUI-only behaviour (`tui/slash.py::
+    _handle_copy` copies the last reply, a fenced code block, or the last
+    tool output to the system clipboard) -- `-p` has no transcript widgets
+    and no clipboard to copy TO, so this just says so honestly rather than
+    copying nothing silently."""
+    return "Nothing to copy outside an interactive session -- each -p call has no clipboard to copy to."
+
+
 def _cmd_bugreport(args: str, facade: HeadlessFacade) -> str:
     """2.0.1 W3a: "one paste instead of screenshots" -- a REAL, fully
     functional command here (unlike /export's interactive-picker-only
@@ -826,6 +835,8 @@ _BUILTIN_SPECS = {
     "add-dir": ("core", "Add a working directory", "<directory>", _cmd_add_dir),
     "theme": ("core", "Show or set the color theme", "[theme]", _cmd_theme),
     "exit": ("ui", "Exit halo", None, _cmd_exit),
+    "copy": ("ui", "Copy the last reply, a code block, or the last tool output to the clipboard",
+             "[code [N]|tool]", _cmd_copy),
     "rename": ("ui", "Rename this session", "<title>", _cmd_rename),
     "fork": ("ui", "Fork this session into a new one", None, _cmd_fork),
     "stats": ("core", "Show tokens/cost per model and tool-call counts (--models, --tools)", None, _cmd_stats),

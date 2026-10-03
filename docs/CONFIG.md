@@ -197,6 +197,8 @@ directly by the features that own them:
 | `connectors.<slug>.enabled` | `true` | hand-edited; `false` removes just that one connector's tool |
 | `connectors.<slug>.alwaysLoad` | `false` | hand-edited; preloads that connector's tool instead of leaving it to ToolSearch |
 | `connectors.<slug>.max_turns` | `4` | hand-edited; forwarded as the bridge's own `claude -p --max-turns` |
+| `quit_on_double_ctrl_c` | `true` | `halo config set quit_on_double_ctrl_c false` turns off the second-Ctrl+C quit (only `/exit`/`Ctrl+D`/`Ctrl+Q` leave) |
+| `clipboard.crlf` | `false` | hand-edited; `true` makes a copy use `\r\n` line endings instead of `\n` |
 
 ## Every environment variable
 

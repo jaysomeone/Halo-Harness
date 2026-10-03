@@ -261,6 +261,16 @@ to `~/.halo/config.json` and (in the TUI) re-applies it live.
 `/quit` is a TUI-only alias that actually closes the app (same as `Ctrl+D`
 on an empty prompt).
 
+### `/copy [code [N]|tool]` `[TUI-only]`
+2.0.1 (W4c): copies text to the system clipboard with no mouse needed.
+Bare `/copy` copies the last assistant reply; `/copy code` copies that
+reply's last fenced code block exactly as written (`/copy code 2` for the
+2nd block, counting from the top); `/copy tool` copies the last tool
+call's full, untruncated output (the same text its own `o` pager shows).
+Every form shows a toast naming what was copied and how many characters.
+In `-p` there is no transcript or clipboard to copy to/from, so it is a
+no-op note instead.
+
 ### `/rename <title>`
 Sets the session's title, real in both `-p` and the TUI (no live worker
 thread needed -- it's a plain index-file write).
@@ -395,10 +405,13 @@ build/VCS directories like `.git`/`node_modules`/`__pycache__` are pruned).
 
 These single keys are bound globally, always available regardless of
 focus: `Ctrl+C` (interrupt the turn, or quit on a second press within
-1.5s; copies a text selection instead if one exists), `Ctrl+D` (quit when
-the prompt is empty, else forward-delete), `Ctrl+Q` (1.0.1: force quit --
-exits even if the session is wedged; waits at most 2s for a clean
-shutdown, then exits regardless), `Esc` (interrupt), `Shift+Tab` (cycle
+1.5s -- never reaches your shell, the terminal stays open either way;
+copies a text selection instead if one exists; 2.0.1 `quit_on_double_
+ctrl_c: false` in `~/.halo/config.json` turns the second-press quit off,
+leaving `/exit`/`Ctrl+D`/`Ctrl+Q` as the only ways to leave), `Ctrl+D`
+(quit when the prompt is empty, else forward-delete), `Ctrl+Q` (1.0.1:
+force quit -- exits even if the session is wedged; waits at most 2s for a
+clean shutdown, then exits regardless), `Esc` (interrupt), `Shift+Tab` (cycle
 permission mode through `default` -> `acceptEdits` -> `plan` -> `auto` ->
 back to `default`; 1.0.1: if a permission card is still pending when the
 mode lands on `auto`/`bypassPermissions` it's resolved as allowed right
@@ -439,7 +452,13 @@ inserts a newline without submitting, `Tab` accepts the completion popup,
 `Up`/`Down` walk prompt history (prefix-filtered). Inside the transcript:
 `o` on a focused tool card opens a full-screen pager of its untruncated
 output; `Ctrl+O` there toggles that card's own expanded/collapsed state
-(distinct from the global verbose toggle).
+(distinct from the global verbose toggle); 2.0.1 (W4c) `y` -- on the card
+itself or inside its pager -- copies that same full output to the
+clipboard without opening/closing anything. `Y` copies the whole current
+turn (the last prompt plus everything produced for it so far) and works
+anywhere EXCEPT while the chat box has focus, where a bare `Y` just types
+a capital Y as normal; see "Copy and paste" in `docs/TROUBLESHOOTING.md`
+and the `/copy` command above for the mouse-free copy actions.
 
 **Auto-scroll (1.0.1).** The transcript follows new output (a streaming
 reply, a growing tool card) automatically as long as it's scrolled to the

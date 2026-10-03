@@ -15,12 +15,16 @@ _KEY_ROWS = [
     ("Enter", "Submit"),
     ("\\ + Enter, Ctrl+J, Alt+Enter", "Insert a newline"),
     ("Esc", "Interrupt the running turn / dismiss a card / deny"),
-    ("Ctrl+C (x2)", "Interrupt, then quit (Ctrl+C on a selection -- in the chat box or the "
-                     "transcript -- copies it instead)"),
+    ("Ctrl+C (x2)", "Interrupt, then quit on a second press -- never reaches your shell, the "
+                     "terminal stays open either way; a selection -- in the chat box or the "
+                     "transcript -- copies it instead; config quit_on_double_ctrl_c: false turns "
+                     "off the second-press quit"),
     ("Ctrl+A", "Select all text in the chat box"),
     ("Ctrl+V", "Paste the system clipboard into the chat box (notifies if no clipboard "
                 "tool is found -- use your terminal's own paste instead)"),
     ("Ctrl+D", "Quit (on an empty prompt)"),
+    ("y", "Copy a focused tool card's full output, or the pager's own content"),
+    ("Y", "Copy the whole transcript of the current turn (not while typing in the chat box)"),
     ("Shift+Tab", "Cycle permission mode: default -> acceptEdits -> plan -> auto"),
     ("Ctrl+L", "Clear the transcript view"),
     ("Ctrl+O", "Toggle verbose (expand thinking / tool cards)"),

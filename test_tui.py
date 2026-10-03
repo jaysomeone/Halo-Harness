@@ -70,7 +70,22 @@ from halo_harness.testing.fake_controller import FakeController, default_demo_tu
 from halo_harness.tui.app import BridgeApp
 from halo_harness.tui.events import drain_queue
 from halo_harness.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, ToolCard
-from halo_harness.tui.widgets.transcript import AssistantText, IntroLine, SystemNote, UserMessage
+from halo_harness.tui.widgets.transcript import AssistantText, IntroLine, SystemNote, ThinkingBlock, UserMessage
+import halo_harness.tui.clipboard as clipboard_mod
+
+# W4c: `copy_to_clipboard` (tui/app.py) now ALWAYS kicks off the external-
+# tool fallback worker on every copy (belt-and-suspenders, see its own
+# docstring) -- before this round that worker was a guaranteed no-op on
+# Windows (no xclip/wl-copy/xsel on PATH, and no win32 branch existed at
+# all), but W4c item 3 adds a REAL `clip.exe` write there. Stubbed once,
+# for the whole file, so no pilot below -- old or new -- ever touches the
+# developer's actual OS clipboard just by pressing Ctrl+C/y/Y or running
+# /copy; every assertion in this file already reads `app.clipboard`
+# (Textual's own in-process register, set by `copy_to_clipboard` itself),
+# never the real clipboard, so nothing here loses coverage. The clipboard
+# module's own pure dispatch logic (which argv, which platform) is tested
+# directly, with its own stubbing, in tests/test_clipboard.py.
+clipboard_mod.copy_via_external_tool = lambda *a, **kw: False
 
 test, TESTS = new_registry()
 
@@ -6819,6 +6834,488 @@ def test_svg_snapshot_pending_dock_with_two_queued_asks(ctx: Ctx):
             bar_text = _static_text(app.status_bar)
             ctx.check(f"status bar shows the needs-you · 2 tag, got {bar_text!r}", "needs you · 2" in bar_text)
     asyncio.run(body())
+
+
+# ============================================================================
+# 2.0.1 W4c: clipboard quality and Ctrl+C reassurance (rolo live, 2026-10-02
+# ~03:30). Item 1: copy the SOURCE text, not screen cells -- each widget's
+# own `copy_text()`, never `screen.get_selected_text()`'s cell-by-cell walk.
+# Glyph/border stripping and "soft-wrap joining" are covered as PURE checks
+# in tests/test_clipboard.py (no Textual needed there); these pilots cover
+# the per-widget wiring, multi-widget selection, /copy, y/Y, the toast
+# wording and the quit_on_double_ctrl_c switch -- everything that needs a
+# real running BridgeApp. See this file's own top-of-file comment for why
+# `copy_via_external_tool` is stubbed globally, not per-test, in this round.
+# ============================================================================
+
+def _last_mounted(app):
+    return app.transcript.widgets_in_order()[-1]
+
+
+@test
+def test_copy_text_user_message_widget_is_the_raw_prompt_without_the_prompt_arrow(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            await app.transcript.add_user("hello there")
+            widget = _last_mounted(app)
+            ctx.check(f"widget is a UserMessage, got {type(widget).__name__}", isinstance(widget, UserMessage))
+            ctx.check(f"copy_text has no prompt-arrow glyph, got {widget.copy_text()!r}",
+                      widget.copy_text() == "hello there")
+    asyncio.run(body())
+
+
+@test
+def test_copy_text_assistant_text_widget_is_the_raw_markdown_source(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            await app.transcript.append_text(1, 0, "**bold** reply")
+            widget = _last_mounted(app)
+            ctx.check(f"widget is AssistantText, got {type(widget).__name__}", isinstance(widget, AssistantText))
+            ctx.check(f"copy_text is the raw markdown, got {widget.copy_text()!r}",
+                      widget.copy_text() == "**bold** reply")
+    asyncio.run(body())
+
+
+@test
+def test_copy_text_thinking_block_widget_is_reasoning_text_only_no_spinner_glyph(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            await app.transcript.append_thinking(1, 0, "considering the options")
+            widget = _last_mounted(app)
+            ctx.check(f"widget is ThinkingBlock, got {type(widget).__name__}", isinstance(widget, ThinkingBlock))
+            ctx.check(f"copy_text is bare reasoning text, got {widget.copy_text()!r}",
+                      widget.copy_text() == "considering the options")
+    asyncio.run(body())
+
+
+@test
+def test_copy_text_tool_card_widget_is_header_plus_full_untruncated_body(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            card = ToolCard(tool_use_id="t1", header="⏺ Bash(git status)")
+            card.set_result(ok=True, summary="2 files changed", content="line1\nline2\nline3\nline4")
+            await app.transcript.mount_tool_card(card)
+            # `copy_text()` itself is the RAW stored header+body (the bullet
+            # glyph is baked into `self.header` by dispatch.py, unlike the
+            # other widget types above whose own stored source never had a
+            # glyph to begin with) -- `clean_copy_text` (tui/clipboard.py),
+            # applied by every real caller (app.perform_copy, ToolCard's own
+            # `y`, a transcript selection), is what strips it; checked here
+            # the same way, so this test matches real usage exactly.
+            from halo_harness.tui.clipboard import clean_copy_text
+            ctx.check(f"copy_text is RAW (glyph still present), got {card.copy_text()!r}",
+                      card.copy_text() == "⏺ Bash(git status)\n\nline1\nline2\nline3\nline4")
+            cleaned = clean_copy_text(card.copy_text())
+            ctx.check(f"clean_copy_text strips the glyph and keeps the FULL body, got {cleaned!r}",
+                      cleaned == "Bash(git status)\n\nline1\nline2\nline3\nline4")
+    asyncio.run(body())
+
+
+@test
+def test_system_note_marker_set_text_keeps_copy_text_in_sync_with_the_decision_line(ctx: Ctx):
+    """W4c item 1: `app.py::clear_pending_card` rewrites a pending-ask
+    marker through `set_text` (never a bare `.update()`) so a copy of the
+    transcript after the ask resolves reads the DECISION line, never the
+    stale "... needed, see below" text -- the actual bug a bare `.update()`
+    would have reintroduced."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            marker = await app.transcript.add_note("⏸ permission needed for Bash(pytest -q), see below",
+                                                     kind="pending-marker")
+            ctx.check("copy_text starts as the pending wording",
+                      "permission needed" in marker.copy_text())
+            marker.set_text("✓ allowed once Bash(pytest -q)")
+            ctx.check(f"copy_text now matches the rendered decision line, got {marker.copy_text()!r}",
+                      marker.copy_text() == "✓ allowed once Bash(pytest -q)")
+    asyncio.run(body())
+
+
+@test
+def test_multi_widget_selection_concatenates_texts_in_document_order(ctx: Ctx):
+    """`screen.selections` is a plain dict -- set here directly (Textual's
+    own PUBLIC reactive var) rather than simulating a real mouse drag,
+    deliberately in REVERSE insertion order, to prove the copy is ordered
+    by each widget's position in the TRANSCRIPT, not dict/selection order."""
+    from textual.selection import Selection
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.add_user("what does this do")
+            await app.transcript.append_text(1, 0, "it does X")
+            card = ToolCard(tool_use_id="t1", header="⏺ Bash(ls)")
+            card.set_result(ok=True, summary="ok", content="a.txt\nb.txt")
+            await app.transcript.mount_tool_card(card)
+            user_w, text_w, tool_w = app.transcript.widgets_in_order()
+            app.screen.selections = {tool_w: Selection(None, None), user_w: Selection(None, None),
+                                      text_w: Selection(None, None)}
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("ctrl+c")
+            expected = "what does this do\n\nit does X\n\nBash(ls)\n\na.txt\nb.txt"
+            ctx.check(f"all three texts concatenated in DOCUMENT order, glyph-stripped, got {app.clipboard!r}",
+                      app.clipboard == expected)
+            ctx.check(f"toast names what was copied and the char count, got {notified}",
+                      any(f"Copied selection ({len(expected)} characters)" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_partial_widget_selection_still_copies_the_whole_widget_text(ctx: Ctx):
+    """W4c item 1: "a selection that covers PART of a transcript widget
+    copies that widget's underlying text" -- in FULL, never just the
+    highlighted range. `Selection.extract`/`widget.get_selection` (the
+    screen-cell path this round replaces) are never even called; only
+    `screen.selections`' KEYS decide which widgets contribute at all."""
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(1, 0, "a long reply with several words in it")
+            widget = _last_mounted(app)
+            app.screen.selections = {widget: Selection(Offset(2, 0), Offset(6, 0))}
+            await pilot.press("ctrl+c")
+            ctx.check(f"the FULL widget text was copied, not a narrow slice, got {app.clipboard!r}",
+                      app.clipboard == "a long reply with several words in it")
+    asyncio.run(body())
+
+
+# ---------------------------------------------------------------------------
+# W4c item 2: /copy, /copy code [N], /copy tool.
+# ---------------------------------------------------------------------------
+
+@test
+def test_slash_copy_bare_copies_the_last_assistant_reply(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(1, 0, "the final answer")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check(f"the last reply landed on the clipboard, got {app.clipboard!r}",
+                      app.clipboard == "the final answer")
+            ctx.check(f"toast names 'last reply' and the char count, got {notified}",
+                      any("Copied last reply (16 characters)" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_with_no_reply_yet_notifies_instead_of_copying(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check("nothing landed on the clipboard", not app.clipboard)
+            ctx.check(f"a 'no reply yet' notice was shown, got {notified}",
+                      any("no assistant reply yet" in m.lower() for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_code_bare_copies_the_last_fenced_block_of_the_last_reply(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(
+                1, 0, "intro\n```python\nprint(1)\n```\nmiddle\n```js\nconsole.log(2)\n```\nend")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy code")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check(f"the LAST fenced block was copied, got {app.clipboard!r}", app.clipboard == "console.log(2)")
+            ctx.check(f"toast names 'last code block', got {notified}",
+                      any("Copied last code block" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_code_with_index_copies_the_nth_block_counting_from_the_top(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(
+                1, 0, "intro\n```python\nprint(1)\n```\nmiddle\n```js\nconsole.log(2)\n```\nend")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy code 1")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check(f"the FIRST block (counting from the top) was copied, got {app.clipboard!r}",
+                      app.clipboard == "print(1)")
+            ctx.check(f"toast names 'code block 1', got {notified}", any("Copied code block 1" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_code_index_out_of_range_notifies_instead_of_copying(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(1, 0, "```python\nprint(1)\n```")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy code 5")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check("nothing landed on the clipboard", not app.clipboard)
+            ctx.check(f"an out-of-range notice named the real count (1), got {notified}",
+                      any("1 code block(s)" in m and "5" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_code_with_no_fenced_blocks_notifies_instead_of_copying(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(1, 0, "just plain prose, no code at all")
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy code")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check("nothing landed on the clipboard", not app.clipboard)
+            ctx.check(f"a 'no code blocks' notice was shown, got {notified}",
+                      any("no code blocks" in m.lower() for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_tool_copies_the_last_tool_cards_full_output(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            card1 = ToolCard(tool_use_id="t1", header="⏺ Glob(*.py)")
+            card1.set_result(ok=True, summary="ok", content="old.py")
+            await app.transcript.mount_tool_card(card1)
+            card2 = ToolCard(tool_use_id="t2", header="⏺ Bash(ls)")
+            card2.set_result(ok=True, summary="ok", content="a.txt\nb.txt")
+            await app.transcript.mount_tool_card(card2)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy tool")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check(f"the LAST (not first) tool card's full output was copied, got {app.clipboard!r}",
+                      app.clipboard == "Bash(ls)\n\na.txt\nb.txt")
+            ctx.check(f"toast names 'last tool output', got {notified}",
+                      any("Copied last tool output" in m for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_slash_copy_tool_with_no_tool_card_yet_notifies_instead_of_copying(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/copy tool")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=5)
+            ctx.check("nothing landed on the clipboard", not app.clipboard)
+            ctx.check(f"a 'no tool output yet' notice was shown, got {notified}",
+                      any("no tool output yet" in m.lower() for m in notified))
+    asyncio.run(body())
+
+
+# ---------------------------------------------------------------------------
+# W4c item 2: y (focused tool card / pager), Y (whole current turn, guarded
+# against hijacking ordinary typing in the chat box).
+# ---------------------------------------------------------------------------
+
+@test
+def test_y_key_on_a_focused_tool_card_copies_its_full_output(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            card = ToolCard(tool_use_id="t1", header="⏺ Bash(ls)")
+            card.set_result(ok=True, summary="ok", content="a.txt\nb.txt")
+            await app.transcript.mount_tool_card(card)
+            card.focus()
+            await pilot.pause(0.05)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("y")
+            ctx.check(f"the card's full output landed on the clipboard, got {app.clipboard!r}",
+                      app.clipboard == "Bash(ls)\n\na.txt\nb.txt")
+            ctx.check(f"toast names 'tool output', got {notified}", any("Copied tool output" in m for m in notified))
+            from halo_harness.tui.widgets.cards import PagerScreen
+            ctx.check("'y' does not open the pager (unlike 'o')", not isinstance(app.screen, PagerScreen))
+    asyncio.run(body())
+
+
+@test
+def test_y_key_inside_the_pager_copies_the_same_full_content(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            card = ToolCard(tool_use_id="t1", header="⏺ Bash(ls)")
+            card.set_result(ok=True, summary="ok", content="a.txt\nb.txt")
+            await app.transcript.mount_tool_card(card)
+            card.focus()
+            await pilot.pause(0.05)
+            await pilot.press("o")
+            await pilot.pause(0.05)
+            from halo_harness.tui.widgets.cards import PagerScreen
+            ctx.check("the pager is open", isinstance(app.screen, PagerScreen))
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("y")
+            ctx.check(f"the same full content was copied from the pager, got {app.clipboard!r}",
+                      app.clipboard == "Bash(ls)\n\na.txt\nb.txt")
+            ctx.check(f"toast fired, got {notified}", any("Copied tool output" in m for m in notified))
+            ctx.check("the pager stays open after copying", isinstance(app.screen, PagerScreen))
+    asyncio.run(body())
+
+
+@test
+def test_capital_y_types_a_literal_character_while_the_chat_box_has_focus(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.append_text(1, 0, "some earlier reply")
+            await pilot.click("#prompt-input")
+            await pilot.press("Y")
+            ctx.check(f"a literal capital Y was typed, not copied, got {app.prompt_input.text!r}",
+                      app.prompt_input.text == "Y")
+            ctx.check("nothing was copied", not app.clipboard)
+    asyncio.run(body())
+
+
+@test
+def test_capital_y_copies_the_whole_current_turn_when_the_chat_box_is_not_focused(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.transcript.add_user("explain X")
+            await app.transcript.append_text(1, 0, "X is ...")
+            card = ToolCard(tool_use_id="t1", header="⏺ Bash(ls)")
+            card.set_result(ok=True, summary="ok", content="a.txt")
+            await app.transcript.mount_tool_card(card)
+            card.focus()  # anything other than the prompt input
+            await pilot.pause(0.05)
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("Y")
+            expected = "explain X\n\nX is ...\n\nBash(ls)\n\na.txt"
+            ctx.check(f"the whole turn (prompt + reply + tool card) was copied, got {app.clipboard!r}",
+                      app.clipboard == expected)
+            ctx.check(f"toast names 'this turn', got {notified}", any("Copied this turn" in m for m in notified))
+    asyncio.run(body())
+
+
+# ---------------------------------------------------------------------------
+# W4c item 4: the exact Ctrl+C toast wording, and the quit_on_double_ctrl_c
+# config switch. `theme.set_config_value`/`get_config_value` read/write the
+# SAME `~/.halo/config.json` this whole file's one scoped BRIDGE_STATE_DIR
+# points at (set once, for the whole process, by `ensure_scoped_state_dir_
+# once()` at import time) -- each test resets the key back to `true` (the
+# documented default) in a finally block so it never leaks into another
+# test in this same file.
+# ---------------------------------------------------------------------------
+
+@test
+def test_ctrl_c_toast_says_halo_and_that_the_terminal_stays_open(ctx: Ctx):
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("ctrl+c")
+            ctx.check(f"the exact reassurance wording was shown, got {notified}",
+                      any(m == "Press Ctrl+C again to exit halo (your terminal stays open)" for m in notified))
+    asyncio.run(body())
+
+
+@test
+def test_quit_on_double_ctrl_c_false_disables_the_second_press_quit(ctx: Ctx):
+    from halo_harness import theme as theme_mod
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            notified = []
+            app.notify = lambda msg, **kw: notified.append(msg)
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.3)
+            ctx.check("a second Ctrl+C within the window does NOT quit when the switch is off",
+                      fake.quit_called is False)
+            ctx.check(f"app.return_code is still unset, got {app.return_code!r}", app.return_code is None)
+            ctx.check(f"the toast explains Ctrl+C never exits halo here, got {notified}",
+                      any("never exits halo here" in m for m in notified))
+    try:
+        theme_mod.set_config_value("quit_on_double_ctrl_c", False)
+        asyncio.run(body())
+    finally:
+        theme_mod.set_config_value("quit_on_double_ctrl_c", True)
+
+
+@test
+def test_quit_on_double_ctrl_c_false_still_leaves_ctrl_d_working(ctx: Ctx):
+    """"only /exit, Ctrl+D or Ctrl+Q leave" -- Ctrl+D on an empty prompt is
+    unaffected by the switch (it never went through `_ctrl_c_deadline` at
+    all)."""
+    from halo_harness import theme as theme_mod
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+d")
+            await pilot.pause(0.2)
+        ctx.check("Ctrl+D still quits on an empty prompt", fake.quit_called is True)
+    try:
+        theme_mod.set_config_value("quit_on_double_ctrl_c", False)
+        asyncio.run(body())
+    finally:
+        theme_mod.set_config_value("quit_on_double_ctrl_c", True)
 
 
 if __name__ == "__main__":

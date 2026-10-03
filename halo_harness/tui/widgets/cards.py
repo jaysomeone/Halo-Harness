@@ -25,9 +25,14 @@ STATUS_GLYPHS = {"running": "●", "ok": "✓", "error": "✗", "skipped": "⊘"
 
 class PagerScreen(ModalScreen):
     """A full-screen scrollable view of one tool call's complete,
-    untruncated output (`o` on a focused ToolCard)."""
+    untruncated output (`o` on a focused ToolCard). W4c item 2: `y` copies
+    that same full content without closing the pager, so it can still be
+    checked against the clipboard afterward."""
 
-    BINDINGS = [Binding("escape,q,o", "dismiss_pager", "Close", show=False)]
+    BINDINGS = [
+        Binding("escape,q,o", "dismiss_pager", "Close", show=False),
+        Binding("y", "copy_pager", "Copy", show=False),
+    ]
     DEFAULT_CSS = """
     PagerScreen { align: center middle; }
     PagerScreen > Static { width: 90%; height: 90%; border: round $primary; padding: 1 2;
@@ -44,6 +49,13 @@ class PagerScreen(ModalScreen):
 
     def action_dismiss_pager(self) -> None:
         self.dismiss()
+
+    def copy_text(self) -> str:
+        return f"{self._title}\n\n{self._body}"
+
+    def action_copy_pager(self) -> None:
+        from halo_harness.tui.clipboard import clean_copy_text
+        self.app.perform_copy(clean_copy_text(self.copy_text()), label="tool output")
 
 
 def _truncate_lines(text: str, n: int) -> "tuple[str, int]":
@@ -67,7 +79,10 @@ class ToolCard(Static, can_focus=True):
     MCP/Agent calls get at least this counter even though only Bash
     streams `tool_progress` lines of its own."""
 
-    BINDINGS = [Binding("o", "open_pager", "Pager", show=False)]
+    BINDINGS = [
+        Binding("o", "open_pager", "Pager", show=False),
+        Binding("y", "copy_card", "Copy", show=False),
+    ]
 
     def __init__(self, *, tool_use_id: str, header: str) -> None:
         super().__init__("", markup=False, classes="tool-card tool-running")
@@ -175,6 +190,18 @@ class ToolCard(Static, can_focus=True):
 
     def action_open_pager(self) -> None:
         self.app.push_screen(PagerScreen(self.header, self.body_text or "(no output yet)"))
+
+    def copy_text(self) -> str:
+        """W4c item 1/2: the SAME full, untruncated content the `o` pager
+        shows (header + complete body, never the 3-line collapsed/expanded
+        render `_refresh` builds for the on-screen card) -- what a
+        transcript selection touching this card copies, and what `y`
+        copies directly without opening the pager at all."""
+        return f"{self.header}\n\n{self.body_text or '(no output yet)'}"
+
+    def action_copy_card(self) -> None:
+        from halo_harness.tui.clipboard import clean_copy_text
+        self.app.perform_copy(clean_copy_text(self.copy_text()), label="tool output")
 
     def _refresh(self) -> None:
         from halo_harness.model_display import format_elapsed_seconds

@@ -30,6 +30,13 @@ class UserMessage(Static):
 
     def __init__(self, text: str) -> None:
         super().__init__(f"❯ {text}", markup=False, classes="user-message")
+        # W4c item 1: the SOURCE text a copy ever reads -- never the
+        # displayed `"❯ {text}"` (re-deriving it by slicing the rendered
+        # string would just be re-reading our own chrome back out again).
+        self.raw_text = text
+
+    def copy_text(self) -> str:
+        return self.raw_text
 
 
 class SystemNote(Static):
@@ -38,6 +45,21 @@ class SystemNote(Static):
 
     def __init__(self, text: str, *, kind: str = "note") -> None:
         super().__init__(text, markup=False, classes=f"system-note system-note-{kind}")
+        self.raw_text = text
+
+    def copy_text(self) -> str:
+        return self.raw_text
+
+    def set_text(self, text: str) -> None:
+        """W4c item 1: the ONE way to change this widget's text after
+        construction -- keeps `raw_text` (what a copy reads) and the
+        actual render in sync. `app.py::clear_pending_card` rewrites a
+        pending-ask marker to its decision line through this, never
+        through a bare `.update()` that would leave `copy_text()` still
+        answering with the stale "permission needed ..." wording after
+        the ask was already resolved."""
+        self.raw_text = text
+        self.update(text)
 
 
 class IntroLine(Static):
@@ -116,13 +138,20 @@ class IntroLine(Static):
         self.done = True
         self.update(self.full_text)
 
+    def copy_text(self) -> str:
+        """W4c item 1: the full line regardless of how much has actually
+        typed out yet -- never the partial `self._shown` prefix (plus the
+        block cursor glyph, which is not content)."""
+        return self.full_text
+
 
 class FoldedHistory(Static):
     def __init__(self, count: int) -> None:
-        super().__init__(
-            f"⋯ {count} earlier lines folded (use /export to save the full transcript)",
-            markup=False, classes="folded-history",
-        )
+        self.message = f"⋯ {count} earlier lines folded (use /export to save the full transcript)"
+        super().__init__(self.message, markup=False, classes="folded-history")
+
+    def copy_text(self) -> str:
+        return self.message
 
 
 class ThinkingBlock(Static):
@@ -187,6 +216,13 @@ class ThinkingBlock(Static):
 
     @property
     def text(self) -> str:
+        return self.reasoning_text
+
+    def copy_text(self) -> str:
+        """W4c item 1: `reasoning_text` itself (never the rendered
+        `✻ Thinking… (Ns · N tokens)` header/preview `_refresh_display`
+        builds -- that header is computed fresh for display and never
+        stored, so there is nothing to strip here to begin with)."""
         return self.reasoning_text
 
     def had_reasoning(self) -> bool:
@@ -332,6 +368,13 @@ class AssistantText(Markdown):
         super().__init__("")
         self._stream = None
         self.raw_text = ""
+
+    def copy_text(self) -> str:
+        """W4c item 1: the markdown SOURCE this streamed, never Textual's
+        own rendered `Markdown` output (which would mean re-reading the
+        widget's rendered content, exactly what this round moves away
+        from)."""
+        return self.raw_text
 
     def start_stream(self) -> None:
         # `Markdown.get_stream` is a classmethod taking the widget as an
@@ -736,3 +779,12 @@ class Transcript(VerticalScroll):
         """Generic hook for permission/question/plan cards -- tracked for
         folding exactly like everything else."""
         await self._mount_tracked(widget)
+
+    def widgets_in_order(self) -> list:
+        """W4c item 1/2: every currently-tracked widget, oldest (top) first
+        -- the read-only view `tui/app.py`'s copy actions need (a multi-
+        widget transcript selection, `Y`'s "whole current turn", `/copy`'s
+        "last reply"/"last tool output" search) without reaching into
+        `_history` directly from outside this class. A plain list copy --
+        callers never mutate the transcript's own bookkeeping through it."""
+        return list(self._history)

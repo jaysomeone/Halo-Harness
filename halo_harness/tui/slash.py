@@ -60,6 +60,8 @@ async def handle_slash(app, name: str, args: str) -> None:
         "effort": _handle_effort,
         # 2.0.0 Launch intro: replays the typewriter line.
         "intro": _handle_intro,
+        # W4c item 2: /copy, /copy code [N], /copy tool.
+        "copy": _handle_copy,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -1052,3 +1054,72 @@ def _edit_candidate_then_apply(app, session, candidate) -> None:
             pass
     app.run_worker(lambda: _apply_worker(app, session, candidate), thread=True, name="improve-apply",
                     group="improve-apply")
+
+
+# ============================================================================
+# W4c item 2: /copy (last assistant reply), /copy code [N] (its last fenced
+# block, or the Nth), /copy tool (last tool output). All three are synchronous
+# (plain list/string work over widgets already in memory, no worker needed)
+# and go through `app.perform_copy` (tui/app.py), the one choke point that
+# applies `clean_copy_text`/the CRLF config and shows the "Copied ..." toast.
+# ============================================================================
+
+def _last_widget_of_type(app, widget_type):
+    for widget in reversed(app.transcript.widgets_in_order()):
+        if isinstance(widget, widget_type):
+            return widget
+    return None
+
+
+async def _handle_copy(app, args: str) -> None:
+    from halo_harness.tui.widgets.cards import ToolCard
+    from halo_harness.tui.widgets.transcript import AssistantText
+
+    tokens = (args or "").split()
+    sub = tokens[0].lower() if tokens else ""
+
+    if sub == "tool":
+        card = _last_widget_of_type(app, ToolCard)
+        if card is None:
+            app.notify("No tool output yet to copy.", severity="warning", title="/copy")
+            return
+        from halo_harness.tui.clipboard import clean_copy_text
+        app.perform_copy(clean_copy_text(card.copy_text()), label="last tool output")
+        return
+
+    if sub == "code":
+        widget = _last_widget_of_type(app, AssistantText)
+        if widget is None:
+            app.notify("No assistant reply yet to copy from.", severity="warning", title="/copy")
+            return
+        from halo_harness.tui.clipboard import clean_code_text, extract_fenced_code_blocks
+        blocks = extract_fenced_code_blocks(widget.raw_text)
+        if not blocks:
+            app.notify("The last reply has no code blocks.", severity="warning", title="/copy")
+            return
+        index_text = tokens[1] if len(tokens) > 1 else ""
+        if not index_text:
+            app.perform_copy(clean_code_text(blocks[-1]), label="last code block")
+            return
+        try:
+            n = int(index_text)
+        except ValueError:
+            app.notify(f"/copy code: {index_text!r} is not a number.", severity="error", title="/copy")
+            return
+        if not (1 <= n <= len(blocks)):
+            app.notify(f"The last reply has {len(blocks)} code block(s); {n} is out of range.",
+                       severity="error", title="/copy")
+            return
+        app.perform_copy(clean_code_text(blocks[n - 1]), label=f"code block {n}")
+        return
+
+    if sub:
+        app.notify("Usage: /copy, /copy code [N], or /copy tool", severity="error", title="/copy")
+        return
+
+    widget = _last_widget_of_type(app, AssistantText)
+    if widget is None:
+        app.notify("No assistant reply yet to copy.", severity="warning", title="/copy")
+        return
+    from halo_harness.tui.clipboard import clean_copy_text
+    app.perform_copy(clean_copy_text(widget.copy_text()), label="last reply")
