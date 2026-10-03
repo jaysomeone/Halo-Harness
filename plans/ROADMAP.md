@@ -54,3 +54,7 @@ and upload to GitHub; no input needed to move forward.
 - 2.0.7 (NEW): DOOM theme (section G of `2.0.2-brief.md`).
 The version numbers inside the older brief files still say their old
 numbers; this section is the authority.
+- 2.0.8 (NEW, approved 2026-10-02): remote control of sessions from Signal,
+  self-hosted through signal-cli, both identity models (dedicated number
+  first, linked device documented), pairing + safety-number pinning +
+  signed commands + local control socket. Brief: `2.0.8-signal-brief.md`.

@@ -35,7 +35,7 @@ open. The remaining 2.0.1 rounds, in order:
    with a real `claude` login; a cloud session cannot do them, so leave a
    note in the PR for the owner to run them.
 
-After 2.0.1: `ROADMAP.md` (see its RENUMBERED section) lists 2.0.2 through 2.0.7 with their briefs here; 2.0.2 is `2.0.2-brief.md` (roles v2, organizations, sub-agent scale, MCP repair, Qwen, terminal title).
+After 2.0.1: `ROADMAP.md` (see its RENUMBERED section) lists 2.0.2 through 2.0.8 with their briefs here; 2.0.2 is `2.0.2-brief.md` (roles v2, organizations, sub-agent scale, MCP repair, Qwen, terminal title).
 
 ## How to work from a cold session
 
@@ -73,3 +73,4 @@ After 2.0.1: `ROADMAP.md` (see its RENUMBERED section) lists 2.0.2 through 2.0.7
 | `2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md` | 2.0.3: picker columns, balances, enumeration, Codex and OpenAI, jev, learned rules |
 | `2.0.4-brief.md` | 2.0.4: model gym, soak test and watchdog, CI, invariants |
 | `2.0.5-ollama-brief.md` | 2.0.5: local and LAN Ollama models |
+| `2.0.8-signal-brief.md` | 2.0.8: remote control of sessions from Signal |
