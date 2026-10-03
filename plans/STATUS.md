@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~07:45)
+# Status board (updated 2026-10-03 ~09:55)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -18,7 +18,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] Part 10 (W5a): fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved, connector cold start for `halo mcp list`, --betas gating, --prompt-suggestions in stream-json, `halo bg` subcommands; process-group kills can no longer hit the harness (the Linux suite killer)
 - [x] Part 11 (aa973ed, W5b): live-checks runbook and HALO_LIVE tests; connector discovery landing live in the TUI (re-kicked from the startup worker once the auth cache is primed, found live on Kali) and on request in print mode; steadier cc-session and CLI-flag tests; identifying-content scrub of fixtures and docs with a privacy scan test (git-less fallback walk)
 - [x] Part 12 (1ed5b3f, W6a): release review fixes round A, all 18 critical/major findings + `--restricted`/`--betas`/`--brief` parity, each with a test (Windows 2572/0, Kali 2572/0; live Kali: `halo bg` round trip with the new wrapper, cold `mcp list`)
-- [~] Release: fix pass round B RUNNING (minors 19-38, remaining parity, CHANGELOG [2.0.1] items 11+, hobby-tool name scrub, CLI-test hermeticity found on WSL: `BRIDGE_TEST_NO_BACKGROUND_NET` + a logged-out `BRIDGE_TEST_CC_AUTH_STATUS` for every module and child); then three-platform suites (Windows, WSL, Kali), Kali live checks per docs/harness/LIVE-CHECKS.md (rg, real claude and Playwright all confirmed present), tag v2.0.1, push
+- [x] Part 13 (2e91814, W6b): release review fixes round B (findings 19-38 + 7 parity gaps), CLI tests hermetic (whole-run `BRIDGE_TEST_NO_BACKGROUND_NET` + logged-out `BRIDGE_TEST_CC_AUTH_STATUS`), hobby-tool scrub + case-insensitive privacy scan, CHANGELOG [2.0.1] items 11-20
+- [x] Release v2.0.1 TAGGED + PUSHED: three platforms green on the final tree (Windows 2611/0 tui 212+1; WSL 2611/0 tui 213; Kali 2611/0 tui 213, real-binary modules 22/22 + 28/28 with no skips, privacy scan on the git-less copy, cold `mcp list` 4 connectors in 2 s, cold TUI note, Playwright round trip 'Example Domain')
 
 ## Side work done this session
 
