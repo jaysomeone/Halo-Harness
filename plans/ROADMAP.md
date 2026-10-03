@@ -64,3 +64,18 @@ numbers; this section is the authority.
   tree and git history with a documented remediation workflow. Brief:
   `2.0.9-review-privacy-brief.md`. The content scrub of personal fixture
   text and docs happens earlier, in 2.0.1 W5.
+  2.0.9 ALSO (rolo 2026-10-03): a security review of the code itself,
+  separate from the privacy audit -- the harness's own attack surface
+  (credential handling and storage, subprocess and shell construction,
+  path handling in the file tools, MCP and connector trust boundaries,
+  OAuth token storage, the 2.0.8 remote-control crypto and control socket,
+  correctness of the user's own permission rules, the install script and
+  dependency supply chain, what logs and telemetry record), with findings
+  fixed before the tag. This is protection of the user's machine and
+  credentials; it adds no refusal or safety logic to the harness.
+- 3.0.1.1 (rolo 2026-10-03, RESEARCH ONLY, starts after 2.0.9 ships): a
+  secure way for separate Halo instances to work together with no cloud
+  and no externally hosted server -- a team at work, friends on different
+  home networks, or one person's own sessions on several machines, same
+  network or not. Brief with the research questions and deliverables:
+  `3.0.1.1-p2p-research-brief.md`.

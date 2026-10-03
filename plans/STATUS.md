@@ -66,4 +66,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.9 (`2.0.9-review-privacy-brief.md`)
 
-- [ ] `/review` deep code review, [ ] `halo audit privacy`, [ ] scrub verified and history rewrite with a mirror backup (announced, not asked), [ ] front page redo with real captures, diagrams, animations and the "why Halo" stories, [ ] release
+- [ ] `/review` deep code review, [ ] security review of the code (`2.0.9-review-privacy-brief.md` A2), [ ] `halo audit privacy`, [ ] scrub verified and history rewrite with a mirror backup (announced, not asked), [ ] front page redo with real captures, diagrams, animations and the "why Halo" stories, [ ] release
+
+## 3.0.1.1 (`3.0.1.1-p2p-research-brief.md`, RESEARCH ONLY, not before 2.0.9 ships)
+
+- [ ] research round: Halo instances working together with no cloud and no hosted server (team, friends, own sessions; same network or not) -> `docs/harness/P2P-RESEARCH.md` + a draft implementation brief
