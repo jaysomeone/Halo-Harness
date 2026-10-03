@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~17:30)
+# Status board (updated 2026-10-03 ~17:35)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -40,7 +40,6 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] E (8c5b306, round 5): decision-only endpoints (table patterns openjev/jev-judge) routed to roles.judge, never the session model; learned tools-rejected rule per endpoint; python_repr_args + missing_tool_call_opener repair patterns real, bare </think> stripped; prefixItems rewrite; docs/MODELS.md Qwen at work + FAMILY-BASELINE-qwen.md; three platforms green (2768/0); six shapes unconfirmed until the owner's work-VM bugreport
 - [~] Round 6 (RUNNING; rolo 2026-10-03, `2.0.2-round6-update-brief.md`): `halo update` (check/apply, install kind detection, other-session guard), `/update` with update-and-restart, `halo --version` shows the commit, startup update note, `scripts/install-halo.ps1`, README + docs/INSTALL.md rewritten as clear fresh-install and update steps
 - [ ] Round 7 (rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
-- [ ] Round 8 (rolo 2026-10-03, `2.0.2-round8-governor-brief.md`): the Governor ported from the owner's other app (cross-process AIMD limiter per gateway host with Retry-After, priority fairness, hard in-flight cap, jsonl log, `/gov`), health-classified failover to a different host, role lanes with the verifier-never-weaker-than-coder rule; WAITING on the source files (only the README synced; vault sync drops .py)
 - [ ] Release 2.0.2
 
 ## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
@@ -48,6 +47,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [ ] research, [ ] `ol:` provider on the native API, [ ] hardware and host analysis, [ ] roles for local models + `/local` with a built-in capability probe (the gym ranking waits for 2.0.5), [ ] init tab, docs, [ ] release
 
 ## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
+
+- [ ] FIRST ROUND of 2.0.4 (moved out of 2.0.2 by rolo 2026-10-03: wait until after 2.0.3 for the files to sync): the Governor (`2.0.2-round8-governor-brief.md`, report in `governor-import/README.md`; look for governor.py / routing.py / test_governor.py in the vault folder `appDev/governor-rate-limiter/` once they have synced, then review, improve and port; failover to local Ollama needs 2.0.3's `ol:` route)
 
 - [ ] three picker columns, [ ] balances for every provider, [ ] `cc:`/`ant:` enumeration, [ ] Codex + OpenAI + Responses dialect, [ ] jev, [ ] learned gateway rules, [ ] error translation, [ ] catalog auto-refresh, [ ] command consolidation and group labels, [ ] `cc:` route v2 (control-channel steer, set_model/set_permission_mode, /compact passthrough, native history research, context duplication audit, conformance test), [ ] legacy env file no longer read (announced for 2.0.4 in the 2.0.1 CHANGELOG), [ ] release
 
