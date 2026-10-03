@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~12:20)
+# Status board (updated 2026-10-03 ~13:10)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -34,8 +34,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 ## 2.0.2 (`2.0.2-brief.md`)
 
 - [x] F + A (c46fcd3, round 1): tab title `halo` (root cause: Textual never sets the OS title; claude children do), roles v2 (10 roles, per-role effort, custom names, Tab completion, `halo completion`, templates + editor, bare `halo roles` table); three platforms green (2667/0), live Kali title check
-- [~] B (round 2 RUNNING, `2.0.2-round2-orgs-brief.md`): organizations (trees, editor, `/org run`), built-in `solo`, `release-flow`, `company`
-- [ ] C: `/tasks` panel with live sub-agent transcripts, configurable concurrency and depth, `count`/`batch` spawning, shared task board
+- [x] B (25f5886, round 2): organizations (`~/.halo/orgs/*.json` trees, validation, built-ins solo / release-flow / company, `/org run` + `halo org run` + `Agent(org=)`, tree-and-fields editor, docs/ORGS.md); general fixes: `Agent(name)` tool restriction now reaches the child, depth/concurrency caps travel with the run; three platforms green (2679/0), live Kali `/org run solo` -> pong
+- [~] C (round 3 RUNNING, `2.0.2-round3-tasks-brief.md`): `/tasks` panel with live sub-agent transcripts, configurable concurrency and depth, `count`/`batch` spawning, shared task board
 - [ ] D: MCP repair actions in `/mcp`, `halo mcp fix`
 - [ ] E: Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
 - [ ] Release 2.0.2
