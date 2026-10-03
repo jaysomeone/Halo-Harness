@@ -33,7 +33,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.2 (`2.0.2-brief.md`)
 
-- [ ] F + A: terminal title; roles v2 (planner, judge, tester, compaction, subagent_default), per-role effort, custom role names, tab completion, shell completion, role templates with editor
+- [~] F + A (round 1 RUNNING, `2.0.2-round1-brief.md`): terminal title; roles v2 (planner, judge, tester, compaction, subagent_default), per-role effort, custom role names, tab completion, shell completion, role templates with editor
 - [ ] B: organizations (trees, editor, `/org run`), built-in `solo`, `release-flow`, `company`
 - [ ] C: `/tasks` panel with live sub-agent transcripts, configurable concurrency and depth, `count`/`batch` spawning, shared task board
 - [ ] D: MCP repair actions in `/mcp`, `halo mcp fix`
