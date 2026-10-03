@@ -58,3 +58,9 @@ numbers; this section is the authority.
   self-hosted through signal-cli, both identity models (dedicated number
   first, linked device documented), pairing + safety-number pinning +
   signed commands + local control socket. Brief: `2.0.8-signal-brief.md`.
+- 2.0.9 (NEW, 2026-10-02): deep code review as a Halo feature (/review,
+  parallel dimension reviewers + judge verification + optional fix pass,
+  on the 2.0.2 roles and orgs) and a privacy/secret audit tool for the
+  tree and git history with a documented remediation workflow. Brief:
+  `2.0.9-review-privacy-brief.md`. The content scrub of personal fixture
+  text and docs happens earlier, in 2.0.1 W5.
