@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~03:30)
+# Status board (updated 2026-10-03 ~05:35)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -16,8 +16,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] Part 8 (b4d53b7): 14 hook events, all 28 flags resolved, skills in sub-agents, sub-agent asks in the dock, rewind for created files, misc
 - [x] Part 9 (3343f27, W4c): source-text copy, `/copy` forms, `y`/`Y`, clip.exe and pbcopy fallbacks, OSC 52 trust gate, Ctrl+C toast and `quit_on_double_ctrl_c`
 - [x] Part 10 (W5a): fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved, connector cold start for `halo mcp list`, --betas gating, --prompt-suggestions in stream-json, `halo bg` subcommands; process-group kills can no longer hit the harness (the Linux suite killer)
-- [~] W5b: live-checks runbook and `--live` tests; connector discovery landing live in the TUI and on request in print mode; Claude Code interop, rg and Playwright on Kali; Linux determinism of the cc-session tests; connector cold start in print mode; W4a follow-ups (fallback-model retry, background-job task hooks, plugin-dir skills/hooks/MCP, Bash shadow of tracked files, WorktreeRemoved); identifying-content scrub of fixtures and docs with a scan test
-- [ ] Release: Opus review, fix pass, CHANGELOG consolidation, three-platform suites, Kali live checks, tag v2.0.1, push
+- [x] Part 11 (aa973ed, W5b): live-checks runbook and HALO_LIVE tests; connector discovery landing live in the TUI (re-kicked from the startup worker once the auth cache is primed, found live on Kali) and on request in print mode; steadier cc-session and CLI-flag tests; identifying-content scrub of fixtures and docs with a privacy scan test (git-less fallback walk)
+- [~] Release: Opus review DONE (38 findings: 2 critical, 16 major, 20 minor; `plans/review-2.0.1-findings.md`); fix pass round A (findings 1-18 + `--restricted`/`--betas`/`--brief` parity) RUNNING; then round B (minors 19-38, remaining parity, CHANGELOG [2.0.1] items 11+, scrub of hobby-tool names), three-platform suites incl. WSL, Kali live checks per docs/harness/LIVE-CHECKS.md, tag v2.0.1, push
 
 ## Side work done this session
 
