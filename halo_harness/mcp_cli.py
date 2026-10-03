@@ -164,12 +164,10 @@ def _cmd_list(rest: list) -> int:
             # reads the cached claude.ai login, and a fresh process has no
             # cache yet, so prime it first the way `halo providers` does
             # (gateway-driven `claude` is never spawned by that refresh).
-            try:
-                from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
-                if cached_auth_status_is_stale():
-                    refresh_cached_claude_auth_status()
-            except Exception:
-                pass
+            # W5b: this prime-then-discover pair is now the shared helper
+            # `headless.build_session`'s own print-mode cold-start path uses
+            # too (`connectors_bridge.prime_auth_cache_if_stale`).
+            connectors_bridge.prime_auth_cache_if_stale()
             connectors_bridge.ensure_discovered_synchronously_if_cold()
         from halo_harness.mcp import explain
         for line in explain.explain_lines(cwd=cwd, claude_json=claude_json, settings=settings):

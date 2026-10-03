@@ -80,6 +80,34 @@ def connector_max_turns(slug: str) -> int:
     return v if isinstance(v, int) and v > 0 else 4
 
 
+def discover_on_start_configured() -> bool:
+    """`connectors.discover_on_start` -- print mode's own opt-in to pay for
+    a synchronous cold-start discovery on EVERY run, not only one that
+    names a `connector__*` tool via `--tools`. Default False: the W5b
+    brief's own rule is "never block a `-p` run on a `claude` spawn by
+    default"."""
+    from halo_harness.theme import get_config_value
+    return bool(get_config_value("connectors.discover_on_start", default=False))
+
+
+def prime_auth_cache_if_stale() -> None:
+    """W5b ("connector cold start, properly"): `discovery_eligible()` (and
+    therefore `ensure_discovered_synchronously_if_cold()`) reads the
+    CACHED claude.ai auth status only -- by design, so it's cheap and safe
+    to call from anywhere, never a `claude auth status` spawn of its own.
+    A genuinely fresh process has no cache at all, so eligibility reads
+    False even on a real claude.ai login until something primes it once.
+    One bounded refresh, the same way `halo mcp list`/`halo providers`
+    already do; never raises -- the caller always still gets a usable (if
+    possibly still-absent) cached answer either way."""
+    try:
+        from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
+        if cached_auth_status_is_stale():
+            refresh_cached_claude_auth_status()
+    except Exception:
+        pass
+
+
 # ---- eligibility -------------------------------------------------------------
 
 def claude_binary_available() -> bool:

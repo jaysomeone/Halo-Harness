@@ -391,7 +391,7 @@ once inside WSL to create the venv:
 
 ```sh
 wsl -e bash -lc 'rsync -a --delete --exclude .git --exclude __pycache__ --exclude wheels \
-  ~/Documents/vibes/appDev/Halo-Harness/ ~/halo-harness-wt/ \
+  /mnt/c/path/to/halo-harness/ ~/halo-harness-wt/ \
   && cd ~/halo-harness-wt && source ~/halo-harness-wt-venv/bin/activate \
   && python3 tests/run_all.py | tail -5 \
   && python3 test_bridge.py | tail -5 \

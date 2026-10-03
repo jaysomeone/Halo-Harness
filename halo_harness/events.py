@@ -31,6 +31,10 @@ EVENT_KINDS = frozenset({
     "replay", "notification", "steer_queued", "steer_applied",
     "compaction",  # H5 scope B
     "phase", "steer_restart",  # Halo 2.0.1 W2a (liveness-tips-brief Part A6/GLM-brief item 3)
+    "system_note",  # Halo 2.0.1 W5b: an async, out-of-band transcript line (e.g.
+                     # background connector discovery finishing) -- pushed straight
+                     # onto Controller.events from whatever thread noticed, never
+                     # tied to an active turn's own generator.
 })
 
 COMMAND_KINDS = frozenset({
@@ -171,6 +175,19 @@ def turn_done(*, turn: int = 0, reason: str = "end_turn") -> Event:
 def notification(text: str, *, level: str = "info") -> Event:
     """data: {level, text}"""
     return Event("notification", {"level": level, "text": text})
+
+
+def system_note(text: str) -> Event:
+    """data: {text}. A plain transcript line with no turn/model context --
+    unlike `notification` (a toast, `app.notify`), this renders as a real
+    line in the scrolling transcript (`Transcript.add_note`), and unlike
+    `user_message` it is never logged/sent to the model: purely informing
+    whoever is watching the TUI that something happened in the background
+    (Halo 2.0.1 W5b: "N claude.ai connectors available" once discovery
+    finishes). Safe to push from ANY thread via `Controller.events.put(...)`
+    at any time, including while no turn is active -- the 30 Hz drain loop
+    (`tui/app.py::_drain`) is unconditional."""
+    return Event("system_note", {"text": text})
 
 
 def compaction(*, phase: str, trigger: str = "auto", turn: int = 0, tokens_before: Optional[int] = None,

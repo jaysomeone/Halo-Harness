@@ -76,6 +76,15 @@ class ToolSearchTool(Tool):
                 # the (now-parallel, still up-to-MCP_TIMEOUT) lazy-start
                 # wait short instead of blocking ToolSearch's first call.
                 ensure_lazy(abort=getattr(ctx, "abort", None))
+            # W5b ("connector cold start, properly"): the claude.ai
+            # connectors bridge's own on-first-hit discovery -- gated
+            # INSIDE the method itself on the query actually mentioning a
+            # connector, so an ordinary keyword/select call never pays for
+            # a discovery round a cold cache would otherwise never run
+            # (print mode's own "never block by default" rule).
+            ensure_connectors = getattr(catalog, "ensure_connectors_discovered_for_query", None)
+            if ensure_connectors is not None:
+                ensure_connectors(query)
             results, deferred_matched = catalog.search(query, max_results)
         else:
             results, deferred_matched = self._search_registry_only(registry, query, max_results)

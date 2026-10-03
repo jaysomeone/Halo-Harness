@@ -106,8 +106,8 @@ def test_select_preload_never_exceeds_cap_budget(ctx: Ctx):
 def test_select_preload_rest_never_fills_leftover_budget(ctx: Ctx):
     """The bug finding 1 fixes, directly: with NO requested names at all,
     a huge cap_budget must still preload ONLY the alwaysLoad tool -- never
-    quietly fill the rest of the budget with unrequested tools (that's
-    what put rolo's real catalog exactly at cap with zero headroom)."""
+    quietly fill the rest of the budget with unrequested tools (that's what
+    put a real large catalog exactly at cap with zero headroom)."""
     mgr = _manager(tool_count=20)
     try:
         triples = mgr.all_tools()
@@ -403,19 +403,19 @@ def test_registry_add_and_remove_tool(ctx: Ctx):
 
 
 # ---- finding 12: golden ToolSearch ranking on a real-shaped catalog -------
-# Names below are VERBATIM real deferred tool names from rolo's own live
-# session (`mcp list`/ToolSearch's own reminder block, 2026-09-24), across
-# all 15 of halo's real configured MCP servers (ableton, codriver,
-# devices, expanded-models, gui, hardware, hear, jam, kb, max, mix, play,
-# plugins, samples, sd3 -- excludes claude-in-chrome/claude_ai_* connectors,
-# which aren't halo's own servers). Descriptions are plausible
-# reconstructions in this codebase's own terse MCP-tool style (real
-# descriptions aren't captured in any log this offline test can read), sized
-# to match the finding's own repro shape: most are one short sentence,
+# Names below are shaped like a real, large deferred-tool catalog from a
+# home music-production MCP setup (anonymized -- not one real session's
+# verbatim tool list), spanning 15 differently-themed MCP servers (ableton,
+# codriver, devices, expanded-models, gui, hardware, hear, jam, kb, max,
+# mix, play, plugins, samples, sd3 -- excludes claude-in-chrome/claude_ai_*
+# connectors, which aren't this kind of server). Descriptions are plausible
+# reconstructions in this codebase's own terse MCP-tool style, sized to
+# match the finding's own repro shape: most are one short sentence,
 # `moog_set` and `hw_synth_cc` are deliberately long and mention "midi"
-# many times INCIDENTALLY (Moog/synth CC parameter dumps), recreating the
-# exact regression ("19 midi hits in 2,510 characters" outscoring hw_ports'
-# own short, on-topic one under the OLD raw-substring-count algorithm).
+# many times INCIDENTALLY (hardware-synth CC parameter dumps), recreating
+# the exact regression ("19 midi hits in 2,510 characters" outscoring
+# hw_ports' own short, on-topic one under the OLD raw-substring-count
+# algorithm).
 
 def _midi_heavy_description(subject: str) -> str:
     """~2,500 characters, ~19 incidental "midi" mentions -- same shape as
@@ -427,7 +427,7 @@ def _midi_heavy_description(subject: str) -> str:
     return (sentence * 8).strip()
 
 
-_REAL_TOOL_CATALOG = [
+_LARGE_TOOL_CATALOG = [
     # server, tool, description
     ("hardware", "hw_ports", "List every MIDI input and output port name currently visible to the OS."),
     ("hardware", "hw_clock_start", "Start the hardware MIDI clock generator at the current tempo."),
@@ -464,8 +464,8 @@ _REAL_TOOL_CATALOG = [
     ("hardware", "ekit_profiles_list", "List stored electronic kit profiles."),
     ("hardware", "ekit_drum_rack_map", "Map an electronic kit's pads onto an Ableton drum rack."),
     ("hardware", "ekit_jam_map", "Map an electronic kit for a jam session."),
-    ("hardware", "ekit_sd3_setup", "Configure Superior Drummer 3 for a detected electronic kit."),
-    ("ableton", "moog_set", _midi_heavy_description("the Moog Subsequent 37")),
+    ("hardware", "ekit_sd3_setup", "Configure the drum sampler library for a detected electronic kit."),
+    ("ableton", "moog_set", _midi_heavy_description("the hardware synth")),
     ("ableton", "transport", "Start, stop, or query Live's transport."),
     ("ableton", "midi_send", "Send a raw MIDI message to a track's input."),
     ("ableton", "capture_midi", "Capture the last few bars of incoming MIDI as a clip."),
@@ -503,8 +503,8 @@ _REAL_TOOL_CATALOG = [
     ("plugins", "preset_recall", "Recall a saved plugin preset."),
     ("samples", "samples_search", "Search the sample library by description."),
     ("samples", "samples_similar", "Find samples similar to a given one."),
-    ("sd3", "sd3_search_instruments", "Search Superior Drummer 3's instrument library."),
-    ("sd3", "sd3_search_grooves", "Search Superior Drummer 3's MIDI groove library."),
+    ("sd3", "sd3_search_instruments", "Search the drum sampler library's instrument library."),
+    ("sd3", "sd3_search_grooves", "Search the drum sampler library's MIDI groove library."),
 ]
 
 
@@ -516,7 +516,7 @@ def _sdk_tool(name, description):
 @test
 def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx):
     """The exact regression repro from the finding: on a real ~100-tool
-    catalog shape spanning every one of halo's 15 real MCP servers,
+    catalog shape spanning 15 differently-themed MCP servers,
     "list MIDI ports" must rank `mcp__hardware__hw_ports` FIRST -- not
     14th behind a long, MIDI-word-stuffed description (moog_set/
     hw_synth_cc, both deliberately built to recreate that exact
@@ -524,7 +524,7 @@ def test_finding_12_golden_ranking_list_midi_ports_ranks_hw_ports_first(ctx: Ctx
     from halo_harness.mcp.manager import mcp_tool_name
 
     deferred = {}
-    for server, name, desc in _REAL_TOOL_CATALOG:
+    for server, name, desc in _LARGE_TOOL_CATALOG:
         wire_name = mcp_tool_name(server, name)
         deferred[wire_name] = (server, _sdk_tool(name, desc))
 

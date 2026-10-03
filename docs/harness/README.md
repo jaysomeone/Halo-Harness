@@ -69,4 +69,5 @@ finding is `severity -- file:line -- defect -- failure scenario -- fix`.
 | [claude-code-2.1.281-binary-facts.md](claude-code-2.1.281-binary-facts.md) | facts about the real `claude` binary, extracted directly from it, that this project matches on purpose (trust rules, settings-merge algorithm, permission-rule grammar, ...) |
 | [claude-in-chrome-integration.md](claude-in-chrome-integration.md) | design notes for the `--chrome` native-messaging bridge |
 | [INSTALL.md](INSTALL.md) | the full install walkthrough -- linked from the repo-root README; read that copy, this is the same file |
+| [LIVE-CHECKS.md](LIVE-CHECKS.md) | the opt-in runbook for everything that needs a REAL upstream/binary (`ant:`/Databricks Claude passthrough, real-`claude`-binary interop, ripgrep, Playwright) -- never run by the ordinary hermetic suites |
 | [RECOMMENDATIONS.md](RECOMMENDATIONS.md) | a point-in-time roadmap review (2026-09-25); largely superseded by later milestones landing what it recommended -- see the milestone table above for what actually shipped |

@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from halo_harness import events
 from halo_harness.controller import Controller
 from halo_harness.headless import attach_cli_files, build_session
 
@@ -136,4 +137,36 @@ def build_controller(args) -> "tuple[Controller, object, object]":
     controller.pending_resume_filter = pending_resume_filter
     for n in build.mcp_notices:
         print(f"[halo] mcp: {n}", file=sys.stderr)
+
+    # W5b ("connector cold start, properly"): the TUI's own half of the
+    # redesign -- discovery stays entirely in the background (never
+    # synchronous here, unlike print mode's opt-in path in `build_session`
+    # itself), and `on_done` only runs once a real discovery round actually
+    # finished. It adds whatever it found straight into the now-live
+    # `SessionCatalog` (safe: `add_connector_tools` takes the catalog's own
+    # lock) and pushes ONE transcript line onto `controller.events` --
+    # thread-safe and drain-loop-unconditional (`tui/app.py::_drain` reads
+    # it 30x/s regardless of whether a turn is active), so this can land
+    # before, during or after the user's first turn.
+    if build.session_catalog is not None:
+        def _on_connectors_discovered(connectors) -> None:
+            build.session_catalog.add_connector_tools(connectors)
+            plural = "" if len(connectors) == 1 else "s"
+            controller.events.put(events.system_note(
+                f"{len(connectors)} claude.ai connector{plural} available."))
+
+        # Live on the Kali VM (2.0.1 part 11): a FRESH TUI process has no
+        # cached claude.ai auth status yet when this runs, so the kick
+        # below is refused by `discovery_eligible()` (cache-only, by
+        # design) and nothing ever discovered the connectors -- the
+        # transcript note never came, MCP stayed 0/0. The callback is
+        # therefore also parked on the controller for `tui/app.py::
+        # _prime_auth_status_worker`, which re-kicks the SAME once-per-
+        # process discovery the moment its own auth refresh lands and says
+        # claude.ai login. The immediate attempt stays for the case where
+        # the cache is already primed in this process.
+        controller.connectors_discovery_on_done = _on_connectors_discovered
+        from halo_harness.mcp import connectors_bridge
+        connectors_bridge.ensure_discovered_in_background(on_done=_on_connectors_discovered)
+
     return controller, build.command_registry, build.facade

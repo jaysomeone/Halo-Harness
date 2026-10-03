@@ -538,6 +538,22 @@ class BridgeApp(App):
                 self.notify, "Claude subscription detected -- cc: models available (see /model).",
                 title="providers", timeout=4,
             )
+            # 2.0.1 part 11 (live on the Kali VM): `tui/bootstrap.py`'s
+            # own background-discovery kick ran BEFORE this refresh, when
+            # the cache was still empty, so `discovery_eligible()` refused
+            # it and a cold-cache TUI never learned its claude.ai
+            # connectors (no transcript note, MCP 0/0 for the whole
+            # session). Now that the cache says claude.ai login, re-kick
+            # the SAME once-per-process discovery from this worker -- still
+            # off the UI thread, still the only launch-time spawner --
+            # with the `on_done` bootstrap parked on the controller (adds
+            # the tools to the live catalog and posts the one note).
+            try:
+                from halo_harness.mcp import connectors_bridge
+                on_done = getattr(self.controller, "connectors_discovery_on_done", None)
+                connectors_bridge.ensure_discovered_in_background(on_done=on_done)
+            except Exception:
+                pass
 
     def _catalog_startup_refresh_worker(self) -> None:
         """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see

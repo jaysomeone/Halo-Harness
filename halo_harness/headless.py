@@ -890,18 +890,35 @@ def build_session(
 
             # W4b claude.ai connectors bridge: one `connector__<slug>` tool
             # per discovered connector (cache-only read here -- discovery
-            # itself is a background worker kicked off below, never inline
-            # on a session build), gated by --tools/deny the same way a
+            # itself is a background worker, never inline on a session
+            # build by default), gated by --tools/deny the same way a
             # built-in would be, preloaded or deferred same as any MCP tool.
-            # W5 ("connector cold start"): a genuinely EMPTY cache gets ONE
-            # bounded (20s) synchronous discovery HERE, before the loop
-            # below freezes the catalog -- the background worker kicked off
-            # further down is then a same-session no-op (shared gate), so
-            # this costs nothing extra on a warm cache, only fills the real
-            # first-ever gap.
+            # W5b ("connector cold start, properly"): a synchronous (bounded
+            # 20s) discovery on a genuinely empty cache is no longer
+            # unconditional here -- print mode must never block a plain
+            # `-p` run on a `claude` spawn by default, only when THIS run
+            # actually wants a connector tool (named explicitly via
+            # `--tools`, or `connectors.discover_on_start` opts every run
+            # in); eligibility reads the CACHED claude.ai login, so the
+            # auth cache is primed first the way `halo mcp list` already
+            # does. The TUI (print_mode=False) never runs this
+            # synchronously at all -- `tui/bootstrap.py` kicks off the SAME
+            # background discovery AFTER its Controller exists, with an
+            # `on_done` that adds whatever it finds straight into this live
+            # catalog (`SessionCatalog.add_connector_tools`) and posts one
+            # transcript line, so a cold cache still fills in time for the
+            # first turn without ever blocking startup. A mid-session
+            # ToolSearch call that actually asks for a connector by name
+            # gets its own bounded discovery too -- see `SessionCatalog.
+            # ensure_connectors_discovered_for_query`, called from
+            # `ToolSearchTool.run()`.
             from halo_harness.mcp import connectors_bridge
             from halo_harness.tools.connector_tool import ConnectorTool
-            connectors_bridge.ensure_discovered_synchronously_if_cold()
+            connector_requested = bool(tools_subset) and any(
+                n.startswith("connector__") for n in tools_subset)
+            if print_mode and (connector_requested or connectors_bridge.discover_on_start_configured()):
+                connectors_bridge.prime_auth_cache_if_stale()
+                connectors_bridge.ensure_discovered_synchronously_if_cold()
             for info in connectors_bridge.get_connectors():
                 if not connectors_bridge.connector_enabled(info.slug):
                     continue
@@ -915,7 +932,12 @@ def build_session(
                     frozen_registry.add_tool(connector_tool)
                 else:
                     deferred[connector_wire_name] = (None, connector_tool)
-            connectors_bridge.ensure_discovered_in_background()
+            if print_mode:
+                # The TUI's own equivalent background kick is
+                # `tui/bootstrap.build_controller`'s job, not this shared
+                # builder's -- it needs a real `on_done` wired to a live
+                # `Controller`, which doesn't exist yet at this point.
+                connectors_bridge.ensure_discovered_in_background()
 
             # finding 13 must-do: keep ToolSearch whenever the deferred pool
             # is non-empty, even when --tools/a deny rule would otherwise

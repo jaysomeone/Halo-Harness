@@ -51,7 +51,7 @@ recorded at the end of this file, in "Final suite verification".
 | H9 install | `pip install --user --break-system-packages -e .` | installs | `halo 0.3.0` | PASS | WSL Ubuntu |
 | H9 fresh clone | `git clone https://github.com/roloVibes/Halo-Harness` | clones, or a documented reason it can't | Repo is private; WSL has no git/gh credentials for it -- BLOCKED, documented, not attempted around (no credential exfiltration) | BLOCKED (documented, expected) | WSL Ubuntu |
 | H9 fixtures | `doctor`/`mcp list` vs real WSL `~/.claude` | honest status, no crash | Real OpenRouter key found; exit 0 | PASS | WSL Ubuntu |
-| H9 fixtures | `doctor`/`mcp list` vs copied Windows `~/.claude.json` (15 ableton-console servers pointing at Windows venvs) | all fail to connect gracefully, no crash | All 15 report "Failed to connect" individually, exit 0 | PASS | WSL Ubuntu |
+| H9 fixtures | `doctor`/`mcp list` vs copied Windows `~/.claude.json` (15 servers from an unrelated home project, pointing at Windows venvs) | all fail to connect gracefully, no crash | All 15 report "Failed to connect" individually, exit 0 | PASS | WSL Ubuntu |
 | H1 acceptance | `-p "read README.md ... number of lines"` | matches `wc -l` | README.md line count matched exactly | PASS (live) | WSL Ubuntu |
 | H2 acceptance | Write->Edit->Bash chain, `--permission-mode auto` | `alpha delta gamma` | Exact match | PASS (live) | WSL Ubuntu |
 | H9 TUI | tmux launch, stream, `/model` dialog | renders correctly | Status bar + model picker rendered correctly | PASS | WSL Ubuntu (tmux) |
@@ -99,8 +99,8 @@ Kali VM instead, see below); `ant:`/Databricks routes (no key/VPN).
 | H9 install | `pipx install uv; uv tool install --editable .` | installs | `Installed 1 executable: halo`, `halo 0.3.0` | PASS | Kali |
 | H9 doctor | `halo doctor` against the VM's REAL `~/.claude` | honest, no crash | exit 0: real `~/.claude`/`.claude.json` found, `claude=~/.local/bin/claude` + Chrome native host under `~/.config/google-chrome/NativeMessagingHosts`, node/npx OK, rg WARN, `$EDITOR` WARN, bash OK, **a real `claude plugin install`ed MCP server discovered (`plugin_claude-mem_mcp-search`)**, Linux (Kali) recognised, xclip found | PASS | Kali |
 | H9 models | `halo models` | lists or an honest empty table | empty OpenRouter table (no key in the login env), models.dev cached (223 providers) | PASS (see deferred: empty-table wording) | Kali |
-| H9 mcp list | `halo mcp list` against the VM's real 4 user servers + 1 plugin server | honest per-server health, no crash | exit 0: `caido-mcp-extended` (npx tsx), `mcp-kali-server`, `plugin_claude-mem_mcp-search` Connected; `caido` (binary absent) and `vibe-hacking` (a real `type: http` server, nothing listening on :3333) honestly Failed | PASS | Kali |
-| H9 vault | grep `~/Documents/vibes/` for claude-bridge/claude_bridge/halo | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
+| H9 mcp list | `halo mcp list` against the VM's real 4 user servers + 1 plugin server | honest per-server health, no crash | exit 0: three of the owner's own locally-configured servers Connected (one a security-tool proxy via `npx tsx`, one a local helper server, one a real `claude plugin install`ed server); two honestly Failed (one for a missing binary, one a real `type: http` server with nothing listening on its port) | PASS | Kali |
+| H9 vault | grep the owner's local notes vault for claude-bridge/claude_bridge/halo | stale text replaced if found | no file describes claude-bridge at all -- nothing to replace, nothing written | N/A | Kali |
 | Suites + live lines | `~/vm_suites.sh`, `~/vm_live.sh` (venv; key handed over stdin, never on a command line) | green; pong / line count / Write-Edit-Bash / proxy pong / MCP call / --chrome / --playwright / stream-json / config untouched | see "Kali VM" at the end of this file | -- | Kali |
 
 ## Part B -- MCP compatibility matrix
@@ -360,7 +360,7 @@ used it as the primary Linux target for the rest of the pass:
   behaviour, not something either harness's code does) -- halo's own write path to those
   files is unchanged (`permissions.add_allow_rule`, only on an explicit "always allow" answer,
   never triggered by a `-p` run).
-- **Vault README pointer**: searched `~/Documents/vibes/` (content grep for
+- **Vault README pointer**: searched the owner's local notes vault (content grep for
   "claude-bridge"/"claude_bridge"/"halo", case-insensitive, plus a filename search),
   confirmed independently by both worker sessions -- **no file describing claude-bridge exists
   anywhere in that vault**. Nothing to replace, nothing written.

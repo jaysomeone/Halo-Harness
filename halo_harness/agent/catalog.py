@@ -377,3 +377,57 @@ class SessionCatalog:
             for server, wire_name, sdk_tool in self.manager.all_tools():
                 if server in started and wire_name not in self.names and wire_name not in self.deferred:
                     self.deferred[wire_name] = (server, sdk_tool)
+
+    def add_connector_tools(self, infos: "list") -> "list[str]":
+        """W5b ("connector cold start, properly"): the claude.ai-connectors
+        sibling of `ensure_lazy_discovered` above -- called from whatever
+        just finished a REAL discovery round (the TUI's background
+        `on_done`, `tui/bootstrap.py`; a mid-session `ToolSearch` hit, see
+        `ensure_connectors_discovered_for_query` below) to add each newly-
+        found, enabled connector straight into the deferred pool, same
+        `(None, ConnectorTool(info))` shape `headless.build_session` uses
+        for a warm cache at session start (`agent.catalog.SessionCatalog.
+        load()` already special-cases `server is None` to mean "already a
+        built Tool instance"). Skips one already loaded/deferred or
+        disabled via `connectors.<slug>.enabled`. Returns the wire names
+        actually added -- the TUI's `on_done` uses the length for its own
+        "N claude.ai connectors available" transcript line."""
+        from halo_harness.mcp import connectors_bridge
+        from halo_harness.tools.connector_tool import ConnectorTool
+        added: list = []
+        with self._lock:
+            for info in infos:
+                if not connectors_bridge.connector_enabled(info.slug):
+                    continue
+                wire_name = f"connector__{info.slug}"
+                if wire_name in self.names or wire_name in self.deferred:
+                    continue
+                self.deferred[wire_name] = (None, ConnectorTool(info))
+                added.append(wire_name)
+        return added
+
+    def ensure_connectors_discovered_for_query(self, query: str, *, timeout: float = 20.0) -> None:
+        """W5b: print mode's third way a connector can be "requested" --
+        "a ToolSearch select of such a name" (the brief's own wording,
+        alongside `--tools` and `connectors.discover_on_start`). A
+        `connector__*` tool can only ever enter `self.deferred` from an
+        already-warm connectors cache (`headless.build_session` only ever
+        READS the cache at session start, never blocks a plain run on
+        discovery by default), so a model that calls `ToolSearch` asking
+        for one by name -- when the cache is still cold -- would otherwise
+        get "not found" forever, even mid-session. Called from
+        `ToolSearchTool.run()` ONLY when the query itself actually mentions
+        a connector (never on an ordinary keyword search), so a plain
+        ToolSearch call never pays for this; `connectors_bridge.
+        ensure_discovered_synchronously_if_cold` is already a cheap,
+        self-gating no-op the rest of the time (cache already warm, not
+        eligible, or already run once this session) -- same shape as
+        `ensure_lazy_discovered`'s own "cheap: a no-op once already
+        started" call every ToolSearch hit makes unconditionally."""
+        if "connector" not in query.lower():
+            return
+        from halo_harness.mcp import connectors_bridge
+        connectors_bridge.prime_auth_cache_if_stale()
+        if not connectors_bridge.ensure_discovered_synchronously_if_cold(timeout=timeout):
+            return
+        self.add_connector_tools(connectors_bridge.get_connectors())

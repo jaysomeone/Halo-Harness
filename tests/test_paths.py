@@ -321,7 +321,7 @@ def test_env_file_path_override_and_new_default(ctx: Ctx):
         ctx.check("BRIDGE_ENV_FILE overrides outright", p.env_file_path() == tmp / "explicit-env-file")
         os.environ.pop("BRIDGE_ENV_FILE", None)
 
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("OPENROUTER_API_KEY=x\n", encoding="utf-8")
         ctx.check("still the NEW path even when only the legacy one exists on disk",
@@ -625,7 +625,7 @@ def test_env_file_path_for_write_copies_legacy_forward_once(ctx: Ctx):
         for k in saved_overrides:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("OPENROUTER_API_KEY=legacy-value\n", encoding="utf-8")
         ctx.check("legacy_env_file_path matches", p.legacy_env_file_path() == legacy)
@@ -676,7 +676,7 @@ def test_env_file_path_for_write_marks_the_new_file_and_leaves_the_legacy_file_a
         for k in saved_keys:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy_text = "OPENROUTER_API_KEY=from-legacy\nDATABRICKS_TOKEN=tok-legacy\n"
         legacy.write_text(legacy_text, encoding="utf-8")
@@ -736,7 +736,7 @@ def test_env_file_path_for_write_honors_an_explicit_override(ctx: Ctx):
     tmp = Path(tempfile.mkdtemp(prefix="h2-env-file-write-override-"))
     try:
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("X=1\n", encoding="utf-8")
         custom = tmp / "explicit-write-target"
@@ -765,7 +765,7 @@ def test_load_provider_env_files_new_wins_legacy_fills_gaps(ctx: Ctx):
         for k in saved_keys:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("OPENROUTER_API_KEY=from-legacy\nDATABRICKS_TOKEN=from-legacy\n", encoding="utf-8")
         new = tmp / ".config" / "halo" / "env"
@@ -809,7 +809,7 @@ def test_tool_child_env_strips_keys_from_both_new_and_legacy_files(ctx: Ctx):
         for k in saved_overrides:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("LEGACY_ONLY_SECRET=x\n", encoding="utf-8")
         new = tmp / ".config" / "halo" / "env"
@@ -867,7 +867,7 @@ def test_tool_child_env_stops_stripping_legacy_only_keys_once_the_marker_exists(
         for k in saved_overrides:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("MY_LEGACY_SECRET=x\n", encoding="utf-8")
         new = tmp / ".config" / "halo" / "env"
@@ -899,7 +899,7 @@ def test_env_file_copy_forward_is_atomic_and_leaves_no_tmp_file(ctx: Ctx):
         for k in saved_overrides:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_HOME"] = str(tmp)
-        legacy = tmp / ".config" / "vibes-hacker" / "env"
+        legacy = tmp / ".config" / p._LEGACY_ENV_DIR_NAME / "env"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("K=v\n", encoding="utf-8")
         write_path = p.env_file_path_for_write()

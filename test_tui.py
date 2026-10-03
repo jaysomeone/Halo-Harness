@@ -275,6 +275,28 @@ def test_compaction_events_render_start_and_done_notes_and_status(ctx: Ctx):
 
 
 @test
+def test_system_note_event_renders_a_transcript_line_not_a_toast(ctx: Ctx):
+    """W5b ("connector cold start, properly"): `system_note` is the async,
+    out-of-band transcript line `tui/bootstrap.build_controller`'s
+    connector-discovery `on_done` posts onto `Controller.events` once
+    background discovery finishes -- unlike `notification` (which dispatch.py
+    renders as a toast via `app.notify`), it must land as a REAL line in
+    the scrolling transcript instead."""
+    from halo_harness.tui.dispatch import apply_event
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            await apply_event(app, ev.system_note("3 claude.ai connectors available."))
+            notes = [w for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"exactly one transcript note, got {len(notes)}", len(notes) == 1)
+            ctx.check(f"it carries the exact text, got {notes[0].content!r}",
+                      "3 claude.ai connectors available." in str(notes[0].content))
+    asyncio.run(body())
+
+
+@test
 def test_steer_queued_note_never_embeds_the_steer_text_only_the_user_bubble_does(ctx: Ctx):
     """U5 must-do: the note is permanently text-free (`"↳ steering…"`,
     never the steer's own words) -- the actual text appears exactly once,

@@ -102,23 +102,23 @@ def test_comment_lines_skipped(ctx: Ctx):
 
 @test
 def test_round_trip_rolo_style_frontmatter(ctx: Ctx):
-    """The exact frontmatter shape rolo's real memory topic files use."""
+    """The exact frontmatter shape the owner's real memory topic files use."""
     text = (
         "---\n"
-        "name: project_plex_server\n"
-        'description: Plex server "roundBoy" runs on lan-host.lan\n'
+        "name: project_media_server\n"
+        'description: Home media server "mediabox" runs on lan-host.lan\n'
         "metadata:\n"
         "  type: project\n"
         "  originSessionId: sess-1\n"
         "  modified: 2026-08-12\n"
         "---\n"
-        "Body content about roundBoy.\n"
+        "Body content about mediabox.\n"
     )
     fm, body = parse(text)
-    ctx.check("name", fm.get("name") == "project_plex_server")
-    ctx.check("description", fm.get("description") == 'Plex server "roundBoy" runs on lan-host.lan')
+    ctx.check("name", fm.get("name") == "project_media_server")
+    ctx.check("description", fm.get("description") == 'Home media server "mediabox" runs on lan-host.lan')
     ctx.check("metadata.type", fm.get("metadata", {}).get("type") == "project")
-    ctx.check("body", body == "Body content about roundBoy.")
+    ctx.check("body", body == "Body content about mediabox.")
 
 
 @test

@@ -347,6 +347,32 @@ def test_esc_then_next_turn_restarts_and_resumes(ctx: Ctx):
         t.join(timeout=10)
         old_pid = session._cc_state.process.pid
 
+        # W5b Linux determinism (carried from W3b): `t.join()` only proves
+        # the turn GENERATOR finished -- it reads "ABORTED" off watch_abort's
+        # queue the instant that's put there, which happens BEFORE
+        # watch_abort goes on to create the cleanup thread and publish it to
+        # `state.cleanup_thread` (see cc_runtime.py's own watch_abort). On a
+        # cold/loaded box that gap can outlast `t.join()` returning, so
+        # ensure_cc_state() on the very next turn (below) could still find
+        # `cleanup_thread` is None and `process.alive` is True (the kill-if-
+        # needed hasn't landed yet) and silently REUSE the old process
+        # instead of restarting -- the exact "restarted with a new pid,
+        # X -> X" (no restart at all) failure seen on a fresh Kali process.
+        # Poll for the real readiness signal (cleanup_thread appearing, then
+        # actually finishing) before touching abort/turn again.
+        deadline = time.monotonic() + 10.0
+        cleanup = None
+        while time.monotonic() < deadline:
+            cleanup = session._cc_state.cleanup_thread
+            if cleanup is not None:
+                break
+            time.sleep(0.02)
+        ctx.check("the abort cleanup thread actually started", cleanup is not None)
+        if cleanup is not None:
+            cleanup.join(timeout=10)
+        ctx.check("the aborted process is actually gone before restarting",
+                  not session._cc_state.process.alive)
+
         session.abort.clear()
         events_ = list(session.turn("reply with the single word pong"))
         new_pid = session._cc_state.process.pid
@@ -1100,11 +1126,21 @@ def test_posix_close_cc_leaves_no_claude_or_bridge_process(ctx: Ctx):
         ctx.check("the fake claude is running mid-session", _pgrep_count(f"fake_claude_cc.py -p --model {marker}") == 1)
         run_dir = session._cc_state.bridge.socket_path.parent
         session.close_cc()
-    deadline = time.monotonic() + 8
+    # W5b Linux determinism (carried from W3b): an 8s bound is plenty once
+    # the process/filesystem caches are warm, but a FIRST run in a fresh
+    # interpreter on Linux (the very scenario a standalone three-run
+    # verification exercises) saw the socket-file poll below still give up
+    # at 8.88s with the file not yet gone -- a genuine cold-start cost
+    # (first subprocess teardown, first unlink of this kind), not a wrong
+    # mechanism. All three bounded polls here get the same, longer bound
+    # rather than special-casing just the one that was observed to lose the
+    # race, since the other two are exactly as exposed to the same cold
+    # start in principle.
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline and _pgrep_count(f"fake_claude_cc.py -p --model {marker}") > 0:
         time.sleep(0.2)
     ctx.check("no claude survivor after close_cc", _pgrep_count(f"fake_claude_cc.py -p --model {marker}") == 0)
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline and _pgrep_count("-m halo_harness.ccbridge") > bridge_before:
         time.sleep(0.2)
     ctx.check("no ccbridge child survivor after close_cc", _pgrep_count("-m halo_harness.ccbridge") <= bridge_before)
@@ -1115,7 +1151,7 @@ def test_posix_close_cc_leaves_no_claude_or_bridge_process(ctx: Ctx):
     # under load) -- a bare, unpolled glob() right after the process-
     # absence checks above raced that gap. Bounded poll instead of a bare
     # check, same deadline style as the two process-absence waits above.
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + 20
     sock_files = list(run_dir.glob("*.sock"))
     while time.monotonic() < deadline and sock_files:
         time.sleep(0.2)

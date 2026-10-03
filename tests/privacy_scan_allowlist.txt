@@ -1,0 +1,17 @@
+# tests/privacy_scan_allowlist.txt -- exact key/token-shaped strings
+# tests/test_privacy_scan.py's token-pattern scan is allowed to find,
+# because each one is a deliberate, obviously-fake fixture value (short,
+# no real entropy, no real provider ever issues a key this shape) rather
+# than a real secret. One exact string per line; blank lines and lines
+# starting with # are ignored. Add a new fake here ONLY after confirming
+# by hand that it is not a real credential -- never add a real key here,
+# allowlisted or not (rotate/revoke it instead).
+sk-or-v1-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE1234567890abcdef
+sk-or-v1-abcdef1234567890
+sk-or-v1-totallyrealsecretvalue
+sk-or-v1-totallyrealsecretvalue1234567890
+dapi0123456789abcdef0123456789abcdef
+ghp_abcdefghijklmnopqrstuvwxyz0123456789
+Bearer abcdefghijklmnopqrstuvwx
+Bearer sk-or-from-effective-env
+Bearer sk-or-management

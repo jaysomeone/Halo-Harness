@@ -75,24 +75,24 @@ Project notes for claude-bridge.
 '''
 
 MEMORY_TOPIC_2 = '''---
-name: project_plex_server
-description: Plex server "roundBoy" runs on lan-host.lan (RTX 4090); remote access enabled for friend sharing
+name: project_media_server
+description: Home media server "mediabox" runs on lan-host.lan; remote access enabled for friend sharing
 metadata:
   type: project
   originSessionId: fake-session-002
   modified: 2026-08-12
 ---
-Plex server "roundBoy" runs on lan-host.lan (RTX 4090); remote access enabled 2026-08-12
-for friend sharing, behind double NAT needing 32400 forwarded on both routers.
-Single Movies library on D:\\vids (all 1080p HEVC). Plex Pass active so shared friends
-stream free. Owner owner.
+Home media server "mediabox" runs on lan-host.lan; remote access enabled 2026-08-12
+for friend sharing, behind double NAT needing a port forwarded on both routers.
+Single library on a dedicated video drive (all transcoded video). A streaming pass
+is active so shared friends stream free. Owner: the account owner.
 '''
 
 
 def _memory_md_250_lines() -> str:
     lines = ["# MEMORY.md (fake, for tests)", ""]
     lines.append("- [claude-bridge project](project_claude_bridge.md) -- proxy + harness work")
-    lines.append('- [Plex server "roundBoy"](project_plex_server.md) -- runs on lan-host.lan (RTX 4090); '
+    lines.append('- [Home media server "mediabox"](project_media_server.md) -- runs on lan-host.lan; '
                  "remote access enabled 2026-08-12 for friend sharing")
     for i in range(3, 251):
         lines.append(f"- filler memory line {i} for truncation-cap testing")
@@ -164,7 +164,7 @@ def build_fake_home(root: Optional[Path] = None) -> dict:
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "MEMORY.md").write_text(_memory_md_250_lines(), encoding="utf-8")
     (memory_dir / "project_claude_bridge.md").write_text(MEMORY_TOPIC_1, encoding="utf-8")
-    (memory_dir / "project_plex_server.md").write_text(MEMORY_TOPIC_2, encoding="utf-8")
+    (memory_dir / "project_media_server.md").write_text(MEMORY_TOPIC_2, encoding="utf-8")
 
     # proj/ -- CLAUDE.md importing @AGENTS.md and @docs/extra.md, a fenced
     # @not-an-import, an HTML comment, sub/CLAUDE.md.

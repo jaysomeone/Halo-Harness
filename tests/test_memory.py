@@ -21,17 +21,18 @@ class FakeSettings:
 
 
 @test
-def test_memory_md_loaded_and_mentions_plex(ctx: Ctx):
+def test_memory_md_loaded_and_mentions_media_server(ctx: Ctx):
     """This is the exact content path the H0 acceptance check exercises
-    live (rolo's real MEMORY.md mentions roundBoy/lan-host.lan) -- proven
-    here hermetically against the fixture's equivalent content."""
+    live (the owner's real MEMORY.md mentions a home media server by name
+    and a LAN host) -- proven here hermetically against the fixture's
+    equivalent, synthetic content."""
     fh = build_fake_home()
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     store = MemoryStore(fh["proj"], FakeSettings())
     idx = store.load_index()
     ctx.check("MEMORY.md exists", idx.exists)
-    ctx.check("mentions roundBoy", "roundBoy" in idx.text)
-    ctx.check("mentions the Plex IP", "lan-host.lan" in idx.text)
+    ctx.check("mentions the media server's name", "mediabox" in idx.text)
+    ctx.check("mentions the LAN host", "lan-host.lan" in idx.text)
 
 
 @test
@@ -75,10 +76,10 @@ def test_topic_file_frontmatter_round_trip(ctx: Ctx):
     store = MemoryStore(fh["proj"], FakeSettings())
     topics = {t.name: t for t in store.entries()}
     ctx.check("project_claude_bridge topic present", "project_claude_bridge" in topics)
-    ctx.check("project_plex_server topic present", "project_plex_server" in topics)
-    plex = topics["project_plex_server"]
-    ctx.check(f"type == project, got {plex.type!r}", plex.type == "project")
-    ctx.check("description mentions roundBoy", "roundBoy" in plex.description)
+    ctx.check("project_media_server topic present", "project_media_server" in topics)
+    media = topics["project_media_server"]
+    ctx.check(f"type == project, got {media.type!r}", media.type == "project")
+    ctx.check("description mentions the media server's name", "mediabox" in media.description)
 
 
 @test

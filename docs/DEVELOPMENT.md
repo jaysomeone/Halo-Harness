@@ -80,6 +80,17 @@ before the first run. `test_tui.py` regenerates
 `docs/harness/tui-snapshots/*.svg` on every run (normalized, not
 byte-diffed -- box-drawing/font metrics legitimately differ by terminal).
 
+## Live and real-binary checks
+
+The three suites above are fully hermetic (mocks only). A few things can
+only be verified for real: the `ant:`/Databricks Claude passthrough routes
+(`HALO_LIVE=1 python -m tests.live.test_passthrough`, never auto-run), the
+real-`claude`-binary interop and ripgrep-backend tests already in the
+ordinary suites (they SKIP cleanly without their one prerequisite, and
+simply stop skipping on a box that has it), and a manual Playwright
+screenshot round trip. See `docs/harness/LIVE-CHECKS.md` for the full
+runbook (what to run, where, and what to expect back).
+
 ## The briefs/review/acceptance workflow
 
 `docs/harness/` is this project's own build history, not user

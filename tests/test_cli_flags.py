@@ -118,7 +118,30 @@ def _run_cli(fh, mock, prompt, extra_args=None, timeout=30, extra_env=None):
     env.update(extra_env or {})
     args = [sys.executable, "-m", "halo_harness", "-p", prompt, "--model", "or:mock/model",
             "--cwd", str(fh["proj"])] + (extra_args or [])
-    return subprocess.run(args, env=env, cwd=str(REPO_DIR), capture_output=True, text=True, timeout=timeout)
+    return _run_bounded(args, env=env, cwd=str(REPO_DIR), timeout=timeout)
+
+
+def _run_bounded(args, *, env, cwd, timeout, interval=0.05):
+    """Same contract as `subprocess.run(..., capture_output=True, text=True,
+    timeout=timeout)` -- but waits on the child's OWN observable state (has
+    it exited yet?) with a bounded poll, rather than handing the whole
+    fixed window straight to `subprocess.run`'s internal wait. W5
+    determinism addition: `--chrome`/`--playwright` below spawn a real
+    node/npx process, which under full-suite load can legitimately take
+    longer than a short fixed window to finish without ever being stuck --
+    polling lets a caller hand it a generous bound (so a slow-but-healthy
+    child still gets to finish) while a genuinely hung child is still
+    killed and reported once that bound is reached."""
+    proc = subprocess.Popen(args, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(interval)
+    if proc.poll() is None:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 @test
@@ -182,12 +205,15 @@ def test_chrome_flag_real_and_prompt_still_runs(ctx: Ctx):
     and deterministic regardless of whether a live `claude.exe`/browser
     happens to be reachable on the machine running it. Either way the
     turn itself must complete normally: a failed/slow MCP server is
-    never fatal to the session (D-CFG)."""
+    never fatal to the session (D-CFG). W5 determinism: a real node/npx
+    spawn under full-suite load can take longer than a short fixed window
+    without being stuck -- `timeout=90` plus `_run_bounded`'s poll (not a
+    single blocking wait) gives it room to actually finish."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
         result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--chrome"],
-                           extra_env={"MCP_TIMEOUT": "3000"})
+                           extra_env={"MCP_TIMEOUT": "3000"}, timeout=90)
         ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-400:]!r}", result.returncode == 0)
         ctx.check("no not-yet line for --chrome any more", "--chrome is not supported yet" not in result.stderr)
         ctx.check("no crash", "Traceback" not in result.stderr)
@@ -199,12 +225,13 @@ def test_chrome_flag_real_and_prompt_still_runs(ctx: Ctx):
 @test
 def test_playwright_flag_real_and_prompt_still_runs(ctx: Ctx):
     """H3: `--playwright` is real now -- same shape as the chrome test
-    above (short MCP_TIMEOUT, never fatal to the turn)."""
+    above (short MCP_TIMEOUT, never fatal to the turn). W5 determinism:
+    same bounded-poll, generous-timeout treatment as --chrome above."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
         result = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--playwright"],
-                           extra_env={"MCP_TIMEOUT": "3000"})
+                           extra_env={"MCP_TIMEOUT": "3000"}, timeout=90)
         ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr[-400:]!r}", result.returncode == 0)
         ctx.check("no not-yet line for --playwright any more", "--playwright is not supported yet" not in result.stderr)
         ctx.check("no crash", "Traceback" not in result.stderr)

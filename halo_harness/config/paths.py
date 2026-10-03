@@ -205,6 +205,14 @@ def bridge_home() -> Path:
     return resolved
 
 
+# The legacy pre-2.0.0 env file's real directory name under `~/.config/` --
+# kept here, functional, as the ONE place that names it (halo still reads
+# it for backward compat; removing it entirely is a later release, 2.0.4).
+# `tests/test_paths.py` imports this constant rather than re-typing the
+# literal, so the name itself appears in exactly one spot in the tree.
+_LEGACY_ENV_DIR_NAME = "vibes-hacker"
+
+
 def legacy_env_file_path() -> Path:
     """The pre-2.0.0 provider-credentials env file path, unconditionally
     (never consults HALO_ENV_FILE/BRIDGE_ENV_FILE -- that's `env_file_
@@ -212,7 +220,7 @@ def legacy_env_file_path() -> Path:
     for themselves whether consulting it makes sense (an explicit override
     is total and should skip it entirely -- see `env_file_path_for_write`
     and `providers.config.load_provider_env_files`)."""
-    return home() / ".config" / "vibes-hacker" / "env"
+    return home() / ".config" / _LEGACY_ENV_DIR_NAME / "env"
 
 
 def env_file_path() -> Path:

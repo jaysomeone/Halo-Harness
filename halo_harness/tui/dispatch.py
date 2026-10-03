@@ -604,6 +604,11 @@ async def _apply_event_inner(app, event) -> None:
         await _apply_replay(app, data.get("messages") or [])
     elif kind == "notification":
         app.notify(data.get("text", ""), severity=_SEVERITY.get(data.get("level"), "information"))
+    elif kind == "system_note":
+        # W5b: an async, out-of-band transcript line (background connector
+        # discovery finishing is the first user) -- a real transcript note,
+        # never a toast, and never logged/sent to the model.
+        await app.transcript.add_note(data.get("text", ""), kind="note")
     elif kind == "steer_queued":
         # U5 must-do: the steer's own TEXT is never embedded in this note
         # -- it shows up exactly once, moments later, as an ordinary user
