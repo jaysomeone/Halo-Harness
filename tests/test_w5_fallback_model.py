@@ -81,8 +81,12 @@ def test_repeated_429_exhaustion_swaps_to_the_fallback_model(ctx: Ctx):
                    "".join(texts) == "answered by the fallback")
         errors = [e for e in events_seen if e.kind == "error"]
         ctx.check(f"no terminal error -- the turn recovered via fallback, got {errors}", errors == [])
-        ctx.check(f"the session is now ON the fallback model, got {session.model_ref.raw}",
-                   session.model_ref.raw == "or:mock/fallback-secondary-ok")
+        # finding 4 (W6a): the notice's own wording says the swap lasts
+        # "for the rest of this turn" -- it used to stay on the fallback
+        # forever (every later turn, too). The turn is over by the time
+        # `session.turn()` returns, so the primary must already be back.
+        ctx.check(f"the session is back on the PRIMARY once the turn ends, got {session.model_ref.raw}",
+                   session.model_ref.raw == "or:mock/fallback-primary-busy")
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
@@ -114,6 +118,151 @@ def test_no_fallback_configured_still_fails_exactly_as_before(ctx: Ctx):
         mock.stop()
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
         os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_f4_primary_is_retried_again_at_the_start_of_the_next_turn(ctx: Ctx):
+    """finding 4 (W6a): part 10's own commit message and the in-turn
+    notice both say the primary is retried "at the start of each user
+    turn" -- it never actually was; a fallback used once stayed the
+    session's model for every LATER turn too. Two turns, same session,
+    the primary 429ing forever: turn 2 must try the primary a full ladder
+    again, not skip straight to the fallback it's still parked on."""
+    calls = {"primary": 0, "fallback": 0}
+
+    def _scn_primary_busy2(h, body):
+        calls["primary"] += 1
+        send_json_response(h, 429, {"error": {"message": "rate limited", "type": "rate_limit_error"}},
+                            {"Retry-After": "0"})
+
+    def _scn_fallback_ok2(h, body):
+        calls["fallback"] += 1
+        _finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "answered by the fallback"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ])
+
+    SCENARIOS["fallback-primary-busy-2turn"] = _scn_primary_busy2
+    SCENARIOS["fallback-secondary-ok-2turn"] = _scn_fallback_ok2
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(
+            fh, mock, model="or:mock/fallback-primary-busy-2turn",
+            fallback_models=["or:mock/fallback-secondary-ok-2turn"],
+        )
+        list(session.turn("turn one"))
+        ctx.check(f"turn 1: primary tried MAX_RETRIES+1 times, got {calls}", calls["primary"] == 6)
+        ctx.check(f"turn 1: fallback answered once, got {calls}", calls["fallback"] == 1)
+        ctx.check(f"turn 1 ends back on the primary, got {session.model_ref.raw}",
+                   session.model_ref.raw == "or:mock/fallback-primary-busy-2turn")
+
+        list(session.turn("turn two"))
+        ctx.check(f"turn 2: the primary is tried again from scratch, got {calls}", calls["primary"] == 12)
+        ctx.check(f"turn 2: falls back again, got {calls}", calls["fallback"] == 2)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_f4_current_model_excluded_from_its_own_fallback_list(ctx: Ctx):
+    """finding 4 (W6a): if `--fallback-model` names the session's OWN
+    current model (directly, or because a PRIOR turn's primary ended up
+    listed), trying to "switch" to itself must never waste a whole retry
+    ladder before reaching a REAL fallback entry."""
+    calls = {"primary": 0, "fallback": 0}
+
+    def _scn_primary_busy3(h, body):
+        calls["primary"] += 1
+        send_json_response(h, 429, {"error": {"message": "rate limited", "type": "rate_limit_error"}},
+                            {"Retry-After": "0"})
+
+    def _scn_fallback_ok3(h, body):
+        calls["fallback"] += 1
+        _finish(h, [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "answered by the real fallback"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ])
+
+    SCENARIOS["fallback-primary-busy-3"] = _scn_primary_busy3
+    SCENARIOS["fallback-secondary-ok-3"] = _scn_fallback_ok3
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(
+            fh, mock, model="or:mock/fallback-primary-busy-3",
+            fallback_models=["or:mock/fallback-primary-busy-3", "or:mock/fallback-secondary-ok-3"],
+        )
+        events_seen = list(session.turn("hi"))
+        ctx.check(f"the primary is tried exactly one ladder's worth (6), never 12 from a wasted "
+                  f"self-swap, got {calls}", calls["primary"] == 6)
+        ctx.check(f"the real fallback answered once, got {calls}", calls["fallback"] == 1)
+        texts = [e.data.get("text", "") for e in events_seen if e.kind == "text_delta"]
+        ctx.check(f"the real fallback's reply streamed through, got {texts}",
+                  "".join(texts) == "answered by the real fallback")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_f3_cross_provider_fallback_resolves_its_own_credentials(ctx: Ctx):
+    """finding 3 (W6a): `apply_next_fallback_model` used to pass
+    `self.creds` (the CURRENT model's own credentials) unconditionally --
+    a cross-provider fallback sent its request to the NEW provider's
+    upstream with the OLD provider's base_url/key."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model-f3", fallback_models=["dbx:databricks-glm-5-3"])
+        session._fallback_remaining = list(session.fallback_models)
+        applied = session.apply_next_fallback_model()
+        ctx.check("the fallback was applied", applied)
+        ctx.check(f"the session switched provider, got {session.model_ref.raw}",
+                  session.model_ref.provider == "databricks")
+        ctx.check(f"creds are the fallback's OWN Databricks creds, not the primary's OpenRouter ones, "
+                  f"got base_url={session.creds.base_url!r}",
+                  session.creds.base_url != mock.base_url and "databricks" in (session.creds.base_url or "").lower())
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+
+
+@test
+def test_f3_fallback_entry_with_no_credentials_is_skipped_not_installed(ctx: Ctx):
+    """An entry whose provider has no usable credentials at all must be
+    skipped exactly like an unresolvable model string -- never installed
+    with `creds=None` (every later request on it would then fail outright
+    with no credentials at all)."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    snapshot = {k: os.environ.get(k) for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN")}
+    try:
+        os.environ.pop("DATABRICKS_HOST", None)
+        os.environ.pop("DATABRICKS_TOKEN", None)
+        session = _new_session(fh, mock, model="or:mock/model-f3b", fallback_models=["dbx:databricks-glm-5-3"])
+        before_ref = session.model_ref
+        session._fallback_remaining = list(session.fallback_models)
+        applied = session.apply_next_fallback_model()
+        ctx.check(f"no usable fallback left (the only entry had no creds) -> False, got {applied}",
+                  applied is False)
+        ctx.check(f"the session never switched off the primary, got {session.model_ref.raw}",
+                  session.model_ref.raw == before_ref.raw)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        for k, v in snapshot.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

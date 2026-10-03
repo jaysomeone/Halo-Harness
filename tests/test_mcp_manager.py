@@ -1326,6 +1326,127 @@ def test_headers_helper_runs_for_untrusted_non_project_scope(ctx: Ctx):
         loop.close()
 
 
+@test
+def test_f13_w6a_resolved_headers_adds_bearer_token_from_oauth_login(ctx: Ctx):
+    """finding 13 (W6a): `halo mcp login <name>` saved tokens that
+    NOTHING read -- `_resolved_headers` must add `Authorization: Bearer
+    <access_token>` from `oauth.load_tokens(name)` when no static/helper
+    header already set one."""
+    from halo_harness.mcp import oauth
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
+
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="w6a-f13-home-")))
+    try:
+        oauth.save_tokens("oauth_server", {"access_token": "tok-abc123", "refresh_token": "rtok-xyz"})
+        cfg = McpServerConfig(name="oauth_server", type="http", url="https://example.invalid/mcp", scope="user")
+        loop = McpLoop()
+        h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=True)
+        try:
+            headers = loop.run(h._resolved_headers(), timeout=5)
+            ctx.check(f"Authorization header carries the saved access token, got {headers}",
+                      headers.get("Authorization") == "Bearer tok-abc123")
+        finally:
+            h.close()
+            loop.close()
+    finally:
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+@test
+def test_f13_w6a_resolved_headers_static_authorization_wins_over_oauth(ctx: Ctx):
+    """An explicit static `Authorization` header (or one a headersHelper
+    sets) must never be silently overwritten by a stored OAuth token."""
+    from halo_harness.mcp import oauth
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
+
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="w6a-f13-home2-")))
+    try:
+        oauth.save_tokens("oauth_server2", {"access_token": "should-not-be-used"})
+        # finding 13 (W6a): kept under 16 chars after "Bearer " on purpose
+        # -- tests/test_privacy_scan.py's own bearer-token-shaped-fragment
+        # scan (halo_harness.redact._BEARER_RE) flags anything longer as
+        # a possible real leaked credential.
+        cfg = McpServerConfig(name="oauth_server2", type="http", url="https://example.invalid/mcp",
+                               headers={"Authorization": "Bearer static-tok"}, scope="user")
+        loop = McpLoop()
+        h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=True)
+        try:
+            headers = loop.run(h._resolved_headers(), timeout=5)
+            ctx.check(f"the explicit static header wins, got {headers}",
+                      headers.get("Authorization") == "Bearer static-tok")
+        finally:
+            h.close()
+            loop.close()
+    finally:
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+@test
+def test_f13_w6a_connect_with_oauth_retry_refreshes_once_then_succeeds(ctx: Ctx):
+    """finding 13 (W6a): a connect attempt that looks like a 401, with a
+    refresh_token on file, is retried exactly once with a freshly
+    refreshed access token -- isolated from the real MCP transport via a
+    fake `connect_fn` that fails on the first (stale-token) header and
+    succeeds on the second (refreshed) one."""
+    from halo_harness.mcp import oauth
+    from halo_harness.mcp.client import McpLoop
+    from halo_harness.mcp.manager import McpServerConfig, McpServerHandle
+
+    saved_home = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="w6a-f13-retry-")))
+    try:
+        oauth.save_tokens("retry_server", {"access_token": "stale-token", "refresh_token": "the-refresh-token"})
+
+        def _fake_refresh(name, stored, *, oauth_cfg, server_url):
+            ctx.check(f"the stored refresh_token reached refresh_tokens, got {stored}",
+                      stored.get("refresh_token") == "the-refresh-token")
+            new_tokens = {"access_token": "refreshed-token", "refresh_token": "the-refresh-token"}
+            oauth.save_tokens(name, new_tokens)
+            return new_tokens, None
+        import halo_harness.mcp.oauth as oauth_mod
+        original_refresh = oauth_mod.refresh_tokens
+        oauth_mod.refresh_tokens = _fake_refresh
+
+        calls = []
+
+        async def _fake_connect(*, url, headers, connect_timeout):
+            calls.append(dict(headers))
+            if headers.get("Authorization") == "Bearer stale-token":
+                raise RuntimeError("401 Unauthorized")
+            return "connected-ok"
+
+        cfg = McpServerConfig(name="retry_server", type="http", url="https://example.invalid/mcp", scope="user")
+        loop = McpLoop()
+        h = McpServerHandle(cfg, loop, tool_env=dict(os.environ), cwd=REPO_DIR, trusted=True)
+        try:
+            headers = loop.run(h._resolved_headers(), timeout=5)
+            result = loop.run(h._connect_with_oauth_retry(_fake_connect, headers=headers, connect_timeout=5.0),
+                               timeout=5)
+            ctx.check(f"the connect eventually succeeded, got {result!r}", result == "connected-ok")
+            ctx.check(f"exactly two attempts were made (one retry), got {len(calls)}", len(calls) == 2)
+            ctx.check(f"the SECOND attempt used the refreshed token, got {calls}",
+                      calls[1].get("Authorization") == "Bearer refreshed-token")
+        finally:
+            h.close()
+            loop.close()
+            oauth_mod.refresh_tokens = original_refresh
+    finally:
+        if saved_home is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

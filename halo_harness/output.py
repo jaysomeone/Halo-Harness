@@ -164,6 +164,15 @@ class PrintModeSink:
         # `build_result_object`'s own docstring.
         self._start_monotonic = time.monotonic()
         self._prompt_suggestion: Optional[str] = None
+        # parity gap (W6a): `--brief`'s whole point is RUNNING commentary
+        # before the final answer -- SendUserMessage's own text otherwise
+        # only ever showed up as this tool call's result/summary (TUI
+        # transcript, --verbose, stream-json; see that tool's own
+        # docstring), invisible in the single most common case (`-p`,
+        # plain text, non-verbose). Tracks `tool_use_ready` ids for THIS
+        # one tool name so the matching `tool_result` is recognized and
+        # printed regardless of `--verbose`.
+        self._pending_send_user_message_ids: "set" = set()
 
     def add_prompt_suggestion(self, text: str) -> None:
         """W4a `--prompt-suggestions`: folded into the one result object,
@@ -262,6 +271,8 @@ class PrintModeSink:
             # equivalent (dimmed, like thinking), never shown non-verbose
             # (the whole point of --verbose here is showing the WORK, not
             # just the final answer).
+            if event.data.get("name") == "SendUserMessage":
+                self._pending_send_user_message_ids.add(event.data.get("id"))
             if self.verbose and self.output_format == "text":
                 name = event.data.get("name", "?")
                 tool_input = event.data.get("input") or {}
@@ -271,7 +282,16 @@ class PrintModeSink:
                 repaired = " (repaired)" if event.data.get("repaired") else ""
                 self.stream.write(f"\x1b[2m[tool] {name}{repaired} {summary}\x1b[0m\n")
         elif event.kind == "tool_result":
-            if self.verbose and self.output_format == "text":
+            # parity gap (W6a): printed in PLAIN text, regardless of
+            # --verbose -- see this sink's own `__init__` comment on
+            # `_pending_send_user_message_ids`.
+            if event.data.get("id") in self._pending_send_user_message_ids:
+                self._pending_send_user_message_ids.discard(event.data.get("id"))
+                if event.data.get("ok") and self.output_format == "text":
+                    text = event.data.get("content") or event.data.get("summary") or ""
+                    if text:
+                        self.stream.write(text if text.endswith("\n") else text + "\n")
+            elif self.verbose and self.output_format == "text":
                 ok = "ok" if event.data.get("ok") else "error"
                 self.stream.write(f"\x1b[2m[tool result: {ok}]\x1b[0m\n")
         elif event.kind == "steer_restart":

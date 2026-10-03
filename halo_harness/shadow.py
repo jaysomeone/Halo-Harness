@@ -81,12 +81,36 @@ class ShadowStore:
         return subprocess.run(["git", "-C", str(self.dir), *args], capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
 
+    def _git_bytes(self, *args: str) -> "subprocess.CompletedProcess":
+        """finding 8 (W6a): binary-safe sibling of `_git` above, for
+        `git show` alone -- `_git`'s own `text=True, errors="replace"`
+        mangles any blob that isn't valid UTF-8 (a binary file a Bash
+        command created/modified), so `_restore_commit` below reads the
+        raw bytes through this instead and writes them back verbatim."""
+        return subprocess.run(["git", "-C", str(self.dir), *args], capture_output=True)
+
     def _ensure_repo(self) -> None:
         if (self.dir / ".git").exists():
             return
         self._git("init", "-q")
         self._git("config", "user.email", "shadow@halo.local")
         self._git("config", "user.name", "halo shadow")
+        # finding 8 (W6a): this repo must round-trip every byte exactly,
+        # text or binary alike -- a user/system `core.autocrlf=true`
+        # (common on a real Windows box, picked up from global/system git
+        # config since a fresh `git init` inherits it) silently normalizes
+        # CRLF->LF on `add`/`commit`, discarding a file's own native line
+        # endings regardless of how Python wrote the shadow working-tree
+        # copy. `-text` in `.gitattributes` additionally stops git from
+        # treating ANY path here as text at all (the belt to this
+        # suspenders): no line-ending conversion, no "LF will be replaced
+        # by CRLF" warnings, ever, for this one repo.
+        self._git("config", "core.autocrlf", "false")
+        self._git("config", "core.safecrlf", "false")
+        try:
+            (self.dir / ".gitattributes").write_text("* -text\n", encoding="utf-8", newline="\n")
+        except OSError:
+            pass
         if sys.platform == "win32":
             # The shadow repo sits under <state>/sessions/<cwd slug>/<id>/shadow,
             # deep enough that git objects can exceed Windows' 260-char path
@@ -146,7 +170,23 @@ class ShadowStore:
             dest = self.dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
-                dest.write_text(content, encoding="utf-8", errors="replace")
+                # finding 8 (W6a): ALWAYS written as bytes now, `str`
+                # content included -- `write_text` on Windows translates
+                # every bare "\n" to "\r\n" on the way out, same as
+                # `read_text` translates "\r\n" back to "\n" on the way
+                # in. A caller that captured raw bytes untranslated (this
+                # module's own `_restore_commit`/`record_step` callers in
+                # tui/dispatch.py read real files with `read_bytes()`, not
+                # `read_text()`, precisely so a binary file round-trips
+                # byte-exact) hands a STRING here that may already
+                # contain a literal "\r\n" -- `write_text` would then add
+                # a SECOND "\r" in front of it ("\r\n" -> "\r\r\n"),
+                # corrupting an ordinary CRLF text file's own line
+                # endings. Encoding back to bytes here keeps the WHOLE
+                # pipeline (capture -> store -> restore) byte-exact, with
+                # no text-mode translation anywhere in it.
+                data = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+                dest.write_bytes(data)
             except OSError:
                 continue
             mangled.append(rel)
@@ -172,20 +212,27 @@ class ShadowStore:
 
     def _restore_commit(self, commit_hash: str) -> "list[str]":
         """Checks out EVERY file tracked as of `commit_hash` back to its
-        real location. Returns the list of real paths written."""
+        real location. Returns the list of real paths written.
+
+        finding 8 (W6a): reads the blob through `_git_bytes` and writes it
+        back with `write_bytes`, unconditionally -- always byte-exact
+        (a real text file round-trips through bytes perfectly too), so a
+        binary file a `record_step` call stored (see its own finding-8
+        comment above) is never mangled by a text decode on the way back
+        out."""
         listing = self._git("ls-tree", "-r", "--name-only", commit_hash)
         restored: "list[str]" = []
         for rel in listing.stdout.splitlines():
             rel = rel.strip()
             if not rel:
                 continue
-            shown = self._git("show", f"{commit_hash}:{rel}")
+            shown = self._git_bytes("show", f"{commit_hash}:{rel}")
             if shown.returncode != 0:
                 continue
             real_path = _unmangle(rel)
             try:
                 real_path.parent.mkdir(parents=True, exist_ok=True)
-                real_path.write_text(shown.stdout, encoding="utf-8", errors="replace")
+                real_path.write_bytes(shown.stdout)
                 restored.append(str(real_path))
             except OSError:
                 continue
@@ -303,6 +350,23 @@ def git_status_dirty_paths(cwd) -> "Optional[dict]":
         return None
     if result.returncode != 0:
         return None
+    # finding 9 (W6a): `git status --porcelain` reports every path RELATIVE
+    # TO THE REPO ROOT, never relative to `cwd` -- joining straight to
+    # `cwd` (the old code) was only ever right when `cwd` WAS the repo
+    # root; from any subdirectory, every path doubled its own leading
+    # segment (e.g. `sub/new.txt` under `cwd=<repo>/sub` became `<repo>/
+    # sub/sub/new.txt`), so nothing a command created there was ever
+    # actually found. `git rev-parse --show-toplevel` is the one true
+    # root `--porcelain` paths are already relative to.
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=str(cwd), capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if root_result.returncode != 0:
+        return None
+    repo_root = Path(root_result.stdout.strip())
     out: dict = {}
     for entry in (result.stdout or "").split("\x00"):
         if len(entry) < 4:
@@ -311,7 +375,7 @@ def git_status_dirty_paths(cwd) -> "Optional[dict]":
         if not rel or (code != "??" and code not in _MODIFIED_TRACKED_CODES):
             continue
         try:
-            out[str((Path(cwd) / rel).resolve())] = code
+            out[str((repo_root / rel).resolve())] = code
         except OSError:
             continue
     return out

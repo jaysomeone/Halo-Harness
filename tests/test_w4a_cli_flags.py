@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 from tests.helpers.fake_home import build_fake_home
-from tests.helpers.mock_openai import MockUpstream
+from tests.helpers.mock_openai import MockUpstream, SCENARIOS, ScriptedTurns
 
 test, TESTS = new_registry()
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -91,6 +91,42 @@ def test_brief_adds_senduser_message_tool(ctx: Ctx):
 
         without = _run_cli(fh, mock, "reply with the single word pong", extra_args=["--output-format", "stream-json"])
         ctx.check("SendUserMessage absent without --brief", "SendUserMessage" not in _init_tools(without))
+    finally:
+        mock.stop()
+
+
+@test
+def test_f_parity_brief_message_is_printed_in_plain_text_output(ctx: Ctx):
+    """parity gap (W6a): `--brief`'s whole point is running commentary
+    BEFORE the final answer -- SendUserMessage's own text used to be only
+    a tool result (TUI transcript/--verbose/stream-json), invisible in
+    the single most common case: `-p`, plain text, non-verbose. Must now
+    be printed as it happens, even without --verbose, ahead of the
+    turn's real final answer."""
+    import json as _json
+
+    SCENARIOS["w4a-brief-text"] = ScriptedTurns([
+        [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+         {"choices": [{"index": 0, "delta": {"tool_calls": [
+             {"index": 0, "id": "call_sum", "type": "function",
+              "function": {"name": "SendUserMessage",
+                            "arguments": _json.dumps({"message": "working on it now"})}},
+         ]}}]},
+         {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}],
+        [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+         {"choices": [{"index": 0, "delta": {"content": "final answer here"}}]},
+         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}],
+    ])
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        result = _run_cli(fh, mock, "do the thing and tell me how it's going",
+                           extra_args=["--brief"], model="or:mock/w4a-brief-text")
+        ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr!r}", result.returncode == 0)
+        ctx.check(f"the SendUserMessage text was printed, got stdout={result.stdout!r}",
+                  "working on it now" in result.stdout)
+        ctx.check(f"the real final answer still came through too, got stdout={result.stdout!r}",
+                  "final answer here" in result.stdout)
     finally:
         mock.stop()
 

@@ -653,6 +653,20 @@ class Transcript(VerticalScroll):
             await widget.remove()
             self._history = [w for w in self._history if w is not widget]
 
+    async def finish_all_phase_lines(self, *, agent_id: "str | None" = None) -> None:
+        """finding 7 (W6a): `turn_done` (main session or a sub-agent's) is
+        a definitive "nothing more is coming" signal for this `agent_id`
+        -- unlike `message_end`, it can arrive with NO phase line ever
+        finalized first at all (a call that ends in an error or an Esc
+        skips `message_end` entirely), leaving the line live and ticking
+        ("Thinking... (2 m, no tokens yet) ... no data for 120 s") long
+        after the status bar already went idle. Finalizes (or removes)
+        EVERY line still live under `agent_id`, not just one at a single
+        turn number, since a stale line from an earlier turn under the
+        same key would never otherwise get cleaned up either."""
+        for line_agent_id, turn in [k for k in self._phase_lines if k[0] == agent_id]:
+            await self.finish_phase_line(turn, agent_id=line_agent_id)
+
     def tick_phase_lines(self) -> None:
         """Called every drain tick (`BridgeApp._drain`) regardless of
         whether any new event arrived -- A1: the elapsed/no-data text is

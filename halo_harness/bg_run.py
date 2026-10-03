@@ -38,17 +38,27 @@ def start_background_run(argv: list, *, popen=subprocess.Popen) -> dict:
     `<state>/bg/<id>/output.log`, stdin closed. Returns `{"id", "log_path",
     "pid", "meta_path"}` immediately -- never waits for the child. `popen`
     is a seam: a test substitutes a fake to avoid actually launching a real
-    Python process for every invocation shape it wants to check."""
+    Python process for every invocation shape it wants to check.
+
+    finding 15 (W6a): the REAL command is launched through `_bg_wrapper`
+    (this process's own pid, recorded in `meta.json`, is the WRAPPER's --
+    killing its group takes the real command with it, unchanged from
+    before) so it can write `status.json` once the real command actually
+    exits; `meta.json` also records `start_time` (`process_start_time`),
+    so a PID the OS later reuses for something unrelated is never
+    mistaken for this run still being alive."""
     run_id = uuid.uuid4().hex[:8]
     run_dir = _bg_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "output.log"
     meta_path = run_dir / "meta.json"
+    status_path = run_dir / "status.json"
 
     forced_argv = list(argv)
     if "-p" not in forced_argv and "--print" not in forced_argv:
         forced_argv = forced_argv + ["-p"]
-    command = [sys.executable, "-m", "halo_harness", *forced_argv]
+    real_command = [sys.executable, "-m", "halo_harness", *forced_argv]
+    command = [sys.executable, "-m", "halo_harness._bg_wrapper", str(status_path), *real_command]
 
     log_fh = open(log_path, "ab")
     try:
@@ -60,13 +70,81 @@ def start_background_run(argv: list, *, popen=subprocess.Popen) -> dict:
     finally:
         log_fh.close()  # the CHILD inherited its own duplicate fd; this process's copy is done with it
 
-    meta = {"id": run_id, "pid": proc.pid, "command": command, "cwd": str(Path.cwd()),
-            "started": time.time(), "log_path": str(log_path)}
+    meta = {"id": run_id, "pid": proc.pid, "command": real_command, "cwd": str(Path.cwd()),
+            "started": time.time(), "log_path": str(log_path), "status_path": str(status_path),
+            "start_time": process_start_time(proc.pid)}
     try:
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except OSError:
         pass
     return {"id": run_id, "log_path": str(log_path), "pid": proc.pid, "meta_path": str(meta_path)}
+
+
+def process_start_time(pid: int) -> Optional[str]:
+    """finding 15 (W6a): an opaque, re-readable "when did THIS pid start"
+    fingerprint -- never a real timestamp a caller should interpret, just
+    a value that stays the same for the SAME still-running process and
+    differs once the OS reuses that pid for something else entirely.
+    `/proc/<pid>/stat` field 22 (starttime) on Linux; the creation
+    `FILETIME` from `GetProcessTimes` on Windows. `None` when it can't be
+    determined at all (an unsupported platform, or the process is already
+    gone) -- callers treat that as "can't tell, don't refuse on it
+    alone", same as a pre-upgrade `meta.json` with no `start_time` key."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if os.name == "nt":
+        return _windows_process_start_time(pid)
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+        # `comm` (field 2, in parens) can itself contain spaces/parens --
+        # same `rsplit(")", 1)` trick `pid_alive` above already uses for
+        # the state field. Fields from "state" (3) onward are then
+        # `after[0]`, `after[1]`, ...; starttime is field 22, so index 19.
+        after = content.rsplit(")", 1)[-1].split()
+        return after[19]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _windows_process_start_time(pid: int) -> Optional[str]:
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            creation, exit_t, kernel_t, user_t = (wintypes.FILETIME(), wintypes.FILETIME(),
+                                                     wintypes.FILETIME(), wintypes.FILETIME())
+            ok = kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_t),
+                                            ctypes.byref(kernel_t), ctypes.byref(user_t))
+            if not ok:
+                return None
+            return str((creation.dwHighDateTime << 32) | creation.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def is_our_process(meta: dict) -> bool:
+    """finding 15 (W6a): `pid_alive(meta["pid"])` alone answers "is SOME
+    process using this pid right now" -- true even once the OS has
+    reassigned it to something this run never spawned. Refuses that case
+    whenever `meta["start_time"]` (recorded at spawn) and a FRESH
+    `process_start_time` for the SAME pid disagree; a run recorded before
+    this field existed, or a platform/moment where it can't be read at
+    all, falls back to the pid-only check rather than a false refusal."""
+    pid = meta.get("pid")
+    if not pid_alive(pid):
+        return False
+    expected = meta.get("start_time")
+    if not expected:
+        return True
+    current = process_start_time(pid)
+    return current is None or current == expected
 
 
 def list_runs() -> "list[dict]":

@@ -730,22 +730,65 @@ class McpServerHandle:
         resident) helper is trust-gated; user/managed/flag/dynamic/plugin
         scope is the operator's own global config either way."""
         headers = dict(self.config.headers or {})
-        if not self.config.headers_helper:
-            return headers
-        if self.config.scope == "project" and not self._trusted:
+        if self.config.headers_helper and not (self.config.scope == "project" and not self._trusted):
+            try:
+                import asyncio
+                from halo_harness.mcp.http_sse import merged_headers, run_headers_helper
+                helper_headers = await asyncio.to_thread(
+                    run_headers_helper, self.config.headers_helper, env=self._tool_env,
+                    server_name=self.config.name, url=self.config.url or "",
+                )
+                headers = merged_headers(headers, helper_headers)
+            except Exception as e:  # headersHelper failure -> static headers, never fatal
+                log.debug("mcp %s: headersHelper failed (%s) -- using static headers only", self.config.name, e)
+        elif self.config.headers_helper:
             log.debug("mcp %s: headersHelper skipped -- untrusted project", self.config.name)
-            return headers
-        try:
-            import asyncio
-            from halo_harness.mcp.http_sse import merged_headers, run_headers_helper
-            helper_headers = await asyncio.to_thread(
-                run_headers_helper, self.config.headers_helper, env=self._tool_env,
-                server_name=self.config.name, url=self.config.url or "",
-            )
-            headers = merged_headers(headers, helper_headers)
-        except Exception as e:  # headersHelper failure -> static headers, never fatal
-            log.debug("mcp %s: headersHelper failed (%s) -- using static headers only", self.config.name, e)
+        # finding 13 (W6a): `halo mcp login <name>` saved tokens that
+        # NOTHING read -- `load_tokens` had no caller at all, so a server
+        # that needs OAuth stayed needs-auth/401 even after a "successful"
+        # login. Checked regardless of headers_helper (the early return
+        # above used to skip this branch entirely for the common case of
+        # no helper at all); an explicit static/helper `Authorization`
+        # header always wins -- this only fills the header in when
+        # nothing else already did.
+        if "Authorization" not in headers:
+            from halo_harness.mcp import oauth
+            tokens = oauth.load_tokens(self.config.name)
+            access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+            if access_token:
+                headers["Authorization"] = f"Bearer {access_token}"
         return headers
+
+    @staticmethod
+    def _looks_like_auth_failure(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return "401" in text or "unauthorized" in text
+
+    async def _connect_with_oauth_retry(self, connect_fn, *, headers: dict, connect_timeout: float):
+        """finding 13 (W6a): one retry, with a freshly refreshed OAuth
+        access token, when the FIRST attempt looks like an auth failure
+        and this server has stored OAuth tokens at all (`halo mcp login
+        <name>` ran at some point) -- never more than once, and the
+        original failure is re-raised, with a `run halo mcp login <name>`
+        pointer appended, when there is no refresh_token on file or the
+        refresh itself fails."""
+        try:
+            return await connect_fn(url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+        except Exception as e:
+            if not self._looks_like_auth_failure(e):
+                raise
+            from halo_harness.mcp import oauth
+            stored = oauth.load_tokens(self.config.name) or {}
+            new_tokens, err = oauth.refresh_tokens(
+                self.config.name, stored, oauth_cfg=(self.config.oauth or {}), server_url=self.config.url or "")
+            if err or not new_tokens:
+                raise RuntimeError(f"{e} -- run `halo mcp login {self.config.name}`") from e
+            refreshed = dict(headers)
+            refreshed["Authorization"] = f"Bearer {new_tokens['access_token']}"
+            try:
+                return await connect_fn(url=self.config.url, headers=refreshed, connect_timeout=connect_timeout)
+            except Exception as e2:
+                raise RuntimeError(f"{e2} -- run `halo mcp login {self.config.name}`") from e2
 
     async def _open_transport(self, connect_timeout: float):
         from halo_harness.mcp import http_sse as http_sse_mod
@@ -761,8 +804,8 @@ class McpServerHandle:
         if self.config.type == "http":
             headers = await self._resolved_headers()
             try:
-                return await http_sse_mod.connect_http(
-                    url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+                return await self._connect_with_oauth_retry(
+                    http_sse_mod.connect_http, headers=headers, connect_timeout=connect_timeout)
             except Exception as http_exc:
                 # OpenCode-H9 MCP-compatibility item: "Streamable HTTP ->
                 # SSE fallback" -- a server declared `type: "http"`
@@ -789,8 +832,8 @@ class McpServerHandle:
         if self.config.type == "sse":
             log.debug("mcp %s: 'sse' transport is deprecated (use 'http')", self.config.name)
             headers = await self._resolved_headers()
-            return await http_sse_mod.connect_sse(
-                url=self.config.url, headers=headers, connect_timeout=connect_timeout)
+            return await self._connect_with_oauth_retry(
+                http_sse_mod.connect_sse, headers=headers, connect_timeout=connect_timeout)
         if self.config.type in ("ws", "websocket"):
             # only ever reached when parse_server already found a real
             # mcp.client.websocket (websocket_client_available()) -- a

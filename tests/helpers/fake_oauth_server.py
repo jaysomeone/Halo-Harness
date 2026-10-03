@@ -35,8 +35,12 @@ def _b64url(raw: bytes) -> str:
 
 
 class FakeOAuthServer:
-    def __init__(self, *, require_client_secret: str = None) -> None:
+    def __init__(self, *, require_client_secret: str = None, valid_refresh_token: str = None) -> None:
         self.require_client_secret = require_client_secret
+        # finding 13 (W6a release fix pass): None (default) accepts ANY
+        # non-empty refresh_token; set to a specific string to also
+        # exercise the "presented refresh_token rejected" failure path.
+        self.valid_refresh_token = valid_refresh_token
         self.codes: dict = {}  # code -> {"code_challenge", "redirect_uri"}
         self.token_calls: list = []
         server = self
@@ -82,7 +86,23 @@ class FakeOAuthServer:
                 body = parse_qs(self.rfile.read(length).decode("utf-8"))
                 get = lambda k: (body.get(k) or [""])[0]
                 server.token_calls.append({k: get(k) for k in
-                                             ("grant_type", "code", "redirect_uri", "client_id", "client_secret")})
+                                             ("grant_type", "code", "redirect_uri", "client_id", "client_secret",
+                                              "refresh_token")})
+                # finding 13 (W6a release fix pass): `grant_type=refresh_
+                # token` -- a NEW token pair for whatever `refresh_token`
+                # was presented, gated on `server.valid_refresh_token`
+                # (None, the default, accepts any non-empty value) so a
+                # test can also exercise the "refresh itself fails" path.
+                if get("grant_type") == "refresh_token":
+                    presented = get("refresh_token")
+                    if not presented or (server.valid_refresh_token is not None
+                                          and presented != server.valid_refresh_token):
+                        self._json(400, {"error": "invalid_grant", "error_description": "unknown refresh_token"})
+                        return
+                    self._json(200, {"access_token": "fake-refreshed-access-token",
+                                       "refresh_token": "fake-refreshed-refresh-token",
+                                       "token_type": "Bearer", "expires_in": 3600})
+                    return
                 record = server.codes.get(get("code"))
                 if record is None:
                     self._json(400, {"error": "invalid_grant", "error_description": "unknown code"})

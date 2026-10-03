@@ -108,6 +108,64 @@ def test_credentials_present_typesafe_falls_back_to_settings_env_chain(ctx: Ctx)
 
 
 @test
+def test_f5_w6a_resolve_openrouter_base_url_falls_back_to_settings_env_chain(ctx: Ctx):
+    """finding 5 (W6a): the settings-chain fallback used to cover the KEY
+    only -- `base_url` always came from bare `env_compat` (no settings-
+    chain awareness at all), so a gateway's own key resolved from
+    settings while its base URL silently stayed the real
+    `https://openrouter.ai/api/v1`, sending that gateway key straight to
+    the real OpenRouter API."""
+    from halo_harness.providers.config import resolve_openrouter
+    with _Env() as env:
+        env.write_user_settings_env({
+            "OPENROUTER_API_KEY": "sk-or-gateway-FAKE",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/openrouter",
+        })
+        orc = resolve_openrouter()
+        ctx.check("resolved from the settings.json env block alone", orc is not None)
+        if orc is not None:
+            ctx.check(f"key came from settings, got {orc.api_key!r}", orc.api_key == "sk-or-gateway-FAKE")
+            ctx.check(f"base_url ALSO came from settings (never the real openrouter.ai), got {orc.base_url!r}",
+                      orc.base_url == "https://gateway.example.invalid/openrouter")
+
+
+@test
+def test_f5_w6a_resolve_anthropic_base_url_falls_back_to_settings_env_chain(ctx: Ctx):
+    """Same bug, the `ant:` side -- a standard Claude Code gateway setup
+    (settings.json `env` with `ANTHROPIC_BASE_URL`+`ANTHROPIC_API_KEY`)
+    used to send the gateway key to the real `https://api.anthropic.com`."""
+    from halo_harness.providers.config import resolve_anthropic
+    with _Env() as env:
+        env.write_user_settings_env({
+            "ANTHROPIC_API_KEY": "sk-ant-gateway-FAKE",
+            "ANTHROPIC_BASE_URL": "https://gateway.example.invalid/anthropic",
+        })
+        anc = resolve_anthropic()
+        ctx.check("resolved from the settings.json env block alone", anc is not None)
+        if anc is not None:
+            ctx.check(f"key came from settings, got {anc.api_key!r}", anc.api_key == "sk-ant-gateway-FAKE")
+            ctx.check(f"base_url ALSO came from settings (never the real api.anthropic.com), got "
+                      f"{anc.base_url!r}", anc.base_url == "https://gateway.example.invalid/anthropic")
+
+
+@test
+def test_f5_w6a_base_url_settings_fallback_never_fires_for_a_caller_supplied_env(ctx: Ctx):
+    """Same `env is os.environ` gate as the key's own fallback -- a caller
+    that already passed its OWN merged env dict must never have the base
+    URL silently re-derived a second, possibly different way either."""
+    from halo_harness.providers.config import resolve_openrouter
+    with _Env() as env:
+        env.write_user_settings_env({
+            "OPENROUTER_API_KEY": "sk-or-from-settings", "OPENROUTER_BASE_URL": "https://gateway.example.invalid",
+        })
+        orc = resolve_openrouter(env={"OPENROUTER_API_KEY": "sk-or-explicit"})
+        ctx.check("resolved from the explicit env dict", orc is not None)
+        if orc is not None:
+            ctx.check(f"base_url is the real default, NOT silently pulled from settings for an "
+                      f"explicit env dict, got {orc.base_url!r}", orc.base_url == "https://openrouter.ai/api/v1")
+
+
+@test
 def test_settings_fallback_never_fires_for_a_caller_supplied_env(ctx: Ctx):
     """The fallback is gated on `env is os.environ` (a BARE call) -- a
     caller that already passed its OWN merged env dict (a real session's

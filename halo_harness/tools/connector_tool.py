@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from typing import Optional
 
 from halo_harness.mcp import connectors as mcp_connectors
@@ -109,9 +108,39 @@ class ConnectorTool(Tool):
         specific underlying connector tool -- the bare tool name is what
         `mcp.connectors_bridge.translate_claude_ai_rule` produces from a
         Claude Code rule, and the most useful thing a hand-written one
-        could match on too."""
+        could match on too.
+
+        finding 12 (W6a): a call that OMITS `tool` (the model describing
+        the request in plain words, which `request` alone never updates
+        this to match) has NOTHING here to match a per-tool rule against
+        at all -- `run` below additionally pushes every per-tool deny/ask
+        rule straight into the inner `claude -p`'s own `--disallowedTools`,
+        so that call still cannot reach the denied tool even when Halo's
+        own (necessarily coarse) decision here allowed the call through."""
         data = input if isinstance(input, dict) else {}
         return data.get("tool") or ""
+
+    def _per_tool_rules_as_mcp_names(self, ctx: ToolContext, prefix: str) -> "list[str]":
+        """finding 12 (W6a): every deny/ask rule targeting THIS connector
+        tool by a SPECIFIC sub-tool name (`connector__<slug>(<tool>)`,
+        never a bare whole-tool rule -- that already denies the call
+        before `run` is ever reached) translated into the inner claude's
+        own `mcp__claude_ai_<Name>__<tool>` naming, for `--disallowedTools`.
+        Best-effort: no permission_engine attached (a bare ToolContext in
+        a test) just means nothing is added."""
+        engine = getattr(ctx, "permission_engine", None)
+        if engine is None:
+            return []
+        names: "list[str]" = []
+        for rule in list(getattr(engine, "deny_rules", None) or []) + list(getattr(engine, "ask_rules", None) or []):
+            if getattr(rule, "tool", None) != self.name or getattr(rule, "kind", None) == "bare":
+                continue
+            value = getattr(rule, "value", None)
+            if isinstance(value, str) and value:
+                name = f"{prefix}__{value}"
+                if name not in names:
+                    names.append(name)
+        return names
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         data = input if isinstance(input, dict) else {}
@@ -133,21 +162,46 @@ class ConnectorTool(Tool):
             prompt_parts.append(f"Use the connector tool named (or ending in) {tool!r}.")
         if args:
             prompt_parts.append(f"Arguments: {json.dumps(args, ensure_ascii=False)}")
+        # finding 12 (W6a): a per-tool deny/ask rule (`connector__<slug>
+        # (<tool>)`) only ever matches when the MODEL happens to pass
+        # `tool` -- a call with just `request` is decided against empty
+        # permission_content and allowed through, after which the inner
+        # claude could reach ANY of this connector's tools via
+        # `--allowedTools {prefix}__*`. Every such rule is now ALSO
+        # pushed into the inner claude's own `--disallowedTools`, and
+        # `--allowedTools` itself narrows to the one named tool whenever
+        # the model DOES give one.
+        disallowed = self._per_tool_rules_as_mcp_names(ctx, prefix)
+        allowed_tools_value = f"{prefix}__{tool}" if tool else f"{prefix}__*"
         full_argv = argv + [
             "-p", "--output-format", "json", "--max-turns", str(self.max_turns),
-            "--allowedTools", f"{prefix}__*",
+            "--allowedTools", allowed_tools_value,
+        ] + (["--disallowedTools", ",".join(disallowed)] if disallowed else []) + [
             "--append-system-prompt", _SYSTEM_PROMPT_TEMPLATE.format(prefix=prefix),
             "\n".join(prompt_parts),
         ]
-        try:
-            proc = subprocess.run(full_argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                    timeout=DEFAULT_WALL_CLOCK_TIMEOUT_S, env=_claude_subprocess_env())
-        except subprocess.TimeoutExpired:
+        # finding 11 (W6a): a plain blocking `subprocess.run(..., timeout=)`
+        # never read `ctx.abort` at all (Esc did nothing for up to 120s on
+        # any connector__* call) and, on timeout, killed only the direct
+        # child -- on Windows that's commonly the npm `claude.CMD` shim,
+        # orphaning the real `claude.exe` underneath it. `tools._proc.
+        # run_streamed` is the SAME runner the Bash tool uses: its own
+        # process group (Job object/CREATE_NEW_PROCESS_GROUP on Windows,
+        # start_new_session on POSIX), polled against `ctx.abort`, with
+        # the WHOLE group killed on abort or timeout.
+        from halo_harness.tools._proc import run_streamed
+        output, exit_code, timed_out, aborted = run_streamed(
+            full_argv, cwd=os.getcwd(), env=_claude_subprocess_env(),
+            timeout_s=DEFAULT_WALL_CLOCK_TIMEOUT_S, abort=ctx.abort,
+        )
+        if aborted:
+            return ToolResult(f"{self.name}: interrupted.", is_error=True)
+        if timed_out:
             return ToolResult(f"{self.name}: timed out after {DEFAULT_WALL_CLOCK_TIMEOUT_S:.0f}s.", is_error=True)
-        except OSError as e:
-            return ToolResult(f"{self.name}: failed to start claude: {e}", is_error=True)
+        if exit_code is None:
+            return ToolResult(f"{self.name}: failed to start claude: {output}", is_error=True)
 
-        text, is_error = _extract_result_text(proc.stdout, proc.returncode)
+        text, is_error = _extract_result_text(output, exit_code)
         blocks = cap_and_spill([{"type": "text", "text": text}], session_dir=getattr(ctx, "session_dir", None),
                                  tool_use_id=getattr(ctx, "tool_use_id", None))
         return ToolResult("".join(b.get("text", "") for b in blocks), is_error=is_error)

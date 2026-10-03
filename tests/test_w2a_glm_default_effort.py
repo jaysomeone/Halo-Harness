@@ -143,6 +143,46 @@ def test_other_chat_families_still_omit_the_field(ctx: Ctx):
         mock.stop()
 
 
+@_scoped
+def test_f6_w6a_set_model_also_lands_settings_xhigh_on_the_default_not_max(ctx: Ctx):
+    """finding 6 (W6a release fix pass): `__init__`'s "a settings-inherited
+    effort this route's schema does not accept lands on the route's own
+    default, not on the clamp map's `max`" rule used to run ONLY at session
+    construction (`test_settings_xhigh_lands_on_the_route_default_not_on_max`
+    above, pinned at init time already) -- a LATER `/model` switch onto
+    that same kind of route skipped it entirely and sent `max`, the exact
+    "GLM pauses" cost this whole file exists to prevent. Starts on a plain
+    OpenRouter chat model (whose own `effort_values_supported` already
+    includes `xhigh` natively, so construction leaves `effort='xhigh'`/
+    `effort_source='settings'` completely untouched) and switches onto GLM
+    via `set_model` -- no mock server needed, since neither call ever
+    drives a real turn."""
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref, resolve_model_profile
+    from halo_harness.providers.stream import ProviderCreds
+
+    fh = build_fake_home()
+    state_dir = Path(tempfile.mkdtemp(prefix="w6a-f6-state-"))
+    start_ref = parse_model_ref("or:deepseek/deepseek-chat")
+    session = Session(
+        cwd=fh["proj"], model_ref=start_ref, model_profile=ModelProfile(),
+        creds=ProviderCreds(base_url="http://example.invalid", api_key="k"), state_dir=state_dir,
+        model_label=start_ref.raw, session_context=SessionContext(cwd=fh["proj"], model_label=start_ref.raw),
+        effort="xhigh", effort_source="settings",
+    )
+    ctx.check(f"construction left xhigh untouched (OpenRouter chat supports it natively), got {session.effort!r}",
+              session.effort == "xhigh")
+    glm_ref = parse_model_ref("dbx:databricks-glm-5-3")
+    glm_profile = resolve_model_profile(glm_ref, state_dir, {})
+    session.set_model(glm_ref, glm_profile)
+    ctx.check(f"settings xhigh lands on the GLM route default (high) after a /model switch too, "
+              f"not max, got {session.effort!r}", session.effort == "high")
+    ctx.check(f"effort_source becomes default, got {session.effort_source!r}", session.effort_source == "default")
+    ctx.check(f"requested value kept for display, got {session.effort_requested!r}",
+              session.effort_requested == "xhigh")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

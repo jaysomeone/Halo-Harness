@@ -659,7 +659,7 @@ class Session:
         agent_type_restriction: Optional[set] = None, abort: Optional[threading.Event] = None,
         agent_id: Optional[str] = None, job_registry: Optional[JobRegistry] = None,
         roles: Optional[dict] = None, cli_roles: Optional[dict] = None,
-        cli_flags: Optional[dict] = None,
+        cli_flags: Optional[dict] = None, settings: Optional[object] = None,
     ):
         # H9: identifies THIS session as a particular sub-agent (passed by
         # `agent/subagent.py`'s `_build_child_session`; the parent/main
@@ -680,6 +680,11 @@ class Session:
         self.small_model_ref = small_model_ref
         self.model_profile = model_profile
         self.creds = creds
+        # finding 3 (W6a): kept so `apply_next_fallback_model` can resolve
+        # a FALLBACK entry's own credentials with the exact resolver
+        # `/model` uses (`headless._resolve_creds(ref, settings)`) instead
+        # of inheriting the CURRENT model's creds regardless of provider.
+        self.settings = settings
         self.state_dir = state_dir
         self.model_label = model_label
         self.effort = effort
@@ -1226,8 +1231,46 @@ class Session:
             profile = resolve_model_profile(ref, self.state_dir, routes)
         except Exception:
             return self.apply_next_fallback_model()  # an unresolvable entry is skipped, not fatal
-        self.set_model(ref, profile, self.creds)
+        # finding 3 (W6a): this used to pass `self.creds` -- the CURRENT
+        # model's own credentials -- unconditionally, so a cross-provider
+        # fallback (an `or:` primary with a `dbx:` fallback, or the
+        # reverse) sent its request to the NEW provider's upstream with
+        # the OLD provider's base_url/key. Resolved here with the exact
+        # same resolver `/model` itself uses (`controller.py`'s own
+        # `_default_model_resolver` calls this identically); an entry
+        # whose provider has no usable credentials at all is skipped, same
+        # treatment as an unresolvable model string just above.
+        from halo_harness.headless import _resolve_creds
+        creds = _resolve_creds(ref, self.settings)
+        if creds is None:
+            return self.apply_next_fallback_model()
+        self.set_model(ref, profile, creds)
         return True
+
+    def _restore_primary_model_after_turn(self) -> None:
+        """finding 4 (W6a): called from `_turn_inner`'s own `finally`, every
+        turn -- a no-op (no snapshot yet, or this turn never switched away
+        from it) in the overwhelming majority of turns. Restores via the
+        real `/model`-equivalent `set_model` (so the route/provider_profile/
+        catalog cap/vision flags all move back together, and the switch is
+        logged like any other) and then puts the snapshotted effort fields
+        back verbatim -- `set_model` has no `effort` parameter of its own;
+        it re-clamps whatever `self.effort` happens to be against the NEW
+        route, which for a restore means the OLD (already-valid-for-this-
+        exact-route) value should win outright, not get re-clamped again."""
+        snap = getattr(self, "_primary_model_snapshot", None)
+        if snap is None:
+            return
+        ref, profile, creds, effort, effort_source = snap
+        if self.model_ref.raw == ref.raw:
+            return
+        try:
+            self.set_model(ref, profile, creds)
+        except Exception:
+            return
+        self.effort = effort
+        self.effort_source = effort_source
+        self.effort_change_note = None
 
     def _try_fallback_after_exhaustion(self, tool_choice, no_tools):
         """W5 (carried from W4a): the actual wiring point for
@@ -3279,7 +3322,22 @@ class Session:
         # `_try_fallback_after_exhaustion` -- a provider failure (repeated
         # 5xx/429 exhaustion) swaps to the next entry here for the rest of
         # the turn, with one `notification` event marking the switch.
-        self._fallback_remaining = list(self.fallback_models)
+        # finding 4 (W6a): never let the model this turn is ALREADY on
+        # appear in its own fallback chain -- a redundant "swap" to the
+        # same model wastes a retry slot instead of actually changing
+        # anything (can happen once the snapshot/restore below is in
+        # place: the primary from a PRIOR turn is always this turn's
+        # starting model).
+        self._fallback_remaining = [m for m in self.fallback_models if m != self.model_ref.raw]
+        # finding 4 (W6a): snapshotted so `_restore_primary_model_after_
+        # turn` (this turn's own `finally`, below) can put the session
+        # back on whatever it was ACTUALLY on when this turn started --
+        # the notice `_try_fallback_after_exhaustion` yields says a
+        # fallback swap lasts "for the rest of this turn", but nothing
+        # ever switched back; a fallback used once used to stay the
+        # session's model for every LATER turn too.
+        self._primary_model_snapshot = (self.model_ref, self.model_profile, self.creds,
+                                         self.effort, self.effort_source)
         self._check_config_change()
         self._loop_breaker = {}
         self._loop_breaker_history = []
@@ -3388,6 +3446,17 @@ class Session:
             # `_turn_body` used to sit stranded here until the NEXT turn's
             # first safe point, applied only after that next turn's own
             # first model reply had already been derived without it).
+            #
+            # finding 4 (W6a): restores the primary model snapshotted at
+            # the top of this method -- runs on EVERY exit from the try
+            # above (a clean finish, an error return, or a GeneratorExit/
+            # other exception re-raised through the `except` blocks just
+            # above), so a fallback used this turn (including a last
+            # entry `apply_next_fallback_model` already `set_model`'d
+            # right before `_try_fallback_after_exhaustion` gave up on it
+            # for `ToolCatalogTooLarge` -- that model was never actually
+            # used for a real request) never survives past this turn.
+            self._restore_primary_model_after_turn()
             self._end_busy_period()
 
     def _end_busy_period(self) -> None:
@@ -3985,17 +4054,30 @@ class Session:
                     # "none: nobody, anything that would prompt is denied
                     # automatically" wording exactly.
                     if self.permission_prompt_tool and self.permission_prompts != "none":
-                        ppt_result = self._ask_permission_prompt_tool(name, tool_input, decision.reason)
-                        if ppt_result == "allow":
+                        ppt_result = self._ask_permission_prompt_tool(name, tool_input, decision.reason, tool_id)
+                        if ppt_result is not None and ppt_result["behavior"] == "allow":
+                            # finding 18 (W6a): `updatedInput` (Claude Code's
+                            # documented reply field, same name/meaning as
+                            # the PermissionRequest hook's own) applies to
+                            # the call that actually runs -- same pattern as
+                            # that hook's own rewrite just above.
+                            if isinstance(ppt_result.get("updatedInput"), dict):
+                                tool_input = ppt_result["updatedInput"]
+                                item["input"] = tool_input
                             item["ready"] = True
                             return item
-                        if ppt_result == "deny":
-                            item["text"] = f"Permission denied by --permission-prompt-tool: {decision.reason}"
+                        if ppt_result is not None and ppt_result["behavior"] == "deny":
+                            # finding 18 (W6a): `message` (the documented
+                            # reply field for a denial) wins when the tool
+                            # actually gave one; falls back to the engine's
+                            # own reason otherwise.
+                            deny_reason = ppt_result.get("message") or decision.reason
+                            item["text"] = f"Permission denied by --permission-prompt-tool: {deny_reason}"
                             item["permission_denial"] = {
                                 "tool_name": name, "tool_input": tool_input,
-                                "reason": decision.reason, "suggested_rule": decision.suggested_rule,
+                                "reason": deny_reason, "suggested_rule": decision.suggested_rule,
                             }
-                            self._fire_permission_denied(name, tool_input, decision.reason)
+                            self._fire_permission_denied(name, tool_input, deny_reason)
                             return item
                         # None (tool missing/unreachable/inconclusive reply):
                         # falls through to the ordinary denial below, same
@@ -4132,26 +4214,41 @@ class Session:
         except Exception:
             pass
 
-    def _ask_permission_prompt_tool(self, name: str, tool_input: dict, reason: str) -> Optional[str]:
+    def _ask_permission_prompt_tool(self, name: str, tool_input: dict, reason: str,
+                                      tool_use_id: str) -> "Optional[dict]":
         """W4a `--permission-prompt-tool <tool>`: `<tool>` is an MCP tool's
         full catalog name (`mcp__<server>__<tool>`, exactly as it appears in
-        `/mcp`/the wire catalog); called with `{tool_name, tool_input,
-        reason}` and expected to reply with `{"behavior": "allow"|"deny"}`
-        JSON (a bare `allow`/`deny` text reply is also accepted). Returns
-        None -- never raises -- for anything else (malformed name, no MCP
-        manager, the call itself erroring, an inconclusive reply): the
-        caller's own existing denial fallback is what the user actually
-        sees for that case, same as having no --permission-prompt-tool at
-        all."""
+        `/mcp`/the wire catalog).
+
+        finding 18 (W6a): Claude Code's own documented contract sends
+        `{tool_name, input, tool_use_id}` and expects `{"behavior":
+        "allow", "updatedInput": {...}}` or `{"behavior": "deny",
+        "message": "..."}` -- this used to send `{tool_name, tool_input,
+        reason}` (a tool written against the documented schema, which
+        requires `input`, errored on every call) and read only
+        `behavior`, silently dropping `updatedInput`/`message`.
+        `tool_input` is kept alongside `input` as an alias for a tool
+        written against this harness's own older shape; `reason` is kept
+        too, as a harmless extra. A bare `allow`/`deny` text reply is
+        still accepted (no `updatedInput`/`message` either way).
+
+        Returns `{"behavior", "updatedInput", "message"}` (the latter two
+        `None` when not given) -- never raises -- or `None` for anything
+        else (malformed name, no MCP manager, the call itself erroring, an
+        inconclusive reply): the caller's own existing denial fallback is
+        what the user actually sees for that case, same as having no
+        --permission-prompt-tool at all."""
         tool_name = self.permission_prompt_tool or ""
         parts = tool_name.split("__", 2)
         if len(parts) != 3 or parts[0] != "mcp" or self.mcp_manager is None:
             return None
         _prefix, server, mcp_tool = parts
         try:
-            result = self.mcp_manager.call(server, mcp_tool,
-                                            {"tool_name": name, "tool_input": tool_input, "reason": reason},
-                                            timeout=30)
+            result = self.mcp_manager.call(
+                server, mcp_tool,
+                {"tool_name": name, "input": tool_input, "tool_input": tool_input,
+                 "tool_use_id": tool_use_id, "reason": reason},
+                timeout=30)
         except Exception:
             return None
         if bool(getattr(result, "isError", False) or getattr(result, "is_error", False)):
@@ -4164,7 +4261,11 @@ class Session:
             except ValueError:
                 parsed = None
         behavior = parsed.get("behavior") if isinstance(parsed, dict) else text.lower()
-        return behavior if behavior in ("allow", "deny") else None
+        if behavior not in ("allow", "deny"):
+            return None
+        return {"behavior": behavior,
+                "updatedInput": parsed.get("updatedInput") if isinstance(parsed, dict) else None,
+                "message": parsed.get("message") if isinstance(parsed, dict) else None}
 
     def _fire_permission_denied(self, name: str, tool_input: dict, reason: str) -> None:
         """H4 scope B: PermissionDenied -- observational only (nothing it
@@ -4372,7 +4473,12 @@ class Session:
         # e.g. tens of KB, never the raw uncapped tool output) text so
         # the pager has something real to show.
         yield events.Event("tool_result", {"id": tool_id, "ok": not tr.is_error, "summary": summary_text[:200],
-                                            "content": summary_text, "images": images_for_event}, turn=turn_no)
+                                            "content": summary_text, "images": images_for_event,
+                                            # finding 9 (W6a): the synchronous "before" snapshot stashed
+                                            # just above the dispatch call, Bash-only (None otherwise) --
+                                            # never logged, UI-event-only, same as `images` just above.
+                                            "bash_shadow_before": item.get("_bash_shadow_before")},
+                           turn=turn_no)
         return content_for_log, tr.is_error
 
     # ---- interactive permission handshake (U2) ---------------------------
@@ -4944,6 +5050,23 @@ class Session:
                 # final result), keeping only a head/tail sample.
                 progress_chunks = _BoundedChunks()
                 item_ctx = dataclasses.replace(ctx, tool_use_id=tool_id, progress_cb=progress_chunks.append)
+                if name == "Bash":
+                    # finding 9 (W6a): the shadow "before" snapshot for a
+                    # Bash call, taken HERE -- synchronously, on THIS (the
+                    # session's own worker) thread, immediately before
+                    # the real command runs. The TUI used to take it on a
+                    # SEPARATE Textual worker thread, scheduled only once
+                    # the drain loop (a different thread, reacting to this
+                    # item's own `tool_use_ready` event) got around to it
+                    # -- this thread dispatches the real command right
+                    # after that yield regardless of when (or whether) that
+                    # ever happened, so a fast command could finish before
+                    # that worker even started, making "before" identical
+                    # to "after" and nothing was ever recorded. Carried to
+                    # the TUI through the `tool_result` event below
+                    # (`_finalize_tool_result`), never through the log.
+                    from halo_harness.shadow import git_status_dirty_paths
+                    item["_bash_shadow_before"] = git_status_dirty_paths(self.cwd)
                 item["result"] = self.tool_registry.dispatch(name, item["input"], item_ctx)
                 for chunk in progress_chunks.chunks:
                     yield events.Event("tool_progress", {"id": tool_id, "name": name, "text": chunk}, turn=turn_no)
@@ -5089,6 +5212,21 @@ class Session:
             self.creds = creds
         self.model_label = model_ref.raw
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
+        # parity gap (W6a): `--betas`'s own `anthropic-beta` header was
+        # computed ONCE, at construction time (`headless.build_session`),
+        # gated on the STARTING route alone -- `set_model` never
+        # recomputed it, so a later `/model` switch AWAY from an
+        # Anthropic-family route kept sending it to OpenRouter/Databricks-
+        # chat (the exact cross-route leak part 10 fixed for session
+        # START only), and a switch INTO one never gained it. Recomputed
+        # here with the identical gate `build_session` uses, on every
+        # switch.
+        self.extra_headers = {k: v for k, v in self.extra_headers.items() if k != "anthropic-beta"}
+        if self.cli_flags.get("betas"):
+            is_anthropic_family = model_ref.provider == "anthropic" or (
+                model_ref.provider == "databricks" and model_ref.dialect == "anthropic-passthrough")
+            if is_anthropic_family:
+                self.extra_headers["anthropic-beta"] = ",".join(self.cli_flags["betas"])
         # item 22 remainder: same state_dir threading as __init__ above --
         # a /model switch onto a Databricks endpoint with its own learned
         # rule picks it up immediately, not just a freshly-started session.
@@ -5120,6 +5258,22 @@ class Session:
         from halo_harness.providers.request import _anthropic_model_supports_adaptive_thinking
         if self.effort is not None:
             clamped = clamp_effort(self.effort, self.provider_profile)
+            # finding 6 (W6a): mirrors __init__'s own special case (same
+            # condition, same override) -- an effort INHERITED FROM
+            # SETTINGS (never an explicit --effort/`/effort`) that this
+            # route's schema does not accept lands on the route's own
+            # default, not on the clamp map's most-expensive answer.
+            # __init__ only ever ran this once, at session start; a later
+            # `/model` switch onto that same kind of route (Claude Code's
+            # settings `effortLevel: xhigh` carried onto Databricks GLM)
+            # skipped it entirely and sent `max`, the exact "GLM pauses"
+            # cost part 2 fixed for session start alone.
+            if (self.provider_profile.default_effort_when_unset and self.effort_source == "settings"
+                    and self.effort.lower() not in self.provider_profile.effort_values_supported
+                    and self.provider_profile.reasoning_default_effort):
+                self.effort_requested = self.effort
+                clamped = self.provider_profile.reasoning_default_effort
+                self.effort_source = "default"
             if clamped != self.effort:
                 self.effort_change_note = f"Effort level adjusted to '{clamped}' for {model_ref.raw} (was '{self.effort}')"
                 # Halo 2.0.1 W2a: the value carried over from the OLD route

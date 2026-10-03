@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import threading
 import time
 import uuid
@@ -169,11 +170,30 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     # itself fails -- a sub-agent must still run even when isolation isn't
     # available.
     child_cwd = parent.cwd
+    # finding 14 (W6a): the worktree path THIS call created (None when
+    # isolation isn't requested, or creation fell back to the parent's
+    # own cwd) -- stashed on `child` below so `run_agent_call`'s own
+    # completion handling (both the foreground and background paths) can
+    # remove a CLEAN tree (firing WorktreeRemoved) or surface a DIRTY
+    # one's path/branch in the Agent result instead of silently
+    # stranding it under `~/.halo/worktrees`.
+    isolation_worktree_path = None
+    isolation_worktree_branch = None
     if spec.isolation == "worktree":
         from halo_harness.worktree import create_worktree
         wt_path, wt_error = create_worktree(parent.cwd, f"agent-{agent_id}", state_dir=parent.state_dir)
         if wt_path is not None:
             child_cwd = wt_path
+            isolation_worktree_path = wt_path
+            try:
+                branch_result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(wt_path),
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                )
+                if branch_result.returncode == 0:
+                    isolation_worktree_branch = branch_result.stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
         else:
             log.warning("sub-agent %s isolation:worktree could not create a worktree (%s) -- "
                         "running in the parent's own cwd instead", spec.name, wt_error)
@@ -229,17 +249,23 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     )
 
     permission_mode = spec.permission_mode or parent.permission_engine.mode
+    # finding 14 (W6a): both of these used to root at `parent.cwd`
+    # unconditionally -- for an `isolation: worktree` child (`child_cwd`
+    # above, the worktree path), every edit landed OUTSIDE the engine's
+    # own working directory: asked for in default/acceptEdits mode, and
+    # flatly denied in print/background mode, no matter what the child
+    # actually did.
     child_engine = PermissionEngine(
         deny_rules=parent.permission_engine.deny_rules, ask_rules=parent.permission_engine.ask_rules,
         allow_rules=list(parent.permission_engine.allow_rules), mode=permission_mode,
-        cwd=parent.cwd, extra_dirs=parent.permission_engine.extra_dirs,
+        cwd=child_cwd, extra_dirs=parent.permission_engine.extra_dirs,
         print_mode=parent.permission_engine.print_mode,
     )
 
     hook_runner = None
     if parent.hook_runner is not None:
         hook_runner = HookRunner(
-            parent.hook_runner.hooks_by_event, cwd=parent.cwd, session_id=child_log.session_id,
+            parent.hook_runner.hooks_by_event, cwd=child_cwd, session_id=child_log.session_id,
             transcript_path=str(child_log.path), effective_env=parent.hook_runner.effective_env,
             permission_mode=permission_mode, effort=(spec.effort or parent.effort),
             mcp_manager=parent.mcp_manager, prompt_caller=parent.hook_runner.prompt_caller,
@@ -297,9 +323,22 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         # again once this call returns -- see loop.py's own `job_registry=`
         # param docstring for the full failure mode this closes.
         job_registry=parent.job_registry,
+        # finding 14 (W6a): the ONLY purpose of this is so `Session.
+        # __init__`'s own (already-built, already-tested) `_fire_
+        # worktree_created` fires for THIS child too -- it reads exactly
+        # this key and no other (a child never gets cli_flags otherwise;
+        # every OTHER cli_flags-driven behavior stays off, unchanged).
+        cli_flags=({"_worktree_created_path": str(isolation_worktree_path)}
+                    if isolation_worktree_path is not None else None),
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = child._call_model_for_hook
+    # finding 14 (W6a): read back by `run_agent_call`'s own completion
+    # handling (foreground and background alike) once this child's run
+    # ends, to remove a CLEAN tree or surface a DIRTY one's path/branch.
+    child._isolation_worktree_path = isolation_worktree_path
+    child._isolation_worktree_branch = isolation_worktree_branch
+    child._isolation_worktree_repo_root = parent.cwd
     child.interactive = False  # deliberately NEVER True -- ExitPlanMode stays out of scope (see module docstring)
     # H5c finding 8 / W4a: a live, answerable permission card (and, as of
     # W4a, AskUserQuestion too) for ANY child of an interactive parent,
@@ -502,6 +541,54 @@ def _wrap_task_result(text: str, task_id: str) -> str:
     return f'<task_result task_id="{task_id}">\n{text}\n</task_result>'
 
 
+def _finalize_child_isolation_worktree(child) -> "Optional[str]":
+    """finding 14 (W6a): the other half of `isolation: worktree` -- called
+    once THIS child's run has fully ended (foreground and background
+    alike). A no-op (`None`) when this child never got its own worktree
+    (`_isolation_worktree_path` is None -- isolation wasn't requested, or
+    creation fell back to the parent's own cwd). A CLEAN tree (`git
+    status` empty) is removed -- firing WorktreeRemoved -- and its own
+    `halo-worktree-*` branch deleted with it; a DIRTY one (the point of
+    isolating it in the first place, most of the time) is left alone, and
+    this returns a note naming its path/branch for the caller to append
+    to the Agent result text, so the child's own work is never silently
+    stranded under `~/.halo/worktrees` with no way for the user to find
+    it again. Never raises."""
+    wt_path = getattr(child, "_isolation_worktree_path", None)
+    if wt_path is None:
+        return None
+    branch = getattr(child, "_isolation_worktree_branch", None)
+    repo_root = getattr(child, "_isolation_worktree_repo_root", None) or wt_path.parent
+    try:
+        from halo_harness.shadow import git_status_dirty_paths
+        dirty = git_status_dirty_paths(wt_path)
+    except Exception:
+        dirty = None
+    if dirty:  # a real, non-empty set of uncommitted changes
+        return (f"(this sub-agent's isolated worktree has uncommitted changes and was kept at "
+                f"{wt_path}{f' on branch {branch}' if branch else ''} -- remove it yourself with "
+                f"`halo worktree rm {wt_path}` once you're done with it)")
+    if dirty is None:  # could not determine (not a repo somehow, git unreachable, ...) -- never guess
+        return f"(this sub-agent's isolated worktree at {wt_path} was kept -- its status could not be checked)"
+    try:
+        from halo_harness.worktree import remove_worktree
+        removed = remove_worktree(wt_path, repo_root_hint=repo_root)
+    except Exception:
+        removed = False
+    if removed:
+        try:
+            child._fire_worktree_removed(wt_path)
+        except Exception:
+            pass
+        if branch:
+            try:
+                subprocess.run(["git", "-C", str(repo_root), "branch", "-D", branch],
+                                capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return None
+
+
 def _hydrate_tasks_from_disk(runtime: AgentRuntime) -> None:
     """H9 whole-tree review finding 27 (task-map persistence half):
     `runtime.tasks` is in-memory only, so a fresh process (a `-c` resume,
@@ -612,6 +699,20 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
         background=background, role_override=role_override,
     )
+    # finding 10 (W6a): `_build_child_session` sets `_subagent_live_asks`
+    # from `parent.interactive` ALONE, with no way to know whether THIS
+    # caller actually gave it a live channel to forward an ask through --
+    # a `context: fork`/`agent` Skill (tools/skill.py) calls this directly
+    # with no `on_event` at all, so a foreground child of an interactive
+    # parent got the live/blocking ask path (`_await_permission_decision`/
+    # `_await_reply`) with its `permission_request`/`question` event
+    # reaching no live consumer whatsoever -- the turn hung until Esc,
+    # nothing ever visibly asked. A BACKGROUND child is unaffected: it has
+    # its OWN separate live-ask channel (`_bg_run`'s own `on_event`, built
+    # below from `parent._event_sink`), unrelated to this `on_event`
+    # parameter.
+    if not background and on_event is None:
+        child._subagent_live_asks = False
     # H9 whole-tree review finding 13: captured BEFORE the child ever makes
     # a model call -- a resumed child's own log already carries every PRIOR
     # invocation's "usage" nodes (reloaded from disk); only nodes appended
@@ -741,6 +842,9 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 status_suffix = f" [{'; '.join(status_bits)}]" if status_bits else ""
                 if is_error:
                     text = f"(this sub-agent may not have finished normally)\n{text}"
+                worktree_note = _finalize_child_isolation_worktree(child)
+                if worktree_note:
+                    text = f"{text}\n\n{worktree_note}"
                 notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id}){status_suffix}]\n"
                           f"{_wrap_task_result(text, new_task_id)}")
                 with parent._agent_notices_lock:
@@ -805,6 +909,9 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
 
     if is_error:
         text = f"[sub-agent did not finish normally ({abnormal_reason}) -- this may be a stale/partial answer]\n{text}"
+    worktree_note = _finalize_child_isolation_worktree(child)
+    if worktree_note:
+        text = f"{text}\n\n{worktree_note}"
     wrapped = _wrap_task_result(text, new_task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
@@ -871,6 +978,9 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment
     if is_error:
         text = f"[sub-agent did not finish normally ({abnormal_reason}) -- this may be a stale/partial answer]\n{text}"
+    worktree_note = _finalize_child_isolation_worktree(child)
+    if worktree_note:
+        text = f"{text}\n\n{worktree_note}"
     wrapped = _wrap_task_result(text, task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)

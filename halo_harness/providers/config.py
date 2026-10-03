@@ -364,6 +364,35 @@ def _settings_fallback_value(env: dict, key: str) -> Optional[str]:
     return load_settings_env_chain(Path.cwd()).get(key)
 
 
+def _settings_fallback_base_url(env: dict, name: str, default: str) -> str:
+    """finding 5 (W6a): companion to `_settings_fallback_value` above, for
+    a base-URL field instead of a required credential. `env_compat` only
+    ever matches a HALO_/BRIDGE_/ROLO_CLAUDE_-prefixed override (the
+    harness's own knob-naming convention) against whatever `env` it was
+    given -- it had no settings-chain fallback of its own, unlike the
+    MATCHING credential lookup (`_settings_fallback_value`) just above. A
+    gateway setup's key could therefore resolve from a trusted project/
+    user settings.json `env` block while its own base URL silently kept
+    the real provider's default host, sending that gateway key to
+    api.anthropic.com/openrouter.ai instead. Same gate as `_settings_
+    fallback_value`: only a BARE `os.environ` call ever consults the
+    settings chain at all (a caller that already handed in a real
+    session's merged `effective_env` is unaffected, matching Databricks'
+    own settings-chain re-derivation gate exactly) -- and, like that
+    function, this reads the settings chain's BARE name directly (never
+    bare `os.environ`'s own un-prefixed name, which stays reserved for
+    Databricks' identically-named Claude-Code-compatible vars, per
+    `resolve_anthropic`'s own docstring)."""
+    value = env_compat(name, env)
+    if value:
+        return value
+    if env is os.environ:
+        value = load_settings_env_chain(Path.cwd()).get(name)
+        if value:
+            return value
+    return default
+
+
 @dataclass
 class OrConfig:
     """OpenRouter configuration."""
@@ -383,12 +412,19 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     settings-env chain (`_settings_fallback_value`), same as `resolve_
     databricks` already did -- a key living only in a trusted project/user
     settings.json `env` block is no longer invisible to auto-detection.
+
+    finding 5 (W6a): `base_url` gets the SAME settings-chain fallback now
+    (`_settings_fallback_base_url`) -- it used to come from `env_compat`
+    alone (no settings-chain awareness at all), so an OpenRouter-proxy
+    key resolved from settings while its own base URL silently kept
+    `https://openrouter.ai/api/v1`, sending that proxy key straight to
+    the real OpenRouter API instead.
     """
     env = env if env is not None else os.environ
     api_key = _settings_fallback_value(env, "OPENROUTER_API_KEY")
     if not api_key:
         return None
-    base_url = env_compat("OPENROUTER_BASE_URL", env, "https://openrouter.ai/api/v1")
+    base_url = _settings_fallback_base_url(env, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     return OrConfig(api_key=api_key, base_url=base_url)
 
 
@@ -408,11 +444,16 @@ def resolve_openrouter_management_key(env: dict | None = None) -> "str | None":
 class AntConfig:
     """Direct (non-Databricks, non-OpenRouter) Anthropic API configuration
     (H5 scope C's `ant:` provider): `ANTHROPIC_API_KEY` against
-    `api.anthropic.com` directly. Deliberately never reads
-    `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` -- those are Databricks'
-    (or another gateway's) own Claude-Code-compatible env vars at rolo's
-    work box, and conflating them here would silently point `ant:` at the
-    wrong host for whoever has that pair set."""
+    `api.anthropic.com` directly. Deliberately never reads bare
+    `os.environ`'s own `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` --
+    those are Databricks' (or another gateway's) own Claude-Code-
+    compatible env vars at rolo's work box, and conflating them here
+    would silently point `ant:` at the wrong host for whoever has that
+    pair set in their shell. finding 5 (W6a): a trusted project/user
+    settings.json `env` block's own (bare-named) `ANTHROPIC_BASE_URL` is
+    a different, explicitly-scoped signal -- not ambient shell state --
+    so `resolve_anthropic` DOES fall back to it, same as it already did
+    for `ANTHROPIC_API_KEY`."""
     api_key: str
     base_url: str = "https://api.anthropic.com"
 
@@ -425,12 +466,19 @@ def resolve_anthropic(env: dict | None = None) -> AntConfig | None:
     env chain the same way `resolve_openrouter`/`resolve_databricks` do
     (`_settings_fallback_value`) -- never collides with Databricks' own use
     of `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, since this reads
-    `ANTHROPIC_API_KEY` specifically."""
+    `ANTHROPIC_API_KEY` specifically.
+
+    finding 5 (W6a): `base_url` now gets the SAME settings-chain fallback
+    (`_settings_fallback_base_url`) -- it used to come from `env_compat`
+    alone, which never consults the settings chain at all, so a gateway
+    key resolved from a trusted settings.json `env` block while its own
+    base URL silently kept `https://api.anthropic.com`, sending that
+    gateway key to the real Anthropic API instead."""
     env = env if env is not None else os.environ
     api_key = _settings_fallback_value(env, "ANTHROPIC_API_KEY")
     if not api_key:
         return None
-    base_url = env_compat("ANTHROPIC_BASE_URL", env, "https://api.anthropic.com")
+    base_url = _settings_fallback_base_url(env, "ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     return AntConfig(api_key=api_key, base_url=base_url)
 
 

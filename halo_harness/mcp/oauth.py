@@ -194,3 +194,40 @@ def run_authorization_flow(*, server_name: str, server_url: str, oauth_cfg: dict
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
         return None, f"token endpoint did not return an access_token: {tokens!r}"
     return tokens, None
+
+
+def refresh_tokens(server_name: str, stored: dict, *, oauth_cfg: dict,
+                    server_url: str = "") -> "tuple[Optional[dict], Optional[str]]":
+    """finding 13 (W6a): `grant_type=refresh_token` against the SAME token
+    endpoint `run_authorization_flow` uses -- `(new_tokens_or_None,
+    error_or_None)`, saving the new tokens on success (same file
+    `load_tokens` reads back). `None`, "no refresh_token on file" when
+    `stored` (whatever `load_tokens(server_name)` returned) has none --
+    a server that never issued one needs a full `halo mcp login` instead,
+    never a silent no-op. Never raises."""
+    refresh_token = stored.get("refresh_token") if isinstance(stored, dict) else None
+    if not refresh_token:
+        return None, "no refresh_token on file for this server"
+    _auth_ep, token_ep, err = discover_endpoints(server_url, oauth_cfg)
+    if err:
+        return None, err
+    if not token_ep:
+        return None, "no token endpoint configured or discoverable for this server"
+    client_id = oauth_cfg.get("client_id") or "halo-mcp-client"
+    body = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id}
+    if oauth_cfg.get("client_secret"):
+        body["client_secret"] = oauth_cfg["client_secret"]
+    try:
+        req = Request(token_ep, data=urlencode(body).encode("ascii"),
+                      headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
+        with urlopen(req, timeout=15.0) as resp:
+            tokens = json.loads(resp.read().decode("utf-8"))
+    except (URLError, HTTPError, ValueError, TimeoutError) as e:
+        return None, f"token refresh failed: {type(e).__name__}: {e}"
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        return None, f"token endpoint did not return an access_token on refresh: {tokens!r}"
+    # A refresh response commonly omits `refresh_token` (the old one stays
+    # valid) -- carried over so a LATER refresh still has one to use.
+    tokens.setdefault("refresh_token", refresh_token)
+    save_tokens(server_name, tokens)
+    return tokens, None

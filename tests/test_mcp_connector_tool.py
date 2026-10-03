@@ -113,11 +113,57 @@ def test_run_spawns_the_documented_command_line_and_passes_through_the_result(ct
         call = next(l for l in lines if "--output-format" in l and "json" in l)
         ctx.check(f"-p present, got {call}", "-p" in call)
         ctx.check("--max-turns 7", call[call.index("--max-turns") + 1] == "7")
-        ctx.check("--allowedTools names this connector's own wire prefix only",
-                  call[call.index("--allowedTools") + 1] == "mcp__claude_ai_Claude_Docs__*")
+        # finding 12 (W6a): `--allowedTools` now NARROWS to the one named
+        # sub-tool whenever the call gives `tool` (this call does: "batch")
+        # -- it only stays the wildcard prefix when `tool` is omitted.
+        ctx.check("--allowedTools names this connector's own wire prefix AND tool",
+                  call[call.index("--allowedTools") + 1] == "mcp__claude_ai_Claude_Docs__batch")
         system_prompt = call[call.index("--append-system-prompt") + 1]
         ctx.check(f"system prompt names the same prefix, got {system_prompt!r}",
                   "mcp__claude_ai_Claude_Docs" in system_prompt and "tool proxy" in system_prompt.lower())
+
+
+@test
+def test_f12_w6a_per_tool_deny_rule_reaches_disallowed_tools_when_tool_is_omitted(ctx: Ctx):
+    """finding 12 (W6a): `connector__claude_docs(batch)` only ever matched
+    Halo's own permission engine when the call gave `tool` -- a call with
+    just `request` was decided against EMPTY `permission_content` and
+    allowed straight through, after which the inner claude could reach
+    ANY of this connector's tools via `--allowedTools {prefix}__*`. Every
+    per-tool deny/ask rule targeting this connector must now ALSO reach
+    the inner claude's own `--disallowedTools`, regardless of whether
+    `tool` was given."""
+    from halo_harness.permissions import PermissionEngine, parse_rule
+
+    with _Env():
+        home = Path(tempfile.mkdtemp(prefix="connector-tool-home-f12-"))
+        os.environ["BRIDGE_TEST_HOME"] = str(home)
+        os.environ["HALO_CLAUDE_EXE"] = FAKE_CLAUDE
+        argv_log = home / "argv.log"
+        os.environ["FAKE_CLAUDE_CC_ARGV_LOG"] = str(argv_log)
+
+        deny_rule = parse_rule("connector__claude_docs(batch)", action="deny")
+        engine = PermissionEngine(deny_rules=[deny_rule], mode="auto", cwd=REPO_DIR)
+        # Halo's OWN top-level decision: a call with no `tool` is allowed
+        # through (empty permission_content never matches "batch") --
+        # exactly the gap this finding closes downstream of here.
+        decision = engine.decide("connector__claude_docs", {"request": "list my docs"}, tool=ConnectorTool(_CLAUDE_DOCS))
+        ctx.check(f"Halo's own coarse decision allows it through (the documented gap), got {decision.action!r}",
+                  decision.action == "allow")
+
+        tool = ConnectorTool(_CLAUDE_DOCS)
+        ctx_obj = ToolContext(cwd=REPO_DIR, permission_engine=engine)
+        result = tool.run({"request": "list my docs"}, ctx_obj)
+        ctx.check(f"not an error (the inner claude call itself still ran), got {result.content!r}",
+                  result.is_error is False)
+
+        lines = [json.loads(l) for l in argv_log.read_text(encoding="utf-8").splitlines() if l.strip()]
+        call = next(l for l in lines if "--output-format" in l and "json" in l)
+        ctx.check(f"--allowedTools stays the wildcard prefix (no tool was named), got {call}",
+                  call[call.index("--allowedTools") + 1] == "mcp__claude_ai_Claude_Docs__*")
+        ctx.check(f"--disallowedTools carries the per-tool deny rule, got {call}",
+                  "--disallowedTools" in call
+                  and call[call.index("--disallowedTools") + 1] == "mcp__claude_ai_Claude_Docs__batch")
 
 
 @test

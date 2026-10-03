@@ -556,12 +556,14 @@ prints it as a trailing `[next: ...]` line, `json` adds a
 only when you ask for it.
 
 #### `--restricted`
-What: removes `Bash`/`PowerShell`/`WebFetch` from the tool catalog unless
-named explicitly in `--tools`, and ignores `--dangerously-skip-permissions`
-(falls back to the default permission mode with a notice). Claude Code's
-own additional "ignores user/project/local settings files" and "only a
-person may approve settings/git/tool-config writes" rules are not modelled
-this round.
+What: a read-only tool set -- removes `Bash`/`PowerShell`/`WebFetch`/
+`Edit`/`Write`/`NotebookEdit` and every MCP server tool from the catalog
+unless named explicitly in `--tools`, and ignores
+`--dangerously-skip-permissions` (falls back to the default permission mode
+with a notice). Also honored by an interactive launch now, not only `-p`.
+Claude Code's own additional "ignores user/project/local settings files"
+and "only a person may approve settings/git/tool-config writes" rules are
+not modelled this round.
 
 #### `--system-prompt-snapshot {on,off}`
 What: `on` (the default either way): halo already computes the system

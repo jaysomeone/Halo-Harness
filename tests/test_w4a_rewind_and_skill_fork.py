@@ -8,6 +8,7 @@
   existing sub-agent machinery instead of the old "not implemented" error.
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -109,8 +110,8 @@ def test_bash_shadow_captures_both_a_new_file_and_a_modified_tracked_file(ctx: C
     already-tracked one gets BOTH captured into the same shadow step, but
     only the brand-new one is marked `created` (so a later undo restores
     the tracked file's PRIOR content instead of deleting it)."""
-    from halo_harness.shadow import ShadowStore
-    from halo_harness.tui.dispatch import _maybe_record_bash_shadow_step, _start_bash_shadow_before
+    from halo_harness.shadow import ShadowStore, git_status_dirty_paths
+    from halo_harness.tui.dispatch import _maybe_record_bash_shadow_step
 
     class _FakeController:
         pass
@@ -136,14 +137,18 @@ def test_bash_shadow_captures_both_a_new_file_and_a_modified_tracked_file(ctx: C
     shadow_dir = Path(tempfile.mkdtemp(prefix="w5-bashshadow-store-"))
     app = _FakeApp(repo, shadow_dir)
 
-    _start_bash_shadow_before(app, "tool_1")
+    # finding 9 (W6a): `before` is now taken synchronously by the CALLER
+    # (agent/loop.py, on the session worker, right before the real command
+    # runs) and handed to `_maybe_record_bash_shadow_step` directly --
+    # simulated here with a plain direct call, no separate worker/race.
+    before = git_status_dirty_paths(repo)
     # The "Bash command" this step represents: modifies the tracked file
     # AND creates a new one, exactly the combination v1 (untracked-only)
     # could never fully capture.
     tracked.write_text("v2", encoding="utf-8")
     new_file = repo / "brand_new.txt"
     new_file.write_text("hi", encoding="utf-8")
-    _maybe_record_bash_shadow_step(app, "tool_1", "Bash", {"command": "echo"}, True)
+    _maybe_record_bash_shadow_step(app, "Bash", {"command": "echo"}, True, before)
 
     store = ShadowStore(shadow_dir)
     ctx.check(f"exactly one shadow step was recorded, got {store.steps}", len(store.steps) == 1)
@@ -164,6 +169,139 @@ def test_bash_shadow_captures_both_a_new_file_and_a_modified_tracked_file(ctx: C
     result = store.rewind_to(step["id"])
     ctx.check(f"rewind restored tracked.txt's own v2 content, got {tracked.read_text(encoding='utf-8')!r}",
               result is not None and tracked.read_text(encoding="utf-8") == "v2")
+
+
+@test
+def test_f9_w6a_git_status_dirty_paths_from_a_subdirectory_resolves_correctly(ctx: Ctx):
+    """finding 9 (W6a): `git status --porcelain` paths are relative to the
+    REPO ROOT, never to `cwd` -- joining straight to `cwd` (the old code)
+    doubled the leading segment for any subdirectory cwd (`sub/new.txt`
+    under `cwd=<repo>/sub` became `<repo>/sub/sub/new.txt`), so nothing a
+    command created from a subdirectory was ever actually found."""
+    from halo_harness.shadow import git_status_dirty_paths
+
+    repo = Path(tempfile.mkdtemp(prefix="w6a-f9-repo-"))
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "README.md").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+    sub = repo / "sub"
+    sub.mkdir()
+    (sub / "new.txt").write_text("hi", encoding="utf-8")
+
+    dirty = git_status_dirty_paths(sub)
+    expected = str((sub / "new.txt").resolve())
+    ctx.check(f"the real path is reported (not doubled), got {dirty}", dirty.get(expected) == "??")
+    ctx.check(f"no doubled sub{os.sep}sub segment leaked into any reported path, got {dirty}",
+              not any((f"sub{os.sep}sub") in p for p in dirty))
+
+
+@test
+def test_f8_w6a_bash_shadow_round_trips_a_binary_file_byte_exact(ctx: Ctx):
+    """finding 8 (W6a): a Bash command that writes a BINARY file (a PNG
+    here) must round-trip byte-exact through the shadow store -- reading
+    it as text with `errors="replace"` (the old, unconditional behavior)
+    mangled it before `record_step` ever got a chance to store it right,
+    and `rewind_to` used to re-mangle it a second time on the way back out
+    even if the first mangling were somehow fixed."""
+    from halo_harness.shadow import ShadowStore, git_status_dirty_paths
+    from halo_harness.tui.dispatch import _maybe_record_bash_shadow_step
+
+    class _FakeController:
+        pass
+
+    class _FakeApp:
+        def __init__(self, cwd, shadow_dir):
+            self.cwd = cwd
+            self.controller = _FakeController()
+            self.controller.shadow_dir = shadow_dir
+
+        def run_worker(self, fn, thread=False, name=None):
+            fn()
+
+    repo = Path(tempfile.mkdtemp(prefix="w6a-f8-repo-"))
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "README.md").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    shadow_dir = Path(tempfile.mkdtemp(prefix="w6a-f8-store-"))
+    app = _FakeApp(repo, shadow_dir)
+
+    before = git_status_dirty_paths(repo)
+    png = repo / "image.png"
+    # A tiny but genuinely binary payload: a PNG signature plus NUL and
+    # high bytes that are NOT valid UTF-8 on their own.
+    original_bytes = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) + b"\x00\xff\xfe\x00more binary data"
+    png.write_bytes(original_bytes)
+    _maybe_record_bash_shadow_step(app, "Bash", {"command": "echo"}, True, before)
+
+    store = ShadowStore(shadow_dir)
+    ctx.check(f"exactly one shadow step was recorded, got {store.steps}", len(store.steps) == 1)
+    step = store.steps[0]
+    ctx.check(f"the binary file is captured, got {step['files']}", str(png.resolve()) in step["files"])
+
+    png.write_bytes(b"corrupted after the shadow step")
+    result = store.rewind_to(step["id"])
+    ctx.check(f"rewind restored the ORIGINAL bytes exactly, got {len(png.read_bytes())} bytes "
+              f"(wanted {len(original_bytes)})", result is not None and png.read_bytes() == original_bytes)
+
+
+@test
+def test_f8_w6a_bash_shadow_round_trips_crlf_text_without_doubling_it(ctx: Ctx):
+    """Regression pin for a real bug this round's own first attempt at
+    finding 8 introduced: a text file with NATIVE CRLF line endings (an
+    ordinary file on Windows, or any file that just happens to use them)
+    read via `read_bytes()` (never `read_text()`, so a BINARY file round-
+    trips byte-exact too) carries a literal "\\r\\n" in the resulting
+    string -- writing that back out through `write_text` (which itself
+    translates every bare "\\n" to "\\r\\n" on Windows) doubled the "\\r"
+    ("\\r\\n" -> "\\r\\r\\n"). The whole pipeline must stay byte-exact
+    with NO text-mode translation anywhere in it."""
+    from halo_harness.shadow import ShadowStore, git_status_dirty_paths
+    from halo_harness.tui.dispatch import _maybe_record_bash_shadow_step
+
+    class _FakeController:
+        pass
+
+    class _FakeApp:
+        def __init__(self, cwd, shadow_dir):
+            self.cwd = cwd
+            self.controller = _FakeController()
+            self.controller.shadow_dir = shadow_dir
+
+        def run_worker(self, fn, thread=False, name=None):
+            fn()
+
+    repo = Path(tempfile.mkdtemp(prefix="w6a-f8-crlf-repo-"))
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "README.md").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    shadow_dir = Path(tempfile.mkdtemp(prefix="w6a-f8-crlf-store-"))
+    app = _FakeApp(repo, shadow_dir)
+
+    before = git_status_dirty_paths(repo)
+    doc = repo / "doc.txt"
+    original_bytes = b"line one\r\nline two\r\n"  # NATIVE CRLF, written raw (never via write_text)
+    doc.write_bytes(original_bytes)
+    _maybe_record_bash_shadow_step(app, "Bash", {"command": "echo"}, True, before)
+
+    store = ShadowStore(shadow_dir)
+    ctx.check(f"exactly one shadow step was recorded, got {store.steps}", len(store.steps) == 1)
+    step = store.steps[0]
+
+    doc.write_bytes(b"corrupted after the shadow step")
+    result = store.rewind_to(step["id"])
+    ctx.check(f"rewind restored the ORIGINAL CRLF bytes exactly (never doubled), got {doc.read_bytes()!r} "
+              f"(wanted {original_bytes!r})", result is not None and doc.read_bytes() == original_bytes)
 
 
 @test

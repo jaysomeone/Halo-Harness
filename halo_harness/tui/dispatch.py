@@ -82,8 +82,6 @@ async def _mount_tool_card(app, data: dict) -> None:
             except OSError:
                 pre_exists = None
     app._pending_tool_inputs[tool_id] = (name, input_data, pre_exists)
-    if name == "Bash" and isinstance(input_data, dict):
-        _start_bash_shadow_before(app, tool_id)
     # review finding 5: repair can hand a REJECTED tool_use through to
     # `tool_use_ready` with its raw, un-coerced input (e.g. `old_string:
     # null`) -- DiffView's `.splitlines()` on a non-str kills the whole
@@ -109,14 +107,39 @@ def _as_text(value) -> str:
     return str(value)
 
 
-def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
+def _read_for_shadow(path: "Path"):
+    """finding 8 (W6a): a binary file (an image, an archive, build output)
+    a Bash command created or modified must round-trip byte-exact through
+    `/rewind`/`/undo`/`/redo` -- reading it as text with `errors="replace"`
+    (the old, unconditional behavior) mangled it the moment it was first
+    captured, before `ShadowStore` even got a chance to store it right.
+    Read as text only when the raw bytes actually ARE valid UTF-8 with no
+    NUL byte; otherwise the raw `bytes` are kept, for `ShadowStore.
+    record_step`/`_restore_commit` to write back with `write_bytes`. `None`
+    (skip this file) only when it can't be read as a file at all."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" not in raw:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return raw
+
+
+def _maybe_record_shadow_step(app, tool_id, ok: bool, bash_shadow_before=None) -> None:
     """U5 scope B / W4a: every successful Write/Edit/NotebookEdit records a
     git-shadow snapshot of the file's RESULTING (post-edit) content, keyed
     to this step, so `/rewind`/`/undo`/`/redo` has something to restore to
     -- `created=[path]` when `_mount_tool_card` saw it did NOT exist before
     this call (so undo past this step deletes it, W4a). Bash is handled
-    separately by `_maybe_record_bash_shadow_step` (a git-status diff
-    around the call, off the UI thread). Best-effort throughout: no real
+    separately by `_maybe_record_bash_shadow_step`, from `bash_shadow_
+    before` (finding 9 (W6a): the session worker's own SYNCHRONOUS
+    pre-dispatch snapshot, carried here through the `tool_result` event --
+    see `agent/loop.py`'s matching comment -- never a separate Textual
+    worker racing the real command). Best-effort throughout: no real
     session attached (FakeController), an unreadable file, ... all silently
     skip -- a shadow snapshot is a convenience, never part of the
     conversation itself, so it must never turn into an error note."""
@@ -126,7 +149,7 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
         return
     name, input_data, pre_exists = info
     if name == "Bash":
-        _maybe_record_bash_shadow_step(app, tool_id, name, input_data, ok)
+        _maybe_record_bash_shadow_step(app, name, input_data, ok, bash_shadow_before)
         return
     if not ok:
         return
@@ -142,7 +165,9 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
         store = store_for_controller(app.controller)
         if store is None:
             return
-        content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        content = _read_for_shadow(Path(file_path))
+        if content is None:
+            return
         created = [file_path] if pre_exists is False else []
         store.record_step({file_path: content}, label=f"{name}({Path(file_path).name})", trigger="tool",
                            created=created)
@@ -150,29 +175,7 @@ def _maybe_record_shadow_step(app, tool_id, ok: bool) -> None:
         pass
 
 
-def _start_bash_shadow_before(app, tool_id) -> None:
-    """W4a: Bash's own shadow-copy half -- the BEFORE snapshot, taken off
-    the UI thread (same `run_worker(..., thread=True)` convention as
-    `_git_branch`; this function itself runs inside `apply_event`, the
-    drain loop's own call, which must never block on a subprocess). A
-    repo-less cwd (not a git repo) or a timeout leaves nothing stashed,
-    which `_maybe_record_bash_shadow_step` reads as "no diff available"
-    and silently skips -- the documented limit for non-git directories."""
-    if not hasattr(app, "_pending_bash_shadow_before"):
-        app._pending_bash_shadow_before = {}
-    app.run_worker(lambda: _bash_shadow_before_worker(app, tool_id), thread=True, name="shadow-bash-before")
-
-
-def _bash_shadow_before_worker(app, tool_id) -> None:
-    from halo_harness.shadow import git_status_dirty_paths
-    before = git_status_dirty_paths(app.cwd)
-    store = getattr(app, "_pending_bash_shadow_before", None)
-    if store is not None and before is not None:
-        store[tool_id] = before
-
-
-def _maybe_record_bash_shadow_step(app, tool_id, name, input_data, ok: bool) -> None:
-    before = (getattr(app, "_pending_bash_shadow_before", None) or {}).pop(tool_id, None)
+def _maybe_record_bash_shadow_step(app, name, input_data, ok: bool, before) -> None:
     if not ok or before is None:
         return
     app.run_worker(lambda: _bash_shadow_after_worker(app, before), thread=True, name="shadow-bash-after")
@@ -201,10 +204,10 @@ def _bash_shadow_after_worker(app, before: dict) -> None:
         files = {}
         created = []
         for p in new_paths:
-            try:
-                files[p] = Path(p).read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            content = _read_for_shadow(Path(p))
+            if content is None:
                 continue
+            files[p] = content
             if after.get(p) == "??":
                 created.append(p)
         if files:
@@ -427,7 +430,7 @@ async def _apply_event_inner(app, event) -> None:
             # before.
             card.set_result(ok=bool(data.get("ok")), summary=data.get("summary", ""), content=data.get("content"),
                              images=data.get("images"))
-        _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")))
+        _maybe_record_shadow_step(app, data.get("id"), bool(data.get("ok")), data.get("bash_shadow_before"))
     elif kind == "permission_request":
         # H5c finding 8: a FOREGROUND sub-agent's own "ask" (when its
         # parent session is interactive) is now a LIVE, answerable card
@@ -523,6 +526,11 @@ async def _apply_event_inner(app, event) -> None:
             # resets the received-token counter/running tool name, so
             # neither can ever carry a stale reading into the next turn.
             app.status_bar.go_idle()
+        # finding 7 (W6a): a call that ends in an error or an Esc yields
+        # `turn_done` with no `message_end` first (the ONLY other place
+        # that used to finalize a phase line), so its line stayed live and
+        # kept ticking after the turn had already ended.
+        await app.transcript.finish_all_phase_lines(agent_id=agent_id)
         await app.transcript.finish_open_streams(agent_id=agent_id)
         if agent_id is None:
             app.on_turn_done(data.get("reason", "end_turn"))

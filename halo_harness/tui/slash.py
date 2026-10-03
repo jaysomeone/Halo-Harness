@@ -66,9 +66,20 @@ async def handle_slash(app, name: str, args: str) -> None:
     if handler is not None:
         await handler(app, args)
         return
+    # finding 17 (W6a): `Controller.run_slash` used to be called directly
+    # on the UI thread here -- the fallback for every custom command AND
+    # skill (nothing else reaches this branch). Its own prompt-kind path
+    # fires the UserPromptExpansion command/HTTP hook synchronously (600s
+    # default timeout, no abort), so a slow one froze the WHOLE TUI, not
+    # just this one command. Same thread-worker + call_from_thread
+    # pattern `_handle_doctor`/`_handle_providers` above already use.
+    app.run_worker(lambda: _run_slash_worker(app, name, args), thread=True, name="run-slash", group="run-slash")
+
+
+def _run_slash_worker(app, name: str, args: str) -> None:
     result = app.controller.run_slash(name, args)
     if result:
-        await app.transcript.add_note(result, kind="command")
+        app.call_from_thread(app.transcript.add_note, result, kind="command")
 
 
 async def _handle_model(app, args: str) -> None:

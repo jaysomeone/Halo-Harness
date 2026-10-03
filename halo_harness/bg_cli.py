@@ -28,7 +28,7 @@ def _format_age(started) -> str:
 
 
 def _cmd_list(rest: list) -> int:
-    from halo_harness.bg_run import list_runs, pid_alive
+    from halo_harness.bg_run import is_our_process, list_runs
 
     parser = argparse.ArgumentParser(prog="halo bg list", add_help=True)
     parser.parse_args(rest)
@@ -38,7 +38,10 @@ def _cmd_list(rest: list) -> int:
         return 0
     for meta in runs:
         pid = meta.get("pid")
-        status = "running" if pid_alive(pid) else "exited"
+        # finding 15 (W6a): `is_our_process` refuses a pid the OS has
+        # already reused for an unrelated process -- a bare `pid_alive`
+        # used to report that one as "running" forever.
+        status = "running" if is_our_process(meta) else "exited"
         cmd_str = " ".join(str(a) for a in (meta.get("command") or []))
         print(f"{meta.get('id', '?'):10} {status:8} pid={pid} age={_format_age(meta.get('started')):4} {cmd_str}")
     return 0
@@ -72,7 +75,7 @@ def _cmd_logs(rest: list) -> int:
 
 
 def _cmd_stop(rest: list) -> int:
-    from halo_harness.bg_run import kill_pid, load_run, pid_alive
+    from halo_harness.bg_run import is_our_process, kill_pid, load_run
 
     parser = argparse.ArgumentParser(prog="halo bg stop", add_help=True)
     parser.add_argument("id")
@@ -82,7 +85,9 @@ def _cmd_stop(rest: list) -> int:
         print(f"halo bg stop: unknown id {args.id!r}", file=sys.stderr)
         return 1
     pid = meta.get("pid")
-    if not pid_alive(pid):
+    # finding 15 (W6a): refuses to signal a pid the OS has reused for an
+    # unrelated process since this run's own one exited.
+    if not is_our_process(meta):
         print(f"halo bg stop: {args.id} is not running (already exited)")
         return 0
     if kill_pid(pid):
@@ -93,7 +98,7 @@ def _cmd_stop(rest: list) -> int:
 
 
 def _cmd_rm(rest: list) -> int:
-    from halo_harness.bg_run import kill_pid, load_run, pid_alive
+    from halo_harness.bg_run import is_our_process, kill_pid, load_run
 
     parser = argparse.ArgumentParser(prog="halo bg rm", add_help=True)
     parser.add_argument("id")
@@ -105,7 +110,8 @@ def _cmd_rm(rest: list) -> int:
         print(f"halo bg rm: unknown id {args.id!r}", file=sys.stderr)
         return 1
     pid = meta.get("pid")
-    if pid_alive(pid):
+    # finding 15 (W6a): same is_our_process check as list/stop.
+    if is_our_process(meta):
         if not args.force:
             print(f"halo bg rm: {args.id} is still running (pid {pid}) -- pass --force to stop and remove it",
                   file=sys.stderr)

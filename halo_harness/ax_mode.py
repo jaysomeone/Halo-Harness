@@ -43,26 +43,45 @@ def _ask_permission(controller, data: dict) -> None:
 
 
 def _ask_question(controller, data: dict) -> None:
+    """finding 16 (W6a): the current AskUserQuestion wire shape is
+    `{questions: [{question, options, ...}, ...]}` -- reading the OLD
+    flat `question`/`options` fields directly rendered "[question]
+    (question)" with no question text and no options at all. Reuses
+    `tools.ask_user_question._normalize_questions` (the SAME normalizer
+    the tool itself and the TUI's QuestionCard rely on) so this never
+    drifts from either again; one prompt per question, and -- for more
+    than one -- a `{question_text: answer}` dict, the EXACT shape
+    QuestionCard's own docstring documents for a multi-question reply."""
+    from halo_harness.tools.ask_user_question import _normalize_questions
+
     request_id = data.get("id")
     input_data = data.get("input") or {}
-    question = input_data.get("question") or "(question)"
-    options = input_data.get("options") or []
-    print(f"\n[question] {question}")
-    for i, opt in enumerate(options, 1):
-        label = opt.get("label") if isinstance(opt, dict) else str(opt)
-        print(f"  {i}. {label}")
-    print("your answer: ", end="", flush=True)
-    try:
-        reply = input().strip()
-    except EOFError:
-        reply = ""
-    # A bare number picks that option's label (closer to what a sighted
-    # user clicking the card would send); anything else is free text --
-    # `resolve_question`'s own contract explicitly allows a plain string.
-    if reply.isdigit() and 1 <= int(reply) <= len(options):
-        opt = options[int(reply) - 1]
-        reply = opt.get("label") if isinstance(opt, dict) else str(opt)
-    controller.answer_question(request_id, reply)
+    questions = _normalize_questions(input_data)
+    if not questions:
+        controller.answer_question(request_id, "")
+        return
+    answers: dict = {}
+    for q in questions:
+        question_text = q.get("question") or "(question)"
+        options = q.get("options") or []
+        print(f"\n[question] {question_text}")
+        for i, opt in enumerate(options, 1):
+            label = opt.get("label") if isinstance(opt, dict) else str(opt)
+            print(f"  {i}. {label}")
+        print("your answer: ", end="", flush=True)
+        try:
+            reply = input().strip()
+        except EOFError:
+            reply = ""
+        # A bare number picks that option's label (closer to what a sighted
+        # user clicking the card would send); anything else is free text --
+        # `resolve_question`'s own contract explicitly allows a plain string.
+        if reply.isdigit() and 1 <= int(reply) <= len(options):
+            opt = options[int(reply) - 1]
+            reply = opt.get("label") if isinstance(opt, dict) else str(opt)
+        answers[question_text] = reply
+    final_answer = next(iter(answers.values())) if len(answers) == 1 else answers
+    controller.answer_question(request_id, final_answer)
 
 
 def _review_plan(controller, data: dict) -> None:
@@ -134,6 +153,33 @@ def run_ax_screen_reader_mode(args) -> int:
                 continue
             if line in ("/quit", "/exit"):
                 break
+            # finding 16 (W6a): every typed /command except /quit used to
+            # be sent to the MODEL as an ordinary prompt -- this module's
+            # own docstring says slash commands "behave identically" to
+            # the real TUI, which routes them through `Controller.
+            # run_slash`, never `submit`.
+            if line.startswith("/"):
+                name, _, cmd_args = line[1:].partition(" ")
+                # Mirrors `run_slash`'s own branching just enough to know
+                # whether THIS call queues an ordinary turn (a prompt-kind
+                # custom command/skill -- text comes back "" and the
+                # worker picks it up right after) or answers synchronously
+                # right here (everything else, including /compact) --
+                # only the former needs draining afterward, and blocking
+                # on `controller.events` for a command that never submits
+                # a turn would hang this loop forever.
+                cmd = controller.registry.resolve(name) if controller.registry is not None else None
+                submits_turn = (cmd is not None and cmd.kind == "prompt"
+                                 and not (name == "compact" and cmd.source == "builtin"))
+                result = controller.run_slash(name, cmd_args)
+                if result:
+                    print(result)
+                if submits_turn:
+                    try:
+                        exit_code = _drain_until_idle(controller)
+                    except queue.Empty:
+                        pass
+                continue
             controller.submit(line)
             try:
                 exit_code = _drain_until_idle(controller)

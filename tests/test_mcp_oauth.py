@@ -190,6 +190,58 @@ def test_tokens_persist_under_halo_mcp_oauth_never_claude_files(ctx: Ctx):
     _with_scoped_home(_run)
 
 
+@test
+def test_f13_w6a_refresh_tokens_round_trip_against_the_fake_server(ctx: Ctx):
+    """finding 13 (W6a): `refresh_tokens` exchanges a stored
+    `refresh_token` for a new access token against the discovered token
+    endpoint, and saves the result (readable back via `load_tokens`)."""
+    def _run(home: Path):
+        server = FakeOAuthServer()
+        server.start()
+        try:
+            oauth_cfg = {"authorization_endpoint": server.base_url + "/authorize",
+                         "token_endpoint": server.base_url + "/token", "client_id": "cid"}
+            stored = {"access_token": "stale-token", "refresh_token": "fake-refresh-token"}
+            new_tokens, err = oauth.refresh_tokens("fresh-server", stored, oauth_cfg=oauth_cfg,
+                                                     server_url=server.base_url)
+            ctx.check(f"no error, got {err!r}", err is None)
+            ctx.check(f"a NEW access token came back, got {new_tokens!r}",
+                      new_tokens is not None and new_tokens.get("access_token") == "fake-refreshed-access-token")
+            call = next(c for c in server.token_calls if c.get("grant_type") == "refresh_token")
+            ctx.check(f"the stored refresh_token was presented, got {call}",
+                      call.get("refresh_token") == "fake-refresh-token")
+            loaded = oauth.load_tokens("fresh-server")
+            ctx.check(f"the new tokens were saved, got {loaded!r}",
+                      loaded is not None and loaded.get("access_token") == "fake-refreshed-access-token")
+        finally:
+            server.stop()
+    _with_scoped_home(_run)
+
+
+@test
+def test_f13_w6a_refresh_tokens_no_refresh_token_on_file_is_a_clean_error(ctx: Ctx):
+    new_tokens, err = oauth.refresh_tokens("x", {"access_token": "only-this"}, oauth_cfg={})
+    ctx.check(f"no tokens, got {new_tokens!r}", new_tokens is None)
+    ctx.check(f"a clean 'no refresh_token' error, got {err!r}", err is not None and "refresh_token" in err)
+
+
+@test
+def test_f13_w6a_refresh_tokens_rejected_refresh_token_is_a_clean_error(ctx: Ctx):
+    def _run(home: Path):
+        server = FakeOAuthServer(valid_refresh_token="the-only-good-one")
+        server.start()
+        try:
+            oauth_cfg = {"authorization_endpoint": server.base_url + "/authorize",
+                         "token_endpoint": server.base_url + "/token", "client_id": "cid"}
+            new_tokens, err = oauth.refresh_tokens(
+                "y", {"refresh_token": "a-stale-rejected-one"}, oauth_cfg=oauth_cfg, server_url=server.base_url)
+            ctx.check(f"no tokens, got {new_tokens!r}", new_tokens is None)
+            ctx.check(f"a clean error naming the failure, got {err!r}", err is not None and "refresh failed" in err)
+        finally:
+            server.stop()
+    _with_scoped_home(_run)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

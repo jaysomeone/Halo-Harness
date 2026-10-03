@@ -486,6 +486,13 @@ class SessionBuild:
     hook_runner: Optional[object]
     resume_error: Optional[str] = None   # H6 scope D: --continue/--resume didn't resolve to a session
     agents: "dict" = None                # H6 scope A: the discovered AgentSpec catalog (for /agents)
+    # finding 1 (W6a): whether `session_log`'s own file already existed on
+    # disk (a -c/--resume/--session-id/--fork-session target) before this
+    # call touched it, and its exact byte length at that moment --
+    # `run_print_mode`'s `--no-session-persistence` cleanup needs both, but
+    # SessionLog is built inside THIS function, not there.
+    pre_existing_log: bool = False
+    pre_existing_log_size: int = 0
 
 
 def build_session(
@@ -648,8 +655,17 @@ def build_session(
         # commands or code (Bash, PowerShell, ...) and WebFetch unless
         # --tools names them". `tools` (the raw --tools string, not yet
         # catalog-filtered) is the one signal for "named them explicitly".
+        #
+        # parity gap (W6a): part 8's own commit message calls this "a
+        # read-only tool set", but this used to strip only Bash/
+        # PowerShell/WebFetch -- Edit/Write/NotebookEdit (arbitrary file
+        # writes) and every MCP server tool (arbitrary server-side
+        # actions) stayed reachable. `--tools` still names an exception
+        # through exactly the same `named` set.
         named = set(split_tool_rule_list(tools)) if tools else set()
-        restricted_deny = {"Bash", "PowerShell", "WebFetch"} - named
+        mcp_tool_names = {n for n in frozen_registry.names() if n.startswith("mcp__")}
+        restricted_deny = ({"Bash", "PowerShell", "WebFetch", "Edit", "Write", "NotebookEdit"}
+                            | mcp_tool_names) - named
         if restricted_deny:
             frozen_registry = frozen_registry.without(restricted_deny)
     extra_dirs = [Path(d) for d in settings.permissions_additional_directories] + [Path(d) for d in (add_dir or [])]
@@ -1049,6 +1065,16 @@ def build_session(
         resolved_session_id, resume_error = agent_sessions.resolve_resume(cwd, resume if resume else None)
     if resolved_session_id is not None and fork_session_flag:
         resolved_session_id = agent_sessions.fork_session(cwd, resolved_session_id)
+    # finding 1 (W6a): remember whether a log already exists on disk for
+    # this id -- i.e. whether -c/--resume/--session-id/--fork-session
+    # handed us a PRE-EXISTING session -- before `SessionLog` touches
+    # anything. `--no-session-persistence` must only ever erase a log
+    # THIS process created; `_pre_existing_log_size` is the exact byte
+    # length to truncate back to for one it merely resumed.
+    _pre_existing_log_path = (
+        agent_sessions.sessions_dir(cwd) / f"{resolved_session_id}.jsonl") if resolved_session_id else None
+    _pre_existing_log = bool(_pre_existing_log_path and _pre_existing_log_path.is_file())
+    _pre_existing_log_size = _pre_existing_log_path.stat().st_size if _pre_existing_log else 0
     session_log = SessionLog(cwd, session_id=resolved_session_id or uuid.uuid4().hex)
     # critical fix: `SessionLog.__init__` never reads its own file (only
     # `SessionLog.latest_for_cwd` does that, via this exact same line) --
@@ -1074,7 +1100,7 @@ def build_session(
         extra_headers=extra_headers, permission_engine=permission_engine,
         session_catalog=session_catalog, mcp_manager=mcp_manager, hook_runner=hook_runner,
         agents=discovered_agents, routes=routes, agent_type_restriction=agent_type_restriction,
-        roles=persisted_roles, cli_roles=cli_roles, cli_flags=cli_flags,
+        roles=persisted_roles, cli_roles=cli_roles, cli_flags=cli_flags, settings=settings,
     )
     if hook_runner is not None:
         hook_runner.prompt_caller = session._call_model_for_hook
@@ -1119,7 +1145,41 @@ def build_session(
         claude_json=claude_json, resolved_mode=resolved_mode, routes=routes, state_dir=state_dir,
         model_ref=model_ref, model_profile=model_profile, creds=creds, ctx=ctx, session_log=session_log,
         hook_runner=hook_runner, resume_error=resume_error, agents=discovered_agents,
+        pre_existing_log=_pre_existing_log, pre_existing_log_size=_pre_existing_log_size,
     )
+
+
+def maybe_create_worktree(cwd: Path, cli_flags: dict) -> Path:
+    """W4a `-w/--worktree [name]`: the session runs in a FRESH git worktree
+    instead of the real working tree -- created here, before anything else
+    touches `cwd`, so settings/CLAUDE.md/instructions/tool access are all
+    resolved against the worktree from the very first line. Falls back to
+    the original `cwd` (one stderr notice, never a hard failure) when this
+    isn't a git repo or `git worktree add` itself fails for any reason.
+
+    finding 2 (W6a): pulled out of `run_print_mode` so `tui.bootstrap.
+    build_controller` can call the exact same thing before ITS OWN
+    `build_session` call -- the TUI used to have no worktree-creation code
+    at all, so `halo -w` (without `-p`) silently ran in the real working
+    tree. Mutates `cli_flags` in place on success (stashes
+    `_worktree_created_path`, the same key `maybe_remove_worktree_on_exit`
+    below reads for the exit-time removal logic) and returns the cwd the
+    caller should actually use."""
+    if cli_flags.get("worktree") is None:
+        return cwd
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.worktree import create_worktree
+    wt_path, wt_error = create_worktree(cwd, cli_flags.get("worktree") or None, state_dir=bridge_home())
+    if wt_path is not None:
+        print(f"halo: --worktree -> {wt_path}", file=sys.stderr)
+        # W4a WorktreeCreated: fired once Session (and its hook_runner)
+        # exists -- the worktree itself is created before build_session
+        # ever runs, so this just carries the path through cli_flags.
+        cli_flags["_worktree_created_path"] = str(wt_path)
+        return wt_path
+    print(f"halo: --worktree could not create a worktree ({wt_error}) -- "
+          f"continuing in the current directory", file=sys.stderr)
+    return cwd
 
 
 def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
@@ -1206,27 +1266,7 @@ def run_print_mode(
     process's exit code (the LAST turn's, for stream-json input)."""
     cwd = Path(cwd).resolve() if cwd else Path.cwd()
     cli_flags = dict(cli_flags or {})
-    if cli_flags.get("worktree") is not None:
-        # W4a `-w/--worktree [name]`: the session runs in a FRESH git
-        # worktree instead of the real working tree -- created here, before
-        # anything else touches `cwd`, so settings/CLAUDE.md/instructions/
-        # tool access are all resolved against the worktree from the very
-        # first line. Falls back to the original cwd (one stderr notice,
-        # never a hard failure) when this isn't a git repo or `git worktree
-        # add` itself fails for any reason.
-        from halo_harness.config.paths import bridge_home
-        from halo_harness.worktree import create_worktree
-        wt_path, wt_error = create_worktree(cwd, cli_flags.get("worktree") or None, state_dir=bridge_home())
-        if wt_path is not None:
-            print(f"halo: --worktree -> {wt_path}", file=sys.stderr)
-            cwd = wt_path
-            # W4a WorktreeCreated: fired once Session (and its hook_runner)
-            # exists -- the worktree itself is created before build_session
-            # ever runs, so this just carries the path through cli_flags.
-            cli_flags["_worktree_created_path"] = str(wt_path)
-        else:
-            print(f"halo: --worktree could not create a worktree ({wt_error}) -- "
-                  f"continuing in the current directory", file=sys.stderr)
+    cwd = maybe_create_worktree(cwd, cli_flags)
 
     # must-do: validated FIRST, before anything (incl. MCP) starts -- the
     # old position (right before `Session(...)`, well after `build_manager`
@@ -1277,6 +1317,7 @@ def run_print_mode(
     )
     session, frozen_registry, model_ref = (build.session, build.tool_registry, build.model_ref)
     mcp_manager, resolved_mode, session_log = build.mcp_manager, build.resolved_mode, build.session_log
+    _pre_existing_log, _pre_existing_log_size = build.pre_existing_log, build.pre_existing_log_size
     family = model_family(model_ref.model)
     attach_cli_files(session, file_specs, cwd=cwd)
 
@@ -1513,14 +1554,28 @@ def run_print_mode(
             # worth), but nothing it wrote survives past this process's own
             # exit: the log file/directory and its index entry are removed
             # here, last, after every other finally-block cleanup above.
+            #
+            # finding 1 (W6a): that used to run unconditionally, so
+            # combined with -c/--resume/--session-id/--fork-session it
+            # deleted a PRE-EXISTING session -- its transcript, sub-agent
+            # logs and rewind shadow repo -- that this process never
+            # created. A resumed log is now only ever truncated back to
+            # the exact byte length it had before this run touched it;
+            # its index entry and session dir (sub-agent logs, shadow
+            # repo) are left alone. Only a log THIS run created from
+            # scratch still gets the full delete.
             try:
                 import shutil as _shutil
-                agent_sessions.forget_session(cwd, session_log.session_id)
-                if session_log.path.exists():
-                    session_log.path.unlink()
-                session_dir = session_log.dir / session_log.session_id
-                if session_dir.is_dir():
-                    _shutil.rmtree(session_dir, ignore_errors=True)
+                if _pre_existing_log:
+                    with open(session_log.path, "r+b") as f:
+                        f.truncate(_pre_existing_log_size)
+                else:
+                    agent_sessions.forget_session(cwd, session_log.session_id)
+                    if session_log.path.exists():
+                        session_log.path.unlink()
+                    session_dir = session_log.dir / session_log.session_id
+                    if session_dir.is_dir():
+                        _shutil.rmtree(session_dir, ignore_errors=True)
             except Exception:
                 pass
         # W5 (carried from W4a): `-w/--worktree` created a FRESH worktree

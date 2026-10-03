@@ -230,6 +230,68 @@ def test_cmd_bg_stop_and_rm_on_a_real_long_running_child(ctx: Ctx):
 
 
 @test
+def test_f15_w6a_process_start_time_is_stable_and_present_for_a_real_pid(ctx: Ctx):
+    from halo_harness.bg_run import process_start_time
+
+    mine = process_start_time(os.getpid())
+    ctx.check(f"a value came back for this process's own real pid, got {mine!r}", mine)
+    again = process_start_time(os.getpid())
+    ctx.check(f"re-reading it gives the SAME value, got {mine!r} vs {again!r}", mine == again)
+    ctx.check("an invalid/unused pid returns None, not a crash", process_start_time(2**30) in (None, ""))
+
+
+@test
+def test_f15_w6a_is_our_process_refuses_a_pid_whose_start_time_differs(ctx: Ctx):
+    """finding 15 (W6a): the core of the fix -- a PID that is genuinely
+    alive right now (this test's own process) but whose recorded
+    `start_time` does NOT match a fresh read is treated as "not our
+    run" (the OS reused the pid), never silently reported as still
+    running."""
+    from halo_harness.bg_run import is_our_process, process_start_time
+
+    real_start = process_start_time(os.getpid())
+    matching_meta = {"pid": os.getpid(), "start_time": real_start}
+    ctx.check(f"matching start_time -> our process, got {matching_meta}", is_our_process(matching_meta) is True)
+
+    mismatched_meta = {"pid": os.getpid(), "start_time": "definitely-not-the-real-value-12345"}
+    ctx.check(f"mismatched start_time -> refused even though the pid IS alive, got {mismatched_meta}",
+              is_our_process(mismatched_meta) is False)
+
+    no_field_meta = {"pid": os.getpid()}
+    ctx.check(f"no start_time at all -> falls back to pid-only (pre-upgrade meta.json), got {no_field_meta}",
+              is_our_process(no_field_meta) is True)
+
+    dead_meta = {"pid": 2**30, "start_time": "whatever"}
+    ctx.check("an unused pid is never 'our process' regardless of start_time",
+              is_our_process(dead_meta) is False)
+
+
+@test
+def test_f15_w6a_start_background_run_records_start_time_and_writes_status_json(ctx: Ctx):
+    """finding 15 (W6a): `meta.json` now carries `start_time`, and the
+    detached child (routed through `_bg_wrapper`) writes `status.json`
+    once the real command actually exits -- the "Tests to add" item this
+    pins end to end against a real short-lived `halo --version -p` run."""
+    import json as _json
+    from halo_harness.bg_run import load_run, start_background_run
+
+    with _Env():
+        info = start_background_run(["--version"])
+        meta = load_run(info["id"])
+        ctx.check(f"start_time was recorded, got {meta}", meta is not None and meta.get("start_time"))
+        status_path = Path(meta["status_path"])
+
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline and not status_path.exists():
+            time.sleep(0.1)
+        ctx.check(f"status.json was written once the real command exited, got exists={status_path.exists()}",
+                  status_path.exists())
+        if status_path.exists():
+            status = _json.loads(status_path.read_text(encoding="utf-8"))
+            ctx.check(f"it records a clean exit code, got {status}", status.get("exit_code") == 0)
+
+
+@test
 def test_cmd_bg_unknown_subcommand_and_no_args(ctx: Ctx):
     from halo_harness.bg_cli import cmd_bg
     code, _out = _capture(cmd_bg, [])

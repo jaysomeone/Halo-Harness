@@ -4476,6 +4476,47 @@ def test_slash_providers_builds_the_table_off_the_main_thread(ctx: Ctx):
 
 
 @test
+def test_f17_w6a_custom_command_run_slash_fallback_runs_off_the_ui_thread(ctx: Ctx):
+    """finding 17 (W6a): the `handle_slash` FALLBACK (everything not in
+    its own `handler` dict -- every custom command and skill) used to
+    call `Controller.run_slash` directly on the UI thread. Its prompt-kind
+    path fires the UserPromptExpansion command/HTTP hook synchronously
+    (600s default timeout, no abort), so a slow one froze the whole TUI,
+    not just this one command. Proven the same way the providers/doctor
+    fix above is: recording whether `run_slash` itself ever runs on the
+    main thread."""
+    import threading
+
+    seen_main_thread = []
+
+    def _fake_run_slash(name: str, args: str = "") -> str:
+        seen_main_thread.append(threading.current_thread() is threading.main_thread())
+        return f"ran /{name} {args}".rstrip()
+
+    async def body():
+        fake = FakeController()
+        fake.run_slash = _fake_run_slash
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "/my-custom-command hello")
+            await pilot.press("enter")
+            notes = []
+            for _ in range(60):
+                await app._drain()
+                await pilot.pause(0.05)
+                notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+                if any("my-custom-command" in n for n in notes):
+                    break
+            ctx.check("run_slash was actually called", len(seen_main_thread) > 0)
+            ctx.check(f"it never ran on the main/UI thread, got {seen_main_thread}",
+                      all(is_main is False for is_main in seen_main_thread))
+            ctx.check(f"its result still reached the transcript, got {notes}",
+                      any("my-custom-command" in n for n in notes))
+    asyncio.run(body())
+
+
+@test
 def test_slash_providers_enable_disable_stay_synchronous(ctx: Ctx):
     """`enable`/`disable` are a plain local config.json write (no network/
     subprocess) -- the decision keeps them synchronous, never a worker."""
@@ -5257,6 +5298,31 @@ def test_phase_line_progresses_sending_thinking_writing_then_summary(ctx: Ctx):
             ctx.check(f"collapses to a Thought-for summary once reasoning happened, got {rendered!r}",
                       "Thought for" in rendered and "reasoning tokens" not in rendered)
             ctx.check("the phase line is finalized (no longer the live one for this call)",
+                      (None, 1) not in app.transcript._phase_lines)
+    asyncio.run(body())
+
+
+@test
+def test_f7_w6a_turn_done_without_message_end_still_finalizes_the_phase_line(ctx: Ctx):
+    """finding 7 (W6a): a call that ends in an error or an Esc yields
+    `turn_done` with NO `message_end` first -- `finish_phase_line` used
+    to run only from the `message_end` branch, so the line stayed live
+    and kept ticking ("Thinking... (2 m, no tokens yet) ... no data for
+    120 s, Esc interrupts...") even after the status bar already went
+    idle."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            app._local_events.put(ev.phase(state="request_sent", turn=1, model="or:mock/x"))
+            app._local_events.put(ev.phase(state="headers", turn=1, ttfb_ms=5.0))
+            await _drain_a_few(app, pilot, n=2, pause=0.02)
+            ctx.check("the phase line is live before turn_done",
+                      (None, 1) in app.transcript._phase_lines)
+
+            app._local_events.put(ev.turn_done(turn=1, reason="interrupted"))
+            await _drain_a_few(app, pilot, n=3, pause=0.02)
+            ctx.check("turn_done alone (no message_end) finalizes/removes the phase line",
                       (None, 1) not in app.transcript._phase_lines)
     asyncio.run(body())
 

@@ -20,8 +20,9 @@ import sys
 from pathlib import Path
 
 from halo_harness import events
+from halo_harness.cli_flags import cli_flags_from_args
 from halo_harness.controller import Controller
-from halo_harness.headless import attach_cli_files, build_session
+from halo_harness.headless import attach_cli_files, build_session, maybe_create_worktree
 
 
 def build_controller(args) -> "tuple[Controller, object, object]":
@@ -31,6 +32,20 @@ def build_controller(args) -> "tuple[Controller, object, object]":
     (`controller.start()` is the caller's job, once the App is ready to
     receive events)."""
     cwd = Path(args.cwd).resolve() if getattr(args, "cwd", None) else Path.cwd()
+
+    # finding 2 (W6a): `cli_flags_from_args(args)` was never called here at
+    # all, so EVERY 2.0.1 flag it carries (--restricted, --fallback-model,
+    # --plugin-dir/--plugin-url, --betas, --brief, --environment,
+    # --forward-subagent-text, ...) was silently accepted and ignored by
+    # an interactive launch -- `build_session` below always got
+    # `cli_flags=None` -> `{}`. `-w/--worktree` is resolved the same way
+    # `run_print_mode` resolves it (the shared `maybe_create_worktree`
+    # helper, called before `build_session` so settings/CLAUDE.md/tool
+    # access all resolve against the worktree from the first line) --
+    # `-w` used to exist only inside `run_print_mode`, so `halo -w` (no
+    # `-p`) edited the real working tree.
+    cli_flags = cli_flags_from_args(args)
+    cwd = maybe_create_worktree(cwd, cli_flags)
 
     # H13 Part C ("--resume <text> picks the unique match or opens the
     # picker filtered"): resolved BEFORE build_session (which would
@@ -84,6 +99,7 @@ def build_controller(args) -> "tuple[Controller, object, object]":
         continue_=bool(getattr(args, "continue_", False)), resume=effective_resume,
         fork_session_flag=bool(getattr(args, "fork_session", False)),
         print_mode=False, roles_flag=getattr(args, "role", None),
+        cli_flags=cli_flags,
     )
     attach_cli_files(build.session, getattr(args, "file", None), cwd=cwd)
 
