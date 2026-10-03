@@ -113,4 +113,11 @@ the authority for the order after 2.0.2.
   note when an update is available, a PowerShell install one-liner, and
   README + docs/INSTALL.md rewritten as short fresh-install and update
   steps per platform. Brief: `2.0.2-round6-update-brief.md`.
+- 2.0.2 round 7 (rolo 2026-10-03): the init becomes one wizard with
+  explicit Back / Skip / Next / Finish buttons (today the provider tabs
+  are a separate app the user leaves with Esc before console prompts take
+  over), with new Roles and Organizations steps (template presets, the
+  editors embedded, skip for later) and `halo setup roles|orgs` plus
+  `/setup` to reopen those screens from the CLI or inside halo. Brief:
+  `2.0.2-round7-init-wizard-brief.md`.
 
