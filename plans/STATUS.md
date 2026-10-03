@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~16:40)
+# Status board (updated 2026-10-03 ~17:05)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -37,8 +37,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] B (25f5886, round 2): organizations (`~/.halo/orgs/*.json` trees, validation, built-ins solo / release-flow / company, `/org run` + `halo org run` + `Agent(org=)`, tree-and-fields editor, docs/ORGS.md); general fixes: `Agent(name)` tool restriction now reaches the child, depth/concurrency caps travel with the run; three platforms green (2679/0), live Kali `/org run solo` -> pong
 - [x] C (07999f2, round 3): `/tasks` + Ctrl+T panel with live transcript viewer and task-board tab, `agents N` in the status bar, `agents.max_concurrent`/`max_depth` config, Agent `count`/`batch` fan-out with queueing, TaskCreate/TaskUpdate/TaskList board, `/org run` streams live with cards and the bar refreshes; three platforms green (2695/0), live Kali panel + viewer
 - [x] D (c93480d, round 4): `/mcp` keys r/R/a/l/L/e/i/d/t with legend, reasons and fix lines, per-server logs, reconnect backoff ladder, `halo mcp fix|test`, inline entry form; three platforms green (2744 tests; install-hint path split fixed for Linux), live Kali dialog + CLI on a scratch home with failing servers
-- [~] E (round 5 RUNNING, `2.0.2-round5-qwen-brief.md`): Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
-- [ ] Round 6 (rolo 2026-10-03, `2.0.2-round6-update-brief.md`): `halo update` (check/apply, install kind detection, other-session guard), `/update` with update-and-restart, `halo --version` shows the commit, startup update note, `scripts/install-halo.ps1`, README + docs/INSTALL.md rewritten as clear fresh-install and update steps
+- [x] E (8c5b306, round 5): decision-only endpoints (table patterns openjev/jev-judge) routed to roles.judge, never the session model; learned tools-rejected rule per endpoint; python_repr_args + missing_tool_call_opener repair patterns real, bare </think> stripped; prefixItems rewrite; docs/MODELS.md Qwen at work + FAMILY-BASELINE-qwen.md; three platforms green (2768/0); six shapes unconfirmed until the owner's work-VM bugreport
+- [~] Round 6 (RUNNING; rolo 2026-10-03, `2.0.2-round6-update-brief.md`): `halo update` (check/apply, install kind detection, other-session guard), `/update` with update-and-restart, `halo --version` shows the commit, startup update note, `scripts/install-halo.ps1`, README + docs/INSTALL.md rewritten as clear fresh-install and update steps
 - [ ] Round 7 (rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
 - [ ] Release 2.0.2
 
