@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~12:00)
+# Status board (updated 2026-10-03 ~12:20)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -40,17 +40,17 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [ ] E: Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
 - [ ] Release 2.0.2
 
-## 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`)
+## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
 
-- [ ] three picker columns, [ ] balances for every provider, [ ] `cc:`/`ant:` enumeration, [ ] Codex + OpenAI + Responses dialect, [ ] jev, [ ] learned gateway rules, [ ] error translation, [ ] catalog auto-refresh, [ ] command consolidation and group labels, [ ] `cc:` route v2 (control-channel steer, set_model/set_permission_mode, /compact passthrough, native history research, context duplication audit, conformance test), [ ] release
+- [ ] research, [ ] `ol:` provider on the native API, [ ] hardware and host analysis, [ ] roles for local models + `/local` with a built-in capability probe (the gym ranking waits for 2.0.5), [ ] init tab, docs, [ ] release
 
-## 2.0.4 (`2.0.4-brief.md`)
+## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
 
-- [ ] model gym, [ ] soak test + watchdog, [ ] CI + release script, [ ] invariants doc + test, [ ] legacy env file no longer read, [ ] release
+- [ ] three picker columns, [ ] balances for every provider, [ ] `cc:`/`ant:` enumeration, [ ] Codex + OpenAI + Responses dialect, [ ] jev, [ ] learned gateway rules, [ ] error translation, [ ] catalog auto-refresh, [ ] command consolidation and group labels, [ ] `cc:` route v2 (control-channel steer, set_model/set_permission_mode, /compact passthrough, native history research, context duplication audit, conformance test), [ ] legacy env file no longer read (announced for 2.0.4 in the 2.0.1 CHANGELOG), [ ] release
 
-## 2.0.5 (`2.0.5-ollama-brief.md`)
+## 2.0.5 = hardening (`2.0.4-brief.md` minus the env-file drop)
 
-- [ ] research, [ ] `ol:` provider on the native API, [ ] hardware and host analysis, [ ] roles for local models + `/local`, [ ] gym ranking, init tab, docs, [ ] release
+- [ ] model gym (including the local-model ranking), [ ] soak test + watchdog, [ ] CI + release script, [ ] invariants doc + test, [ ] release
 
 ## 2.0.6
 

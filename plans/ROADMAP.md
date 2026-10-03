@@ -79,3 +79,29 @@ numbers; this section is the authority.
   home networks, or one person's own sessions on several machines, same
   network or not. Brief with the research questions and deliverables:
   `3.0.1.1-p2p-research-brief.md`.
+
+## REORDERED 2026-10-03 (rolo): Ollama moves before the old 2.0.3
+
+The brief files keep the numbers they were written under; this section is
+the authority for the order after 2.0.2.
+- 2.0.3 = local and LAN Ollama models (brief `2.0.5-ollama-brief.md`):
+  research, the native `ol:` provider, hardware and host analysis, roles
+  for local models and `/local`, init tab, docs. The model-gym ranking of
+  local models that brief mentions waits for the gym itself (now 2.0.5);
+  2.0.3 ships a built-in capability probe instead (context window, tool
+  calling, streaming) so `/local` can still say which models can run a
+  session.
+- 2.0.4 = the old 2.0.3 (briefs `2.0.3-brief.md`, `2.0.3-jev.md`,
+  `2.0.3-research.md`): three picker columns, balances for every provider,
+  `cc:`/`ant:` enumeration, Codex and OpenAI with the Responses dialect,
+  jev, learned gateway rules, error translation, catalog auto-refresh,
+  command consolidation and group labels, the `cc:` route v2 (section H).
+  PLUS the legacy env file no longer being read, because the 2.0.1
+  CHANGELOG already announces that for 2.0.4 and the notice stays true.
+- 2.0.5 = hardening (brief `2.0.4-brief.md` minus the env-file drop): model
+  gym including the local-model ranking, soak test and watchdog, CI and
+  release script, invariants doc and test.
+- 2.0.6 embeddings, 2.0.7 DOOM theme, 2.0.8 Signal remote control, 2.0.9
+  review + security review + privacy audit + front page, then the 3.0.1.1
+  research: unchanged.
+
