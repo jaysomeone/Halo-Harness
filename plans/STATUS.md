@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~14:30)
+# Status board (updated 2026-10-03 ~16:00)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -36,8 +36,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] F + A (c46fcd3, round 1): tab title `halo` (root cause: Textual never sets the OS title; claude children do), roles v2 (10 roles, per-role effort, custom names, Tab completion, `halo completion`, templates + editor, bare `halo roles` table); three platforms green (2667/0), live Kali title check
 - [x] B (25f5886, round 2): organizations (`~/.halo/orgs/*.json` trees, validation, built-ins solo / release-flow / company, `/org run` + `halo org run` + `Agent(org=)`, tree-and-fields editor, docs/ORGS.md); general fixes: `Agent(name)` tool restriction now reaches the child, depth/concurrency caps travel with the run; three platforms green (2679/0), live Kali `/org run solo` -> pong
 - [x] C (07999f2, round 3): `/tasks` + Ctrl+T panel with live transcript viewer and task-board tab, `agents N` in the status bar, `agents.max_concurrent`/`max_depth` config, Agent `count`/`batch` fan-out with queueing, TaskCreate/TaskUpdate/TaskList board, `/org run` streams live with cards and the bar refreshes; three platforms green (2695/0), live Kali panel + viewer
-- [~] D (round 4 RUNNING, `2.0.2-round4-mcp-repair-brief.md`): MCP repair actions in `/mcp`, `halo mcp fix`
-- [ ] E: Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
+- [x] D (c93480d, round 4): `/mcp` keys r/R/a/l/L/e/i/d/t with legend, reasons and fix lines, per-server logs, reconnect backoff ladder, `halo mcp fix|test`, inline entry form; three platforms green (2744 tests; install-hint path split fixed for Linux), live Kali dialog + CLI on a scratch home with failing servers
+- [~] E (round 5 RUNNING, `2.0.2-round5-qwen-brief.md`): Qwen fix (decision-only endpoints to the judge role; leak patterns, string arguments, Coder XML, bare `</think>`, Databricks schema limits); owner bugreport still wanted for the exact error text
 - [ ] Release 2.0.2
 
 ## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
