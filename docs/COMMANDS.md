@@ -1458,6 +1458,18 @@ equivalent, since `edit`/`new` already cover the same ground from a
 script. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
 and how a run flows through the tree.
 
+## `/tasks` (Ctrl+T)
+
+Halo 2.0.2 round 3: a full-height panel listing every running, queued,
+background and finished sub-agent of this session (position/role, model,
+status, elapsed, tool count, cost, and an org run's place in the tree),
+plus a second tab for the shared task board (`TaskCreate`/`TaskUpdate`/
+`TaskList`). Enter opens a live transcript viewer of the highlighted
+agent's own log; `Tab` switches tabs; Ctrl+T or Esc closes it. The Agent
+tool's own `count`/`batch` parameters spawn several sub-agents in one
+call (capped at `agents.max_concurrent`, excess ones queue); see
+[SUBAGENTS.md](SUBAGENTS.md) for the full picture.
+
 ## `halo completion`
 
 ```sh

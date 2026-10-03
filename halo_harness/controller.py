@@ -327,6 +327,55 @@ class Controller:
             pass
         return rows
 
+    def list_agent_tasks(self) -> list:
+        """Halo 2.0.2 round 3 (brief C): every running/queued/background/
+        finished sub-agent AND background Bash job of this session, for
+        the `/tasks` panel -- sub-agent rows from `agent.subagent.list_
+        agent_task_rows` (read straight off disk: meta.json + each
+        child's own jsonl log, correct even right after a `-c` resume),
+        PLUS one row per `agent.jobs.JobRegistry.list_jobs()` entry
+        (H8 scope A's own docstring already named this exact use: "the
+        `/tasks` slash command's own data source" -- written long before
+        `/tasks` itself existed) adapted into the SAME row shape, `agent_
+        id` prefixed `job-` so it can never collide with a real agent_id
+        and `log_path` left None (no transcript viewer for a bash job --
+        BashOutput/the pager already cover its captured output)."""
+        rows: list = []
+        if getattr(self.session, "agent_runtime", None) is not None:
+            try:
+                from halo_harness.agent.subagent import list_agent_task_rows
+                rows = list_agent_task_rows(self.session)
+            except Exception:
+                rows = []
+        job_registry = getattr(self.session, "job_registry", None)
+        if job_registry is not None:
+            import time
+            now = time.time()
+            for job in job_registry.list_jobs():
+                started = job.get("started_at")
+                rows.append({
+                    "agent_id": f"job-{job['id']}", "task_id": job["id"],
+                    "title": job.get("description") or (job.get("command") or "")[:60], "model": "(bash)",
+                    "status": job.get("status") or "running",
+                    "is_error": job.get("status") in ("failed", "killed"), "tool_count": 0, "cost_usd": None,
+                    "started": started,
+                    "elapsed_s": max(0.0, now - started) if isinstance(started, (int, float)) else None,
+                    "depth": 0, "parent_agent_id": None, "log_path": None,
+                })
+        return rows
+
+    def read_task_board(self) -> list:
+        """Halo 2.0.2 round 3 (brief C): the shared task board (`TaskCreate`/
+        `TaskUpdate`/`TaskList` tools) for the tasks panel's second tab --
+        `tools.task_board.read_board`'s own list of `{id, title, status,
+        owner, notes, result}` dicts, `[]` if nothing has been created yet
+        or this session has no log directory at all."""
+        try:
+            from halo_harness.tools.task_board import read_board
+            return read_board(self.session.log.dir / self.session.log.session_id)
+        except Exception:
+            return []
+
     def list_permission_rules(self) -> list:
         """`[{"action": "allow"|"ask"|"deny", "source": ..., "rule": ...},
         ...]` -- the live `PermissionEngine`'s own rule lists, for the

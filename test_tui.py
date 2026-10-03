@@ -7927,6 +7927,125 @@ def test_quit_on_double_ctrl_c_false_still_leaves_ctrl_d_working(ctx: Ctx):
         theme_mod.set_config_value("quit_on_double_ctrl_c", True)
 
 
+# ============================================================================
+# Halo 2.0.2 round 3 (brief C item 1): the /tasks / Ctrl+T panel.
+# ============================================================================
+
+_FAKE_AGENT_ROWS = [
+    {"agent_id": "agent-run1", "task_id": "t1", "title": "Worker", "model": "or:mock/x", "status": "running",
+     "is_error": False, "tool_count": 2, "cost_usd": 0.001, "elapsed_s": 5.0, "depth": 0, "parent_agent_id": None,
+     "log_path": ""},
+    {"agent_id": "agent-done1", "task_id": "t2", "title": "Researcher", "model": "or:mock/y", "status": "completed",
+     "is_error": False, "tool_count": 4, "cost_usd": 0.002, "elapsed_s": 12.0, "depth": 0, "parent_agent_id": None,
+     "log_path": ""},
+]
+
+
+@test
+def test_tasks_panel_shows_a_fake_running_agent_and_a_finished_one(ctx: Ctx):
+    from halo_harness.tui.dialogs.tasks import TasksPanel
+
+    async def body():
+        fake = FakeController(agent_tasks=list(_FAKE_AGENT_ROWS))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            ctx.check(f"the panel opened, got {type(app.screen).__name__}", isinstance(app.screen, TasksPanel))
+            option_list = app.screen.query_one("#tasks-list")
+            texts = [str(o.prompt) for o in option_list.options]
+            ctx.check(f"a row for the running agent, got {texts}", any("running" in t and "Worker" in t for t in texts))
+            ctx.check(f"a row for the finished agent, got {texts}", any("done" in t and "Researcher" in t for t in texts))
+    asyncio.run(body())
+
+
+@test
+def test_tasks_panel_enter_opens_transcript_viewer_in_follow_mode(ctx: Ctx):
+    from halo_harness.tui.dialogs.tasks import TasksPanel, TranscriptViewer
+
+    async def body():
+        log_dir = Path(tempfile.mkdtemp(prefix="tasks-panel-log-"))
+        log_path = log_dir / "agent-run1.jsonl"
+        log_path.write_text(json.dumps({"type": "user", "content": [{"type": "text", "text": "hi"}]}) + "\n",
+                             encoding="utf-8")
+        rows = [dict(_FAKE_AGENT_ROWS[0], log_path=str(log_path))]
+        fake = FakeController(agent_tasks=rows)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            app.screen.query_one("#tasks-list").highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            ctx.check(f"the transcript viewer opened, got {type(app.screen).__name__}",
+                      isinstance(app.screen, TranscriptViewer))
+            ctx.check("follow mode is on by default", app.screen.follow is True)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check(f"escape goes back to the panel, got {type(app.screen).__name__}",
+                      isinstance(app.screen, TasksPanel))
+    asyncio.run(body())
+
+
+@test
+def test_ctrl_t_toggles_the_panel_open_and_closed(ctx: Ctx):
+    from halo_harness.tui.dialogs.tasks import TasksPanel
+
+    async def body():
+        fake = FakeController(agent_tasks=list(_FAKE_AGENT_ROWS))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            ctx.check("first ctrl+t opens it", isinstance(app.screen, TasksPanel))
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.1)
+            ctx.check(f"second ctrl+t closes it, got {type(app.screen).__name__}",
+                      not isinstance(app.screen, TasksPanel))
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_shows_agents_running_count(ctx: Ctx):
+    """Halo 2.0.2 round 3: `subagent_start` with no matching `subagent_
+    end` yet bumps the status bar's `agents N` segment; `subagent_end`
+    drops it back to 0 (segment omitted entirely, same convention as
+    needs_you_count)."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            ctx.check("starts at 0 (no segment)", app.status_bar.agents_running == 0)
+            ctx.check("no 'agents' segment yet", "agents " not in str(app.status_bar.render()))
+            start_ev = ev.Event("subagent_start", {"name": "Worker"}, turn=1)
+            start_ev.agent_id = "child-1"
+            app._local_events.put(start_ev)
+            await _drain_a_few(app, pilot, n=5, pause=0.02)
+            ctx.check(f"bumped to 1, got {app.status_bar.agents_running}", app.status_bar.agents_running == 1)
+            ctx.check(f"shown in the rendered bar, got {str(app.status_bar.render())!r}",
+                      "agents 1" in str(app.status_bar.render()))
+            end_ev = ev.Event("subagent_end", {"name": "Worker", "is_error": False}, turn=1)
+            end_ev.agent_id = "child-1"
+            app._local_events.put(end_ev)
+            await _drain_a_few(app, pilot, n=5, pause=0.02)
+            ctx.check(f"back to 0 once finished, got {app.status_bar.agents_running}",
+                      app.status_bar.agents_running == 0)
+            ctx.check("segment omitted again", "agents " not in str(app.status_bar.render()))
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

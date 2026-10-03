@@ -68,7 +68,8 @@ class FakeController:
     StopIteration at the caller)."""
 
     def __init__(self, turns: Optional[list] = None, *, model: str = DEFAULT_MODEL,
-                 permission_mode: str = "default"):
+                 permission_mode: str = "default", agent_tasks: Optional[list] = None,
+                 task_board: Optional[list] = None):
         self.turns = turns if turns is not None else default_demo_turns()
         self._next_turn_idx = 0
         self.model = model
@@ -98,6 +99,12 @@ class FakeController:
         self.ingested_mentions: list = []
         self.shadow_step_list: list = []
         self.rewind_applies: list = []
+        # Halo 2.0.2 round 3 (brief C): `/tasks`/Ctrl+T's own panel --
+        # a test sets these directly, or via the constructor, to render a
+        # fake running/queued/finished agent and a fake task-board row
+        # with no real Session/agent_runtime/sub-agent ever involved.
+        self.agent_tasks: list = list(agent_tasks) if agent_tasks is not None else []
+        self.task_board: list = list(task_board) if task_board is not None else []
 
     def submit(self, text: str, pasted=None, meta=None) -> Iterator[ev.Event]:
         self.submitted.append(text)
@@ -171,6 +178,12 @@ class FakeController:
 
     def reconnect_mcp(self, name: str, abort=None) -> None:
         self.reconnects += 1
+
+    def list_agent_tasks(self) -> list:
+        return list(self.agent_tasks)
+
+    def read_task_board(self) -> list:
+        return list(self.task_board)
 
     def memory_path(self):
         from halo_harness.config.paths import memory_dir

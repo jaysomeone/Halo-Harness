@@ -83,6 +83,38 @@ fix, roles v2, and organizations.
    org_editor.py`; `load` re-installs a built-in over a local copy) and
    `halo org list|show|new|edit|run` from the CLI. See
    [docs/ORGS.md](docs/ORGS.md).
+4. **Sub-agent visibility and scale**: `/tasks`/Ctrl+T (new, `tui/dialogs/
+   tasks.py`) -- a full-height panel listing every running, queued,
+   background and finished sub-agent (and background job) of this
+   session, an org run's own descendants indented under their parent;
+   Enter opens a live, follow-mode transcript viewer of that agent's own
+   log (`PgUp`/`PgDn` scroll, `o` the full pager); a second tab shows the
+   new shared task board. The status bar shows `agents N` (running
+   count) when N > 0. `agents.max_depth` (config, default 1, up to 3; an
+   org's own tree shape overrides it, unclamped) joins `agents.max_
+   concurrent` as a real config knob instead of a hard-coded constant.
+   The Agent tool gains `count` (N identical copies of `prompt`) and
+   `batch` (a list of `{prompt, role?, model?, effort?}` objects) --
+   spawns several sub-agents in one call, capped at `agents.max_
+   concurrent` (excess ones queue, announced to the panel immediately via
+   a new `subagent_queued` event, and start as slots free); the parent
+   waits on all of them and gets back one combined result, one
+   `<task_result>` section per child, in spawn order. A new shared task
+   board (`TaskCreate`/`TaskUpdate`/`TaskList` tools, `~/.halo/sessions/
+   <id>/tasks.json`) lets every sub-agent of a session -- an
+   organization's workers, most usefully -- claim and report on open
+   work; claiming an already-claimed task is refused, never a lost
+   update. Two `/org run` gaps closed on the way: its own result used to
+   land in the transcript as a raw `<task_result task_id="...">` block
+   with no live progress at all (it now streams through the same live
+   sub-agent machinery an `Agent(org=...)` tool call already uses, so the
+   root position -- and everything it delegates to -- gets a real card
+   with its own position title, and the final text is unwrapped before
+   display); and an org run's own spend, though it was already rolling
+   into the session's cost meter correctly, never reached the status bar
+   (nothing re-reads it once a slash command finishes outside the normal
+   turn loop) -- it now pushes a fresh status refresh once the run
+   completes. See [docs/SUBAGENTS.md](docs/SUBAGENTS.md).
 
 ## [2.0.0] - 2026-10-01
 

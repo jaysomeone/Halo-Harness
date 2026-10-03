@@ -150,6 +150,12 @@ class BridgeApp(App):
         Binding("ctrl+l", "clear_view", "Clear", show=False),
         Binding("ctrl+o", "toggle_verbose", "Verbose", show=False),
         Binding("ctrl+r", "history_search", "History", show=False),
+        # Halo 2.0.2 round 3 (brief C item 1): the tasks panel -- a plain
+        # (non-priority) binding, same as ctrl+r just above; TasksPanel's
+        # OWN "ctrl+t" binding (tui/dialogs/tasks.py) closes it again once
+        # that screen is focused, giving the toggle its "again closes it"
+        # behaviour without this action needing to inspect `self.screen`.
+        Binding("ctrl+t", "toggle_tasks", "Tasks", show=False),
         Binding("f1", "show_help", "Help", show=False),
         # U5 scope A: brand-new keys, no existing single-key binding to
         # conflict with -- ctrl+p (palette) and ctrl+e (external editor)
@@ -2199,6 +2205,18 @@ class BridgeApp(App):
                 self.prompt_input.move_cursor(self.prompt_input.document.end)
 
         self.push_screen(HistorySearchDialog(display), _on_pick)
+
+    def action_toggle_tasks(self) -> None:
+        """Halo 2.0.2 round 3 (brief C item 1): `/tasks`/Ctrl+T -- pushes
+        the panel; TasksPanel's own `ctrl+t`/`escape` bindings close it
+        again once it's the focused screen (see this action's own
+        BINDINGS comment above), so this method only ever needs to handle
+        "open a new one". `read_task_board` is an optional Controller
+        method (a bare/legacy stand-in may not have it)."""
+        from halo_harness.tui.dialogs.tasks import TasksPanel
+        list_tasks = getattr(self.controller, "list_agent_tasks", None) or (lambda: [])
+        read_board = getattr(self.controller, "read_task_board", None)
+        self.push_screen(TasksPanel(list_agent_tasks=list_tasks, read_task_board=read_board))
 
     def apply_theme(self, name: str) -> None:
         self.theme_name = name

@@ -28,6 +28,14 @@ EVENT_KINDS = frozenset({
     "tool_use_start", "tool_use_ready", "tool_progress", "tool_result",
     "permission_request", "question", "plan_review", "todos", "status",
     "message_end", "error", "turn_done", "subagent_start", "subagent_end",
+    # Halo 2.0.2 round 3 (brief C): a `count`/`batch` Agent-tool fan-out
+    # job minted its agent_id/task_id and is waiting for a concurrency-pool
+    # slot to free -- fired once per job, in spawn order, BEFORE any of
+    # them actually starts (so the tasks panel can list every one
+    # immediately instead of only learning about a job once a worker
+    # finally picks it up); the job's own ordinary `subagent_start` follows
+    # later, once it actually begins.
+    "subagent_queued",
     "replay", "notification", "steer_queued", "steer_applied",
     "compaction",  # H5 scope B
     "phase", "steer_restart",  # Halo 2.0.1 W2a (liveness-tips-brief Part A6/GLM-brief item 3)

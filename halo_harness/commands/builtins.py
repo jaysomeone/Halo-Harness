@@ -937,18 +937,27 @@ def _cmd_stats(args: str, facade: HeadlessFacade) -> str:
 def _cmd_tasks(args: str, facade: HeadlessFacade) -> str:
     """H8 scope A: lists every background Bash job this session has
     started (via `run_in_background` or a timed-out foreground command
-    moved to the background), most-recently-started last."""
+    moved to the background), most-recently-started last. Halo 2.0.2
+    round 3 (brief C item 1): in the TUI, `/tasks`/Ctrl+T instead opens
+    a live panel covering sub-agents too (plus the shared task board) --
+    `tui/slash.py`'s own handler intercepts it there before this
+    headless-text fallback is ever reached; this plain-text form (used
+    from print mode/the CLI, where no such panel exists) still only ever
+    lists background Bash jobs, with one line pointing at the richer
+    TUI panel added."""
     session = getattr(facade, "session", None)
     registry = getattr(session, "job_registry", None)
     jobs = registry.list_jobs() if registry is not None else []
     if not jobs:
-        return "No background jobs in this session."
+        return "No background jobs in this session. (The TUI's own /tasks/Ctrl+T also shows sub-agents " \
+               "and the shared task board.)"
     lines = ["Background jobs:"]
     for job in jobs:
         cmd = job["command"]
         if len(cmd) > 60:
             cmd = cmd[:60] + "..."
         lines.append(f"  {job['id']}  [{job['status']}]  {job['description'] or cmd}")
+    lines.append("(The TUI's own /tasks/Ctrl+T also shows sub-agents and the shared task board.)")
     return "\n".join(lines)
 
 

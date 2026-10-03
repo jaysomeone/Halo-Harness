@@ -331,6 +331,21 @@ org sets its own. `/org list|show|new|edit|load` manage them; `halo org
 list|show|new|edit|run` is the CLI equivalent. See
 [docs/ORGS.md](../docs/ORGS.md).
 
+### Sub-agent visibility and scale
+
+`/tasks` (or Ctrl+T) opens a panel listing every running, queued,
+background and finished sub-agent of this session, with a second tab for
+the shared task board; Enter opens a live transcript viewer of the
+highlighted one. `agents.max_concurrent` (config, default 4) and
+`agents.max_depth` (config, default 1, up to 3; an org's own tree shape
+overrides this, unclamped) govern how many sub-agents may run at once
+and how deep they may delegate; the Agent tool's `count`/`batch`
+parameters spawn several in one call (one combined result, in spawn
+order), queueing past the cap. The shared task board (`TaskCreate`/
+`TaskUpdate`/`TaskList` tools, `~/.halo/sessions/<id>/tasks.json`) lets
+an organization's workers claim and report on open work. See
+[docs/SUBAGENTS.md](../docs/SUBAGENTS.md).
+
 ## Permissions and auto mode
 
 Seven modes, same names and mode-table semantics as Claude Code:

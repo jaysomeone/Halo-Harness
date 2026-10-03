@@ -55,6 +55,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -88,6 +89,33 @@ def effective_max_concurrent(runtime: "AgentRuntime") -> int:
         return value if value > 0 else MAX_CONCURRENT_AGENTS
     except (TypeError, ValueError):
         return MAX_CONCURRENT_AGENTS
+
+
+def effective_max_depth(runtime: "AgentRuntime") -> int:
+    """Halo 2.0.2 round 3 (brief C): "agents.max_depth (default 1, up to
+    3)" -- mirrors `effective_max_concurrent`'s own shape exactly. An
+    org's own tree-derived `max_depth` (set on its root `AgentRuntime` by
+    `run_org_call`, "depth comes from the tree") wins outright, same as
+    an org's `max_concurrent` already does -- NOT clamped to 3, since a
+    legitimate org tree (e.g. the `company` built-in: CEO -> VP -> manager
+    -> worker) is routinely deeper than the config knob's own range.
+    Only the CONFIG-sourced value (every non-org session) is clamped to
+    [1, 3]; a bad/missing/out-of-range one falls back to the original
+    hardcoded `MAX_DEPTH=1` so every pre-2.0.2-round-3 session behaves
+    exactly as before this knob existed. Never raises."""
+    if runtime.max_depth is not None:
+        try:
+            value = int(runtime.max_depth)
+            return value if value > 0 else MAX_DEPTH
+        except (TypeError, ValueError):
+            return MAX_DEPTH
+    from halo_harness.theme import get_config_value
+    candidate = get_config_value("agents.max_depth", default=MAX_DEPTH)
+    try:
+        value = int(candidate)
+    except (TypeError, ValueError):
+        return MAX_DEPTH
+    return value if 1 <= value <= 3 else MAX_DEPTH
 
 
 @dataclass
@@ -180,7 +208,7 @@ def _write_meta(meta_path: Path, data: dict) -> None:
 
 def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: str,
                           model_override: Optional[str], parent_tool_use_id: str, background: bool = False,
-                          role_override: Optional[str] = None):
+                          role_override: Optional[str] = None, effort_override: Optional[str] = None):
     """A real `agent.loop.Session` for `spec`: its OWN fresh (or resumed)
     log, a tool subset frozen from the PARENT's own catalog (never grows
     it -- brief B), its `body` as the full system prompt (CLAUDE.md/memory
@@ -311,6 +339,11 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     from halo_harness.roles import role_effort_for
     _role_effort = role_effort_for(_effective_role_name, role_table=runtime.role_table,
                                     cli_overrides=runtime.cli_role_overrides)
+    # Halo 2.0.2 round 3 (brief C): a `count`/`batch` fan-out job's own
+    # per-item `effort` override (`_run_agent_fanout` below) -- one rung
+    # ABOVE everything else here, same precedence `role_override`/`model_
+    # override` already get over this agent's own file/role defaults.
+    _effective_effort = effort_override or spec.effort or _role_effort or parent.effort
 
     permission_mode = spec.permission_mode or parent.permission_engine.mode
     # finding 14 (W6a): both of these used to root at `parent.cwd`
@@ -354,7 +387,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         hook_runner = HookRunner(
             parent.hook_runner.hooks_by_event, cwd=child_cwd, session_id=child_log.session_id,
             transcript_path=str(child_log.path), effective_env=parent.hook_runner.effective_env,
-            permission_mode=permission_mode, effort=(spec.effort or _role_effort or parent.effort),
+            permission_mode=permission_mode, effort=_effective_effort,
             mcp_manager=parent.mcp_manager, prompt_caller=parent.hook_runner.prompt_caller,
             enabled=parent.hook_runner.enabled, agent_id=agent_id, agent_type=spec.name,
         )
@@ -363,7 +396,7 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         cwd=child_cwd, model_ref=model_ref, model_profile=model_profile, creds=parent.creds,
         state_dir=parent.state_dir, model_label=model_ref.raw, session_context=ctx,
         small_model_ref=parent.small_model_ref, session_log=child_log,
-        max_turns=(spec.max_turns or parent.max_turns), effort=(spec.effort or _role_effort or parent.effort),
+        max_turns=(spec.max_turns or parent.max_turns), effort=_effective_effort,
         permission_engine=child_engine, session_catalog=None, mcp_manager=parent.mcp_manager,
         hook_runner=hook_runner,
         # bug fix: without these, a child ignores whatever custom routing
@@ -750,6 +783,214 @@ def _hydrate_tasks_from_disk(runtime: AgentRuntime) -> None:
             }
 
 
+def _prepare_fanout_jobs(spec: AgentSpec, tool_input: dict) -> "tuple[Optional[list], Optional[str]]":
+    """Parses `count`/`batch` into a list of per-job dicts (`prompt`,
+    `role`, `model`, `effort`, `description`) -- `(jobs, None)` on
+    success, `(None, error_text)` on a bad shape. The caller only reaches
+    this when at least one of `count`/`batch` is not None; `batch` wins
+    if somehow both were given."""
+    description = tool_input.get("description") or spec.description[:60]
+    batch = tool_input.get("batch")
+    if batch is not None:
+        if not isinstance(batch, list) or not batch:
+            return None, "batch must be a non-empty list of {prompt, role?, model?, effort?} objects"
+        jobs = []
+        for i, item in enumerate(batch):
+            if not isinstance(item, dict) or not item.get("prompt"):
+                return None, f"batch[{i}] must be an object with a non-empty 'prompt' field"
+            jobs.append({
+                "prompt": item["prompt"], "role": item.get("role") or tool_input.get("role"),
+                "model": item.get("model") or tool_input.get("model"), "effort": item.get("effort"),
+                "description": (item.get("description") or description)[:60],
+            })
+        return jobs, None
+    try:
+        n = int(tool_input.get("count"))
+    except (TypeError, ValueError):
+        return None, "count must be a positive integer"
+    if n <= 0:
+        return None, "count must be a positive integer"
+    if n > 50:
+        return None, "count may not exceed 50 in one call"
+    prompt = tool_input.get("prompt") or spec.initial_prompt or description
+    if not prompt:
+        return None, "The prompt parameter is required"
+    jobs = [{"prompt": prompt, "role": tool_input.get("role"), "model": tool_input.get("model"),
+             "effort": None, "description": description[:60]} for _ in range(n)]
+    return jobs, None
+
+
+def _run_agent_fanout(*, runtime: AgentRuntime, spec: AgentSpec, tool_id: str, tool_input: dict,
+                       on_event=None) -> "tuple[list, object]":
+    """Halo 2.0.2 round 3 (brief C): `count`/`batch` -- spawns several
+    children of `spec` and waits for ALL of them, capped at `effective_
+    max_concurrent(runtime)` the same way several separate Agent tool_use
+    blocks in one turn already are (`agent/loop.py`'s own `_run_agent_
+    batch`). Excess jobs QUEUE: every job's own agent_id/task_id is
+    minted and a `subagent_queued` event fired for it, in SPAWN order,
+    BEFORE any pool worker has even started picking them up -- so the
+    tasks panel shows every job immediately, never only once a slot
+    frees. Returns ONE combined ToolResult: one `<task_result>` section
+    per child, in SPAWN order (never completion order -- a slow 2nd
+    child must not reshuffle a fast 5th one ahead of it in the model's
+    own reading of the result). `on_event`, same contract as `run_agent_
+    call`'s own: None means no genuinely LIVE consumer exists, so a
+    child's own live permission/question asks are disabled (same
+    `_subagent_live_asks` guard the single-spawn path already applies)
+    rather than risking a child parked forever waiting for an answer
+    nothing will ever deliver."""
+    from halo_harness.tools.base import ToolResult
+
+    jobs, error = _prepare_fanout_jobs(spec, tool_input)
+    if error is not None:
+        return [], ToolResult(error, is_error=True)
+    n = len(jobs)
+    if n > 1:
+        for i, job in enumerate(jobs):
+            job["description"] = f"{job['description']} ({i + 1}/{n})"
+
+    parent = runtime.parent
+    live_asks_ok = on_event is not None
+    all_events: list = []
+    events_lock = threading.Lock()
+
+    def _emit(ev) -> None:
+        with events_lock:
+            all_events.append(ev)
+        if on_event is not None:
+            on_event(ev)
+
+    prepared = []  # [(agent_id, task_id, job), ...], in spawn order
+    for job in jobs:
+        agent_id = _new_agent_id()
+        new_task_id = uuid.uuid4().hex[:12]
+        with runtime.lock:
+            runtime.tasks[new_task_id] = {"child_session_id": f"agent-{agent_id}", "spec_name": spec.name,
+                                           "cwd": str(parent.cwd), "abort_event": None,
+                                           "running_in_process": True, "status": "queued"}
+        # A minimal meta.json stub, written up front -- the tasks panel
+        # reads meta.json (what survives a `-c` resume), not just this
+        # in-memory dict, so it must see "queued" right away; `_build_
+        # child_session` (inside `_run_one_fanout_child`) naturally
+        # overwrites/merges this SAME file with "running" once this job
+        # actually starts (`_write_meta` merges onto existing content).
+        _, meta_path = _child_log_paths(parent, agent_id)
+        _write_meta(meta_path, {"agent_id": agent_id, "type": spec.name, "description": job["description"],
+                                 "status": "queued", "task_id": new_task_id, "parent_tool_use_id": tool_id})
+        queued_ev = events.Event("subagent_queued", {"agent_id": agent_id, "name": spec.dock_label or spec.name,
+                                                        "description": job["description"],
+                                                        "parent_tool_use_id": tool_id, "task_id": new_task_id})
+        queued_ev.agent_id = agent_id
+        _emit(queued_ev)
+        prepared.append((agent_id, new_task_id, job))
+
+    results: list = [None] * n
+
+    def _run_one(index: int) -> None:
+        agent_id, new_task_id, job = prepared[index]
+        try:
+            results[index] = _run_one_fanout_child(
+                runtime=runtime, spec=spec, agent_id=agent_id, new_task_id=new_task_id, job=job,
+                tool_id=tool_id, on_event=_emit, live_asks_ok=live_asks_ok,
+            )
+        except Exception as e:  # this module's own contract: never raise out of a spawn path
+            log.exception("fan-out child dispatch failed for task_id=%r", new_task_id)
+            results[index] = (f"Sub-agent dispatch failed: {type(e).__name__}: {e}", True)
+
+    max_workers = min(effective_max_concurrent(runtime), n)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for f in [pool.submit(_run_one, i) for i in range(n)]:
+            f.result()
+
+    sections = []
+    any_error = False
+    for i, ((_agent_id, new_task_id, _job), (text, is_error)) in enumerate(zip(prepared, results, strict=True)):
+        any_error = any_error or is_error
+        sections.append(f"--- child {i + 1}/{n} (task_id={new_task_id}) ---\n{text}")
+    return all_events, ToolResult("\n\n".join(sections), is_error=any_error)
+
+
+def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: str, new_task_id: str,
+                           job: dict, tool_id: str, on_event, live_asks_ok: bool) -> "tuple[str, bool]":
+    """One `count`/`batch` job's own full build-run-finalize sequence --
+    the same steps `run_agent_call`'s single-spawn foreground path runs,
+    parameterized by a PRE-MINTED `agent_id`/`task_id` (minted by `_run_
+    agent_fanout` before this job ever reached a pool slot, so it could
+    be announced as "queued" immediately) and this job's own prompt/
+    role/model/effort. `on_event` here is always a real callable (`_run_
+    agent_fanout`'s own `_emit`, which both collects and optionally
+    forwards); `live_asks_ok` carries whether the ORIGINAL caller gave
+    `_run_agent_fanout` a genuinely live channel -- a bare `_emit` with
+    nothing live downstream must still disable `_subagent_live_asks`,
+    exactly like the single-spawn path's own `on_event is None` check."""
+    from halo_harness.tools.truncate import spill_and_truncate
+
+    parent = runtime.parent
+    role_name = job["role"] or spec.role
+    try:
+        child, meta_path = _build_child_session(
+            runtime=runtime, spec=spec, agent_id=agent_id, model_override=job["model"],
+            parent_tool_use_id=tool_id, background=False, role_override=job["role"],
+            effort_override=job["effort"],
+        )
+        if not live_asks_ok:
+            child._subagent_live_asks = False
+        since_index = len(child.log.nodes())
+        runtime.live_children[agent_id] = child
+        _write_meta(meta_path, {"task_id": new_task_id, "background": False})
+        with runtime.lock:
+            entry = runtime.tasks.get(new_task_id)
+            if entry is not None:
+                entry["status"] = "running"
+
+        _dock_name = spec.dock_label or spec.name
+        start_ev = events.Event("subagent_start", {"agent_id": agent_id, "name": _dock_name,
+                                                     "description": job["description"],
+                                                     "parent_tool_use_id": tool_id, "task_id": new_task_id})
+        start_ev.agent_id = agent_id
+        _fire_subagent_hook(child, "SubagentStart")
+        _fire_task_hook(parent, "TaskCreated", task_id=new_task_id, spec_name=spec.name,
+                         description=job["description"])
+        on_event(start_ev)
+
+        try:
+            child_events = _run_child_to_completion(child, job["prompt"], agent_id=agent_id,
+                                                      parent_tool_use_id=tool_id, on_event=on_event)
+        finally:
+            child.close_cc()
+            runtime.live_children.pop(agent_id, None)
+
+        text = _final_text_from_log(child)
+        is_error, abnormal_reason = _child_turn_outcome(child_events)
+        _fire_subagent_hook(child, "SubagentStop")
+        _fire_task_hook(parent, "TaskCompleted", task_id=new_task_id, spec_name=spec.name,
+                         description=job["description"])
+        _write_meta(meta_path, {"status": "completed", "is_error": is_error, "finished": time.time()})
+        _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+        with parent._agent_notices_lock:
+            parent.permission_denials.extend(child.permission_denials)
+        end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": _dock_name,
+                                                  "parent_tool_use_id": tool_id, "task_id": new_task_id,
+                                                  "is_error": is_error})
+        end_ev.agent_id = agent_id
+        on_event(end_ev)
+        if is_error:
+            text = (f"[sub-agent did not finish normally ({abnormal_reason}) -- this may be a "
+                     f"stale/partial answer]\n{text}")
+        worktree_note = _finalize_child_isolation_worktree(child)
+        if worktree_note:
+            text = f"{text}\n\n{worktree_note}"
+        wrapped = _wrap_task_result(text, new_task_id)
+        capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
+                                     tool_use_id=f"{tool_id}-{agent_id}")
+        return capped, is_error
+    finally:
+        with runtime.lock:
+            entry = runtime.tasks.get(new_task_id)
+            if entry is not None:
+                entry["running_in_process"] = False
+
+
 def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str,
                     on_event=None) -> "tuple[list, object]":
     """`(events, ToolResult)` for ONE Agent/Task tool_use. Never raises --
@@ -768,7 +1009,10 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # call` and propagated to every descendant by `_build_child_session`)
     # overrides the module-wide `MAX_DEPTH` when set; `None` for every
     # non-org caller, so this is byte-for-byte the old check otherwise.
-    _max_depth = runtime.max_depth if runtime.max_depth is not None else MAX_DEPTH
+    # Round 3 (brief C): that "otherwise" now reads the `agents.max_depth`
+    # config knob instead of the bare module constant -- see `effective_
+    # max_depth`'s own docstring.
+    _max_depth = effective_max_depth(runtime)
     if runtime.depth >= _max_depth:
         return [], ToolResult(
             "Sub-agents cannot spawn further sub-agents (depth limit reached) -- finish this task "
@@ -790,6 +1034,19 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     if restriction is not None and subagent_type not in restriction:
         return [], ToolResult(f"This session may not spawn subagent_type {subagent_type!r}.", is_error=True)
 
+    # Halo 2.0.2 round 3 (brief C): `count` (N identical prompts) / `batch`
+    # (a list of per-child prompt+role+model+effort overrides) spawn
+    # several children of `subagent_type` in ONE call, capped at `agents.
+    # max_concurrent` the same way several separate Agent tool_use blocks
+    # in one turn already are -- see `_run_agent_fanout`'s own docstring.
+    if tool_input.get("count") is not None or tool_input.get("batch") is not None:
+        if bool(tool_input.get("run_in_background")) or spec.background:
+            return [], ToolResult("count/batch cannot be combined with run_in_background -- the parent "
+                                   "already waits on every fan-out child; run them one at a time in the "
+                                   "background instead if that's what you need.", is_error=True)
+        return _run_agent_fanout(runtime=runtime, spec=spec, tool_id=tool_id, tool_input=tool_input,
+                                  on_event=on_event)
+
     description = tool_input.get("description") or spec.description[:60]
     prompt = tool_input.get("prompt") or spec.initial_prompt or description
     background = bool(tool_input.get("run_in_background")) or spec.background
@@ -800,11 +1057,17 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # model` inside `_build_child_session` resolves the role AGAINST.
     role_override = tool_input.get("role")
     role_name = role_override or spec.role
+    # Halo 2.0.2 round 3 (brief C): `Agent(effort=...)` overrides this
+    # agent's own file/role/parent-inherited effort for just this one
+    # call -- same rung `_run_one_fanout_child`'s own per-job `effort`
+    # already occupies (see `_build_child_session`'s own `_effective_
+    # effort` precedence chain).
+    effort_override = tool_input.get("effort")
 
     agent_id = _new_agent_id()
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
-        background=background, role_override=role_override,
+        background=background, role_override=role_override, effort_override=effort_override,
     )
     # finding 10 (W6a): `_build_child_session` sets `_subagent_live_asks`
     # from `parent.interactive` ALONE, with no way to know whether THIS
@@ -948,6 +1211,14 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # flagged here, not just an abort/denial (the two cases
                 # `child.abort.is_set()`/`permission_denials` already covered).
                 is_error, abnormal_reason = _child_turn_outcome(child_events)
+                # Halo 2.0.2 round 3 (brief C): the tasks panel's own
+                # "finished agents stay listed ... with their final
+                # status" reads THIS field (meta.json has no other record
+                # of is_error -- `_write_meta` above fired before this was
+                # known) plus a stamped finish time, so a closed panel
+                # reopened later still shows the real outcome, not just
+                # "completed" for both a clean and a failed run alike.
+                _write_meta(meta_path, {"is_error": is_error, "finished": time.time()})
                 # review finding 20: the foreground path always emits
                 # `subagent_end` (see the mirror-image `end_ev` below the
                 # foreground `try/finally`); `_bg_run` never did, so a live
@@ -1016,7 +1287,9 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     is_error, abnormal_reason = _child_turn_outcome(child_events)
     _fire_subagent_hook(child, "SubagentStop")
     _fire_task_hook(parent, "TaskCompleted", task_id=new_task_id, spec_name=spec.name, description=description)
-    _write_meta(meta_path, {"status": "completed"})
+    # Halo 2.0.2 round 3 (brief C): `is_error`/`finished` -- see _bg_run's
+    # own matching comment just above.
+    _write_meta(meta_path, {"status": "completed", "is_error": is_error, "finished": time.time()})
     # H9 whole-tree review finding 13: see the background path's own
     # comment above -- a FOREGROUND child's usage/cost gets the same
     # rollup, just synchronously here instead of at the end of `_bg_run`.
@@ -1135,7 +1408,7 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     child, meta_path = _build_child_session(
         runtime=runtime, spec=spec, agent_id=agent_id, model_override=tool_input.get("model"),
         parent_tool_use_id=tool_id, background=False,  # a resume always runs in the foreground
-        role_override=role_override,
+        role_override=role_override, effort_override=tool_input.get("effort"),
     )
     # H9 whole-tree review finding 13: see run_agent_call's own comment on
     # its identically-named local -- a resume's own child log already
@@ -1154,7 +1427,7 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     # H9 whole-tree review finding 26: same treatment as run_agent_call's
     # own foreground path -- see its comment.
     is_error, abnormal_reason = _child_turn_outcome(child_events)
-    _write_meta(meta_path, {"status": "completed"})
+    _write_meta(meta_path, {"status": "completed", "is_error": is_error, "finished": time.time()})
     _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
     parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment
     if is_error:
@@ -1166,3 +1439,129 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
     return child_events, ToolResult(capped, is_error=is_error)
+
+
+def _walk_live_children(runtime: "AgentRuntime"):
+    """Yields `(agent_id, child_session)` for every CURRENTLY live
+    descendant reachable from `runtime`, at any depth -- each child's
+    own `agent_runtime.live_children` is a FRESH dict (never shared by
+    reference across the tree, unlike `tasks`/`lock`), so a grandchild's
+    liveness is only visible by recursing into its own parent's dict."""
+    for agent_id, child in list(runtime.live_children.items()):
+        yield agent_id, child
+        child_runtime = getattr(child, "agent_runtime", None)
+        if child_runtime is not None:
+            yield from _walk_live_children(child_runtime)
+
+
+def _agent_log_nodes(log_path: Path) -> list:
+    """A bare, dependency-free read of one `agent-*.jsonl` file's lines
+    -- used for a `tool_count`/cost lookup without constructing a real
+    `SessionLog` (which also wants to create directories etc.). Missing/
+    unreadable file or a malformed line is silently skipped, never
+    raised -- this is a best-effort reporting path, not core machinery."""
+    nodes: list = []
+    try:
+        with log_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    nodes.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return nodes
+
+
+def _tool_count_from_log(nodes: list) -> int:
+    count = 0
+    for node in nodes:
+        if node.get("type") != "assistant":
+            continue
+        for block in (node.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                count += 1
+    return count
+
+
+def _cost_for_agent_from_log(nodes: list, agent_id: str) -> "Optional[float]":
+    cost = None
+    for node in nodes:
+        if node.get("type") == "usage" and node.get("agent_id") == agent_id:
+            c = node.get("cost_usd")
+            if isinstance(c, (int, float)) and not isinstance(c, bool):
+                cost = c
+    return cost
+
+
+def list_agent_task_rows(session) -> list:
+    """Halo 2.0.2 round 3 (brief C): every running, queued, background
+    and finished sub-agent of THIS session -- the tasks panel's own data
+    source (`Controller.list_agent_tasks()`). A flat list of row dicts,
+    tree position included (`depth`/`parent_agent_id`, derived from the
+    directory nesting `_child_log_paths` already produces, never from
+    cross-referencing tool_use ids -- see this function's own `rel_parts`
+    math): {agent_id, task_id, title, model, status, is_error, tool_count,
+    cost_usd, started, elapsed_s, depth, parent_agent_id, log_path}.
+    Reads disk (meta.json + each child's own jsonl log) rather than any
+    in-memory event history, so it reports correctly even for a `-c`-
+    resumed session that never re-ran a single turn yet; a still-RUNNING
+    child's cost is read live off its own `cost_meter` (via `runtime.
+    live_children`, walked recursively) when reachable, falling back to
+    whatever its own parent's log already rolled up (the usual place a
+    FINISHED child's cost lives -- `_rollup_child_cost_into_parent`)."""
+    top_subdir = session.log.dir / session.log.session_id / "subagents"
+    rows: list = []
+    if not top_subdir.is_dir():
+        return rows
+    live_by_id: dict = {}
+    runtime = getattr(session, "agent_runtime", None)
+    if runtime is not None:
+        live_by_id = dict(_walk_live_children(runtime))
+    for meta_path in sorted(top_subdir.rglob("agent-*.meta.json")):
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        agent_id = data.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            continue
+        rel_parts = meta_path.relative_to(top_subdir).parts
+        depth = (len(rel_parts) - 1) // 2
+        parent_agent_id = None
+        parent_log_path = None
+        if len(rel_parts) >= 3:
+            parent_dir = meta_path.parent.parent  # the "agent-<parent>" folder itself
+            parent_agent_id = parent_dir.name[len("agent-"):]
+            parent_log_path = parent_dir.parent / f"{parent_dir.name}.jsonl"
+        log_name = meta_path.name
+        if log_name.endswith(".meta.json"):
+            log_name = log_name[: -len(".meta.json")] + ".jsonl"
+        log_path = meta_path.parent / log_name
+        nodes = _agent_log_nodes(log_path)
+        started = data.get("started")
+        finished = data.get("finished")
+        elapsed = None
+        if isinstance(started, (int, float)):
+            end = finished if isinstance(finished, (int, float)) else time.time()
+            elapsed = max(0.0, end - started)
+        cost = None
+        live_child = live_by_id.get(agent_id)
+        if live_child is not None:
+            cm = getattr(live_child, "cost_meter", None)
+            if cm is not None and getattr(cm, "has_cost_data", False):
+                cost = cm.total_usd
+        if cost is None:
+            source_nodes = session.log.nodes() if parent_log_path is None else _agent_log_nodes(parent_log_path)
+            cost = _cost_for_agent_from_log(source_nodes, agent_id)
+        rows.append({
+            "agent_id": agent_id, "task_id": data.get("task_id"), "title": data.get("type") or "?",
+            "model": data.get("model"), "status": data.get("status") or "running",
+            "is_error": bool(data.get("is_error")), "tool_count": _tool_count_from_log(nodes),
+            "cost_usd": cost, "started": started, "elapsed_s": elapsed, "depth": depth,
+            "parent_agent_id": parent_agent_id, "log_path": str(log_path),
+        })
+    return rows

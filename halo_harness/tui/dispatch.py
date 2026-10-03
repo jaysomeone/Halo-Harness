@@ -594,6 +594,12 @@ async def _apply_event_inner(app, event) -> None:
         # on `subagent_end` below.
         name = data.get("name", "?")
         child_agent_id = agent_id or data.get("agent_id")
+        # Halo 2.0.2 round 3 (brief C): "the status bar shows `agents N`
+        # (running count) when N > 0" -- incremented on every genuine
+        # start (a QUEUED fan-out job, below, is deliberately NOT a
+        # "running" agent yet, so it never touches this counter).
+        app._agents_running_count = getattr(app, "_agents_running_count", 0) + 1
+        app.status_bar.set_agents_running(app._agents_running_count)
         if child_agent_id:
             from halo_harness.tui.widgets.cards import SubAgentCard
             card = SubAgentCard(agent_id=child_agent_id, name=name)
@@ -602,11 +608,21 @@ async def _apply_event_inner(app, event) -> None:
             widget = await app.transcript.add_note(f"→ sub-agent: {name}", kind="subagent")
             app.transcript.subagent_marks.append(widget)
     elif kind == "subagent_end":
+        app._agents_running_count = max(0, getattr(app, "_agents_running_count", 0) - 1)
+        app.status_bar.set_agents_running(app._agents_running_count)
         child_agent_id = agent_id or data.get("agent_id")
         card = app.transcript.subagent_cards.pop(child_agent_id, None) if child_agent_id else None
         if card is not None:
             card.finish()
         widget = await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}", kind="subagent")
+        app.transcript.subagent_marks.append(widget)
+    elif kind == "subagent_queued":
+        # Halo 2.0.2 round 3 (brief C): a `count`/`batch` fan-out job
+        # waiting for a concurrency-pool slot -- `/tasks` (tui/dialogs/
+        # tasks.py) is the real place to see these; this note is just a
+        # breadcrumb in the main transcript so "why hasn't my 5th agent
+        # started yet" has an answer without opening the panel.
+        widget = await app.transcript.add_note(f"… sub-agent queued: {data.get('name', '?')}", kind="subagent")
         app.transcript.subagent_marks.append(widget)
     elif kind == "replay":
         await _apply_replay(app, data.get("messages") or [])

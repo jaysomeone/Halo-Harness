@@ -18,13 +18,18 @@ DESCRIPTION = (
     "conversation, so include everything it needs. `subagent_type` picks which agent definition runs "
     "(default \"general-purpose\"); `model` overrides which model it uses; `role` (one of orchestrator, "
     "coder, reviewer, researcher, small) resolves the model from the configured role table instead, "
-    "overriding the agent's own default role for just this call; `run_in_background=true` starts it "
-    "without blocking this turn -- its result is reported to you as a notice once it finishes. Pass "
-    "`task_id` (from an earlier <task_result>) to resume that same sub-agent with more context instead "
-    "of starting a new one. Sub-agents cannot spawn further sub-agents. Pass `org` (an organization name "
-    "from `halo org list`) instead of `subagent_type` to run that organization's root position on "
-    "`prompt` as its goal -- it delegates through this same tool to its own positions, each restricted "
-    "to the positions it reports to; the final result flows back the same way a plain sub-agent's does."
+    "overriding the agent's own default role for just this call; `effort` overrides the reasoning effort "
+    "sent for this call. `run_in_background=true` starts it without blocking this turn -- its result is "
+    "reported to you as a notice once it finishes. Pass `task_id` (from an earlier <task_result>) to "
+    "resume that same sub-agent with more context instead of starting a new one. Sub-agents cannot spawn "
+    "further sub-agents. Pass `org` (an organization name from `halo org list`) instead of `subagent_type` "
+    "to run that organization's root position on `prompt` as its goal -- it delegates through this same "
+    "tool to its own positions, each restricted to the positions it reports to; the final result flows "
+    "back the same way a plain sub-agent's does. You may spawn several agents in one call: `count` runs "
+    "N identical copies of `prompt`; `batch` takes a list of `{prompt, role?, model?, effort?}` objects, "
+    "one per agent. Either way you get ONE combined result, one section per agent, in the order they were "
+    "spawned; `/tasks` (or Ctrl+T) shows every one of them, including any still queued behind the "
+    "concurrency cap, while they run. `count`/`batch` cannot be combined with `run_in_background`."
 )
 
 INPUT_SCHEMA = {
@@ -36,13 +41,28 @@ INPUT_SCHEMA = {
         "model": {"type": "string", "description": "Optional model override for this agent"},
         "role": {"type": "string", "description": "Optional role override (orchestrator|coder|reviewer|"
                                                     "researcher|small) resolving the model from the role table"},
+        "effort": {"type": "string", "description": "Optional reasoning-effort override for this call"},
         "run_in_background": {"type": "boolean", "description": "Run without blocking this turn"},
         "task_id": {"type": "string",
                      "description": "Resume a previously returned task_id instead of starting a new sub-agent"},
         "org": {"type": "string", "description": "Run this organization's root position instead of a single "
                                                     "sub-agent (see `halo org list`); `prompt` is its goal"},
+        "count": {"type": "integer", "description": "Spawn this many identical copies of `prompt` in "
+                                                      "parallel (capped at agents.max_concurrent at a time); "
+                                                      "mutually exclusive with `batch`"},
+        "batch": {"type": "array", "description": "Spawn one agent per entry, in parallel (capped at "
+                                                    "agents.max_concurrent at a time); mutually exclusive "
+                                                    "with `count`",
+                   "items": {"type": "object", "properties": {
+                       "prompt": {"type": "string"}, "role": {"type": "string"}, "model": {"type": "string"},
+                       "effort": {"type": "string"}, "description": {"type": "string"},
+                   }, "required": ["prompt"]}},
     },
-    "required": ["description", "prompt"],
+    # `prompt` is required for a single spawn or `count`, but NOT for
+    # `batch` (each item supplies its own) -- enforced in `run()` below
+    # instead of here, so a strict provider's own schema validation never
+    # rejects a valid batch call for lacking a top-level prompt.
+    "required": ["description"],
 }
 
 
@@ -67,8 +87,11 @@ class AgentTool(Tool):
         if runtime is None:
             return ToolResult("Sub-agents are not available in this session.", is_error=True)
         input = input if isinstance(input, dict) else {}
-        if not input.get("prompt"):
-            return ToolResult("The prompt parameter is required", is_error=True)
+        # round 3 (brief C): `batch` supplies its own per-item prompt --
+        # only `count`/a plain single spawn need this top-level one.
+        if not input.get("prompt") and not input.get("batch"):
+            return ToolResult("The prompt parameter is required (unless using batch, where each item "
+                               "supplies its own)", is_error=True)
         if not input.get("description"):
             return ToolResult("The description parameter is required", is_error=True)
         # Halo 2.0.2 round 2 (brief B): `org=` picks the org-running path

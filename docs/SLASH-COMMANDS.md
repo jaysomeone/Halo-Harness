@@ -308,10 +308,17 @@ switch to the richer cross-session telemetry aggregation (run off the UI
 thread in the TUI) documented under `halo stats` in
 `docs/COMMANDS.md`.
 
-### `/tasks`
-Lists every background Bash job started this session
+### `/tasks` (Ctrl+T)
+H8 scope A: lists every background Bash job started this session
 (`run_in_background`, or a foreground command that outran its timeout),
-with status and a truncated command line.
+with status and a truncated command line. Halo 2.0.2 round 3: in the
+TUI, `/tasks`/Ctrl+T instead opens a full-height panel -- every
+running, queued, background and finished sub-agent of this session
+(an org run's own descendants indented under their parent), plus the
+shared task board on a second tab (`Tab` switches); Enter opens a live
+transcript viewer of the highlighted agent; Ctrl+T again, or Esc,
+closes it. Print mode has no panel, so it keeps the original plain-text
+background-jobs listing. See `docs/SUBAGENTS.md`.
 
 ### `/rewind [step-id]` `[TUI-only]`
 Restores the working tree (every file a Write/Edit/NotebookEdit touched,

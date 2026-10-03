@@ -73,6 +73,8 @@ async def handle_slash(app, name: str, args: str) -> None:
         # never blocks the UI thread, even though it stays on the plain
         # headless-text fallback underneath.
         "org": _handle_org,
+        # Halo 2.0.2 round 3 (brief C item 1): same toggle Ctrl+T uses.
+        "tasks": _handle_tasks,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -251,14 +253,26 @@ def _open_roles_editor(app, name: str, template: dict, models: list) -> None:
 
 
 async def _handle_org(app, args: str) -> None:
-    """Halo 2.0.2 round 2 (brief B): `/org edit <name>` opens a real form
-    (`tui/dialogs/org_editor.py`); every other subcommand (`list`/`show`/
-    `new`/`load`/`run`, or the bare list) goes through the SAME headless-
-    text fallback every other command uses (`commands/builtins.py::
-    _cmd_org`, off the UI thread -- `run` especially must never block it,
-    since it can run a whole real sub-agent tree to completion)."""
+    """Halo 2.0.2 round 2 (brief B) / round 3 (brief C): `/org edit <name>`
+    opens a real form (`tui/dialogs/org_editor.py`); `/org run` gets its
+    OWN live worker (round 3 -- see `_run_org_worker`'s own docstring for
+    why: the old headless-text fallback dumped a raw `<task_result>` XML
+    block into the transcript as a plain note, with no live progress and
+    no status-bar refresh); every other subcommand (`list`/`show`/`new`/
+    `load`, or the bare list) still goes through the SAME headless-text
+    fallback every other command uses (`commands/builtins.py::_cmd_org`,
+    off the UI thread)."""
     parts = (args or "").strip().split(None, 1)
     sub = parts[0].lower() if parts else ""
+    if sub == "run":
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        name, _, goal = rest.partition(" ")
+        goal = goal.strip()
+        if not name or not goal:
+            await app.transcript.add_note('Usage: /org run <name> "<goal>"', kind="command")
+            return
+        app.run_worker(lambda: _run_org_worker(app, name, goal), thread=True, name="run-org", group="run-org")
+        return
     if sub != "edit":
         app.run_worker(lambda: _run_slash_worker(app, "org", args), thread=True, name="run-slash", group="run-slash")
         return
@@ -268,6 +282,62 @@ async def _handle_org(app, args: str) -> None:
         return
     app.run_worker(lambda: _org_edit_form_worker(app, name), thread=True, name="org-edit-form",
                     group="org-edit-form")
+
+
+def _strip_task_result(text: str) -> str:
+    """`agent.subagent._wrap_task_result`'s own `<task_result task_id=
+    "...">...</task_result>` wrapper, stripped for display -- a no-op
+    (returns `text` unchanged) when it isn't present at all (an error
+    ToolResult from `run_org_call` -- unknown org, validation failure --
+    never gets wrapped in the first place)."""
+    import re
+    m = re.match(r'^<task_result task_id="[^"]*">\n(.*)\n</task_result>$', text or "", re.DOTALL)
+    return m.group(1) if m else (text or "")
+
+
+def _run_org_worker(app, name: str, goal: str) -> None:
+    """Halo 2.0.2 round 3 (brief C): runs `name` for real, LIVE -- unlike
+    the old headless-text path (`commands/builtins.py::_cmd_org`'s own
+    "run" branch, still used by `halo org run` from a real CLI with no
+    TUI at all), this passes `app.controller.events.put` as `run_org_
+    call`'s `on_event`, so the root position (and everything it
+    delegates to) gets a real SubAgentCard with its own position title --
+    the SAME live dock rendering an ordinary `Agent(subagent_type=...)`
+    tool call already gets -- instead of the whole run happening silently
+    and then dumping a raw `<task_result>` block into the transcript as a
+    plain note once it's done."""
+    session = getattr(app.controller, "session", None)
+    if session is None or getattr(session, "agent_runtime", None) is None:
+        app.call_from_thread(app.transcript.add_note,
+                              "Organizations can only be run once a session is running.", kind="command")
+        return
+    from halo_harness.agent.subagent import run_org_call
+    _events, result = run_org_call(
+        runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
+        tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
+        on_event=app.controller.events.put,
+    )
+    text = _strip_task_result(result.content)
+    app.call_from_thread(_finish_org_run, app, name, text, result.is_error)
+
+
+async def _finish_org_run(app, name: str, text: str, is_error: bool) -> None:
+    # `call_from_thread`'s own `invoke()` awaits an async callable like
+    # this one -- a plain sync function here would silently create-but-
+    # never-await the `add_note` coroutine (Transcript.add_note is async)
+    # and the note would never actually appear.
+    await app.transcript.add_note(f"org {name!r} finished:\n{text}", kind=("error" if is_error else "command"))
+    # round 3 (brief C): the whole org tree already rolled its spend into
+    # THIS session's own cost_meter/log (agent/subagent.py's `_rollup_
+    # child_cost_into_parent`, called once per child, bubbling all the way
+    # up to the top session) -- nothing else ever asks the status bar to
+    # re-read it, since `/org run` happens entirely OUTSIDE the normal
+    # turn loop (a `status` event otherwise only fires from Session.
+    # status_event()/message_end). The SAME status_event() the Controller
+    # already uses after a mode/model change -- just queued here too.
+    session = getattr(app.controller, "session", None)
+    if session is not None and hasattr(session, "status_event"):
+        app.controller.events.put(session.status_event())
 
 
 def _org_edit_form_worker(app, name: str) -> None:
@@ -740,6 +810,10 @@ async def _handle_mcp(app, _args: str) -> None:
     servers = list_fn() if list_fn is not None else []
     app.push_screen(McpStatus(servers, reconnect=app.controller.reconnect_mcp,
                                approve=app.controller.approve_mcp_server))
+
+
+async def _handle_tasks(app, _args: str) -> None:
+    app.action_toggle_tasks()
 
 
 async def _handle_clear(app, _args: str) -> None:

@@ -29,6 +29,7 @@ from halo_harness.tools.grep_tool import GrepTool
 from halo_harness.tools.notebook_edit import NotebookEditTool
 from halo_harness.tools.read import ReadTool
 from halo_harness.tools.skill import SkillTool
+from halo_harness.tools.task_board import TaskCreateTool, TaskListTool, TaskUpdateTool
 from halo_harness.tools.task_stop import TaskStopTool
 from halo_harness.tools.todowrite import TodoWriteTool
 from halo_harness.tools.tool_search import ToolSearchTool
@@ -49,8 +50,10 @@ def default_tools() -> list:
     that assumes `powershell.exe` might exist)."""
     tools = [
         AgentTool(), AskUserQuestionTool(), BashTool(), BashOutputTool(), EditTool(), EnterPlanModeTool(),
-        ExitPlanModeTool(), GlobTool(), GrepTool(), NotebookEditTool(), ReadTool(), SkillTool(), TaskStopTool(),
-        TaskTool(), TodoWriteTool(), ToolSearchTool(), WebFetchTool(), WriteTool(),
+        ExitPlanModeTool(), GlobTool(), GrepTool(), NotebookEditTool(), ReadTool(), SkillTool(),
+        # Halo 2.0.2 round 3 (brief C item 3): the shared task board.
+        TaskCreateTool(), TaskListTool(), TaskStopTool(), TaskTool(), TaskUpdateTool(), TodoWriteTool(),
+        ToolSearchTool(), WebFetchTool(), WriteTool(),
     ]
     if sys.platform == "win32":
         from halo_harness.tools.powershell import PowerShellTool

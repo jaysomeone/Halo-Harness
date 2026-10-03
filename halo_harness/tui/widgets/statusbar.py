@@ -86,6 +86,14 @@ class StatusBar(Static):
         # above (never replaces it) -- that one keeps its own richer
         # PermissionCard-specific "1 yes · 2 session · ..." text unchanged.
         self.needs_you_count: int = 0
+        # Halo 2.0.2 round 3 (brief C): the count of sub-agents currently
+        # RUNNING (subagent_start seen, no matching subagent_end yet) --
+        # 0 omits the segment entirely, same "blank, not a placeholder"
+        # convention as every other optional one here. A QUEUED job (a
+        # `count`/`batch` fan-out job still waiting for a pool slot) is
+        # deliberately NOT counted -- the brief calls this "agents N
+        # (running count)"; `/tasks` is where a queued job is visible.
+        self.agents_running: int = 0
         self.mode = "default"
         self.cwd = cwd
         self.branch = branch
@@ -255,6 +263,12 @@ class StatusBar(Static):
             self.needs_you_count = count
             self._refresh_display()
 
+    def set_agents_running(self, count: int) -> None:
+        count = max(0, count)
+        if count != self.agents_running:
+            self.agents_running = count
+            self._refresh_display()
+
     def set_effort(self, effort: "str | None") -> None:
         # 1.0.1 hotfix 20.3: `/effort`'s own immediate UI update -- unlike
         # apply_status's fields, this DOES accept None (a switch to a model
@@ -354,6 +368,9 @@ class StatusBar(Static):
         needs_you_str = (f"needs you · {self.needs_you_count}"
                           if self.needs_you_count and not (self.permission_pending and self.needs_you_count == 1)
                           else "")
+        # Halo 2.0.2 round 3 (brief C): "agents N" (running count), 0 omits
+        # it entirely -- same convention as needs_you_str just above.
+        agents_str = f"agents {self.agents_running}" if self.agents_running else ""
         loc_str = self.cwd if not self.branch else f"{self.cwd} ({self.branch})"
         model_label = self.model
 
@@ -372,7 +389,8 @@ class StatusBar(Static):
         if width and self.cwd:
             def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
                 bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
-                                     permission_str, needs_you_str, mcp_on and mcp_str, spinner_str, new_str) if b]
+                                     permission_str, needs_you_str, agents_str, mcp_on and mcp_str, spinner_str,
+                                     new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
                 # that separator plus its own trailing space, a close-
@@ -439,6 +457,9 @@ class StatusBar(Static):
         if needs_you_str:
             text.append("│ ", style="dim")
             text.append(f"{needs_you_str} ", style="bold yellow")
+        if agents_str:
+            text.append("│ ", style="dim")
+            text.append(f"{agents_str} ", style="cyan")
         if loc_str:
             text.append("│ ", style="dim")
             text.append(f"{loc_str} ", style="dim")
