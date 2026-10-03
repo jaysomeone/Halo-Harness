@@ -128,4 +128,11 @@ the authority for the order after 2.0.2.
   webhook, API triggers), other agent runtimes as positions (after the
   2.0.4 Codex route), a web dashboard; its private LAN/Tailscale mode
   feeds the 3.0.1.1 research.
+- 2.0.2 round 8 (rolo 2026-10-03): the Governor, the owner's cross-process
+  adaptive rate limiter from another project (report in
+  `plans/governor-import/README.md`): AIMD per gateway host with
+  Retry-After, priority fairness, hard in-flight cap, health-classified
+  failover to a different host, and role lanes (verifier never weaker than
+  coder). Ported with improvements (Windows locking, atomic state, log
+  rotation, timeout classification). Brief: `2.0.2-round8-governor-brief.md`.
 

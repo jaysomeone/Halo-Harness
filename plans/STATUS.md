@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~17:05)
+# Status board (updated 2026-10-03 ~17:30)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -40,6 +40,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] E (8c5b306, round 5): decision-only endpoints (table patterns openjev/jev-judge) routed to roles.judge, never the session model; learned tools-rejected rule per endpoint; python_repr_args + missing_tool_call_opener repair patterns real, bare </think> stripped; prefixItems rewrite; docs/MODELS.md Qwen at work + FAMILY-BASELINE-qwen.md; three platforms green (2768/0); six shapes unconfirmed until the owner's work-VM bugreport
 - [~] Round 6 (RUNNING; rolo 2026-10-03, `2.0.2-round6-update-brief.md`): `halo update` (check/apply, install kind detection, other-session guard), `/update` with update-and-restart, `halo --version` shows the commit, startup update note, `scripts/install-halo.ps1`, README + docs/INSTALL.md rewritten as clear fresh-install and update steps
 - [ ] Round 7 (rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
+- [ ] Round 8 (rolo 2026-10-03, `2.0.2-round8-governor-brief.md`): the Governor ported from the owner's other app (cross-process AIMD limiter per gateway host with Retry-After, priority fairness, hard in-flight cap, jsonl log, `/gov`), health-classified failover to a different host, role lanes with the verifier-never-weaker-than-coder rule; WAITING on the source files (only the README synced; vault sync drops .py)
 - [ ] Release 2.0.2
 
 ## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
