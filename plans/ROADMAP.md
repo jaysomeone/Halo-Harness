@@ -136,3 +136,15 @@ the authority for the order after 2.0.2.
   coder). Ported with improvements (Windows locking, atomic state, log
   rotation, timeout classification). Brief: `2.0.2-round8-governor-brief.md`.
 
+## ADDED 2026-10-03 (rolo): Hugging Face and cloud-hosted models join the 2.0.3 pack
+
+- 2.0.3 covers local AND cloud-hosted models on both Ollama and Hugging
+  Face: the `ol:` route reaches a local daemon, a LAN host and the
+  ollama.com cloud models by host; a new `hf:` route reaches the Hugging
+  Face router (Inference Providers, HF_TOKEN), dedicated Inference
+  Endpoints, and local OpenAI-compatible servers running Hub models
+  (llama-server, transformers serve, vLLM, TGI, LM Studio, Jan), with one
+  `/local` discovery across Ollama models, the HF cache and running
+  servers. Research first (how users actually run local HF models), in the
+  2.0.3 round-1 research brief.
+

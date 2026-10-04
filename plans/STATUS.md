@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~19:00)
+# Status board (updated 2026-10-03 ~19:15)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -42,9 +42,9 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [~] Round 7 (RUNNING; rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
 - [ ] Release 2.0.2
 
-## 2.0.3 = Ollama (brief file `2.0.5-ollama-brief.md`, written under its old number; moved ahead by rolo 2026-10-03)
+## 2.0.3 = local and cloud models: Ollama + Hugging Face (brief file `2.0.5-ollama-brief.md` written under its old number, plus `2.0.3-ollama-round1-research-brief.md`; moved ahead by rolo 2026-10-03; HF + cloud added by rolo 2026-10-03)
 
-- [ ] research, [ ] `ol:` provider on the native API, [ ] hardware and host analysis, [ ] roles for local models + `/local` with a built-in capability probe (the gym ranking waits for 2.0.5), [ ] init tab, docs, [ ] release
+- [ ] research (Ollama local + cloud, Hugging Face local runtimes + router/endpoints), [ ] `ol:` provider on the native API (local, LAN, ollama.com cloud by host), [ ] `hf:` route (HF router with HF_TOKEN, dedicated endpoints, local OpenAI-compatible servers auto-detected: llama-server, transformers serve, vLLM, TGI, LM Studio), [ ] shared local-model discovery (Ollama models, HF cache, running servers) in `/local` with the capability probe (the gym ranking waits for 2.0.5), [ ] hardware and host analysis, [ ] roles for local models, [ ] init tab, docs, [ ] release
 
 ## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
 
