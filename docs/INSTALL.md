@@ -93,9 +93,13 @@ halo init
 
 ```sh
 cd ~                 # or /tmp, or any other project directory at all
-halo init            # one time: pick a provider, credentials, default model, doctor, live pong
+halo init            # one time: a wizard -- provider, model, permission mode, theme, roles, orgs, doctor, pong
 halo                 # full-screen TUI -- reads THIS directory's CLAUDE.md, rules, settings, .mcp.json
 ```
+
+`halo init`'s wizard has Back/Skip/Next buttons and never exits to the
+console between steps; `halo setup roles`/`halo setup orgs` reopen its
+Roles/Organizations screens later without repeating the provider steps.
 
 That's the whole point of installing it: `halo`, once on PATH, is a real
 console script, not a script that only works from inside this checkout --

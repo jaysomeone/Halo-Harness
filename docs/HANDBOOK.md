@@ -13,14 +13,19 @@ halo init                    # pick a provider, set credentials, doctor, live po
 halo                         # full-screen TUI
 ```
 
-1. **`halo init`** lets you pick which provider to set up -- Databricks,
-   OpenRouter, the Anthropic API, or your Claude subscription -- asks for the
-   one credential it's missing, picks a default model from that provider's
-   own catalog, and ends with a real "pong" from it; it then offers to set up
-   another provider, looping until you're done (with more than one
-   configured, one last pick chooses the overall default) -- see
-   `docs/COMMANDS.md`'s `init` section for exactly what each step reads and
-   writes.
+1. **`halo init`** walks one wizard, Back/Skip/Next (Finish on the last
+   step) in the footer, nothing exiting to the console in between:
+   **Providers** (pick Databricks/OpenRouter/the Anthropic API/your Claude
+   subscription, paste the one credential it's missing, repeat for
+   another); **Default model** (a picker across everything just
+   configured); **Permission mode** (`auto` recommended); **Theme** (six
+   built-ins, a live preview); **Roles** (a switch, default on, plus three
+   presets); **Organizations** (a switch, default off, plus a default
+   org); **Linux fixes** (skipped when nothing needs it); **Summary**
+   (what was written, doctor, a live "pong"). Reach Roles/Organizations
+   again later with `/setup roles`/`/setup orgs` or `halo setup roles`/
+   `halo setup orgs` -- see `docs/COMMANDS.md`'s `init`/`setup` sections
+   for exactly what each step reads and writes.
 2. **The first session** opens with an empty prompt line and a status bar
    showing the model, permission mode, and MCP server count. Type a prompt
    and press `Enter`.
@@ -344,7 +349,11 @@ template actually defines is an equally valid role name everywhere above.
 per role and manages templates (`templates`/`save`/`load`/`new`/`edit`/
 `show`); `halo roles template ...` is the CLI equivalent; `halo stats
 --roles` sums sub-agent spend per role; `halo completion bash|zsh|
-powershell` completes role names and cached model refs too. See
+powershell` completes role names and cached model refs too. A switch,
+`roles.enabled` (default on), turns the whole table off (every role
+resolves to the session model); the init wizard's Roles step (`halo
+init`, `/setup roles`, `halo setup roles`) offers three shipped presets
+(`balanced`/`quality`/`local-first`) with a live preview. See
 [docs/ROLES.md](../docs/ROLES.md) for the full resolution precedence
 (including the new `compaction`/`subagent_default` rungs) and the
 (documented, never automatic beyond one specific case) cost-aware defaults.
@@ -364,8 +373,15 @@ roles/custom agents already use, each position restricted to only the
 positions it itself may call; depth comes from the org's own tree shape,
 concurrency from `agents.max_concurrent` (config, default 4) unless the
 org sets its own. `/org list|show|new|edit|load` manage them; `halo org
-list|show|new|edit|run` is the CLI equivalent. See
-[docs/ORGS.md](../docs/ORGS.md).
+list|show|new|edit|run` is the CLI equivalent. A switch, `orgs.enabled`
+(default OFF, unlike roles), gates discoverability only (`/org`, the
+`/tasks` board tab, the Agent tool's own `org=` -- never whether a named
+org actually runs); the init wizard's Organizations step (`halo init`,
+`/setup orgs`, `halo setup orgs`) picks a default org (`orgs.default`,
+used by `halo org run "<goal>"` with no name) and offers budgets
+(`budget_usd` on the org/a position, enforced through the cost meter)
+and goals (the run's own goal becomes a root task on the shared board).
+See [docs/ORGS.md](../docs/ORGS.md).
 
 ### Sub-agent visibility and scale
 

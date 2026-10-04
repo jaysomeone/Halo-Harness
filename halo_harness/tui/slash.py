@@ -80,6 +80,10 @@ async def handle_slash(app, name: str, args: str) -> None:
         # actually requests the quit-update-relaunch handoff (see
         # `_on_update_dialog_result`).
         "update": _handle_update,
+        # Halo 2.0.2 round 7: /setup [roles|orgs] -- the init wizard's own
+        # Roles/Organizations step(s), pushed onto THIS live app's screen
+        # stack (same pattern as /roles edit, /org edit).
+        "setup": _handle_setup,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -270,12 +274,20 @@ async def _handle_org(app, args: str) -> None:
     parts = (args or "").strip().split(None, 1)
     sub = parts[0].lower() if parts else ""
     if sub == "run":
+        from halo_harness.orgs import default_org_name, parse_run_args
         rest = parts[1].strip() if len(parts) > 1 else ""
-        name, _, goal = rest.partition(" ")
-        goal = goal.strip()
-        if not name or not goal:
-            await app.transcript.add_note('Usage: /org run <name> "<goal>"', kind="command")
+        name, goal = parse_run_args(rest)
+        if not goal:
+            await app.transcript.add_note('Usage: /org run [<name>] "<goal>" (no name uses orgs.default, '
+                                           'see /setup orgs)', kind="command")
             return
+        if name is None:
+            name = default_org_name()
+            if name is None:
+                await app.transcript.add_note(
+                    'No organization name given, and no default is set -- /org run <name> "<goal>", '
+                    'or set a default in /setup orgs.', kind="command")
+                return
         app.run_worker(lambda: _run_org_worker(app, name, goal), thread=True, name="run-org", group="run-org")
         return
     if sub != "edit":
@@ -1437,3 +1449,34 @@ async def _handle_copy(app, args: str) -> None:
         return
     from halo_harness.tui.clipboard import clean_copy_text
     app.perform_copy(clean_copy_text(widget.copy_text()), label="last reply")
+
+
+# ============================================================================
+# Halo 2.0.2 round 7: /setup [roles|orgs] -- pushes the init wizard's own
+# Roles/Organizations step(s) straight onto THIS live app's screen stack
+# (the "modal screen stack over the session" the brief names), reusing
+# the EXACT SAME step classes `halo init`/`halo setup`'s own standalone
+# `InitWizardApp` uses. Bare /setup chains roles -> orgs -> a short
+# summary (the "set up roles and orgs later" path); /setup roles or
+# /setup orgs opens just that one step. Finishing (or quitting) pops
+# every screen THIS call pushed, landing back on the live session with
+# nothing else to do -- config.json changes are already live the next
+# time anything reads them, and the roles step pushes a freshly-applied
+# template into the LIVE session's own role table too (see its own
+# `commit()`).
+# ============================================================================
+
+async def _handle_setup(app, args: str) -> None:
+    from halo_harness.tui.dialogs.init_wizard import build_truncated_state, first_step_screen
+    sub = (args or "").strip().lower()
+    if sub == "roles":
+        step_keys = ("roles",)
+    elif sub == "orgs":
+        step_keys = ("orgs",)
+    elif sub:
+        await app.transcript.add_note(f"Usage: /setup, /setup roles, or /setup orgs (got {sub!r})", kind="command")
+        return
+    else:
+        step_keys = ("roles", "orgs", "summary")
+    state = build_truncated_state(app.cwd, step_keys=step_keys, on_finish=lambda _app: None)
+    app.push_screen(first_step_screen(state))

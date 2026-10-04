@@ -73,6 +73,7 @@ class OrgEditor(ModalScreen):
     OrgEditor > Horizontal { width: 96%; height: 86%; border: round $primary; background: $surface; }
     OrgEditor #org-tree-pane { width: 36%; padding: 1 2; border-right: solid $primary-darken-1; }
     OrgEditor #org-fields-pane { width: 64%; padding: 1 2; }
+    OrgEditor #org-template-picker { height: 5; margin-bottom: 1; }
     OrgEditor #org-tree-list { height: 1fr; }
     OrgEditor #org-field-instructions { height: 8; }
     """
@@ -100,6 +101,13 @@ class OrgEditor(ModalScreen):
                 yield Static(f"Organization: {self.org_name}", classes="dialog-title")
                 yield Static("Enter: edit position  |  ^N add  ^D delete  |  ^S save  |  Esc cancel",
                               classes="dialog-subtitle")
+                # Halo 2.0.2 round 7 (init wizard brief, item 3): "the org
+                # editor gains the same template picker at its top --
+                # start from: solo / release-flow / company / <saved>".
+                # Picking one REPLACES this org's own positions (never
+                # merges); ctrl+s still saves to THIS SAME `org_name`.
+                yield Static("Start from (replaces the positions below):", classes="dialog-subtitle")
+                yield OptionList(id="org-template-picker")
                 yield OptionList(id="org-tree-list")
             with Vertical(id="org-fields-pane"):
                 yield Static("", id="org-field-heading")
@@ -117,10 +125,42 @@ class OrgEditor(ModalScreen):
 
     def on_mount(self) -> None:
         self._refresh_tree()
+        self._refresh_template_picker()
         ordered = _ordered_titles(self.org)
         if ordered:
             self._load_position(ordered[0][0])
+        # #org-template-picker sits ABOVE #org-tree-list in DOM order --
+        # explicit focus here keeps Enter-on-the-tree the form's own
+        # default, unchanged from before this picker existed (same fix
+        # `roles_editor.py`'s own on_mount needed).
         self.query_one("#org-tree-list", OptionList).focus()
+
+    def _refresh_template_picker(self) -> None:
+        from halo_harness.orgs import list_orgs
+        picker = self.query_one("#org-template-picker", OptionList)
+        picker.clear_options()
+        for name in list_orgs():
+            picker.add_option(Option(name, id=name))
+
+    def _apply_org_template(self, name: str) -> None:
+        """Round 7, item 3: "start from" -- REPLACES this org's own
+        `positions` with the picked one's (never merges); `org_name`
+        (the ctrl+s save target) is untouched."""
+        from halo_harness.orgs import load_org
+        picked = load_org(name)
+        if picked is None:
+            self.query_one("#org-hint", Static).update(f"No such organization: {name!r}")
+            return
+        self.org["positions"] = copy.deepcopy(picked.get("positions") or [])
+        if not self.org.get("description"):
+            self.org["description"] = picked.get("description") or ""
+        self._current_title = None
+        self._refresh_tree()
+        ordered = _ordered_titles(self.org)
+        if ordered:
+            self._load_position(ordered[0][0])
+        self.query_one("#org-hint", Static).update(f"Loaded {name!r} into the form -- ctrl+s saves it as "
+                                                     f"{self.org_name!r}.")
 
     def _refresh_tree(self) -> None:
         option_list = self.query_one("#org-tree-list", OptionList)
@@ -175,6 +215,10 @@ class OrgEditor(ModalScreen):
         self.query_one("#org-field-reports", Input).value = ", ".join(position.get("reports") or [])
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "org-template-picker":
+            if event.option_id:
+                self._apply_org_template(str(event.option_id))
+            return
         self._commit_current_fields()
         self._refresh_tree()
         self._load_position(str(event.option_id))

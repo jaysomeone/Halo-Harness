@@ -105,16 +105,29 @@ def _cmd_run(rest: list) -> int:
     from halo_harness import headless
     from halo_harness.agent.subagent import run_org_call
     parser = argparse.ArgumentParser(prog="halo org run", add_help=True)
-    parser.add_argument("name")
-    parser.add_argument("goal")
+    parser.add_argument("name_or_goal")
+    parser.add_argument("goal", nargs="?", default=None)
     parser.add_argument("--model", default=None)
     args = parser.parse_args(rest)
+    # Halo 2.0.2 round 7 (init wizard brief item 3): "orgs.default, used
+    # by /org run with no name" -- `halo org run "<goal>"` (one
+    # positional) uses it; `halo org run <name> "<goal>"` (two) names one
+    # explicitly, unchanged from before this existed.
+    if args.goal is None:
+        from halo_harness.orgs import default_org_name
+        name, goal = default_org_name(), args.name_or_goal
+        if name is None:
+            print('halo org run: no organization name given, and no default is set -- '
+                  '`halo org run <name> "<goal>"`, or set one with `halo setup orgs`.', file=sys.stderr)
+            return 2
+    else:
+        name, goal = args.name_or_goal, args.goal
     build = headless.build_session(cwd=Path.cwd(), bare=True, print_mode=True, model_ref_raw=args.model)
     session = build.session
     try:
         _events, result = run_org_call(
             runtime=session.agent_runtime, tool_id="cli-org-run", tool_name="Agent",
-            tool_input={"org": args.name, "prompt": args.goal, "description": f"Run org {args.name}"},
+            tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
         )
         print(result.content)
         return 1 if result.is_error else 0
@@ -129,13 +142,14 @@ _SUBCOMMANDS = {"list": _cmd_list, "show": _cmd_show, "new": _cmd_new, "edit": _
 
 
 def cmd_org(argv: list) -> int:
-    """`halo org list|show <name>|new <name>|edit <name>|run <name>
-    "<goal>"`."""
+    """`halo org list|show <name>|new <name>|edit <name>|run [<name>]
+    "<goal>"` (`run` with no name uses `orgs.default`, see `halo setup
+    orgs`)."""
     if not argv:
-        print('usage: halo org list|show <name>|new <name>|edit <name>|run <name> "<goal>"', file=sys.stderr)
+        print('usage: halo org list|show <name>|new <name>|edit <name>|run [<name>] "<goal>"', file=sys.stderr)
         return 2
     if argv[0] in ("-h", "--help"):
-        print('usage: halo org list|show <name>|new <name>|edit <name>|run <name> "<goal>"')
+        print('usage: halo org list|show <name>|new <name>|edit <name>|run [<name>] "<goal>"')
         return 0
     sub, rest = argv[0], argv[1:]
     fn = _SUBCOMMANDS.get(sub)

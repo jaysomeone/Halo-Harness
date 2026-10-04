@@ -615,6 +615,19 @@ chain). Every step is idempotent -- re-running only reports what's already
 correct. Never writes `~/.claude.json`/`~/.claude/settings.json`, never
 prints a key or token.
 
+**Halo 2.0.2 round 7**: on a real terminal, every interactive step above
+(Providers, Default model, Permission mode) plus three more -- **Theme**
+(the six built-in themes, a live preview of the transcript/status bar in
+each), **Roles** and **Organizations** (see below), and **Linux fixes**
+(skipped automatically when nothing needs fixing) -- run inside ONE
+Textual app, `Step N of M: <name>` in the header and `Back` / `Skip` /
+`Next` (`Finish` on the last step) in the footer; nothing exits to the
+console between steps, and Esc asks "Quit setup? What you saved so far
+stays" instead of ending the run silently. A piped/non-tty run (every
+script, `--yes`, `--provider`) is unaffected -- it keeps the exact
+sequential-picker/numbered-fallback behaviour the worked example below
+shows.
+
 ```sh
 halo init --help
 ```
@@ -1544,9 +1557,12 @@ deliberately non-idempotent write in this whole table -- see
 re-validating on save. The TUI's own `/roles edit <name>` opens a form
 instead (`tui/dialogs/roles_editor.py`) unless `roles.editor: "external"`
 is configured, in which case it uses the same `$EDITOR` flow as this CLI
-command. See [ROLES.md](ROLES.md) for the full picture: the role table
-itself, per-role effort, custom role names, and `/role`/`/roles` in the
-TUI and print mode.
+command; that form, and the init wizard's own Roles step, both gain a
+"start from" template picker in round 7 (three shipped presets --
+`balanced`/`quality`/`local-first` -- written on first use, never
+overwritten). See [ROLES.md](ROLES.md) for the full picture: the role
+table itself, per-role effort, custom role names, `/role`/`/roles` in the
+TUI and print mode, the presets, and the `roles.enabled` mode switch.
 
 ## `halo org`
 
@@ -1555,7 +1571,7 @@ halo org list
 halo org show <name>
 halo org new <name> [--description TEXT]
 halo org edit <name>
-halo org run <name> "<goal>" [--model REF]
+halo org run [<name>] "<goal>" [--model REF]
 ```
 
 Halo 2.0.2 round 2: manages `~/.halo/orgs/<name>.json` organizations -- a
@@ -1567,12 +1583,37 @@ re-validating on save; `run` executes the org's root position on
 `Agent(org=...)` tool call uses, and prints its final answer. `--model`
 on `run` is only a fallback for a position with neither its own `role`
 nor `model` set (every built-in template's own positions always set
-one). The TUI's own `/org edit <name>` opens a form instead
-(`tui/dialogs/org_editor.py`); `/org load <name>` (TUI-only -- re-installs
+one). Round 7: `<name>` is optional on `run` -- a bare `halo org run
+"<goal>"` (one argument) uses `orgs.default` (set via the init wizard's
+own Organizations step, `/setup orgs`, or `halo setup orgs`); with no
+default set either, it refuses cleanly instead of guessing. The TUI's
+own `/org edit <name>` opens a form instead (`tui/dialogs/org_editor.py`,
+also gaining a round 7 "start from: solo / release-flow / company /
+<saved>" template picker); `/org load <name>` (TUI-only -- re-installs
 one of the three shipped built-ins, overwriting a local copy) has no CLI
 equivalent, since `edit`/`new` already cover the same ground from a
 script. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
-and how a run flows through the tree.
+how a run flows through the tree, budgets, and goals.
+
+## `halo setup` / `/setup` (Halo 2.0.2 round 7)
+
+```sh
+halo setup            # the init wizard's Roles step, then Organizations, then a short summary
+halo setup roles       # just the Roles setup screen
+halo setup orgs        # just the Organizations setup screen
+```
+
+The SAME two setup screens `halo init`'s own wizard shows (Roles,
+Organizations -- see [ROLES.md](ROLES.md)/[ORGS.md](ORGS.md)), reachable
+again later without re-running the whole provider flow -- "a setup
+screen should pop up to set those features up in addition to doing it
+within halo." On a real terminal this opens the wizard screen(s); with no
+TTY it prints the current roles table / orgs list instead of blocking,
+and exits 0. `/setup`, `/setup roles`, `/setup orgs` do the same thing
+inside a running session (`tui/slash.py`'s own handler pushes the screen
+onto the live app -- a modal stack over the session, not a separate
+program): saving a role template there updates the LIVE session's own
+role table immediately, no restart needed.
 
 ## `/tasks` (Ctrl+T)
 

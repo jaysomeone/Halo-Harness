@@ -539,9 +539,10 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
 
 def _render_roles_table(facade: HeadlessFacade) -> str:
     from halo_harness.roles import format_roles_table, resolve_all_roles, resolve_role_table
+    hint = "(tip: /setup roles opens a guided setup screen with templates)\n"
     session = getattr(facade, "session", None)
     if session is None:
-        return "Nothing to show yet: /roles needs a live session to resolve against."
+        return hint + "Nothing to show yet: /roles needs a live session to resolve against."
     runtime = getattr(session, "agent_runtime", None)
     role_table = getattr(runtime, "role_table", None)
     if role_table is None:
@@ -552,7 +553,7 @@ def _render_roles_table(facade: HeadlessFacade) -> str:
         parent_profile=session.model_profile, state_dir=session.state_dir,
         routes=getattr(runtime, "routes", None),
     )
-    return format_roles_table(rows)
+    return hint + format_roles_table(rows)
 
 
 def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
@@ -567,7 +568,7 @@ def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
         return "Roles can only be set once a session is running."
     parts = rest.split()
     if len(parts) < 2:
-        return "Usage: /role <name> <model> [effort]"
+        return "Usage: /role <name> <model> [effort] (or /setup roles for a guided setup screen)"
     name, model = parts[0], parts[1]
     effort = parts[2] if len(parts) > 2 else None
     runtime = getattr(session, "agent_runtime", None)
@@ -588,7 +589,7 @@ def _cmd_role(args: str, facade: HeadlessFacade) -> str:
     """Halo 2.0.2 brief A.4: `/role <name> <model> [effort]` -- the short
     form of `/roles set` (see `_set_one_role`'s own docstring)."""
     if not (args or "").strip():
-        return "Usage: /role <name> <model> [effort]"
+        return "Usage: /role <name> <model> [effort] (or /setup roles for a guided setup screen)"
     return _set_one_role(args.strip(), facade)
 
 
@@ -651,11 +652,16 @@ def _cmd_org(args: str, facade: HeadlessFacade) -> str:
 
     if sub == "run":
         if not rest:
-            return 'Usage: /org run <name> "<goal>"'
-        name, _, goal = rest.partition(" ")
-        goal = goal.strip()
+            return 'Usage: /org run [<name>] "<goal>" (no name uses orgs.default, see /setup orgs)'
+        from halo_harness.orgs import default_org_name, parse_run_args
+        name, goal = parse_run_args(rest)
         if not goal:
-            return 'Usage: /org run <name> "<goal>"'
+            return 'Usage: /org run [<name>] "<goal>" (no name uses orgs.default, see /setup orgs)'
+        if name is None:
+            name = default_org_name(state_dir=state_dir)
+            if name is None:
+                return ('No organization name given, and no default is set -- /org run <name> "<goal>", '
+                         'or set a default in /setup orgs.')
         if session is None or getattr(session, "agent_runtime", None) is None:
             return "Organizations can only be run once a session is running."
         from halo_harness.agent.subagent import run_org_call
@@ -666,6 +672,22 @@ def _cmd_org(args: str, facade: HeadlessFacade) -> str:
         return result.content
 
     return f"/org: unknown subcommand {sub!r} (known: list, show, new, load, edit, run)"
+
+
+def _cmd_setup(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 7: `/setup [roles|orgs]` -- the guided setup
+    SCREEN only exists in the TUI (`tui/slash.py::_handle_setup`
+    intercepts this first, same split as `/roles edit`/`/org edit`); this
+    headless fallback (a bare `-p "/setup"`, or a custom command/skill
+    that happens to invoke it) just names the real surfaces instead of
+    half-implementing a form with no screen to draw it on."""
+    sub = (args or "").strip().lower()
+    if sub == "roles":
+        return "/setup roles opens the roles setup screen in the TUI only -- use `halo setup roles` from the CLI."
+    if sub == "orgs":
+        return "/setup orgs opens the organizations setup screen in the TUI only -- use `halo setup orgs` from the CLI."
+    return ("/setup opens the roles and organizations setup screens in the TUI only -- "
+            "use `halo setup` from the CLI, or `/roles`/`/org` here.")
 
 
 def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
@@ -1055,7 +1077,8 @@ _BUILTIN_SPECS = {
               "[templates|save|load|new|edit|show <name>|set <name> <model> [effort]]", _cmd_roles),
     "role": ("core", "Set one role's model/effort for this session", "<name> <model> [effort]", _cmd_role),
     "org": ("core", "List/show/run organizations (trees of sub-agent positions)",
-             "[list|show|new|load|edit|run <name> [\"<goal>\"]]", _cmd_org),
+             "[list|show|new|load|edit|run [<name>] \"<goal>\"]", _cmd_org),
+    "setup": ("core", "Open the roles/organizations guided setup screens", "[roles|orgs]", _cmd_setup),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),

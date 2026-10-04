@@ -34,7 +34,7 @@ git clone https://github.com/roloVibes/Halo-Harness.git
 cd Halo-Harness
 uv tool install --reinstall .   # or: pipx install --force -e .
 cd ~                            # cd anywhere: halo is a real command on PATH now
-halo init                       # pick a provider, paste one credential, get a live pong
+halo init                       # a wizard: provider, model, permission mode, theme, roles, orgs
 halo                            # the full-screen TUI
 ```
 

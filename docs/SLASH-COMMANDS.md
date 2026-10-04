@@ -166,7 +166,7 @@ that resolves this role picks it up. `<name>` must already be a known role
 (a built-in, or a custom name a team.json/loaded template actually defined)
 -- an unknown name errors with the list of known ones. See `docs/ROLES.md`.
 
-### `/org [list|show <name>|new <name>|load <name>|edit <name>|run <name> "<goal>"]`
+### `/org [list|show <name>|new <name>|load <name>|edit <name>|run [<name>] "<goal>"]`
 Halo 2.0.2 round 2: bare `/org` (and `/org list`) lists saved
 organizations (`~/.halo/orgs/<name>.json`); `show` prints the text tree;
 `new` creates a one-position "Orchestrator" starter; `load` re-installs a
@@ -174,7 +174,20 @@ built-in's shipped definition over a local copy; `edit` opens a form in
 the TUI only (print mode names that instead, like `/roles edit`); `run`
 executes the org's root position on `"<goal>"` against the LIVE session,
 through the exact same machinery an `Agent(org=...)` tool call uses --
-the result flows back like any other sub-agent's. See `docs/ORGS.md`.
+the result flows back like any other sub-agent's. Round 7: `<name>` is
+optional on `run` -- `/org run "<goal>"` (just the goal, quoted) uses
+`orgs.default` (set via `/setup orgs`); with none set, it names the fix
+instead of guessing. See `docs/ORGS.md`.
+
+### `/setup [roles|orgs]`
+Halo 2.0.2 round 7: opens the init wizard's own Roles/Organizations setup
+screen(s) over the live session (a modal screen stack, not a separate
+program) -- bare `/setup` chains Roles -> Organizations -> a short
+summary; `/setup roles`/`/setup orgs` open just one. Saving a role
+template here updates the LIVE session's own role table immediately, no
+restart needed. `halo setup [roles|orgs]` is the CLI equivalent (prints
+the current roles table/orgs list with no TTY instead of blocking). See
+`docs/ROLES.md`/`docs/ORGS.md`.
 
 ### `/providers [list|enable <name>|disable <name>|setup <name>]`
 H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-

@@ -148,6 +148,15 @@ class AgentRuntime:
     # org tree -- not just its root -- shares the same two caps.
     max_depth: Optional[int] = None
     max_concurrent: Optional[int] = None
+    # Halo 2.0.2 round 7 (init wizard brief 3b): an organization run's own
+    # budget tracker (`orgs.OrgBudgetTracker`, untyped here for the same
+    # reverse-import reason `role_table`/`routes` already are plain
+    # dicts) -- `None` for every non-org caller. Shared BY REFERENCE down
+    # the whole tree (copied onto every descendant's own nested
+    # AgentRuntime by `_build_child_session`, exactly like `tasks`/`lock`
+    # already are), never rebuilt per hop, so one org-wide/per-position
+    # spend total survives the whole run, not just one level of it.
+    org_budget: Optional[object] = None
     tasks: dict = field(default_factory=dict)        # task_id -> {"child_session_id", "spec_name", "cwd"}
     lock: "threading.Lock" = field(default_factory=threading.Lock)
     # H9 whole-tree review finding 27 (task-map persistence half): flips
@@ -488,7 +497,10 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
                                         # Halo 2.0.2 round 2 (brief B): propagated to EVERY descendant, not
                                         # just this one hop -- an org's depth/concurrency caps must survive
                                         # the whole tree, not reset to the module defaults one level down.
-                                        max_depth=runtime.max_depth, max_concurrent=runtime.max_concurrent)
+                                        max_depth=runtime.max_depth, max_concurrent=runtime.max_concurrent,
+                                        # round 7 (brief 3b): the SAME tracker object, never a fresh one --
+                                        # see AgentRuntime.org_budget's own docstring.
+                                        org_budget=runtime.org_budget)
     _write_meta(meta_path, {
         "agent_id": agent_id, "type": spec.name, "description": spec.description,
         "model": model_ref.raw, "parent_tool_use_id": parent_tool_use_id,
@@ -1033,6 +1045,14 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     restriction = getattr(parent, "agent_type_restriction", None)
     if restriction is not None and subagent_type not in restriction:
         return [], ToolResult(f"This session may not spawn subagent_type {subagent_type!r}.", is_error=True)
+    # Halo 2.0.2 round 7 (brief 3b): an org (or per-position) budget
+    # already tripped refuses the spawn outright, BEFORE any model call
+    # happens -- same shape as the depth check above. `org_budget` is
+    # `None` for every non-org caller, so this is a no-op everywhere else.
+    if runtime.org_budget is not None:
+        refusal = runtime.org_budget.refusal_before_spawn(subagent_type, parent.cost_meter.total_usd)
+        if refusal:
+            return [], ToolResult(refusal, is_error=True)
 
     # Halo 2.0.2 round 3 (brief C): `count` (N identical prompts) / `batch`
     # (a list of per-child prompt+role+model+effort overrides) spawn
@@ -1187,7 +1207,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # is queued, so by the time the parent's next turn (which
                 # applies that notice) actually runs, `--max-budget-usd`/
                 # `/stats` already reflect it.
+                _cost_before = parent.cost_meter.total_usd  # round 7 (brief 3b): this call's own delta, below
                 _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+                budget_note = (runtime.org_budget.record_spend(
+                    spec.name, parent.cost_meter.total_usd - _cost_before, parent.cost_meter.total_usd)
+                    if runtime.org_budget is not None else None)
                 # H6/D10 (see the foreground path's own comment): merge even
                 # for a background sub-agent, under the same lock its own
                 # pending-notice append already uses.
@@ -1244,6 +1268,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 worktree_note = _finalize_child_isolation_worktree(child)
                 if worktree_note:
                     text = f"{text}\n\n{worktree_note}"
+                if budget_note:
+                    text = f"{text}\n\n{budget_note}"
                 notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id}){status_suffix}]\n"
                           f"{_wrap_task_result(text, new_task_id)}")
                 with parent._agent_notices_lock:
@@ -1293,7 +1319,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # H9 whole-tree review finding 13: see the background path's own
     # comment above -- a FOREGROUND child's usage/cost gets the same
     # rollup, just synchronously here instead of at the end of `_bg_run`.
+    _cost_before = parent.cost_meter.total_usd  # round 7 (brief 3b): this call's own delta, below
     _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+    budget_note = (runtime.org_budget.record_spend(spec.name, parent.cost_meter.total_usd - _cost_before,
+                                                     parent.cost_meter.total_usd)
+                   if runtime.org_budget is not None else None)
     # H6 known v1 gap (D10) / B must-do: a non-interactive child's own
     # "ask" denials (agent/loop.py's `_resolve_tool_call`) land in the
     # CHILD's own `permission_denials` list, which nothing outside this
@@ -1313,6 +1343,8 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     worktree_note = _finalize_child_isolation_worktree(child)
     if worktree_note:
         text = f"{text}\n\n{worktree_note}"
+    if budget_note:
+        text = f"{text}\n\n{budget_note}"
     wrapped = _wrap_task_result(text, new_task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
@@ -1360,11 +1392,30 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     root = root_position(org)
     if root is None:
         return [], ToolResult(f"Organization {name!r} has no single root.", is_error=True)
+    # Halo 2.0.2 round 7 (brief 3b, "goals"): this run's own goal becomes
+    # the root task on the shared board -- best-effort (a missing/
+    # unwritable session_dir, e.g. a bare unit-test Session, just means no
+    # goal task exists; every position still runs normally either way).
+    goal_task_id = None
+    session_dir = runtime.parent.log.dir / runtime.parent.log.session_id  # same path ctx.session_dir uses (agent/loop.py)
+    try:
+        from halo_harness.tools.task_board import create_task
+        goal_task_id = create_task(session_dir, title=f"Goal: {goal}", notes=f"organization={name}", kind="goal")
+    except Exception:
+        goal_task_id = None
+    # Halo 2.0.2 round 7 (brief 3b, "budgets"): a tracker shared by every
+    # position in this run (and every descendant's own nested
+    # AgentRuntime, via `_build_child_session`'s `org_budget=` copy) --
+    # `baseline_usd` is THIS call's own starting point, so a budget never
+    # counts spend from whatever the parent session already did before
+    # this org run started.
+    from halo_harness.orgs import build_budget_tracker
+    org_budget = build_budget_tracker(org, baseline_usd=runtime.parent.cost_meter.total_usd)
     org_runtime = AgentRuntime(
-        parent=runtime.parent, agents=position_agent_specs(org), routes=runtime.routes,
+        parent=runtime.parent, agents=position_agent_specs(org, goal_task_id=goal_task_id), routes=runtime.routes,
         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides, depth=runtime.depth,
         tasks=runtime.tasks, lock=runtime.lock, max_depth=org_tree_depth(org) + 1,
-        max_concurrent=org.get("max_concurrent"),
+        max_concurrent=org.get("max_concurrent"), org_budget=org_budget,
     )
     inner_input = {"subagent_type": root["title"], "prompt": goal,
                    "description": tool_input.get("description") or f"Run org {name}"}

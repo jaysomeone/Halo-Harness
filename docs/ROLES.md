@@ -13,7 +13,46 @@ REASONING EFFORT per role too. Verified against `halo_harness/roles.py`,
 [DATABRICKS.md](DATABRICKS.md)'s work-matrix section for endpoint health (a
 separate concern), and that same doc's **End-to-end team workflow** section
 for how a shared `team.json`'s own `roles` table gets onto everyone's box
-via `halo init --provider databricks`.
+via `halo init --provider databricks`. Round 7 (the init wizard) is
+verified against `halo_harness/tui/dialogs/init_wizard.py` and
+`setup_cli.py` too.
+
+## Setting up with the wizard (`roles.enabled`, presets)
+
+The init wizard's own Roles step (`halo init`, step 5; `halo setup
+roles`/`/setup roles` later; "step 5, then orgs" for a bare `halo setup`)
+starts with a switch, **`roles.enabled`** (default **on**): off means
+every role resolves to the session model -- `resolve_role_table()`
+returns `{}` outright, the same shape a session with no role table
+configured at all already falls through to -- and `/roles`/`/role` are
+hidden from `/help`/tab-completion/the rotating tips (never from
+`resolve()` itself: typing either by hand still works, this is a
+discoverability default, never a functional gate).
+
+With it on, the step shows three shipped **presets** -- written as
+ordinary templates (below) into `~/.halo/roles/` the first time this
+screen runs, computed from whatever is actually configured right then,
+and never overwritten after that (same "copy on first use" rule as
+[ORGS.md](ORGS.md)'s own built-ins):
+
+| Preset | What it sets |
+|---|---|
+| `balanced` | the cost-aware defaults: the session model for most roles; `researcher`/`small` drop to the cheapest configured model |
+| `quality` | the session model everywhere; `judge`/`reviewer` pinned to the strongest configured model (the session's own default at setup time) |
+| `local-first` | `small`/`researcher`/`judge` on a local `ol:` model when one is configured (forward-compatible with the 2.0.3 Ollama release -- nothing resolves one yet), else the cheapest configured model |
+
+A preview of the highlighted template's own table is shown; `Use this
+template` (same action as the step's own `Next`) applies it -- through
+the SAME `apply_role_template` a `/roles load`/`halo roles template
+load` would use, also pushed straight into a LIVE session's own role
+table when this runs via `/setup roles` inside one, no restart needed;
+`Edit roles...` opens the round-1 form (below) inside the wizard and
+returns here; `Skip for now` leaves config untouched and the summary
+step prints a one-line `/roles` hint. The round-1 form itself
+(`/roles edit <name>`, `tui/dialogs/roles_editor.py`) gained the SAME
+"start from a template" picker at its top (choosing one REPLACES the
+form's own roles, never merges) plus a `Save as template...` action
+(a COPY under a new name, distinct from `ctrl+s`'s save-to-this-name).
 
 ## The ten roles
 

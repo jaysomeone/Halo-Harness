@@ -107,14 +107,20 @@ and report on it:
 | `owner` | free text (the claiming agent's own name/title -- nothing tracks "who am I" automatically; the caller supplies it) |
 | `notes` | free text, settable at any time |
 | `result` | a free-text pointer to the outcome (a file path, a one-line summary, ...) |
+| `kind` | Halo 2.0.2 round 7: `"task"` (default) or `"goal"` -- an org run's own goal (see [ORGS.md](ORGS.md)) |
+| `parent` | Halo 2.0.2 round 7: another task's own id this one works toward, optional |
 
-`TaskCreate(title, notes?)` adds an `open` task. `TaskUpdate(id,
-status?, owner?, notes?, result?)` updates one -- claiming (`status:
-"claimed"`) **requires `owner`** and is **refused** if the task isn't
-currently `open` (so two agents racing to claim the same task resolve
-to exactly one winner, never a lost update). `TaskList()` prints every
-task, any status. This is distinct from `TodoWrite` (one model's own
-private, whole-list-replacing todos) -- the task board is shared and
-additive.
+`TaskCreate(title, notes?, parent?)` adds an `open` task (Round 7:
+`parent` links it under another task, typically an org run's own goal,
+so `/tasks`' board tab can show goal -> tasks -> results instead of a
+flat list). `TaskUpdate(id, status?, owner?, notes?, result?)` updates
+one -- claiming (`status: "claimed"`) **requires `owner`** and is
+**refused** if the task isn't currently `open`, under the same
+process-wide lock every read-modify-write cycle takes: this is an
+**atomic task checkout** -- two agents racing to claim the same task
+resolve to exactly one winner, never a lost update or a double-claim.
+`TaskList()` prints every task, any status. This is distinct from
+`TodoWrite` (one model's own private, whole-list-replacing todos) -- the
+task board is shared and additive.
 
 This is the SAME board the tasks panel's own "Board" tab shows live.

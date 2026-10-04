@@ -8521,6 +8521,305 @@ def test_mcp_dialog_e_opens_the_inline_form_and_saves(ctx: Ctx):
     asyncio.run(body())
 
 
+# ============================================================================
+# Halo 2.0.2 round 7: the init wizard (tui/dialogs/init_wizard.py) -- one
+# Textual app for the whole interactive `halo init`, Back/Skip/Next/Finish
+# buttons, no console tear-down between steps. `InitWizardApp` is run as
+# its OWN standalone app here (same `run_test()` pattern `InitTabsApp`'s
+# own pilot block above already uses), never via `run_init_wizard`'s
+# `.run()` (which blocks for a real terminal) -- a test builds `WizardState`
+# directly and wraps it.
+# ============================================================================
+
+@test
+def test_init_wizard_walks_every_step_with_next_never_exiting(ctx: Ctx):
+    """Brief Tests section: "the wizard walks all steps with Next and
+    never exits between them"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-walk-")
+        try:
+            step_keys = ("providers", "default_model", "permission_mode", "theme", "roles", "orgs", "summary")
+            state = WizardState(cwd=REPO_DIR, step_keys=step_keys, no_live=True)
+            app = InitWizardApp(state)
+            seen = []
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                for _key in step_keys:
+                    seen.append(type(app.screen).__name__)
+                    app.screen.query_one("#wiz-next").press()
+                    await pilot.pause(0.25)
+            ctx.check(f"walked every step in order with Next alone, got {seen}",
+                      seen == ["ProvidersStep", "DefaultModelStep", "PermissionModeStep", "ThemeStep",
+                               "RolesStep", "OrgsStep", "SummaryStep"])
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_back_returns_to_the_previous_step_with_values_kept(ctx: Ctx):
+    """Brief Tests section: "Back returns to the previous step with its
+    values kept"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from textual.widgets import OptionList
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-back-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("permission_mode", "theme"), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                perm_screen = app.screen
+                option_list = perm_screen.query_one("#wiz-permission-list", OptionList)
+                option_list.highlighted = 2  # NOT the initial "auto" highlight
+                app.screen.query_one("#wiz-next").press()
+                await pilot.pause(0.2)
+                ctx.check("advanced to theme", type(app.screen).__name__ == "ThemeStep")
+                app.screen.query_one("#wiz-back").press()
+                await pilot.pause(0.2)
+                ctx.check("back on the SAME permission_mode screen instance (never rebuilt)",
+                          app.screen is perm_screen)
+                ctx.check("the highlighted value survived the round trip",
+                          app.screen.query_one("#wiz-permission-list", OptionList).highlighted == 2)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_skip_on_roles_and_orgs_leaves_config_untouched(ctx: Ctx):
+    """Brief Tests section: "Skip on roles and orgs leaves config
+    untouched"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.theme import get_config_value
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-skip-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("roles", "orgs"), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                app.screen.query_one("#wiz-skip").press()  # roles
+                await pilot.pause(0.2)
+                app.screen.query_one("#wiz-skip").press()  # orgs
+                await pilot.pause(0.2)
+                ctx.check("roles.enabled never written",
+                          get_config_value("roles.enabled", default="<unset>") == "<unset>")
+                ctx.check("orgs.enabled never written",
+                          get_config_value("orgs.enabled", default="<unset>") == "<unset>")
+                ctx.check("orgs.default never written",
+                          get_config_value("orgs.default", default="<unset>") == "<unset>")
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_esc_asks_before_quitting(ctx: Ctx):
+    """Brief Tests section: "Esc asks before quitting"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState, _QuitConfirm
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-esc-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("roles",), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+                ctx.check("a confirm modal appeared instead of an immediate exit",
+                          isinstance(app.screen, _QuitConfirm) and app.is_running)
+                await pilot.press("n")
+                await pilot.pause(0.2)
+                ctx.check("answering No returns to the step, the app keeps running",
+                          type(app.screen).__name__ == "RolesStep" and app.is_running)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_quality_template_writes_the_expected_role_table(ctx: Ctx):
+    """Brief Tests section: "picking the quality template writes the
+    expected role table"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.roles import configured_role_table
+    from halo_harness.theme import set_config_value
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-quality-")
+        try:
+            set_config_value("model", "or:vendor/strong-model")
+            state = WizardState(cwd=REPO_DIR, step_keys=("roles",), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                picker = app.screen.query_one("#wiz-roles-templates")
+                names = [str(picker.get_option_at_index(i).id) for i in range(picker.option_count)]
+                picker.highlighted = names.index("quality")
+                await pilot.pause(0.05)
+                app.screen.query_one("#wiz-roles-use").press()
+                await pilot.pause(0.2)
+                table = configured_role_table()
+                ctx.check(f"quality pins judge+reviewer to the session's own model, got {table}",
+                          table.get("judge") == "or:vendor/strong-model"
+                          and table.get("reviewer") == "or:vendor/strong-model")
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_edit_roles_opens_and_returns_to_the_step(ctx: Ctx):
+    """Brief Tests section: "Edit roles... opens the editor and returns
+    to the step"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-editroles-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("roles",), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                roles_screen = app.screen
+                roles_screen.query_one("#wiz-roles-edit").press()
+                await pilot.pause(0.3)
+                ctx.check(f"the roles editor opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, RolesEditor))
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+                ctx.check("back on the SAME roles step instance", app.screen is roles_screen)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_choosing_default_org_writes_orgs_default(ctx: Ctx):
+    """Brief Tests section: "choosing a default org writes orgs.
+    default"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.theme import get_config_value
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-defaultorg-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("orgs",), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                picker = app.screen.query_one("#wiz-orgs-list")
+                names = [str(picker.get_option_at_index(i).id) for i in range(picker.option_count)]
+                picker.highlighted = names.index("release-flow")
+                await pilot.pause(0.05)
+                app.screen.query_one("#wiz-orgs-default").press()
+                await pilot.pause(0.2)
+                ctx.check(f"orgs.default was written, got {get_config_value('orgs.default', default=None)!r}",
+                          get_config_value("orgs.default", default=None) == "release-flow")
+                ctx.check("orgs.enabled was also turned on (the switch defaulted on when clicked)",
+                          get_config_value("orgs.enabled", default=False) is True)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_start_step_five_opens_on_roles(ctx: Ctx):
+    """Brief Tests section: "start_step=5 opens on roles"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState, _resolve_start_index, \
+        full_step_keys
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-startstep-")
+        try:
+            step_keys = full_step_keys()
+            state = WizardState(cwd=REPO_DIR, step_keys=step_keys,
+                                 index=_resolve_start_index(5, step_keys), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                ctx.check(f"opened directly on the Roles step, got {type(app.screen).__name__}",
+                          type(app.screen).__name__ == "RolesStep")
+                ctx.check("Back is enabled (earlier steps are still reachable from a mid-wizard start)",
+                          not app.screen.query_one("#wiz-back").disabled)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_slash_setup_roles_opens_the_screen_and_updates_the_live_session(ctx: Ctx):
+    """Brief Tests section: "/setup roles inside a mounted BridgeApp opens
+    the screen and the live role table changes after save". `FakeController`
+    has no real `.session`/`agent_runtime` at all (same reason
+    `test_slash_effort_against_a_real_session_persists_the_sent_value`
+    above needs the real-controller rig instead)."""
+    import argparse
+    from halo_harness.tui.dialogs.init_wizard import RolesStep
+
+    async def body():
+        fh = build_fake_home()
+        old_env = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_OPENROUTER_BASE_URL",
+                                                     "OPENROUTER_API_KEY")}
+        mock = MockUpstream().start()
+        os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+        os.environ["BRIDGE_OPENROUTER_BASE_URL"] = mock.base_url
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        controller = None
+        try:
+            from halo_harness.tui.bootstrap import build_controller
+            from halo_harness.tui.slash import handle_slash
+            args = argparse.Namespace(
+                cwd=str(fh["proj"]), settings=None, allowed_tools=None, disallowed_tools=None,
+                permission_mode="bypassPermissions", dangerously_skip_permissions=False, bare=True,
+                tools=None, add_dir=None, model="or:mock/setup-roles", small_model=None, session_id=None,
+                max_turns=10, effort=None, append_system_prompt=None, chrome=False, no_chrome=False,
+                playwright=False, playwright_cdp=None, playwright_headless=False, mcp_config=None,
+                strict_mcp_config=False,
+            )
+            controller, registry, facade = build_controller(args)
+            app = BridgeApp(controller, registry=registry, facade=facade,
+                             tool_registry=getattr(facade, "tool_registry", None), cwd=fh["proj"])
+            # Set BEFORE /setup roles opens -- the "quality" preset is
+            # COMPUTED from the current default model the first time this
+            # screen is built (and never recomputed once the file exists),
+            # so this must land before that happens, not after.
+            from halo_harness.theme import set_config_value
+            set_config_value("model", "or:vendor/strong-for-setup")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await handle_slash(app, "setup", "roles")
+                await pilot.pause(0.2)
+                ctx.check(f"the roles setup screen opened, got {type(app.screen).__name__}",
+                          isinstance(app.screen, RolesStep))
+                picker = app.screen.query_one("#wiz-roles-templates")
+                names = [str(picker.get_option_at_index(i).id) for i in range(picker.option_count)]
+                picker.highlighted = names.index("quality")
+                app.screen.query_one("#wiz-roles-use").press()
+                await pilot.pause(0.3)
+                runtime = controller.session.agent_runtime
+                ctx.check(f"the LIVE session's own role table picked up the template, got {runtime.role_table}",
+                          runtime.role_table.get("judge") == "or:vendor/strong-for-setup")
+                ctx.check("the screen popped back to the live session (no screens left over)",
+                          not isinstance(app.screen, RolesStep))
+        finally:
+            if controller is not None:
+                controller.quit()
+            mock.stop()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    asyncio.run(body())
+
+
 if __name__ == "__main__":
     # NEW (post-H9 acceptance): see tests/helpers/runner.py's own docstring.
     from tests.helpers.runner import cleanup_tracked_temp_dirs, install_temp_dir_tracking

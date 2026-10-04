@@ -64,9 +64,18 @@ def agent_row_text(row: dict, *, phase_word: "Optional[str]" = None) -> str:
 
 
 def board_row_text(row: dict) -> str:
+    # Halo 2.0.2 round 7 (brief 3b, "goals"): a goal task (an org run's own
+    # root task, `tools/task_board.create_task(..., kind="goal")`) is
+    # tagged; a task some OTHER task's own child of (`parent` set, by
+    # TaskCreate's own optional field) is indented one level, so the
+    # board reads goal -> tasks -> results instead of a flat list -- a
+    # plain pre-round-7 task (`kind` absent, `parent` absent) renders
+    # byte-for-byte as before.
+    indent = "  " if row.get("parent") else ""
+    tag = "[goal] " if row.get("kind") == "goal" else ""
     owner = f" owner={row['owner']}" if row.get("owner") else ""
     result = f" result={row['result']!r}" if row.get("result") else ""
-    return f"[{row.get('status', '?')}]{owner} {row.get('title', '?')}{result}"
+    return f"{indent}{tag}[{row.get('status', '?')}]{owner} {row.get('title', '?')}{result}"
 
 
 def _blocks_to_text(content) -> str:
@@ -285,7 +294,19 @@ class TasksPanel(ModalScreen):
         self.dismiss()
 
     def action_next_tab(self) -> None:
-        self.tab = "board" if self.tab == "agents" else "agents"
+        # Halo 2.0.2 round 7 (init wizard brief, "Modes"): the board tab
+        # is hidden (Tab stays on "agents") while `orgs.enabled` is off --
+        # the shared board itself still WORKS (no cyber-blocks: a
+        # TaskCreate/TaskUpdate call always succeeds), only this
+        # discovery surface is gated, same as `/org`/`/tasks`' own
+        # listing elsewhere (`commands/registry.py`).
+        if self.tab == "agents":
+            from halo_harness.orgs import orgs_mode_enabled
+            if not orgs_mode_enabled():
+                return
+            self.tab = "board"
+        else:
+            self.tab = "agents"
         self.refresh_rows()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:

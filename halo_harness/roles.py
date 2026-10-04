@@ -152,13 +152,31 @@ def known_role_names(*extra_tables: "Optional[dict]") -> "tuple[str, ...]":
     return tuple(seen)
 
 
+def roles_mode_enabled() -> bool:
+    """Halo 2.0.2 round 7 (init wizard brief, "Modes"): `roles.enabled` in
+    `~/.halo/config.json`, default True. False means "every role resolves
+    to the session model" -- enforced by `resolve_role_table` returning
+    `{}` unconditionally below, the SAME empty-table shape an agent with
+    no role at all already falls through to, so turning this off needs no
+    other code path to change at all."""
+    from halo_harness.theme import get_config_value
+    return bool(get_config_value("roles.enabled", True))
+
+
 def resolve_role_table(*, provider: Optional[str] = None) -> dict:
     """The persisted role table a session resolves agents against --
     `configured_role_table()` verbatim whenever it holds ANYTHING at all;
     otherwise the cost-aware defaults, but only when `provider` (the
     session's own resolved model provider) is `"databricks"` -- see this
     module's own docstring/`COST_AWARE_DEFAULTS` comment. Any other
-    provider with an empty configured table gets `{}` back."""
+    provider with an empty configured table gets `{}` back.
+
+    Round 7: `{}` outright when `roles.enabled` is False -- checked FIRST,
+    ahead of even the cost-aware default, since "every role resolves to
+    the session model" (the mode's own documented meaning) must win over
+    everything else this function would otherwise apply."""
+    if not roles_mode_enabled():
+        return {}
     configured = configured_role_table()
     if configured:
         return configured
@@ -503,3 +521,114 @@ def apply_role_template(name: str, state_dir=None) -> "tuple[bool, list[str]]":
     for role_name, value in template["roles"].items():
         set_config_value(f"roles.{role_name}", value)
     return True, []
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 round 7 (init wizard brief, item 2): three shipped PRESETS,
+# written as ordinary templates (above) into `role_templates_dir()` the
+# first time the roles setup screen runs, and never overwritten after
+# that -- the exact "copy on first use, never overwrite" idiom `orgs.py::
+# ensure_builtin_orgs` already uses for its own three built-ins. Unlike
+# `_BUILTIN_ORGS` (a fixed literal), these three are COMPUTED from
+# whatever is actually configured right now (there is no single "the
+# strongest/cheapest model" without asking the live catalogs), so they
+# are written once, at first-use time, not kept as a module constant.
+# ---------------------------------------------------------------------------
+
+BUILTIN_ROLE_PRESET_NAMES = ("balanced", "quality", "local-first")
+
+
+def _configured_model_entries(state_dir=None) -> "list[dict]":
+    """Every model entry across every CONFIGURED+enabled provider, in
+    `init_providers.model_entries_for_provider`'s own row shape -- the one
+    place `_cheapest_model_entry`/`_local_ol_model_entry` below both read
+    from. Best-effort: any provider whose own catalog lookup raises (an
+    unrefreshed cache, a provider with no catalog concept) just
+    contributes nothing, never crashes the whole preset computation."""
+    from halo_harness.init_providers import configured_providers, model_entries_for_provider
+    out: "list[dict]" = []
+    for provider in configured_providers():
+        try:
+            out.extend(model_entries_for_provider(provider, state_dir))
+        except Exception:
+            pass
+    return out
+
+
+def _cheapest_model_entry(state_dir=None) -> Optional[str]:
+    """The lowest `price_in_per_m` ref across every configured provider's
+    catalog -- `None` when nothing has a usable price (a fresh/unrefreshed
+    catalog, or every configured provider priced `None`), so the caller
+    can fall back to the session's own default model instead."""
+    best_ref, best_price = None, None
+    for e in _configured_model_entries(state_dir):
+        price = e.get("price_in_per_m")
+        if not isinstance(price, (int, float)) or isinstance(price, bool):
+            continue
+        if best_price is None or price < best_price:
+            best_price, best_ref = price, e.get("ref")
+    return best_ref
+
+
+def _local_ol_model_entry(state_dir=None) -> Optional[str]:
+    """A local Ollama (`ol:`) model, when one is configured -- forward-
+    compatible with the 2.0.3 Ollama release (roadmap): `init` has no
+    `ol:` provider to configure yet in 2.0.2, so this always returns
+    `None` today and `compute_builtin_role_presets` below falls through to
+    the cheapest configured model instead, exactly as the brief's own
+    "else the cheapest configured model" names."""
+    for e in _configured_model_entries(state_dir):
+        ref = e.get("ref") or ""
+        if ref.startswith("ol:"):
+            return ref
+    return None
+
+
+def compute_builtin_role_presets(*, default_model: Optional[str] = None, state_dir=None) -> dict:
+    """`{"balanced": {"description", "roles"}, "quality": {...}, "local-
+    first": {...}}` (brief item 2's own three descriptions) -- `default_
+    model` is "the strongest configured model" (brief's own wording for
+    `quality`): this harness has no model-strength ranking of its own, so
+    the session's own already-chosen default (whatever the provider/
+    default-model wizard steps just resolved, or `config.json`'s current
+    one) is the best available proxy, documented here rather than
+    invented silently. A role only appears in a preset's own `roles` dict
+    when a real value was actually found for it (no model configured at
+    all yet -> an empty-but-valid template, never a crash)."""
+    from halo_harness.theme import get_config_value
+    if not default_model:
+        current = get_config_value("model", default=None)
+        default_model = current if isinstance(current, str) and current else None
+    cheapest = _cheapest_model_entry(state_dir) or default_model
+    local = _local_ol_model_entry(state_dir) or cheapest
+    return {
+        "balanced": {
+            "description": "Cost-aware defaults: the session model for most roles; researcher and small "
+                           "drop to the cheapest configured model.",
+            "roles": ({"researcher": cheapest, "small": cheapest} if cheapest else {}),
+        },
+        "quality": {
+            "description": "The session model everywhere; judge and reviewer pinned to the strongest "
+                           "configured model.",
+            "roles": ({"judge": default_model, "reviewer": default_model} if default_model else {}),
+        },
+        "local-first": {
+            "description": "small, researcher and judge on a local ol: model when one is configured, "
+                           "else the cheapest configured model.",
+            "roles": ({"small": local, "researcher": local, "judge": local} if local else {}),
+        },
+    }
+
+
+def ensure_builtin_role_presets(*, default_model: Optional[str] = None, state_dir=None) -> None:
+    """Writes each of `BUILTIN_ROLE_PRESET_NAMES` as an ordinary template
+    the first time it's missing -- never overwrites one that already
+    exists (even an empty/stale one from an earlier run with a different
+    provider configured), matching `orgs.ensure_builtin_orgs`'s own
+    "never overwritten once present" rule."""
+    presets = compute_builtin_role_presets(default_model=default_model, state_dir=state_dir)
+    d = role_templates_dir(state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    for name, data in presets.items():
+        if not (d / f"{name}.json").exists():
+            save_role_template(name, data, state_dir=state_dir)

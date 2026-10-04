@@ -10,9 +10,11 @@ version.
 
 ## [2.0.2] - unreleased
 
-W7 rounds 1-5 of the 2.0.2 brief (F, A, B, C, D, then E): the terminal tab
-title fix, roles v2, organizations, sub-agent visibility and scale, MCP
-repair actions, and Qwen tool calling at work.
+W7 rounds 1-7 of the 2.0.2 brief (F, A, B, C, D, E, then the init wizard):
+the terminal tab title fix, roles v2, organizations, sub-agent visibility
+and scale, MCP repair actions, Qwen tool calling at work, `halo update`,
+and one init wizard with Back/Skip/Next buttons plus Roles/Organizations
+setup screens.
 
 1. **Terminal tab title stays `halo`**: root cause confirmed by reading
    every `claude`-spawning call site -- each one pipes the child's stdout/
@@ -208,6 +210,46 @@ repair actions, and Qwen tool calling at work.
    false`. `scripts/install-halo.ps1` (new) mirrors `install-halo.sh` for
    Windows PowerShell. README/docs/INSTALL.md gain matching Install and
    Update sections; docs/INSTALL.md also gains an Uninstall section.
+8. **One init wizard, Roles/Organizations setup screens**: owner report
+   -- "I have to press esc then it exits then brings up the next
+   section ... there should be a button you select to move it forward
+   ... there should be an init step that lets you set up roles first too
+   or skip for later ... a setup screen should pop up to set those
+   features up in addition to doing it within halo ... selection of
+   templates would be good". `tui/dialogs/init_wizard.py` (new): ONE
+   Textual app for the whole interactive `halo init`, `Step N of M: <name>`
+   header, `Back`/`Skip`/`Next` (`Finish` on the last step) footer, Esc
+   asking "Quit setup? What you saved so far stays" instead of ending
+   silently -- Providers (the existing tabs content, moved in), Default
+   model, Permission mode, **Theme** (new: the six built-in themes, a
+   live preview), **Roles** (new: a `roles.enabled` switch, default on,
+   three shipped presets -- `balanced`/`quality`/`local-first` -- with a
+   preview, `Edit roles...` opening the round-1 form inline), **Organizations**
+   (new: an `orgs.enabled` switch, default off, a default-org pick,
+   `Edit org...` opening the round-2 form inline), Linux fixes (skipped
+   automatically when nothing needs fixing), Summary. Both modes gate
+   discoverability only (`/roles`/`/role`/`/org` hidden from `/help`/
+   completion/the rotating tips, the `/tasks` board tab, and the `Agent`
+   tool's own `org=` parameter while off) -- never a functional gate; an
+   org/role invoked by name still works either way. `halo setup
+   [roles|orgs]` (new `setup_cli.py`) and `/setup [roles|orgs]` (`tui/
+   slash.py`) reopen the Roles/Organizations screens later -- a bare
+   `halo setup`/`/setup` chains roles -> orgs -> a short summary; with no
+   TTY, `halo setup` prints the current roles table/orgs list and exits
+   0. The round-1 roles editor and round-2 org editor both gain a "start
+   from a template" picker at their top (roles also gains `Save as
+   template...`). Paperclip-derived additions to organizations (brief
+   3b): **budgets** (`budget_usd` on an org and/or a position, enforced
+   through the existing cost meter -- a hard stop refuses a FURTHER
+   delegation once reached, a warning at 80%; the call already running
+   always finishes) and **goals** (`/org run`'s own goal becomes a root
+   task, `kind: "goal"`, on the shared board before the root position
+   runs; every position is told to link its own tasks to it via
+   `TaskCreate`'s new `parent`). `orgs.default` (`/org run`/`halo org
+   run` with no name) is new too. Left for a later round (Paperclip
+   ideas that didn't fit this one): `halo org install`/`/org install`
+   with a README per template, approval gates (`requires_approval`),
+   export/import, and `/org resume`.
 
 ## [2.0.0] - 2026-10-01
 

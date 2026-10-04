@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,68 @@ def is_valid_org_name(name: str) -> bool:
     more permissive than a ROLE name (an org's name is a file stem, not a
     role keyword)."""
     return bool(name) and bool(_ORG_NAME_RE.match(name)) and ".." not in name
+
+
+def _valid_budget(value) -> bool:
+    """A `budget_usd` value (org-level or per-position, brief 3b) is valid
+    when it's a non-negative, non-bool number -- `None` (no budget at all)
+    is handled by the CALLER, never here."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+
+
+def orgs_mode_enabled() -> bool:
+    """Halo 2.0.2 round 7 (init wizard brief, "Modes"): `orgs.enabled` in
+    `~/.halo/config.json`, default False (unlike roles, which defaults
+    on) -- read fresh everywhere this matters (the slash-command/tips
+    enumeration in `commands/registry.py`, the Agent tool's own `org=`
+    advertisement in `tools/agent.py`) so flipping it takes effect
+    immediately, no restart needed. Never gates `run_org_call`/`/org run`
+    ITSELF -- turning this off only changes what's ADVERTISED, matching
+    the harness's own "no safety/refusal gating" rule; an org explicitly
+    invoked by name still runs."""
+    from halo_harness.theme import get_config_value
+    return bool(get_config_value("orgs.enabled", False))
+
+
+def default_org_name(state_dir=None) -> Optional[str]:
+    """`orgs.default` in `~/.halo/config.json` -- what `/org run`/`halo
+    org run`'s own "no name given" fallback (brief item 3) resolves to.
+    `None` when unset, or when it no longer names a real, valid org (a
+    stale value left over from a deleted/renamed one is never silently
+    treated as real)."""
+    from halo_harness.theme import get_config_value
+    name = get_config_value("orgs.default", default=None)
+    if not isinstance(name, str) or not name:
+        return None
+    return name if load_org(name, state_dir=state_dir) is not None else None
+
+
+def set_default_org(name: str, state_dir=None) -> "tuple[bool, list[str]]":
+    """Writes `orgs.default` -- `(False, [reason])` when `name` isn't a
+    real, currently-valid org (never writes a dangling default)."""
+    from halo_harness.theme import set_config_value
+    if load_org(name, state_dir=state_dir) is None:
+        return False, [f"no such organization: {name!r} (or it failed validation)"]
+    set_config_value("orgs.default", name)
+    return True, []
+
+
+def parse_run_args(rest: str) -> "tuple[Optional[str], str]":
+    """`/org run [<name>] "<goal>"` argument splitting, shared by every
+    caller (`commands/builtins.py::_cmd_org`, `tui/slash.py::_handle_org`,
+    `org_cli.py::_cmd_run`) -- Halo 2.0.2 round 7 (init wizard brief item
+    3): "orgs.default, used by /org run with no name". `rest` STARTING
+    with a quote character means no name was given at all (the whole
+    thing, unquoted, is the goal -- `orgs.default` applies); otherwise the
+    first whitespace-separated token is the name and everything after it
+    is the goal, exactly as before this existed."""
+    rest = (rest or "").strip()
+    if rest and rest[0] in "\"'":
+        quote = rest[0]
+        body = rest[1:]
+        return None, (body[:-1] if body.endswith(quote) else body).strip()
+    name, _, goal = rest.partition(" ")
+    return (name or None), goal.strip()
 
 
 def find_position(org: dict, title: str) -> "Optional[dict]":
@@ -80,6 +143,8 @@ def validate_org(data) -> "list[str]":
         problems.append('"name" must be a string')
     if "description" in data and not isinstance(data.get("description"), str):
         problems.append('"description" must be a string')
+    if "budget_usd" in data and data.get("budget_usd") is not None and not _valid_budget(data.get("budget_usd")):
+        problems.append('"budget_usd" must be a non-negative number')
     positions = data.get("positions")
     if not isinstance(positions, list) or not positions:
         return problems + ['"positions" must be a non-empty list']
@@ -91,6 +156,8 @@ def validate_org(data) -> "list[str]":
             problems.append(f'position #{i}: needs a non-empty "title"')
             continue
         titles.append(p["title"])
+        if "budget_usd" in p and p.get("budget_usd") is not None and not _valid_budget(p.get("budget_usd")):
+            problems.append(f'position {p["title"]!r}: "budget_usd" must be a non-negative number')
     dupes = sorted({t for t in titles if titles.count(t) > 1})
     if dupes:
         problems.append(f"duplicate position title(s): {', '.join(dupes)}")
@@ -207,10 +274,16 @@ def describe(org: dict) -> str:
     return "\n".join(lines)
 
 
-def _render_context(org: dict, position: dict) -> str:
+def _render_context(org: dict, position: dict, *, goal_task_id: Optional[str] = None) -> str:
     """Appended to a position's own `instructions` to become its full
     system prompt (brief item 2: "its instructions plus a rendered view
-    of the tree and of the positions it may delegate to")."""
+    of the tree and of the positions it may delegate to").
+
+    `goal_task_id` (brief 3b, "goals"): the shared task board's own root
+    task for THIS run (`run_org_call` creates it before spawning the
+    root position) -- every position is told to set `parent=<id>` on its
+    own `TaskCreate` calls so `/tasks`' board tab shows goal -> tasks ->
+    results, rather than a flat, unrelated list."""
     lines = [f"You are the '{position['title']}' position in the '{org.get('name', '?')}' organization.",
               "", "Full organization chart:", describe(org)]
     reports = position.get("reports") or []
@@ -225,6 +298,14 @@ def _render_context(org: dict, position: dict) -> str:
             lines.append(f"  - {title} ({_who(target)}): {summary}")
     else:
         lines += ["", "You have nobody to delegate to -- do this yourself and report your final answer."]
+    if goal_task_id:
+        lines += ["", f"This run's goal is tracked as task {goal_task_id!r} on the shared task board "
+                       f"(TaskList/TaskCreate/TaskUpdate) -- when you create your own tasks toward this goal, "
+                       f"pass parent={goal_task_id!r} so the board shows goal -> tasks -> results."]
+    budget = position.get("budget_usd")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool):
+        lines += ["", f"This position has its own budget of ${budget:.2f} for this run -- once reached, "
+                       f"you will be refused if spawned again; finish and report before then."]
     return "\n".join(lines)
 
 
@@ -309,14 +390,16 @@ def reload_builtin_org(name: str, state_dir=None) -> "tuple[bool, list[str]]":
     return True, []
 
 
-def position_agent_specs(org: dict) -> "dict[str, object]":
+def position_agent_specs(org: dict, *, goal_task_id: Optional[str] = None) -> "dict[str, object]":
     """One `config.agents_md.AgentSpec` per position, keyed by title --
     `agent/subagent.py::run_org_call` hands this whole dict to a fresh
     `AgentRuntime.agents` so every position is spawnable by `subagent_
     type` exactly like a discovered `.claude/agents/*.md` file, with its
     own `reports` enforced through the SAME `agent_type_restriction`
     check an agent file's own `tools: ["Agent(name)"]` already drives
-    (`AgentSpec.delegate_restriction`, read by `_build_child_session`)."""
+    (`AgentSpec.delegate_restriction`, read by `_build_child_session`).
+    `goal_task_id` (brief 3b): threaded into every position's own
+    rendered context, see `_render_context`'s own docstring."""
     from halo_harness.config.agents_md import AgentSpec
     specs: dict = {}
     for p in (org.get("positions") or []):
@@ -324,7 +407,8 @@ def position_agent_specs(org: dict) -> "dict[str, object]":
             continue
         title = p["title"]
         tools = p.get("tools")
-        body = f"{(p.get('instructions') or '').strip()}\n\n{_render_context(org, p)}".strip()
+        body = f"{(p.get('instructions') or '').strip()}\n\n" \
+               f"{_render_context(org, p, goal_task_id=goal_task_id)}".strip()
         specs[title] = AgentSpec(
             name=title, description=f"Organization position: {title}",
             tools=(list(tools) if isinstance(tools, list) and tools else None),
@@ -337,6 +421,92 @@ def position_agent_specs(org: dict) -> "dict[str, object]":
             source=f"org:{org.get('name', '?')}",
         )
     return specs
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 round 7 (init wizard brief 3b): budgets -- `budget_usd` on the
+# org (hard stop) and per position (warning at 80%, hard stop at 100%),
+# "enforced through the existing cost meter". One tracker instance is built
+# once per `run_org_call` and shared (by reference, like `AgentRuntime.
+# tasks`/`.lock`) across the WHOLE tree via `AgentRuntime.org_budget` --
+# `agent/subagent.py::run_agent_call` is what actually calls these two
+# methods, right before spawning a position (`refusal_before_spawn`) and
+# right after rolling its cost into the parent (`record_spend`).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OrgBudgetTracker:
+    org_name: str
+    org_budget_usd: Optional[float] = None
+    position_budgets: dict = field(default_factory=dict)   # title -> budget_usd
+    baseline_usd: float = 0.0                               # parent.cost_meter.total_usd when the run started
+    spent_by_position: dict = field(default_factory=dict)   # title -> cumulative usd spent AS this position
+    org_stopped: bool = False
+    stopped_positions: "set" = field(default_factory=set)
+
+    def _org_spent(self, parent_total_usd: float) -> float:
+        return max(0.0, parent_total_usd - self.baseline_usd)
+
+    def refusal_before_spawn(self, title: str, parent_total_usd: float) -> Optional[str]:
+        """Called right before a NEW position is spawned -- a hard stop
+        already tripped (org-wide, or this exact title) refuses outright;
+        never retroactively stops a call already running."""
+        if self.org_stopped or (self.org_budget_usd is not None
+                                 and self._org_spent(parent_total_usd) >= self.org_budget_usd):
+            self.org_stopped = True
+            return (f"Organization {self.org_name!r}'s budget (${self.org_budget_usd:.2f}) has been reached -- "
+                    f"no further positions may be spawned this run.")
+        if title in self.stopped_positions:
+            return (f"Position {title!r}'s own budget "
+                    f"(${self.position_budgets.get(title, 0.0):.2f}) has been reached -- "
+                    f"it cannot be spawned again this run.")
+        return None
+
+    def record_spend(self, title: str, spent_usd: float, parent_total_usd: float) -> Optional[str]:
+        """Called right after a position's call finishes and its cost is
+        rolled into the parent -- returns a warning/stop line to append to
+        that call's own result text, or `None` when nothing crossed a
+        threshold. Never raises, never refuses retroactively (the call
+        already happened); only flips the flags `refusal_before_spawn`
+        reads for the NEXT spawn attempt."""
+        if spent_usd > 0:
+            self.spent_by_position[title] = self.spent_by_position.get(title, 0.0) + spent_usd
+        notes: "list[str]" = []
+        budget = self.position_budgets.get(title)
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+            spent = self.spent_by_position.get(title, 0.0)
+            if spent >= budget:
+                self.stopped_positions.add(title)
+                notes.append(f"[budget] position {title!r} has reached its ${budget:.2f} budget -- "
+                              f"it will be refused if spawned again this run")
+            elif spent >= 0.8 * budget:
+                notes.append(f"[budget] position {title!r} has used {spent / budget:.0%} of its ${budget:.2f} budget")
+        if self.org_budget_usd is not None and self.org_budget_usd > 0:
+            total = self._org_spent(parent_total_usd)
+            if total >= self.org_budget_usd:
+                self.org_stopped = True
+                notes.append(f"[budget] organization {self.org_name!r} has reached its "
+                              f"${self.org_budget_usd:.2f} budget -- budget reached")
+            elif total >= 0.8 * self.org_budget_usd:
+                notes.append(f"[budget] organization {self.org_name!r} has used "
+                              f"{total / self.org_budget_usd:.0%} of its ${self.org_budget_usd:.2f} budget")
+        return "; ".join(notes) if notes else None
+
+
+def build_budget_tracker(org: dict, *, baseline_usd: float = 0.0) -> OrgBudgetTracker:
+    """One tracker for a `run_org_call` run of `org` -- `None` org/position
+    `budget_usd` values are simply absent from `position_budgets` (a
+    position with no budget of its own is never affected by this at
+    all)."""
+    position_budgets = {}
+    for p in (org.get("positions") or []):
+        if isinstance(p, dict) and p.get("title") and isinstance(p.get("budget_usd"), (int, float)) \
+                and not isinstance(p.get("budget_usd"), bool):
+            position_budgets[p["title"]] = p["budget_usd"]
+    org_budget = org.get("budget_usd")
+    org_budget = org_budget if isinstance(org_budget, (int, float)) and not isinstance(org_budget, bool) else None
+    return OrgBudgetTracker(org_name=org.get("name", "?"), org_budget_usd=org_budget,
+                             position_budgets=position_budgets, baseline_usd=baseline_usd)
 
 
 # ---------------------------------------------------------------------------

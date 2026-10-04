@@ -82,7 +82,28 @@ def _format_task(t: dict) -> str:
     owner = f" owner={t['owner']}" if t.get("owner") else ""
     notes = f" notes={t['notes']!r}" if t.get("notes") else ""
     result = f" result={t['result']!r}" if t.get("result") else ""
-    return f"[{t.get('id')}] ({t.get('status')}){owner} {t.get('title')}{notes}{result}"
+    parent = f" parent={t['parent']}" if t.get("parent") else ""
+    return f"[{t.get('id')}] ({t.get('status')}){owner}{parent} {t.get('title')}{notes}{result}"
+
+
+def create_task(session_dir: Path, *, title: str, notes: Optional[str] = None,
+                 parent: Optional[str] = None, kind: str = "task") -> str:
+    """The real work behind `TaskCreateTool.run()`, also called directly
+    by `agent/subagent.py::run_org_call` (Halo 2.0.2 round 7, brief 3b,
+    "goals") to record an org run's own goal as the board's root task,
+    before any position ever runs. `kind` ("task" or "goal") and `parent`
+    (another task's id) are the same two additions that let the board
+    show goal -> tasks -> results instead of a flat, unrelated list --
+    a plain `TaskCreate` call with neither is unchanged from before this
+    round. Returns the new task's id."""
+    task = {"id": uuid.uuid4().hex[:8], "title": title, "status": "open", "owner": None,
+            "notes": notes or "", "result": None, "parent": parent or None, "kind": kind or "task",
+            "created": time.time(), "updated": time.time()}
+    with _lock:
+        tasks = read_board(session_dir)
+        tasks.append(task)
+        _write_board(session_dir, tasks)
+    return task["id"]
 
 
 class TaskCreateTool(Tool):
@@ -97,6 +118,9 @@ class TaskCreateTool(Tool):
         "properties": {
             "title": {"type": "string", "description": "A short description of the work"},
             "notes": {"type": "string", "description": "Optional extra detail"},
+            "parent": {"type": "string", "description": "Optional: another task's id (e.g. this run's own "
+                                                          "goal task) this one works toward -- the board tab "
+                                                          "shows goal -> tasks -> results when this is set"},
         },
         "required": ["title"],
     }
@@ -112,14 +136,8 @@ class TaskCreateTool(Tool):
             return ToolResult("The title parameter is required", is_error=True)
         if ctx.session_dir is None:
             return ToolResult("No session directory is available in this context.", is_error=True)
-        task = {"id": uuid.uuid4().hex[:8], "title": title, "status": "open", "owner": None,
-                "notes": input.get("notes") or "", "result": None,
-                "created": time.time(), "updated": time.time()}
-        with _lock:
-            tasks = read_board(ctx.session_dir)
-            tasks.append(task)
-            _write_board(ctx.session_dir, tasks)
-        return ToolResult(f"Created task {task['id']!r}: {title}")
+        task_id = create_task(ctx.session_dir, title=title, notes=input.get("notes"), parent=input.get("parent"))
+        return ToolResult(f"Created task {task_id!r}: {title}")
 
 
 class TaskUpdateTool(Tool):

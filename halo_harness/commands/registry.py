@@ -20,6 +20,31 @@ from typing import Callable, Optional
 _BACKTICK_CMD_RE = re.compile(r"!`([^`]*)`")
 
 
+def _hidden_command_names() -> "set[str]":
+    """Halo 2.0.2 round 7 (init wizard brief, "Modes"): `roles`/`role`
+    while `roles.enabled` is False, `org` while `orgs.enabled` is False --
+    hidden from `/help`, tab-completion and the generated-tip pool
+    (`tui/tips.py`), never from `resolve()` itself (typing the command
+    directly still works -- this is a discoverability default, not a
+    refusal; the harness never gates behaviour this way). Best-effort:
+    any error reading the config just means "nothing hidden" rather than
+    breaking `/help`/completion outright."""
+    hidden: "set[str]" = set()
+    try:
+        from halo_harness.roles import roles_mode_enabled
+        if not roles_mode_enabled():
+            hidden.update({"roles", "role"})
+    except Exception:
+        pass
+    try:
+        from halo_harness.orgs import orgs_mode_enabled
+        if not orgs_mode_enabled():
+            hidden.add("org")
+    except Exception:
+        pass
+    return hidden
+
+
 @dataclass
 class SlashCommand:
     name: str  # e.g. "help", "git:commit", "anthropic-skills:dataviz" (no leading "/")
@@ -84,7 +109,8 @@ class Registry:
 
     def complete(self, prefix: str) -> list:
         prefix = prefix.lstrip("/")
-        names = sorted(set(self._commands) | set(self._aliases))
+        hidden = _hidden_command_names()
+        names = sorted((set(self._commands) | set(self._aliases)) - hidden)
         seen = set()
         out = []
         for n in names:
@@ -98,11 +124,18 @@ class Registry:
 
     def help_rows(self) -> list:
         """`[(invocation, description), ...]`, primary names only (not
-        aliases), sorted alphabetically."""
-        return [(f"/{name}", self._commands[name].description) for name in sorted(self._commands)]
+        aliases), sorted alphabetically -- minus whatever `_hidden_
+        command_names` excludes right now (Halo 2.0.2 round 7: `roles`/
+        `role`/`org` while their own mode switch is off)."""
+        hidden = _hidden_command_names()
+        return [(f"/{name}", self._commands[name].description) for name in sorted(self._commands) if name not in hidden]
 
     def all(self) -> list:
-        return [self._commands[name] for name in sorted(self._commands)]
+        """Every registered command minus `_hidden_command_names()` --
+        `tui/tips.py::generated_tips_for_registry` reads this, so a
+        hidden command never grows an auto-generated tip either."""
+        hidden = _hidden_command_names()
+        return [self._commands[name] for name in sorted(self._commands) if name not in hidden]
 
     @staticmethod
     def discover(cwd, home=None, *, plugin_roots: Optional[list] = None) -> "Registry":

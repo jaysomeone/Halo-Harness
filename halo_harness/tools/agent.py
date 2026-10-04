@@ -32,47 +32,65 @@ DESCRIPTION = (
     "concurrency cap, while they run. `count`/`batch` cannot be combined with `run_in_background`."
 )
 
-INPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
-        "prompt": {"type": "string", "description": "The task for the agent to perform, or an organization's goal"},
-        "subagent_type": {"type": "string", "description": "The type of agent to use (default general-purpose)"},
-        "model": {"type": "string", "description": "Optional model override for this agent"},
-        "role": {"type": "string", "description": "Optional role override (orchestrator|coder|reviewer|"
-                                                    "researcher|small) resolving the model from the role table"},
-        "effort": {"type": "string", "description": "Optional reasoning-effort override for this call"},
-        "run_in_background": {"type": "boolean", "description": "Run without blocking this turn"},
-        "task_id": {"type": "string",
-                     "description": "Resume a previously returned task_id instead of starting a new sub-agent"},
-        "org": {"type": "string", "description": "Run this organization's root position instead of a single "
-                                                    "sub-agent (see `halo org list`); `prompt` is its goal"},
-        "count": {"type": "integer", "description": "Spawn this many identical copies of `prompt` in "
-                                                      "parallel (capped at agents.max_concurrent at a time); "
-                                                      "mutually exclusive with `batch`"},
-        "batch": {"type": "array", "description": "Spawn one agent per entry, in parallel (capped at "
-                                                    "agents.max_concurrent at a time); mutually exclusive "
-                                                    "with `count`",
-                   "items": {"type": "object", "properties": {
-                       "prompt": {"type": "string"}, "role": {"type": "string"}, "model": {"type": "string"},
-                       "effort": {"type": "string"}, "description": {"type": "string"},
-                   }, "required": ["prompt"]}},
-    },
-    # `prompt` is required for a single spawn or `count`, but NOT for
-    # `batch` (each item supplies its own) -- enforced in `run()` below
-    # instead of here, so a strict provider's own schema validation never
-    # rejects a valid batch call for lacking a top-level prompt.
-    "required": ["description"],
+_BASE_SCHEMA_PROPERTIES = {
+    "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
+    "prompt": {"type": "string", "description": "The task for the agent to perform, or an organization's goal"},
+    "subagent_type": {"type": "string", "description": "The type of agent to use (default general-purpose)"},
+    "model": {"type": "string", "description": "Optional model override for this agent"},
+    "role": {"type": "string", "description": "Optional role override (orchestrator|coder|reviewer|"
+                                                "researcher|small) resolving the model from the role table"},
+    "effort": {"type": "string", "description": "Optional reasoning-effort override for this call"},
+    "run_in_background": {"type": "boolean", "description": "Run without blocking this turn"},
+    "task_id": {"type": "string",
+                 "description": "Resume a previously returned task_id instead of starting a new sub-agent"},
+    "count": {"type": "integer", "description": "Spawn this many identical copies of `prompt` in "
+                                                  "parallel (capped at agents.max_concurrent at a time); "
+                                                  "mutually exclusive with `batch`"},
+    "batch": {"type": "array", "description": "Spawn one agent per entry, in parallel (capped at "
+                                                "agents.max_concurrent at a time); mutually exclusive "
+                                                "with `count`",
+               "items": {"type": "object", "properties": {
+                   "prompt": {"type": "string"}, "role": {"type": "string"}, "model": {"type": "string"},
+                   "effort": {"type": "string"}, "description": {"type": "string"},
+               }, "required": ["prompt"]}},
 }
+_ORG_SCHEMA_PROPERTY = {
+    "org": {"type": "string", "description": "Run this organization's root position instead of a single "
+                                                "sub-agent (see `halo org list`); `prompt` is its goal"},
+}
+
+# `prompt` is required for a single spawn or `count`, but NOT for `batch`
+# (each item supplies its own) -- enforced in `run()` below instead of
+# here, so a strict provider's own schema validation never rejects a
+# valid batch call for lacking a top-level prompt.
+INPUT_SCHEMA = {"type": "object", "properties": {**_BASE_SCHEMA_PROPERTIES, **_ORG_SCHEMA_PROPERTY},
+                "required": ["description"]}
+_INPUT_SCHEMA_NO_ORG = {"type": "object", "properties": dict(_BASE_SCHEMA_PROPERTIES), "required": ["description"]}
+_DESCRIPTION_NO_ORG = DESCRIPTION[:DESCRIPTION.index(" Pass `org`")] + DESCRIPTION[DESCRIPTION.index(
+    " You may spawn several agents"):]
 
 
 class AgentTool(Tool):
     name = "Agent"
-    description = DESCRIPTION
-    input_schema = INPUT_SCHEMA
     # agent/subagent.py's run_agent_call already spills/caps its own
     # <task_result> text -- a second generic cap here would double-spill.
     result_cap = None
+
+    # Halo 2.0.2 round 7 (init wizard brief, "Modes"): `org=` is only
+    # ADVERTISED (description + schema) while `orgs.enabled` is True --
+    # `run()` below still accepts it either way (no cyber-blocks: this is
+    # a discoverability default, never a functional gate). Properties,
+    # not class attributes, so each catalog build re-reads the live
+    # config instead of freezing whatever it was at import time.
+    @property
+    def description(self) -> str:
+        from halo_harness.orgs import orgs_mode_enabled
+        return DESCRIPTION if orgs_mode_enabled() else _DESCRIPTION_NO_ORG
+
+    @property
+    def input_schema(self) -> dict:
+        from halo_harness.orgs import orgs_mode_enabled
+        return INPUT_SCHEMA if orgs_mode_enabled() else _INPUT_SCHEMA_NO_ORG
 
     def summary(self, input: dict) -> str:
         input = input if isinstance(input, dict) else {}

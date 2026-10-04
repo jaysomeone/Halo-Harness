@@ -269,58 +269,52 @@ def test_numbered_fallback_without_a_tty_never_launches_the_tabs_app(ctx: Ctx):
 
 
 @test
-def test_tabs_app_used_on_a_real_terminal_feeds_the_rest_of_init(ctx: Ctx):
-    """Scripts the tabs app itself (never a real Textual run here -- this
-    test is about cmd_init's OWN wiring, not the widget) to prove its
-    result actually drives the default-model/permission-mode/summary steps
-    that follow, exactly like the old one-provider-at-a-time loop did."""
+def test_wizard_used_on_a_real_terminal_drives_cmd_init(ctx: Ctx):
+    """Halo 2.0.2 round 7: the one-app init wizard replaces the tabs app
+    as `cmd_init`'s own interactive entry point (brief: "I press esc then
+    it exits then brings up the next section ... there should be a
+    button"). Scripts `init_wizard.run_init_wizard` itself (never a real
+    Textual run here -- this test is about `cmd_init`'s OWN wiring, not
+    the widget) to prove its result -- now `app.state.pong_ok`/`.team_
+    warnings`, the wizard's OWN Summary step already having printed
+    everything else on screen -- is what `cmd_init` actually returns/
+    surfaces, the same way `_run_init_tabs`'s result used to feed the
+    old separate console steps."""
     import halo_harness.init_cli as init_cli
-    import halo_harness.tui.dialogs.init_tabs as tabs_mod
-    from halo_harness.theme import get_config_value
+    import halo_harness.tui.dialogs.init_wizard as wizard_mod
 
-    class _FakeTabsApp:
-        configured_this_run = ["openrouter"]
-        catalog_notes = {"openrouter": "3 model(s) cached"}
-        written = []
+    class _FakeState:
+        team_warnings = ["a team.json warning"]
+        pong_ok = True
 
-    real_run_tabs = tabs_mod.run_init_tabs
-    real_perm_mode = init_cli._step_pick_permission_mode
-    # 1.0.1 part 2 fixpass finding 6: `_run_init_tabs` now calls
-    # `run_init_tabs(team=..., no_live=...)` -- `**kw` so this stand-in
-    # keeps accepting whatever `_run_init_tabs` passes.
-    tabs_mod.run_init_tabs = lambda **kw: _FakeTabsApp()
-    # The permission-mode step is its OWN separate interactive picker --
-    # stubbed here so this test (a real-tty simulation) only ever exercises
-    # the tabs-vs-sequential-loop DECISION this test is actually about,
-    # never a second real Textual sub-app with nothing driving it.
-    init_cli._step_pick_permission_mode = lambda args, console: ""
+    class _FakeWizardApp:
+        state = _FakeState()
+
+    real_run_wizard = wizard_mod.run_init_wizard
+    wizard_mod.run_init_wizard = lambda **kw: _FakeWizardApp()
     try:
         with _Env():
-            os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
             with _fake_tty(stdin_tty=True, stdout_tty=True):
                 rc = init_cli.cmd_init(["--no-live", "--no-fixes"])
-            ctx.check(f"exit 0, got {rc}", rc == 0)
-            ctx.check("the default model picked up the tabs app's own provider",
-                      str(get_config_value("model", default="")).startswith("or:"))
+            ctx.check(f"exit 0 (pong_ok True), got {rc}", rc == 0)
     finally:
-        tabs_mod.run_init_tabs = real_run_tabs
-        init_cli._step_pick_permission_mode = real_perm_mode
+        wizard_mod.run_init_wizard = real_run_wizard
 
 
 @test
-def test_tabs_app_failure_falls_back_to_the_sequential_picker(ctx: Ctx):
-    """The tabs app raising (a Textual runtime failure) must fall back to
-    the OLD one-provider-at-a-time loop instead of crashing `init`
+def test_wizard_failure_falls_back_to_the_sequential_picker(ctx: Ctx):
+    """The wizard app raising (a Textual runtime failure) must fall back
+    to the OLD one-provider-at-a-time loop instead of crashing `init`
     outright -- same "interactive picker failed" shape every other picker
     in this file already uses."""
     import halo_harness.init_cli as init_cli
-    import halo_harness.tui.dialogs.init_tabs as tabs_mod
+    import halo_harness.tui.dialogs.init_wizard as wizard_mod
 
-    def _boom(**kw):  # finding 6: see the previous test's own **kw note
+    def _boom(**kw):
         raise RuntimeError("no real terminal available (simulated)")
 
-    real_run_tabs = tabs_mod.run_init_tabs
-    tabs_mod.run_init_tabs = _boom
+    real_run_wizard = wizard_mod.run_init_wizard
+    wizard_mod.run_init_wizard = _boom
     real_select = init_cli._step_select_provider
     select_calls = []
 
@@ -338,43 +332,45 @@ def test_tabs_app_failure_falls_back_to_the_sequential_picker(ctx: Ctx):
             ctx.check(f"exit 0, got {rc}", rc == 0)
             ctx.check("fell back to the sequential picker (it was actually called)", select_calls)
     finally:
-        tabs_mod.run_init_tabs = real_run_tabs
+        wizard_mod.run_init_wizard = real_run_wizard
         init_cli._step_select_provider = real_select
         init_cli._step_pick_permission_mode = real_perm_mode
 
 
 # ---------------------------------------------------------------------------
-# 1.0.1 part 2 fixpass finding 5: a TypeSafe-only `configured_this_run`
-# must not KeyError (PROVIDER_LABEL/PROVIDER_DEFAULT_MODEL have no entry
-# for it -- TypeSafe is in TAB_PROVIDERS but not PROVIDERS).
+# 1.0.1 part 2 fixpass finding 5 (retargeted, round 7): a TypeSafe-only
+# `configured_this_run` must never KeyError anywhere in `cmd_init`'s own
+# wiring -- the round 7 wizard integration point (`_run_init_wizard_flow`)
+# no longer has a per-provider PROVIDER_LABEL/PROVIDER_DEFAULT_MODEL loop
+# of its own AT ALL (that bookkeeping now lives entirely INSIDE the
+# wizard's own DefaultModelStep, pinned separately in test_tui.py), so
+# this pins the NEW, narrower contract: a state shaped this way is simply
+# never even inspected by `_run_init_wizard_flow`, so it cannot KeyError.
 # ---------------------------------------------------------------------------
 
 @test
-def test_run_init_tabs_skips_typesafe_in_the_default_model_loop(ctx: Ctx):
+def test_wizard_state_with_typesafe_only_never_keyerrors(ctx: Ctx):
     import halo_harness.init_cli as init_cli
-    import halo_harness.tui.dialogs.init_tabs as tabs_mod
+    import halo_harness.tui.dialogs.init_wizard as wizard_mod
 
-    class _FakeTypesafeOnlyApp:
+    class _FakeState:
         configured_this_run = ["typesafe"]
-        catalog_notes: dict = {}
-        written: list = []
         team_warnings: list = []
+        pong_ok = True
 
-    real_run_tabs = tabs_mod.run_init_tabs
-    real_perm_mode = init_cli._step_pick_permission_mode
-    tabs_mod.run_init_tabs = lambda **kw: _FakeTypesafeOnlyApp()
-    init_cli._step_pick_permission_mode = lambda args, console: ""
+    class _FakeWizardApp:
+        state = _FakeState()
+
+    real_run_wizard = wizard_mod.run_init_wizard
+    wizard_mod.run_init_wizard = lambda **kw: _FakeWizardApp()
     try:
         with _Env():
             os.environ["TYPESAFE_API_KEY"] = "fake-typesafe-key"
             with _fake_tty(stdin_tty=True, stdout_tty=True):
-                # Before the fix: PROVIDER_LABEL["typesafe"] raised KeyError
-                # here, taking the whole `init` run down with it.
                 rc = init_cli.cmd_init(["--no-live", "--no-fixes"])
             ctx.check(f"exit 0 (no KeyError), got {rc}", rc == 0)
     finally:
-        tabs_mod.run_init_tabs = real_run_tabs
-        init_cli._step_pick_permission_mode = real_perm_mode
+        wizard_mod.run_init_wizard = real_run_wizard
 
 
 # ---------------------------------------------------------------------------

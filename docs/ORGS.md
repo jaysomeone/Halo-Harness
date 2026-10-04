@@ -9,7 +9,58 @@ resolves, and `plans/WORKER-RULES.md` (the repo this project builds
 itself with) for the hand-back format the `release-flow` built-in's own
 positions quote. Verified against `halo_harness/orgs.py`,
 `agent/subagent.py`, `tools/agent.py`, `commands/builtins.py`,
-`tui/slash.py`, `tui/dialogs/org_editor.py`, and `org_cli.py`.
+`tui/slash.py`, `tui/dialogs/org_editor.py`, `org_cli.py`, `setup_cli.py`,
+and `tui/dialogs/init_wizard.py` (round 7).
+
+## Setting up with the wizard (`orgs.enabled`, the default org)
+
+The init wizard's own Organizations step (`halo init`, step 6; `halo
+setup orgs`/`/setup orgs` later; "roles, then orgs, then summary" for a
+bare `halo setup`) starts with a switch, **`orgs.enabled`** (default
+**off**, unlike roles): off hides `/org` from `/help`/tab-completion/the
+rotating tips, the `/tasks` board tab, and the `Agent` tool's own `org=`
+parameter (never from `resolve()`/`run_org_call` itself -- `/org run` by
+name, and an already-running org, both still work; this is a
+discoverability default, never a functional gate).
+
+With it on, the step lists every built-in and saved org with a tree
+preview of the highlighted one; `Make this the default org` (same action
+as the step's own `Next`) writes **`orgs.default`**, what `/org run`/
+`halo org run` resolve to when no name is given (`halo org run
+"<goal>"`, one argument -- refuses cleanly with no default set instead
+of guessing); `Edit org...` opens the round-2 form (`tui/dialogs/
+org_editor.py`) inside the wizard and returns here -- that form itself
+gained the SAME "start from: solo / release-flow / company / <saved>"
+template picker at its top this round (choosing one REPLACES the
+positions below, never merges; `ctrl+s` still saves under the SAME
+name); `Skip for now` leaves config untouched.
+
+### Budgets and goals (ideas borrowed from Paperclip)
+
+Two more `~/.halo/orgs/<name>.json` fields, enforced through the
+existing cost meter:
+
+- **`budget_usd`** (a number, on the org and/or any position): a hard
+  stop -- `Agent(org=...)`'s own delegation check (the same place the
+  depth cap is enforced) refuses to spawn a FURTHER position once the
+  org's total spend since the run started, or that one position's own
+  cumulative spend, reaches its budget; a result crossing 80% gets a
+  warning line appended instead. A position whose own budget is hit is
+  refused only for a LATER spawn attempt -- the call already running
+  always finishes.
+- **Goals**: `/org run <name> "<goal>"` (`Agent(org=...)`, `halo org run`)
+  records the goal as a root task on the session's shared task board
+  (`kind: "goal"`) before the root position ever runs; every position is
+  told its own id and to pass `parent=<that id>` on its own `TaskCreate`
+  calls, so `/tasks`' board tab shows goal -> tasks -> results instead of
+  a flat list.
+
+Later, recorded in the roadmap, not this round (Paperclip ideas that
+didn't fit): `halo org install <name>`/`/org install` for ready-made
+template packages with a README per template, approval gates
+(`requires_approval: true` holding a position's result as a pending
+card), export/import (`halo org export`/`import`), and `/org resume` for
+an interrupted run.
 
 ## Schema
 
