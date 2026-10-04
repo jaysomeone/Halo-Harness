@@ -275,3 +275,27 @@ Placement:
   port 8000 collides with vLLM in Halo's probe; detect by `/v1/models`
   shape). BYOK rungs and the Pro-only local rung documented as the user's
   choice; Halo never signs the user up for anything.
+- Live facts for the 5g research round and the 2.0.4 `xp:` route (measured
+  2026-10-04 with rolo's key, which lives OUTSIDE the repo in the vibes
+  folder; never copy it into any file): `GET /v1/models` returned 299 models
+  for this key (the public catalog page shows about 1,089; the key's
+  enabled rungs decide what the list shows); each entry carries
+  `context_window_tokens`, `maximum_output_tokens`, per-million input,
+  output, cached-input and cache-write costs, `supports_tools`,
+  `supports_structured_output`, `supports_reasoning`, `supported_reasoning_
+  efforts`, `reasoning_content_native`, `reports_cached_input_tokens`,
+  `data_policy`, `owned_by`, sampling bounds; `jev-latest` answered 503
+  `unavailable_route` ("ask the gateway operator to check the alias
+  deployments") at that hour; `qwen3.8-27b` answered "pong" with
+  `usage.cost` 0.00018208 USD, `completion_tokens_details.reasoning_tokens`
+  140 of 144 completion tokens (a thinking model by default), top-level
+  `provider` "experiential_cloud", top-level `cost` absent (the docs say
+  top-level; the live response puts it in `usage.cost`); `GET
+  /api/v1/credits` returned `{total_credits, total_usage}` in USD.
+- Halo today cannot drive the gateway through the `or:` route with a base
+  URL override: the gateway refuses the OpenRouter dialect's `usage` field
+  ("The parameter 'usage' is not supported by this gateway profile. Remove
+  the field and resend the request.") with a 400 before anything runs. So
+  the 2.0.4 `xp:` route needs its own provider profile (no OpenRouter-only
+  fields: `usage.include`, `provider` preferences, `transforms`), reading
+  cost from `usage.cost`, and the slug grammar accepts ids without a slash.
