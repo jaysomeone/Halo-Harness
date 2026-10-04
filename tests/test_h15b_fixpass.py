@@ -220,6 +220,56 @@ def test_build_session_explicit_small_model_refusal_warns_on_stderr(ctx: Ctx):
 
 
 # ---------------------------------------------------------------------------
+# 2.0.2 review finding 12 (major): nothing ever read the `small` role --
+# the session's own small model came only from --small-model/HALO_MODEL_
+# SMALL/routes.json's own "small"/the main model, even though both the
+# built-in presets and the Databricks cost-aware table set `roles.small`.
+# ---------------------------------------------------------------------------
+
+@test
+def test_build_session_persisted_roles_small_wins_over_routes_default(ctx: Ctx):
+    from halo_harness.headless import build_session
+    from halo_harness.theme import set_config_value
+    with _Env() as env:
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+        set_config_value("roles.small", "or:vendor/cheap-small")
+        env.state_dir.mkdir(parents=True, exist_ok=True)
+        (env.state_dir / "routes.json").write_text(
+            json.dumps({"small": "or:vendor/routes-default-small"}), encoding="utf-8")
+        cwd = Path(tempfile.mkdtemp(prefix="h15b-roles-small-cwd-"))
+        build = build_session(cwd=cwd, model_ref_raw="or:deepseek/deepseek-v3.2", bare=True, print_mode=True,
+                               max_turns=1)
+        try:
+            ctx.check(f"roles.small wins over routes.json's own default, got {build.session.small_model_ref.raw!r}",
+                      build.session.small_model_ref.raw == "or:vendor/cheap-small")
+        finally:
+            _close_build(build)
+
+
+@test
+def test_build_session_cli_role_small_wins_and_carries_its_own_effort(ctx: Ctx):
+    """`--role small=MODEL:EFFORT` (the CLI override, one rung above the
+    persisted table) wins outright, and its own effort now reaches
+    `session.small_model_effort` -- "per-role effort" was partial
+    before this (the second half of finding 12)."""
+    from halo_harness.headless import build_session
+    from halo_harness.theme import set_config_value
+    with _Env() as env:
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-fake"
+        set_config_value("roles.small", "or:vendor/persisted-small")
+        cwd = Path(tempfile.mkdtemp(prefix="h15b-cli-role-small-cwd-"))
+        build = build_session(cwd=cwd, model_ref_raw="or:deepseek/deepseek-v3.2", bare=True, print_mode=True,
+                               max_turns=1, roles_flag=["small=or:vendor/cli-small:low"])
+        try:
+            ctx.check(f"the CLI --role override wins, got {build.session.small_model_ref.raw!r}",
+                      build.session.small_model_ref.raw == "or:vendor/cli-small")
+            ctx.check(f"its own effort reached the session, got {build.session.small_model_effort!r}",
+                      build.session.small_model_effort == "low")
+        finally:
+            _close_build(build)
+
+
+# ---------------------------------------------------------------------------
 # finding 9: the OpenRouter balance fetch only ever targets the real
 # openrouter.ai host.
 # ---------------------------------------------------------------------------

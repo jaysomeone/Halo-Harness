@@ -68,15 +68,25 @@ def apply_update(*, cmd: Optional[str] = None, force: bool = False) -> int:
               f"(pid {pids}); close it first, or pass --force", file=sys.stderr)
         return 1
     before = upd.installed_build()
+    kind = upd.install_kind()
     if cmd is None:
-        cmd = upd.install_kind().get("reinstall_cmd")
+        cmd = kind.get("reinstall_cmd")
     if not cmd:
         print("halo update: could not determine how halo was installed -- nothing to run", file=sys.stderr)
         return 1
+    # Finding 3: a checkout kind's `spec` is the real checkout directory
+    # (never a bare "."  -- see update.install_kind) -- running there,
+    # not in whatever directory `halo update`/`/update` happened to be
+    # invoked from, is what makes the git pull (and the reinstall's own
+    # path argument) land on the right repo. An installed-package kind's
+    # `spec` is a URL/git+spec, not a real local directory, so `cwd` stays
+    # None there and the command runs from wherever, same as before.
+    spec = kind.get("spec")
+    cwd = spec if spec and Path(spec).is_dir() else None
     print(f"halo update: installed {upd.format_version_line(before)}")
     print(f"halo update: running: {cmd}")
     try:
-        result = upd.run(cmd, shell=True, capture_output=False, text=True, timeout=600)
+        result = upd.run(cmd, shell=True, cwd=cwd, capture_output=False, text=True, timeout=600)
         returncode = result.returncode
     except (OSError, subprocess.SubprocessError) as e:
         print(f"halo update: the reinstall command failed to run: {e}", file=sys.stderr)

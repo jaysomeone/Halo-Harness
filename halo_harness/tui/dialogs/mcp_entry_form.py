@@ -26,6 +26,7 @@ class McpEntryForm(ModalScreen):
     McpEntryForm > Vertical { width: 84%; height: auto; max-height: 90%; border: round $primary;
         background: $surface; padding: 1 2; }
     McpEntryForm TextArea { height: 6; }
+    McpEntryForm #mcp-field-args { height: 4; }
     """
 
     def __init__(self, name: str, cfg, *, cwd) -> None:
@@ -41,8 +42,13 @@ class McpEntryForm(ModalScreen):
             if self.cfg.type == "stdio":
                 yield Static("Command")
                 yield Input(id="mcp-field-command", value=self.cfg.command or "")
-                yield Static("Args (space-separated)")
-                yield Input(id="mcp-field-args", value=" ".join(str(a) for a in (self.cfg.args or [])))
+                # 2.0.2 review finding 15: a single-line Input split on
+                # whitespace can never represent a spaced argument (e.g.
+                # a Windows path like "C:/My Projects/app") unambiguously
+                # -- one argument per line instead, same shape env/
+                # headers below already use.
+                yield Static("Args (one per line)")
+                yield TextArea(id="mcp-field-args", text="\n".join(str(a) for a in (self.cfg.args or [])))
                 yield Static("Env (KEY=VALUE, one per line)")
                 yield TextArea(id="mcp-field-env", text="\n".join(f"{k}={v}" for k, v in (self.cfg.env or {}).items()))
             else:
@@ -57,19 +63,27 @@ class McpEntryForm(ModalScreen):
         self.dismiss(False)
 
     def action_save(self) -> None:
-        from halo_harness.mcp_cli import _build_entry, _parse_kv_list, _store_entry
+        # 2.0.2 review finding 15 (major): PATCHES the raw on-disk entry
+        # (`_raw_entry_for`) instead of rebuilding one from scratch
+        # (`_build_entry`, still used by `halo mcp add`/`add-json`,
+        # which genuinely want a fresh entry) -- cwd/timeout/
+        # headersHelper/alwaysLoad/mcpLazy/any unknown key now survive a
+        # save that never touched them.
+        from halo_harness.mcp_cli import _parse_kv_list, _patch_entry, _raw_entry_for, _store_entry
+        existing = _raw_entry_for(scope=self.cfg.scope, name=self.server_name, cwd=self.cwd)
         try:
             if self.cfg.type == "stdio":
                 command = self.query_one("#mcp-field-command", Input).value.strip()
-                args = self.query_one("#mcp-field-args", Input).value.split()
+                args = [l.strip() for l in self.query_one("#mcp-field-args", TextArea).text.splitlines()
+                        if l.strip()]
                 env_lines = [l for l in self.query_one("#mcp-field-env", TextArea).text.splitlines() if l.strip()]
-                entry = _build_entry(transport="stdio", command_or_url=command, extra_args=args,
+                entry = _patch_entry(existing, transport="stdio", command_or_url=command, extra_args=args,
                                       env=_parse_kv_list(env_lines, "="), headers={}, oauth=self.cfg.oauth)
             else:
                 url = self.query_one("#mcp-field-url", Input).value.strip()
                 header_lines = [l for l in self.query_one("#mcp-field-headers", TextArea).text.splitlines()
                                  if l.strip()]
-                entry = _build_entry(transport=self.cfg.type, command_or_url=url, extra_args=[], env={},
+                entry = _patch_entry(existing, transport=self.cfg.type, command_or_url=url, extra_args=[], env={},
                                       headers=_parse_kv_list(header_lines, ":"), oauth=self.cfg.oauth)
             _store_entry(scope=self.cfg.scope, name=self.server_name, entry=entry, cwd=self.cwd)
         except (OSError, ValueError, KeyError) as e:

@@ -77,6 +77,31 @@ def test_configured_role_table_filters_unknown_and_non_string(ctx: Ctx):
 
 
 @test
+def test_configured_role_table_excludes_reserved_setting_keys(ctx: Ctx):
+    """2.0.2 review finding 13 (major) pin: `roles.enabled`/`roles.editor`
+    are reserved settings that live in the SAME `roles` config map a real
+    role table does -- "editor" is syntactically a valid role name and
+    `"external"` normalizes as a perfectly good bare model string, so
+    this used to read `roles.editor: "external"` as a custom role
+    "editor" pointed at the model "external", which then failed
+    `/roles`/`known_role_names` outright with InvalidModelError the
+    moment anything tried to actually resolve it."""
+    from halo_harness.roles import configured_role_table, known_role_names
+    from halo_harness.theme import set_config_value
+    _fresh_state_dir("roles-reserved-")
+    try:
+        set_config_value("roles.editor", "external")
+        set_config_value("roles.enabled", True)
+        set_config_value("roles.coder", "or:vendor/x")
+        table = configured_role_table()
+        ctx.check(f"editor/enabled excluded, the real role survives, got {table}", table == {"coder": "or:vendor/x"})
+        ctx.check(f"'editor' never becomes a known role name, got {known_role_names()}",
+                  "editor" not in known_role_names())
+    finally:
+        _clear_state_dir_env()
+
+
+@test
 def test_resolve_role_table_empty_and_databricks_applies_cost_aware_default(ctx: Ctx):
     from halo_harness.roles import COST_AWARE_DEFAULTS, resolve_role_table
     _fresh_state_dir("roles-costaware-")

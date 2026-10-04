@@ -8221,6 +8221,47 @@ def test_ctrl_t_toggles_the_panel_open_and_closed(ctx: Ctx):
 
 
 @test
+def test_tasks_panel_recurring_refresh_runs_off_the_ui_thread(ctx: Ctx):
+    """2.0.2 review finding 17 (major) pin: the EXPENSIVE part of a
+    RECURRING refresh (re-reading every sub-agent's log/meta.json) must
+    run on a worker thread, never block the UI thread the 1s timer
+    itself fires on. The very FIRST paint (`on_mount`) is deliberately
+    still synchronous (so the panel never opens empty-then-populates a
+    tick later) -- this checks the recurring path specifically, by
+    calling `refresh_rows()` again after that first paint."""
+    from halo_harness.tui.dialogs.tasks import TasksPanel
+    import threading as _threading
+
+    async def body():
+        seen_threads = []
+
+        def _tracking_list():
+            seen_threads.append(_threading.get_ident())
+            return list(_FAKE_AGENT_ROWS)
+        fake = FakeController(agent_tasks=list(_FAKE_AGENT_ROWS))
+        fake.list_agent_tasks = _tracking_list
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            ctx.check("the panel opened", isinstance(app.screen, TasksPanel))
+            ui_thread_id = _threading.get_ident()
+            seen_threads.clear()  # on_mount's own synchronous first paint already called it once
+            app.screen.refresh_rows()
+            for _ in range(30):
+                await pilot.pause(0.02)
+                if seen_threads:
+                    break
+            ctx.check(f"the recurring refresh's own I/O ran off the UI thread, got {seen_threads} vs ui={ui_thread_id}",
+                      bool(seen_threads) and seen_threads[0] != ui_thread_id)
+    asyncio.run(body())
+
+
+@test
 def test_status_bar_shows_agents_running_count(ctx: Ctx):
     """Halo 2.0.2 round 3: `subagent_start` with no matching `subagent_
     end` yet bumps the status bar's `agents N` segment; `subagent_end`
@@ -8521,6 +8562,62 @@ def test_mcp_dialog_e_opens_the_inline_form_and_saves(ctx: Ctx):
     asyncio.run(body())
 
 
+@test
+def test_mcp_dialog_e_save_preserves_fields_the_form_never_shows(ctx: Ctx):
+    """2.0.2 review finding 15 (major) pin: saving used to REBUILD the
+    entry from scratch, dropping cwd/timeout/alwaysLoad/mcpLazy/any
+    unknown key even when the user only touched the command field. Also
+    pins the args-with-spaces fix: args are now one per line (never
+    whitespace-split), so a path containing a space round-trips as ONE
+    argument."""
+    from halo_harness.config.claude_json import claude_json_path
+    from halo_harness.mcp.manager import McpServerConfig
+    from halo_harness.tui.dialogs.mcp_entry_form import McpEntryForm
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
+    from textual.widgets import Input, TextArea
+
+    async def body():
+        old_editor, old_visual = os.environ.pop("EDITOR", None), os.environ.pop("VISUAL", None)
+        try:
+            claude_json_path().write_text(json.dumps({"mcpServers": {"alpha": {
+                "type": "stdio", "command": "node", "args": ["old.js", "--root", "C:/My Projects/app"],
+                "env": {"X": "1"}, "cwd": "/some/dir", "timeout": 9999, "headersHelper": "h", "alwaysLoad": True,
+                "mcpLazy": False, "someUnknownField": "keep-me",
+            }}}), encoding="utf-8")
+            fake = FakeController(mcp_servers=[dict(r) for r in _FAKE_MCP_ROWS])
+            fake.resolve_mcp_config = lambda name: McpServerConfig(
+                name="alpha", type="stdio", command="node",
+                args=["old.js", "--root", "C:/My Projects/app"], env={"X": "1"}, scope="user")
+            app = await _mounted(fake)
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _open_mcp_dialog(pilot, app)
+                _highlight(screen, "alpha")
+                await pilot.press("e")
+                await _wait_until(app, pilot, lambda: isinstance(app.screen, McpEntryForm))
+                args_area = app.screen.query_one("#mcp-field-args", TextArea)
+                ctx.check(f"the spaced arg shows as ONE line, got {args_area.text!r}",
+                          "C:/My Projects/app" in args_area.text.splitlines())
+                app.screen.query_one("#mcp-field-command", Input).value = "node-renamed"
+                await pilot.press("ctrl+s")
+                await _wait_until(app, pilot, lambda: isinstance(app.screen, McpStatus) and fake.reconnects > 0)
+
+                saved = json.loads(claude_json_path().read_text(encoding="utf-8"))
+                entry = saved.get("mcpServers", {}).get("alpha", {})
+                ctx.check(f"the edited field was saved, got {entry}", entry.get("command") == "node-renamed")
+                ctx.check(f"the spaced arg survived as ONE argument, got {entry.get('args')}",
+                          entry.get("args") == ["old.js", "--root", "C:/My Projects/app"])
+                for key, expected in (("cwd", "/some/dir"), ("timeout", 9999), ("headersHelper", "h"),
+                                       ("alwaysLoad", True), ("mcpLazy", False), ("someUnknownField", "keep-me")):
+                    ctx.check(f"{key!r} the form never shows survived untouched, got {entry.get(key)!r}",
+                              entry.get(key) == expected)
+        finally:
+            if old_editor is not None:
+                os.environ["EDITOR"] = old_editor
+            if old_visual is not None:
+                os.environ["VISUAL"] = old_visual
+    asyncio.run(body())
+
+
 # ============================================================================
 # Halo 2.0.2 round 7: the init wizard (tui/dialogs/init_wizard.py) -- one
 # Textual app for the whole interactive `halo init`, Back/Skip/Next/Finish
@@ -8613,6 +8710,38 @@ def test_init_wizard_skip_on_roles_and_orgs_leaves_config_untouched(ctx: Ctx):
                           get_config_value("orgs.enabled", default="<unset>") == "<unset>")
                 ctx.check("orgs.default never written",
                           get_config_value("orgs.default", default="<unset>") == "<unset>")
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_default_model_step_next_with_no_pick_keeps_current_default(ctx: Ctx):
+    """Finding 1 (critical) pin: the step's own copy already promises
+    "Next keeps the current default if you don't pick one" -- `on_mount`
+    used to call `action_first()` unconditionally, so `commit()` always
+    saw SOME row highlighted and overwrote `config.model` even with zero
+    user interaction. Repro from the review: config.model points at a
+    provider not configured this run (only Anthropic's fixed aliases
+    show, "ant:fable" first) -- one bare Next used to silently flip it to
+    "ant:fable"."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.theme import get_config_value, set_config_value
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-default-model-")
+        try:
+            set_config_value("model", "or:deepseek/deepseek-chat")
+            state = WizardState(cwd=REPO_DIR, step_keys=("default_model", "permission_mode"), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                ctx.check(f"opened on the Default model step, got {type(app.screen).__name__}",
+                          type(app.screen).__name__ == "DefaultModelStep")
+                app.screen.query_one("#wiz-next").press()
+                await pilot.pause(0.2)
+                ctx.check(f"config.model untouched by a bare Next, got {get_config_value('model', default=None)!r}",
+                          get_config_value("model", default=None) == "or:deepseek/deepseek-chat")
         finally:
             _restore_state_dir_env(old)
     asyncio.run(body())

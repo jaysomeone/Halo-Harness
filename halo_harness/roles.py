@@ -52,6 +52,21 @@ ROLE_NAMES = ("orchestrator", "planner", "coder", "reviewer", "judge", "research
 
 _ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# 2.0.2 review finding 13 (major): `roles.enabled` (roles_mode_enabled,
+# below) and `roles.editor` (tui/slash.py's own $EDITOR-override switch)
+# are reserved SETTINGS, but both live in the exact same `roles` config
+# map a real role->model table does -- "editor" is syntactically a valid
+# role name and `"external"` normalizes as a perfectly good bare model
+# string, so `configured_role_table()` used to read `roles.editor:
+# "external"` as a custom role named "editor" pointed at the model
+# "external". That made `/roles` (and `halo roles`/`stats --roles`/
+# completion) try to resolve a model named "external" and fail outright
+# with InvalidModelError, and turned off the Databricks cost-aware
+# defaults (a non-empty configured table always wins, see `resolve_role_
+# table`) for every session, just because this ONE setting happened to
+# be configured.
+_RESERVED_ROLES_SETTING_KEYS = frozenset({"enabled", "editor"})
+
 
 def is_role_name_syntax(name: str) -> bool:
     """Brief A.3: "any `[a-z][a-z0-9_]*`" -- the syntax check alone, with
@@ -116,14 +131,16 @@ def configured_role_table() -> dict:
     valid role names (brief A.3: built-in OR custom, `[a-z][a-z0-9_]*` --
     no longer restricted to `ROLE_NAMES`) holding a usable value (a
     non-empty model string, or a `{"model", "effort"}` dict -- brief
-    A.2). Never raises."""
+    A.2), with the reserved settings keys that happen to live in this
+    SAME map (`_RESERVED_ROLES_SETTING_KEYS` -- finding 13) excluded no
+    matter what they're set to. Never raises."""
     from halo_harness.theme import get_config_value
     raw = get_config_value("roles", default={})
     if not isinstance(raw, dict):
         return {}
     out: dict = {}
     for k, v in raw.items():
-        if not is_role_name_syntax(k):
+        if not is_role_name_syntax(k) or k in _RESERVED_ROLES_SETTING_KEYS:
             continue
         normalized = _normalize_role_value(v)
         if normalized is not None:

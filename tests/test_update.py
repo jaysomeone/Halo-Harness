@@ -128,6 +128,24 @@ def test_installed_build_editable_runs_git_in_checkout(ctx: Ctx):
 
 
 @test
+def test_installed_build_non_editable_dir_info_still_resolves_commit(ctx: Ctx):
+    """Finding 16: both installers' default install (`uv tool install
+    --reinstall .`, never --editable) has NO "editable" key in dir_info
+    at all -- `installed_build` must still resolve checkout/commit/branch
+    for it, or `halo update`/doctor treat it as "commit unknown" forever
+    (so an available update, even one the install COULD pull, never
+    shows)."""
+    checkout = _tmp()
+    d = {"url": f"file://{checkout.as_posix()}", "dir_info": {}}
+    run_fn = _fake_run({"rev-parse": _Proc("d00dfee\n"), "branch": _Proc("master\n")})
+    b = upd.installed_build(direct_url=d, run_fn=run_fn)
+    ctx.check("editable is False (no key present)", b["editable"] is False)
+    ctx.check(f"checkout resolved from the file:// url, got {b['checkout']!r}",
+              Path(b["checkout"]).resolve() == checkout.resolve())
+    ctx.check(f"commit from git rev-parse, got {b['commit']!r}", b["commit"] == "d00dfee")
+
+
+@test
 def test_installed_build_no_direct_url_uses_pythonpath_checkout(ctx: Ctx):
     """"nothing for a plain PYTHONPATH run" -- direct_url=None (no real
     distribution at all) still finds a checkout (faked here instead of
@@ -206,8 +224,12 @@ def test_install_kind_pip_fallback_after_fake_uv_and_pipx_list(ctx: Ctx):
     run_fn = _fake_run({"uv tool list": _Proc("some-other-tool v1\n"), "pipx list": _Proc("nothing here\n")})
     k = upd.install_kind(direct_url=d, prefix=str(prefix), run_fn=run_fn)
     ctx.check(f"kind is pip, got {k}", k["kind"] == "pip")
-    ctx.check(f"reinstall_cmd uses pip, got {k['reinstall_cmd']!r}",
-              k["reinstall_cmd"] == "python -m pip install --upgrade git+https://github.com/roloVibes/Halo-Harness")
+    # Finding 16: `sys.executable`, never whichever bare `python` happens
+    # to be first on PATH (which is not necessarily THIS install's own
+    # interpreter).
+    ctx.check(f"reinstall_cmd uses sys.executable, got {k['reinstall_cmd']!r}",
+              k["reinstall_cmd"] == f"{sys.executable} -m pip install --upgrade "
+                                     f"git+https://github.com/roloVibes/Halo-Harness")
 
 
 @test
@@ -219,8 +241,12 @@ def test_install_kind_editable_checkout(ctx: Ctx):
     k = upd.install_kind(direct_url=d, prefix=str(prefix), run_fn=_fake_run({}))
     ctx.check(f"kind is editable_checkout, got {k}", k["kind"] == "editable_checkout")
     ctx.check(f"spec is the checkout path, got {k['spec']!r}", Path(k["spec"]).resolve() == checkout.resolve())
-    ctx.check(f"reinstall_cmd is git pull then the editable reinstall, got {k['reinstall_cmd']!r}",
-              k["reinstall_cmd"] == "git pull && uv tool install --reinstall --editable .")
+    # Finding 3: never a bare "." -- `-C <checkout>` (and the reinstall's
+    # own path argument) keeps the whole command tied to the real
+    # checkout no matter what directory it ends up running from.
+    ctx.check(f"reinstall_cmd is git -C <checkout> pull then the editable reinstall, got {k['reinstall_cmd']!r}",
+              k["reinstall_cmd"] == f"git -C {k['spec']} pull --ff-only "
+                                     f"&& uv tool install --reinstall --editable {k['spec']}")
 
 
 @test
@@ -232,7 +258,38 @@ def test_install_kind_bare_checkout(ctx: Ctx):
     finally:
         _restore(patch)
     ctx.check(f"kind is bare_checkout, got {k}", k["kind"] == "bare_checkout")
-    ctx.check(f"reinstall_cmd is plain git pull, got {k['reinstall_cmd']!r}", k["reinstall_cmd"] == "git pull")
+    ctx.check(f"reinstall_cmd pulls in the checkout, never a bare git pull, got {k['reinstall_cmd']!r}",
+              k["reinstall_cmd"] == f"git -C {k['spec']} pull --ff-only")
+
+
+@test
+def test_install_kind_dir_checkout_non_editable_local_install(ctx: Ctx):
+    """Finding 16: both installers' default (`uv tool install --reinstall
+    .`, never --editable) records exactly this non-editable local
+    `dir_info` shape. Must be recognized as a real checkout (so update
+    actually pulls) whenever the local path is a real git repo -- never
+    silently reinstall the frozen file:// snapshot from install time."""
+    checkout = _tmp()
+    (checkout / ".git").mkdir()
+    d = {"url": f"file://{checkout.as_posix()}", "dir_info": {}}
+    run_fn = _fake_run({"uv tool list": _Proc("some-other-tool v1\n"), "pipx list": _Proc("nothing here\n")})
+    k = upd.install_kind(direct_url=d, run_fn=run_fn)
+    ctx.check(f"kind is dir_checkout, got {k}", k["kind"] == "dir_checkout")
+    ctx.check(f"spec is the checkout path, got {k['spec']!r}", Path(k["spec"]).resolve() == checkout.resolve())
+    ctx.check(f"reinstall_cmd pulls first, then a NON-editable reinstall, got {k['reinstall_cmd']!r}",
+              k["reinstall_cmd"] == f"git -C {k['spec']} pull --ff-only "
+                                     f"&& {sys.executable} -m pip install --upgrade {k['spec']}")
+
+
+@test
+def test_install_kind_dir_info_without_a_real_git_repo_is_not_a_checkout(ctx: Ctx):
+    """A plain (non-git) local directory install must NOT be claimed as a
+    checkout kind -- there is nothing to `git pull` there."""
+    checkout = _tmp()  # no .git inside
+    d = {"url": f"file://{checkout.as_posix()}", "dir_info": {}}
+    run_fn = _fake_run({"uv tool list": _Proc("some-other-tool v1\n"), "pipx list": _Proc("nothing here\n")})
+    k = upd.install_kind(direct_url=d, run_fn=run_fn)
+    ctx.check(f"kind is NOT dir_checkout, got {k}", k["kind"] != "dir_checkout")
 
 
 @test
@@ -413,19 +470,66 @@ def test_other_halo_pids_excludes_self_and_filters_by_cmdline(ctx: Ctx):
     if os.name == "nt":
         import json as _json
         rows = _json.dumps([
-            {"ProcessId": this_pid, "CommandLine": "halo.exe --something (this very process)"},
-            {"ProcessId": other_pid, "CommandLine": "C:\\tools\\halo.exe"},
-            {"ProcessId": other_pid + 1, "CommandLine": "notepad.exe"},
+            {"ProcessId": this_pid, "ParentProcessId": 1, "CommandLine": "halo.exe --something (this very process)"},
+            {"ProcessId": other_pid, "ParentProcessId": 1, "CommandLine": "C:\\tools\\halo.exe"},
+            {"ProcessId": other_pid + 1, "ParentProcessId": 1, "CommandLine": "notepad.exe"},
         ])
         run_fn = _fake_run({"Win32_Process": _Proc(rows)})
     else:
-        table = (f"  PID ARGS\n{this_pid} halo --something\n{other_pid} /usr/bin/halo\n"
-                 f"{other_pid + 1} /usr/bin/vim\n")
+        table = (f"  PID  PPID ARGS\n{this_pid} 1 halo --something\n{other_pid} 1 /usr/bin/halo\n"
+                 f"{other_pid + 1} 1 /usr/bin/vim\n")
         run_fn = _fake_run({"ps -eo": _Proc(table)})
     pids = upd.other_halo_pids(run_fn=run_fn)
     ctx.check(f"this process excluded, got {pids}", this_pid not in pids)
     ctx.check(f"the other halo-looking pid is included, got {pids}", other_pid in pids)
     ctx.check(f"the unrelated pid is excluded, got {pids}", (other_pid + 1) not in pids)
+
+
+@test
+def test_other_halo_pids_excludes_this_process_whole_ancestor_chain(ctx: Ctx):
+    """Finding 2 (critical): on Windows, a uv-tool/pipx/pip console-script
+    install's own launcher stub (`~/.local/bin/halo.exe`) stays alive as
+    the PARENT of the real `python.exe` that runs halo -- its command
+    line also names `halo.exe` (it IS one), so excluding only
+    `os.getpid()` always counted it as "another" halo process and every
+    real `halo update`/`/update` on Windows refused forever. Same shape
+    proven on POSIX via `ppid`."""
+    this_pid = os.getpid()
+    launcher_pid = this_pid + 1000  # this process's OWN parent -- never "another" process
+    genuinely_other_pid = this_pid + 2000  # a REAL separate halo invocation elsewhere
+    if os.name == "nt":
+        import json as _json
+        rows = _json.dumps([
+            {"ProcessId": launcher_pid, "ParentProcessId": 1, "CommandLine": "C:\\Users\\x\\.local\\bin\\halo.exe"},
+            {"ProcessId": this_pid, "ParentProcessId": launcher_pid,
+             "CommandLine": "C:\\...\\python.exe C:\\...\\halo.exe --version"},
+            {"ProcessId": genuinely_other_pid, "ParentProcessId": 1, "CommandLine": "C:\\tools\\halo.exe"},
+        ])
+        run_fn = _fake_run({"Win32_Process": _Proc(rows)})
+    else:
+        table = (f"  PID  PPID ARGS\n{launcher_pid} 1 /usr/bin/halo\n"
+                 f"{this_pid} {launcher_pid} /usr/bin/python3 /usr/bin/halo --version\n"
+                 f"{genuinely_other_pid} 1 /usr/bin/halo\n")
+        run_fn = _fake_run({"ps -eo": _Proc(table)})
+    pids = upd.other_halo_pids(run_fn=run_fn)
+    ctx.check(f"this process's own launcher PARENT is excluded, got {pids}", launcher_pid not in pids)
+    ctx.check(f"this process itself is excluded, got {pids}", this_pid not in pids)
+    ctx.check(f"a genuinely separate halo process is still caught, got {pids}", genuinely_other_pid in pids)
+
+
+@test
+def test_is_halo_cmdline_rejects_substring_false_positives(ctx: Ctx):
+    """Finding 2: the old `"halo" in cmdline.lower()` also matched an
+    editor window titled after this repo and a `tail -f ~/.halo/...` --
+    neither names a `halo`/`halo.exe` TOKEN."""
+    ctx.check("an editor open on the repo folder is NOT halo",
+              not upd._is_halo_cmdline("C:\\Users\\x\\AppData\\Local\\Programs\\Code.exe "
+                                        "C:\\Users\\x\\Documents\\Halo-Harness"))
+    ctx.check("tailing halo's own log is NOT halo", not upd._is_halo_cmdline("tail -f ~/.halo/bridge.log"))
+    ctx.check("an unrelated process is NOT halo", not upd._is_halo_cmdline("/usr/bin/vim notes.txt"))
+    ctx.check("a bare halo invocation IS halo", upd._is_halo_cmdline("/usr/bin/halo --continue"))
+    ctx.check("a -m halo_harness invocation IS halo",
+              upd._is_halo_cmdline("/usr/bin/python3 -m halo_harness --continue"))
 
 
 @test

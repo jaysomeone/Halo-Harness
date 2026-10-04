@@ -149,11 +149,13 @@ def _make_handler(result: _CallbackResult):
 def run_authorization_flow(*, server_name: str, server_url: str, oauth_cfg: dict,
                             callback_timeout: float = DEFAULT_CALLBACK_TIMEOUT_S,
                             open_browser: bool = True,
-                            print_fn: Callable[[str], None] = print) -> "tuple[Optional[dict], Optional[str]]":
+                            print_fn: Callable[[str], None] = print,
+                            abort: "Optional[threading.Event]" = None) -> "tuple[Optional[dict], Optional[str]]":
     """`(tokens_or_None, error_or_None)` -- the full authorization-code (+
     PKCE) round trip against whatever endpoints `discover_endpoints`
-    resolves. Blocks (bounded by `callback_timeout`) waiting for the local
-    callback; never raises."""
+    resolves. Blocks (bounded by `callback_timeout`, or until `abort` is
+    set -- 2.0.2 review finding 14) waiting for the local callback; never
+    raises."""
     auth_ep, token_ep, err = discover_endpoints(server_url, oauth_cfg)
     if err:
         return None, err
@@ -185,12 +187,28 @@ def run_authorization_flow(*, server_name: str, server_url: str, oauth_cfg: dict
             pass
 
     threading.Thread(target=httpd.handle_request, daemon=True, name=f"halo-oauth-{server_name}").start()
-    got = result.event.wait(timeout=callback_timeout)
+    # 2.0.2 review finding 14 (major): a single `result.event.wait(timeout
+    # =callback_timeout)` had no way to react to `abort` at all -- Esc on
+    # the TUI's own McpStatus dialog (`action_cancel`) only ever set the
+    # dialog's own `_busy_abort` Event, which nothing downstream of here
+    # ever read, so the worker (and the dialog's "Cancelling..." hint)
+    # stayed stuck until the full 120s timeout elapsed either way. Short
+    # polls instead, so an `abort` set mid-wait is noticed within ~0.2s.
+    deadline = time.monotonic() + callback_timeout
+    got = False
+    while time.monotonic() < deadline:
+        if abort is not None and abort.is_set():
+            break
+        if result.event.wait(timeout=0.2):
+            got = True
+            break
     try:
         httpd.server_close()
     except OSError:
         pass
     if not got:
+        if abort is not None and abort.is_set():
+            return None, "login cancelled"
         return None, f"timed out after {callback_timeout:.0f}s waiting for the browser redirect"
     if result.error:
         return None, f"authorization failed: {result.error}"

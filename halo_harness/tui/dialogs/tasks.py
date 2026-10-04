@@ -237,13 +237,32 @@ class TasksPanel(ModalScreen):
         self.tab = "agents"  # public: the pilot test asserts this directly
         self._rows: list = []
         self._timer = None
+        # 2.0.2 review finding 17 (major): True while a `_refresh_worker`
+        # is already in flight -- the NEXT tick skips starting another
+        # one rather than piling up overlapping reads if a refresh ever
+        # takes longer than the 1s poll interval.
+        self._refresh_in_flight = False
 
     def compose(self):
         yield Static("", id="tasks-title", classes="dialog-title")
         yield OptionList(id="tasks-list")
 
+    def _refresh_rows_sync(self) -> None:
+        """For the two moments a stale/empty flash would actually be
+        visible -- the FIRST paint (`on_mount`) and an explicit tab
+        switch (`action_next_tab`) -- synchronous, never the worker-
+        thread path `refresh_rows`'s own RECURRING 1s tick uses
+        (finding 17). A fresh session has few enough agents/tasks that
+        this one-off read is fast."""
+        tab = self.tab
+        try:
+            rows = list(self._list_agent_tasks() or []) if tab == "agents" else list(self._read_task_board() or [])
+        except Exception:
+            rows = []
+        self._apply_rows(tab, rows)
+
     def on_mount(self) -> None:
-        self.refresh_rows()
+        self._refresh_rows_sync()
         # Live on the Kali VM: without focus, Enter on the panel did nothing
         # (OptionList's own Enter binding only fires while it is focused),
         # so the transcript viewer was unreachable from the keyboard.
@@ -255,11 +274,42 @@ class TasksPanel(ModalScreen):
             self._timer.stop()
 
     def refresh_rows(self) -> None:
+        # 2.0.2 review finding 17 (major): the actual I/O (`_list_agent_
+        # tasks`/`_read_task_board` -- re-reading every sub-agent's own
+        # meta.json + jsonl log, or the task board file) now runs on a
+        # worker thread, never the UI thread the 1s timer itself fires
+        # on; `_apply_rows` (below) does the OptionList rebuild back on
+        # the UI thread once the worker hands its result over.
+        if self._refresh_in_flight:
+            return
+        self._refresh_in_flight = True
+        tab = self.tab
+
+        def _worker() -> None:
+            try:
+                if tab == "agents":
+                    rows = list(self._list_agent_tasks() or [])
+                else:
+                    rows = list(self._read_task_board() or [])
+            except Exception:
+                rows = []
+            self.app.call_from_thread(self._apply_rows, tab, rows)
+        self.run_worker(_worker, thread=True, name="tasks-refresh")
+
+    def _apply_rows(self, tab: str, rows: list) -> None:
+        """UI-thread-only: builds the OptionList from `rows` (computed
+        off-thread by `refresh_rows`'s own worker) -- never touches disk
+        itself, same as before this finding's fix, just no longer
+        INTERLEAVED with the I/O that used to block this same thread for
+        however long the read took."""
+        self._refresh_in_flight = False
+        if tab != self.tab:
+            return  # the user switched tabs while this refresh was in flight -- stale, drop it
+        self._rows = rows
         option_list = self.query_one("#tasks-list", OptionList)
         highlighted = option_list.highlighted
         option_list.clear_options()
-        if self.tab == "agents":
-            self._rows = list(self._list_agent_tasks() or [])
+        if tab == "agents":
             running = sum(1 for r in self._rows if _status_word(r) == "running")
             queued = sum(1 for r in self._rows if _status_word(r) == "queued")
             self.query_one("#tasks-title", Static).update(
@@ -278,7 +328,6 @@ class TasksPanel(ModalScreen):
                 phase_word = card.phase_word if (card is not None and not card.done) else None
                 option_list.add_option(Option(agent_row_text(row, phase_word=phase_word), id=row.get("agent_id")))
         else:
-            self._rows = list(self._read_task_board() or [])
             self.query_one("#tasks-title", Static).update(
                 f"Task board -- {len(self._rows)} tasks (Tab: sub-agents, Esc/Ctrl+T: close)")
             if not self._rows:
@@ -307,7 +356,7 @@ class TasksPanel(ModalScreen):
             self.tab = "board"
         else:
             self.tab = "agents"
-        self.refresh_rows()
+        self._refresh_rows_sync()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Enter (or a click) on a row -- `OptionList` itself binds Enter

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -169,6 +170,22 @@ def validate_org(data) -> "list[str]":
         if role and role not in known_roles:
             problems.append(f"position {p['title']!r}: unknown role {role!r} "
                              f"(expected one of {', '.join(known_roles)})")
+        # Finding 4: a position's own `model:` used to reach
+        # `resolve_agent_model` -> `parse_model_ref` completely
+        # unvalidated -- a bare, unroutable string (e.g. "Qwen3-Coder")
+        # passed `validate_org`/the org editor clean and only raised
+        # `InvalidModelError` out of `_build_child_session` the moment
+        # that position was actually spawned. Purely syntactic (no
+        # provider credentials needed -- see `parse_model_ref`), so this
+        # never flags a well-formed ref just because its own provider
+        # isn't configured on THIS box.
+        model = p.get("model")
+        if isinstance(model, str) and model.strip():
+            from halo_harness.model import parse_model_ref
+            try:
+                parse_model_ref(model)
+            except Exception as e:
+                problems.append(f"position {p['title']!r}: invalid model {model!r} ({e})")
         reports = p.get("reports") or []
         if not isinstance(reports, list):
             problems.append(f'position {p["title"]!r}: "reports" must be a list')
@@ -439,20 +456,36 @@ class OrgBudgetTracker:
     org_name: str
     org_budget_usd: Optional[float] = None
     position_budgets: dict = field(default_factory=dict)   # title -> budget_usd
-    baseline_usd: float = 0.0                               # parent.cost_meter.total_usd when the run started
+    baseline_usd: float = 0.0                               # kept for callers/introspection; see org_spent_usd below
     spent_by_position: dict = field(default_factory=dict)   # title -> cumulative usd spent AS this position
     org_stopped: bool = False
     stopped_positions: "set" = field(default_factory=set)
-
-    def _org_spent(self, parent_total_usd: float) -> float:
-        return max(0.0, parent_total_usd - self.baseline_usd)
+    # 2.0.2 review finding 5 (major): the org-wide total THIS tracker has
+    # itself seen through `record_spend`, accumulated from each call's own
+    # `spent_usd` argument -- never compared against some OTHER object's
+    # `total_usd` reading. The old `_org_spent(parent_total_usd)` compared
+    # `parent_total_usd - baseline_usd`, but every real caller passes the
+    # SPAWNING POSITION's own fresh CostMeter total (a brand new Session
+    # per position, starting at 0), not the ROOT session's meter the
+    # baseline was captured from -- after any prior spend on the root,
+    # `position_total - baseline` stayed negative (clamped to 0) FOREVER,
+    # so the org budget could never trip. Verified: `OrgBudgetTracker(
+    # budget 1.00, baseline 3.00)`, then `refusal_before_spawn(.., 2.50)`
+    # returned None and `record_spend(.., 2.50, 2.50)` returned None too.
+    # A `threading.Lock` guards it: fan-out jobs (and concurrent sibling
+    # positions) call `record_spend` from more than one thread at once.
+    org_spent_usd: float = 0.0
+    _lock: "object" = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def refusal_before_spawn(self, title: str, parent_total_usd: float) -> Optional[str]:
         """Called right before a NEW position is spawned -- a hard stop
         already tripped (org-wide, or this exact title) refuses outright;
-        never retroactively stops a call already running."""
-        if self.org_stopped or (self.org_budget_usd is not None
-                                 and self._org_spent(parent_total_usd) >= self.org_budget_usd):
+        never retroactively stops a call already running. `parent_total_
+        usd` is accepted for backward compatibility but no longer used
+        for the org-wide check -- see `org_spent_usd`'s own docstring."""
+        with self._lock:
+            org_spent = self.org_spent_usd
+        if self.org_stopped or (self.org_budget_usd is not None and org_spent >= self.org_budget_usd):
             self.org_stopped = True
             return (f"Organization {self.org_name!r}'s budget (${self.org_budget_usd:.2f}) has been reached -- "
                     f"no further positions may be spawned this run.")
@@ -464,13 +497,19 @@ class OrgBudgetTracker:
 
     def record_spend(self, title: str, spent_usd: float, parent_total_usd: float) -> Optional[str]:
         """Called right after a position's call finishes and its cost is
-        rolled into the parent -- returns a warning/stop line to append to
-        that call's own result text, or `None` when nothing crossed a
-        threshold. Never raises, never refuses retroactively (the call
-        already happened); only flips the flags `refusal_before_spawn`
-        reads for the NEXT spawn attempt."""
+        rolled into the parent -- `spent_usd` must be THAT CALL'S OWN
+        delta (`child.cost_meter.total_usd`, never a before/after
+        subtraction on a meter shared with concurrent siblings). Returns
+        a warning/stop line to append to that call's own result text, or
+        `None` when nothing crossed a threshold. Never raises, never
+        refuses retroactively (the call already happened); only flips the
+        flags `refusal_before_spawn` reads for the NEXT spawn attempt.
+        `parent_total_usd` is accepted for backward compatibility but no
+        longer used for the org-wide check -- see `org_spent_usd`."""
         if spent_usd > 0:
             self.spent_by_position[title] = self.spent_by_position.get(title, 0.0) + spent_usd
+            with self._lock:
+                self.org_spent_usd += spent_usd
         notes: "list[str]" = []
         budget = self.position_budgets.get(title)
         if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
@@ -482,7 +521,8 @@ class OrgBudgetTracker:
             elif spent >= 0.8 * budget:
                 notes.append(f"[budget] position {title!r} has used {spent / budget:.0%} of its ${budget:.2f} budget")
         if self.org_budget_usd is not None and self.org_budget_usd > 0:
-            total = self._org_spent(parent_total_usd)
+            with self._lock:
+                total = self.org_spent_usd
             if total >= self.org_budget_usd:
                 self.org_stopped = True
                 notes.append(f"[budget] organization {self.org_name!r} has reached its "

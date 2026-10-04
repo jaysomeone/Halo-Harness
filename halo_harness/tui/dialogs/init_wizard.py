@@ -576,18 +576,31 @@ class DefaultModelStep(StepScreen):
         from textual.widgets.option_list import Option
         from halo_harness.model_display import format_model_row
         from halo_harness.tui.dialogs.model_picker import _grouped
+        from halo_harness.theme import get_config_value
         try:
             option_list = self.query_one("#wiz-model-list", OptionList)
         except Exception:
             return
+        current = get_config_value("model", default=None)
+        current_index, pos = None, 0
         for group, members in _grouped(self._entries):
             if group:
                 option_list.add_option(Option(Text(f"── {group} ──", style="bold dim"), disabled=True))
+                pos += 1
             for e in members:
                 option_list.add_option(Option(Text(format_model_row(e), no_wrap=True, overflow="ellipsis"),
                                                id=e["ref"]))
-        if option_list.option_count:
-            option_list.action_first()
+                if current_index is None and isinstance(current, str) and e["ref"] == current:
+                    current_index = pos
+                pos += 1
+        # Finding 1 fixpass (critical): highlight the EXISTING default, never
+        # just the first catalog row -- Next with no interaction then writes
+        # the same value back (a no-op) instead of silently overwriting it
+        # on a re-run of init. No match (fresh install, or a default from a
+        # provider not configured this run) leaves nothing highlighted;
+        # commit() below keeps the literal current value untouched.
+        if current_index is not None:
+            option_list.highlighted = current_index
 
     def commit(self) -> None:
         from halo_harness.theme import get_config_value, set_config_value

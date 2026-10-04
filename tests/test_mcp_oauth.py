@@ -176,6 +176,81 @@ def test_timeout_waiting_for_redirect_is_a_clean_error(ctx: Ctx):
 
 
 @test
+def test_abort_cancels_the_wait_before_the_timeout(ctx: Ctx):
+    """2.0.2 review finding 14 (major) pin: `abort` (new) lets a caller
+    (the TUI's own McpStatus dialog, Esc) end the wait almost
+    immediately instead of blocking for the full `callback_timeout` --
+    before this fix, nothing downstream of `Controller.login_mcp_server`
+    ever read the dialog's own abort Event at all."""
+    server = FakeOAuthServer()
+    server.start()
+    try:
+        abort = threading.Event()
+        started = time.monotonic()
+
+        def _abort_soon() -> None:
+            time.sleep(0.3)
+            abort.set()
+        threading.Thread(target=_abort_soon, daemon=True).start()
+        tokens, err = oauth.run_authorization_flow(
+            server_name="x", server_url=server.base_url,
+            oauth_cfg={"authorization_endpoint": server.base_url + "/authorize",
+                       "token_endpoint": server.base_url + "/token", "client_id": "cid"},
+            open_browser=False, callback_timeout=10.0, print_fn=lambda *_: None, abort=abort)
+        elapsed = time.monotonic() - started
+        ctx.check(f"no tokens, got {tokens!r}", tokens is None)
+        ctx.check(f"a clean cancellation error, got {err!r}", err is not None and "cancel" in err.lower())
+        ctx.check(f"returned quickly via abort, not the full 10s timeout, got {elapsed:.2f}s", elapsed < 3.0)
+    finally:
+        server.stop()
+
+
+@test
+def test_run_login_forwards_abort_and_print_fn_to_the_oauth_flow(ctx: Ctx):
+    """2.0.2 review finding 14: `mcp_cli.run_login` is the one place
+    `Controller.login_mcp_server` (and `/mcp`'s own `l`) calls into --
+    before this fix it accepted no `abort`/`print_fn` at all, so neither
+    could reach `oauth.run_authorization_flow` no matter what the TUI
+    passed in."""
+    from halo_harness import mcp_cli
+    from halo_harness.config.claude_json import claude_json_path
+    cwd = Path(tempfile.mkdtemp(prefix="mcp-oauth-runlogin-"))
+
+    def _with_scoped_home_and_server(fn):
+        with tempfile.TemporaryDirectory() as td:
+            old = os.environ.get("BRIDGE_TEST_HOME")
+            os.environ["BRIDGE_TEST_HOME"] = td
+            try:
+                claude_json_path().write_text(
+                    '{"mcpServers": {"x": {"type": "http", "url": "https://example.invalid/mcp"}}}',
+                    encoding="utf-8")
+                return fn()
+            finally:
+                if old is None:
+                    os.environ.pop("BRIDGE_TEST_HOME", None)
+                else:
+                    os.environ["BRIDGE_TEST_HOME"] = old
+
+    captured = {}
+
+    def _fake_flow(**kwargs):
+        captured.update(kwargs)
+        return None, "stubbed -- never contacts anything real"
+    orig = oauth.run_authorization_flow
+    oauth.run_authorization_flow = _fake_flow
+    try:
+        abort = threading.Event()
+        printed = []
+        print_fn = printed.append
+        _with_scoped_home_and_server(lambda: mcp_cli.run_login(
+            "x", cwd, abort=abort, print_fn=print_fn))
+        ctx.check(f"abort forwarded by identity, got {captured.get('abort')!r}", captured.get("abort") is abort)
+        ctx.check(f"print_fn forwarded, got {captured.get('print_fn')!r}", captured.get("print_fn") == print_fn)
+    finally:
+        oauth.run_authorization_flow = orig
+
+
+@test
 def test_tokens_persist_under_halo_mcp_oauth_never_claude_files(ctx: Ctx):
     def _run(home: Path):
         path = oauth.save_tokens("my-remote", {"access_token": "abc", "refresh_token": "def"})

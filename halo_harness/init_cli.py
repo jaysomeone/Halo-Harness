@@ -522,12 +522,23 @@ def _chat_capable_dbx_entries(state_dir) -> "list[dict]":
     from halo_harness.model_display import databricks_row_fields
     from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
     from halo_harness.providers.dbx_routing import PATH_TYPE_DISPLAY, classify_family, default_path_type, is_chat_task
+    from halo_harness.providers.profiles import decision_only_info, load_model_table
     endpoints = load_dbx_endpoints_json(state_dir)
     old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
+    # 2.0.2 review finding 8 (major): a decision-only/judge endpoint is
+    # chat-shaped (`is_chat_task` alone lets it through) but takes no
+    # tools at all -- shown here as an ordinary family row with nothing
+    # marking it different, it could become `config.model`/the session's
+    # default via init/the wizard's own default-model picker, after which
+    # every real turn failed with ToolsNotSupported. Loaded ONCE for the
+    # whole list rather than per-row.
+    _decision_only_model_table = load_model_table()
     out = []
     for name in sorted(endpoints):
         e = endpoints[name] if isinstance(endpoints[name], dict) else {}
         if not is_chat_task(e.get("task")):
+            continue
+        if decision_only_info(name, _decision_only_model_table) is not None:
             continue
         family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
                                   model_class=e.get("model_class") or "")

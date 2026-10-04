@@ -333,7 +333,14 @@ def _apply_update_and_relaunch(argv: list) -> int:
     from halo_harness.update import relaunch_halo
     from halo_harness.update_cli import apply_update
     try:
-        apply_update()
+        # Finding 2: this process's own Textual app has ALREADY exited
+        # (see this function's own docstring above) -- the ONLY thing
+        # `other_halo_pids`'s refusal could still be catching at this
+        # exact point is this same invocation's own uv/pipx console-
+        # script launcher parent (now excluded by `_ancestor_pids`, but
+        # `force=True` here too so this specific, already-past-the-TUI
+        # handoff never refuses on account of itself either way).
+        apply_update(force=True)
     except Exception as e:
         print(f"halo: update failed: {e}", file=sys.stderr)
     relaunch_args = [a for a in argv if a not in ("--continue", "-c")]

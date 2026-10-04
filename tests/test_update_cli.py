@@ -147,6 +147,38 @@ def test_apply_update_force_overrides_the_refusal(ctx: Ctx):
 
 
 @test
+def test_apply_update_runs_in_the_checkout_cwd_never_the_process_cwd(ctx: Ctx):
+    """Finding 3 (critical): for an editable/bare/local-dir checkout kind,
+    the reinstall command must run WITH `cwd` set to the real checkout --
+    never in whatever directory `halo update`/`/update` happened to be
+    invoked from (usually an unrelated project repo) -- and must leave
+    THIS process's own cwd completely untouched either way."""
+    checkout = Path(tempfile.mkdtemp(prefix="halo-update-checkout-"))
+    other_project = Path(tempfile.mkdtemp(prefix="halo-update-unrelated-project-"))
+    orig = _patch_all(installed_commit="aaaaaaa", available_commit="bbbbbbb")
+    upd.install_kind = lambda **kw: {"kind": "editable_checkout", "spec": str(checkout),
+                                      "reinstall_cmd": f"git -C {checkout} pull --ff-only && echo reinstalled"}
+    seen_cwd = []
+
+    def fake_run(cmd, **kwargs):
+        if isinstance(cmd, list) and cmd[:1] == ["halo"]:
+            return _Proc(stdout="halo 2.0.3 (bbbbbbb, master)\n")
+        seen_cwd.append(kwargs.get("cwd"))
+        return _Proc(returncode=0)
+    upd.run = fake_run
+    old_cwd = os.getcwd()
+    os.chdir(str(other_project))
+    try:
+        code, _out, _err = _capture(update_cli.apply_update)
+        ctx.check(f"exit 0, got {code}", code == 0)
+        ctx.check(f"the reinstall ran with cwd == the checkout, got {seen_cwd}", seen_cwd == [str(checkout)])
+        ctx.check(f"this PROCESS's own cwd is untouched, got {os.getcwd()!r}", os.getcwd() == str(other_project))
+    finally:
+        os.chdir(old_cwd)
+        _restore_all(orig)
+
+
+@test
 def test_apply_update_reports_before_and_after_from_a_fresh_halo_dash_dash_version(ctx: Ctx):
     orig = _patch_all(installed_commit="aaaaaaa", available_commit="bbbbbbb",
                        after_version="halo 2.0.3 (bbbbbbb, master)")
@@ -168,6 +200,28 @@ def test_apply_update_nonzero_reinstall_returncode_is_a_failure(ctx: Ctx):
         ctx.check(f"the reinstall command's own failure propagates, got {code}", code == 1)
     finally:
         _restore_all(orig)
+
+
+@test
+def test_apply_update_and_relaunch_passes_force_true(ctx: Ctx):
+    """Finding 2: `cli._apply_update_and_relaunch`'s own docstring says
+    the TUI's Textual app has ALREADY exited by the time this runs -- the
+    review found it still called `apply_update()` with no `force`, so it
+    silently refused (on account of its own now-irrelevant uv/pipx
+    console-script launcher parent -- see the `other_halo_pids` fix) and
+    relaunched the OLD build instead of the one it just "applied"."""
+    from halo_harness import cli as cli_mod
+    calls = []
+    orig_apply, orig_relaunch = update_cli.apply_update, upd.relaunch_halo
+    update_cli.apply_update = lambda **kw: calls.append(kw) or 0
+    upd.relaunch_halo = lambda args, **kw: 0
+    try:
+        cli_mod._apply_update_and_relaunch(["--continue"])
+        ctx.check(f"apply_update called exactly once, got {calls}", len(calls) == 1)
+        ctx.check(f"force=True was passed, got {calls}", calls[0].get("force") is True)
+    finally:
+        update_cli.apply_update = orig_apply
+        upd.relaunch_halo = orig_relaunch
 
 
 @test

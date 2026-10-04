@@ -593,7 +593,15 @@ async def _apply_event_inner(app, event) -> None:
         # ready` branches above, matched by this SAME agent_id) and frozen
         # on `subagent_end` below.
         name = data.get("name", "?")
-        child_agent_id = agent_id or data.get("agent_id")
+        # Finding 6: `data["agent_id"]` is set ONCE, directly, by whoever
+        # built this exact subagent_start event -- never mutated again,
+        # unlike the top-level `agent_id` field, which (pre-fix) a
+        # deeper-nested ancestor's own `_tag()` could overwrite as the
+        # event bubbled up through more than one hop (a VP's own start_ev,
+        # tagged with the VP's real id, got re-tagged with the CEO's id
+        # one level up). Preferred first now, with the top-level field
+        # only as a defensive fallback for an older/incomplete event shape.
+        child_agent_id = data.get("agent_id") or agent_id
         # Halo 2.0.2 round 3 (brief C): "the status bar shows `agents N`
         # (running count) when N > 0" -- incremented on every genuine
         # start (a QUEUED fan-out job, below, is deliberately NOT a
@@ -610,7 +618,7 @@ async def _apply_event_inner(app, event) -> None:
     elif kind == "subagent_end":
         app._agents_running_count = max(0, getattr(app, "_agents_running_count", 0) - 1)
         app.status_bar.set_agents_running(app._agents_running_count)
-        child_agent_id = agent_id or data.get("agent_id")
+        child_agent_id = data.get("agent_id") or agent_id  # finding 6, see subagent_start's own comment above
         card = app.transcript.subagent_cards.pop(child_agent_id, None) if child_agent_id else None
         if card is not None:
             card.finish()

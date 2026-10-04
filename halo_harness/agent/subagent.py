@@ -55,10 +55,11 @@ import subprocess
 import threading
 import time
 import uuid
+import contextlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from halo_harness import events
 
@@ -118,6 +119,163 @@ def effective_max_depth(runtime: "AgentRuntime") -> int:
     return value if 1 <= value <= 3 else MAX_DEPTH
 
 
+class SessionConcurrencyGate:
+    """2.0.2 review finding 10 (major): a bounded gate shared by
+    reference down the WHOLE tree (`AgentRuntime.concurrency_semaphore`,
+    propagated by `_build_child_session`/`run_org_call` exactly like
+    `org_budget` already is), acquired around each child's own run in
+    EVERY spawn path -- single, fan-out, resume -- so the session-/org-
+    wide concurrency cap is real: two separate `count` calls in one turn
+    (or nested levels) can no longer multiply past it just because each
+    one's own `ThreadPoolExecutor` pool is independently sized.
+
+    Deliberately NOT a bare `threading.Semaphore`: a child delegating to
+    a grandchild is logically one more hop of the SAME call already
+    holding a slot, but PHYSICALLY it runs on a brand new pool-worker
+    thread -- even a lone Agent tool_use goes through `agent/loop.py`'s
+    `_run_agent_batch`, which always builds its own `ThreadPoolExecutor`
+    (`max_workers=min(cap, 1)` for exactly one call). A bare semaphore
+    sized below the nesting depth deadlocks: the OUTER thread blocks
+    waiting (`queue.Queue.get()`) for the inner pool's worker to finish,
+    while that worker blocks waiting for the very slot the outer thread
+    is holding. Verified directly (a traced plain-semaphore substitute
+    produced exactly this hang on a 2-level chain at cap=1).
+
+    Fixed with EXPLICIT nesting-depth handoff across the thread
+    boundary: `wrap_for_pool`, called on the SUBMITTING thread right
+    before `pool.submit`, captures that thread's current depth and
+    returns a wrapper which seeds the SAME depth onto whichever worker
+    thread the pool actually runs it on (restored afterward, since pool
+    threads are reused across unrelated later jobs). A plain `threading.
+    local` alone cannot do this -- a new thread never inherits another
+    thread's local storage, pool-reused or not."""
+
+    def __init__(self, value: int) -> None:
+        # A counter under a Condition rather than a Semaphore, so the cap
+        # can change while slots are held: `agents.max_concurrent` is read
+        # again at every spawn (`set_limit`), which is how a config change
+        # during a session applies to the next spawn instead of the next
+        # session (the test that found this wrote the config after the
+        # Session was built, exactly what `/setup` does).
+        self._limit = max(1, int(value))
+        self._active = 0
+        self._cv = threading.Condition()
+        self._local = threading.local()
+
+    def set_limit(self, value) -> None:
+        try:
+            limit = max(1, int(value))
+        except (TypeError, ValueError):
+            return
+        with self._cv:
+            self._limit = limit
+            self._cv.notify_all()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def _acquire(self) -> None:
+        with self._cv:
+            while self._active >= self._limit:
+                self._cv.wait()
+            self._active += 1
+
+    def _release(self) -> None:
+        with self._cv:
+            self._active = max(0, self._active - 1)
+            self._cv.notify_all()
+
+    def __enter__(self) -> "SessionConcurrencyGate":
+        depth = getattr(self._local, "depth", 0)
+        if depth == 0:
+            self._acquire()
+        self._local.depth = depth + 1
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        self._local.depth -= 1
+        if self._local.depth == 0:
+            self._release()
+        return False
+
+    def wrap_for_pool(self, fn: Callable) -> Callable:
+        """Call on the thread about to `pool.submit(...)` a job that may
+        itself (directly or several Agent-dispatch hops later) try to
+        enter THIS gate again -- never on the pool worker thread itself.
+        The returned callable, run on whatever thread the pool actually
+        picks, inherits this submitting thread's CURRENT depth for its
+        own duration, then restores whatever depth that worker thread
+        had before (0 for a fresh one; otherwise whatever an EARLIER,
+        unrelated job left it at -- pool threads are reused)."""
+        # Fix pass A, found by the session-wide test on all three platforms:
+        # seeding the worker with the SUBMITTING thread's depth let every
+        # fan-out child skip the semaphore whenever the submitter already
+        # held a slot (two `batch` calls, cap 2, peaked at 4). A pool worker
+        # now starts OUTSIDE the gate and takes a real slot; the submitting
+        # thread gives its own slot back for as long as it waits on the
+        # pool (`released()` / `pool()` below), which is what keeps a
+        # nested chain at cap 1 from deadlocking: a parent blocked on its
+        # children is not running.
+        inherited = 0
+
+        def _wrapped(*args, **kwargs):
+            prev = getattr(self._local, "depth", 0)
+            self._local.depth = inherited
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._local.depth = prev
+        return _wrapped
+
+    @contextlib.contextmanager
+    def released(self):
+        """Give this thread's slot back while it blocks on children, and
+        take it again afterwards (a no-op for a thread outside the gate).
+        The per-thread depth is kept as it is, so the thread is still
+        "inside" the gate logically and its own `__exit__` still balances."""
+        depth = getattr(self._local, "depth", 0)
+        if depth > 0:
+            self._release()
+        try:
+            yield
+        finally:
+            if depth > 0:
+                self._acquire()
+
+    def pool(self, max_workers: int, limit: "Optional[int]" = None) -> "_GatedPool":
+        """A `ThreadPoolExecutor` stand-in for the two spawn sites: the
+        submitting thread's slot is released for the whole `with` block
+        and re-taken on exit, every submitted job runs outside the gate so
+        its own `with gate:` acquires a real slot, and `limit` (the cap
+        read from config or the org right now) resizes the gate first."""
+        if limit is not None:
+            self.set_limit(limit)
+        return _GatedPool(self, max_workers)
+
+
+class _GatedPool:
+    def __init__(self, gate: "SessionConcurrencyGate", max_workers: int) -> None:
+        self._gate = gate
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._released = None
+
+    def __enter__(self) -> "_GatedPool":
+        self._released = self._gate.released()
+        self._released.__enter__()
+        return self
+
+    def submit(self, fn: Callable, *args, **kwargs):
+        return self._executor.submit(self._gate.wrap_for_pool(fn), *args, **kwargs)
+
+    def __exit__(self, *exc_info) -> bool:
+        try:
+            self._executor.shutdown(wait=True)
+        finally:
+            self._released.__exit__(*exc_info)
+        return False
+
+
 @dataclass
 class AgentRuntime:
     """Held as `Session.agent_runtime` and threaded through every
@@ -172,6 +330,20 @@ class AgentRuntime:
     # `agent/cc_runtime.py`'s own `close_cc()` ALSO walks this (belt-and-
     # suspenders: quitting mid-call must not leave one running).
     live_children: dict = field(default_factory=dict)
+    # H9 whole-tree review finding 10: ONE semaphore shared by reference
+    # down the WHOLE tree from wherever it's first sized for real (`agent.
+    # loop.Session.__init__` for an ordinary session, `run_org_call` for an
+    # org run -- both below), acquired around each child's own run in
+    # EVERY spawn path (single, fan-out, resume) so the session- (or org-)
+    # wide concurrency cap is real: two separate `count` calls, or nested
+    # levels, can no longer multiply past it just because each one's own
+    # ThreadPoolExecutor pool is independently sized. Defaults to an
+    # effectively-unbounded semaphore so a bare `AgentRuntime(parent=...)`
+    # built directly (every pre-existing test fixture, never routed
+    # through either real construction site) behaves exactly as before
+    # this field existed -- unlimited, never a surprise new cap in a test
+    # that never asked for one.
+    concurrency_semaphore: "object" = field(default_factory=lambda: SessionConcurrencyGate(1_000_000))
 
 
 def _new_agent_id() -> str:
@@ -339,6 +511,28 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         parent_ref=parent.model_ref, parent_profile=parent.model_profile,
         parent_small_ref=parent.small_model_ref, state_dir=parent.state_dir, routes=runtime.routes,
     )
+    # 2.0.2 review finding 7 (major): a decision-only/judge endpoint
+    # (`Controller.set_model` auto-routes one to `roles.judge` rather than
+    # ever installing it as the session model) can never carry the
+    # built-in `Judge` agent's own HARD-CODED Explore tool set -- every
+    # request it made raised `ToolsNotSupported` before the model ever
+    # got to answer, and the user-facing error pointed back at "use the
+    # judge role instead of the session model", which was already in use.
+    # Tool-less instead whenever the RESOLVED model itself can't take
+    # tools, regardless of which agent/role asked for it -- the registry
+    # empties out (same shape `--tools ""` already supports) and the
+    # prompt gets an explicit heads-up to decide from the text alone.
+    # `model_profile` here is `halo_harness.model.ModelProfile` (context/
+    # pricing/vision only -- no `tools_supported` field at all); decision-
+    # only-ness is a `providers.profiles` concept, the SAME check
+    # `Controller.set_model`/`headless.build_session` already make before
+    # ever letting this ref become the session model.
+    if model_ref.provider == "databricks":
+        from halo_harness.providers.profiles import decision_only_notice
+        if decision_only_notice(model_ref.model):
+            ctx.tool_registry = parent.tool_registry.filtered([])
+            ctx.system_prompt = (f"{ctx.system_prompt}\n\nThis endpoint supports no tool calls at all -- decide "
+                                  f"and answer directly from the prompt text alone.")
     # Halo 2.0.2 (brief A.2): "sub-agent runs apply the role's effort
     # through the same path the session uses" -- resolved alongside (not
     # inside) `resolve_agent_model` so that function's return shape never
@@ -404,7 +598,8 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     child = Session(
         cwd=child_cwd, model_ref=model_ref, model_profile=model_profile, creds=parent.creds,
         state_dir=parent.state_dir, model_label=model_ref.raw, session_context=ctx,
-        small_model_ref=parent.small_model_ref, session_log=child_log,
+        small_model_ref=parent.small_model_ref, small_model_effort=getattr(parent, "small_model_effort", None),
+        session_log=child_log,
         max_turns=(spec.max_turns or parent.max_turns), effort=_effective_effort,
         permission_engine=child_engine, session_catalog=None, mcp_manager=parent.mcp_manager,
         hook_runner=hook_runner,
@@ -500,7 +695,10 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
                                         max_depth=runtime.max_depth, max_concurrent=runtime.max_concurrent,
                                         # round 7 (brief 3b): the SAME tracker object, never a fresh one --
                                         # see AgentRuntime.org_budget's own docstring.
-                                        org_budget=runtime.org_budget)
+                                        org_budget=runtime.org_budget,
+                                        # finding 10: the SAME semaphore object, never a fresh one -- see
+                                        # AgentRuntime.concurrency_semaphore's own docstring.
+                                        concurrency_semaphore=runtime.concurrency_semaphore)
     _write_meta(meta_path, {
         "agent_id": agent_id, "type": spec.name, "description": spec.description,
         "model": model_ref.raw, "parent_tool_use_id": parent_tool_use_id,
@@ -547,9 +745,26 @@ def _fire_subagent_hook(child, event_name: str) -> None:
 
 
 def _tag(ev, *, agent_id: str, parent_tool_use_id: str):
-    ev.agent_id = agent_id
+    """Finding 6 (major): a delegate's own events (a VP's under a CEO, in
+    a depth > 1 org) used to have their `agent_id` OVERWRITTEN at every
+    level they bubble up through -- each ancestor's own `_run_child_to_
+    completion` called this with ITS OWN `agent_id`, unconditionally,
+    even for an event a DEEPER call already tagged with the real
+    originator's id. Verified: `_tag(Event(agent_id="vp000001"),
+    agent_id="ceo00001")` gave `agent_id == "ceo00001"` while `ev.data.
+    agent_id` stayed `"vp000001"` -- the dock keys cards by `ev.agent_id`,
+    so the VP's own card got the CEO's key, orphaning the CEO's real card
+    (never finished, ticks "thinking Ns" forever) and misrouting the VP's
+    text into it. Only set when not already set, so the DEEPEST
+    (innermost/real) agent_id survives every hop back up -- `root_agent_
+    id` records the outermost hop's own id for anything that wants it."""
+    if not getattr(ev, "agent_id", None):
+        ev.agent_id = agent_id
     if isinstance(ev.data, dict):
-        ev.data = {**ev.data, "parent_tool_use_id": parent_tool_use_id}
+        extra = {"parent_tool_use_id": parent_tool_use_id}
+        if "root_agent_id" not in ev.data:
+            extra["root_agent_id"] = agent_id
+        ev.data = {**ev.data, **extra}
     return ev
 
 
@@ -910,7 +1125,11 @@ def _run_agent_fanout(*, runtime: AgentRuntime, spec: AgentSpec, tool_id: str, t
             results[index] = (f"Sub-agent dispatch failed: {type(e).__name__}: {e}", True)
 
     max_workers = min(effective_max_concurrent(runtime), n)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    # 2.0.2 review finding 10: `wrap_for_pool`, called on THIS (the
+    # submitting) thread -- see `SessionConcurrencyGate`'s own docstring
+    # for why a bare `threading.local` cannot do this across the thread
+    # boundary a fresh pool worker always is.
+    with runtime.concurrency_semaphore.pool(max_workers=max_workers, limit=effective_max_concurrent(runtime)) as pool:
         for f in [pool.submit(_run_one, i) for i in range(n)]:
             f.result()
 
@@ -940,6 +1159,30 @@ def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: s
     parent = runtime.parent
     role_name = job["role"] or spec.role
     try:
+        # 2.0.2 review finding 11 (major): after Esc, every QUEUED fan-out
+        # job used to still build a child session (a worktree included,
+        # when isolated), fire SubagentStart/TaskCreated + SubagentStop/
+        # TaskCompleted, and write logs -- undoing H5c finding 7's own
+        # abort-batch contract, which `_run_agent_batch` (several separate
+        # Agent tool_use blocks in one turn) already enforces. A job
+        # already past this point shares `runtime.parent.abort` with every
+        # OTHER foreground child (`_build_child_session`'s own `abort=`),
+        # so it already reacts to Esc mid-turn with no change needed here.
+        if parent.abort.is_set():
+            _, not_started_meta_path = _child_log_paths(parent, agent_id)
+            _write_meta(not_started_meta_path, {"status": "not_started", "is_error": True, "finished": time.time()})
+            return "Sub-agent not started: interrupted by the user.", True
+        # 2.0.2 review finding 5 (major): the SAME hard-stop-before-spawn
+        # check the single-spawn path already makes -- a fan-out job used
+        # to skip org budgets entirely (checked once, at the top of the
+        # whole count/batch call, never again as later jobs in the SAME
+        # batch keep spending).
+        if runtime.org_budget is not None:
+            refusal = runtime.org_budget.refusal_before_spawn(spec.name, parent.cost_meter.total_usd)
+            if refusal:
+                _, refused_meta_path = _child_log_paths(parent, agent_id)
+                _write_meta(refused_meta_path, {"status": "not_started", "is_error": True, "finished": time.time()})
+                return refusal, True
         child, meta_path = _build_child_session(
             runtime=runtime, spec=spec, agent_id=agent_id, model_override=job["model"],
             parent_tool_use_id=tool_id, background=False, role_override=job["role"],
@@ -966,8 +1209,11 @@ def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: s
         on_event(start_ev)
 
         try:
-            child_events = _run_child_to_completion(child, job["prompt"], agent_id=agent_id,
-                                                      parent_tool_use_id=tool_id, on_event=on_event)
+            # 2.0.2 review finding 10: the session-/org-wide cap, not just
+            # this one fan-out call's own pool (sized separately, below).
+            with runtime.concurrency_semaphore:
+                child_events = _run_child_to_completion(child, job["prompt"], agent_id=agent_id,
+                                                          parent_tool_use_id=tool_id, on_event=on_event)
         finally:
             child.close_cc()
             runtime.live_children.pop(agent_id, None)
@@ -979,6 +1225,16 @@ def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: s
                          description=job["description"])
         _write_meta(meta_path, {"status": "completed", "is_error": is_error, "finished": time.time()})
         _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+        # 2.0.2 review finding 5: a fan-out job's own spend now reaches the
+        # SAME budget tracker a single spawn already does -- this path
+        # never called `record_spend` at all before. `child.cost_meter.
+        # total_usd` is this job's own delta already (a fresh CostMeter
+        # per Session construction), never a before/after subtraction on
+        # the shared PARENT meter, which concurrent sibling jobs finishing
+        # at the same moment would double-count.
+        budget_note = (runtime.org_budget.record_spend(spec.name, child.cost_meter.total_usd,
+                                                          parent.cost_meter.total_usd)
+                       if runtime.org_budget is not None else None)
         with parent._agent_notices_lock:
             parent.permission_denials.extend(child.permission_denials)
         end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": _dock_name,
@@ -992,6 +1248,8 @@ def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: s
         worktree_note = _finalize_child_isolation_worktree(child)
         if worktree_note:
             text = f"{text}\n\n{worktree_note}"
+        if budget_note:
+            text = f"{text}\n\n{budget_note}"
         wrapped = _wrap_task_result(text, new_task_id)
         capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                      tool_use_id=f"{tool_id}-{agent_id}")
@@ -1085,10 +1343,26 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     effort_override = tool_input.get("effort")
 
     agent_id = _new_agent_id()
-    child, meta_path = _build_child_session(
-        runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
-        background=background, role_override=role_override, effort_override=effort_override,
-    )
+    try:
+        child, meta_path = _build_child_session(
+            runtime=runtime, spec=spec, agent_id=agent_id, model_override=model_override, parent_tool_use_id=tool_id,
+            background=background, role_override=role_override, effort_override=effort_override,
+        )
+    except Exception as e:
+        # 2.0.2 review finding 4 (major): this module's own docstring says
+        # "Never raises" -- an unresolvable model (a bad org position
+        # `model:`, or a `/role` pointed at a bogus ref) raised
+        # InvalidModelError straight out of here instead. The TUI's own
+        # `/org run` worker had no guard for that at all (took the whole
+        # app down with it, see `tui/slash.py::_run_org_worker`'s own
+        # fix). A minimal meta.json is written here too, so the tasks
+        # panel shows this attempt as a real, finished (errored) entry
+        # instead of nothing at all.
+        _, failed_meta_path = _child_log_paths(parent, agent_id)
+        _write_meta(failed_meta_path, {"agent_id": agent_id, "type": spec.name, "description": description,
+                                        "status": "completed", "is_error": True, "finished": time.time(),
+                                        "parent_tool_use_id": tool_id})
+        return [], ToolResult(f"Could not start sub-agent '{spec.name}': {type(e).__name__}: {e}", is_error=True)
     # finding 10 (W6a): `_build_child_session` sets `_subagent_live_asks`
     # from `parent.interactive` ALONE, with no way to know whether THIS
     # caller actually gave it a live channel to forward an ask through --
@@ -1196,8 +1470,9 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 bg_sink = getattr(parent, "_event_sink", None)
                 on_event = ((lambda ev: bg_sink(ev) if ev.kind in ("permission_request", "question", "plan_review")
                              else None) if bg_sink is not None else None)
-                child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
-                                                         on_event=on_event)
+                with runtime.concurrency_semaphore:  # 2.0.2 review finding 10: session-wide, not just one pool's own
+                    child_events = _run_child_to_completion(child, prompt, agent_id=agent_id,
+                                                             parent_tool_use_id=tool_id, on_event=on_event)
                 text = _final_text_from_log(child)
                 _fire_subagent_hook(child, "SubagentStop")
                 _fire_task_hook(parent, "TaskCompleted", task_id=new_task_id, spec_name=spec.name, description=description)
@@ -1207,10 +1482,16 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # is queued, so by the time the parent's next turn (which
                 # applies that notice) actually runs, `--max-budget-usd`/
                 # `/stats` already reflect it.
-                _cost_before = parent.cost_meter.total_usd  # round 7 (brief 3b): this call's own delta, below
                 _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+                # 2.0.2 review finding 5 (major): `child.cost_meter.total_usd`
+                # is already scoped to exactly this call (a fresh CostMeter
+                # per Session construction) -- a before/after subtraction on
+                # the shared PARENT meter double-counted whenever another
+                # sibling's own rollup landed on that SAME shared total in
+                # between the two reads (concurrent fan-out jobs, or two
+                # backgrounded sub-agents finishing at once).
                 budget_note = (runtime.org_budget.record_spend(
-                    spec.name, parent.cost_meter.total_usd - _cost_before, parent.cost_meter.total_usd)
+                    spec.name, child.cost_meter.total_usd, parent.cost_meter.total_usd)
                     if runtime.org_budget is not None else None)
                 # H6/D10 (see the foreground path's own comment): merge even
                 # for a background sub-agent, under the same lock its own
@@ -1295,8 +1576,9 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
         return [start_ev], result
 
     try:
-        child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
-                                                 on_event=on_event)
+        with runtime.concurrency_semaphore:  # 2.0.2 review finding 10: session-wide, not just one pool's own
+            child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
+                                                     on_event=on_event)
     finally:
         # H11b finding 14: a foreground child's own claude subprocess/
         # bridge/socket (if it ever used cc:) is closed the moment its ONE
@@ -1319,9 +1601,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # H9 whole-tree review finding 13: see the background path's own
     # comment above -- a FOREGROUND child's usage/cost gets the same
     # rollup, just synchronously here instead of at the end of `_bg_run`.
-    _cost_before = parent.cost_meter.total_usd  # round 7 (brief 3b): this call's own delta, below
     _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
-    budget_note = (runtime.org_budget.record_spend(spec.name, parent.cost_meter.total_usd - _cost_before,
+    # 2.0.2 review finding 5: `child.cost_meter.total_usd` is this call's
+    # own delta already -- see `_bg_run`'s own matching comment above for
+    # why a before/after subtraction on the shared PARENT meter is wrong.
+    budget_note = (runtime.org_budget.record_spend(spec.name, child.cost_meter.total_usd,
                                                      parent.cost_meter.total_usd)
                    if runtime.org_budget is not None else None)
     # H6 known v1 gap (D10) / B must-do: a non-interactive child's own
@@ -1360,10 +1644,13 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     FRESH `AgentRuntime` that swaps in the org's own positions (one
     `AgentSpec` per title, each with its own `reports` as its `delegate_
     restriction` -- `orgs.position_agent_specs`) for `runtime.agents`,
-    and sets `max_depth` from the org's own tree shape ("depth comes
-    from the tree": one hop for THIS call, plus the longest root-to-leaf
-    path `orgs.org_tree_depth` finds in the org's own `reports` graph)
-    and `max_concurrent` from the org's own value (or `None`, falling
+    and sets `max_depth` from the org's own tree shape, RELATIVE to the
+    caller's own depth ("depth comes from the tree": the caller's own
+    depth, plus one hop for THIS call, plus the longest root-to-leaf path
+    `orgs.org_tree_depth` finds in the org's own `reports` graph -- a
+    caller already at ITS OWN depth cap is refused outright, same as an
+    ordinary Agent call) and `max_concurrent` from the org's own value
+    (or `None`, falling
     through to the `agents.max_concurrent` config knob via `effective_
     max_concurrent`). Shares the CALLER's own `tasks`/`lock` so task_id
     resume/`TaskStop` bookkeeping for whatever this spawns stays part of
@@ -1372,6 +1659,20 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     from halo_harness.orgs import list_orgs, load_org, org_tree_depth, position_agent_specs, root_position, \
         validate_org
     from halo_harness.tools.base import ToolResult
+
+    # 2.0.2 review finding 9 (major) part a: the SAME depth-cap check
+    # `run_agent_call` makes for an ordinary Agent call -- without it, a
+    # sub-agent already at ITS OWN depth cap could still START a whole
+    # org tree (max_depth below is only ever checked AFTER being freshly
+    # OVERWRITTEN for the org run, so the caller's own pre-existing cap
+    # never got a say), bypassing "Sub-agents cannot spawn further
+    # sub-agents" entirely.
+    _caller_max_depth = effective_max_depth(runtime)
+    if runtime.depth >= _caller_max_depth:
+        return [], ToolResult(
+            "Sub-agents cannot spawn further sub-agents (depth limit reached) -- finish this task "
+            "yourself instead of delegating further.", is_error=True,
+        )
 
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     name = tool_input.get("org")
@@ -1414,13 +1715,47 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     org_runtime = AgentRuntime(
         parent=runtime.parent, agents=position_agent_specs(org, goal_task_id=goal_task_id), routes=runtime.routes,
         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides, depth=runtime.depth,
-        tasks=runtime.tasks, lock=runtime.lock, max_depth=org_tree_depth(org) + 1,
+        tasks=runtime.tasks, lock=runtime.lock,
+        # 2.0.2 review finding 9 part b: RELATIVE to the caller's own
+        # depth, never absolute -- `org_tree_depth(org) + 1` alone (the
+        # old code) ignored `runtime.depth` entirely, so an org started
+        # from an already-nested caller (depth 1) got the SAME cap as one
+        # started fresh (depth 0), silently losing however many levels
+        # the caller was already down. Verified: an `AgentRuntime` at
+        # depth 1 running `org="company"` (tree depth 3) used to build
+        # `{'depth': 1, 'max_depth': 4}` -- only 3 more hops below depth
+        # 1, when the whole tree needs 1 + 3 + 1 = 5.
+        max_depth=runtime.depth + org_tree_depth(org) + 1,
         max_concurrent=org.get("max_concurrent"), org_budget=org_budget,
     )
+    # 2.0.2 review finding 10 (major): a FRESH semaphore, sized for THIS
+    # org run specifically (its own `max_concurrent`, or the config
+    # default via `effective_max_concurrent`) -- shared down the WHOLE
+    # org tree by `_build_child_session`'s own propagation, so "an org's
+    # own max_concurrent" finally caps the WHOLE run, not just whichever
+    # one position's own fan-out pool happened to read it.
+    org_runtime.concurrency_semaphore = SessionConcurrencyGate(effective_max_concurrent(org_runtime))
     inner_input = {"subagent_type": root["title"], "prompt": goal,
                    "description": tool_input.get("description") or f"Run org {name}"}
-    return run_agent_call(runtime=org_runtime, tool_id=tool_id, tool_input=inner_input, tool_name=tool_name,
-                           on_event=on_event)
+    # Fix-pass notes ("outer org task resume"): tag whatever task_id this
+    # call just minted for the root position with enough to rebuild an
+    # equivalent org_runtime later -- see `_resume_task`'s own matching
+    # comment. Diffed by key (never assumed to be exactly one new entry)
+    # since a root position itself using count/batch would mint more than
+    # one; every new entry this one `run_agent_call` call produced is the
+    # SAME org run, so all of them get the same tag.
+    before_task_ids = set(runtime.tasks)
+    result = run_agent_call(runtime=org_runtime, tool_id=tool_id, tool_input=inner_input, tool_name=tool_name,
+                             on_event=on_event)
+    for new_id in set(org_runtime.tasks) - before_task_ids:
+        entry = org_runtime.tasks.get(new_id)
+        if isinstance(entry, dict):
+            entry["org_name"] = name
+            entry["org_max_depth"] = org_runtime.max_depth
+            entry["org_max_concurrent"] = org_runtime.max_concurrent
+            entry["org_budget"] = org_budget
+            entry["goal_task_id"] = goal_task_id
+    return result
 
 
 def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str, *, on_event=None):
@@ -1447,6 +1782,32 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
             is_error=True,
         )
     spec = runtime.agents.get(record["spec_name"])
+    effective_runtime = runtime
+    # Fix-pass notes ("outer org task resume" -- REFUTED as "loses max_
+    # depth/max_concurrent", it was worse: resume failed outright). The
+    # org's ROOT position (and every other position spawned through
+    # `run_org_call`) is never a name in the CALLER's own `runtime.agents`
+    # catalog -- that mapping only ever existed on the ephemeral `org_
+    # runtime` `run_org_call` built and discarded once its own call
+    # returned, so `spec` above is always None for one of these.
+    # `run_org_call` now tags the task record with enough to rebuild an
+    # equivalent runtime here: the org's own name/depth/concurrency/
+    # budget, so a resumed org position runs inside the SAME caps (and
+    # can still delegate to its own reports) the original run had.
+    if spec is None and record.get("org_name"):
+        from halo_harness.orgs import load_org, position_agent_specs
+        org = load_org(record["org_name"], state_dir=parent.state_dir)
+        if org is not None:
+            agents = position_agent_specs(org, goal_task_id=record.get("goal_task_id"))
+            spec = agents.get(record["spec_name"])
+            if spec is not None:
+                effective_runtime = AgentRuntime(
+                    parent=runtime.parent, agents=agents, routes=runtime.routes,
+                    role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides,
+                    depth=runtime.depth, tasks=runtime.tasks, lock=runtime.lock,
+                    max_depth=record.get("org_max_depth"), max_concurrent=record.get("org_max_concurrent"),
+                    org_budget=record.get("org_budget"), concurrency_semaphore=runtime.concurrency_semaphore,
+                )
     if spec is None:
         return [], ToolResult(f"The agent type for task_id {task_id!r} is no longer available.", is_error=True)
 
@@ -1456,11 +1817,29 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     # this resumed call keeps resolving against the SAME agent's own role.
     role_override = tool_input.get("role")
     role_name = role_override or spec.role
-    child, meta_path = _build_child_session(
-        runtime=runtime, spec=spec, agent_id=agent_id, model_override=tool_input.get("model"),
-        parent_tool_use_id=tool_id, background=False,  # a resume always runs in the foreground
-        role_override=role_override, effort_override=tool_input.get("effort"),
-    )
+    # Finding 5: the SAME hard-stop-before-spawn check run_agent_call's
+    # single-spawn path already makes -- a resume used to skip org
+    # budgets entirely.
+    if effective_runtime.org_budget is not None:
+        refusal = effective_runtime.org_budget.refusal_before_spawn(spec.name, parent.cost_meter.total_usd)
+        if refusal:
+            return [], ToolResult(refusal, is_error=True)
+    try:
+        child, meta_path = _build_child_session(
+            runtime=effective_runtime, spec=spec, agent_id=agent_id, model_override=tool_input.get("model"),
+            parent_tool_use_id=tool_id, background=False,  # a resume always runs in the foreground
+            role_override=role_override, effort_override=tool_input.get("effort"),
+        )
+    except Exception as e:
+        # Finding 4: same "never raises" contract run_agent_call's own
+        # single-spawn path now guards with -- an unresolvable model (a
+        # bad `model=` override on the resume call, or a position whose
+        # own `model:` only went bad after this task was created) used to
+        # raise straight out of here.
+        _, failed_meta_path = _child_log_paths(parent, agent_id)
+        _write_meta(failed_meta_path, {"status": "completed", "is_error": True, "finished": time.time()})
+        return [], ToolResult(f"Could not resume sub-agent for task_id {task_id!r}: {type(e).__name__}: {e}",
+                               is_error=True)
     # H9 whole-tree review finding 13: see run_agent_call's own comment on
     # its identically-named local -- a resume's own child log already
     # carries every PRIOR call's usage nodes; only what's appended from
@@ -1469,8 +1848,10 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     runtime.live_children[agent_id] = child  # H11b finding 14, see run_agent_call's own comment
     prompt = tool_input.get("prompt") or "Please continue."
     try:
-        child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
-                                                 on_event=on_event)
+        # finding 10: the session-/org-wide cap, never just one pool's own.
+        with effective_runtime.concurrency_semaphore:
+            child_events = _run_child_to_completion(child, prompt, agent_id=agent_id, parent_tool_use_id=tool_id,
+                                                     on_event=on_event)
     finally:
         child.close_cc()
         runtime.live_children.pop(agent_id, None)
@@ -1480,12 +1861,21 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     is_error, abnormal_reason = _child_turn_outcome(child_events)
     _write_meta(meta_path, {"status": "completed", "is_error": is_error, "finished": time.time()})
     _rollup_child_cost_into_parent(parent, child, agent_id=agent_id, since_index=since_index, role=role_name)
+    # Finding 5: a resumed call's own spend now reaches the SAME budget
+    # tracker a fresh spawn already does -- `child.cost_meter.total_usd`
+    # (never a before/after subtraction on the shared PARENT meter) is
+    # "this call's own delta", see run_agent_call's own matching comment.
+    budget_note = (effective_runtime.org_budget.record_spend(spec.name, child.cost_meter.total_usd,
+                                                                parent.cost_meter.total_usd)
+                   if effective_runtime.org_budget is not None else None)
     parent.permission_denials.extend(child.permission_denials)  # H6/D10, see run_agent_call's own comment
     if is_error:
         text = f"[sub-agent did not finish normally ({abnormal_reason}) -- this may be a stale/partial answer]\n{text}"
     worktree_note = _finalize_child_isolation_worktree(child)
     if worktree_note:
         text = f"{text}\n\n{worktree_note}"
+    if budget_note:
+        text = f"{text}\n\n{budget_note}"
     wrapped = _wrap_task_result(text, task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
@@ -1505,12 +1895,45 @@ def _walk_live_children(runtime: "AgentRuntime"):
             yield from _walk_live_children(child_runtime)
 
 
+# 2.0.2 review finding 17 (major): keyed by (size, mtime) -- see
+# `_agent_log_nodes`'s own docstring. A plain dict/lock (never an LRU
+# cap): one entry per sub-agent log this process has ever looked at,
+# which is bounded by how many sub-agents a session actually ran, not
+# by poll frequency.
+_agent_log_nodes_cache: "dict[str, tuple]" = {}
+_agent_log_nodes_cache_lock = threading.Lock()
+
+
 def _agent_log_nodes(log_path: Path) -> list:
     """A bare, dependency-free read of one `agent-*.jsonl` file's lines
     -- used for a `tool_count`/cost lookup without constructing a real
     `SessionLog` (which also wants to create directories etc.). Missing/
     unreadable file or a malformed line is silently skipped, never
-    raised -- this is a best-effort reporting path, not core machinery."""
+    raised -- this is a best-effort reporting path, not core machinery.
+
+    2.0.2 review finding 17 (major): cached by (size, mtime) -- the
+    tasks panel's own 1Hz poll used to re-read and re-parse EVERY sub-
+    agent's WHOLE jsonl log on every tick just to count tools, even one
+    that hadn't grown since the last tick (the overwhelmingly common
+    case once a run has more than a couple of agents -- most are
+    already finished). Verified: 20 synthetic ~1MB logs took 0.22s PER
+    call before this. A cache HIT (unchanged size/mtime) skips the
+    read+parse entirely; a MISS (grown, shrunk, or never seen) still
+    re-reads the whole file -- not fully incremental, but the dominant
+    real-world cost (re-scanning FINISHED agents' static logs every
+    tick) is gone."""
+    key = str(log_path)
+    try:
+        st = log_path.stat()
+        stamp = (st.st_size, st.st_mtime)
+    except OSError:
+        with _agent_log_nodes_cache_lock:
+            _agent_log_nodes_cache.pop(key, None)
+        return []
+    with _agent_log_nodes_cache_lock:
+        cached = _agent_log_nodes_cache.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
     nodes: list = []
     try:
         with log_path.open("r", encoding="utf-8") as f:
@@ -1524,6 +1947,8 @@ def _agent_log_nodes(log_path: Path) -> list:
                     continue
     except OSError:
         pass
+    with _agent_log_nodes_cache_lock:
+        _agent_log_nodes_cache[key] = (stamp, nodes)
     return nodes
 
 

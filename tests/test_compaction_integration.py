@@ -914,6 +914,34 @@ def test_h202_compaction_model_still_beats_the_compaction_role(ctx: Ctx):
         os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
 
 
+@test
+def test_h202_compaction_role_effort_is_applied_and_restored(ctx: Ctx):
+    """2.0.2 review finding 12 (major), second half: the `compaction`
+    role's own `effort` (a `{"model", "effort"}` table value) used to be
+    unpacked (`raw, _compaction_effort = role_value_parts(...)`) and then
+    dropped outright -- the summary call ran on the swapped-in model but
+    the SESSION's own ordinary effort, never a role-specific one."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model=None)
+        session.roles = {"compaction": {"model": "or:mock/compaction-from-role", "effort": "high"}}
+        session.effort = "low"  # the session's own ordinary effort, before any swap
+
+        saved = session._compaction_model_override()
+        ctx.check(f"the role's own effort is applied for the summary call, got {session.effort!r}",
+                  session.effort == "high")
+        session._restore_compaction_model(saved)
+        ctx.check(f"the session's own ordinary effort is restored afterward, got {session.effort!r}",
+                  session.effort == "low")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

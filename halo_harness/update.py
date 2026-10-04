@@ -37,6 +37,15 @@ _UNSET = object()
 _TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
+def _quote_for_shell(path: str) -> str:
+    """Double-quote a real filesystem path for a `shell=True` command on
+    both cmd.exe and POSIX shells -- only when it needs it (a space), so
+    every existing plain-URL spec (never has one) keeps printing exactly
+    as before. Good enough for a checkout's own path (never has an
+    embedded `"`)."""
+    return f'"{path}"' if path and (" " in path or "\t" in path) else path
+
+
 def run(cmd, **kwargs):
     """The one subprocess seam this module uses -- tests monkeypatch
     `halo_harness.update.run`, never `subprocess.run` directly."""
@@ -144,8 +153,14 @@ def installed_build(*, direct_url: "object" = _UNSET, run_fn=None) -> dict:
         commit = vcs_info.get("commit_id")
         info["commit"] = commit[:7] if commit else None
         info["requested_revision"] = vcs_info.get("requested_revision")
-    elif isinstance(dir_info, dict) and dir_info.get("editable"):
-        info["editable"] = True
+    elif isinstance(dir_info, dict):
+        # Finding 16: BOTH installers' default (`uv tool install
+        # --reinstall .`, no --editable) produce this same `dir_info`
+        # shape with no "editable" key at all -- resolving checkout/
+        # commit/branch must not depend on that key, or a plain (never
+        # editable) checkout install always reports commit=None, which
+        # made `halo update`/doctor treat it as "always behind" forever.
+        info["editable"] = bool(dir_info.get("editable"))
         checkout = _url_to_path(d.get("url")) or _checkout_root_on_pythonpath()
         if checkout is not None:
             info["checkout"] = str(checkout)
@@ -209,16 +224,23 @@ def _tool_reinstall_cmd(prefix: str, run_fn, *, editable: bool, path: str = ".")
     existence alone is the uv-tool/pipx tell), or (if that venv isn't the
     one we're even running from right now) `uv tool list`/`pipx list`
     naming this distribution. Falls back to plain pip."""
+    path = _quote_for_shell(path)
     if Path(prefix, "uv-receipt.toml").exists() or _uv_tool_has(DIST_NAME, run_fn):
         return f"uv tool install --reinstall{' --editable' if editable else ''} {path}"
     if Path(prefix, "pipx_metadata.json").exists() or _pipx_has(DIST_NAME, run_fn):
         return f"pipx install --force{' -e' if editable else ''} {path}"
-    return f"python -m pip install --upgrade{' -e' if editable else ''} {path}"
+    # Finding 16: whichever bare `python` happens to be first on PATH is
+    # not necessarily THIS install's own interpreter (a pyenv/conda shim,
+    # a different venv) -- `sys.executable` is always the one halo itself
+    # is running under right now, same interpreter pip would need to
+    # target anyway.
+    return f"{_quote_for_shell(sys.executable)} -m pip install --upgrade{' -e' if editable else ''} {path}"
 
 
 def install_kind(*, direct_url: "object" = _UNSET, prefix: Optional[str] = None, run_fn=None) -> dict:
     """{"kind", "spec", "reinstall_cmd"} -- `kind` is one of "uv_tool",
-    "pipx", "pip", "editable_checkout", "bare_checkout", "unknown".
+    "pipx", "pip", "editable_checkout", "dir_checkout", "bare_checkout",
+    "unknown".
     `reinstall_cmd` is the exact command `halo update`/doctor's fix line
     runs or prints; always a plain string meant to be run with a shell
     (it may contain `&&`), never argv split for you."""
@@ -229,13 +251,33 @@ def install_kind(*, direct_url: "object" = _UNSET, prefix: Optional[str] = None,
         checkout = _checkout_root_on_pythonpath()
         if checkout is None:
             return {"kind": "unknown", "spec": None, "reinstall_cmd": None}
-        return {"kind": "bare_checkout", "spec": str(checkout), "reinstall_cmd": "git pull"}
+        spec = str(checkout)
+        # Finding 3: never a bare "git pull" -- `-C <checkout>` keeps the
+        # pull tied to the real checkout no matter what directory `halo
+        # update`/`/update` is actually invoked from.
+        return {"kind": "bare_checkout", "spec": spec,
+                "reinstall_cmd": f"git -C {_quote_for_shell(spec)} pull --ff-only"}
     dir_info = d.get("dir_info") if isinstance(d, dict) else None
     if isinstance(dir_info, dict) and dir_info.get("editable"):
         checkout = _url_to_path(d.get("url")) or _checkout_root_on_pythonpath()
-        tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=True)
-        return {"kind": "editable_checkout", "spec": str(checkout) if checkout else ".",
-                "reinstall_cmd": f"git pull && {tool_cmd}"}
+        spec = str(checkout) if checkout else "."
+        tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=True, path=spec)
+        git_cmd = f"git -C {_quote_for_shell(spec)} pull --ff-only" if checkout else "git pull"
+        return {"kind": "editable_checkout", "spec": spec, "reinstall_cmd": f"{git_cmd} && {tool_cmd}"}
+    if isinstance(dir_info, dict):
+        # Finding 16: both installers' default (`uv tool install
+        # --reinstall .`, no --editable) produce exactly this
+        # non-editable local-dir_info shape. Without this branch it fell
+        # through to the generic `spec = _spec_from_direct_url(d)` path
+        # below, which reinstalls the frozen `file://` snapshot from the
+        # moment of install -- no pull, ever -- even though the clone
+        # right next to it keeps moving.
+        checkout = _url_to_path(d.get("url")) or _checkout_root_on_pythonpath()
+        if checkout is not None and (checkout / ".git").exists():
+            spec = str(checkout)
+            tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=False, path=spec)
+            git_cmd = f"git -C {_quote_for_shell(spec)} pull --ff-only"
+            return {"kind": "dir_checkout", "spec": spec, "reinstall_cmd": f"{git_cmd} && {tool_cmd}"}
     spec = _spec_from_direct_url(d)
     tool_cmd = _tool_reinstall_cmd(prefix, run_fn, editable=False, path=spec)
     kind = "uv_tool" if tool_cmd.startswith("uv ") else ("pipx" if tool_cmd.startswith("pipx") else "pip")
@@ -424,13 +466,47 @@ def note_due_today(state_dir: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def _is_halo_cmdline(cmdline: str) -> bool:
-    return "halo" in (cmdline or "").lower()
+    """True only for a process that IS halo: the literal `halo`/`halo.exe`
+    entry point as any whitespace-separated token (by its own basename,
+    so a full path still matches), or a `-m halo_harness`-style module
+    invocation -- never a mere substring hit. Finding 2: the old `"halo"
+    in cmdline.lower()` also matched an editor window titled after this
+    repo (`...\\Halo-Harness`) and `tail -f ~/.halo/bridge.log`; neither
+    names a `halo`/`halo.exe` TOKEN, just a longer word/path containing
+    those letters."""
+    for tok in (cmdline or "").split():
+        if tok == "halo_harness":
+            return True
+        name = tok.strip('"').replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if name in ("halo", "halo.exe"):
+            return True
+    return False
+
+
+def _ancestor_pids(this_pid: int, pid_to_ppid: "dict[int, int]") -> "set[int]":
+    """`this_pid` plus every PID above it in the process tree (parent,
+    grandparent, ...). Finding 2: on Windows, a `uv tool`/pipx/pip
+    console-script install's own launcher stub (`~/.local/bin/halo.exe`)
+    stays alive as the PARENT of the real `python.exe` that runs halo --
+    that parent's own command line also names `halo`/`halo.exe` (it IS
+    one), so excluding only `os.getpid()` left it counted as "another"
+    halo process, and every real `halo update`/`/update` on Windows
+    refused forever. Stops at the first pid missing from the map (the
+    root, or a race where ps/CIM already lost it) or on a cycle
+    (defensive; real process trees never have one)."""
+    seen = {this_pid}
+    pid = pid_to_ppid.get(this_pid)
+    while pid is not None and pid not in seen:
+        seen.add(pid)
+        pid = pid_to_ppid.get(pid)
+    return seen
 
 
 def other_halo_pids(*, run_fn=None) -> "list[int]":
     """Every OTHER process on this machine that looks like a `halo`
-    invocation (by command line), this process itself always excluded --
-    `update_cli.apply_update`'s own refusal check. Best-effort: any
+    invocation (by command line) -- this process AND its whole ancestor
+    chain (see `_ancestor_pids`) always excluded, never just `os.getpid()`
+    -- `update_cli.apply_update`'s own refusal check. Best-effort: any
     failure to even list processes returns `[]` (the brief's refusal is a
     courtesy, never a hard guarantee this can't still race)."""
     run_fn = run_fn or run
@@ -439,21 +515,37 @@ def other_halo_pids(*, run_fn=None) -> "list[int]":
     try:
         if os.name == "nt":
             r = run_fn(["powershell", "-NoProfile", "-Command",
-                        "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | "
+                        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | "
                         "ConvertTo-Json -Compress"], capture_output=True, text=True, timeout=10)
             rows = json.loads(r.stdout) if (r.stdout or "").strip() else []
             rows = [rows] if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
+            pid_to_ppid = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                pid, ppid = row.get("ProcessId"), row.get("ParentProcessId")
+                if pid is not None and ppid is not None:
+                    pid_to_ppid[int(pid)] = int(ppid)
+            excluded = _ancestor_pids(this_pid, pid_to_ppid)
             for row in rows:
                 pid = row.get("ProcessId") if isinstance(row, dict) else None
-                if pid and int(pid) != this_pid and _is_halo_cmdline(row.get("CommandLine")):
+                if pid and int(pid) not in excluded and _is_halo_cmdline(row.get("CommandLine")):
                     pids.append(int(pid))
         else:
-            r = run_fn(["ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=10)
+            r = run_fn(["ps", "-eo", "pid,ppid,args"], capture_output=True, text=True, timeout=10)
+            rows = []  # (pid, args)
+            pid_to_ppid = {}
             for line in (r.stdout or "").splitlines()[1:]:
-                line = line.strip()
-                pid_str, _, rest = line.partition(" ")
-                if pid_str.isdigit() and int(pid_str) != this_pid and _is_halo_cmdline(rest):
-                    pids.append(int(pid_str))
+                parts = line.strip().split(None, 2)
+                if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                    continue
+                pid, ppid, args = int(parts[0]), int(parts[1]), parts[2]
+                rows.append((pid, args))
+                pid_to_ppid[pid] = ppid
+            excluded = _ancestor_pids(this_pid, pid_to_ppid)
+            for pid, args in rows:
+                if pid not in excluded and _is_halo_cmdline(args):
+                    pids.append(pid)
     except Exception:
         return []
     return pids

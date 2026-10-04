@@ -38,7 +38,7 @@ from halo_harness.config.agents_md import discover_agents
 from halo_harness.config.claude_json import is_trusted, load_claude_json
 from halo_harness.config.paths import bridge_home, env_compat, home, lookup_project
 from halo_harness.config.settings import resolve_settings
-from halo_harness.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
+from halo_harness.model import DEFAULT_MODEL_REF, parse_model_ref, resolve_default_model_raw, resolve_model_profile
 from halo_harness.output import PrintModeSink, StreamJsonSink
 from halo_harness.providers.routing import InvalidModelError
 from halo_harness.permissions import (
@@ -753,8 +753,48 @@ def build_session(
                   f"using the configured default model for this session instead", file=sys.stderr)
             model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
             model_ref = parse_model_ref(model_raw, routes)
+            # 2.0.2 review finding 8 (major): `resolve_default_model_raw`'s
+            # OWN "configured default" chain (config.model, HALO_MODEL,
+            # routes.default, or the work-env `dbx:<ANTHROPIC_MODEL>`
+            # shortcut) is exactly what pointed at the decision-only
+            # endpoint in the first place -- calling it again with the
+            # SAME inputs just returned the SAME ref, uncaught, so "a
+            # session can never start on it" failed precisely when the
+            # CONFIGURED default itself was the decision-only endpoint.
+            # Falls all the way through to the hardcoded DEFAULT_MODEL_REF
+            # instead, which this whole block never routes to `roles.
+            # judge` (it isn't Databricks), so this loop can run at most
+            # once.
+            if model_ref.provider == "databricks" and decision_only_notice(model_ref.model):
+                print(f"halo: the configured default model is ALSO a decision-only endpoint -- "
+                      f"using {DEFAULT_MODEL_REF!r} for this session instead", file=sys.stderr)
+                model_raw = DEFAULT_MODEL_REF
+                model_ref = parse_model_ref(model_raw, routes)
+    # V2c (H15): the persisted role table (config.json's own "roles" --
+    # itself already seeded from a team.json at `init` time -- or, only
+    # when that's completely empty AND this session's own model is a
+    # Databricks one, the documented cost-aware default) plus this run's
+    # own `--role name=model` CLI overrides (always win, even over the
+    # persisted table -- see `config.agents_md.resolve_agent_model`'s own
+    # docstring for the full chain). Resolved HERE (moved up from just
+    # below the small-model block) so `roles.small`/`--role small=...`
+    # can actually be consulted for `small_raw` right below -- 2.0.2
+    # review finding 12 (major): neither was ever read before this;
+    # the session's own small model came only from `--small-model`/
+    # `HALO_MODEL_SMALL`/`routes.json`'s own "small"/the main model,
+    # even though both the built-in presets AND the Databricks cost-
+    # aware table set `roles.small`, and ROLES.md documents it driving
+    # summaries/titles/`/improve`/the compaction fallback.
+    from halo_harness.roles import parse_role_flags, resolve_role_table, role_value_parts
+    cli_roles = parse_role_flags(roles_flag)
+    persisted_roles = resolve_role_table(provider=model_ref.provider)
+    _small_role_raw = cli_roles.get("small")
+    if _small_role_raw is None:
+        _small_role_raw = persisted_roles.get("small")
+    _small_role_model, small_effort = role_value_parts(_small_role_raw)
+
     explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
-    small_raw = explicit_small_raw or routes.get("small") or model_raw
+    small_raw = explicit_small_raw or _small_role_model or routes.get("small") or model_raw
     try:
         small_ref = parse_model_ref(small_raw, routes) if small_raw else None
     except InvalidModelError:
@@ -776,17 +816,6 @@ def build_session(
                   f"using the main model {model_raw!r} for background calls instead", file=sys.stderr)
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
-
-    # V2c (H15): the persisted role table (config.json's own "roles" --
-    # itself already seeded from a team.json at `init` time -- or, only
-    # when that's completely empty AND this session's own model is a
-    # Databricks one, the documented cost-aware default) plus this run's
-    # own `--role name=model` CLI overrides (always win, even over the
-    # persisted table -- see `config.agents_md.resolve_agent_model`'s own
-    # docstring for the full chain).
-    from halo_harness.roles import parse_role_flags, resolve_role_table
-    cli_roles = parse_role_flags(roles_flag)
-    persisted_roles = resolve_role_table(provider=model_ref.provider)
 
     # H12 Part C (RECOMMENDATIONS.md P0 #3): a per-family Edit context-line
     # hint, appended to the frozen registry's OWN Edit tool INSTANCE
@@ -1137,7 +1166,8 @@ def build_session(
     )
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
-        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
+        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref,
+        small_model_effort=small_effort, session_log=session_log,
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
         effort_source=effort_source,
         extra_headers=extra_headers, permission_engine=permission_engine,

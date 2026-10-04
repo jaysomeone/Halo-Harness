@@ -228,6 +228,33 @@ def test_build_session_never_starts_on_a_decision_only_model(ctx: Ctx):
                   get_config_value("roles.judge", default=None) == f"dbx:{_OPENJEV}")
 
 
+@test
+def test_build_session_falls_through_when_the_configured_default_itself_is_decision_only(ctx: Ctx):
+    """2.0.2 review finding 8 (major) pin: "a session can never start on
+    it" failed specifically when the CONFIGURED DEFAULT (config.model,
+    HALO_MODEL, routes.default, or the work-env dbx:<ANTHROPIC_MODEL>
+    shortcut -- never an explicit --model) is itself the decision-only
+    endpoint. `resolve_default_model_raw()`'s own fallback call returns
+    the EXACT SAME ref a second time (nothing about its inputs changed
+    in between), so the old code's single re-check never caught it and
+    the session was built on the decision-only endpoint anyway."""
+    from halo_harness.model import DEFAULT_MODEL_REF
+    from halo_harness.theme import get_config_value, set_config_value
+    with _Env() as env, tempfile.TemporaryDirectory() as cwd:
+        os.environ["OPENROUTER_API_KEY"] = "test-key-not-real"
+        os.environ["DATABRICKS_HOST"] = "https://test.cloud.databricks.com"
+        os.environ["DATABRICKS_TOKEN"] = "test-token"
+        set_config_value("model", f"dbx:{_OPENJEV}")  # the CONFIGURED DEFAULT itself, not an explicit --model
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            build = _build(Path(cwd))  # model_ref_raw=None -- goes through resolve_default_model_raw
+        ctx.check(f"falls all the way through to the hardcoded default, got {build.model_ref.raw}",
+                  build.model_ref.raw == DEFAULT_MODEL_REF)
+        ctx.check(f"roles.judge was still configured as a side effect, got "
+                  f"{get_config_value('roles.judge', default=None)!r}",
+                  get_config_value("roles.judge", default=None) == f"dbx:{_OPENJEV}")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

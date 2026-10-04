@@ -650,7 +650,8 @@ class Session:
     def __init__(
         self, *, cwd, model_ref: ModelRef, model_profile: ModelProfile,
         creds: Optional[ProviderCreds], state_dir, model_label: str, session_context,
-        small_model_ref: Optional[ModelRef] = None, session_log: Optional[SessionLog] = None,
+        small_model_ref: Optional[ModelRef] = None, small_model_effort: Optional[str] = None,
+        session_log: Optional[SessionLog] = None,
         max_turns: int = 50, openrouter_base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
         effort_source: Optional[str] = None,
@@ -680,6 +681,13 @@ class Session:
         self.cwd = cwd
         self.model_ref = model_ref
         self.small_model_ref = small_model_ref
+        # 2.0.2 review finding 12 (major), second half: "per-role effort"
+        # was partial -- `roles.small`'s own `effort` (a `{"model",
+        # "effort"}` table value) had nowhere to go at all. `None` (no
+        # table value, a bare-string one, or no caller passing this new
+        # optional param) changes nothing -- `call_small_model` already
+        # falls back to `self.effort`, exactly as before this existed.
+        self.small_model_effort = small_model_effort
         self.model_profile = model_profile
         self.creds = creds
         # finding 3 (W6a): kept so `apply_next_fallback_model` can resolve
@@ -1032,6 +1040,21 @@ class Session:
         self.agent_runtime = AgentRuntime(parent=self, agents=(agents or {}), routes=(routes or {}),
                                            role_table=self.roles, cli_role_overrides=self.cli_roles,
                                            depth=agent_depth)
+        # 2.0.2 review finding 10 (major): ONE semaphore for the WHOLE
+        # session tree, sized here (for a genuinely top-level Session --
+        # a CHILD's own transient `agent_runtime` built by THIS same
+        # `__init__`, for a sub-agent, is immediately replaced right after
+        # construction by `agent.subagent._build_child_session`'s own
+        # `AgentRuntime(..., concurrency_semaphore=runtime.concurrency_
+        # semaphore)`, which propagates the REAL one instead -- this one
+        # is simply discarded, unused, in that case). Without this, two
+        # separate `count`/`batch` calls in one turn (or nested levels)
+        # each got their OWN independently-sized ThreadPoolExecutor pool,
+        # so the total running at once could multiply well past `agents.
+        # max_concurrent`.
+        from halo_harness.agent.subagent import SessionConcurrencyGate, effective_max_concurrent
+        self.agent_runtime.concurrency_semaphore = SessionConcurrencyGate(
+            effective_max_concurrent(self.agent_runtime))
         self.agent_type_restriction = agent_type_restriction
         # H6 scope F: background sub-agent completions wait here (a plain
         # list under a lock, exactly like the steering queue) until the
@@ -1763,10 +1786,15 @@ class Session:
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
+        # 2.0.2 review finding 12, second half: `roles.small`'s own
+        # `effort` applies ONLY when this call is actually ON the small
+        # model (`ref is not self.model_ref`) -- the plain main-model
+        # fallback case is completely unchanged.
+        effort = self.effort if ref is self.model_ref else (self.small_model_effort or self.effort)
         body = build_request_body(
             system_text=system_text,
             messages=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
-            tools=[], route=route, profile=profile, effort=self.effort,
+            tools=[], route=route, profile=profile, effort=effort,
             context_tokens=self.model_profile.context_tokens,
             prompt_estimate=_rough_estimate("", []),
             requested_max_tokens=max_tokens,
@@ -3025,12 +3053,20 @@ class Session:
         Claude Code's own settings chain; this is strictly the next,
         lower-precedence rung, never a competitor to either)."""
         raw = self._compaction_knobs.compaction_model
+        # 2.0.2 review finding 12 (major), second half: the `compaction`
+        # role's own `effort` (a `{"model", "effort"}` table value) used
+        # to be unpacked and then dropped outright -- the summary call
+        # ran on the swapped-in MODEL but the SESSION's own ordinary
+        # effort, never a role-specific one. `None` (no table value, or
+        # a bare-string one) changes nothing below -- `self.effort`
+        # simply isn't swapped, same as before this existed.
+        compaction_effort = None
         if not raw:
             from halo_harness.roles import role_value_parts
             role_raw = (self.cli_roles or {}).get("compaction")
             if role_raw is None:
                 role_raw = (self.roles or {}).get("compaction")
-            raw, _compaction_effort = role_value_parts(role_raw)
+            raw, compaction_effort = role_value_parts(role_raw)
         if not raw or raw == self.model_ref.raw:
             return None
         try:
@@ -3046,13 +3082,15 @@ class Session:
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
         profile = resolve_profile(route)
         model_profile = resolve_model_profile(ref, self.state_dir, routes)
-        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref)
+        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort)
         self.route, self.provider_profile, self.model_profile, self.model_ref = route, profile, model_profile, ref
+        if compaction_effort:
+            self.effort = compaction_effort
         return saved
 
     def _restore_compaction_model(self, saved) -> None:
         if saved is not None:
-            self.route, self.provider_profile, self.model_profile, self.model_ref = saved
+            self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort = saved
 
     def _run_summary_call(self, system_text: str, call_messages: list, tools, requested_max_tokens: int):
         """One streamed summarisation-call attempt, reusing `_step`'s OWN
@@ -4942,8 +4980,14 @@ class Session:
                 finally:
                     q.put((_DONE, it))
 
-            with ThreadPoolExecutor(max_workers=min(effective_max_concurrent(self.agent_runtime),
-                                                      len(agent_batch))) as pool:
+            # 2.0.2 review finding 10: `wrap_for_pool`, called on THIS
+            # (submitting) thread -- see `SessionConcurrencyGate`'s own
+            # docstring (agent/subagent.py) for why a bare `threading.
+            # local` cannot carry a nesting depth across the thread
+            # boundary a fresh pool worker always is, even for a single
+            # Agent tool_use (this pool is built regardless of count).
+            _cap = effective_max_concurrent(self.agent_runtime)
+            with self.agent_runtime.concurrency_semaphore.pool(max_workers=min(_cap, len(agent_batch)), limit=_cap) as pool:
                 for it in agent_batch:
                     pool.submit(_run_one, it)
                 remaining = len(agent_batch)

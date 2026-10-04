@@ -246,7 +246,7 @@ def set_server_disabled_in_config(name: str, *, cwd: Path, disabled: bool) -> st
 
 
 def run_login(name: str, cwd: Path, *, settings=None, open_browser: bool = True,
-               timeout: Optional[float] = None) -> "tuple[list, bool]":
+               timeout: Optional[float] = None, abort=None, print_fn=None) -> "tuple[list, bool]":
     """The OAuth login round trip shared by `_cmd_login` (`halo mcp
     login`) and `Controller.login_mcp_server` (`/mcp` `l`) -- `(lines,
     ok)`, never raises. Calls `oauth.run_authorization_flow` through the
@@ -256,7 +256,14 @@ def run_login(name: str, cwd: Path, *, settings=None, open_browser: bool = True,
     (test_mcp_subcommands.py) still takes effect here. A claude.ai
     connector (`name` starting `connector__`) has no local OAuth flow --
     callers route those to the connectors-bridge re-auth instructions
-    instead; this only ever looks at locally configured http/sse servers."""
+    instead; this only ever looks at locally configured http/sse servers.
+
+    2.0.2 review finding 14: `abort`/`print_fn` (both optional, both
+    forwarded to `oauth.run_authorization_flow` only when given, so
+    `oauth`'s own defaults -- no cancellation, bare `print`-- are
+    untouched for every pre-existing caller) are how `/mcp`'s own `l` on
+    the TUI threads its dialog's Esc-to-cancel and its live hint line
+    this far down."""
     from halo_harness.config.claude_json import load_claude_json
     from halo_harness.mcp.manager import resolve_server_configs
     resolved, _notices = resolve_server_configs(cwd=cwd, claude_json=load_claude_json(), settings=settings)
@@ -267,6 +274,10 @@ def run_login(name: str, cwd: Path, *, settings=None, open_browser: bool = True,
         return [f"{name!r} is a {cfg.type!r} server -- OAuth only applies to http/sse (remote) servers."], False
     from halo_harness.mcp import oauth
     kwargs = {"callback_timeout": timeout} if timeout is not None else {}
+    if abort is not None:
+        kwargs["abort"] = abort
+    if print_fn is not None:
+        kwargs["print_fn"] = print_fn
     tokens, err = oauth.run_authorization_flow(server_name=name, server_url=cfg.url or "",
                                                  oauth_cfg=cfg.oauth or {}, open_browser=open_browser, **kwargs)
     if err:
@@ -489,6 +500,55 @@ def _read_dot_mcp_json(path: Path) -> dict:
 
 def _write_dot_mcp_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _raw_entry_for(*, scope: str, name: str, cwd: Path) -> dict:
+    """The CURRENT on-disk entry dict for `name` at `scope` -- mirrors
+    `_store_entry`'s own scope branching exactly, read-only. `{}` when it
+    can't be found (deleted since the last resolve). 2.0.2 review
+    finding 15: the one thing `McpEntryForm` (`/mcp` `e` with no
+    $EDITOR) needs so saving can PATCH the existing entry instead of
+    rebuilding one from scratch and losing every field this form
+    doesn't itself expose (cwd, timeout, headersHelper, alwaysLoad,
+    mcpLazy, any unknown key)."""
+    if scope == "project":
+        data = _read_dot_mcp_json(cwd / ".mcp.json")
+        entry = (data.get("mcpServers") or {}).get(name)
+        return dict(entry) if isinstance(entry, dict) else {}
+    data, _indent, _nl, _bom = _read_claude_json_raw()
+    if scope == "user":
+        entry = (data.get("mcpServers") or {}).get(name)
+    else:  # local (default) -- projects[normalize_cwd(cwd)].mcpServers
+        proj = (data.get("projects") or {}).get(normalize_cwd(cwd)) or {}
+        entry = (proj.get("mcpServers") or {}).get(name)
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def _patch_entry(existing: dict, *, transport: str, command_or_url: str, extra_args: list, env: dict,
+                  headers: dict, oauth: Optional[dict]) -> dict:
+    """Like `_build_entry`, but starts from `existing` (the raw on-disk
+    entry, from `_raw_entry_for`) and only overwrites the fields THIS
+    form actually edits -- every other key (cwd, timeout, headersHelper,
+    alwaysLoad, mcpLazy, anything this harness doesn't even know about
+    yet) survives untouched. `_build_entry` itself is left alone: `halo
+    mcp add`/`add-json` genuinely want a FRESH entry, never a merge."""
+    entry = dict(existing)
+    entry["type"] = transport
+    if transport == "stdio":
+        entry["command"] = command_or_url
+        entry["args"] = list(extra_args)
+        entry["env"] = dict(env or {})
+    else:
+        entry["url"] = command_or_url
+        if headers:
+            entry["headers"] = headers
+        else:
+            entry.pop("headers", None)
+    if oauth:
+        entry["oauth"] = oauth
+    else:
+        entry.pop("oauth", None)
+    return entry
 
 
 def _build_entry(*, transport: str, command_or_url: str, extra_args: list, env: dict, headers: dict,

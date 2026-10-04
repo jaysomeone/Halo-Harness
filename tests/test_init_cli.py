@@ -771,6 +771,29 @@ def test_provider_setup_flips_an_existing_explicit_disable_back_on(ctx: Ctx):
               config["providers"]["openrouter"]["enabled"] is True)
 
 
+@test
+def test_chat_capable_dbx_entries_excludes_decision_only_endpoints(ctx: Ctx):
+    """2.0.2 review finding 8 (major) pin: a decision-only/judge endpoint
+    is chat-shaped (`is_chat_task` alone used to let it through) but
+    takes no tools at all -- shown in init/the wizard's own default-
+    model list as an ordinary family row, with nothing marking it
+    different, it could become `config.model` after which every real
+    turn failed with ToolsNotSupported. `databricks-openjev-qwen35-4b`
+    is tabled `capabilities.decision_only` in the repo's own real
+    model_table.json (test_qwen_decision_only.py's own fixture-free
+    classification test relies on the exact same thing)."""
+    from halo_harness.init_cli import _chat_capable_dbx_entries
+    from halo_harness.providers.databricks import write_dbx_endpoints_json
+    state_dir = Path(tempfile.mkdtemp(prefix="init-dbx-decision-only-"))
+    write_dbx_endpoints_json(state_dir, [
+        {"name": "databricks-qwen35-122b-a10b", "task": "llm/v1/chat", "ready": True},
+        {"name": "databricks-openjev-qwen35-4b", "task": "llm/v1/chat", "ready": True},
+    ])
+    refs = [e["ref"] for e in _chat_capable_dbx_entries(state_dir)]
+    ctx.check(f"the ordinary chat endpoint is offered, got {refs}", "dbx:databricks-qwen35-122b-a10b" in refs)
+    ctx.check(f"the decision-only endpoint is excluded, got {refs}", "dbx:databricks-openjev-qwen35-4b" not in refs)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

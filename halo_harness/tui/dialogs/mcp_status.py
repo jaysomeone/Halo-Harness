@@ -127,6 +127,15 @@ class McpStatus(ModalScreen):
 
     def action_cancel(self) -> None:
         if self._busy_abort is not None:
+            # 2.0.2 review finding 14: a SECOND Esc, while the first
+            # one's own cancel request is still pending (the underlying
+            # action can't be force-killed -- see the comment just
+            # below), dismisses the dialog outright instead of leaving
+            # the user stuck looking at "Cancelling..." for however long
+            # the abandoned worker takes to actually notice and finish.
+            if self._busy_abort.is_set():
+                self.dismiss(None)
+                return
             # An action is in flight -- Esc cancels THAT (the worker keeps
             # running the underlying close/start/login regardless, same
             # "abandoned, not stopped" caveat as every other abort-aware
@@ -135,7 +144,7 @@ class McpStatus(ModalScreen):
             # state would otherwise keep changing under the user after
             # they've already left it.
             self._busy_abort.set()
-            self._set_hint(f"Cancelling {self._busy_name}...")
+            self._set_hint(f"Cancelling {self._busy_name}... (Esc again to close this dialog)")
             return
         self.dismiss(None)
 
@@ -167,7 +176,24 @@ class McpStatus(ModalScreen):
         self._run_action_async(self._approve, verb="Approving")
 
     def action_login(self) -> None:
-        self._run_action_async(self._login, verb="Logging in")
+        # 2.0.2 review finding 14: `oauth.run_authorization_flow`'s own
+        # "open this URL to authorize" line used `print_fn=print` by
+        # default -- Textual's `App._print` drops a bare `print()` from a
+        # worker thread entirely (never fed to devtools/capture, see
+        # `halo_harness.termtitle`'s own matching comment on a similar
+        # issue), so on SSH/headless Kali, where no browser opens either,
+        # the user had no way at all to even see the URL to authorize
+        # with by hand. Routed into this dialog's own hint line instead.
+        def _with_live_url(name, abort=None):
+            def _print_fn(line) -> None:
+                self.app.call_from_thread(self._set_hint, str(line))
+            try:
+                return self._login(name, abort=abort, print_fn=_print_fn)
+            except TypeError:
+                # `self._login` doesn't accept print_fn at all (a minimal
+                # test double) -- still run it, just without the live URL.
+                return self._login(name, abort=abort)
+        self._run_action_async(_with_live_url, verb="Logging in")
 
     def action_test_server(self) -> None:
         self._run_action_async(self._test, verb="Testing")

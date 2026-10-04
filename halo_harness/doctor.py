@@ -657,8 +657,8 @@ def _check_install() -> str:
     `halo update`'s own `update.installed_build`/`install_kind`."""
     from halo_harness import update as upd
     label = {"uv_tool": "uv tool", "pipx": "pipx", "pip": "pip",
-             "editable_checkout": "editable checkout", "bare_checkout": "checkout on PYTHONPATH",
-             "unknown": "unknown"}
+             "editable_checkout": "editable checkout", "dir_checkout": "checkout",
+             "bare_checkout": "checkout on PYTHONPATH", "unknown": "unknown"}
     try:
         build = upd.installed_build()
         kind = upd.install_kind()

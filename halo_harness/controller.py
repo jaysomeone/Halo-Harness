@@ -950,13 +950,22 @@ class Controller:
             lines.append("No MCP servers configured.")
         return lines
 
-    def login_mcp_server(self, name: str, abort=None) -> list:
+    def login_mcp_server(self, name: str, abort=None, print_fn=None) -> list:
         """round4 brief item 1: `l` in `/mcp` -- the 2.0.1 OAuth flow for
         a local http/sse server (`mcp_cli.run_login`, the SAME helper
         `halo mcp login` uses), or, for a claude.ai connector row, the
         re-auth instructions line the bridge already produces (there is
         no local OAuth flow for one of those -- the login lives in
-        claude.ai/claude itself)."""
+        claude.ai/claude itself).
+
+        2.0.2 review finding 14: `abort` used to only ever reach the
+        POST-login `reconnect_mcp` call below -- the login round trip
+        itself (where the real, up-to-120s blocking wait actually lives)
+        never saw it at all, so Esc on the TUI's own dialog could not
+        actually cancel a login in progress. `print_fn` (new) is how that
+        SAME dialog gets the "open this URL" line to show up somewhere
+        visible at all -- Textual drops a bare `print()` from a worker
+        thread entirely."""
         if name.startswith("connector__"):
             from halo_harness.mcp import connectors_bridge
             slug = name[len("connector__"):]
@@ -966,7 +975,7 @@ class Controller:
             text = connectors_bridge.reauth_instructions(info)
             return [text or f"{info.name}: already authorized -- nothing to do."]
         from halo_harness.mcp_cli import run_login
-        lines, ok = run_login(name, self.cwd, settings=self.settings)
+        lines, ok = run_login(name, self.cwd, settings=self.settings, abort=abort, print_fn=print_fn)
         if ok:
             lines += self.reconnect_mcp(name, abort=abort)
         return lines

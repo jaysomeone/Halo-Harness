@@ -252,6 +252,195 @@ def test_concurrency_queue_cap_2_with_5_spawns(ctx: Ctx):
 
 
 @test
+def test_fanout_job_still_queued_after_abort_never_starts(ctx: Ctx):
+    """2.0.2 review finding 11 (major) pin: after Esc, every job still
+    sitting in the fan-out pool's own queue used to still build a child
+    session (a worktree included, when isolated), fire SubagentStart/
+    TaskCreated + SubagentStop/TaskCompleted, and write logs -- undoing
+    H5c finding 7's own abort-batch contract. cap=1 so only ONE job can
+    ever be "running" at a time; `parent.abort` is set the INSTANT the
+    first job starts (well before it finishes), so every OTHER job is
+    still queued when its own turn comes up."""
+    from halo_harness.theme import set_config_value
+    _tracked["active"] = 0
+    _tracked["peak"] = 0
+    _tracked["start_order"] = []
+    mock = MockUpstream().start()
+    session = None
+    try:
+        started = threading.Event()
+
+        def _scn(index: int):
+            def _run(h, body):
+                if index == 0:
+                    started.set()
+                with _tracked_lock:
+                    _tracked["active"] += 1
+                    _tracked["start_order"].append(index)
+                try:
+                    start_sse(h)
+                    time.sleep(0.3)
+                    write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {"content": "x"}}]})
+                    write_sse_chunk(h, None, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                    write_sse_chunk(h, None, "[DONE]")
+                    end_sse(h)
+                finally:
+                    with _tracked_lock:
+                        _tracked["active"] -= 1
+            return _run
+        for i in range(4):
+            SCENARIOS[f"scale-abort-child-{i}"] = _scn(i)
+        session = _new_session(mock=mock, model="or:mock/scale-parent-abort", agents={"general-purpose": _gp_spec()})
+        set_config_value("agents.max_concurrent", 1)
+        batch = [{"prompt": f"do {i}", "model": f"or:mock/scale-abort-child-{i}"} for i in range(4)]
+
+        done = []
+        t = threading.Thread(target=lambda: done.append(_dispatch_one(
+            session, {"description": "fan", "subagent_type": "general-purpose", "batch": batch})))
+        t.start()
+        ctx.check("the first job actually started", started.wait(timeout=5.0))
+        session.abort.set()
+        t.join(timeout=10.0)
+        ctx.check("the dispatch finished (no hang)", not t.is_alive() and bool(done))
+        events = done[0] if done else []
+        results = [e for e in events if e.kind == "tool_result" and e.agent_id is None]
+        ctx.check(f"one combined tool_result, got {len(results)}", len(results) == 1)
+        content = results[0].data.get("content", "") if results else ""
+        ctx.check(f"a queued job reports 'not started: interrupted' instead of running, got {content!r}",
+                  "not started" in content.lower() and "interrupted" in content.lower())
+        ctx.check(f"not all 4 children ever actually ran, got {_tracked['start_order']}",
+                  len(_tracked["start_order"]) < 4)
+    finally:
+        if session is not None:
+            session.abort.clear()
+        mock.stop()
+
+
+@test
+def test_concurrency_cap_is_session_wide_across_two_fanout_calls_in_one_turn(ctx: Ctx):
+    """2.0.2 review finding 10 (major) pin: cap 2, TWO separate `batch`
+    calls in the SAME turn (two Agent tool_use blocks -- the outer
+    `_dispatch_tools` pool runs both concurrently, each with its OWN
+    inner fan-out pool for its own 3 children). Before the fix, each
+    fan-out call's own `ThreadPoolExecutor` was independently sized at
+    the cap, so the two together could run up to 2x the configured
+    limit -- the review's own repro: two `count=6` calls, cap 4, peaked
+    at 8 concurrent children."""
+    from halo_harness.theme import set_config_value
+    _tracked["active"] = 0
+    _tracked["peak"] = 0
+    _tracked["start_order"] = []
+    mock = MockUpstream().start()
+    try:
+        for i in range(6):
+            SCENARIOS[f"scale-sesswide-child-{i}"] = _scn_tracked_slow(i)
+        # `_new_session` points BRIDGE_TEST_HOME at a fresh home, so the
+        # config is written AFTER it; the gate re-reads the cap at every
+        # spawn (`SessionConcurrencyGate.set_limit`), which is also what a
+        # config change during a real session relies on.
+        session = _new_session(mock=mock, model="or:mock/scale-parent-sesswide", agents={"general-purpose": _gp_spec()})
+        set_config_value("agents.max_concurrent", 2)
+        batch_a = [{"prompt": f"do {i}", "model": f"or:mock/scale-sesswide-child-{i}"} for i in range(3)]
+        batch_b = [{"prompt": f"do {i}", "model": f"or:mock/scale-sesswide-child-{i}"} for i in range(3, 6)]
+        tus = [
+            {"type": "tool_use", "id": "call_a", "name": "Agent",
+             "input": {"description": "fan-a", "subagent_type": "general-purpose", "batch": batch_a}},
+            {"type": "tool_use", "id": "call_b", "name": "Agent",
+             "input": {"description": "fan-b", "subagent_type": "general-purpose", "batch": batch_b}},
+        ]
+        done = []
+        t = threading.Thread(target=lambda: done.append(list(session._dispatch_tools(1, tus))))
+        t.start()
+        t.join(timeout=30)
+        ctx.check("the dispatch finished within 30s (no deadlock)", not t.is_alive() and done)
+        ctx.check(f"peak concurrency across BOTH fan-out calls never exceeded the session-wide cap (2), "
+                  f"got {_tracked['peak']}", _tracked["peak"] <= 2)
+        ctx.check(f"all 6 children across both calls eventually ran, got {sorted(_tracked['start_order'])}",
+                  sorted(_tracked["start_order"]) == [0, 1, 2, 3, 4, 5])
+    finally:
+        mock.stop()
+
+
+@test
+def test_concurrency_cap_of_1_never_deadlocks_a_nested_delegation_chain(ctx: Ctx):
+    """2.0.2 review finding 10: the session-wide gate must be REENTRANT
+    per thread -- a child delegating to a grandchild runs on the SAME
+    thread that is already, right now, inside the gate for its own
+    parent's call (`_run_child_to_completion` blocks the whole chain). A
+    bare `threading.Semaphore(1)` would have that thread wait forever for
+    a slot it already holds further up its own call stack. cap=1 is the
+    smallest possible value, maximizing the chance of catching a
+    regression back to a plain (non-reentrant) semaphore."""
+    from halo_harness.theme import set_config_value
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["scale-gate-grandchild"] = ScriptedTurns([_text_step("grandchild done")])
+        SCENARIOS["scale-gate-child"] = ScriptedTurns([
+            [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_gc", "type": "function",
+                    "function": {"name": "Agent", "arguments": json.dumps({
+                        "description": "gc", "prompt": "go deeper", "subagent_type": "general-purpose",
+                        "model": "or:mock/scale-gate-grandchild"})},
+                }]}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ],
+            _text_step("child wrapped up"),
+        ])
+        # `effective_max_concurrent` is read ONCE, at Session construction
+        # (to size the gate), unlike `effective_max_depth` (read fresh on
+        # every check) -- `_new_session` itself re-randomizes BRIDGE_TEST_
+        # HOME every call, so config must be written into the SAME fixed
+        # dir the Session construction below will actually read from,
+        # with no `_new_session`-internal re-randomization in between.
+        os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="scale-gate-home-")))
+        set_config_value("agents.max_depth", 2)
+        set_config_value("agents.max_concurrent", 1)
+        from halo_harness.agent.assemble import SessionContext
+        from halo_harness.agent.loop import Session
+        from halo_harness.model import ModelProfile, parse_model_ref
+        from halo_harness.permissions import PermissionEngine
+        from halo_harness.providers.stream import ProviderCreds
+        cwd = Path(tempfile.mkdtemp(prefix="scale-gate-cwd-"))
+        # "general-purpose" (`_gp_spec()`) disallows Agent/Task outright --
+        # fine for the GRANDCHILD (a true leaf; MAX_DEPTH stops it anyway)
+        # but it would also silently block the CHILD's own nested call
+        # (never reaching the pool/gate at all) if reused for that hop
+        # too, so the child needs its own, delegation-capable spec.
+        delegator_spec = _gp_spec(name="delegator", disallowed_tools=[])
+        session = Session(
+            cwd=cwd, model_ref=parse_model_ref("or:mock/scale-gate-parent"), model_profile=ModelProfile(),
+            creds=ProviderCreds(base_url=mock.base_url, api_key="k"),
+            state_dir=Path(tempfile.mkdtemp(prefix="scale-gate-state-")), model_label="or:mock/scale-gate-parent",
+            session_context=SessionContext(cwd=cwd, model_label="or:mock/scale-gate-parent", bare=True),
+            openrouter_base_url=mock.base_url, max_turns=10,
+            permission_engine=PermissionEngine(mode="auto", cwd=cwd),
+            agents={"general-purpose": _gp_spec(), "delegator": delegator_spec}, routes={},
+        )
+        done = []
+        t = threading.Thread(target=lambda: done.append(_dispatch_one(
+            session, {"description": "c", "prompt": "go", "subagent_type": "delegator",
+                       "model": "or:mock/scale-gate-child"})))
+        t.start()
+        t.join(timeout=15)
+        ctx.check("the nested chain finished within 15s instead of deadlocking", not t.is_alive() and done)
+        if done:
+            events_seen = done[0]
+            results = [e for e in events_seen if e.kind == "tool_result" and e.agent_id is None]
+            ctx.check(f"not an error, got {results[0].data if results else None}",
+                      results and results[0].data.get("ok") is True)
+            ctx.check("the child's own wrap-up text reached the top",
+                      results and "child wrapped up" in results[0].data.get("content", ""))
+            nested_results = [e for e in events_seen if e.kind == "tool_result" and e.agent_id is not None]
+            ctx.check(f"the grandchild ACTUALLY ran (a nested tool_result exists), got "
+                      f"{[e.data for e in nested_results]}",
+                      nested_results and any("grandchild done" in e.data.get("content", "") for e in nested_results))
+    finally:
+        mock.stop()
+
+
+@test
 def test_subagent_queued_events_fire_for_every_job_up_front(ctx: Ctx):
     """Every job's own `subagent_queued` must fire BEFORE the pool even
     starts picking any of them up -- capped at 1 concurrent so job 2+'s
@@ -275,7 +464,119 @@ def test_subagent_queued_events_fire_for_every_job_up_front(ctx: Ctx):
         mock.stop()
 
 
+@test
+def test_fanout_and_resume_both_call_the_org_budget_tracker(ctx: Ctx):
+    """2.0.2 review finding 5 (major) pin -- the review's own "Tests to
+    add" list: "Org budget trips ... for fan-out jobs and on resume".
+    Neither path called `record_spend`/`refusal_before_spawn` AT ALL
+    before this fix -- an org position's own budget could never trip no
+    matter how many `count`/`batch` jobs or resumes it ran through.
+    Spies on the TRACKER's own methods (never real dollar amounts --
+    `or:mock/...` models report no real cost either way) so this proves
+    the WIRING, independent of `OrgBudgetTracker`'s own math (pinned
+    separately in tests/test_init_wizard_round7.py)."""
+    from halo_harness.agent.subagent import run_agent_call
+    from halo_harness.orgs import OrgBudgetTracker
+    calls = []
+    orig_record, orig_refusal = OrgBudgetTracker.record_spend, OrgBudgetTracker.refusal_before_spawn
+
+    def _spy_record(self, title, spent_usd, parent_total_usd):
+        calls.append(("record_spend", title))
+        return orig_record(self, title, spent_usd, parent_total_usd)
+
+    def _spy_refusal(self, title, parent_total_usd):
+        calls.append(("refusal_before_spawn", title))
+        return orig_refusal(self, title, parent_total_usd)
+    OrgBudgetTracker.record_spend = _spy_record
+    OrgBudgetTracker.refusal_before_spawn = _spy_refusal
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["scale-budget-child"] = ScriptedTurns([_text_step("done")] * 3)
+        session = _new_session(mock=mock, model="or:mock/scale-parent-budget", agents={"general-purpose": _gp_spec()})
+        session.agent_runtime.org_budget = OrgBudgetTracker(org_name="t", org_budget_usd=100.0)
+        events = _dispatch_one(session, {"description": "fan", "prompt": "go", "subagent_type": "general-purpose",
+                                          "count": 2, "model": "or:mock/scale-budget-child"})
+        results = [e for e in events if e.kind == "tool_result" and e.agent_id is None]
+        ctx.check(f"fan-out completed ok, got {[e.data for e in results]}",
+                  results and results[0].data.get("ok") is True)
+        # 1 top-level check (run_agent_call's own, before EVER dispatching
+        # to the fan-out pool at all) + 1 PER fan-out job (this fix) = 3.
+        ctx.check(f"refusal_before_spawn checked at the top AND once per fan-out job, got {calls}",
+                  len([c for c in calls if c == ("refusal_before_spawn", "general-purpose")]) == 3)
+        ctx.check(f"record_spend called once PER fan-out job, got {calls}",
+                  len([c for c in calls if c == ("record_spend", "general-purpose")]) == 2)
+
+        task_id = next(iter(session.agent_runtime.tasks))
+        calls.clear()
+        _e2, r2 = run_agent_call(runtime=session.agent_runtime, tool_id="call_resume", tool_name="Agent",
+                                  tool_input={"task_id": task_id, "prompt": "continue",
+                                              "model": "or:mock/scale-budget-child"})
+        ctx.check(f"resume ok, got {r2.content!r}", r2.is_error is False)
+        ctx.check(f"the resume ALSO checks the budget before spawning, got {calls}",
+                  ("refusal_before_spawn", "general-purpose") in calls)
+        ctx.check(f"the resume ALSO records its own spend, got {calls}",
+                  ("record_spend", "general-purpose") in calls)
+    finally:
+        OrgBudgetTracker.record_spend = orig_record
+        OrgBudgetTracker.refusal_before_spawn = orig_refusal
+        mock.stop()
+
+
 # ---- error shapes -----------------------------------------------------------
+
+@test
+def test_agent_call_with_an_unresolvable_model_is_a_clean_error_never_a_crash(ctx: Ctx):
+    """2.0.2 review finding 4 (major) pin: `run_agent_call`'s own
+    docstring says "Never raises" -- an unresolvable model (a bad org
+    position `model:`, or a `/role` pointed at a bogus ref) raised
+    `InvalidModelError` straight out of `_build_child_session` instead.
+    Called DIRECTLY here (never through `session._dispatch_tools`,
+    which already has its OWN defense-in-depth try/except around a
+    batched Agent call) -- the same way the TUI's own `_run_org_worker`
+    (`tui/slash.py`) and `tools/skill.py`'s `context: fork`/`agent`
+    path both call straight into this function, with no outer net."""
+    from halo_harness.agent.subagent import run_agent_call
+    mock = MockUpstream().start()
+    try:
+        bad_spec = _gp_spec(model="not-a-real-model-ref")
+        session = _new_session(mock=mock, model="or:mock/scale-parent-badmodel",
+                                agents={"general-purpose": bad_spec})
+        _events, result = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_1", tool_name="Agent",
+            tool_input={"description": "x", "prompt": "go", "subagent_type": "general-purpose"})
+        ctx.check(f"a clean ToolResult, never a raised exception, got {result!r}", result is not None)
+        ctx.check(f"it's an error, got {result.content!r}", result.is_error is True)
+        ctx.check(f"names the problem, got {result.content!r}", "not-a-real-model-ref" in result.content)
+    finally:
+        mock.stop()
+
+
+@test
+def test_resume_task_with_an_unresolvable_model_override_is_a_clean_error(ctx: Ctx):
+    """2.0.2 review finding 4: `_resume_task`'s own `_build_child_
+    session` call needed the SAME guard -- `Agent(task_id=..., model=
+    <bad>)` on a resume used to crash the same way a fresh spawn did.
+    Called DIRECTLY (see the sibling test's own comment on why)."""
+    from halo_harness.agent.subagent import run_agent_call
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["scale-resume-badmodel-child"] = ScriptedTurns([_text_step("first answer")])
+        session = _new_session(mock=mock, model="or:mock/scale-parent-resumebad",
+                                agents={"general-purpose": _gp_spec()})
+        _events, result = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_1", tool_name="Agent",
+            tool_input={"description": "x", "prompt": "go", "subagent_type": "general-purpose",
+                        "model": "or:mock/scale-resume-badmodel-child"})
+        ctx.check(f"first spawn ok, got {result.content!r}", result.is_error is False)
+        task_id = next(iter(session.agent_runtime.tasks))
+        _events2, result2 = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_resume", tool_name="Agent",
+            tool_input={"task_id": task_id, "prompt": "continue", "model": "not-a-real-model-ref"})
+        ctx.check(f"a clean ToolResult, never a raised exception, got {result2!r}", result2 is not None)
+        ctx.check(f"it's an error, got {result2.content!r}", result2.is_error is True)
+    finally:
+        mock.stop()
+
 
 @test
 def test_bad_count_and_bad_batch_shapes_are_clear_errors(ctx: Ctx):

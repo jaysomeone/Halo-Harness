@@ -1748,6 +1748,21 @@ class McpManager:
         h = self.handles.get(name)
         if h is None:
             return False
+        # 2.0.2 review finding 18 (major): this unconditionally sets
+        # `h.state` to "pending"/"pending_approval" a few lines below,
+        # BEFORE calling `start()` -- which skips start()'s OWN "disabled"
+        # guard, since by then `h.state` is no longer "disabled" at all.
+        # `R` (reconnect all) loops over every row, so it silently brought
+        # back up any server the user just disabled with `d` (and parse-
+        # disabled ones); a single `r` on a disabled row did the same.
+        # The explicit re-enable path (`Controller.set_mcp_server_
+        # disabled(name, False)`) never calls this method at all -- it
+        # re-resolves a FRESH, non-disabled handle via `resync_from` and
+        # calls `handle.start()` directly -- so this guard can never block
+        # the one flow that's actually meant to bring a disabled server
+        # back.
+        if h.state == "disabled":
+            return False
         # H13 Part A: a manual `/mcp` reconnect of a `cached` (never
         # actually connected) handle is how "or when /mcp asks for it"
         # connects a lazy server on demand -- captured BEFORE close()/

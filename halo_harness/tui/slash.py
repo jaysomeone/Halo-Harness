@@ -329,13 +329,26 @@ def _run_org_worker(app, name: str, goal: str) -> None:
                               "Organizations can only be run once a session is running.", kind="command")
         return
     from halo_harness.agent.subagent import run_org_call
-    _events, result = run_org_call(
-        runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
-        tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
-        on_event=app.controller.events.put,
-    )
-    text = _strip_task_result(result.content)
-    app.call_from_thread(_finish_org_run, app, name, text, result.is_error)
+    # 2.0.2 review finding 4 (major): `run_org_call`'s own contract is
+    # "never raises", but this is a Textual thread worker, where Textual's
+    # default `exit_on_error=True` takes the WHOLE app down the one time
+    # that contract is violated by a bug anywhere in the call tree (an
+    # org position's own `model:`/`/role` is validated up front now --
+    # see `orgs.validate_org`/`run_agent_call`'s own guard -- but this is
+    # still the right belt-and-suspenders place to stop any OTHER bug
+    # from taking the TUI down with it).
+    try:
+        _events, result = run_org_call(
+            runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
+            tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
+            on_event=app.controller.events.put,
+        )
+        text = _strip_task_result(result.content)
+        is_error = result.is_error
+    except Exception as e:
+        text = f"Organization {name!r} failed to run: {type(e).__name__}: {e}"
+        is_error = True
+    app.call_from_thread(_finish_org_run, app, name, text, is_error)
 
 
 async def _finish_org_run(app, name: str, text: str, is_error: bool) -> None:

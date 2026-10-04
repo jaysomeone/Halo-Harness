@@ -185,6 +185,46 @@ def test_budget_tracker_org_level_warns_then_stops(ctx: Ctx):
 
 
 @test
+def test_budget_tracker_org_level_trips_despite_a_baseline_from_a_different_meter(ctx: Ctx):
+    """2.0.2 review finding 5 (major) pin: every REAL caller passes the
+    SPAWNING POSITION's own fresh CostMeter total (a brand new Session
+    per position, starting at 0), never the root session's meter the
+    baseline was captured from -- the review's own repro: budget $1.00,
+    baseline $3.00 (the root session had already spent $3 before this
+    org run started), then a position's own fresh total reaches $2.50.
+    Before the fix, `max(0, 2.50 - 3.00)` stayed 0 forever and the org
+    budget could never trip no matter how much was actually spent."""
+    from halo_harness.orgs import OrgBudgetTracker
+    tracker = OrgBudgetTracker(org_name="demo", org_budget_usd=1.0, baseline_usd=3.0)
+    ctx.check("no refusal before any spend", tracker.refusal_before_spawn("A", 2.50) is None)
+    note = tracker.record_spend("A", 2.50, 2.50)  # this position's OWN fresh total/delta: $2.50
+    ctx.check(f"org budget ($1.00) already exceeded by $2.50 of real spend, got {note!r}",
+              note is not None and "reached" in note and tracker.org_stopped is True)
+    refusal = tracker.refusal_before_spawn("B", 0.0)
+    ctx.check(f"a further spawn is refused, got {refusal!r}", refusal is not None and "budget" in refusal)
+
+
+@test
+def test_budget_tracker_record_spend_uses_the_callers_own_delta_not_a_shared_total(ctx: Ctx):
+    """2.0.2 review finding 5: `record_spend`'s 3rd argument
+    (`parent_total_usd`) is accepted but no longer trusted for the
+    org-wide check -- only `spent_usd` (the caller's OWN delta,
+    `child.cost_meter.total_usd` in real code) accumulates into `org_
+    spent_usd`. Two concurrent children's own true spend ($0.40 + $0.40 =
+    $0.80) must add up correctly even when the THIRD argument they each
+    happen to pass is a stale/shared/bogus number -- proving the fix no
+    longer double-counts (or under-counts) off of it."""
+    from halo_harness.orgs import OrgBudgetTracker
+    tracker = OrgBudgetTracker(org_name="demo", org_budget_usd=1.0, baseline_usd=0.0)
+    tracker.record_spend("A", 0.40, 999.0)   # a deliberately-wrong/stale 3rd arg
+    tracker.record_spend("B", 0.40, 999.0)   # same stale 3rd arg from a "concurrent" sibling
+    ctx.check(f"org_spent_usd is the real sum of deltas, got {tracker.org_spent_usd}", tracker.org_spent_usd == 0.80)
+    ctx.check("not yet stopped (under $1.00)", tracker.org_stopped is False)
+    tracker.record_spend("C", 0.25, 999.0)
+    ctx.check(f"now over budget, got org_spent_usd={tracker.org_spent_usd}", tracker.org_stopped is True)
+
+
+@test
 def test_budget_tracker_position_level_independent_of_org_level(ctx: Ctx):
     from halo_harness.orgs import OrgBudgetTracker
     tracker = OrgBudgetTracker(org_name="demo", org_budget_usd=None,

@@ -764,6 +764,43 @@ def test_subagent_log_files_and_meta_json(ctx: Ctx):
         mock.stop()
 
 
+# ---- 2.0.2 review finding 17 (major): tasks-panel log-read cache ----------------
+
+@test
+def test_agent_log_nodes_caches_by_size_and_mtime(ctx: Ctx):
+    """2.0.2 review finding 17 (major) pin: the tasks panel's own 1Hz
+    poll used to re-read and re-parse EVERY sub-agent's whole jsonl log
+    on every tick just to count tools, even one that hadn't grown since
+    the last tick. A cache hit (unchanged size/mtime) must skip the
+    read+parse entirely -- proven here by silently rewriting the file's
+    CONTENT (same size, mtime explicitly reset) and confirming the
+    cached (stale) result is what comes back; a genuine append (new
+    size/mtime) IS picked up on the next call."""
+    from halo_harness.agent.subagent import _agent_log_nodes
+    log_path = Path(tempfile.mkdtemp(prefix="agent-log-cache-")) / "agent-x.jsonl"
+    line_a = json.dumps({"type": "assistant", "content": [{"type": "text", "text": "a"}]})
+    log_path.write_text(line_a + "\n", encoding="utf-8")
+    st = log_path.stat()
+    first = _agent_log_nodes(log_path)
+    ctx.check(f"one node read, got {first}", len(first) == 1 and first[0]["content"][0]["text"] == "a")
+
+    # Same size, mtime explicitly reset back -- a cache HIT must return
+    # the OLD (cached) content, never re-read this at all.
+    line_z = json.dumps({"type": "assistant", "content": [{"type": "text", "text": "Z"}]})
+    ctx.check("the replacement line is byte-identical in length (test premise)", len(line_z) == len(line_a))
+    log_path.write_text(line_z + "\n", encoding="utf-8")
+    os.utime(log_path, (st.st_atime, st.st_mtime))
+    second = _agent_log_nodes(log_path)
+    ctx.check(f"cache hit: still the OLD content, got {second}", second == first)
+
+    # A genuine append (new size/mtime) -- a cache MISS, re-read for real.
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "assistant", "content": [{"type": "text", "text": "b"}]}) + "\n")
+    third = _agent_log_nodes(log_path)
+    ctx.check(f"cache miss on growth: picks up both lines fresh, got {third}",
+              len(third) == 2 and third[1]["content"][0]["text"] == "b")
+
+
 # ---- task_id resume --------------------------------------------------------------
 
 @test

@@ -1009,6 +1009,32 @@ def test_manager_reconnect(ctx: Ctx):
 
 
 @test
+def test_manager_reconnect_skips_a_disabled_handle(ctx: Ctx):
+    """2.0.2 review finding 18 (major) pin: `reconnect()` used to
+    unconditionally set `h.state` to "pending"/"pending_approval"
+    BEFORE calling `start()`, which skipped `start()`'s own "disabled"
+    guard (by then `h.state` was no longer "disabled" at all) -- `R`
+    (reconnect all) silently brought back up any server the user just
+    disabled with `d`, and a single `r` on a disabled row did the
+    same. `h.state = "disabled"` here mirrors exactly what `Controller.
+    set_mcp_server_disabled(name, True)` does to a live handle."""
+    from halo_harness.mcp.manager import McpManager
+    mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
+    try:
+        mgr.start_all()
+        ctx.check("connected first", mgr.status()[0]["state"] == "connected")
+        h = mgr.handles["fake"]
+        h.close(timeout=5.0)
+        h.state = "disabled"
+        h.error = "disabled by the user (`/mcp` d)"
+        ok = mgr.reconnect("fake")
+        ctx.check(f"reconnect() refuses a disabled handle, got {ok!r}", ok is False)
+        ctx.check(f"the handle STAYS disabled, got {h.state!r}", h.state == "disabled")
+    finally:
+        mgr.close_all()
+
+
+@test
 def test_manager_resources_and_prompts(ctx: Ctx):
     from halo_harness.mcp.manager import McpManager
     mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))

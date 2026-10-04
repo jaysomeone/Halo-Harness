@@ -298,6 +298,185 @@ def test_reports_restriction_refuses_a_call_outside_it(ctx: Ctx):
         mock.stop()
 
 
+class _FakeCostMeter:
+    def __init__(self, total: float = 0.0) -> None:
+        self.total_usd = total
+
+
+class _FakeLog:
+    def __init__(self, base: Path) -> None:
+        self.dir = base
+        self.session_id = "fake-session"
+
+
+class _FakeParent:
+    """Just enough of a `Session` for `run_org_call` to run its OWN
+    depth-check/org-load/budget-tracker setup without a real one --
+    `state_dir`/`log.dir`+`log.session_id` (the goal task, best-effort)/
+    `cwd`/`cost_meter.total_usd` (the budget baseline) are everything it
+    reads off `runtime.parent` before ever calling `run_agent_call`."""
+    def __init__(self, base: Path, state_dir: Path) -> None:
+        self.state_dir = state_dir
+        self.cost_meter = _FakeCostMeter()
+        self.log = _FakeLog(base)
+        self.cwd = base
+
+
+@test
+def test_run_org_call_max_depth_is_relative_to_callers_own_depth(ctx: Ctx):
+    """2.0.2 review finding 9 (major) part b pin: RELATIVE to the
+    caller's own depth, never absolute -- the review's own verified
+    repro: an AgentRuntime at depth 1 running org="company" (tree depth
+    3) used to build {'depth': 1, 'max_depth': 4} (the SAME cap a
+    depth-0 caller would get), when the whole tree needs 1 + 3 + 1 = 5."""
+    from halo_harness.agent.subagent import AgentRuntime, run_org_call
+    import halo_harness.agent.subagent as subagent_mod
+    from halo_harness.orgs import ensure_builtin_orgs
+    base = Path(tempfile.mkdtemp(prefix="orgs-depth-rel-cwd-"))
+    state_dir = Path(tempfile.mkdtemp(prefix="orgs-depth-rel-state-"))
+    ensure_builtin_orgs(state_dir=state_dir)  # company: tree depth 3
+    captured = {}
+
+    def fake_run_agent_call(*, runtime, tool_id, tool_input, tool_name, on_event=None):
+        captured["depth"] = runtime.depth
+        captured["max_depth"] = runtime.max_depth
+        from halo_harness.tools.base import ToolResult
+        return [], ToolResult("ok")
+    orig = subagent_mod.run_agent_call
+    subagent_mod.run_agent_call = fake_run_agent_call
+    old_state_dir_env = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        from halo_harness.theme import set_config_value
+        set_config_value("agents.max_depth", 3)  # so depth=1 isn't ALREADY at the caller's own cap
+        parent = _FakeParent(base, state_dir)
+        runtime = AgentRuntime(parent=parent, depth=1)  # caller already one hop deep
+        _events, result = run_org_call(runtime=runtime, tool_id="t1", tool_name="Agent",
+                                        tool_input={"org": "company", "prompt": "go"})
+        ctx.check(f"not refused, got {result.content}", not result.is_error)
+        ctx.check(f"org runtime keeps the caller's own depth, got {captured}", captured.get("depth") == 1)
+        ctx.check(f"max_depth is relative: depth(1) + tree(3) + 1 = 5, got {captured}",
+                  captured.get("max_depth") == 5)
+    finally:
+        subagent_mod.run_agent_call = orig
+        if old_state_dir_env is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir_env
+
+
+@test
+def test_run_org_call_refuses_when_caller_already_at_its_depth_cap(ctx: Ctx):
+    """2.0.2 review finding 9 (major) part a pin: a sub-agent already at
+    ITS OWN depth cap used to still be able to START a whole org tree
+    (the depth check only ever happened AFTER max_depth was freshly
+    OVERWRITTEN for the org run, so the caller's pre-existing cap never
+    got a say), bypassing "Sub-agents cannot spawn further sub-agents"
+    entirely."""
+    from halo_harness.agent.subagent import MAX_DEPTH, AgentRuntime, run_org_call
+    base = Path(tempfile.mkdtemp(prefix="orgs-depth-cap-cwd-"))
+    state_dir = Path(tempfile.mkdtemp(prefix="orgs-depth-cap-state-"))
+    parent = _FakeParent(base, state_dir)
+    runtime = AgentRuntime(parent=parent, depth=MAX_DEPTH)  # already at the default cap
+    _events, result = run_org_call(runtime=runtime, tool_id="t1", tool_name="Agent",
+                                    tool_input={"org": "company", "prompt": "go"})
+    ctx.check(f"refused before building any org runtime, got {result.content}", result.is_error)
+    ctx.check(f"clear depth-limit wording, got {result.content!r}", "depth limit" in result.content)
+
+
+@test
+def test_outer_org_task_resume_rebuilds_the_org_runtime(ctx: Ctx):
+    """Fix-pass notes ("outer org task resume" -- REFUTED as "loses max_
+    depth/max_concurrent"; it was worse: resume failed outright with
+    "The agent type for task_id ... is no longer available"). The org
+    ROOT position's own task_id is never a name in the session's base
+    `agents` catalog -- only `run_org_call`'s own ephemeral `org_
+    runtime` ever had it. `run_org_call` now tags the task record with
+    the org's own name so `_resume_task` can rebuild an equivalent
+    runtime and find the position again."""
+    fh = build_fake_home()
+    os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
+    mock = MockUpstream().start()
+    try:
+        from tests.helpers.mock_openai import SCENARIOS, _finish
+        calls = {"n": 0}
+
+        def _root(h, body):
+            calls["n"] += 1
+            _finish(h, _text_chunk("first answer" if calls["n"] == 1 else "resumed answer"))
+        scn = "org-resume-top"
+        SCENARIOS[scn] = _root  # "Orchestrator" has no model: of its own -> inherits the session model
+        session = _make_session(fh, scenario=scn, mock=mock)
+        events_seen = _run_org_dispatch(session, "call_1", "solo", "do the thing")
+        results = [e for e in events_seen if e.kind == "tool_result"]
+        ctx.check(f"first run ok, got {[e.data for e in results]}",
+                  len(results) == 1 and results[0].data.get("ok") is True)
+
+        tasks = session.agent_runtime.tasks
+        ctx.check(f"exactly one task minted for the root, got {tasks}", len(tasks) == 1)
+        task_id = next(iter(tasks))
+        ctx.check(f"tagged with the org's own name, got {tasks[task_id]}", tasks[task_id].get("org_name") == "solo")
+
+        tu = {"type": "tool_use", "id": "call_2", "name": "Agent",
+              "input": {"task_id": task_id, "prompt": "continue", "description": "resume"}}
+        events_seen2 = list(session._dispatch_tools(2, [tu]))
+        results2 = [e for e in events_seen2 if e.kind == "tool_result"]
+        ctx.check(f"exactly one tool_result, got {[e.data for e in results2]}", len(results2) == 1)
+        ctx.check(f"the resume succeeds (never 'no longer available'), got {results2[0].data}",
+                  results2[0].data.get("ok") is True)
+        ctx.check(f"the resumed text reached the top, got {results2[0].data}",
+                  "resumed answer" in results2[0].data.get("content", ""))
+    finally:
+        mock.stop()
+
+
+@test
+def test_run_org_worker_never_crashes_the_tui_on_an_unexpected_exception(ctx: Ctx):
+    """2.0.2 review finding 4 (major): `_run_org_worker` (`tui/slash.py`)
+    runs on a Textual thread worker with the framework's own default
+    `exit_on_error=True` -- the one time anything in the call tree
+    violated `run_org_call`'s "never raises" contract, that took the
+    WHOLE TUI down with it. Belt-and-suspenders: even an exception
+    `run_org_call` itself is now guarded against (any OTHER bug, not
+    just the named model-resolution one fixed elsewhere) must never
+    escape this worker function."""
+    from halo_harness.tui import slash
+    import halo_harness.agent.subagent as subagent_mod
+
+    class _FakeSession:
+        agent_runtime = object()
+
+    class _FakeEvents:
+        def put(self, ev):
+            pass
+
+    class _FakeController:
+        session = _FakeSession()
+        events = _FakeEvents()
+
+    class _FakeApp:
+        def __init__(self):
+            self.controller = _FakeController()
+            self.calls = []
+
+        def call_from_thread(self, fn, *args):
+            self.calls.append((fn, args))
+
+    def _boom(**kwargs):
+        raise RuntimeError("some unrelated bug deep in the call tree")
+    orig = subagent_mod.run_org_call
+    subagent_mod.run_org_call = _boom
+    try:
+        app = _FakeApp()
+        slash._run_org_worker(app, "some-org", "do the thing")  # must NOT raise
+        ctx.check(f"routed to the finish callback instead of crashing, got {app.calls}", len(app.calls) == 1)
+        _fn, args = app.calls[0]
+        ctx.check(f"finish callback is is_error=True, got {args}", args[-1] is True)
+        ctx.check(f"names the real exception, got {args}", "RuntimeError" in args[2])
+    finally:
+        subagent_mod.run_org_call = orig
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)
