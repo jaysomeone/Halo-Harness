@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-04 ~03:15)
+# Status board (updated 2026-10-04 ~05:05)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -43,7 +43,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] Part 8 (67baa6b): release review fixes round A, all 3 criticals + 15 majors + 2 extras (wizard default-model regression, Windows update guard, git pull in the checkout, org crash/budgets/depth/cards, resizable session-wide concurrency gate, judge/decision-only, small role, MCP login cancel + entry form + disabled reconnect, tasks panel off the UI thread); three platforms green (2859/0)
 - [x] Part 9 (35e0838): release review fixes round B, all 21 minors + hermetic standalone test runs + org-name completion + Ctrl+E priority + concurrency-gate docs + CHANGELOG [2.0.2] written out; three platforms green (2886/0)
 - [x] Part 10 (c64c266, round C): background sub-agents and jobs stream live (progress events, completion notes with a result preview, `bg jobs N` in the bar, one compact next-turn notice), `/editor` + `/keys` + doctor TERM_PROGRAM hint + TROUBLESHOOTING entry, update-check polish (always query, 1 h TTL, 'differs from', source_dir), MCP TCP preflight fail-fast, cc: steer test bounded by progress; three platforms green (2900/0)
-- [~] Release 2.0.2: round D RUNNING (`2.0.2-roundD-brief.md`: org install, approval gates, export/import, /org resume, mcp editor +line, learned --forget) -> three platforms + Kali live -> tag v2.0.2 -> installs
+- [x] Part 11 (1a23edb, round D): org template install + saved pool, approval gates through the pending dock (accept / edit and re-run / stop; --yes and dontAsk accept), org and role-template export/import, `/org resume` from the task board with caps and budget restored, editor line syntax per editor, `halo mcp learned --forget`; steer test made deterministic
+- [x] Release v2.0.2 TAGGED + PUSHED: Kali and WSL green on the final tree (2939 tests, 0 failures; tui 269), Windows green standalone (two load-sensitive tests failed only in the parallel run); Kali live round trip: real-binary modules no skips, privacy scan, cold mcp list, title, connectors note, /org run solo, Ctrl+T, /mcp, /setup, /update
 
 ## 2.0.3 = local and cloud models: Ollama + Hugging Face (brief file `2.0.5-ollama-brief.md` written under its old number, plus `2.0.3-ollama-round1-research-brief.md`; moved ahead by rolo 2026-10-03; HF + cloud added by rolo 2026-10-03)
 
