@@ -78,8 +78,19 @@ def _term_score(term: str, *, name_tokens: set, name_lower: str,
     return score
 
 
-def host_cap(provider: str) -> int:
-    return DEFAULT_DATABRICKS_CAP if provider == "databricks" else DEFAULT_OPENROUTER_CAP
+def host_cap(provider: str, tools_max: Optional[int] = None) -> int:
+    """Halo 2.0.3 round 3 (brief item 3): `tools_max`, when given, is the
+    "ollama" dialect's own context-class tool-catalog cap (`providers.
+    ollama_fit.resolve_ollama_tools_max`) -- the SAME `SessionCatalog.cap`/
+    LRU-eviction mechanism `set_model` already uses for the Databricks/
+    OpenRouter caps below, never a second capping path for this provider.
+    Every other provider ignores `tools_max` entirely (unchanged
+    behavior)."""
+    if provider == "databricks":
+        return DEFAULT_DATABRICKS_CAP
+    if provider == "ollama" and isinstance(tools_max, int) and tools_max > 0:
+        return tools_max
+    return DEFAULT_OPENROUTER_CAP
 
 
 def select_preload(mcp_triples, *, preload_names=None, always_load_servers=None, cap_budget: int) -> "tuple[list, dict]":

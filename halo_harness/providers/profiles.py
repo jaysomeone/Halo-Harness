@@ -400,12 +400,26 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         # same as any family with no reasoning_replay story. No model_table.json
         # row lookup: that table is Databricks/OpenRouter-keyed only, and a
         # bare Ollama tag (`qwen3:30b`) would never match a row there anyway.
+        # Halo 2.0.3 round 3 (brief item 3): `tools_max` here is only the
+        # INITIAL value -- this call site has no host/catalog in scope, so
+        # it can't know the real effective num_ctx yet. `None` (round 2's
+        # value) made `convert_tools`'s ToolCatalogTooLarge check a no-op
+        # for every ollama route, which is how the hand-off's "every
+        # request carried the full 24-tool catalog" bug happened.
+        # `tools_max_for_num_ctx(None)` is the SAME smallest-class,
+        # conservative default `providers.ollama_fit.resolve_ollama_
+        # tools_max` falls back to before any catalog has loaded --
+        # `providers.ollama_request.build_ollama_request_body` (which DOES
+        # know the real num_ctx) and `agent/loop.py`'s `_sync_ollama_tools_
+        # cap` both refine this to the real, context-aware number once a
+        # host/catalog read succeeds.
+        from halo_harness.providers.ollama_fit import tools_max_for_num_ctx
         return ProviderProfile(
             system_vs_developer="system", thinking_format="none",
             reasoning_replay="empty", reasoning_effort_supported=False,
             family=family, tool_choice_required_supported=False,
             tools_supported=True, effort_values_supported=EFFORT_LEVELS,
-            model_id=route.upstream_model,
+            model_id=route.upstream_model, tools_max=tools_max_for_num_ctx(None),
         )
 
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)

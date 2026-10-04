@@ -46,6 +46,30 @@ DEFAULT_SHOW = {
 DEFAULT_PS = {"models": []}
 
 
+def partial_offload_ps_entry(model: str, *, size: int, size_vram: int, context_length: int,
+                              expires_at: str = "2026-01-01T01:00:00Z") -> dict:
+    """Halo 2.0.3 round 3: one `/api/ps` entry with `size_vram < size`
+    (brief item 7: "a partial-offload /api/ps case") -- the exact shape
+    `providers.ollama_panel.offload_sentence`/`analyze_host` read.
+    Callers typically wrap this in `{"models": [this]}` for a mock's
+    `ps_response`."""
+    return {"model": model, "name": model, "size": size, "size_vram": size_vram,
+            "context_length": context_length, "expires_at": expires_at}
+
+
+def multi_host_config(hosts: "dict", *, default: "str | None" = None) -> list:
+    """Halo 2.0.3 round 3: an `ollama.hosts`-shaped config list (brief
+    item 7: "a multi-host config") for several `MockUpstream` instances
+    keyed by the NAME each entry should get -- `{name, url, default}`
+    per entry, never an `api_key` (every mock host here is
+    unauthenticated, same as any plain local/LAN Ollama daemon).
+    `default`, when given, is the one name whose entry gets `"default":
+    true`; otherwise the first name in `hosts` does."""
+    names = list(hosts)
+    default = default if default in names else (names[0] if names else None)
+    return [{"name": name, "url": mock.base_url, "default": name == default} for name, mock in hosts.items()]
+
+
 def send_json(handler: "_Handler", status: int, obj) -> None:
     body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)

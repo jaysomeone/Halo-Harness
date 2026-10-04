@@ -105,7 +105,7 @@ model count.
 
 ## Ollama
 
-Halo 2.0.3 round 2 (`plans/2.0.3-ollama-round2-brief.md`, design doc
+Halo 2.0.3 rounds 2-3 (`plans/2.0.3-ollama-round2-brief.md`, design doc
 `docs/harness/LOCAL-MODELS-RESEARCH.md`). `ol:<model>` (the default host)
 or `ol:<model>@<hostname>` (a named entry in `~/.halo/config.json`'s
 `ollama.hosts`) -- local, LAN, or Ollama Cloud, all through the SAME
@@ -150,10 +150,39 @@ parameters}}`) the native API already expects -- no second tool-shape
 conversion needed. No `tool_choice` field exists on this dialect.
 
 **Context ownership**: `num_ctx = min(trained context from
-model_info["<family>.context_length"], host.max_ctx override, 131072)`,
-falling back to a conservative 8192 when the trained context isn't known
-yet (before the catalog has loaded for that model once). Compaction
-triggers at 75% of whatever `num_ctx` that request actually sent.
+model_info["<family>.context_length"], host.max_ctx override, a fit
+estimate, 131072)`, falling back to a conservative 8192 when the trained
+context isn't known yet (before the catalog has loaded for that model
+once). Compaction triggers at 75% of whatever `num_ctx` that request
+actually sent. The fit estimate (Halo 2.0.3 round 3) is the largest
+power-of-two context whose KV cache fits in free memory after the
+model's own weights: on the LOCAL host, free/total VRAM comes from the OS
+GPU tool for the detected vendor (`nvidia-smi` on Windows/Linux, verified
+live; `rocm-smi`/sysfs on AMD and `system_profiler` on Apple stay
+UNCONFIRMED -- no such hardware available this round), cached for about a
+minute so a turn never shells out more than once in that window; on a
+REMOTE host, there is no OS-level read at all, so the fit estimate is
+just that model's OWN already-loaded `context_length` from `/api/ps`
+when it happens to be loaded there already, else unknown. Either way
+`None` (unknown) simply drops out of the `min(...)` -- never a crash,
+never a guessed number.
+
+**Three outcomes, not two** (fix pass after a live run surfaced the gap):
+`/api/ps` is checked FIRST, local hosts included. (1) **Already loaded**
+-- that model's own loaded `context_length` IS the fit estimate, full
+stop; the GPU-memory arithmetic is never repeated for it, because two
+slightly different free-VRAM readings (e.g. two concurrent `halo -p`
+processes) used to compute two different `num_ctx` values for the SAME
+loaded model and force Ollama to reload it, with partial offload, just
+to change its context size. (2) **Not loaded, fits** -- the usual
+headroom math, except free memory is first topped up with every OTHER
+currently-loaded model's own `size_vram` (Ollama can evict any of them
+to make room), since that VRAM is reclaimable, not actually unavailable.
+(3) **Not loaded, does not fit** even after reclaiming -- a distinct,
+POSITIVELY-known outcome from plain "unknown": `num_ctx` falls back to
+the conservative 8192 (never the 131072 hard cap, which is only correct
+when nothing at all is known) -- a model already spilling to system RAM
+must not also be handed the largest possible KV-cache budget.
 
 **Streaming and tool-call ids**: the response is NDJSON (one complete
 JSON object per line, never SSE) -- `message.content`/`message.thinking`/
@@ -186,10 +215,55 @@ digest, never once per catalog read. A model re-pulled under the same
 name/tag with different weights (a new digest) is probed again exactly
 once. This is surfaced later as a measured badge, never a vendor claim.
 
+**Host analysis (`/ollama`, `halo ollama`, `halo doctor`)**: Halo 2.0.3
+round 3. One panel/CLI page per configured host: reachable, version, and
+every currently-loaded model's `size` vs `size_vram` as ONE plain
+sentence ("fully loaded in GPU memory" or "partially offloaded: X of Y
+in GPU memory (N%), the rest in system RAM (slower)") -- never a block,
+never gated on; a partially-offloaded model still runs, just slower.
+Per model: trained context (the catalog's `model_info`) next to the
+EFFECTIVE context it's actually loaded at (`/api/ps`'s own
+`context_length` -- ground truth for a loaded model, not a guess), and
+the KV-cache bytes/token figure -- standard GGML/llama.cpp accounting
+(`2 x layers x kv_heads x head_dim x bytes_per_elem`, f16 `bytes_per_elem`
+assumed since Ollama exposes no per-model KV-quant field), not
+independently re-derived this round; the panel's own help text repeats
+this origin note. `halo doctor` gains a lightweight one-line-per-host
+Ollama section (reachable, version, loaded count only -- never the full
+per-model `/api/show` fan-out the richer panel does).
+
+**Tool-catalog sizing by context class**: Halo 2.0.3 round 3. The `ol:`
+ProviderProfile's `tools_max` now follows the EFFECTIVE `num_ctx` instead
+of round 2's permanently-unbounded `None`: under 16k tokens -> 16 tools,
+16k-32k -> 32, 32k-64k -> 64, 64k and above -> 128 -- overridable with the
+`ollama.tools_max` config key (`docs/CONFIG.md`), and never below however
+many built-in tools this platform actually ships (they're frozen into
+every session before any cap is computed, so a smaller number would be
+unreachable). The SessionCatalog -- not a second mechanism -- is what
+actually shrinks the live tool list to fit (the same cap-shrink/LRU-evict
+dance `/model` already runs on a provider switch); the panel shows the
+resulting catalog's rough per-request prompt-token cost next to each
+loaded model's `tools_max`.
+
+**Roles**: a local `ol:` model defaults to a SUPPORTING role (the model
+picker's `u` action pre-selects `small`, never `orchestrator`/main) when
+assigning it a role -- `roles.<name>` is the exact same config-table
+mechanism `/roles`/`halo roles` already read, no second one. Choosing a
+local model as the session's main model anyway is never blocked; when
+its catalog row doesn't declare tool-calling support, the plain
+consequence sentence prints ("... can answer questions as the main
+model, but cannot edit files, run commands, or call any other tool") and
+the choice proceeds regardless.
+
+**`/local <question>`** (Ollama-only this round; Hugging Face joins round
+5): a one-shot call to `roles.small`'s model, answered inline and NEVER
+logged into the session's own transcript -- the exact same `call_small_
+model` path title generation/`/improve` already use, which builds its
+body directly rather than through `derive_request`.
+
 **Not yet in this round**: images (`images`, a user message's base64
-array), `format` (structured output), roles/picker/hardware-panel
-integration, and Hugging Face's own `hf:` route -- see
-`plans/2.0.3-ollama-round2-brief.md` and the rounds after it.
+array), `format` (structured output), and Hugging Face's own `hf:` route
+-- see `plans/2.0.3-ollama-round2-brief.md` and the rounds after it.
 
 ## Families and their rules
 

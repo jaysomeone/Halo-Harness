@@ -322,6 +322,58 @@ def role_effort_for(role_name: Optional[str], *, role_table: Optional[dict] = No
     return effort
 
 
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 3 (brief item 5): the model picker's own `u` action --
+# "set a role for the highlighted model without editing JSON" -- built on
+# this module's EXISTING `roles.<name>` config-table mechanism
+# (`configured_role_table`/`resolve_role_table`), never a second one.
+# ---------------------------------------------------------------------------
+
+def assign_role(role_name: str, model_ref: str) -> "tuple[bool, list[str]]":
+    """Writes `roles.<role_name> = model_ref` into `~/.halo/config.json`
+    -- the picker's `u` action, and any other direct "set this role to
+    this model" caller. `(False, [reason])` for a `role_name` that fails
+    `is_role_name_syntax` or a blank `model_ref`; never raises."""
+    if not is_role_name_syntax(role_name):
+        return False, [f"invalid role name {role_name!r} (expected [a-z][a-z0-9_]*)"]
+    if not isinstance(model_ref, str) or not model_ref.strip():
+        return False, ["a model reference is required"]
+    from halo_harness.theme import set_config_value
+    set_config_value(f"roles.{role_name}", model_ref.strip())
+    return True, []
+
+
+def default_role_for_ref(model_ref: str) -> str:
+    """The role the picker's `u` action pre-selects for `model_ref`
+    (brief item 5: "local ol: models default to a supporting role...
+    never main by default") -- `small` for any `ol:` ref, `orchestrator`
+    (meaning: the session's main model) for everything else, matching
+    every OTHER provider's existing, no-extra-step eligibility as main.
+    A pre-selected default, never an enforced one: the picker's role list
+    still offers every other role, `orchestrator` included, for the user
+    to pick instead."""
+    return "small" if (model_ref or "").startswith("ol:") else "orchestrator"
+
+
+def main_role_consequence_note(model_ref: str, *, catalog_capabilities: "Optional[list]" = None) -> "Optional[str]":
+    """Brief item 5: "choosing a non-session-capable local model as main
+    prints the plain consequence sentence and proceeds" -- `None` when
+    there's nothing to warn about: not an `ol:` ref at all, or its
+    catalog row's declared `capabilities` (`/api/show`, round 2's
+    `providers.ollama.get_catalog`) already lists "tools", or the
+    capability just isn't known yet (`catalog_capabilities=None` -- a
+    model that hasn't been catalogued yet is NOT the same as one proven
+    incapable; benefit of the doubt, same house policy as round 2's own
+    capability probe). Never blocks either way -- a caller prints this
+    and proceeds regardless of the answer."""
+    if not (model_ref or "").startswith("ol:"):
+        return None
+    if catalog_capabilities is None or "tools" in catalog_capabilities:
+        return None
+    return (f"{model_ref} does not declare tool-calling support: it can answer questions as the main "
+            f"model, but cannot edit files, run commands, or call any other tool.")
+
+
 def _price_str(profile) -> str:
     price_in, price_out = getattr(profile, "price_in", None), getattr(profile, "price_out", None)
     if price_in is None or price_out is None:
@@ -605,17 +657,51 @@ def _cheapest_model_entry(state_dir=None) -> Optional[str]:
 
 
 def _local_ol_model_entry(state_dir=None) -> Optional[str]:
-    """A local Ollama (`ol:`) model, when one is configured -- forward-
-    compatible with the 2.0.3 Ollama release (roadmap): `init` has no
-    `ol:` provider to configure yet in 2.0.2, so this always returns
-    `None` today and `compute_builtin_role_presets` below falls through to
-    the cheapest configured model instead, exactly as the brief's own
-    "else the cheapest configured model" names."""
-    for e in _configured_model_entries(state_dir):
-        ref = e.get("ref") or ""
-        if ref.startswith("ol:"):
-            return ref
-    return None
+    """A local Ollama (`ol:`) model, when one is configured -- reads
+    `ollama.hosts`/the default host directly (`providers.ollama`), never
+    `_configured_model_entries`/`init_providers.configured_providers`:
+    those are keyed to the init wizard's API-key-style provider list,
+    which has no "ollama" entry at all (host-based, not a single on/off
+    key) and would make this always return `None` even with a real
+    Ollama daemon configured -- exactly the 2.0.2-era limitation this
+    function's own prior comment described before `ol:` existed. A
+    best-effort, short-timeout read (same `probe_version`/`get_catalog`
+    calls `/ollama`/`halo doctor` already make): the FIRST model on the
+    default host, preferring one the catalog's own `capabilities` lists
+    "tools" for (round 2's capability probe is NOT consulted here -- that
+    costs a real inference call; this only reads the already-cached
+    catalog). `None` on an unreachable host or an empty catalog, so
+    `compute_builtin_role_presets` falls through to the cheapest
+    configured model instead, exactly as the brief's own "else the
+    cheapest configured model" names.
+
+    Only ever probes a host the user EXPLICITLY configured under `ollama.
+    hosts` -- never the bare, synthesized `127.0.0.1:11434`/`OLLAMA_HOST`
+    default `resolve_ollama_hosts` otherwise falls back to, so this never
+    depends on whatever happens to be running on the box computing a
+    preset (a dev machine's own local daemon, a CI box with nothing at
+    all) -- "configured" means the user actually told Halo about a host,
+    the same bar `_cheapest_model_entry` applies to every other provider
+    via `configured_providers()`."""
+    try:
+        from halo_harness.providers.ollama import get_catalog, resolve_ollama_host
+        from halo_harness.theme import get_config_value
+        if not get_config_value("ollama.hosts", default=None):
+            return None
+        host = resolve_ollama_host(None)
+        if host is None:
+            return None
+        catalog = get_catalog(host)
+        rows = [r for r in (catalog.get("models") or []) if isinstance(r, dict) and (r.get("model") or r.get("name"))]
+        if not rows:
+            return None
+        tool_rows = [r for r in rows if "tools" in (r.get("capabilities") or [])]
+        row = (tool_rows or rows)[0]
+        name = row.get("model") or row.get("name")
+        suffix = "" if (host.default or not host.name or host.name == "default") else f"@{host.name}"
+        return f"ol:{name}{suffix}"
+    except Exception:
+        return None
 
 
 def compute_builtin_role_presets(*, default_model: Optional[str] = None, state_dir=None) -> dict:

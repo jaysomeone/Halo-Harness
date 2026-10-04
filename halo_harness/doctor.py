@@ -917,6 +917,39 @@ def _check_mcp_connectors() -> str:
     return f"{OK} claude.ai connectors: bridge enabled, {len(connectors)} discovered ({names})"
 
 
+def _check_ollama_hosts() -> "list[tuple[str, str]]":
+    """Halo 2.0.3 round 3 (brief item 4): "`halo doctor` gains an Ollama
+    section, one line per host" -- a LIGHTWEIGHT per-host check
+    (`probe_version` + `/api/ps`'s own loaded count only, never the full
+    `/api/show`-per-model catalog `/ollama`/`halo ollama` read -- doctor
+    must stay fast even with several hosts configured). Never raises: an
+    unreachable host is the ordinary case on most boxes (no Ollama
+    installed at all), not a WARN-worthy one -- `[OK]` either way, same
+    "not configured" vocabulary this whole module already uses for
+    OpenRouter/Databricks."""
+    try:
+        from halo_harness.providers.ollama import fetch_ps, probe_version, resolve_ollama_hosts
+    except Exception as e:
+        return [("ollama_hosts", f"{WARN} Ollama: could not check ({type(e).__name__}: {e})")]
+    try:
+        hosts = resolve_ollama_hosts()
+    except Exception as e:
+        return [("ollama_hosts", f"{WARN} Ollama: could not resolve configured hosts ({type(e).__name__}: {e})")]
+    entries: "list[tuple[str, str]]" = []
+    for host in hosts:
+        cid = f"ollama_host_{host.name}"
+        version_info = probe_version(host)
+        if not isinstance(version_info, dict):
+            entries.append((cid, f"{OK} Ollama ({host.name}): not reachable at {host.url}"))
+            continue
+        version = version_info.get("version") or "?"
+        ps = fetch_ps(host) or {}
+        loaded = len(ps.get("models") or [])
+        entries.append((cid, f"{OK} Ollama ({host.name}): reachable, version {version}, "
+                              f"{loaded} model(s) loaded ({host.url})"))
+    return entries
+
+
 def _format_age(seconds: float) -> str:
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -1532,6 +1565,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
     entries.append(("test_leftovers", _check_test_leftovers()))
     entries.append(("mcp_connectors", _check_mcp_connectors()))
+    entries.extend(_check_ollama_hosts())
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))

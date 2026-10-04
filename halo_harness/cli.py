@@ -420,6 +420,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "roles":
         from halo_harness.roles_cli import cmd_roles
         return cmd_roles(argv[1:])
+    if argv and argv[0] == "ollama":
+        from halo_harness.ollama_cli import cmd_ollama
+        return cmd_ollama(argv[1:])
     if argv and argv[0] == "org":
         from halo_harness.org_cli import cmd_org
         return cmd_org(argv[1:])

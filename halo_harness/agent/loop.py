@@ -1958,7 +1958,51 @@ class Session:
 
     # ---- request construction ------------------------------------------
 
+    def _sync_ollama_tools_cap(self) -> None:
+        """Halo 2.0.3 round 3 (brief item 3): before THIS turn's tool list
+        is derived from the logged catalog below, re-size it to what the
+        CURRENT ollama model's context class allows -- reusing the EXACT
+        cap-shrink + LRU-evict + re-log-meta dance `set_model` already
+        runs on a provider switch (`agent/catalog.py`'s `host_cap`/
+        `SessionCatalog._evict_one`), never a second capping path. A no-op
+        for every non-ollama route, and a no-op once the computed cap
+        already matches `self.session_catalog.cap` (so an ordinary multi-
+        step turn doesn't log a new meta node per tool call -- only an
+        actual CHANGE, e.g. the catalog loading for the first time or a
+        `/model` switch's own context class differing, writes one)."""
+        if self.route.dialect != "ollama" or self.session_catalog is None:
+            return
+        from halo_harness.agent.catalog import host_cap
+        from halo_harness.providers.ollama_hw import resolve_context_decision
+        env = self.settings.effective_env if self.settings is not None else None
+        try:
+            decision = resolve_context_decision(self.model_ref, env)
+        except Exception:
+            log.debug("ollama: _sync_ollama_tools_cap could not resolve a context decision", exc_info=True)
+            return
+        new_cap = host_cap(self.route.provider, decision.tools_max)
+        # Never below what's already irrevocably frozen (every currently-
+        # loaded name minus the loaded-DEFERRED ones -- `_evict_one` can
+        # only ever remove one of those): a smaller computed cap still
+        # evicts every loaded-deferred tool it can, but can't be asked to
+        # remove a frozen/preloaded one, so the catalog's OWN stored cap
+        # must never promise more shrinkage than eviction can deliver.
+        frozen_count = len(self.session_catalog.names) - len(self.session_catalog._loaded_order)
+        new_cap = max(new_cap, frozen_count)
+        if new_cap == self.session_catalog.cap:
+            return
+        self.session_catalog.cap = new_cap
+        while len(self.session_catalog.names) > self.session_catalog.cap and self.session_catalog._evict_one():
+            pass
+        if self.provider_profile.tools_max != decision.tools_max:
+            self.provider_profile = dataclasses.replace(self.provider_profile, tools_max=decision.tools_max)
+        self.log.append_meta(tools=self.tool_registry.definitions_for(self.session_catalog.names))
+
     def _derive_and_build(self, tool_choice=None, no_tools: bool = False):
+        # Halo 2.0.3 round 3: MUST run before derive_request below -- it
+        # can shrink the catalog derive_request is about to read from the
+        # log's last meta node (see _sync_ollama_tools_cap's own docstring).
+        self._sync_ollama_tools_cap()
         # finding 4: tools=None makes derive_request fall back to the
         # logged meta node's FROZEN catalog, never the live registry --
         # what actually reached the model must match what a later replay
@@ -2045,14 +2089,23 @@ class Session:
         if host is None:
             raise ProviderNotConfigured(
                 f"no Ollama host named {ref.host!r} for {ref.raw!r} -- configure it under `ollama.hosts`")
-        try:
-            trained_context = trained_context_for(get_catalog(host), ref.model)
-        except Exception:
-            trained_context = None
+        # Halo 2.0.3 round 3 (hand-off item): `fit_estimate` used to be
+        # hardcoded `None` here -- a 27B model's trained context (262144)
+        # alone decided `num_ctx`, so it got the full 131072 hard cap even
+        # on a host whose VRAM couldn't actually hold that much.
+        # `providers.ollama_hw.resolve_context_decision` reads the SAME
+        # trained-context catalog this method always has, plus (local
+        # hosts) a cached OS GPU-memory read or (remote, loaded) `/api/ps`
+        # -- see that function's own docstring for the full fallback
+        # chain; any failure degrades to `None`, same as round 2's own
+        # catalog read.
+        from halo_harness.providers.ollama_hw import resolve_context_decision
+        decision = resolve_context_decision(ref, env)
         body = build_ollama_request_body(
             system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
             route=route, profile=profile, effort=effort, host=host,
-            trained_context=trained_context, fit_estimate=None, requested_max_tokens=requested_max_tokens,
+            trained_context=decision.trained_context, fit_estimate=decision.fit_estimate,
+            requested_max_tokens=requested_max_tokens,
         )
         if ref is self.model_ref:
             num_ctx = (body.get("options") or {}).get("num_ctx")

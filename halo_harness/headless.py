@@ -980,7 +980,23 @@ def build_session(
             denied |= {r.strip() for r in cli_disallow if "(" not in r and r.strip().startswith("mcp__")}
             survivors = [t for t in all_mcp if t[1] not in denied]
 
-            cap = host_cap(model_ref.provider)
+            # Halo 2.0.3 round 3 (brief item 3): an ollama ref's initial
+            # freeze/preload budget already respects its context class --
+            # without this, the INITIAL preload could fill the catalog
+            # past the (smaller) cap `Session._sync_ollama_tools_cap`
+            # would otherwise only discover and shrink to on the first
+            # real turn, and eviction can never remove a FROZEN/preloaded
+            # tool (`SessionCatalog._evict_one`'s own contract), so getting
+            # this right at build time avoids a permanently-stuck-over-cap
+            # catalog for a small-context local model.
+            ollama_tools_max = None
+            if model_ref.provider == "ollama":
+                try:
+                    from halo_harness.providers.ollama_hw import resolve_context_decision
+                    ollama_tools_max = resolve_context_decision(model_ref).tools_max
+                except Exception:
+                    ollama_tools_max = None
+            cap = host_cap(model_ref.provider, ollama_tools_max)
             cap_budget = max(0, cap - len(frozen_registry.names()))
             preload_names = set((load_rolo_config().get("mcpPreload") or []))
             # finding 13 must-do: server-level "alwaysLoad" preloads every
@@ -1051,6 +1067,15 @@ def build_session(
                 from halo_harness.tools.tool_search import ToolSearchTool
                 frozen_registry.add_tool(ToolSearchTool())
 
+            # Halo 2.0.3 round 3: `cap` above was sized from the context
+            # class BEFORE `ToolSearchTool`/the preload loop could add
+            # anything further to `frozen_registry` -- never let the
+            # catalog's own stored cap end up SMALLER than what's already
+            # irrevocably frozen in it (eviction can only ever remove a
+            # LOADED-DEFERRED tool, never one of these), or the very next
+            # request would raise ToolCatalogTooLarge against a catalog
+            # that was never actually allowed to shrink.
+            cap = max(cap, len(frozen_registry.names()))
             session_catalog = SessionCatalog(
                 registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
                 vision=model_profile.vision, audio=model_profile.audio, family=family, names=frozen_registry.names(),

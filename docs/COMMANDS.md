@@ -1250,6 +1250,27 @@ in this build's own table omits that today, so in practice every MCP
 audio result still becomes the existing `[audio content (<mime>) omitted
 -- this model has no audio support]` text note.
 
+## `halo ollama`
+
+```sh
+halo ollama
+halo ollama --host <name>
+halo ollama --refresh
+```
+
+Halo 2.0.3 round 3: per-configured-host analysis for `ollama.hosts`
+(`docs/CONFIG.md`) -- reachability, version, loaded models (`size` vs
+`size_vram` as one plain offload sentence, trained vs. effective
+context, the KV-bytes/token figure, this round's `tools_max` and its
+rough per-request prompt-token cost), and -- local hosts only -- OS-level
+GPU memory. `--host NAME` narrows to one configured entry instead of
+every one; `--refresh` bypasses the short in-memory catalog TTL and
+re-reads `/api/tags`+`/api/show` now. With no `ollama.hosts` configured
+at all, probes the same synthesized default (`OLLAMA_HOST`, else
+`127.0.0.1:11434`) a bare `ol:<model>` ref would use. See
+[MODELS.md](MODELS.md)'s Ollama section; the TUI's own `/ollama` opens an
+interactive dialog instead (`docs/SLASH-COMMANDS.md`).
+
 ## `halo config`
 
 Reads and writes **this harness's own** small store,

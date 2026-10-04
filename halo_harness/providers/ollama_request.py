@@ -101,16 +101,34 @@ def build_ollama_request_body(
     for that model, so an unconfigured host must leave the field out and let
     the server's setting (the operator's choice, which may be longer than
     Ollama's 5-minute default) stand. Checked live on the round 2 run: with
-    the field left out, the server applied its own expiry."""
+    the field left out, the server applied its own expiry.
+
+    Halo 2.0.3 round 3 (brief item 2/3): `num_ctx` is computed BEFORE the
+    tool list, not after -- the context-class `tools_max` it drives has to
+    be known before `convert_tools` checks the catalog against it, not the
+    other way around. `agent/loop.py`'s `_sync_ollama_tools_cap` is what
+    actually shrinks the SessionCatalog (so the catalog handed in here is
+    ALREADY within bounds in the ordinary case); the `dataclasses.replace`
+    below is the backstop assertion `ToolCatalogTooLarge`/`request.py`'s
+    own docstring describes -- never a second capping path, just the one
+    `profile.tools_max` check finally given a real, context-aware number
+    for this dialect instead of round 2's permanently-unbounded `None`.
+    That number is never pushed BELOW `len(tools)` though: when every
+    tool already on the list is frozen/preloaded (nothing left for
+    `_sync_ollama_tools_cap`'s own eviction to remove), failing the turn
+    over a catalog that is physically unable to shrink any further would
+    be exactly the kind of gating house policy forbids -- the backstop's
+    job is catching round 2's unbounded-`None` bug, not blocking a turn
+    the catalog layer already did everything it could about."""
     del tool_choice  # no native-API equivalent (see docstring)
+    import dataclasses
+    from halo_harness.providers.ollama_fit import resolve_ollama_tools_max
     oai_messages = _flatten_messages(messages, system_text)
     ollama_messages = _ollama_messages_from_oai(oai_messages)
-    # Shares ToolsNotSupported/ToolCatalogTooLarge with every other dialect
-    # (profiles.resolve_profile's "ollama" branch sets tools_supported=True,
-    # tools_max=None -- no hard cap yet; round 3's host-context-aware tool
-    # catalog capping is the brief's own deferred follow-up, not this round's).
-    oai_tools = convert_tools(tools, profile)
     num_ctx = compute_num_ctx(trained_context, host.max_ctx, fit_estimate)
+    tools_max = max(resolve_ollama_tools_max(num_ctx), len(tools or []))
+    tools_profile = profile if tools_max == profile.tools_max else dataclasses.replace(profile, tools_max=tools_max)
+    oai_tools = convert_tools(tools, tools_profile)
     body: dict = {
         "model": route.upstream_model,
         "messages": ollama_messages,

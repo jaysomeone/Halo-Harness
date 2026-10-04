@@ -91,6 +91,11 @@ async def handle_slash(app, name: str, args: str) -> None:
         # report), typing the command always works. `/keys` opens the
         # key-name tester dialog (same dock Ctrl+T/`/tasks` already use).
         "editor": _handle_editor, "keys": _handle_keys,
+        # Halo 2.0.3 round 3 (brief items 4/6): /ollama's host analysis is
+        # a real network read (same thread-worker pattern /doctor/
+        # /providers already use); /local's small-role answer is a real
+        # inference call -- neither may block the UI thread.
+        "ollama": _handle_ollama, "local": _handle_local,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -982,6 +987,76 @@ async def _handle_mcp(app, _args: str) -> None:
 
 async def _handle_tasks(app, _args: str) -> None:
     app.action_toggle_tasks()
+
+
+def _ollama_analyses(args: str) -> list:
+    """Shared by `_handle_ollama`'s initial load and the dialog's own `r`
+    refresh callback -- `args` is `/ollama`'s raw argument text, same
+    `--host NAME`/`--refresh` vocabulary `halo ollama` accepts."""
+    from halo_harness.providers.ollama import resolve_ollama_hosts
+    from halo_harness.providers.ollama_panel import analyze_host
+    tokens = (args or "").split()
+    force = "--refresh" in tokens
+    names = [t for t in tokens if t not in ("--refresh", "--host")]
+    host_filter = None
+    if "--host" in tokens:
+        idx = tokens.index("--host")
+        host_filter = tokens[idx + 1] if idx + 1 < len(tokens) else None
+    hosts = resolve_ollama_hosts()
+    if host_filter:
+        hosts = [h for h in hosts if h.name.lower() == host_filter.lower()]
+    elif names:
+        hosts = [h for h in hosts if h.name.lower() in {n.lower() for n in names}]
+    return [analyze_host(h, force=force) for h in hosts]
+
+
+async def _handle_ollama(app, args: str) -> None:
+    app.run_worker(lambda: _ollama_worker(app, args), thread=True, name="ollama", group="ollama")
+
+
+def _ollama_worker(app, args: str) -> None:
+    from halo_harness.tui.dialogs.ollama_status import OllamaStatus
+    analyses = _ollama_analyses(args)
+    app.call_from_thread(app.push_screen, OllamaStatus(analyses, refresh=lambda: _ollama_analyses(args)))
+
+
+async def _handle_local(app, args: str) -> None:
+    """Halo 2.0.3 round 3 (brief item 6): answers from `roles.small` (an
+    `ol:` ref this round -- Hugging Face joins in round 5) WITHOUT
+    touching the main transcript's context -- `Session.call_small_model`
+    builds its body directly, never through `derive_request`/`self.log`
+    (see that method's own docstring), so nothing here can leak into a
+    later turn's history regardless of what the small model answers."""
+    question = (args or "").strip()
+    if not question:
+        await app.transcript.add_note(
+            "Usage: /local <question> -- answers from the roles.small model (an ol: ref this round) "
+            "without adding anything to the main conversation.", kind="command")
+        return
+    session = getattr(app.controller, "session", None)
+    if session is None:
+        await app.transcript.add_note("/local: no live session.", kind="command")
+        return
+    ref = getattr(session, "small_model_ref", None) or session.model_ref
+    if ref.provider != "ollama":
+        await app.transcript.add_note(
+            f"/local needs roles.small set to an ol: model (currently resolves to {ref.raw!r}); "
+            f"set one via /roles, the model picker's u action, or `ollama.hosts`/roles.small in config.",
+            kind="command")
+        return
+    app.run_worker(lambda: _local_worker(app, question, ref), thread=True, name="local", group="local")
+
+
+def _local_worker(app, question: str, ref) -> None:
+    session = app.controller.session
+    try:
+        answer = session.call_small_model(
+            system_text="You are a fast local assistant answering a standalone question directly and "
+                        "concisely. This exchange is not part of any other conversation.",
+            user_text=question, model_ref=ref)
+    except Exception as e:
+        answer = f"(error: {type(e).__name__}: {e})"
+    app.call_from_thread(app.transcript.add_note, f"/local {question}\n\n{answer}", kind="command")
 
 
 async def _handle_editor(app, _args: str) -> None:

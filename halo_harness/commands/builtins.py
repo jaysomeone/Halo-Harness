@@ -322,6 +322,56 @@ def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
     return "\n".join(lines)
 
 
+def _cmd_ollama(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 3 (brief item 4): the plain-text fallback (`-p`,
+    or the TUI falling through to `Controller.run_slash`) -- reports
+    exactly like `halo ollama [--host NAME] [--refresh]`; the TUI's own
+    `/ollama` (`tui/slash.py::_handle_ollama`) opens the interactive
+    dialog instead, off the UI thread (a real network read)."""
+    from halo_harness.providers.ollama import resolve_ollama_hosts
+    from halo_harness.providers.ollama_panel import analyze_host, format_host_analysis
+    tokens = (args or "").split()
+    force = "--refresh" in tokens
+    names = [t for t in tokens if t != "--refresh"]
+    hosts = resolve_ollama_hosts()
+    if names:
+        wanted = {n.lower() for n in names}
+        hosts = [h for h in hosts if h.name.lower() in wanted]
+        if not hosts:
+            return f"/ollama: no configured host matching {', '.join(names)!r}"
+    if not hosts:
+        return "No Ollama hosts configured."
+    return "\n\n".join(format_host_analysis(analyze_host(h, force=force)) for h in hosts)
+
+
+def _cmd_local(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 3 (brief item 6): answers `args` from `roles.
+    small` (an `ol:` ref this round) via `Session.call_small_model` --
+    NEVER through `derive_request`/`session.log`, so this never becomes
+    part of the main transcript's context (see that method's own
+    docstring). `facade.session` is the live session when one is
+    running; `None` in a context with no live session at all (e.g. a
+    unit test facade) is reported plainly, never a traceback."""
+    question = (args or "").strip()
+    if not question:
+        return ("Usage: /local <question> -- answers from the roles.small model (an ol: ref this round) "
+                "without adding anything to the main conversation.")
+    session = facade.session
+    if session is None:
+        return "/local: no live session."
+    ref = getattr(session, "small_model_ref", None) or session.model_ref
+    if ref.provider != "ollama":
+        return (f"/local needs roles.small set to an ol: model (currently resolves to {ref.raw!r}); "
+                f"set one via /roles, the model picker's u action, or `ollama.hosts`/roles.small in config.")
+    try:
+        return session.call_small_model(
+            system_text="You are a fast local assistant answering a standalone question directly and "
+                        "concisely. This exchange is not part of any other conversation.",
+            user_text=question, model_ref=ref)
+    except Exception as e:
+        return f"/local: {type(e).__name__}: {e}"
+
+
 def _cmd_memory(args: str, facade: HeadlessFacade) -> str:
     if facade.memory_store is None:
         return "Auto-memory is not available for this session."
@@ -1190,6 +1240,10 @@ _BUILTIN_SPECS = {
     "models": ("core", "List/refresh the Databricks endpoint catalog", "[refresh]", _cmd_models),
     "dbx": ("core", "Alias for /models refresh", None, _cmd_dbx),
     "mcp": ("core", "List configured MCP servers", None, _cmd_mcp),
+    "ollama": ("core", "Per-host Ollama analysis: reachability, loaded models, context, tool-catalog sizing",
+               "[--host NAME] [--refresh]", _cmd_ollama),
+    "local": ("core", "Ask the roles.small model (an ol: ref this round) a standalone question",
+              "<question>", _cmd_local),
     "memory": ("core", "Show the auto-memory directory and index", None, _cmd_memory),
     "permissions": ("core", "Show the active permission mode and rule counts", None, _cmd_permissions),
     "plan": ("ui", "Review the current plan", None, _cmd_plan),

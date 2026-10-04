@@ -61,13 +61,14 @@ def _gather_real_flags() -> "dict[str, set]":
     built yet, so they show up in `--help` exactly like a real one)."""
     from halo_harness import cli as cli_mod
     from halo_harness import mcp_cli, catalog_cli, doctor as doctor_mod, stats_cli, export_cli, improve_cli, init_cli
-    from halo_harness import update_cli
+    from halo_harness import ollama_cli, update_cli
     from halo_harness import work_matrix as work_matrix_mod
     from halo_harness.config_cli import cmd_config
     import bridge
 
     out: "dict[str, set]" = {}
     out["halo"] = _flags_in(cli_mod._build_parser().format_help())
+    out["halo ollama"] = _flags_in(_capture(ollama_cli.cmd_ollama, ["--help"]))
     out["halo mcp"] = _flags_in(_capture(mcp_cli.cmd_mcp, ["--help"]))
     out["halo mcp list"] = _flags_in(_capture(mcp_cli._cmd_list, ["--help"]))
     out["halo mcp get"] = _flags_in(_capture(mcp_cli._cmd_get, ["--help"]))
@@ -93,7 +94,7 @@ def _gather_real_flags() -> "dict[str, set]":
 def test_every_subcommand_is_documented(ctx: Ctx):
     text = (REPO_DIR / "docs" / "COMMANDS.md").read_text(encoding="utf-8")
     for name in ("init", "doctor", "update", "models", "mcp", "config", "stats", "export", "improve", "proxy",
-                 "work-matrix"):
+                 "work-matrix", "ollama"):
         label = f"halo {name}"
         ctx.check(f"COMMANDS.md documents {label!r} (as a heading)",
                   re.search(rf"^#{{1,3}}\s+.*`?{re.escape(label)}`?", text, re.MULTILINE) is not None)

@@ -51,6 +51,11 @@ def test_resolve_profile_ollama_dialect_shape(ctx: Ctx):
               profile.reasoning_effort_supported is False)
     ctx.check("family classified from the bare id", profile.family == "qwen")
     ctx.check("model_id carried through", profile.model_id == "qwen3:30b")
+    # Halo 2.0.3 round 3: tools_max is no longer the permanently-unbounded
+    # `None` round 2 shipped (the hand-off bug: every request carried the
+    # full tool catalog) -- resolve_profile's own ollama branch now seeds
+    # a real, context-class-derived default (providers.ollama_fit).
+    ctx.check(f"tools_max is a real int now, got {profile.tools_max!r}", isinstance(profile.tools_max, int))
 
 
 # ---- model.py: ol: / ol:<model>@<host> ref parsing -------------------------

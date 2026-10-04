@@ -237,14 +237,22 @@ Source: `docs.ollama.com/gpu.md` (seen 2026-10-04) plus the `/api/ps` and
     `CUDA_VISIBLE_DEVICES` (comma-separated; "UUIDs are more reliable"
     than numeric indices since ordering can vary) -- `nvidia-smi -L`
     prints the UUIDs. **Windows and Linux both use `nvidia-smi`** for
-    totals/usage (`nvidia-smi --query-gpu=memory.total,memory.used,name
-    --format=csv` is the standard invocation for this -- confirmed as
-    NVIDIA's own documented tool, not re-verified flag-by-flag against
-    NVIDIA's own docs this round, **UNCONFIRMED** at that level of
-    detail). On Windows, `Get-CimInstance Win32_VideoController` (WMI)
-    is the non-nvidia-smi fallback the brief names; not independently
-    confirmed this round either -- **UNCONFIRMED**, standard PowerShell/
-    WMI knowledge, verify live.
+    totals/usage -- **CONFIRMED live, 2.0.3 round 3** (previously
+    UNCONFIRMED at the exact-flag level): `nvidia-smi --query-gpu=
+    memory.total,memory.used,memory.free,name --format=csv` prints a
+    header row and unit-suffixed values (e.g. "<N> MiB"); adding
+    `,noheader,nounits` to `--format` drops the header AND the unit
+    suffix, leaving one CSV line of plain MiB integers plus the GPU name
+    (e.g. `<total>, <used>, <free>, <name>`) -- the invocation `providers/
+    ollama_hw.py` actually uses, since it needs to parse the numbers, not
+    just display them. `memory.free` is a valid query field on its own
+    (no need to compute `total - used` by hand). On Windows, `Get-
+    CimInstance Win32_VideoController` (WMI) is the brief's own non-
+    nvidia-smi fallback; moot in practice -- `nvidia-smi` itself already
+    works identically on Windows and Linux, so Halo's own code never
+    needed the WMI path at all. Still **UNCONFIRMED**: the WMI fallback
+    itself (never exercised), and both the AMD/ROCm and Apple branches
+    below (no such hardware available to verify this round either).
   - AMD/ROCm: needs ROCm v7 on Linux; select with `ROCR_VISIBLE_DEVICES`;
     `HSA_OVERRIDE_GFX_VERSION` force-targets an LLVM gfx version for
     unsupported cards; `rocminfo` lists devices. `rocm-smi --showmeminfo
@@ -829,10 +837,11 @@ Sources: `huggingface.co/docs/inference-providers/en/{index,pricing}`,
 - Whether a request's `options.num_ctx` overrides a Modelfile-baked
   `num_ctx` (Q2); exact per-family KV-cache numbers in the Q2 worked
   table (illustrative, not re-verified per model).
-- GPU-memory query flag syntax for `nvidia-smi`/WMI/`rocm-smi`/
-  `system_profiler` at the exact-flag level (Q3); any Ollama log line or
-  command confirming detected GPUs; partial-offload mechanics; a
-  documented minimum-VRAM threshold.
+- GPU-memory query flag syntax for WMI/`rocm-smi`/`system_profiler` at
+  the exact-flag level (Q3) -- `nvidia-smi` itself was confirmed live in
+  2.0.3 round 3 (see section 3 above); any Ollama log line or command
+  confirming detected GPUs; partial-offload mechanics; a documented
+  minimum-VRAM threshold.
 - How to set Ollama's environment variables on macOS at all -- the
   fetched `macos.md` did not cover it (Q4).
 - Tool-calling/instruction-following reliability for Llama 3.x, Gemma 3,

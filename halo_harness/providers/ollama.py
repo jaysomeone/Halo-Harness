@@ -182,20 +182,35 @@ def think_value_for_effort(effort: Optional[str], model_id: str):
 
 
 def compute_num_ctx(trained_context: Optional[int], host_max_ctx: Optional[int] = None,
-                     fit_estimate: Optional[int] = None, *, hard_cap: int = HARD_CONTEXT_CAP,
+                     fit_estimate=None, *, hard_cap: int = HARD_CONTEXT_CAP,
                      fallback_when_unknown: int = FALLBACK_NUM_CTX) -> int:
     """Round 2's context-ownership rule (research doc section 2/6): `num_ctx
     = min(trained context, host.max_ctx override, a fit estimate, hard
     cap)`. `fit_estimate` (round 3's hardware-analysis arithmetic -- VRAM
-    budget divided by the KV-cache-bytes-per-token formula) is optional and
-    simply skipped (`None`) until that round wires in a real OS-level VRAM
-    read; round 2 never guesses one. When `trained_context` itself is
-    unknown (no `/api/show` read yet for this model), falls back to
+    budget divided by the KV-cache-bytes-per-token formula) is one of
+    three things: a positive int (an ordinary candidate, like any other),
+    `None` (genuinely unknown -- simply skipped, the hard cap stands,
+    unchanged from round 2), or `providers.ollama_fit.WEIGHTS_DO_NOT_FIT`
+    (round 3 fix pass, live-run finding: a model whose own WEIGHTS don't
+    fit in free memory got handed the full 131072 hard cap anyway since
+    `None` and "doesn't fit" were conflated -- the next request's
+    `num_ctx` then differed from what the model was already loaded with,
+    forcing Ollama to reload it with a bigger KV cache on every single
+    request). `WEIGHTS_DO_NOT_FIT` is treated like `trained_context is
+    None`: `fallback_when_unknown` (8192, conservative) joins the
+    candidate pool instead of the hard cap being left to win -- a model
+    already spilling to system RAM must not also be handed a 131072-token
+    KV cache budget. When `trained_context` itself is unknown (no
+    `/api/show` read yet for this model), ALSO falls back to
     `fallback_when_unknown` -- still clamped against `host_max_ctx`/
     `fit_estimate`/`hard_cap` like any other candidate, so an explicit
     override always wins even before the catalog has loaded. Always >= 1."""
-    candidates = [c for c in (trained_context, host_max_ctx, fit_estimate, hard_cap) if isinstance(c, int) and c > 0]
-    if trained_context is None:
+    from halo_harness.providers.ollama_fit import WEIGHTS_DO_NOT_FIT
+    weights_do_not_fit = fit_estimate is WEIGHTS_DO_NOT_FIT
+    fit_candidate = fit_estimate if (isinstance(fit_estimate, int) and not isinstance(fit_estimate, bool)
+                                      and fit_estimate > 0) else None
+    candidates = [c for c in (trained_context, host_max_ctx, fit_candidate, hard_cap) if isinstance(c, int) and c > 0]
+    if trained_context is None or weights_do_not_fit:
         candidates.append(fallback_when_unknown)
     return max(1, min(candidates)) if candidates else fallback_when_unknown
 

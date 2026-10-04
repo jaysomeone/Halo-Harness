@@ -11,9 +11,9 @@ version.
 ## [2.0.3] - unreleased
 
 Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
-and onward). Round 1 (research) and round 2 landed so far; rounds 3-6
-(hardware/host analysis, roles, Hugging Face, docs/release prep) are still
-to come under this SAME version number.
+and onward). Rounds 1-3 (research, the `ol:` provider, hardware/host
+analysis and roles) landed so far; rounds 4-6 (Hugging Face, docs/release
+prep) are still to come under this SAME version number.
 
 1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
    dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
@@ -37,6 +37,38 @@ to come under this SAME version number.
    dispatch, `headless.py`'s shared credential resolver) -- an `ol:` model
    now runs a full turn, including a tool call, end to end in print mode
    and the TUI.
+2. **Hardware/host analysis, the fit estimate, and roles** (round 3):
+   `/ollama` (TUI dialog) and `halo ollama [--host NAME] [--refresh]`
+   (CLI) render one page per configured host -- reachable, version,
+   loaded models' `size` vs `size_vram` as one plain offload sentence,
+   trained vs. effective context, and the KV-bytes/token figure (standard
+   GGML/llama.cpp accounting, not independently re-derived); `halo doctor`
+   gains a one-line-per-host Ollama section. The context-ownership rule's
+   `fit_estimate` (round 2 always passed `None`) is now real: the largest
+   power-of-two context that fits in free GPU memory after a model's own
+   weights, from the OS GPU tool for a LOCAL host (`nvidia-smi` on
+   Windows/Linux, verified live this round) or a REMOTE host's own
+   already-loaded `/api/ps` context when there's one to read, cached
+   about a minute so a turn never shells out more than once in that
+   window. The `ol:` ProviderProfile's `tools_max` now follows that
+   effective context's class (under 16k/16k-32k/32k-64k/64k+ -> 16/32/
+   64/128 tools, `ollama.tools_max` overridable, never below this
+   platform's own built-in tool count) instead of round 2's permanently-
+   unbounded `None` -- the SAME SessionCatalog cap-shrink/LRU-evict `/
+   model` already runs on a provider switch does the actual shrinking,
+   never a second capping path. Local `ol:` models default to a
+   supporting role (the picker's new `u` action pre-selects `small`,
+   never main); choosing one as the session's main model anyway prints
+   the plain consequence sentence when it doesn't declare tool-calling
+   support, and proceeds regardless. `/local <question>` (Ollama-only
+   this round) answers from `roles.small` inline, without adding
+   anything to the main transcript's context. Fix pass after a live run:
+   the fit estimate now consults `/api/ps` before any GPU-memory
+   arithmetic (an already-loaded model's own loaded context wins outright,
+   never recomputed, so concurrent requests can no longer disagree and
+   force a reload), counts other loaded models' `size_vram` as reclaimable
+   headroom, and -- when the weights provably don't fit even after that --
+   falls back to a conservative 8192 instead of the 131072 hard cap.
 
 ## [2.0.2] - 2026-10-04
 

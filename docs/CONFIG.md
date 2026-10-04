@@ -206,6 +206,7 @@ directly by the features that own them:
 | `update.notify` | `true` | `halo config set update.notify false` turns off just the once-a-day "update available" startup note (the check itself, and `/update`'s own dialog, still work) |
 | `update.channel` | unset (derived from the install: `stable` when pinned to a `v*` tag, else `main`) | `halo update --channel stable\|main` |
 | `ollama.hosts` | unset (synthesizes one default host from `OLLAMA_HOST`/`127.0.0.1:11434`) | hand-edited; a list of `{name, url, default, keep_alive, max_ctx, num_parallel_hint, api_key}` -- `ol:<model>@<hostname>` selects an entry by `name`; see `docs/MODELS.md`'s "Ollama" section |
+| `ollama.tools_max` | unset (derived from the effective `num_ctx`'s context class -- under 16k: 16, 16k-32k: 32, 32k-64k: 64, 64k+: 128) | `halo config set ollama.tools_max 64`; overrides the `ol:` ProviderProfile's tool-catalog cap outright, still never below however many built-in tools this platform ships -- see `docs/MODELS.md`'s "Ollama" section |
 
 ## Every environment variable
 
