@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-04 ~05:10)
+# Status board (updated 2026-10-04 ~05:40)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -48,7 +48,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.3 = local and cloud models: Ollama + Hugging Face (brief file `2.0.5-ollama-brief.md` written under its old number, plus `2.0.3-ollama-round1-research-brief.md`; moved ahead by rolo 2026-10-03; HF + cloud added by rolo 2026-10-03)
 
-- [~] research RUNNING (`2.0.3-ollama-round1-research-brief.md`; Ollama local + cloud, Hugging Face local runtimes + router/endpoints), [ ] `ol:` provider on the native API (local, LAN, ollama.com cloud by host), [ ] `hf:` route (HF router with HF_TOKEN, dedicated endpoints, local OpenAI-compatible servers auto-detected: llama-server, transformers serve, vLLM, TGI, LM Studio), [ ] shared local-model discovery (Ollama models, HF cache, running servers) in `/local` with the capability probe (the gym ranking waits for 2.0.5), [ ] hardware and host analysis, [ ] roles for local models, [ ] init tab, docs, [ ] release
+- [x] research (f17ec93: `docs/harness/LOCAL-MODELS-RESEARCH.md` + draft `2.0.3-ollama-round2-brief.md` with rounds 2-6), [~] round 2 RUNNING: `ol:` provider on the native API + capability probe + mock_ollama (brief section Round 2),  [ ] `hf:` route (HF router with HF_TOKEN, dedicated endpoints, local OpenAI-compatible servers auto-detected: llama-server, transformers serve, vLLM, TGI, LM Studio), [ ] shared local-model discovery (Ollama models, HF cache, running servers) in `/local` with the capability probe (the gym ranking waits for 2.0.5), [ ] hardware and host analysis, [ ] roles for local models, [ ] init tab, docs, [ ] release
 
 ## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
 
