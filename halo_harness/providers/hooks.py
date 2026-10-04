@@ -202,7 +202,19 @@ _LEAK_PATTERNS = {
     # anywhere" -- `hermes_tool_call` is tried first for every row that
     # lists both (model_table.json's own declared order), so this is only
     # ever REACHED once the properly-opened shape already failed to match.
-    "missing_tool_call_opener": re.compile(r"(\{.*?\})\s*</tool_call>", re.DOTALL),
+    # 2.0.2 review finding 35: `(\{.*?\})\s*</tool_call>` tried EVERY `{`
+    # in the text as a candidate match start (there is no `<tool_call>`
+    # opener left to anchor on, that's the whole point of this pattern),
+    # which is O(n x braces) on a long, brace-heavy final answer with no
+    # `</tool_call>` anywhere at all -- the common case, since this runs
+    # at the end of every tool-less turn. Measured: 0.77s for 68KB, 4.8s
+    # for 170KB of code-like text. A real leaked call always has this
+    # exact JSON shape (`args_repair` immediately pulls "name"/
+    # "arguments" back out of it -- see the comment above) -- anchoring
+    # the opening brace to `{"name"` cuts the candidate starts down to
+    # roughly how many times that literal substring appears, never one
+    # per brace.
+    "missing_tool_call_opener": re.compile(r"(\{\s*\"name\".*?\})\s*</tool_call>", re.DOTALL),
     "glm_arg_key": re.compile(r"<tool_call>\s*([A-Za-z0-9_.\-]+)\s*((?:<arg_key>.*?</arg_value>\s*)+)", re.DOTALL),
     "kimi_section_tokens": re.compile(
         r"<\|tool_call_begin\|>\s*([A-Za-z0-9_.\-]+):\d+\s*<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>",

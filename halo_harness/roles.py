@@ -573,14 +573,31 @@ def _configured_model_entries(state_dir=None) -> "list[dict]":
 
 
 def _cheapest_model_entry(state_dir=None) -> Optional[str]:
-    """The lowest `price_in_per_m` ref across every configured provider's
-    catalog -- `None` when nothing has a usable price (a fresh/unrefreshed
-    catalog, or every configured provider priced `None`), so the caller
-    can fall back to the session's own default model instead."""
+    """The lowest (strictly positive) `price_in_per_m` ref across every
+    configured provider's catalog that also looks tool-capable -- `None`
+    when nothing qualifies (a fresh/unrefreshed catalog, or every
+    configured provider priced `None`), so the caller can fall back to
+    the session's own default model instead.
+
+    2.0.2 review finding 28: no price/tool-support floor at all used to
+    mean a $0 `:free` model or a negative-priced router entry (OpenRouter's
+    own `openrouter/auto` reported "-1") could win outright and become
+    `researcher`/`small` (and `judge` in local-first) -- which then fails
+    every call, since those roles need a real tool-calling endpoint.
+    `price <= 0` is excluded (a real price is always > 0 per-million;
+    `0`/negative means "not a real priced completion model" here, same as
+    a router/free alias). `supported_parameters`, when the catalog
+    reports it at all, must include "tools" -- `None` (most providers'
+    own row shape never sets this) stays fail-open, never excluded, so
+    this never gets stricter than before for a catalog with no such
+    metadata."""
     best_ref, best_price = None, None
     for e in _configured_model_entries(state_dir):
         price = e.get("price_in_per_m")
-        if not isinstance(price, (int, float)) or isinstance(price, bool):
+        if not isinstance(price, (int, float)) or isinstance(price, bool) or price <= 0:
+            continue
+        supported = e.get("supported_parameters")
+        if isinstance(supported, list) and "tools" not in supported:
             continue
         if best_price is None or price < best_price:
             best_price, best_ref = price, e.get("ref")

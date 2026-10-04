@@ -147,6 +147,50 @@ def test_claim_without_owner_is_rejected(ctx: Ctx):
 
 
 @test
+def test_write_board_is_atomic_no_tmp_file_left_behind(ctx: Ctx):
+    """2.0.2 review finding 34 pin (half 1): `_write_board` used to be a
+    plain `write_text` -- an interrupted write could leave a TORN file
+    behind. Now goes through a `.tmp<pid>` file + `os.replace`; after a
+    normal call, no tmp file is left on disk and the real file is valid
+    JSON with exactly what was written."""
+    from halo_harness.tools.task_board import TaskCreateTool
+    top = Path(tempfile.mkdtemp(prefix="board-atomic-"))
+    TaskCreateTool().run({"title": "t"}, _ctx_at(top))
+    leftovers = list(top.glob("tasks.json.tmp*"))
+    ctx.check(f"no tmp file left behind, got {leftovers}", leftovers == [])
+    data = json.loads((top / "tasks.json").read_text(encoding="utf-8"))
+    ctx.check(f"the real file is valid and has the one task, got {data}", len(data["tasks"]) == 1)
+
+
+@test
+def test_create_task_preserves_a_torn_board_instead_of_overwriting_it(ctx: Ctx):
+    """2.0.2 review finding 34 pin (half 2): a torn/corrupt tasks.json
+    (simulated here by hand-writing invalid JSON, standing in for a
+    write this fix's own atomicity could not prevent -- e.g. a disk
+    fault mid-rename, or a pre-fix file left over from before this
+    round) used to be silently treated as "[]" by `create_task`, so the
+    very next create wrote a brand-new single-task board right over it,
+    losing every task that was already there. The corrupt file must
+    survive, renamed aside, not be overwritten."""
+    from halo_harness.tools.task_board import create_task
+    top = Path(tempfile.mkdtemp(prefix="board-torn-"))
+    board_path = top / "tasks.json"
+    board_path.write_text('{"tasks": [{"id": "abc", "title": "lost"}', encoding="utf-8")  # truncated, invalid JSON
+
+    new_id = create_task(top, title="fresh task")
+    ctx.check("create_task never raises, still returns a fresh id", bool(new_id))
+
+    corrupt_backups = list(top.glob("tasks.json.corrupt-*"))
+    ctx.check(f"the torn file was preserved under its own name, got {corrupt_backups}", len(corrupt_backups) == 1)
+    ctx.check("the preserved copy still has the original (unparseable) bytes",
+              corrupt_backups[0].read_text(encoding="utf-8") == '{"tasks": [{"id": "abc", "title": "lost"}')
+
+    fresh = json.loads(board_path.read_text(encoding="utf-8"))
+    ctx.check(f"the new board has exactly the one new task, got {fresh}",
+              len(fresh["tasks"]) == 1 and fresh["tasks"][0]["id"] == new_id)
+
+
+@test
 def test_unknown_task_id_and_bad_status_are_clear_errors(ctx: Ctx):
     from halo_harness.tools.task_board import TaskCreateTool, TaskUpdateTool
     top = Path(tempfile.mkdtemp(prefix="board-errs-"))

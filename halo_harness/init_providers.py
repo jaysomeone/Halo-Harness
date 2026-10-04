@@ -144,6 +144,11 @@ def _openrouter_entries(state_dir) -> "list[dict]":
             "max_output_tokens": entry.get("max_output_tokens"),
             "price_in_per_m": _price_per_m(pricing.get("prompt")),
             "price_out_per_m": _price_per_m(pricing.get("completion")),
+            # 2.0.2 review finding 28: carried through so `roles.py::_cheapest_
+            # model_entry` can skip a tool-less endpoint when the catalog
+            # says so -- `None` (most other providers' own row shapes never
+            # set this at all) means "unknown", never "no tools".
+            "supported_parameters": entry.get("supported_parameters"),
         })
     return out
 

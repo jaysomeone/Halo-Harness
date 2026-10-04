@@ -35,6 +35,28 @@ from typing import Optional
 _OSC_TITLE_FMT = "\x1b]2;{}\x07"
 
 
+_tui_driver = None  # Textual `App._driver` while the TUI runs; None otherwise.
+
+
+def set_tui_driver(driver) -> None:
+    """Called once the TUI mounts (alongside `activate_tui_mode`, same
+    call site) with `App._driver`; `None` again on unmount. 2.0.2 review
+    finding 31: while this is set, `emit_osc2`'s DEFAULT-stream path
+    (never an explicitly-passed `stream`, which stays a deliberate direct
+    write -- e.g. print mode's `PrintModeTitleGuard`, which has no driver
+    at all) routes the OSC sequence through the driver's own `write()`
+    instead of writing `sys.__stdout__` directly from whatever thread
+    happens to call `set_terminal_title` -- Textual 8 writes every FRAME
+    from its own `textual-output` WriterThread (verified: both
+    `linux_driver.py` and `windows_driver.py` write through `self._writer_
+    thread.write`), never the UI thread this module used to assume "also
+    owns Textual's terminal writes." `driver.write()` queues onto that
+    SAME thread, so the title OSC is ordered with frames instead of
+    racing them."""
+    global _tui_driver
+    _tui_driver = driver
+
+
 def emit_osc2(title: str, *, stream=None) -> None:
     """Best-effort OSC 2 title write -- every terminal emulator that
     tracks a tab/window title honours this (Windows Terminal, GNOME
@@ -42,6 +64,12 @@ def emit_osc2(title: str, *, stream=None) -> None:
     window that never learned OSC 2 just ignores the bytes. Never
     raises: a closed/non-writable `stream` is exactly "no terminal is
     watching," not an error worth surfacing."""
+    if stream is None and _tui_driver is not None:
+        try:
+            _tui_driver.write(_OSC_TITLE_FMT.format(title))
+        except Exception:
+            pass
+        return
     s = stream if stream is not None else _real_stdout()
     try:
         s.write(_OSC_TITLE_FMT.format(title))

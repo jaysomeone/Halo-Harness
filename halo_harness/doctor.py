@@ -706,6 +706,51 @@ def _check_old_rolo_claude_leftover(*, resolved=_UNSET, uv_found: Optional[bool]
                 f"mistake", cmd=uninstall_cmd)
 
 
+# Test hygiene (round B fix pass, notes file): exact names several
+# test_*.py files' own fake MCP servers are known to use, plus the
+# `plugin_*fakeserver.log` shape a plugin-scoped fake server test uses --
+# every one found under a REAL `~/.halo/mcp/` (never a BRIDGE_TEST_HOME-
+# scoped one; a hermetic test run's own temp dir is never where a USER
+# would run `halo doctor`) is a near-certain leftover from a standalone
+# test run that predates `tests/helpers/runner.run_all`'s own fix for
+# this (it now scopes BRIDGE_TEST_HOME itself before any test runs).
+_TEST_FIXTURE_LOG_NAMES = frozenset({
+    "a.log", "b.log", "c.log", "big.log", "crash.log", "eager1.log", "fake.log",
+})
+
+
+def _is_test_fixture_log_name(name: str) -> bool:
+    if name in _TEST_FIXTURE_LOG_NAMES:
+        return True
+    if name.startswith("fake.log."):  # fake.log.1, fake.log.2, ... (rotated)
+        return True
+    return name.startswith("plugin_") and "fakeserver" in name and name.endswith(".log")
+
+
+def _check_test_leftovers(state_dir: Optional[Path] = None) -> Optional[str]:
+    """`None` (no entry at all -- this is informational, never a MISSING;
+    nothing is actually broken) when the mcp log dir doesn't exist or
+    nothing in it matches a known test-fixture name."""
+    try:
+        from halo_harness.config.paths import bridge_home
+        sd = Path(state_dir) if state_dir is not None else bridge_home()
+        mcp_dir = sd / "mcp"
+        if not mcp_dir.is_dir():
+            return None
+        found = sorted(p.name for p in mcp_dir.iterdir() if p.is_file() and _is_test_fixture_log_name(p.name))
+    except OSError:
+        return None
+    if not found:
+        return None
+    shown = ", ".join(found[:8]) + (f", +{len(found) - 8} more" if len(found) > 8 else "")
+    # H12 Part B: every WARN/MISSING line must end with -> fix:/-> see:
+    # (test_doctor_prescriptive_fixes.py's own enforced rule) -- there is
+    # no single safe `rm` one-liner for a variable-length file list, so
+    # this names the directory to inspect by hand instead of a command.
+    return _fix(f"{WARN} probable test leftovers in {mcp_dir}: {shown} -- safe to delete",
+                cmd=f"inspect and remove by hand from {mcp_dir}")
+
+
 def _check_mcp_servers(cwd: Optional[Path]) -> str:
     """New (RECOMMENDATIONS.md P0 #2 / section 3, "MCP startup cost is the
     biggest perceived-speed item"): configured MCP servers -- a pure config
@@ -1393,6 +1438,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     from halo_harness.tui.clipboard import clipboard_doctor_line
     entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
+    entries.append(("test_leftovers", _check_test_leftovers()))
     entries.append(("mcp_connectors", _check_mcp_connectors()))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))

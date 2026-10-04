@@ -67,6 +67,29 @@ def _dispatch_one(session, tool_input: dict, *, name: str = "Agent", tool_id: st
     return list(session._dispatch_tools(1, [tu]))
 
 
+# ---- _prepare_fanout_jobs effort fallback: pure unit -----------------------
+
+@test
+def test_prepare_fanout_jobs_applies_top_level_effort_fallback(ctx: Ctx):
+    """2.0.2 review finding 21 pin: `count` used to always get `effort:
+    None` no matter what was asked, and a `batch` item with no `effort`
+    of its own dropped the top-level `effort` instead of falling back to
+    it (docs/SUBAGENTS.md says it does)."""
+    from halo_harness.agent.subagent import _prepare_fanout_jobs
+
+    spec = _gp_spec()
+    jobs, error = _prepare_fanout_jobs(spec, {"count": 2, "effort": "high", "prompt": "go"})
+    ctx.check(f"count=2 with effort=high, got error={error!r} jobs={jobs}",
+              error is None and [j["effort"] for j in jobs] == ["high", "high"])
+
+    jobs, error = _prepare_fanout_jobs(spec, {
+        "batch": [{"prompt": "a"}, {"prompt": "b", "effort": "low"}], "effort": "high",
+    })
+    ctx.check(f"batch item with no effort of its own falls back to the top-level one, "
+              f"got error={error!r} jobs={jobs}",
+              error is None and [j["effort"] for j in jobs] == ["high", "low"])
+
+
 # ---- effective_max_concurrent / effective_max_depth: pure unit --------------
 
 @test
@@ -189,6 +212,33 @@ def test_batch_spawns_per_item_overrides_combined_in_spawn_order(ctx: Ctx):
             ctx.check(f"batch-result-{i} present", f"batch-result-{i}" in content)
         ctx.check("spawn order preserved in the combined text",
                   content.index("batch-result-0") < content.index("batch-result-1") < content.index("batch-result-2"))
+    finally:
+        mock.stop()
+
+
+@test
+def test_fanout_combined_result_is_capped_not_megabytes(ctx: Ctx):
+    """2.0.2 review finding 27 pin: `AgentTool.result_cap=None` means the
+    generic per-tool cap in agent/loop.py never applies to count/batch's
+    OWN combined result, and nothing inside `_run_agent_fanout` capped it
+    either -- `count=50` with a verbose child could return ~1.5M chars in
+    one tool_result. Here, 5 children each answer with 10k chars (50k+
+    combined, comfortably over RESULT_CAP) and the combined result must
+    come back capped, with a pointer to the full saved text."""
+    from halo_harness.agent.subagent import RESULT_CAP
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["scale-fanout-cap-child"] = ScriptedTurns([_text_step("X" * 10_000)])
+        session = _new_session(mock=mock, model="or:mock/scale-parent-cap", agents={"general-purpose": _gp_spec()})
+        events = _dispatch_one(session, {"description": "x", "prompt": "go", "subagent_type": "general-purpose",
+                                          "count": 5, "model": "or:mock/scale-fanout-cap-child"})
+        results = [e for e in events if e.kind == "tool_result" and e.agent_id is None]
+        ctx.check(f"exactly one combined tool_result, got {len(results)}", len(results) == 1)
+        content = results[0].data.get("content", "")
+        ctx.check(f"combined content is capped, not ~50k raw chars, got {len(content)}",
+                  len(content) < RESULT_CAP + 2000)
+        ctx.check(f"names where the full combined text was saved, got {content[-300:]!r}",
+                  "tool-results" in content)
     finally:
         mock.stop()
 
@@ -579,6 +629,47 @@ def test_resume_task_with_an_unresolvable_model_override_is_a_clean_error(ctx: C
 
 
 @test
+def test_agent_call_with_unknown_role_is_an_error_listing_known_roles(ctx: Ctx):
+    """2.0.2 review finding 22 pin: `Agent(role="nope")` used to silently
+    fall through to resolving against the session model instead of
+    erroring the way an unknown `subagent_type` already does -- checked
+    here for a fresh single spawn, a batch item, and a resume's own
+    fresh `role=` override."""
+    from halo_harness.agent.subagent import run_agent_call
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(mock=mock, model="or:mock/scale-parent-badrole", agents={"general-purpose": _gp_spec()})
+        _events, result = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_1", tool_name="Agent",
+            tool_input={"description": "x", "prompt": "go", "subagent_type": "general-purpose", "role": "nope"})
+        ctx.check(f"single spawn: a clean error, got {result!r}", result is not None and result.is_error is True)
+        ctx.check(f"single spawn: names the role and lists known ones, got {result.content!r}",
+                  "nope" in result.content and "coder" in result.content)
+
+        events = _dispatch_one(session, {"description": "x", "subagent_type": "general-purpose",
+                                          "batch": [{"prompt": "p", "role": "nope"}]}, tool_id="call_batch")
+        results = [e for e in events if e.kind == "tool_result" and e.agent_id is None]
+        ctx.check(f"batch item: exactly one tool_result, got {len(results)}", len(results) == 1)
+        ctx.check(f"batch item: is an error naming the role, got {results[0].data}",
+                  results[0].data.get("ok") is False and "nope" in results[0].data.get("content", ""))
+
+        SCENARIOS["scale-badrole-resume-child"] = ScriptedTurns([_text_step("first answer")])
+        _events2, result2 = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_2", tool_name="Agent",
+            tool_input={"description": "x", "prompt": "go", "subagent_type": "general-purpose",
+                        "model": "or:mock/scale-badrole-resume-child"})
+        ctx.check(f"resume setup spawn ok, got {result2.content!r}", result2.is_error is False)
+        task_id = next(iter(session.agent_runtime.tasks))
+        _events3, result3 = run_agent_call(
+            runtime=session.agent_runtime, tool_id="call_resume", tool_name="Agent",
+            tool_input={"task_id": task_id, "prompt": "continue", "role": "nope"})
+        ctx.check(f"resume: a clean error, got {result3!r}", result3 is not None and result3.is_error is True)
+        ctx.check(f"resume: names the role, got {result3.content!r}", "nope" in result3.content)
+    finally:
+        mock.stop()
+
+
+@test
 def test_bad_count_and_bad_batch_shapes_are_clear_errors(ctx: Ctx):
     mock = MockUpstream().start()
     try:
@@ -612,6 +703,95 @@ def test_count_or_batch_combined_with_background_is_refused(ctx: Ctx):
                   results[0].data.get("ok") is False and "background" in results[0].data.get("content", "").lower())
     finally:
         mock.stop()
+
+
+# ---- AgentTool.description: live role list, no false depth claim --------
+
+@test
+def test_agent_tool_description_lists_custom_roles_and_drops_the_depth_falsehood(ctx: Ctx):
+    """2.0.2 review finding 33 pin: the tool description every model sees
+    (including an org position told to delegate) used to hardcode a
+    fixed five-role list and the flat claim "Sub-agents cannot spawn
+    further sub-agents" -- false for any org position or `agents.
+    max_depth > 1` session. The role list must be LIVE (a custom role
+    beyond the five built-ins shows up), and the false claim must be
+    gone."""
+    from halo_harness.theme import set_config_value
+    from halo_harness.tools.agent import AgentTool
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="agent-tool-desc-")))
+    set_config_value("roles.my_custom_role", "or:vendor/x")  # role names are [a-z][a-z0-9_]* -- no hyphens
+    desc = AgentTool().description
+    ctx.check(f"a custom role beyond the five built-ins is listed, got a snippet: "
+              f"{desc[desc.index('one of'):desc.index('one of') + 140]!r}", "my_custom_role" in desc)
+    ctx.check(f"the flat 'cannot spawn further' claim is gone, got {desc!r}",
+              "cannot spawn further" not in desc)
+    ctx.check("the batch schema example still renders single braces, not {{...}}",
+              "{prompt, role?, model?, effort?}" in desc and "{{prompt" not in desc)
+
+
+# ---- list_agent_task_rows ordering: pure unit, real on-disk meta.json -----
+
+@test
+def test_list_agent_task_rows_parent_precedes_its_own_nested_child(ctx: Ctx):
+    """2.0.2 review finding 25 pin: `Path.__lt__` compares the PARTS
+    tuple, not the joined string -- `("agent-P", "subagents", "agent-
+    C.meta.json")` sorts BEFORE `("agent-P.meta.json",)`, because the
+    bare folder name "agent-P" (the child's own first path component) is
+    a strict PREFIX of "agent-P.meta.json" (the parent's own filename),
+    and a prefix always sorts before the longer string it prefixes --
+    deterministically, for ANY parent/child pair, regardless of their
+    actual (random) agent ids. Verified empirically on this Python/OS
+    before writing this test. Builds the on-disk layout `_child_log_
+    paths` produces directly (no real Session needed -- `list_agent_
+    task_rows` only reads `session.log.dir`/`session.log.session_id`/
+    `session.log.nodes()` and `session.agent_runtime`)."""
+    from types import SimpleNamespace
+    from halo_harness.agent.subagent import list_agent_task_rows
+
+    root = Path(tempfile.mkdtemp(prefix="task-rows-order-"))
+    top = root / "sess1" / "subagents"
+    top.mkdir(parents=True)
+    (top / "agent-PARENT.meta.json").write_text(
+        json.dumps({"agent_id": "PARENT", "type": "CEO", "status": "running", "started": 100.0}),
+        encoding="utf-8")
+    nested = top / "agent-PARENT" / "subagents"
+    nested.mkdir(parents=True)
+    (nested / "agent-CHILD.meta.json").write_text(
+        json.dumps({"agent_id": "CHILD", "type": "VP", "status": "running", "started": 200.0}),
+        encoding="utf-8")
+
+    session = SimpleNamespace(log=SimpleNamespace(dir=root, session_id="sess1", nodes=lambda: []),
+                               agent_runtime=None)
+    rows = list_agent_task_rows(session)
+    ids = [r["agent_id"] for r in rows]
+    ctx.check(f"both rows present, got {ids}", set(ids) == {"PARENT", "CHILD"})
+    ctx.check(f"the parent precedes its own nested child, got {ids}", ids.index("PARENT") < ids.index("CHILD"))
+    child_row = next(r for r in rows if r["agent_id"] == "CHILD")
+    ctx.check(f"depth/parent_agent_id still correct, got {child_row}",
+              child_row["depth"] == 1 and child_row["parent_agent_id"] == "PARENT")
+
+
+@test
+def test_list_agent_task_rows_siblings_ordered_by_started_not_agent_id(ctx: Ctx):
+    """finding 25's second half: siblings used to sort by whatever order
+    their random agent_ids happened to fall in -- now by `started`."""
+    from types import SimpleNamespace
+    from halo_harness.agent.subagent import list_agent_task_rows
+
+    root = Path(tempfile.mkdtemp(prefix="task-rows-order2-"))
+    top = root / "sess1" / "subagents"
+    top.mkdir(parents=True)
+    # "zzz" started FIRST, "aaa" started SECOND -- alphabetical-by-id
+    # order would get this backwards.
+    (top / "agent-zzz.meta.json").write_text(
+        json.dumps({"agent_id": "zzz", "type": "A", "status": "done", "started": 100.0}), encoding="utf-8")
+    (top / "agent-aaa.meta.json").write_text(
+        json.dumps({"agent_id": "aaa", "type": "B", "status": "done", "started": 200.0}), encoding="utf-8")
+
+    session = SimpleNamespace(log=SimpleNamespace(dir=root, session_id="sess1", nodes=lambda: []),
+                               agent_runtime=None)
+    ids = [r["agent_id"] for r in list_agent_task_rows(session)]
+    ctx.check(f"ordered by started (zzz first), got {ids}", ids == ["zzz", "aaa"])
 
 
 if __name__ == "__main__":

@@ -84,9 +84,14 @@ class McpStatus(ModalScreen):
     def __init__(self, servers: "list[dict]", *, reconnect: Optional[Callable] = None,
                  approve: Optional[Callable] = None, reconnect_all: Optional[Callable] = None,
                  login: Optional[Callable] = None, test: Optional[Callable] = None,
-                 disable: Optional[Callable] = None, resolve_config: Optional[Callable] = None) -> None:
+                 disable: Optional[Callable] = None, resolve_config: Optional[Callable] = None,
+                 refresh: Optional[Callable[[], list]] = None) -> None:
         super().__init__()
         self.servers = servers
+        # 2.0.2 review finding 19: `Controller.list_mcp_servers` (cache-only,
+        # see its own docstring), re-read after any action instead of
+        # guessing a row's new state from the action's own result text.
+        self._refresh = refresh
         self._reconnect = reconnect
         # H3b must-do (unwired seam): completes the `.mcp.json` interactive
         # approval flow -- a "⏸ pending_approval" server would otherwise
@@ -266,6 +271,17 @@ class McpStatus(ModalScreen):
         self._busy_abort = None
         self._busy_name = None
         self._set_hint("\n".join(lines) if isinstance(lines, list) else str(lines))
+        # 2.0.2 review finding 19: this used to flip the row to "connected"
+        # whenever the result text merely CONTAINED that substring, which
+        # also matched "... -- not connected (state=failed)" from a failed
+        # `t`, and never reflected a `d` disable/enable at all (so a second
+        # `d` disabled again instead of enabling). Re-read the real state
+        # from the Controller (`list_mcp_servers` is cache-only, see its own
+        # docstring -- safe to call here on the UI thread) when one was
+        # wired; only a minimal test double with no `refresh` falls back to
+        # the old best-effort substring guess.
+        if self._refresh is not None and self._refresh_rows_from_controller():
+            return
         for entry in self.servers:
             if entry.get("name") == name:
                 if any("connected" in str(l) for l in (lines or [])):
@@ -277,10 +293,43 @@ class McpStatus(ModalScreen):
                     pass
                 break
 
+    def _refresh_rows_from_controller(self) -> bool:
+        """Re-reads every row from `self._refresh` (`Controller.list_mcp_
+        servers`) and rebuilds the option list from the result, preserving
+        the highlighted index. Used after ANY single action (`_apply_
+        result`) and after `R` (`_apply_bulk_result`, finding 19's "`R`
+        refreshes no rows at all") so the dialog always shows the
+        Controller's own truth instead of a locally-guessed state. Returns
+        False (does nothing) when no `refresh` callable was wired or it
+        raised/returned None, so callers can fall back."""
+        if self._refresh is None:
+            return False
+        try:
+            fresh = self._refresh()
+        except Exception:
+            return False
+        if fresh is None:
+            return False
+        self.servers[:] = fresh
+        try:
+            option_list = self.query_one(OptionList)
+        except Exception:
+            return True
+        highlighted = option_list.highlighted
+        option_list.clear_options()
+        if not self.servers:
+            option_list.add_option(Option("No MCP servers configured.", disabled=True))
+        for entry in self.servers:
+            option_list.add_option(Option(_row(entry), id=entry.get("name")))
+        if highlighted is not None and 0 <= highlighted < len(option_list.options):
+            option_list.highlighted = highlighted
+        return True
+
     def _apply_bulk_result(self, lines) -> None:
         self._busy_abort = None
         self._busy_name = None
         self._set_hint("\n".join(lines) if isinstance(lines, list) else str(lines))
+        self._refresh_rows_from_controller()
 
     # ---- i / L: synchronous, local actions -----------------------------
 

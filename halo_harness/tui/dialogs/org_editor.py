@@ -65,7 +65,12 @@ class OrgEditor(ModalScreen):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+s", "save", "Save", show=True),
         Binding("ctrl+n", "add_position", "Add position", show=True),
-        Binding("ctrl+d", "delete_position", "Delete position", show=True),
+        # 2.0.2 review finding 38: Textual's own Input/TextArea bind
+        # ctrl+d to delete-right -- a FOCUSED field (the usual case;
+        # this screen is mostly fields) swallowed ctrl+d before this
+        # screen-level binding ever saw it. `priority=True` makes this
+        # the app's own first refusal, same rung Ctrl+E's own fix uses.
+        Binding("ctrl+d", "delete_position", "Delete position", show=True, priority=True),
         Binding("ctrl+p", "pick_model", "Pick model", show=True),
     ]
     DEFAULT_CSS = """
@@ -189,8 +194,14 @@ class OrgEditor(ModalScreen):
         position.pop("role", None)
         position.pop("model", None)
         if role_or_model:
-            from halo_harness.roles import is_role_name_syntax
-            position["role" if is_role_name_syntax(role_or_model) else "model"] = role_or_model
+            # 2.0.2 review finding 38: `is_role_name_syntax` is a pure
+            # SYNTAX check ([a-z][a-z0-9_]*) -- a bare model alias like
+            # "haiku"/"sonnet" matches it too, so it used to be saved as
+            # position["role"], and the org then failed validation with
+            # "unknown role" (neither is a real role name). Classified
+            # against the live, ACTUALLY-DEFINED role set instead.
+            from halo_harness.roles import known_role_names
+            position["role" if role_or_model in known_role_names() else "model"] = role_or_model
         position["effort"] = effort or None
         position["instructions"] = instructions
         position["reports"] = reports

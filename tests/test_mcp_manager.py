@@ -1473,6 +1473,42 @@ def test_f13_w6a_connect_with_oauth_retry_refreshes_once_then_succeeds(ctx: Ctx)
             os.environ["BRIDGE_TEST_HOME"] = saved_home
 
 
+@test
+def test_run_all_scopes_the_state_dir_when_nothing_set_it_first(ctx: Ctx):
+    """Test hygiene (round B fix pass, notes file): THIS file is exactly
+    the one the notes file names -- a standalone `python tests/test_mcp_
+    manager.py` run used to write fake-server logs into the REAL
+    `~/.halo/mcp/`, because nothing in this file itself (unlike files
+    that call `ensure_scoped_state_dir_once()`/`ensure_default_provider_
+    credentials()` at module level) ever scoped `BRIDGE_TEST_HOME`
+    before a test touched `bridge_home()`. `run_all` itself now does
+    this, before running any test -- checked here by clearing both
+    state-dir vars, running an EMPTY test list through it, and confirming
+    `bridge_home()` resolves under a freshly-made temp dir afterward,
+    never the real machine home."""
+    import tests.helpers.runner as runner_mod
+    from halo_harness.config.paths import bridge_home
+    saved = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_TEST_NO_BACKGROUND_NET")}
+    for k in saved:
+        os.environ.pop(k, None)
+    try:
+        real_home = Path.home() / ".halo"
+        runner_mod.run_all([], Ctx())
+        ctx.check("BRIDGE_TEST_HOME was set by run_all with nothing scoping it before",
+                  bool(os.environ.get("BRIDGE_TEST_HOME")))
+        ctx.check(f"BRIDGE_TEST_NO_BACKGROUND_NET was set too, got {os.environ.get('BRIDGE_TEST_NO_BACKGROUND_NET')!r}",
+                  os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET") == "1")
+        resolved = bridge_home()
+        ctx.check(f"bridge_home() resolves under the scoped temp dir, got {resolved}",
+                  str(resolved) != str(real_home) and str(resolved).startswith(os.environ["BRIDGE_TEST_HOME"]))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

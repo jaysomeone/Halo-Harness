@@ -20,12 +20,15 @@ import argparse
 import sys
 
 # Mirrors cli.py::main's own `if argv and argv[0] == "<name>":` dispatch
-# table, plus the two Halo 2.0.2 additions (roles, completion) this same
-# round introduces.
+# table, plus the Halo 2.0.2 additions this round introduces. 2.0.2
+# review finding 37: `update`, `org` and `setup` were missing outright --
+# `halo <Tab>` never offered them at all. Checked against cli.py::main's
+# own dispatch list by tests/test_completion_cli.py, so this can't drift
+# again unnoticed.
 SUBCOMMANDS = (
-    "proxy", "models", "mcp", "config", "doctor", "work-matrix", "init",
+    "proxy", "models", "mcp", "config", "doctor", "update", "work-matrix", "init",
     "providers", "stats", "improve", "export", "bugreport", "timeline",
-    "worktree", "bg", "roles", "completion",
+    "worktree", "bg", "roles", "org", "setup", "completion",
 )
 
 
@@ -58,6 +61,14 @@ def _completion_data(state_dir=None) -> "tuple[list[str], list[str], list[str]]"
 def _bash_script(subcommands: list, role_names: list, model_refs: list) -> str:
     words = " ".join(subcommands + role_names + model_refs)
     subs = " ".join(subcommands)
+    # 2.0.2 review finding 37: `:` is in bash's own default COMP_WORDBREAKS
+    # -- bash hands `$cur` everything AFTER the last colon (so typing
+    # "or:deep" gives `cur="deep"`), but `compgen -W "...or:deepseek/x..."`
+    # matches against the FULL candidate word including its "or:" prefix,
+    # so a model ref never completed at all. `__ltrim_colon_completions`
+    # (the standard bash-completion idiom for exactly this) trims each
+    # COMPREPLY entry back down to what bash will actually insert after
+    # the last colon in `$cur`.
     return f"""# halo bash completion -- `eval "$(halo completion bash)"`, or save to a
 # file your bash's completion setup sources.
 _halo_completion() {{
@@ -70,13 +81,21 @@ _halo_completion() {{
         return 0
     fi
     COMPREPLY=( $(compgen -W "{words}" -- "$cur") )
+    type __ltrim_colon_completions >/dev/null 2>&1 && __ltrim_colon_completions "$cur"
 }}
 complete -F _halo_completion halo
 """
 
 
 def _zsh_script(subcommands: list, role_names: list, model_refs: list) -> str:
-    words = " ".join(subcommands + role_names + model_refs)
+    # finding 37: zsh's own `_describe` reads `:` as the word/description
+    # separator in each array entry -- a bare model ref like
+    # "or:deepseek/deepseek-chat" was read as word="or", description=
+    # "deepseek/deepseek-chat", so only "or" (never the real ref) was
+    # ever offered/inserted. Escaped as `\:` here, the same way zsh's own
+    # own completion functions escape a literal colon in a candidate.
+    escaped_words = [w.replace(":", "\\:") for w in (subcommands + role_names + model_refs)]
+    words = " ".join(escaped_words)
     subs = " ".join(subcommands)
     return f"""#compdef halo
 # halo zsh completion -- `eval "$(halo completion zsh)"`, or save to a file

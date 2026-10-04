@@ -165,7 +165,15 @@ class BridgeApp(App):
         # focus -- see `_on_key`'s own docstring for how the SECOND
         # keystroke of the chord is then captured.
         Binding("ctrl+p", "command_palette", "Palette", show=False),
-        Binding("ctrl+e", "open_editor", "Editor", show=False),
+        # Round B fix pass (macOS/VS Code terminal item): Textual's own
+        # Input/TextArea bind `ctrl+e` (alongside bare `end`) to "cursor
+        # to end of line" -- with the chat prompt (a TextArea) focused,
+        # the overwhelmingly common case, that widget-level binding used
+        # to win outright and `open_editor` never fired. `priority=True`
+        # (the same rung ctrl+c/ctrl+d/ctrl+x/ctrl+end above already use)
+        # makes this the app's own first refusal, checked before any
+        # focused widget's own bindings.
+        Binding("ctrl+e", "open_editor", "Editor", show=False, priority=True),
         Binding("ctrl+x", "chord_prefix", "Chord", priority=True, show=False),
         # 1.0.1 hotfix 16: re-anchor the transcript to follow new output.
         # `ctrl+end` is `priority=True` since nothing else binds it (always
@@ -288,6 +296,14 @@ class BridgeApp(App):
         self._history_draft = ""
         self._completion_kind = ""
         self._completion_items: "list[str]" = []
+        # 2.0.2 review finding 24: `_complete_role_command_arg`'s model-
+        # ref candidates (`controller.list_models()` -- models.json + the
+        # dbx catalog + the model table) used to be rebuilt on EVERY
+        # keystroke while that argument's popup stayed open. A short TTL
+        # (not tied to popup open/close, which fires from several call
+        # sites) is enough to collapse a typing burst into one real call.
+        self._role_model_cache: "Optional[list]" = None
+        self._role_model_cache_at: float = 0.0
         # U5 scope A: the merged {context: {chord: action}} keymap (our
         # defaults + ~/.claude/keybindings.json), loaded once here (a
         # user editing that file mid-session picks it up on the next
@@ -407,7 +423,17 @@ class BridgeApp(App):
         # status` probe from a previous `halo doctor` run in the same
         # window) is corrected immediately rather than only after the
         # first child this session itself spawns exits.
-        from halo_harness.termtitle import activate_tui_mode, set_terminal_title
+        from halo_harness.termtitle import activate_tui_mode, set_terminal_title, set_tui_driver
+        # 2.0.2 review finding 31: `set_tui_driver` BEFORE the first title
+        # write below -- Textual 8 writes every frame from its own
+        # `textual-output` WriterThread, never the UI thread, so a raw
+        # direct write to `sys.__stdout__` (the old unconditional path)
+        # could land in the middle of a frame's own escape sequence.
+        # While this is set, `emit_osc2`'s default-stream path queues the
+        # OSC sequence through `self._driver.write(...)` instead, so it's
+        # ordered with frames the same way Textual's own OSC 52 write is
+        # (`copy_to_clipboard` above).
+        set_tui_driver(self._driver)
         set_terminal_title("halo")
         # From here on, spawn-site hooks on worker threads only record a
         # claude child's exit; `_drain` re-asserts the title on this (UI)
@@ -501,8 +527,9 @@ class BridgeApp(App):
         # Leaving the TUI: spawn-site hooks go back to re-asserting the
         # title synchronously (print mode and one-shot probes have no
         # drain tick to do it for them).
-        from halo_harness.termtitle import deactivate_tui_mode
+        from halo_harness.termtitle import deactivate_tui_mode, set_tui_driver
         deactivate_tui_mode()
+        set_tui_driver(None)
 
     def _git_branch(self) -> str:
         try:
@@ -1454,6 +1481,8 @@ class BridgeApp(App):
             self._completion_items = [inv for inv, _desc in complete_slash(event.token, self.registry)]
         elif event.kind == "arg":
             self._completion_items = self._complete_role_command_arg(event.token)
+        elif event.kind == "orgarg":
+            self._completion_items = self._complete_org_command_arg(event.token)
         else:
             self._completion_items = complete_at_path(event.token, str(self.cwd))
         self.completion_popup.show(self._completion_items)
@@ -1474,7 +1503,7 @@ class BridgeApp(App):
         cursor column (`current_token`'s own parameters) -- read directly
         off the widget here rather than widening `CompletionQuery` (kept
         a plain 2-field message, unchanged for "slash"/"at")."""
-        from halo_harness.tui.completion import filter_items, role_command_arg_index
+        from halo_harness.tui.completion import filter_items, role_command_arg_index, role_command_args
 
         row, col = self.prompt_input.cursor_location
         line = self.prompt_input.document.get_line(row)
@@ -1488,20 +1517,59 @@ class BridgeApp(App):
                                                 getattr(runtime, "cli_role_overrides", None)))
             return filter_items(candidates, token)
         if arg_index == 1:
-            try:
-                rows = self.controller.list_models()
-            except Exception:
-                rows = []
-            # Real `Controller.list_models()` rows are dicts with a "ref"
-            # key; `testing.fake_controller.FakeController`'s own (a
-            # TUI-pilot-test stand-in, never the real thing) are bare
-            # strings -- both accepted so this never crashes under either.
-            candidates = [r.get("ref") for r in rows if isinstance(r, dict) and r.get("ref")]
-            candidates += [r for r in rows if isinstance(r, str) and r]
-            return filter_items(candidates, token)
-        pieces = re.split(r"[ \t]+", line.strip())
+            # finding 24: cheap time-based cache -- collapses a typing
+            # burst (one keystroke = one completion query) into one real
+            # `list_models()` call instead of rebuilding the whole
+            # models.json + dbx catalog + model table candidate list on
+            # every keystroke while this argument's popup stays open.
+            now = time.monotonic()
+            if self._role_model_cache is None or (now - self._role_model_cache_at) > 2.0:
+                try:
+                    rows = self.controller.list_models()
+                except Exception:
+                    rows = []
+                # Real `Controller.list_models()` rows are dicts with a
+                # "ref" key; `testing.fake_controller.FakeController`'s
+                # own (a TUI-pilot-test stand-in, never the real thing)
+                # are bare strings -- both accepted so this never crashes
+                # under either.
+                candidates = [r.get("ref") for r in rows if isinstance(r, dict) and r.get("ref")]
+                candidates += [r for r in rows if isinstance(r, str) and r]
+                self._role_model_cache = candidates
+                self._role_model_cache_at = now
+            return filter_items(self._role_model_cache, token)
+        # finding 24: `pieces[1]` of the FULL line used to be read as "the
+        # model just typed" -- that's the role name for `/role ... <effort>`
+        # and the literal word "set" for `/roles set ... <effort>`. The
+        # model is always argument 1 (0 = role name) once the command's
+        # own `/role`/`/roles set` prefix is stripped off -- which is
+        # exactly what `role_command_args` (shared with `role_command_arg_
+        # index` above) does.
+        pieces = role_command_args(line) or []
         model_text = pieces[1] if len(pieces) > 1 else ""
         return filter_items(self._effort_levels_for(model_text), token)
+
+    def _complete_org_command_arg(self, token: str) -> "list":
+        """Round B fix pass ("No Tab completion for org/position names in
+        `/org ...`", confirmed): ranks candidates for the org-NAME
+        argument of `/org show|edit|run|load <name> ...` -- every saved
+        organization's own name (`halo_harness.orgs.list_orgs`, the same
+        listing `/org`/`/org list` itself prints)."""
+        from halo_harness.orgs import list_orgs
+        from halo_harness.tui.completion import filter_items
+        try:
+            names = list_orgs(state_dir=getattr(self.controller, "state_dir", None))
+        except Exception:
+            names = []
+        if token in names:
+            # The typed name is ALREADY a complete, exact match -- no
+            # popup needed (and, for `show`/`edit`/`load`, where the name
+            # is the command's own LAST argument, this is also what lets
+            # a follow-up Enter submit normally instead of being read as
+            # "accept the highlighted completion", which `_accept_
+            # completion` never submits for a non-"slash" kind).
+            return []
+        return filter_items(names, token)
 
     def _effort_levels_for(self, model_text: str) -> "list":
         """The effort words a just-typed (possibly partial/invalid) model
@@ -2113,6 +2181,23 @@ class BridgeApp(App):
             )
 
     def action_quit_on_empty(self) -> None:
+        # 2.0.2 review finding 38 (discovered while fixing it): this is an
+        # APP-level `priority=True` binding (see its own BINDINGS comment
+        # above), which Textual checks BEFORE any screen's own priority
+        # bindings -- with a MODAL dialog open (OrgEditor, roles editor,
+        # the MCP entry form, ...), this used to fire FIRST regardless,
+        # either quitting the whole app (chat prompt empty) or editing
+        # the chat prompt's OWN text (deleting a character there) while
+        # the user was focused on a completely different widget in the
+        # dialog -- either way, the dialog's own ctrl+d binding (e.g.
+        # OrgEditor's "delete position") never ran at all. `SkipAction`
+        # tells Textual "this binding declines the key," which lets the
+        # SAME key fall through to the next namespace in the chain (the
+        # modal screen itself) instead of being swallowed here.
+        from textual.actions import SkipAction
+        from textual.screen import ModalScreen
+        if isinstance(self.screen, ModalScreen):
+            raise SkipAction()
         if self.prompt_input.text.strip():
             self.prompt_input.action_delete_right()  # restore TextArea's own Ctrl+D (forward-delete)
         else:

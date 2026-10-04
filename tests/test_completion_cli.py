@@ -94,7 +94,38 @@ def test_zsh_script_contains_subcommands_roles_and_models(ctx: Ctx):
         ctx.check("compdef header present", out.startswith("#compdef halo"))
         ctx.check("contains a built-in subcommand", "roles" in out)
         ctx.check("contains a built-in role name", "researcher" in out)
-        ctx.check("contains a cached model ref", "dbx:databricks-foo" in out)
+        # finding 37: zsh's own `_describe` reads `:` as the word/
+        # description separator, so a literal unescaped "dbx:..." would
+        # never actually complete as one word -- the colon must be
+        # escaped in the generated script.
+        ctx.check(f"the cached model ref's colon is escaped for zsh, got a snippet: "
+                  f"{out[out.index('databricks-foo') - 10:out.index('databricks-foo') + 5]!r}",
+                  "dbx\\:databricks-foo" in out and "dbx:databricks-foo" not in out)
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_subcommands_includes_update_org_and_setup(ctx: Ctx):
+    """2.0.2 review finding 37 pin: `SUBCOMMANDS` was missing `update`,
+    `org` and `setup` outright (verified against cli.py::main's own
+    dispatch table) -- `halo <Tab>` never offered any of the three."""
+    from halo_harness.completion_cli import SUBCOMMANDS
+    for name in ("update", "org", "setup"):
+        ctx.check(f"{name!r} is in SUBCOMMANDS, got {SUBCOMMANDS}", name in SUBCOMMANDS)
+
+
+@test
+def test_bash_script_uses_ltrim_colon_completions(ctx: Ctx):
+    """finding 37: `:` is in bash's own default COMP_WORDBREAKS -- without
+    `__ltrim_colon_completions`, a model ref like "or:vendor/x" never
+    actually completed (compgen matched the full word, bash only ever
+    inserts what comes after the last colon)."""
+    d = _fresh_state_dir("completion-cli-bash-ltrim-")
+    try:
+        rc, out = _run(["bash", "--state-dir", str(d)])
+        ctx.check(f"rc 0, got {rc}", rc == 0)
+        ctx.check("calls __ltrim_colon_completions", "__ltrim_colon_completions" in out)
     finally:
         _clear_state_dir_env()
 

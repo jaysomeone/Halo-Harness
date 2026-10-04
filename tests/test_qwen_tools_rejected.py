@@ -119,6 +119,35 @@ def test_learned_tools_rejected_round_trip(ctx: Ctx):
 
 
 @test
+def test_learned_tools_rejected_expires_after_its_ttl(ctx: Ctx):
+    """2.0.2 review finding 32 pin: a learned "tools_rejected" row never
+    expired before this -- one transient 400 made an endpoint
+    permanently unusable for tools until learned-rules.json was edited
+    by hand. A fresh learn + a hand-aged timestamp past the TTL must
+    read back False (and so does a pre-existing row with NO timestamp
+    at all, as if written before this fix shipped)."""
+    import json
+    from halo_harness.providers.learned_rules import (
+        TOOLS_REJECTED_TTL_S, _key, _path, learn_tools_rejected, learned_tools_rejected, load_learned_rules,
+    )
+    state_dir = Path(tempfile.mkdtemp(prefix="qwen-tools-rejected-ttl-"))
+    learn_tools_rejected(state_dir, "databricks", "my-model")
+    ctx.check("freshly learned reads back True", learned_tools_rejected(state_dir, "databricks", "my-model") is True)
+
+    rules = load_learned_rules(state_dir)
+    rules[_key("databricks", "my-model")]["tools_rejected_at"] -= (TOOLS_REJECTED_TTL_S + 1)
+    _path(state_dir).write_text(json.dumps(rules), encoding="utf-8")
+    ctx.check("expired after the TTL -- re-learned fresh on the next live call",
+              learned_tools_rejected(state_dir, "databricks", "my-model") is False)
+
+    rules2 = load_learned_rules(state_dir)
+    rules2[_key("databricks", "old-model")] = {"tools_rejected": True}  # no timestamp -- pre-fix row shape
+    _path(state_dir).write_text(json.dumps(rules2), encoding="utf-8")
+    ctx.check("a pre-existing row with no timestamp at all is treated as expired, not stuck forever",
+              learned_tools_rejected(state_dir, "databricks", "old-model") is False)
+
+
+@test
 def test_resolve_profile_consults_the_learned_rule_for_an_untabled_endpoint(ctx: Ctx):
     from halo_harness.providers.learned_rules import learn_tools_rejected
     from halo_harness.providers.profiles import reset_model_table_cache, resolve_profile

@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 from tests.helpers.provider_env_defaults import ensure_scoped_state_dir_once
 
 ensure_scoped_state_dir_once()
@@ -539,6 +539,29 @@ def test_relaunch_halo_calls_exec_fn_with_continue_and_never_really_execs(ctx: C
     ctx.check(f"exec_fn was called exactly once, got {calls}", len(calls) == 1)
     ctx.check(f"--continue is in the argv, got {calls[0][1]}", "--continue" in calls[0][1])
     ctx.check(f"the fake exec_fn's own return makes relaunch_halo return too, got {code}", code == 0)
+
+
+@test
+def test_relaunch_halo_on_windows_waits_for_a_real_child_instead_of_execv(ctx: Ctx):
+    """2.0.2 review finding 30 pin: `os.execv` on Windows exits the uv
+    launcher parent along with this process, handing the console back to
+    the shell while the relaunched TUI races it for the same console.
+    With no `exec_fn` given (the real default path) on this win32 test
+    box, `relaunch_halo` must go through `call_fn` (`subprocess.call` by
+    default) and `sys.exit` with its return code -- never `os.execv`."""
+    if sys.platform != "win32":
+        raise SkipTest("this pins the Windows-only default path")
+    calls = []
+
+    def fake_call(argv):
+        calls.append(argv)
+        return 7
+    try:
+        upd.relaunch_halo(["--continue"], call_fn=fake_call)
+        ctx.check("relaunch_halo must not return normally here", False)
+    except SystemExit as e:
+        ctx.check(f"call_fn was used (never os.execv), got {calls}", len(calls) == 1 and "--continue" in calls[0])
+        ctx.check(f"sys.exit carried call_fn's own return code, got {e.code}", e.code == 7)
 
 
 if __name__ == "__main__":

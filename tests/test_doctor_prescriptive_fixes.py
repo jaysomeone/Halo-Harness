@@ -39,16 +39,30 @@ def _run(argv, home: Path, timeout=30):
 def _isolated(fn):
     """Run `fn()` with BRIDGE_TEST_HOME pointed at a fresh temp home and a
     definitive (not-logged-in) BRIDGE_TEST_CC_AUTH_STATUS, restoring both
-    env vars afterward."""
+    env vars afterward.
+
+    Test hygiene (round B fix pass): a stray `BRIDGE_STATE_DIR` already
+    set in the invoking shell (exactly what WORKER-RULES has every worker
+    export for every OTHER hermetic run, `bridge_home()` resolves it
+    first) used to outrank the fresh `BRIDGE_TEST_HOME` this sets,
+    silently reusing WHATEVER `state_dir_both_exist_nonempty()` sees
+    there instead of this call's own fresh home -- `test_state_dir_
+    migration_check_warns_only_when_both_exist_nonempty` failed this way
+    (verified: passes with `BRIDGE_STATE_DIR` unset, fails with it set to
+    an unrelated scratch dir). Cleared here too, same save/restore
+    pattern as the other two."""
     home = _fresh_home()
     old_home = os.environ.get("BRIDGE_TEST_HOME")
+    old_state_dir = os.environ.get("BRIDGE_STATE_DIR")
     old_auth = os.environ.get("BRIDGE_TEST_CC_AUTH_STATUS")
     os.environ["BRIDGE_TEST_HOME"] = str(home)
+    os.environ.pop("BRIDGE_STATE_DIR", None)
     os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
     try:
         return fn(home)
     finally:
-        for var, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_TEST_CC_AUTH_STATUS", old_auth)):
+        for var, old in (("BRIDGE_TEST_HOME", old_home), ("BRIDGE_STATE_DIR", old_state_dir),
+                          ("BRIDGE_TEST_CC_AUTH_STATUS", old_auth)):
             if old is not None:
                 os.environ[var] = old
             else:

@@ -74,6 +74,58 @@ def test_role_command_arg_index_none_for_unrelated_lines(ctx: Ctx):
 
 
 @test
+def test_role_command_args_strips_either_prefix_to_the_same_shape(ctx: Ctx):
+    """2.0.2 review finding 24 pin: `tui/app.py::_complete_role_command_
+    arg` used to read `pieces[1]` of the UN-stripped line as "the model
+    just typed" -- the role name for `/role ...` and the literal word
+    "set" for `/roles set ...`, never the model either way. Both forms
+    must strip down to the SAME argument pieces."""
+    from halo_harness.tui.completion import role_command_args
+    ctx.check("/role form", role_command_args("/role coder or:x hi") == ["coder", "or:x", "hi"])
+    ctx.check("/roles set form, same pieces", role_command_args("/roles set coder or:x hi") == ["coder", "or:x", "hi"])
+    ctx.check("unrelated line -> None", role_command_args("hello /role x") is None)
+    ctx.check("bare command, no args yet -> []", role_command_args("/role ") == [])
+    ctx.check("no trailing space at all -> None", role_command_args("/role") is None)
+
+
+# ---- org_command_arg_index / current_token's "orgarg" kind -----------------
+
+@test
+def test_org_command_arg_index_detects_only_the_name_argument(ctx: Ctx):
+    """Round B fix pass: `/org show|edit|run|load <name> ...` -- the
+    org-NAME argument only (index 0); a later argument (`run`'s own
+    goal text) reports `None`, there's nothing to complete there."""
+    from halo_harness.tui.completion import org_command_arg_index
+    cases = [
+        ("/org show comp", 14, 0),
+        ("/org edit comp", 14, 0),
+        ("/org run comp", 13, 0),
+        ("/org load comp", 14, 0),
+        ("/org run company \"go", 20, None),   # into the goal text -- nothing to complete
+        ("/org run company ", 17, None),       # finished the name, about to type the goal
+    ]
+    for text, pos, expected in cases:
+        got = org_command_arg_index(text, pos)
+        ctx.check(f"{text!r} @ {pos} -> {expected}, got {got}", got == expected)
+
+
+@test
+def test_org_command_arg_index_none_for_unrelated_lines(ctx: Ctx):
+    from halo_harness.tui.completion import org_command_arg_index
+    for text, pos in (("/org", 4), ("/org list", 9), ("/org new comp", 13), ("hello /org show x", 17)):
+        ctx.check(f"{text!r} is not a /org show|edit|run|load line, got {org_command_arg_index(text, pos)!r}",
+                  org_command_arg_index(text, pos) is None)
+
+
+@test
+def test_current_token_reports_orgarg_kind_for_the_org_name_argument(ctx: Ctx):
+    from halo_harness.tui.completion import current_token
+    kind, _start, token = current_token("/org show comp", 14)
+    ctx.check(f"kind is orgarg, got {kind!r}", kind == "orgarg")
+    ctx.check(f"token is the partial name, got {token!r}", token == "comp")
+
+
+@test
 def test_current_token_reports_arg_kind_for_role_command_arguments(ctx: Ctx):
     from halo_harness.tui.completion import current_token
     kind, start, token = current_token("/role cod", 9)

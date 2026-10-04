@@ -105,6 +105,44 @@ def test_roles_template_show_unknown_name_is_a_clean_error(ctx: Ctx):
 
 
 @test
+def test_roles_template_edit_with_a_multi_word_editor_does_not_crash(ctx: Ctx):
+    """2.0.2 review finding 36 pin: `EDITOR="code --wait"` used to be
+    passed to `subprocess.call` as a SINGLE argv[0] (the literal string
+    "code --wait", space included), raising an uncaught
+    `FileNotFoundError`. `subprocess.call` is swapped out (via the
+    module's own `subprocess` name) so this stays hermetic -- never
+    launches a real editor -- while still proving the actual argv
+    `roles_cli.py` builds."""
+    import halo_harness.roles_cli as roles_cli_mod
+    _fresh_state_dir("roles-cli-edit-")
+    old_editor = os.environ.get("EDITOR")
+    os.environ["EDITOR"] = "code --wait"
+    captured = {}
+
+    class _FakeSubprocess:
+        @staticmethod
+        def call(argv):
+            captured["argv"] = argv
+            return 0
+    real_subprocess = roles_cli_mod.subprocess
+    roles_cli_mod.subprocess = _FakeSubprocess
+    try:
+        rc, _out, err = _run(["template", "edit", "my-template"])
+        ctx.check(f"no crash, exit 0, got rc={rc} err={err!r}", rc == 0)
+        argv = captured.get("argv")
+        ctx.check(f"'--wait' is its own argv element, got {argv}", argv is not None and "--wait" in argv)
+        ctx.check(f"argv[0] is never the literal 'code --wait' string, got {argv}",
+                  argv is not None and argv[0] != "code --wait")
+    finally:
+        roles_cli_mod.subprocess = real_subprocess
+        if old_editor is None:
+            os.environ.pop("EDITOR", None)
+        else:
+            os.environ["EDITOR"] = old_editor
+        _clear_state_dir_env()
+
+
+@test
 def test_roles_unknown_top_level_subcommand(ctx: Ctx):
     rc, _out, err = _run(["notasubcommand"])
     ctx.check(f"non-zero exit, got {rc}", rc == 2)

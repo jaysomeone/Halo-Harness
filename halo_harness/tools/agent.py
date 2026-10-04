@@ -12,21 +12,32 @@ from __future__ import annotations
 
 from halo_harness.tools.base import Tool, ToolContext, ToolResult
 
+#  2.0.2 review finding 33: `{role_names}` is interpolated live (`AgentTool.
+#  description`, below) from `roles.known_role_names()` -- the fixed five-
+#  name list this used to hardcode went stale the moment a custom role
+#  (config.json/team.json/a loaded template) existed. The old flat claim
+#  "Sub-agents cannot spawn further sub-agents" was also simply false for
+#  an org position or any `agents.max_depth > 1` session -- softened to
+#  something true at every depth, rather than trying to interpolate the
+#  exact number here too (`effective_max_depth` needs a live `AgentRuntime`
+#  no tool-description property has access to).
 DESCRIPTION = (
     "Launch a sub-agent to handle a complex, multi-step task autonomously. Give it a clear "
     "`description` (3-5 words) and a self-contained `prompt` -- the sub-agent has no memory of this "
     "conversation, so include everything it needs. `subagent_type` picks which agent definition runs "
-    "(default \"general-purpose\"); `model` overrides which model it uses; `role` (one of orchestrator, "
-    "coder, reviewer, researcher, small) resolves the model from the configured role table instead, "
+    "(default \"general-purpose\"); `model` overrides which model it uses; `role` (one of {role_names}) "
+    "resolves the model from the configured role table instead, "
     "overriding the agent's own default role for just this call; `effort` overrides the reasoning effort "
     "sent for this call. `run_in_background=true` starts it without blocking this turn -- its result is "
     "reported to you as a notice once it finishes. Pass `task_id` (from an earlier <task_result>) to "
-    "resume that same sub-agent with more context instead of starting a new one. Sub-agents cannot spawn "
-    "further sub-agents. Pass `org` (an organization name from `halo org list`) instead of `subagent_type` "
+    "resume that same sub-agent with more context instead of starting a new one. A sub-agent may itself "
+    "delegate further (through its own Agent calls, or an org position's own reports) up to this "
+    "session's own depth limit -- `/tasks` shows how deep any given run has gone. Pass `org` (an "
+    "organization name from `halo org list`) instead of `subagent_type` "
     "to run that organization's root position on `prompt` as its goal -- it delegates through this same "
     "tool to its own positions, each restricted to the positions it reports to; the final result flows "
     "back the same way a plain sub-agent's does. You may spawn several agents in one call: `count` runs "
-    "N identical copies of `prompt`; `batch` takes a list of `{prompt, role?, model?, effort?}` objects, "
+    "N identical copies of `prompt`; `batch` takes a list of `{{prompt, role?, model?, effort?}}` objects, "
     "one per agent. Either way you get ONE combined result, one section per agent, in the order they were "
     "spawned; `/tasks` (or Ctrl+T) shows every one of them, including any still queued behind the "
     "concurrency cap, while they run. `count`/`batch` cannot be combined with `run_in_background`."
@@ -85,7 +96,12 @@ class AgentTool(Tool):
     @property
     def description(self) -> str:
         from halo_harness.orgs import orgs_mode_enabled
-        return DESCRIPTION if orgs_mode_enabled() else _DESCRIPTION_NO_ORG
+        from halo_harness.roles import known_role_names
+        text = DESCRIPTION if orgs_mode_enabled() else _DESCRIPTION_NO_ORG
+        # finding 33: the real, LIVE role list (built-ins + whatever
+        # custom roles config.json/team.json/a loaded template add right
+        # now) -- never the fixed five names this used to hardcode.
+        return text.format(role_names=", ".join(known_role_names()))
 
     @property
     def input_schema(self) -> dict:

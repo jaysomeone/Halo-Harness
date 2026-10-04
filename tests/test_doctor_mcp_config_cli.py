@@ -122,6 +122,33 @@ def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
 
 
 @test
+def test_doctor_lists_probable_test_leftovers_in_mcp_log_dir(ctx: Ctx):
+    """Test hygiene (round B fix pass, notes file): the REAL `~/.halo/
+    mcp/` on the build host held `a.log`/`b.log`/`c.log`/`big.log`/
+    `crash.log`/`eager1.log` (older standalone-test leftovers) and
+    `fake.log`/`fake.log.1`/a `plugin_*fakeserver.log` -- `halo doctor`
+    now lists any of these as probable leftovers, safe to delete, never
+    as a MISSING (nothing is actually broken)."""
+    from halo_harness.doctor import WARN, _check_test_leftovers
+    state_dir = Path(tempfile.mkdtemp(prefix="doctor-leftovers-"))
+    ctx.check("no mcp dir at all -> no entry", _check_test_leftovers(state_dir) is None)
+
+    mcp_dir = state_dir / "mcp"
+    mcp_dir.mkdir()
+    (mcp_dir / "my-real-server.log").write_text("real", encoding="utf-8")
+    ctx.check("only a real-looking log -> still no entry", _check_test_leftovers(state_dir) is None)
+
+    for name in ("a.log", "crash.log", "fake.log", "fake.log.1", "plugin_demo_fakeserver.log"):
+        (mcp_dir / name).write_text("x", encoding="utf-8")
+    line = _check_test_leftovers(state_dir)
+    ctx.check(f"a WARN naming the matched files, got {line!r}", line is not None and line.startswith(WARN))
+    for name in ("a.log", "crash.log", "fake.log", "fake.log.1", "plugin_demo_fakeserver.log"):
+        ctx.check(f"{name} is named, got {line!r}", name in line)
+    ctx.check(f"the real-looking log is NOT flagged, got {line!r}", "my-real-server.log" not in line)
+    ctx.check(f"informational wording, safe-to-delete, got {line!r}", "safe to delete" in line)
+
+
+@test
 def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
     """H9 OpenCode item 23: doctor must ALSO check for `rg`, `$VISUAL`/
     `$EDITOR` and a usable Bash shell (Git Bash on win32, `/bin/bash` on

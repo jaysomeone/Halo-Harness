@@ -148,6 +148,27 @@ def test_leak_parser_missing_tool_call_opener(ctx: Ctx):
 
 
 @test
+def test_missing_tool_call_opener_is_fast_on_a_long_brace_heavy_answer(ctx: Ctx):
+    """2.0.2 review finding 35 pin: `(\\{.*?\\})\\s*</tool_call>` tried
+    every single `{` in the text as a candidate match start when there
+    was no `</tool_call>` anywhere at all -- O(n x braces), measured at
+    0.77s for 68KB and 4.8s for 170KB of code-like text, and this runs
+    at the end of EVERY tool-less Qwen turn. A 200KB brace-heavy answer
+    with no `</tool_call>` must now finish in well under a second (the
+    fix anchors the opening brace to the real shape, `{"name"...`, which
+    a plain code snippet essentially never starts with)."""
+    profile = _profile("openrouter", "qwen/qwen3-coder")
+    chunk = 'def f(x):\n    return {"a": x, "b": {"c": 1, "d": [1, 2, 3]}}\n'
+    text = chunk * (200_000 // len(chunk))  # ~200KB, brace-heavy, no </tool_call> anywhere
+    ctx.check("no </tool_call> in the benchmark text (the pathological case)", "</tool_call>" not in text)
+    t0 = time.monotonic()
+    got = hooks.leak_parser(text, profile)
+    elapsed = time.monotonic() - t0
+    ctx.check(f"finishes in well under a second, got {elapsed:.3f}s", elapsed < 1.0)
+    ctx.check("no leak found (there genuinely isn't one)", got is None)
+
+
+@test
 def test_leak_parser_python_repr_args(ctx: Ctx):
     """Declared by every Qwen row but never implemented until now --
     agno#10231's own shape: a BARE Python-dict-literal call, single quotes

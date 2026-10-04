@@ -1010,6 +1010,23 @@ def _hydrate_tasks_from_disk(runtime: AgentRuntime) -> None:
             }
 
 
+def _invalid_role_error(role: "Optional[str]") -> "Optional[str]":
+    """2.0.2 review finding 22: `None` when `role` is unset or a KNOWN
+    role name; otherwise an error string listing the known roles. Shared
+    by every `Agent(role=...)` surface (single call, batch/count fan-out
+    items, and task resume) -- none of them checked this before, so a
+    typo'd role silently fell through to resolving against the session
+    model instead of erroring the way an unknown `subagent_type` already
+    does."""
+    if not role:
+        return None
+    from halo_harness.roles import known_role_names
+    known = known_role_names()
+    if role in known:
+        return None
+    return f"Unknown role {role!r}. Known roles: {', '.join(known)}"
+
+
 def _prepare_fanout_jobs(spec: AgentSpec, tool_input: dict) -> "tuple[Optional[list], Optional[str]]":
     """Parses `count`/`batch` into a list of per-job dicts (`prompt`,
     `role`, `model`, `effort`, `description`) -- `(jobs, None)` on
@@ -1025,9 +1042,19 @@ def _prepare_fanout_jobs(spec: AgentSpec, tool_input: dict) -> "tuple[Optional[l
         for i, item in enumerate(batch):
             if not isinstance(item, dict) or not item.get("prompt"):
                 return None, f"batch[{i}] must be an object with a non-empty 'prompt' field"
+            item_role = item.get("role") or tool_input.get("role")
+            # finding 22: an unknown role in a batch item (or the shared
+            # top-level one) used to silently resolve to the session model.
+            role_error = _invalid_role_error(item_role)
+            if role_error is not None:
+                return None, f"batch[{i}]: {role_error}"
             jobs.append({
-                "prompt": item["prompt"], "role": item.get("role") or tool_input.get("role"),
-                "model": item.get("model") or tool_input.get("model"), "effort": item.get("effort"),
+                "prompt": item["prompt"], "role": item_role,
+                "model": item.get("model") or tool_input.get("model"),
+                # 2.0.2 review finding 21: a batch item used to drop the
+                # top-level `effort` entirely when it had none of its own,
+                # although docs/SUBAGENTS.md says it falls back.
+                "effort": item.get("effort") or tool_input.get("effort"),
                 "description": (item.get("description") or description)[:60],
             })
         return jobs, None
@@ -1042,8 +1069,13 @@ def _prepare_fanout_jobs(spec: AgentSpec, tool_input: dict) -> "tuple[Optional[l
     prompt = tool_input.get("prompt") or spec.initial_prompt or description
     if not prompt:
         return None, "The prompt parameter is required"
+    role_error = _invalid_role_error(tool_input.get("role"))  # finding 22
+    if role_error is not None:
+        return None, role_error
     jobs = [{"prompt": prompt, "role": tool_input.get("role"), "model": tool_input.get("model"),
-             "effort": None, "description": description[:60]} for _ in range(n)]
+             # finding 21: `count` used to ignore the call's own `effort`
+             # outright -- every job got `None` regardless of what was asked.
+             "effort": tool_input.get("effort"), "description": description[:60]} for _ in range(n)]
     return jobs, None
 
 
@@ -1138,7 +1170,17 @@ def _run_agent_fanout(*, runtime: AgentRuntime, spec: AgentSpec, tool_id: str, t
     for i, ((_agent_id, new_task_id, _job), (text, is_error)) in enumerate(zip(prepared, results, strict=True)):
         any_error = any_error or is_error
         sections.append(f"--- child {i + 1}/{n} (task_id={new_task_id}) ---\n{text}")
-    return all_events, ToolResult("\n\n".join(sections), is_error=any_error)
+    # 2.0.2 review finding 27: each section is individually uncapped
+    # (`AgentTool.result_cap=None` -- "this tool manages its own
+    # truncation", unlike every other tool, which `spill_and_truncate`
+    # in agent/loop.py caps generically) -- `count=50` could return
+    # ~1.5M chars in one tool_result. Capped the same way the single-
+    # spawn/resume paths already cap THEIR own result (`RESULT_CAP`,
+    # head/tail + a spill file for the full combined text).
+    from halo_harness.tools.truncate import spill_and_truncate
+    combined = spill_and_truncate("\n\n".join(sections), cap=RESULT_CAP,
+                                   session_dir=parent.log.dir / parent.log.session_id, tool_use_id=tool_id)
+    return all_events, ToolResult(combined, is_error=any_error)
 
 
 def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: str, new_task_id: str,
@@ -1334,6 +1376,12 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
     # rollup's own `stats --roles` tag) mirrors exactly what `resolve_agent_
     # model` inside `_build_child_session` resolves the role AGAINST.
     role_override = tool_input.get("role")
+    # finding 22: a typo'd/unknown `Agent(role=...)` used to silently
+    # resolve against the session model instead of erroring the way an
+    # unknown subagent_type already does.
+    role_error = _invalid_role_error(role_override)
+    if role_error is not None:
+        return [], ToolResult(role_error, is_error=True)
     role_name = role_override or spec.role
     # Halo 2.0.2 round 3 (brief C): `Agent(effort=...)` overrides this
     # agent's own file/role/parent-inherited effort for just this one
@@ -1716,6 +1764,15 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
         parent=runtime.parent, agents=position_agent_specs(org, goal_task_id=goal_task_id), routes=runtime.routes,
         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides, depth=runtime.depth,
         tasks=runtime.tasks, lock=runtime.lock,
+        # 2.0.2 review finding 29: shared with the CALLER's own runtime
+        # (never the usual "fresh dict per runtime" -- `org_runtime` is a
+        # throwaway wrapper for spawning the org's root position through
+        # the ordinary `run_agent_call` path, not a real nested child
+        # session) so the tasks panel's own `_walk_live_children(session.
+        # agent_runtime)` can actually see the org's root position (and,
+        # transitively, every descendant) while it runs, and `cc_runtime.
+        # close_cc()` on quit reaches any `cc:` position inside it too.
+        live_children=runtime.live_children,
         # 2.0.2 review finding 9 part b: RELATIVE to the caller's own
         # depth, never absolute -- `org_tree_depth(org) + 1` alone (the
         # old code) ignored `runtime.depth` entirely, so an org started
@@ -1816,6 +1873,11 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
     # V2c (H15): a resume may itself carry a fresh `role=` override; else
     # this resumed call keeps resolving against the SAME agent's own role.
     role_override = tool_input.get("role")
+    # finding 22: same check as the single-spawn path above -- a resume's
+    # own fresh `role=` override was never validated either.
+    role_error = _invalid_role_error(role_override)
+    if role_error is not None:
+        return [], ToolResult(role_error, is_error=True)
     role_name = role_override or spec.role
     # Finding 5: the SAME hard-stop-before-spawn check run_agent_call's
     # single-spawn path already makes -- a resume used to skip org
@@ -1997,7 +2059,18 @@ def list_agent_task_rows(session) -> list:
     runtime = getattr(session, "agent_runtime", None)
     if runtime is not None:
         live_by_id = dict(_walk_live_children(runtime))
-    for meta_path in sorted(top_subdir.rglob("agent-*.meta.json")):
+    # 2.0.2 review finding 25: `Path.__lt__` compares the PARTS tuple, not
+    # the joined string -- `("agent-P", "subagents", "agent-C.meta.json")`
+    # sorts BEFORE `("agent-P.meta.json",)` (a tuple whose first element,
+    # the bare folder name "agent-P", is a strict PREFIX of the sibling's
+    # first element "agent-P.meta.json", and a prefix always sorts before
+    # the longer string it prefixes) -- every child's own meta.json used
+    # to sort ahead of its own parent's, and siblings sorted by whatever
+    # order their random agent_ids happened to fall in. Collected here in
+    # whatever order `rglob` yields (not meaningful either way) and
+    # reordered into parent-before-children, `started`-ordered siblings
+    # right before returning, below.
+    for meta_path in top_subdir.rglob("agent-*.meta.json"):
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -2040,4 +2113,40 @@ def list_agent_task_rows(session) -> list:
             "cost_usd": cost, "started": started, "elapsed_s": elapsed, "depth": depth,
             "parent_agent_id": parent_agent_id, "log_path": str(log_path),
         })
-    return rows
+    return _order_task_rows_by_tree(rows)
+
+
+def _order_task_rows_by_tree(rows: list) -> list:
+    """finding 25: parent-before-children, pre-order; siblings (and every
+    root) ordered by `started` (missing/non-numeric sorts last, agent_id
+    as a stable tiebreak so the order is deterministic run to run)."""
+    by_parent: "dict[Optional[str], list]" = {}
+    for row in rows:
+        by_parent.setdefault(row.get("parent_agent_id"), []).append(row)
+
+    def _sort_key(row: dict):
+        started = row.get("started")
+        return (0, started) if isinstance(started, (int, float)) else (1, row["agent_id"])
+    for children in by_parent.values():
+        children.sort(key=_sort_key)
+
+    ordered: list = []
+    seen: set = set()
+
+    def _walk(row: dict) -> None:
+        if row["agent_id"] in seen:
+            return  # a malformed/cyclic parent_agent_id must never infinite-loop this
+        seen.add(row["agent_id"])
+        ordered.append(row)
+        for child in by_parent.get(row["agent_id"], []):
+            _walk(child)
+    for root in by_parent.get(None, []):
+        _walk(root)
+    # Any row whose own parent_agent_id didn't match a REAL row in this
+    # same batch (the parent finished and its meta.json was cleaned up
+    # mid-scan, or any other inconsistency) is still shown, appended at
+    # the end rather than silently dropped.
+    for row in rows:
+        if row["agent_id"] not in seen:
+            _walk(row)
+    return ordered

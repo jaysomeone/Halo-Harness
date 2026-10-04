@@ -68,6 +68,21 @@ it as `queued` immediately (a `subagent_queued` event fires for every
 job up front, in spawn order, before the pool has even looked at any of
 them) and it **starts as a slot frees**, in the order it was spawned.
 
+The cap is **session-wide** (or org-wide for an org run), not per-call:
+two separate `count`/`batch` calls in the same turn, or a nested
+delegation chain, share the SAME counter, so they can never multiply
+past the configured limit between them. The counter is also
+**resizable** -- the limit is re-read from `agents.max_concurrent` (or
+the org's own override) at every single spawn, not fixed once when the
+session started, so a config change made mid-session (`/config`, or
+`/setup`) applies starting with the very next spawn rather than only
+the next session. A parent that is itself waiting on its own children
+gives its slot back for the duration of that wait, and each child takes
+a real slot of its own -- without this, a cap smaller than the nesting
+depth (e.g. `agents.max_concurrent: 1` with a parent delegating to a
+child that delegates again) would deadlock: the parent would block
+holding its slot while waiting for a child that can never acquire one.
+
 ## `count` / `batch`: several sub-agents in one Agent-tool call
 
 The Agent tool accepts two extra, mutually-exclusive parameters:

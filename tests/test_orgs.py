@@ -366,6 +366,49 @@ def test_run_org_call_max_depth_is_relative_to_callers_own_depth(ctx: Ctx):
 
 
 @test
+def test_run_org_call_shares_live_children_with_the_callers_runtime(ctx: Ctx):
+    """2.0.2 review finding 29 pin: `org_runtime` used to get the usual
+    FRESH `live_children` dict every `AgentRuntime` gets by default --
+    so `_walk_live_children(session.agent_runtime)` (the tasks panel's
+    own live-cost/phase lookup, and `close_cc()` on quit) could never
+    see the org's root position or any of its descendants while running,
+    because the root position is registered in `org_runtime.live_
+    children`, a dict the SESSION's own runtime never reaches. Fixed by
+    sharing the SAME dict object -- checked here by identity, not just
+    equality (two separate empty dicts would also compare equal)."""
+    from halo_harness.agent.subagent import AgentRuntime, run_org_call
+    import halo_harness.agent.subagent as subagent_mod
+    from halo_harness.orgs import ensure_builtin_orgs
+    base = Path(tempfile.mkdtemp(prefix="orgs-live-children-cwd-"))
+    state_dir = Path(tempfile.mkdtemp(prefix="orgs-live-children-state-"))
+    ensure_builtin_orgs(state_dir=state_dir)
+    captured = {}
+
+    def fake_run_agent_call(*, runtime, tool_id, tool_input, tool_name, on_event=None):
+        captured["live_children"] = runtime.live_children
+        from halo_harness.tools.base import ToolResult
+        return [], ToolResult("ok")
+    orig = subagent_mod.run_agent_call
+    subagent_mod.run_agent_call = fake_run_agent_call
+    old_state_dir_env = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)
+    try:
+        parent = _FakeParent(base, state_dir)
+        runtime = AgentRuntime(parent=parent)
+        _events, result = run_org_call(runtime=runtime, tool_id="t1", tool_name="Agent",
+                                        tool_input={"org": "solo", "prompt": "go"})
+        ctx.check(f"not refused, got {result.content}", not result.is_error)
+        ctx.check("the org runtime's live_children IS the caller's own dict (same object)",
+                  captured.get("live_children") is runtime.live_children)
+    finally:
+        subagent_mod.run_agent_call = orig
+        if old_state_dir_env is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir_env
+
+
+@test
 def test_run_org_call_refuses_when_caller_already_at_its_depth_cap(ctx: Ctx):
     """2.0.2 review finding 9 (major) part a pin: a sub-agent already at
     ITS OWN depth cap used to still be able to START a whole org tree

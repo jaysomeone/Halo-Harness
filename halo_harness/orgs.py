@@ -105,7 +105,18 @@ def parse_run_args(rest: str) -> "tuple[Optional[str], str]":
         body = rest[1:]
         return None, (body[:-1] if body.endswith(quote) else body).strip()
     name, _, goal = rest.partition(" ")
-    return (name or None), goal.strip()
+    # 2.0.2 review finding 39: the documented `/org run <name> "<goal>"`
+    # form used to keep the quotes on THIS branch (the no-name branch just
+    # above already strips them) -- the goal was sent to the model, and
+    # written to the task board, wrapped in literal quote characters.
+    return (name or None), _strip_one_quote_pair(goal)
+
+
+def _strip_one_quote_pair(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] in "\"'" and text[-1] == text[0]:
+        return text[1:-1].strip()
+    return text
 
 
 def find_position(org: dict, title: str) -> "Optional[dict]":

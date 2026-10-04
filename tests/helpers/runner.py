@@ -132,7 +132,26 @@ def run_all(tests: list, ctx: Ctx):
     """Run every (name, fn) in `tests` against `ctx`, catching SkipTest ->
     SKIP, AssertionError -> FAIL (message only), anything else -> FAIL
     (with a short traceback). Returns (results, passed, failed, skipped)
-    exactly like test_bridge.py's own run_all."""
+    exactly like test_bridge.py's own run_all.
+
+    Test hygiene (round B fix pass, notes file): running one test_*.py
+    module directly (`python tests/test_x.py`) is NOT hermetic by
+    itself -- only `tests/run_all.py`'s own top-level scoping protected a
+    module that never calls `ensure_scoped_state_dir_once()`/`ensure_
+    default_provider_credentials()` itself. A standalone run of the MCP
+    manager tests wrote fake-server logs into the REAL `~/.halo/mcp/`
+    this way (found and removed 2026-10-03). Every test_*.py file's own
+    `__main__` block calls this SAME function, whether run standalone or
+    via `tests/run_all.py` -- scoping it here, before any test actually
+    runs, covers both: `BRIDGE_TEST_HOME` only when NEITHER state-dir var
+    is already set (never clobbers a more specific scheme a file/earlier
+    import already put in place -- same no-op rule `ensure_scoped_state_
+    dir_once` itself documents), `BRIDGE_TEST_NO_BACKGROUND_NET` via
+    `setdefault` (never overrides a file that deliberately sets it to
+    something else first)."""
+    from tests.helpers.provider_env_defaults import ensure_scoped_state_dir_once
+    ensure_scoped_state_dir_once()
+    os.environ.setdefault("BRIDGE_TEST_NO_BACKGROUND_NET", "1")
     results = []
     passed = failed = skipped = 0
     for name, fn in tests:

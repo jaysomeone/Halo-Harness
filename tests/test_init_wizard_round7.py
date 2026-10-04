@@ -95,6 +95,29 @@ def test_compute_builtin_role_presets_shapes(ctx: Ctx):
 
 
 @test
+def test_cheapest_model_entry_skips_free_negative_and_toolless(ctx: Ctx):
+    """2.0.2 review finding 28 pin: no price/tool-support floor at all
+    used to mean a $0 `:free` model or a negative-priced router entry
+    (OpenRouter's own `openrouter/auto` reports "-1") could win outright
+    and become `researcher`/`small` -- which then fails every call."""
+    import halo_harness.roles as roles_mod
+    entries = [
+        {"ref": "or:openrouter/auto", "price_in_per_m": -1, "supported_parameters": ["tools"]},
+        {"ref": "or:vendor/free", "price_in_per_m": 0, "supported_parameters": ["tools"]},
+        {"ref": "or:vendor/toolless", "price_in_per_m": 0.1, "supported_parameters": ["reasoning"]},
+        {"ref": "or:vendor/real", "price_in_per_m": 0.5, "supported_parameters": ["tools"]},
+        {"ref": "or:vendor/unknown-support", "price_in_per_m": 2.0},  # no field at all -- fail-open
+    ]
+    old = roles_mod._configured_model_entries
+    roles_mod._configured_model_entries = lambda state_dir=None: entries
+    try:
+        ctx.check("picks the real, positively-priced, tool-capable entry (cheapest of the two valid ones)",
+                  roles_mod._cheapest_model_entry() == "or:vendor/real")
+    finally:
+        roles_mod._configured_model_entries = old
+
+
+@test
 def test_ensure_builtin_role_presets_never_overwrites(ctx: Ctx):
     from halo_harness.roles import ensure_builtin_role_presets, load_role_template, save_role_template
     state_dir = Path(tempfile.mkdtemp(prefix="roles-presets-noclobber-"))
@@ -143,9 +166,26 @@ def test_parse_run_args_quoted_goal_means_no_name(ctx: Ctx):
     from halo_harness.orgs import parse_run_args
     ctx.check("quoted-only -> (None, goal)", parse_run_args('"fix the thing"') == (None, "fix the thing"))
     ctx.check("single-quoted too", parse_run_args("'fix the thing'") == (None, "fix the thing"))
-    ctx.check("name then goal -> (name, goal)",
-              parse_run_args('release-flow "fix the thing"') == ("release-flow", '"fix the thing"'))
+    # 2.0.2 review finding 39: the name+goal branch used to KEEP the
+    # quotes (unlike the quoted-only branch just above, which already
+    # strips them) -- the goal reached the model and the task board
+    # wrapped in literal quote characters.
+    ctx.check("name then goal -> quotes stripped from the goal too",
+              parse_run_args('release-flow "fix the thing"') == ("release-flow", "fix the thing"))
     ctx.check("empty input -> (None, '')", parse_run_args("") == (None, ""))
+
+
+@test
+def test_parse_run_args_only_strips_a_real_matching_pair(ctx: Ctx):
+    """finding 39's fix must not eat a goal that merely CONTAINS a quote
+    character without wrapping the whole thing in a matching pair."""
+    from halo_harness.orgs import parse_run_args
+    ctx.check("unmatched apostrophe left alone",
+              parse_run_args("release-flow fix don't break it") == ("release-flow", "fix don't break it"))
+    ctx.check("no surrounding quotes at all, unchanged",
+              parse_run_args("release-flow fix the thing") == ("release-flow", "fix the thing"))
+    ctx.check("single-quoted goal after a name also stripped",
+              parse_run_args("release-flow 'fix the thing'") == ("release-flow", "fix the thing"))
     ctx.check("bare name no goal -> goal is empty", parse_run_args("release-flow") == ("release-flow", ""))
 
 

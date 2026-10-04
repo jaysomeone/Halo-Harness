@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 
@@ -89,6 +91,25 @@ def _cmd_load(rest: list) -> int:
     return 0
 
 
+def _run_editor(editor: str, path, *, label: str) -> int:
+    """2.0.2 review finding 36: same fix as `org_cli.py`'s own `_run_
+    editor` (not shared across the two CLI modules -- small and
+    self-contained enough that duplicating it costs less than a new
+    cross-module dependency). `subprocess.call([editor, str(path)])`
+    passed the WHOLE `$EDITOR` string as a single argv[0] -- `EDITOR=
+    "code --wait"` tried to exec a literal file named "code --wait", and
+    even a bare `EDITOR=code` on Windows needs `code.cmd`, which
+    `subprocess.call` never resolves without a shell. Both used to crash
+    with an uncaught `FileNotFoundError` traceback."""
+    argv = shlex.split(editor) or [editor]
+    argv[0] = shutil.which(argv[0]) or argv[0]
+    try:
+        return subprocess.call([*argv, str(path)])
+    except OSError as e:
+        print(f"{label}: could not launch {editor!r}: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
 def _cmd_edit(rest: list) -> int:
     """No form here (that's the TUI's `/roles edit <name>`, `tui/dialogs/
     roles_editor.py`) -- `$EDITOR`/`$VISUAL` on the raw JSON file, creating
@@ -105,7 +126,7 @@ def _cmd_edit(rest: list) -> int:
     if load_role_template(args.name) is None:
         save_role_template(args.name, {"description": "", "roles": {}})
     path = role_templates_dir() / f"{args.name}.json"
-    rc = subprocess.call([editor, str(path)])
+    rc = _run_editor(editor, path, label="halo roles template edit")
     if rc != 0:
         return rc
     try:

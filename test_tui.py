@@ -1550,6 +1550,68 @@ def test_role_command_arg_completion_model_then_effort_slots(ctx: Ctx):
     asyncio.run(body())
 
 
+@test
+def test_role_command_effort_completion_reads_the_model_not_the_role_name(ctx: Ctx):
+    """2.0.2 review finding 24 pin: the effort argument's own completion
+    used to read `pieces[1]` of the FULL, un-stripped line as "the model
+    just typed" -- the role name for `/role ...`, and the literal word
+    "set" for `/roles set ...` -- never the model either form actually
+    typed. Spies on `_effort_levels_for` directly (real route-based
+    effort sets would make a weak test here, since both the right model
+    and the old bug's wrong strings usually fall back to the SAME full
+    EFFORT_LEVELS list through the same except branch)."""
+    async def body():
+        for line, expected_model in (
+            ("/role coder or:vendor/my-model hi", "or:vendor/my-model"),
+            ("/roles set coder or:vendor/my-model hi", "or:vendor/my-model"),
+        ):
+            fake = FakeController(model="or:vendor/my-model")
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                seen = []
+                orig = app._effort_levels_for
+
+                def _spy(model_text, _orig=orig):
+                    seen.append(model_text)
+                    return _orig(model_text)
+                app._effort_levels_for = _spy
+                await pilot.click("#prompt-input")
+                await _type(pilot, line)
+                await pilot.pause(0.1)
+                ctx.check(f"{line!r}: _effort_levels_for was called at all, got {seen}", bool(seen))
+                ctx.check(f"{line!r}: read the typed MODEL, not the role name or 'set', got {seen}",
+                          seen[-1] == expected_model)
+    asyncio.run(body())
+
+
+@test
+def test_org_command_arg_completion_tab_inserts_the_matching_org_name(ctx: Ctx):
+    """Round B fix pass ("No Tab completion for org/position names in
+    `/org ...`", confirmed): `/org show <name>` tab-completes the org
+    NAME argument against every saved organization."""
+    from halo_harness.orgs import ensure_builtin_orgs
+
+    async def body():
+        old, home = _scoped_state_dir_env("org-arg-completion-")
+        try:
+            ensure_builtin_orgs(state_dir=home / ".halo")
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org show comp")
+                await pilot.pause(0.1)
+                ctx.check(f"the popup is open for the org-name argument, got items={app._completion_items!r}",
+                          app.completion_popup.display and "company" in app._completion_items)
+                await pilot.press("tab")
+                await pilot.pause(0.1)
+                ctx.check(f"'company' inserted with no leading slash, got {app.prompt_input.text!r}",
+                          app.prompt_input.text == "/org show company ")
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
 def _scoped_state_dir_env(prefix: str) -> "tuple[dict, Path]":
     """Snapshot the two state-dir env vars, set both to a fresh scratch
     dir, and return `(old_values, scratch_home)` for the caller's own
@@ -1788,6 +1850,96 @@ def test_org_edit_pick_model_then_save_persists_and_reloads(ctx: Ctx):
                 ceo = next(p for p in saved["positions"] if p["title"] == "CEO")
                 ctx.check(f"persisted to disk as a model (role cleared), got {ceo}",
                           ceo.get("model") == "or:vendor/pickable-org-model" and "role" not in ceo)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_org_edit_ctrl_d_deletes_position_even_with_a_field_focused(ctx: Ctx):
+    """2.0.2 review finding 38 pin (half 1): Textual's own Input/TextArea
+    bind ctrl+d to delete-right -- with no `priority=True`, a FOCUSED
+    field (the usual case; this screen is mostly fields) swallowed
+    ctrl+d before the screen's own `delete_position` binding ever saw
+    it, so the key did nothing at all while editing a position."""
+    from textual.widgets import Input, OptionList
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("org-editor-ctrld-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org edit company")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, OrgEditor):
+                        break
+                editor = app.screen
+                option_list = editor.query_one("#org-tree-list", OptionList)
+                target_idx = next(i for i, o in enumerate(option_list.options) if o.id == "Engineer 1")
+                option_list.highlighted = target_idx
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                ctx.check(f"loaded the target position, got {editor._current_title!r}",
+                          editor._current_title == "Engineer 1")
+                role_field = editor.query_one("#org-field-role", Input)
+                role_field.focus()
+                await pilot.pause(0.05)
+                before = len(editor.org["positions"])
+                await pilot.press("ctrl+d")
+                await pilot.pause(0.1)
+                after = len(editor.org["positions"])
+                ctx.check(f"the position was actually deleted despite the field's own focus, "
+                          f"got before={before} after={after}", after == before - 1)
+                ctx.check("Engineer 1 is gone", not any(p.get("title") == "Engineer 1" for p in editor.org["positions"]))
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_org_edit_bare_model_alias_saved_as_model_not_role(ctx: Ctx):
+    """2.0.2 review finding 38 pin (half 2): `is_role_name_syntax` is a
+    pure SYNTAX check -- a bare model alias like "haiku" matches
+    [a-z][a-z0-9_]* too, so it used to be saved as position["role"],
+    and the org then failed validation with "unknown role"."""
+    from textual.widgets import Input, OptionList
+    from halo_harness.orgs import load_org
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    async def body():
+        old, _home = _scoped_state_dir_env("org-editor-alias-")
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.click("#prompt-input")
+                await _type(pilot, "/org edit solo")
+                await pilot.press("enter")
+                for _ in range(40):
+                    await app._drain()
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, OrgEditor):
+                        break
+                editor = app.screen
+                editor.query_one("#org-tree-list", OptionList).highlighted = 0
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                role_field = editor.query_one("#org-field-role", Input)
+                role_field.value = ""
+                role_field.focus()
+                await _type(pilot, "haiku")
+                await pilot.press("ctrl+s")
+                await pilot.pause(0.1)
+                saved = load_org("solo")
+                root = saved["positions"][0]
+                ctx.check(f"saved as a model, never a role, got {root}",
+                          root.get("model") == "haiku" and "role" not in root)
         finally:
             _restore_state_dir_env(old)
     asyncio.run(body())
@@ -8070,6 +8222,44 @@ def test_capital_y_copies_the_whole_current_turn_when_the_chat_box_is_not_focuse
 # ---------------------------------------------------------------------------
 
 @test
+def test_ctrl_e_opens_the_editor_even_with_the_chat_prompt_focused(ctx: Ctx):
+    """Round B fix pass (macOS/VS Code terminal item) pin: Textual's own
+    Input/TextArea bind ctrl+e (alongside bare `end`) to "cursor to end
+    of line" -- with the chat prompt (a TextArea) focused, the
+    overwhelmingly common case, that widget-level binding used to win
+    outright and `open_editor` never fired at all. No real editor is
+    launched here (EDITOR/VISUAL cleared) -- `action_open_editor`'s own
+    "no $VISUAL/$EDITOR set" notice firing IS the proof the app-level
+    action ran instead of the TextArea's own cursor-move."""
+    async def body():
+        old_editor = os.environ.get("EDITOR")
+        old_visual = os.environ.get("VISUAL")
+        os.environ.pop("EDITOR", None)
+        os.environ.pop("VISUAL", None)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)) as pilot:
+                notified = []
+                app.notify = lambda msg, **kw: notified.append(msg)
+                await pilot.click("#prompt-input")
+                await _type(pilot, "some draft text")
+                await pilot.press("ctrl+e")
+                await pilot.pause(0.1)
+                ctx.check(f"open_editor's own notice fired (never swallowed by the focused "
+                          f"TextArea's own ctrl+e), got {notified}",
+                          any("EDITOR" in m for m in notified))
+                ctx.check("the draft text is untouched (no cursor-to-end-of-line side effect)",
+                          app.prompt_input.text == "some draft text")
+        finally:
+            if old_editor is not None:
+                os.environ["EDITOR"] = old_editor
+            if old_visual is not None:
+                os.environ["VISUAL"] = old_visual
+    asyncio.run(body())
+
+
+@test
 def test_ctrl_c_toast_says_halo_and_that_the_terminal_stays_open(ctx: Ctx):
     async def body():
         fake = FakeController()
@@ -8199,6 +8389,62 @@ def test_tasks_panel_enter_opens_transcript_viewer_in_follow_mode(ctx: Ctx):
 
 
 @test
+def test_transcript_viewer_pgup_sticks_while_log_grows(ctx: Ctx):
+    """2.0.2 review finding 20 pin: RichLog's own default `auto_scroll=
+    True` used to force a scroll-to-end on every `write()` regardless of
+    `self.follow`, so a PgUp was undone by the very next 1s poll that
+    found the log had grown. Spies on `RichLog.write` rather than reading
+    animated scroll pixels -- old `_load()` called `write(line)` with no
+    `scroll_end` kwarg at all (falls back to the widget's own auto_scroll
+    attribute, True); the fix passes `scroll_end=self.follow` explicitly."""
+    from halo_harness.tui.dialogs.tasks import TasksPanel, TranscriptViewer
+    from textual.widgets import RichLog
+
+    async def body():
+        log_dir = Path(tempfile.mkdtemp(prefix="transcript-viewer-log-"))
+        log_path = log_dir / "agent-run1.jsonl"
+        log_path.write_text(json.dumps({"type": "user", "content": [{"type": "text", "text": "hi"}]}) + "\n",
+                             encoding="utf-8")
+        rows = [dict(_FAKE_AGENT_ROWS[0], log_path=str(log_path))]
+        fake = FakeController(agent_tasks=rows)
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            app.screen.query_one("#tasks-list").highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            viewer = app.screen
+            ctx.check(f"viewer opened, got {type(viewer).__name__}", isinstance(viewer, TranscriptViewer))
+            log_widget = viewer.query_one("#transcript-log", RichLog)
+            ctx.check(f"RichLog built with auto_scroll off, got {log_widget.auto_scroll}",
+                      log_widget.auto_scroll is False)
+
+            viewer.action_page_up()
+            ctx.check("PgUp turns follow off", viewer.follow is False)
+
+            recorded = []
+            orig_write = RichLog.write
+
+            def _spy(self, content, *a, **kw):
+                recorded.append(kw.get("scroll_end"))
+                return orig_write(self, content, *a, **kw)
+            RichLog.write = _spy
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"type": "assistant", "content": [{"type": "text", "text": "more"}]}) + "\n")
+                viewer._poll()
+            finally:
+                RichLog.write = orig_write
+            ctx.check(f"the new line was appended while PgUp'd, got {recorded}", recorded == [False])
+    asyncio.run(body())
+
+
+@test
 def test_ctrl_t_toggles_the_panel_open_and_closed(ctx: Ctx):
     from halo_harness.tui.dialogs.tasks import TasksPanel
 
@@ -8217,6 +8463,35 @@ def test_ctrl_t_toggles_the_panel_open_and_closed(ctx: Ctx):
             await pilot.pause(0.1)
             ctx.check(f"second ctrl+t closes it, got {type(app.screen).__name__}",
                       not isinstance(app.screen, TasksPanel))
+    asyncio.run(body())
+
+
+@test
+def test_tasks_panel_tab_switches_to_board_even_with_orgs_disabled(ctx: Ctx):
+    """2.0.2 review finding 26 pin: Tab used to do nothing at all while
+    `orgs.enabled` was off (the default) -- TaskCreate/TaskUpdate/
+    TaskList are offered to the model in every session regardless of
+    that setting, so the board tab must always be reachable."""
+    from halo_harness.tui.dialogs.tasks import TasksPanel
+    from halo_harness.theme import set_config_value
+
+    async def body():
+        set_config_value("orgs.enabled", False)
+        fake = FakeController(agent_tasks=list(_FAKE_AGENT_ROWS))
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+t")
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, TasksPanel):
+                    break
+            panel = app.screen
+            ctx.check("opens on the agents tab", panel.tab == "agents")
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            ctx.check(f"Tab switches to the board tab even with orgs.enabled off, got {panel.tab!r}",
+                      panel.tab == "board")
     asyncio.run(body())
 
 
@@ -8451,6 +8726,65 @@ def test_mcp_dialog_d_toggles_disabled_then_enabled(ctx: Ctx):
             await _wait_until(app, pilot, lambda: len(fake.disables) > 1)
             ctx.check(f"second press re-enables (now sees disabled), got {fake.disables}",
                       fake.disables == [("alpha", True), ("alpha", False)])
+    asyncio.run(body())
+
+
+@test
+def test_mcp_dialog_apply_result_refetches_real_state(ctx: Ctx):
+    """2.0.2 review finding 19 pin: `_apply_result` must not flip a row to
+    "connected" just because the result text CONTAINS that substring (a
+    failed `t` says "... not connected (state=failed)"), and `R` (`_apply_
+    bulk_result`) must actually refresh rows instead of leaving them as
+    they were. Uses a controller double that returns a FRESH dict every
+    call (the way the real `Controller.list_mcp_servers` does) rather than
+    FakeController's shared, mutated-in-place dict -- the review's own
+    note is that the shared-dict fake hides this bug."""
+    from halo_harness.tui.dialogs.mcp_status import McpStatus
+    from textual.widgets import Static
+
+    async def body():
+        backing = {"name": "broken", "type": "stdio", "command": "ghost", "args": [],
+                   "state": "failed", "error": "boom", "tool_count": 0, "scope": "user",
+                   "backoff_status": None}
+
+        def list_mcp_servers():
+            return [dict(backing)]
+
+        def test_mcp(name, abort=None):
+            return [f"{name}: tools/list failed -- not connected (state=failed)"]
+
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = McpStatus(list_mcp_servers(), test=test_mcp, refresh=list_mcp_servers)
+            app.push_screen(screen)
+            for _ in range(20):
+                await app._drain()
+                await pilot.pause(0.02)
+                if isinstance(app.screen, McpStatus):
+                    break
+            _highlight(screen, "broken")
+            await pilot.press("t")
+            await _wait_until(app, pilot, lambda: "tools/list failed"
+                               in _static_text(screen.query_one("#mcp-hint", Static)))
+            state = next(e["state"] for e in screen.servers if e["name"] == "broken")
+            ctx.check(f"a failed test must not flip the row to connected, got state={state!r}",
+                      state == "failed")
+
+            backing["state"] = "connected"
+            calls = {"n": 0}
+
+            def reconnect_all(abort=None):
+                calls["n"] += 1
+                return ["broken: connected (fake)"]
+            screen._reconnect_all = reconnect_all
+            await pilot.press("R")
+            await _wait_until(app, pilot, lambda: "connected (fake)"
+                               in _static_text(screen.query_one("#mcp-hint", Static)))
+            ctx.check(f"reconnect_all was actually called, got {calls['n']}", calls["n"] == 1)
+            state2 = next(e["state"] for e in screen.servers if e["name"] == "broken")
+            ctx.check(f"R must pull fresh state from the controller, got state={state2!r}",
+                      state2 == "connected")
     asyncio.run(body())
 
 

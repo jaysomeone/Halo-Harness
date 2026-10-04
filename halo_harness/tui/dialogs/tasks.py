@@ -146,11 +146,20 @@ class TranscriptViewer(ModalScreen):
         self.follow = True  # public: the pilot test asserts this directly
         self._last_size = -1
         self._timer = None
+        # 2.0.2 review finding 20: how many nodes `_load()` has already
+        # written to the RichLog -- a growing log now APPENDS only the
+        # new ones instead of clear()-ing and re-writing the whole log
+        # every poll tick.
+        self._rendered_count = 0
 
     def compose(self):
         yield Static(f"{self._title} -- follow mode (PgUp/PgDn: scroll, o: full pager, Esc: back)",
                       classes="dialog-title")
-        yield RichLog(id="transcript-log", wrap=True, highlight=False, markup=False)
+        # finding 20: RichLog's own default `auto_scroll=True` scrolled to
+        # the end on EVERY write() regardless of `self.follow`, undoing a
+        # PgUp on the very next 1s poll. Scrolling is now done by hand,
+        # only when `self.follow` is True (see `_load()`).
+        yield RichLog(id="transcript-log", wrap=True, highlight=False, markup=False, auto_scroll=False)
 
     def on_mount(self) -> None:
         self._load()
@@ -175,12 +184,19 @@ class TranscriptViewer(ModalScreen):
         except OSError:
             self._last_size = -1
         log_widget = self.query_one("#transcript-log", RichLog)
-        log_widget.clear()
-        for node in _agent_log_nodes(self._log_path):
+        nodes = _agent_log_nodes(self._log_path)
+        # finding 20: the log only ever grows during a live follow (one
+        # jsonl file, append-only) -- re-rendering everything on every 1s
+        # tick was O(whole log) just to show the last few new lines. A
+        # shrink (log rotated/replaced under us) is the one case that
+        # still needs a full redraw.
+        if len(nodes) < self._rendered_count:
+            log_widget.clear()
+            self._rendered_count = 0
+        for node in nodes[self._rendered_count:]:
             for line in render_log_lines(node):
-                log_widget.write(line)
-        if self.follow:
-            log_widget.scroll_end(animate=False)
+                log_widget.write(line, scroll_end=self.follow, animate=False)
+        self._rendered_count = len(nodes)
 
     def action_dismiss_viewer(self) -> None:
         self.dismiss()
@@ -308,6 +324,19 @@ class TasksPanel(ModalScreen):
         self._rows = rows
         option_list = self.query_one("#tasks-list", OptionList)
         highlighted = option_list.highlighted
+        # 2.0.2 review finding 25: restoring by raw INDEX let the row
+        # under the cursor change out from under the user between ticks
+        # (a reordered/regrouped `rows` list is now the usual case, not
+        # the exception, since `list_agent_task_rows` fixed its own
+        # parent/children ordering) -- restored by the option's own `id`
+        # (agent_id / board task id) instead, whenever that id still
+        # exists in the freshly-rebuilt list.
+        highlighted_id = None
+        if highlighted is not None:
+            try:
+                highlighted_id = option_list.get_option_at_index(highlighted).id
+            except Exception:
+                highlighted_id = None
         option_list.clear_options()
         if tab == "agents":
             running = sum(1 for r in self._rows if _status_word(r) == "running")
@@ -334,28 +363,30 @@ class TasksPanel(ModalScreen):
                 option_list.add_option(Option("The task board is empty.", disabled=True))
             for row in self._rows:
                 option_list.add_option(Option(board_row_text(row), id=row.get("id")))
-        if highlighted is not None and option_list.option_count and highlighted < option_list.option_count:
+        restored = False
+        if highlighted_id is not None:
+            try:
+                option_list.highlighted = next(i for i, o in enumerate(option_list.options) if o.id == highlighted_id)
+                restored = True
+            except StopIteration:
+                pass
+        if not restored and highlighted is not None and option_list.option_count and highlighted < option_list.option_count:
             option_list.highlighted = highlighted
-        elif option_list.option_count and self._rows:
+        elif not restored and option_list.option_count and self._rows:
             option_list.highlighted = 0  # first open: a row is highlighted, so Enter has a target
 
     def action_close_panel(self) -> None:
         self.dismiss()
 
     def action_next_tab(self) -> None:
-        # Halo 2.0.2 round 7 (init wizard brief, "Modes"): the board tab
-        # is hidden (Tab stays on "agents") while `orgs.enabled` is off --
-        # the shared board itself still WORKS (no cyber-blocks: a
-        # TaskCreate/TaskUpdate call always succeeds), only this
-        # discovery surface is gated, same as `/org`/`/tasks`' own
-        # listing elsewhere (`commands/registry.py`).
-        if self.tab == "agents":
-            from halo_harness.orgs import orgs_mode_enabled
-            if not orgs_mode_enabled():
-                return
-            self.tab = "board"
-        else:
-            self.tab = "agents"
+        # 2.0.2 review finding 26: the board tab used to stay hidden
+        # (Tab did nothing at all) while `orgs.enabled` was off --
+        # TaskCreate/TaskUpdate/TaskList are offered to the model in
+        # EVERY session regardless of that setting, so the board itself
+        # can be non-empty with no way to reach it from here. Tab now
+        # always switches, the same way `/tasks`'s own board subcommand
+        # always works.
+        self.tab = "board" if self.tab == "agents" else "agents"
         self._refresh_rows_sync()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:

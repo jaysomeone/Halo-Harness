@@ -8,7 +8,7 @@ across the 0.3.x line -- each 0.3.0 milestone below was a working
 checkpoint toward the single 0.3.0 release, not a separate published
 version.
 
-## [2.0.2] - unreleased
+## [2.0.2] - 2026-10-04
 
 W7 rounds 1-7 of the 2.0.2 brief (F, A, B, C, D, E, then the init wizard):
 the terminal tab title fix, roles v2, organizations, sub-agent visibility
@@ -250,6 +250,83 @@ setup screens.
    ideas that didn't fit this one): `halo org install`/`/org install`
    with a README per template, approval gates (`requires_approval`),
    export/import, and `/org resume`.
+9. **Release review, two fix rounds**: an Opus review of the whole
+   `v2.0.1..` diff found 3 critical, 15 major and 21 minor defects, each
+   with a check for whether it was actually confirmed by running or
+   tracing the code; both fix rounds closed every one with a test that
+   failed before and passed after. Round A (criticals/majors): `halo
+   init`'s Default model step
+   no longer saves the first catalog row when you press Next without
+   picking (RolesStep's own "Next overwrites your current roles" bug,
+   reintroduced by the wizard, closed the same way); a decision-only
+   endpoint can no longer become the session default from the picker or
+   a remembered model, and the Judge sub-agent runs tool-less against one
+   instead of raising `ToolsNotSupported`. `halo update`/`/update` work
+   on Windows now -- the uv launcher that stays alive as this process's
+   own parent is no longer mistaken for another session, and an
+   editable/checkout install's `git pull` + reinstall runs in the
+   checkout, never whatever directory you happened to be sitting in.
+   `/org run` and a resumed org task no longer take the TUI down on an
+   unresolvable model, org budgets are enforced against a real per-org
+   total instead of a baseline that never moved, a delegating org's
+   nested sub-agent cards keep their own identity instead of all ticking
+   under the root's, org depth is relative to the caller's own depth, and
+   the per-call concurrency cap became one session-wide (or org-wide)
+   gate so two fan-out calls in the same turn -- or a nested one -- can
+   no longer double the configured cap. MCP repair: OAuth login from
+   `/mcp` can be cancelled and the dialog dismissed while it waits, the
+   inline entry form's args field accepts spaces and several lines
+   without splitting them, and `R` skips a server you disabled. The
+   `/tasks` panel refreshes on a worker thread with a cached parse per
+   log file instead of re-reading every agent log on the UI thread every
+   second. Roles: the `small` role is actually consulted now, and
+   `roles.enabled`/`roles.editor` stop being misread as role names.
+   Round B (the minors): the `/mcp` dialog re-reads each server's real
+   state from the Controller after an action instead of guessing it from
+   the result text (a failed `t` no longer flips a row to "connected");
+   `/tasks`' transcript viewer keeps your scroll position while the log
+   keeps growing, and its own board tab is reachable with `orgs.enabled`
+   off too, since the board itself always worked. `count`/`batch` apply
+   the call's own `effort`, reject an unknown `role` by name (listing the
+   known ones, the same as an unknown `subagent_type` already did) on
+   every surface (single spawn, fan-out, resume), and their combined
+   result is capped and spilled to disk like every other tool's instead
+   of returning megabytes raw. `/role`/`/roles set` now land where the
+   model-resolution chain actually treats as winning over an agent file's
+   own `model:`, with the model and effort validated; its own effort
+   completion reads the model you actually typed, not the role name or
+   the literal word "set". An org run's sub-agents list parent-before-
+   children instead of by whatever order their random ids sorted into,
+   and the tasks panel restores your highlighted row by id, not index.
+   The `balanced`/`quality`/`local-first` presets skip a free/negative-
+   priced or tool-less catalog entry instead of picking OpenRouter's own
+   router alias as "the cheapest model". An org's root position is
+   visible to the tasks panel's live cost/phase lookup now (it used to
+   get its own disconnected bookkeeping). `halo update`'s relaunch on
+   Windows waits for a real child process instead of exiting this one
+   outright and racing the console with it. The real terminal title is
+   written through Textual's own output thread while the TUI runs
+   instead of racing its frames directly on `stdout`. A learned "this
+   endpoint rejects tool calls" rule now expires after a day instead of
+   needing a hand edit to `learned-rules.json` to undo. The `Agent` tool's
+   own description lists the live, configured role names instead of a
+   stale fixed five, and no longer claims a sub-agent can never delegate
+   further (true only at the default depth). The shared task board
+   survives an interrupted write (atomic replace) and keeps a corrupted
+   one aside instead of silently replacing it with a single fresh task.
+   A long tool-less Qwen answer no longer costs seconds in a leak-
+   pattern regex. `halo org edit`/`halo roles template edit` no longer
+   crash with a bare traceback when `$EDITOR` is multi-word (`"code
+   --wait"`) or needs Windows' own PATH extension resolution. `halo
+   completion` lists `update`/`org`/`setup` (missing outright before) and
+   its zsh/bash scripts handle a `:`-bearing model ref correctly. The org
+   editor's Ctrl+D (delete position) now reaches the screen even with a
+   field focused -- Textual's own Input/TextArea binding AND an unrelated
+   app-level "quit on empty/delete-right in the chat box" binding were
+   both intercepting it first -- and a bare model alias typed into "Role
+   or model" (`haiku`, `sonnet`) saves as a model, never a role that then
+   fails validation. `/org run <name> "<goal>"` strips the quotes from
+   the goal instead of sending and recording them literally.
 
 ## [2.0.0] - 2026-10-01
 

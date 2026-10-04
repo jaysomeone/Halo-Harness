@@ -561,7 +561,20 @@ def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
     set <name> <model> [effort]` are the same operation -- sets ONE role
     for THIS session only (never persisted; `/roles save <name>` is the
     explicit "keep this" action), the same live-mutation pattern
-    `_cmd_effort` above uses for `session.effort`."""
+    `_cmd_effort` above uses for `session.effort`.
+
+    2.0.2 review finding 23: this used to write into `runtime.role_table`
+    (or a throwaway `session.roles` dict when no runtime was attached),
+    which `resolve_agent_model`'s own chain (config/agents_md.py) ranks
+    BELOW both an `--role` CLI override and an agent file's own `model:`
+    -- so `/role coder X` reported success but changed nothing whenever
+    either of those applied, although ROLES.md says `/role` always wins.
+    `runtime.cli_role_overrides` is the rung that chain actually treats
+    as "wins even over the agent file's own model:", and it is never
+    None (a real dict by construction) -- so the `session.roles` escape
+    hatch now only matters for a session with no `agent_runtime` at all."""
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.profiles import EFFORT_LEVELS
     from halo_harness.roles import known_role_names
     session = getattr(facade, "session", None)
     if session is None:
@@ -571,16 +584,23 @@ def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
         return "Usage: /role <name> <model> [effort] (or /setup roles for a guided setup screen)"
     name, model = parts[0], parts[1]
     effort = parts[2] if len(parts) > 2 else None
+    if effort is not None and effort not in EFFORT_LEVELS:
+        return f"Unknown effort {effort!r} (expected one of {', '.join(EFFORT_LEVELS)})"
+    if model not in ("inherit", "haiku"):
+        try:
+            parse_model_ref(model)
+        except Exception as e:
+            return f"{model!r} is not a valid model reference: {e}"
     runtime = getattr(session, "agent_runtime", None)
-    role_table = getattr(runtime, "role_table", None)
-    if not isinstance(role_table, dict):
+    overrides = getattr(runtime, "cli_role_overrides", None)
+    if not isinstance(overrides, dict):
         if not hasattr(session, "roles") or not isinstance(session.roles, dict):
             session.roles = {}
-        role_table = session.roles
-    known = known_role_names(role_table, getattr(runtime, "cli_role_overrides", None))
+        overrides = session.roles
+    known = known_role_names(getattr(runtime, "role_table", None), overrides)
     if name not in known:
         return f"Unknown role {name!r} (expected one of {', '.join(known)})"
-    role_table[name] = {"model": model, "effort": effort} if effort else model
+    overrides[name] = {"model": model, "effort": effort} if effort else model
     effort_note = f" (effort: {effort})" if effort else ""
     return f"Role {name!r} set to {model!r}{effort_note} for this session."
 

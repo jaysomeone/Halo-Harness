@@ -23,6 +23,7 @@ hot-path calls, so one coarse lock costs nothing.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -73,9 +74,46 @@ def read_board(session_dir: Path) -> list:
 
 
 def _write_board(session_dir: Path, tasks: list) -> None:
+    """2.0.2 review finding 34: a plain `write_text` can leave a TORN
+    (partially-written) file behind if this process is killed mid-write
+    -- the next `read_board` would then see a JSON parse failure and
+    silently degrade to `[]`, and the next `create_task` would happily
+    "fix" that by writing a brand new single-task board over it, losing
+    every task that was already there. Written to a tmp file and
+    `os.replace`d instead (atomic on both POSIX and Windows -- the same
+    pattern `providers/learned_rules.py`'s own writer and `update.py`'s
+    `_save_cache` already use), so a reader only ever sees either the
+    complete old file or the complete new one, never a partial write."""
     path = _board_path(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"tasks": tasks}, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp_path = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp_path.write_text(json.dumps({"tasks": tasks}, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _read_board_for_write(session_dir: Path) -> "tuple[list, Optional[str]]":
+    """Like `read_board`, but DISTINGUISHES "no board file yet at all"
+    (`([], None)`, the ordinary case for a brand-new session) from "a
+    board file exists but failed to parse" (`([], <error text>)` -- a
+    torn write from before this finding's fix, or genuine corruption).
+    Only a caller about to WRITE the board needs this distinction --
+    `read_board`/`TaskListTool` stay "an unreadable board just shows
+    empty," never an error, same as before. `create_task` (the one path
+    that would otherwise silently replace a corrupt file with a single
+    new task, discarding everything else that was in it) uses this
+    instead, and backs up rather than overwrites when `error` is set."""
+    path = _board_path(session_dir)
+    with _lock:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return [], None  # genuinely nothing there yet -- not an error
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            return [], f"{type(e).__name__}: {e}"
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    return (tasks if isinstance(tasks, list) else []), None
 
 
 def _format_task(t: dict) -> str:
@@ -100,7 +138,20 @@ def create_task(session_dir: Path, *, title: str, notes: Optional[str] = None,
             "notes": notes or "", "result": None, "parent": parent or None, "kind": kind or "task",
             "created": time.time(), "updated": time.time()}
     with _lock:
-        tasks = read_board(session_dir)
+        tasks, error = _read_board_for_write(session_dir)
+        if error is not None:
+            # finding 34: refuse to silently treat a corrupt file as an
+            # empty board and overwrite it -- the corrupt file is kept,
+            # under its own name, for forensics/manual recovery, and this
+            # call starts a fresh board with just the new task (never
+            # raises: `create_task` has no error return of its own, and
+            # `run_org_call`'s "never raises" contract calls this too).
+            path = _board_path(session_dir)
+            try:
+                path.rename(path.with_name(f"{path.name}.corrupt-{int(time.time())}"))
+            except OSError:
+                pass
+            tasks = []
         tasks.append(task)
         _write_board(session_dir, tasks)
     return task["id"]

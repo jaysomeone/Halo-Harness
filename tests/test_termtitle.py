@@ -115,6 +115,37 @@ def test_set_terminal_title_always_writes_to_an_explicit_stream(ctx):
 
 
 @test
+def test_emit_osc2_routes_through_the_tui_driver_when_one_is_set(ctx):
+    """2.0.2 review finding 31 pin: Textual 8 writes every FRAME from its
+    own WriterThread, never the UI thread -- `emit_osc2`'s default-stream
+    path used to write `sys.__stdout__` directly regardless, which could
+    land in the middle of a frame's own escape sequence. While `set_tui_
+    driver` has a driver registered, the default path must queue through
+    `driver.write(...)` instead, and an EXPLICIT `stream=` must still
+    bypass the driver entirely (print mode has no driver at all)."""
+    from halo_harness import termtitle
+
+    class _FakeDriver:
+        def __init__(self):
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data)
+    driver = _FakeDriver()
+    termtitle.set_tui_driver(driver)
+    try:
+        termtitle.emit_osc2("halo")
+        ctx.check(f"the default path went through the driver, got {driver.written}",
+                  driver.written == ["\x1b]2;halo\x07"])
+        buf = io.StringIO()
+        termtitle.emit_osc2("halo", stream=buf)
+        ctx.check(f"an explicit stream still bypasses the driver entirely, got {buf.getvalue()!r}",
+                  buf.getvalue() == "\x1b]2;halo\x07" and len(driver.written) == 1)
+    finally:
+        termtitle.set_tui_driver(None)
+
+
+@test
 def test_windows_console_functions_are_inert_off_windows(ctx):
     """Forces the off-Windows branch deliberately (restored right after)
     so this is deterministic on every box this suite runs on, including

@@ -211,6 +211,45 @@ def test_org_run_cli_with_no_name_uses_the_default(ctx: Ctx):
 
 
 @test
+def test_org_edit_with_a_multi_word_editor_does_not_crash(ctx: Ctx):
+    """2.0.2 review finding 36 pin: `EDITOR="code --wait"` used to be
+    passed to `subprocess.call` as a SINGLE argv[0] (the literal string
+    "code --wait", space included), which raises an uncaught
+    `FileNotFoundError` -- no such file exists. `subprocess.call` itself
+    is swapped out (via the module's own `subprocess` name) so this
+    stays hermetic -- never launches a real editor -- while still
+    proving the actual argv `org_cli.py` builds."""
+    import halo_harness.org_cli as org_cli_mod
+    from halo_harness.org_cli import cmd_org
+    state_dir = _fresh_state_dir("org-cli-edit-")
+    old_editor = os.environ.get("EDITOR")
+    os.environ["EDITOR"] = "code --wait"
+    captured = {}
+
+    class _FakeSubprocess:
+        @staticmethod
+        def call(argv):
+            captured["argv"] = argv
+            return 0
+    real_subprocess = org_cli_mod.subprocess
+    org_cli_mod.subprocess = _FakeSubprocess
+    try:
+        rc = cmd_org(["edit", "my-org"])
+        ctx.check(f"no crash, exit 0, got {rc}", rc == 0)
+        argv = captured.get("argv")
+        ctx.check(f"'--wait' is its own argv element, got {argv}", argv is not None and "--wait" in argv)
+        ctx.check(f"argv[0] is never the literal 'code --wait' string, got {argv}",
+                  argv is not None and argv[0] != "code --wait")
+    finally:
+        org_cli_mod.subprocess = real_subprocess
+        if old_editor is None:
+            os.environ.pop("EDITOR", None)
+        else:
+            os.environ["EDITOR"] = old_editor
+        _clear_state_dir_env()
+
+
+@test
 def test_org_run_cli_with_no_name_and_no_default_refuses_cleanly(ctx: Ctx):
     from halo_harness.org_cli import cmd_org
     _fresh_state_dir("org-cli-nodefault-")

@@ -551,18 +551,35 @@ def other_halo_pids(*, run_fn=None) -> "list[int]":
     return pids
 
 
-def relaunch_halo(extra_args: "list[str]", *, exec_fn: Optional[Callable] = None) -> int:
+def relaunch_halo(extra_args: "list[str]", *, exec_fn: Optional[Callable] = None,
+                   call_fn: Optional[Callable] = None) -> int:
     """Replaces THIS process with a fresh `halo <extra_args>` (`--continue`
     is always one of them, from the caller) -- never returns on a real
-    `exec_fn` (the default, `os.execv`). `exec_fn` is the test seam: a
-    fake records the call and returns instead of truly exec'ing, which is
-    why this still has a (dead-code-in-production) `return` for it to see."""
-    exec_fn = exec_fn or os.execv
+    `exec_fn` (the default, `os.execv`, POSIX only -- see below).
+    `exec_fn`/`call_fn` are the test seams: a fake records the call and
+    returns instead of truly exec'ing/launching, which is why this still
+    has a (dead-code-in-production-on-POSIX) `return` for `exec_fn` to
+    see.
+
+    2.0.2 review finding 30: `os.execv` REPLACES this process outright --
+    on Windows, that also exits the uv launcher `halo.exe` wrapper that
+    started this one (its own parent), since replacing a process image
+    doesn't keep a PARENT alive. The shell then takes the console back
+    immediately, racing the relaunched TUI that's also trying to read/
+    write it. `exec_fn` passed explicitly (every existing test) always
+    wins outright, on any platform -- only the DEFAULT varies: on Windows
+    it's `sys.exit(subprocess.call(argv))` (waits for a real child, same
+    as the uv launcher itself already does for every other halo
+    invocation), on POSIX it stays `os.execv`."""
     halo_path = shutil.which("halo") or shutil.which("halo.exe")
     if halo_path:
         argv = [halo_path, *extra_args]
     else:
         halo_path = sys.executable
         argv = [halo_path, "-m", "halo_harness", *extra_args]
+    if exec_fn is None and sys.platform == "win32":
+        call_fn = call_fn or subprocess.call
+        sys.exit(call_fn(argv))
+    exec_fn = exec_fn or os.execv
     exec_fn(halo_path, argv)
     return 0
