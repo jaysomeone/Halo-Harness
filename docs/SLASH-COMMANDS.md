@@ -132,7 +132,11 @@ context: the question and answer show up as a note, never as a logged
 user/assistant turn, so nothing here is replayed into a later request.
 Needs `roles.small` set to an `ol:`/`hf:` model (`/roles`, `/role small
 ol:...`, or the model picker's `u` action); errors plainly, never
-silently, when it isn't.
+silently, when it isn't. Round 5b part 2: when the session's main model
+is also `ol:` on the SAME host and `roles.small` resolves to a DIFFERENT
+local model that would not fit beside it in GPU memory, `/local` answers
+from the main model instead for this one question -- see
+`docs/MODELS.md`'s "VRAM-aware role defaults" section.
 
 ### `/memory`
 Shows the auto-memory directory path, whether `MEMORY.md` exists, and how
@@ -184,7 +188,9 @@ table a role-bearing `Agent`/`Task` call actually resolves against) so it
 never drifts from real behavior. `templates`/`save`/`load`/`new`/`show`
 manage `~/.halo/roles/<name>.json` templates; `edit` opens a form in the TUI
 only (print mode names that instead); `set` is the long form of `/role`
-below. See `docs/ROLES.md`.
+below. Round 5b part 2: a VRAM-aware role redirected to the main model
+(`docs/MODELS.md`'s "VRAM-aware role defaults") shows `(same as main:
+fits beside it: no)` next to that role's own source. See `docs/ROLES.md`.
 
 ### `/role <name> <model> [effort]`
 Halo 2.0.2: sets ONE role for THIS session only -- mutates the live

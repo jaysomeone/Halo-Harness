@@ -214,6 +214,7 @@ directly by the features that own them:
 | `huggingface.bill_to` | unset (no header sent) | `halo config set huggingface.bill_to my-org`; a Team/Enterprise org name sent as `X-HF-Bill-To` on every ROUTER (`hf:<org>/<model>`) request only -- never on an `hf:endpoint/<name>` call |
 | `huggingface.local_servers` | unset (relies on auto-detection alone) | hand-edited, or `halo init`'s Hugging Face tab; a list of `{name, url, api_key, default}` -- `hf:local/<model>@<name>` selects an entry by `name`; `hf:local/<model>` (bare) prefers this list's default entry, else the first AUTO-detected local server; see `docs/MODELS.md`'s "Hugging Face" section |
 | `huggingface.local_probe_ports` | unset (`8080, 8000, 1234` -- see `docs/MODELS.md`) | hand-edited; a list of ints overriding which ports the `hf:local/*` auto-detect sweep probes (loopback only); `HF_LOCAL_PROBE_PORTS` (env) wins over this when both are set |
+| `huggingface.lmstudio_models_dir` | unset (`~/.lmstudio/models`, LM Studio's own documented default) | `halo config set huggingface.lmstudio_models_dir /path/to/models`; only needed when LM Studio's own in-app "Model Storage" setting moved the folder -- see `docs/MODELS.md`'s "LM Studio's own model folder" |
 
 ## Every environment variable
 

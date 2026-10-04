@@ -129,11 +129,18 @@ def test_doctor_ollama_section_one_line_per_host(ctx: Ctx):
     try:
         set_config_value("ollama.hosts", multi_host_config({"mock": mock}))
         entries = _check_ollama_hosts()
-        ctx.check(f"exactly one doctor entry for the one configured host, got {entries}", len(entries) == 1)
+        # Round 5b part 2 (brief item 4) appends the host-setup checklist
+        # as further entries for the SAME host right after its own one-
+        # line summary -- the summary itself is still exactly one line,
+        # first, which is what this test's own name is about.
+        ctx.check(f"the one-line summary plus checklist entries follow for the one configured host, got {entries}",
+                  len(entries) > 1)
         cid, line = entries[0]
         ctx.check("id names the host", cid == "ollama_host_mock")
         ctx.check(f"line reports reachable + version, got {line!r}", "reachable" in line and "version" in line)
         ctx.check(f"line reports a loaded-model count, got {line!r}", "model(s) loaded" in line)
+        ctx.check("every entry for this host is namespaced under its id",
+                  all(c.startswith("ollama_host_mock") for c, _l in entries))
     finally:
         mock.stop()
         _clear_state_dir_env()

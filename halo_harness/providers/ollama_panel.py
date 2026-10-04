@@ -228,3 +228,74 @@ def format_host_analysis(a: HostAnalysis) -> str:
                     lines.append(f"      last turn: {tps or '?'} tok/s, prefill {prefill or '?'} s{offloaded}")
     lines.append(f"  {KV_FORMULA_ORIGIN_NOTE}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 5b part 2 (brief item 4): the host-setup checklist
+# `halo ollama doctor [--host NAME]` and `halo doctor`'s own Ollama section
+# both render verbatim -- "what the host exposes" is `format_host_analysis`
+# above, unchanged; this is only the SECOND half, the documented
+# recommendations Halo cannot read back from any API, plus where each one
+# lives per OS. Plain sentences, never a block, per house policy.
+# ---------------------------------------------------------------------------
+
+_EXPOSE_SWITCH_SHORT = {
+    "win32": "the tray app's \"Expose Ollama to the network\" switch",
+    "darwin": "the menu-bar app's \"Expose to network\" switch",
+    "linux": "OLLAMA_HOST=0.0.0.0 via `sudo systemctl edit ollama`",
+}
+
+_WHERE_SENTENCES = {
+    "win32": ("Windows: the tray app's \"Expose Ollama to the network\" switch (its Settings screen) "
+              "overrides OLLAMA_HOST outright; setting OLLAMA_HOST yourself as a user-scope environment "
+              "variable (Settings -> Environment Variables) also works, but only takes effect after quitting "
+              "and relaunching the tray app."),
+    "darwin": ("macOS: the menu-bar app's own \"Expose to network\" switch overrides OLLAMA_HOST the same "
+               "way; setting it yourself is `launchctl setenv OLLAMA_HOST 0.0.0.0:11434` followed by "
+               "relaunching the app -- from the research doc's community knowledge (docs/harness/"
+               "LOCAL-MODELS-RESEARCH.md section 4), not independently confirmed live."),
+    "linux": ("Linux: `sudo systemctl edit ollama`, add one `Environment=\"VAR=value\"` line per variable "
+              "under `[Service]`, then `sudo systemctl daemon-reload` and restart the service."),
+}
+
+_RECOMMENDATIONS = (
+    "OLLAMA_FLASH_ATTENTION=1 (faster attention; also needed on most backends before KV cache "
+    "quantization is honoured at all)",
+    "OLLAMA_KV_CACHE_TYPE=q8_0 (roughly half the KV-cache memory of the f16 default, at a small quality cost)",
+    "OLLAMA_NUM_PARALLEL=1 for a single-user box (never needs more than one request in flight at once; "
+    "a higher value just splits the SAME context budget across concurrent requests)",
+    "OLLAMA_KEEP_ALIVE (how long a model stays loaded after its last request -- longer avoids a reload "
+    "on the next turn, at the cost of holding memory meanwhile)",
+    "OLLAMA_CONTEXT_LENGTH (the server-wide context default applied when nothing else sets num_ctx -- "
+    "Halo itself always sends num_ctx per request, so this mostly matters for other clients of the same host)",
+)
+
+
+def host_setup_checklist(host, *, platform_name: "Optional[str]" = None) -> "list[str]":
+    """Plain sentences for `halo ollama doctor`/`halo doctor`'s Ollama
+    section: the loopback-only one-liner (brief: "A loopback-only host
+    gets one plain line") when `providers.ollama_hw.is_local_host(host)`,
+    then the documented recommendations Halo cannot read back, then
+    WHERE each one lives -- for a LOCAL host, only `platform_name`'s own
+    OS (default `sys.platform`, the OS Halo itself is running on); for a
+    REMOTE host (no `ssh:`-probed OS identity exists anywhere in this
+    codebase), all three OSes briefly, since Halo genuinely does not know
+    which one that host runs. `platform_name`, when given explicitly,
+    overrides the local-host default -- the test seam (never read
+    directly from `sys.platform` by a caller)."""
+    from halo_harness.providers.ollama_hw import is_local_host
+    local = is_local_host(host)
+    lines: "list[str]" = []
+    if local:
+        import sys
+        this_os = platform_name if platform_name is not None else sys.platform
+        switch = _EXPOSE_SWITCH_SHORT.get(this_os, "the per-OS \"expose to network\" switch")
+        lines.append(f"this daemon is reachable from this machine only; to share it on the LAN flip {switch}.")
+        oses = (this_os,) if this_os in _WHERE_SENTENCES else ()
+    else:
+        oses = ("win32", "darwin", "linux")  # remote: unknown OS, print all three briefly
+    lines.append("Halo cannot read these back from any API -- documented recommendations, not probed "
+                 "facts: " + "; ".join(_RECOMMENDATIONS) + ".")
+    for p in oses:
+        lines.append(_WHERE_SENTENCES[p])
+    return lines

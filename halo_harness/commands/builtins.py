@@ -370,6 +370,18 @@ def _cmd_local(args: str, facade: HeadlessFacade) -> str:
     if session is None:
         return "/local: no live session."
     ref = getattr(session, "small_model_ref", None) or session.model_ref
+    # Round 5b part 2 (brief item 3): "/local <question> follows the same
+    # rule" -- a DIFFERENT local ol: model configured for the small role
+    # that would not fit beside the session's own main model falls back
+    # to the main model for THIS question, same redirection `roles.
+    # vram_aware_override` already applies at config-resolution time (this
+    # is the RUNTIME twin, for whatever `small_model_ref` actually ended
+    # up resolving to this session).
+    if ref is not session.model_ref and ref.provider == "ollama" and session.model_ref.provider == "ollama":
+        from halo_harness.roles import vram_aware_override
+        _value, _reason = vram_aware_override("small", ref.raw, main_ref=session.model_ref)
+        if _reason:
+            ref = session.model_ref
     if ref.provider not in ("ollama", "huggingface"):
         return (f"/local needs roles.small set to an ol: or hf: model (currently resolves to {ref.raw!r}); "
                 f"set one via /roles, the model picker's u action, or `ollama.hosts`/`huggingface.*`/roles.small "

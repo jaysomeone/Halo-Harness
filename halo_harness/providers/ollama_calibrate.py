@@ -192,7 +192,9 @@ def _ps_entry_for_model(ps: Optional[dict], model: str) -> Optional[dict]:
 
 
 def run_calibration(host, model: str, *, start_ctx: int, min_ctx: int = MIN_CALIBRATE_CTX,
-                     keep_alive: Optional[str] = None, timeout: float = 60.0) -> CalibrationResult:
+                     keep_alive: Optional[str] = None, timeout: float = 60.0,
+                     step_up: bool = False, trained_context: Optional[int] = None,
+                     hard_cap: Optional[int] = None) -> CalibrationResult:
     """The brief's own stepping loop (item 2): load at a candidate
     `num_ctx` (floored to a power of two, never below `min_ctx`), read
     `/api/ps` back, and step DOWN by powers of two until `size_vram >=
@@ -206,24 +208,66 @@ def run_calibration(host, model: str, *, start_ctx: int, min_ctx: int = MIN_CALI
     the floor is reached with nothing better measured. Hermetic tests
     point `host.url` at a `tests/helpers/mock_ollama.MockUpstream`
     scripted with a `ps_response` sequence (see that helper's own
-    `ScriptedByCallCount`-style patterns) -- never a real model."""
-    from halo_harness.providers.ollama import fetch_ps
+    `ScriptedByCallCount`-style patterns) -- never a real model.
+
+    Round 5b part 2 (brief item 7, "part 1 follow-up"): `step_up` defaults
+    False here (this bare function's own pre-existing contract, round 5b
+    part 1 -- unchanged for any caller that doesn't ask for the new
+    behavior explicitly) -- `halo ollama calibrate` (`ollama_cli.py`) and
+    the automatic first-use trigger (`run_auto_calibration` below) are the
+    two callers that explicitly pass `step_up=True` (the former unless
+    `--no-up`), per the brief's own "also steps up" ask. When True, once
+    the DOWN loop above finds a fitting candidate, `step_up` keeps
+    doubling from there -- a FIRST guess that already fits fully resident
+    (the common case on a roomy card) used to be recorded as-is even when
+    the model would ALSO fit at a much larger context; stepping up finds
+    the true ceiling
+    instead of settling for the first lucky guess. Bounded by `min(
+    trained_context, hard_cap)` when `trained_context` is given (never
+    worth probing past the model's own trained window) and always by
+    `hard_cap` (`providers.ollama.HARD_CONTEXT_CAP`, 131072, when
+    `hard_cap` is omitted) -- stops at the FIRST non-resident load up
+    here (never steps down again to search for a smaller gap), recording
+    the LAST value that was still fully resident."""
+    from halo_harness.providers.ollama import HARD_CONTEXT_CAP, fetch_ps
+    hard_cap = hard_cap if isinstance(hard_cap, int) and hard_cap > 0 else HARD_CONTEXT_CAP
+    up_bound = min(trained_context, hard_cap) if isinstance(trained_context, int) and trained_context > 0 \
+        else hard_cap
     candidate = max(_floor_pow2(max(1, start_ctx)), min_ctx)
     steps = 0
     last_size: Optional[int] = None
     last_size_vram: Optional[int] = None
-    while candidate >= min_ctx:
+
+    def _load_and_check(ctx: int) -> "Optional[tuple[int, int]]":
+        nonlocal steps
         steps += 1
-        _load_model_at_num_ctx(host, model, num_ctx=candidate, keep_alive=keep_alive, timeout=timeout)
-        ps = fetch_ps(host, timeout=timeout)
-        entry = _ps_entry_for_model(ps, model)
-        if entry is not None:
-            size, size_vram = entry.get("size"), entry.get("size_vram")
-            last_size = size if isinstance(size, int) else last_size
-            last_size_vram = size_vram if isinstance(size_vram, int) else last_size_vram
-            if isinstance(size, int) and isinstance(size_vram, int) and size > 0 and size_vram >= size:
-                return CalibrationResult(outcome="fits", max_full_gpu_ctx=candidate, steps=steps,
-                                          last_size=size, last_size_vram=size_vram)
+        _load_model_at_num_ctx(host, model, num_ctx=ctx, keep_alive=keep_alive, timeout=timeout)
+        entry = _ps_entry_for_model(fetch_ps(host, timeout=timeout), model)
+        if entry is None:
+            return None
+        size, size_vram = entry.get("size"), entry.get("size_vram")
+        if not (isinstance(size, int) and isinstance(size_vram, int) and size > 0):
+            return None
+        return size, size_vram
+
+    while candidate >= min_ctx:
+        result = _load_and_check(candidate)
+        if result is not None:
+            size, size_vram = result
+            last_size, last_size_vram = size, size_vram
+            if size_vram >= size:
+                fitting = candidate
+                if step_up:
+                    up_candidate = fitting * 2
+                    while up_candidate <= up_bound:
+                        up_result = _load_and_check(up_candidate)
+                        if up_result is None or up_result[1] < up_result[0]:
+                            break
+                        fitting = up_candidate
+                        last_size, last_size_vram = up_result
+                        up_candidate *= 2
+                return CalibrationResult(outcome="fits", max_full_gpu_ctx=fitting, steps=steps,
+                                          last_size=last_size, last_size_vram=last_size_vram)
         candidate //= 2
     return CalibrationResult(outcome="does_not_fit", max_full_gpu_ctx=None, steps=steps,
                               last_size=last_size, last_size_vram=last_size_vram)
@@ -243,7 +287,7 @@ def run_auto_calibration(host, model: str, *, state_dir) -> Optional[str]:
     notice line for the caller to surface -- or `None` on any failure
     (never raises; a failed attempt degrades to "use the live fit
     estimate/remote default, same as before this existed")."""
-    from halo_harness.providers.ollama import get_catalog, probe_version
+    from halo_harness.providers.ollama import get_catalog, probe_version, trained_context_for
     from halo_harness.providers.ollama_hw import catalog_row, estimate_fit_for_host, is_local_host
     try:
         catalog = get_catalog(host)
@@ -256,7 +300,13 @@ def run_auto_calibration(host, model: str, *, state_dir) -> Optional[str]:
         start = estimate_fit_for_host(host, model, catalog)
         if not isinstance(start, int) or isinstance(start, bool) or start <= 0:
             start = 32768
-        result = run_calibration(host, model, start_ctx=start, keep_alive=host.keep_alive)
+        # Round 5b part 2: auto-calibrate also steps UP (brief item 7) --
+        # bounded by this model's own trained context, so a first guess
+        # that fits is still checked for a LARGER fitting value instead of
+        # settling for it, same as the explicit `halo ollama calibrate`.
+        trained = trained_context_for(catalog, model)
+        result = run_calibration(host, model, start_ctx=start, keep_alive=host.keep_alive, trained_context=trained,
+                                  step_up=True)
         record_calibration(state_dir, host_url=host.url, model=model, digest=digest,
                             max_full_gpu_ctx=result.max_full_gpu_ctx, ollama_version=ollama_version)
         where = "locally" if is_local_host(host) else "over the network"

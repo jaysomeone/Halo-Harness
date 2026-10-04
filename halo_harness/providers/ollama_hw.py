@@ -568,6 +568,54 @@ class OllamaContextDecision:
     offloaded: Optional[bool] = None
 
 
+def fits_beside_main(host, *, main_model: str, candidate_model: str, catalog: Optional[dict],
+                      hw_runner=None) -> Optional[bool]:
+    """Halo 2.0.3 round 5b part 2 (brief item 3, "VRAM-aware role
+    defaults"): would `candidate_model`'s own on-disk weight size
+    (`catalog_row(...)["size"]`, the same bytes Ollama loads into VRAM --
+    `estimate_fit_for_host`'s own docstring) fit ALONGSIDE `main_model`'s
+    CURRENTLY RESIDENT weight footprint (`/api/ps`'s own `size_vram` --
+    requires `main_model` to be loaded right now; a measured fact, never
+    a guess) without exceeding this host's total GPU memory. Literally
+    the brief's own formula: "weights of the candidate plus the main
+    model's resident size exceed the host's memory". `None` (unknown,
+    never a guess -- the caller's own house policy of "benefit of the
+    doubt" then applies) whenever ANY input is missing: `main_model`
+    isn't currently loaded on this host, `candidate_model` isn't in
+    `catalog` (or has no `size`), or no GPU memory total is readable at
+    all (local: `get_local_gpu_memories`; remote: only when `host.ssh` is
+    configured, else always `None` -- same reachability rule every other
+    GPU read in this module already follows). `True`/`False` only when
+    every input was a real measurement."""
+    from halo_harness.providers.ollama import fetch_ps
+    ps = fetch_ps(host) or {}
+    main_entry = None
+    for entry in (ps.get("models") or []):
+        if isinstance(entry, dict) and (entry.get("model") == main_model or entry.get("name") == main_model):
+            main_entry = entry
+            break
+    if main_entry is None:
+        return None
+    main_resident = main_entry.get("size_vram")
+    if not isinstance(main_resident, int) or isinstance(main_resident, bool) or main_resident <= 0:
+        return None
+    candidate_row = catalog_row(catalog, candidate_model)
+    candidate_weight = candidate_row.get("size") if candidate_row else None
+    if not isinstance(candidate_weight, int) or isinstance(candidate_weight, bool) or candidate_weight <= 0:
+        return None
+    if is_local_host(host):
+        cards = get_local_gpu_memories(runner=hw_runner)
+    elif getattr(host, "ssh", None):
+        card = get_ssh_gpu_memory(host.ssh, runner=hw_runner)
+        cards = [card] if card is not None else []
+    else:
+        return None
+    total_bytes = [c.total_bytes for c in cards if c is not None and isinstance(c.total_bytes, int)]
+    if not total_bytes:
+        return None
+    return (main_resident + candidate_weight) <= sum(total_bytes)
+
+
 def resolve_context_decision(model_ref, env=None, *, hw_runner=None) -> OllamaContextDecision:
     """ONE per-ref entry point for everything round 3 (and, as of round
     5b, the learned-cap/remote-default precedence) needs to know about an

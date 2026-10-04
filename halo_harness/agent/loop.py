@@ -853,6 +853,21 @@ class Session:
         # excluded below) -- that stays exclusively the counter above's job.
         self._loop_breaker_history: list = []
         self._loop_breaker_period2: dict = {}
+        # Round 5b part 2 fix pass (live-run finding, 2026-10-04): a
+        # STRICTER, ollama/huggingface-only guard, independent of the
+        # generic loop breaker above -- a live run looped for 25 minutes
+        # (175 requests) with the model repeating one meaningless tool
+        # call turn after turn once `format` could no longer let it just
+        # answer in prose (see `_build_ollama_body_for_ref`'s own updated
+        # comment on why that constraint was removed). `_identical_call_
+        # guard_key`/`_count` track only the MOST RECENT call's (name,
+        # canonical args) and how many times IN A ROW (never non-
+        # consecutive, unlike `_loop_breaker`'s own per-turn total) that
+        # exact pair has just repeated; reset every turn alongside
+        # `_loop_breaker` itself (see `_turn_inner`). See `_resolve_tool_
+        # call`'s own use of this for the exact threshold/wording.
+        self._identical_call_guard_key: Optional[tuple] = None
+        self._identical_call_guard_count: int = 0
         # H10 Part B4: `/improve`'s hint -- fires AT MOST once per session
         # (status-bar text + one `notification` event, never a card, never
         # a model call); `_maybe_yield_improve_hint` (called from
@@ -1880,6 +1895,17 @@ class Session:
                 ref=ref, route=route, profile=profile, system_text=system_text, messages=messages,
                 tools=[], tool_choice=None, effort=effort, requested_max_tokens=max_tokens,
             )
+            # Round 5b part 2 (brief item 7): this method returns a plain
+            # string with no event stream of its own to yield a
+            # `notification` through (callers include `/local`'s own
+            # reply text, a title suggestion, and `/improve`'s draft text
+            # -- none of those may be silently polluted with an extra
+            # line) -- logged instead, so the notice is actually SURFACED
+            # from this call site (visible in logs/`--verbose`) rather
+            # than sitting queued until some LATER `_step` call happens to
+            # flush it, or never if this session never makes one.
+            for _notice in self._drain_pending_ollama_notices():
+                log.info("ollama: %s", _notice)
         else:
             body = build_request_body(
                 system_text=system_text, messages=messages,
@@ -2123,6 +2149,25 @@ class Session:
         except Exception:
             log.debug("ollama: auto-calibration for %s@%s failed", model, host.name, exc_info=True)
 
+    def _drain_pending_ollama_notices(self) -> list:
+        """Round 5b part 2 (brief item 7, "the auto-calibrate notice
+        flushes from the two secondary call sites too"): pops and clears
+        every notice `_maybe_auto_calibrate_ollama` queued since the last
+        drain, from WHICHEVER call site actually triggered it -- `_step`'s
+        own main-turn flush (unchanged, still inline there) and this
+        method share the exact same list, so a notice is never shown
+        twice and never silently dropped just because the call that
+        triggered it wasn't the main turn. `call_small_model` (no event
+        stream of its own to yield through -- see that method's own
+        docstring on why its return value must stay clean) logs the
+        drained text instead of yielding it; `_run_compaction` (a real
+        event-yielding generator) yields it exactly like `_step` does."""
+        if not self._pending_ollama_notices:
+            return []
+        notices = list(self._pending_ollama_notices)
+        self._pending_ollama_notices.clear()
+        return notices
+
     def _build_ollama_body_for_ref(self, *, ref: ModelRef, route: Route, profile: ProviderProfile,
                                     system_text: str, messages: list, tools, tool_choice=None,
                                     effort: Optional[str], requested_max_tokens: Optional[int]) -> dict:
@@ -2301,11 +2346,12 @@ class Session:
         # plain function) right after the body that triggered it was
         # built -- a plain UI-only `notification` event, never written
         # into the logged transcript (a snapshot would replay on every
-        # future turn for no reason).
-        if self._pending_ollama_notices:
-            for _notice in self._pending_ollama_notices:
-                yield events.notification(_notice, level="info")
-            self._pending_ollama_notices.clear()
+        # future turn for no reason). Round 5b part 2: shares `_drain_
+        # pending_ollama_notices` with the two secondary call sites
+        # (`call_small_model`/`_run_compaction`) now that a THIRD place
+        # can queue one -- same list, same "never shown twice" contract.
+        for _notice in self._drain_pending_ollama_notices():
+            yield events.notification(_notice, level="info")
         req = self._build_request(body)
 
         attempts = 0
@@ -3606,6 +3652,15 @@ class Session:
                     system_text, call_messages, call_tools,
                     min(4096, self.model_profile.max_output_tokens or 4096),
                 )
+                # Round 5b part 2 (brief item 7): `_run_summary_call`'s own
+                # `_build_body_for_messages` call can trigger the auto-
+                # calibrate notice (a compaction summariser swapped to a
+                # different `compactionModel`, or the main model's own
+                # first-use-on-this-host trigger) -- `_run_compaction` IS
+                # a real event-yielding generator, so this flushes it the
+                # SAME way `_step`'s own main-turn site already does.
+                for _notice in self._drain_pending_ollama_notices():
+                    yield events.notification(_notice, level="info")
                 if outcome == "overflow":
                     if not tried_fallback:
                         # finding 4: OpenCode-style fallback -- flatten the
@@ -3825,6 +3880,8 @@ class Session:
         self._loop_breaker = {}
         self._loop_breaker_history = []
         self._loop_breaker_period2 = {}
+        self._identical_call_guard_key = None
+        self._identical_call_guard_count = 0
         # H3/H4 must-do: a PREVIOUS turn's interrupt (Esc/Ctrl+C) leaves
         # `self.abort` set -- reused unchanged, a brand new turn would see
         # it already fired and abort immediately, before ever streaming a
@@ -4256,6 +4313,95 @@ class Session:
             yield events.phase(state="waiting_for_model", turn=turn_no, model=self.model_ref.raw)
             # else: loop back for another _step() call with the new tool_results
 
+    def _attempt_tool_repair(self, *, tool_name: Optional[str], schema: Optional[dict],
+                              error_message: str, raw_input) -> Optional[dict]:
+        """Round 5b part 2 (brief item 2): ONE local, isolated repair
+        round -- a tools-less, history-less completion against THIS
+        session's own current model (never `small_model_ref`: it never
+        made the original call, so asking it to fix one would be asking
+        the wrong model), constrained to `tool_name`'s own `input_schema`
+        via `build_ollama_request_body`/`providers.request.build_request_
+        body`'s new `force_format`/`force_response_format` override, on
+        the `ollama`/`huggingface` (local) routes ONLY (`providers.
+        tool_call_schema.supports_constrained_tool_calls` -- every other
+        dialect's caller never even reaches this far, see `_resolve_tool_
+        call`'s own gating). Returns the repaired, schema-coerced
+        arguments dict on success; `None` on ANY failure whatsoever --
+        `schema is None` (an unresolved tool), the host rejecting the
+        route entirely, a network/timeout failure, a reply that still
+        isn't a JSON object, or a reply that still fails `agent.repair.
+        validate_and_coerce` against the SAME schema -- the caller always
+        falls back to the existing plain error either way (the brief's
+        own pin: "one repair round then the plain error"). Never raises."""
+        if schema is None or not tool_name:
+            return None
+        from halo_harness.providers.tool_call_schema import repair_prompt_for, supports_constrained_tool_calls
+        env = self.settings.effective_env if self.settings is not None else None
+        is_ollama = self.route.dialect == "ollama"
+        is_hf_local = self.route.provider == "huggingface" and bool(getattr(self.model_ref, "local", False))
+        host = None
+        if is_ollama:
+            from halo_harness.providers.ollama import resolve_ollama_host
+            from halo_harness.providers.ollama_hw import is_local_host
+            host = resolve_ollama_host(self.model_ref.host, env)
+            if host is None or not supports_constrained_tool_calls(
+                    provider="ollama", dialect="ollama", local=is_local_host(host)):
+                return None
+        elif not (is_hf_local and supports_constrained_tool_calls(
+                provider="huggingface", dialect="openai-chat", local=True)):
+            return None
+        system_text, user_text = repair_prompt_for(
+            tool_name=tool_name, schema=schema, error_message=error_message, raw_input=raw_input)
+        messages = [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
+        try:
+            if is_ollama:
+                from halo_harness.providers.ollama_hw import resolve_context_decision
+                from halo_harness.providers.ollama_request import build_ollama_request_body
+                decision = resolve_context_decision(self.model_ref, env)
+                body = build_ollama_request_body(
+                    system_text=system_text, messages=messages, tools=[], route=self.route,
+                    profile=self.provider_profile, effort=None, host=host,
+                    trained_context=decision.trained_context, fit_estimate=decision.fit_estimate,
+                    requested_max_tokens=512, learned_cap=decision.learned_cap, remote=decision.remote,
+                    force_format=schema,
+                )
+            else:
+                body = build_request_body(
+                    system_text=system_text, messages=messages, tools=[], route=self.route,
+                    profile=self.provider_profile, effort=None,
+                    context_tokens=self.model_profile.context_tokens,
+                    prompt_estimate=_rough_estimate(system_text, messages), requested_max_tokens=512,
+                    force_response_format=schema,
+                )
+            req = self._build_request(body)
+            abort = threading.Event()
+            timer = threading.Timer(20.0, abort.set)
+            timer.daemon = True
+            timer.start()
+            text_parts: list = []
+            gen = self._stream(req, abort=abort)
+            try:
+                for ev in gen:
+                    kind = ev.get("type")
+                    if kind == "content_block_delta":
+                        delta = ev.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            text_parts.append(str(delta.get("text", "")))
+                    elif kind == "error":
+                        return None
+            finally:
+                timer.cancel()
+                gen.close()
+            parsed = json.loads("".join(text_parts).strip())
+        except Exception:
+            log.debug("ollama/huggingface: tool-call repair round failed for %s", tool_name, exc_info=True)
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        from halo_harness.agent.repair import validate_and_coerce
+        coerced, errors = validate_and_coerce(parsed, schema)
+        return None if errors else coerced
+
     def _resolve_tool_call(self, tu: dict, outcome, tool_call_flags: dict) -> dict:
         """Everything about ONE tool_use call up to (never including)
         actual dispatch: length/malformed short-circuit -> basic shape
@@ -4264,48 +4410,115 @@ class Session:
         means "go dispatch me"; the reason this is its own function is so
         a run of consecutive read-only READY calls can be discovered and
         batched -- see `_dispatch_tools` -- without duplicating any of
-        this decision logic)."""
+        this decision logic).
+
+        Round 5b part 2 (brief item 2, "repair loop"): a length-truncated
+        call is NEVER offered the repair round (the brief's own list is
+        "bad JSON arguments, unknown tool, missing required argument" --
+        truncation is a max_tokens budget problem a same-sized repair call
+        would hit again) and an UNRESOLVED tool name is also never
+        attempted (there is no single schema to constrain a repair call
+        against when Halo doesn't yet know which tool was meant -- see
+        `_attempt_tool_repair`'s own docstring). The other two cases
+        (malformed JSON, and a resolved tool whose arguments failed
+        `agent.repair.validate_and_coerce` -- which already covers "missing
+        required argument") each get exactly ONE `_attempt_tool_repair`
+        call; its own `None` return (gated to `ollama`/`huggingface` local
+        routes, or any failure at all) falls straight through to the SAME
+        plain error this always surfaced before this round existed."""
         tool_id, raw_name = tu.get("id"), tu.get("name")
         item = {"tool_id": tool_id, "name": raw_name, "input": tu.get("input") or {}, "repaired": False, "ready": False}
 
         classification = classify_length_tool_call(tool_call_flags.get(tool_id) or {})
-        if classification in ("length", "malformed"):
-            if classification == "length":
-                item["text"] = (f"Tool call {raw_name!r} was cut off at max_tokens mid-call -- split the "
-                                 f"operation into smaller steps and retry.")
-            else:
-                json_error = (tool_call_flags.get(tool_id) or {}).get("json_error", "invalid JSON")
-                item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
+        if classification == "length":
+            item["text"] = (f"Tool call {raw_name!r} was cut off at max_tokens mid-call -- split the "
+                             f"operation into smaller steps and retry.")
             item["input"] = {}
-            # H10 Part A: both a length-truncated and an unrecoverably
-            # malformed call are "the model never produced usable args" --
-            # lumped under schema_invalid rather than growing the taxonomy.
             item["error_class"] = "schema_invalid"
             return item
 
-        basic_error = validate_tool_use(tu)
-        if basic_error is not None:
-            item["text"] = basic_error
-            item["error_class"] = "schema_invalid"
-            return item
+        name = tool_input = None
+        repaired = False
 
-        if not outcome.ok:
-            item["text"] = outcome.error_text
-            item["repaired"] = outcome.repaired
-            # H10 Part A: a duplicate call is never "invalid" -- classed
-            # "other" so it never inflates schema_invalid/not_found counts.
-            item["error_class"] = {"unknown_tool": "other", "invalid_args": "schema_invalid"}.get(
-                outcome.error_kind, "other")
-            return item
+        if classification == "malformed":
+            flags = tool_call_flags.get(tool_id) or {}
+            json_error = flags.get("json_error", "invalid JSON")
+            tool = self.tool_registry.get(raw_name) if raw_name else None
+            repaired_input = self._attempt_tool_repair(
+                tool_name=raw_name, schema=(tool.input_schema if tool is not None else None),
+                error_message=f"arguments were not valid JSON: {json_error}",
+                raw_input=flags.get("raw_input"),
+            ) if tool is not None else None
+            if repaired_input is None:
+                item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
+                item["input"] = {}
+                # H10 Part A: both a length-truncated and an unrecoverably
+                # malformed call are "the model never produced usable
+                # args" -- lumped under schema_invalid rather than growing
+                # the taxonomy.
+                item["error_class"] = "schema_invalid"
+                return item
+            name, tool_input, repaired = raw_name, repaired_input, True
+        else:
+            basic_error = validate_tool_use(tu)
+            if basic_error is not None:
+                item["text"] = basic_error
+                item["error_class"] = "schema_invalid"
+                return item
 
-        name = outcome.block.get("name")  # possibly renamed by repair
-        tool_input = outcome.block.get("input") or {}
-        # A block promoted from a text-embedded leak (H2 scope B) is
-        # ALWAYS "repaired" for transparency -- it never arrived as a
-        # native call, regardless of whether its name/schema also happened
-        # to need fixing up.
-        repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
+            if not outcome.ok:
+                if outcome.error_kind == "invalid_args":
+                    resolved_name = outcome.block.get("name")
+                    tool = self.tool_registry.get(resolved_name) if resolved_name else None
+                    repaired_input = self._attempt_tool_repair(
+                        tool_name=resolved_name, schema=(tool.input_schema if tool is not None else None),
+                        error_message=outcome.error_text or "invalid arguments",
+                        raw_input=tu.get("input"),
+                    ) if tool is not None else None
+                    if repaired_input is not None:
+                        name, tool_input, repaired = resolved_name, repaired_input, True
+                if name is None:
+                    item["text"] = outcome.error_text
+                    item["repaired"] = outcome.repaired
+                    # H10 Part A: a duplicate call is never "invalid" --
+                    # classed "other" so it never inflates schema_invalid/
+                    # not_found counts.
+                    item["error_class"] = {"unknown_tool": "other", "invalid_args": "schema_invalid"}.get(
+                        outcome.error_kind, "other")
+                    return item
+            else:
+                name = outcome.block.get("name")  # possibly renamed by repair
+                tool_input = outcome.block.get("input") or {}
+                # A block promoted from a text-embedded leak (H2 scope B)
+                # is ALWAYS "repaired" for transparency -- it never
+                # arrived as a native call, regardless of whether its
+                # name/schema also happened to need fixing up.
+                repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
         item.update(name=name, input=tool_input, repaired=repaired)
+
+        # Round 5b part 2 fix pass (live-run finding): a STRICTER,
+        # ollama/huggingface-only 3-in-a-row guard -- see `__init__`'s own
+        # comment on `_identical_call_guard_key`/`_count` for why this is
+        # separate from the generic loop breaker below (threshold 3, not
+        # 5/8; counts only an unbroken run of the IDENTICAL call, not a
+        # per-turn total). Same `BashOutput` exemption as the generic
+        # breaker, for the same reason (a legitimate poll loop must not
+        # be cut off after 3 polls) -- an exempt call leaves this guard's
+        # state untouched rather than resetting the run, so neither side
+        # of an exempt call miscounts.
+        if (self.route.dialect == "ollama" or self.route.provider == "huggingface") and name != "BashOutput":
+            guard_key = (name, _canonical_args(tool_input))
+            if guard_key == self._identical_call_guard_key:
+                self._identical_call_guard_count += 1
+            else:
+                self._identical_call_guard_key = guard_key
+                self._identical_call_guard_count = 1
+            if self._identical_call_guard_count >= 3:
+                item["text"] = (f"{name}: the model repeated the same tool call three times in a row -- "
+                                 f"stopping this turn so you can steer it.")
+                item["end_turn"] = True
+                item["error_class"] = "loop_breaker"
+                return item
 
         # H9 whole-tree review finding 8: polling a background job with
         # BashOutput(shell_id=...) -- Moonshot's OWN documented pattern for

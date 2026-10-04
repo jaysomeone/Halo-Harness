@@ -135,6 +135,12 @@ class InitTabsApp(App):
         # four are purely local (env vars/settings files, no subprocess/
         # network) and were already computed once in `__init__`.
         state = self._state_cache[provider]
+        if provider in ("ollama", "huggingface"):
+            # Round 5b part 2 (brief item 5): see `init_wizard.py`'s
+            # identical sibling widget for the full rationale -- this app
+            # is the lighter-weight twin of that wizard step.
+            yield Static("detecting what's already on this machine…", id=f"{provider}-detect",
+                        classes="tab-help")
         status_text = "checking…" if provider == "claude" else _status_text(provider, state=state)
         yield Static(status_text, id=f"{provider}-status", classes="tab-status")
         for f in state["fields"]:
@@ -181,6 +187,25 @@ class InitTabsApp(App):
         for provider in TAB_PROVIDERS:
             if provider != "claude" and self._state_cache[provider]["configured"]:
                 self.run_worker(lambda p=provider: self._probe_worker(p), thread=True, name=f"init-tab-probe-{provider}")
+        if "ollama" in TAB_PROVIDERS or "huggingface" in TAB_PROVIDERS:
+            self.run_worker(self._detect_local_worker, thread=True, name="init-detect-local")
+
+    def _detect_local_worker(self) -> None:
+        from halo_harness.providers.local_models import detection_summary_lines
+        try:
+            lines = detection_summary_lines()
+        except Exception:
+            lines = []
+        text = "\n".join(lines) if lines else "nothing detected on this machine yet (no Ollama daemon, no " \
+                                               "local server, no cached model files)."
+        self.call_from_thread(self._apply_detect_text, text)
+
+    def _apply_detect_text(self, text: str) -> None:
+        for provider in ("ollama", "huggingface"):
+            try:
+                self.query_one(f"#{provider}-detect", Static).update(text)
+            except Exception:
+                pass
 
     def _team_cfg_worker(self) -> None:
         from halo_harness.team_config import load_team_config

@@ -420,6 +420,21 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             family=family, tool_choice_required_supported=False,
             tools_supported=True, effort_values_supported=EFFORT_LEVELS,
             model_id=route.upstream_model, tools_max=tools_max_for_num_ctx(None),
+            # Round 5b part 2 (brief item 1), kept by the fix pass (brief
+            # item 1's own turn-level CONSTRAINT was removed -- see
+            # providers/ollama_request.py's docstring -- but this stays
+            # enabled regardless): the generic bare-dict/fenced-JSON leak
+            # extractors (providers/hooks.py's own `_LEAK_EXTRACTORS`,
+            # already tested for every other family) catch a `{"name":
+            # ..., "arguments": {...}}`-shaped reply that a model leaks as
+            # plain `message.content` text on its OWN initiative, never
+            # forced into that shape by Halo -- enabling them here is what
+            # turns that into a real dispatched tool_use via `agent/
+            # loop.py::_turn_body`'s EXISTING leak_parser call (unchanged,
+            # dialect-agnostic) -- no new promotion code needed, and
+            # harmless since nothing here ever REQUIRES the model to
+            # answer in this shape.
+            tool_leak_patterns=("python_repr_args", "json_text_call"),
         )
 
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
@@ -545,8 +560,10 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             **hook_fields,
         )
 
-    # openrouter (also the fallback for any other openai-chat-dialect host)
-    return ProviderProfile(
+    # openrouter (also the fallback for any other openai-chat-dialect host,
+    # which per model.py's own routing is "huggingface" and nothing else --
+    # see the round 5b part 2 override just below the ProviderProfile call)
+    profile = ProviderProfile(
         system_vs_developer="system", max_tokens_field="max_tokens",
         reasoning_effort_supported=effort_supported, thinking_format="openrouter_details",
         reasoning_replay=replay if replay != "text" else "details",
@@ -581,6 +598,19 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         model_id=route.upstream_model,
         **hook_fields,
     )
+    if route.provider == "huggingface":
+        # Round 5b part 2 (brief item 1/2): the "huggingface" profile the
+        # brief names is this SAME generic openai-chat profile -- there is
+        # no distinct "huggingface" dialect in `model.py`'s own routing
+        # (`hf:` always resolves `dialect="openai-chat"`) -- narrowed here
+        # by `route.provider` alone so an OpenRouter route through this
+        # identical branch is never touched. Same `tool_leak_patterns`
+        # reasoning as the `ollama` branch above (see its own comment);
+        # kept as a single-field `replace` rather than duplicating the
+        # whole `ProviderProfile(...)` call a second time.
+        from dataclasses import replace
+        profile = replace(profile, tool_leak_patterns=("python_repr_args", "json_text_call"))
+    return profile
 
 
 _DISABLING_EFFORTS = frozenset({"none", "disabled", "off", "minimal"})

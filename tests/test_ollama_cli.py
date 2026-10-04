@@ -104,7 +104,13 @@ def test_halo_ollama_calibrate_fits_prints_the_cap_and_records_it(ctx: Ctx):
     mock = MockUpstream().start()  # qwen3:30b is in DEFAULT_TAGS/DEFAULT_SHOW
     try:
         mock.scenarios["qwen3:30b"] = _make_fits_scenario(mock, "qwen3:30b")
-        result = _run_ollama_cli(fh, mock.base_url, extra_args=["calibrate", "qwen3:30b", "--start", "8192"])
+        # Round 5b part 2: this scenario reports "fully resident" at EVERY
+        # candidate, so the default step-UP phase (now on by default for
+        # this CLI command, see tests/test_ollama_calibrate_step_up_5b2.py
+        # for its own dedicated coverage) would keep climbing; --no-up
+        # keeps this test's own scope narrow (find-and-record one fit).
+        result = _run_ollama_cli(fh, mock.base_url,
+                                  extra_args=["calibrate", "qwen3:30b", "--start", "8192", "--no-up"])
         ctx.check(f"exit 0, got {result.returncode} stderr={result.stderr!r}", result.returncode == 0)
         ctx.check(f"reports fits + the num_ctx, got {result.stdout!r}",
                   "fits fully in GPU memory at num_ctx=8192" in result.stdout)

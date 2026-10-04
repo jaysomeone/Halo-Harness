@@ -316,6 +316,16 @@ class ProvidersStep(StepScreen):
 
     def _tab_widgets(self, provider: str):
         state = self._state_cache[provider]
+        if provider in ("ollama", "huggingface"):
+            # Round 5b part 2 (brief item 5, "the wizard detects before
+            # it asks"): opens with a placeholder; `on_mount`'s own
+            # worker (off the UI thread, short-timeout probes only --
+            # see `providers.local_models.detection_summary_lines`'s own
+            # docstring) fills it in later. A slow/never-finishing probe
+            # just leaves this line as-is -- the tab is fully usable
+            # (every field/button below renders immediately) either way.
+            yield Static("detecting what's already on this machine…", id=f"wiz-{provider}-detect",
+                        classes="tab-help")
         status_text = "checking…" if provider == "claude" else _pv_status_text(provider, state=state)
         yield Static(status_text, id=f"wiz-{provider}-status", classes="tab-status")
         for f in state["fields"]:
@@ -350,6 +360,25 @@ class ProvidersStep(StepScreen):
         for provider in TAB_PROVIDERS:
             if provider != "claude" and self._state_cache[provider]["configured"]:
                 self.run_worker(lambda p=provider: self._probe_worker(p), thread=True, name=f"wiz-init-probe-{provider}")
+        if "ollama" in TAB_PROVIDERS or "huggingface" in TAB_PROVIDERS:
+            self.run_worker(self._detect_local_worker, thread=True, name="wiz-init-detect-local")
+
+    def _detect_local_worker(self) -> None:
+        from halo_harness.providers.local_models import detection_summary_lines
+        try:
+            lines = detection_summary_lines()
+        except Exception:
+            lines = []
+        text = "\n".join(lines) if lines else "nothing detected on this machine yet (no Ollama daemon, no " \
+                                               "local server, no cached model files)."
+        self.app.call_from_thread(self._apply_detect_text, text)
+
+    def _apply_detect_text(self, text: str) -> None:
+        for provider in ("ollama", "huggingface"):
+            try:
+                self.query_one(f"#wiz-{provider}-detect", Static).update(text)
+            except Exception:
+                pass
 
     def _team_cfg_worker(self) -> None:
         from halo_harness.team_config import load_team_config

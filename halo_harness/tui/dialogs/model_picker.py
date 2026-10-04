@@ -166,7 +166,8 @@ class ModelPicker(ModalScreen):
         if highlighted is None or highlighted >= len(self._filtered):
             return
         ref = self._filtered[highlighted]["ref"]
-        self.app.push_screen(RoleAssignPicker(ref), lambda role_name: self._role_assigned(ref, role_name))
+        self.app.push_screen(RoleAssignPicker(ref, main_ref=self.current),
+                              lambda role_name: self._role_assigned(ref, role_name))
 
     def _role_assigned(self, ref: str, role_name) -> None:
         hint = self.query_one("#model-hint", Static)
@@ -240,9 +241,14 @@ class RoleAssignPicker(ModalScreen):
     RoleAssignPicker OptionList { height: 1fr; }
     """
 
-    def __init__(self, model_ref: str) -> None:
+    def __init__(self, model_ref: str, *, main_ref: str = "") -> None:
         super().__init__()
         self.model_ref = model_ref
+        # Round 5b part 2 (brief item 3): the session's CURRENT model --
+        # needed only for the "(same as main: fits beside it: no)" caption
+        # below; `""` (a caller that omits it, or no session is running
+        # yet) just means the caption never has anything to show.
+        self.main_ref = main_ref
 
     def compose(self):
         with Vertical():
@@ -260,6 +266,35 @@ class RoleAssignPicker(ModalScreen):
         if default in names:
             option_list.highlighted = names.index(default)
         option_list.focus()
+        from halo_harness.roles import VRAM_AWARE_ROLE_NAMES
+        if self.main_ref and self.main_ref != self.model_ref and default in VRAM_AWARE_ROLE_NAMES:
+            # Round 5b part 2: a real GPU-memory/`/api/ps` read, off the UI
+            # thread (the SAME `run_worker(thread=True)` pattern every
+            # other live probe in this codebase uses) and short -- the
+            # dialog is already fully usable before this resolves; the
+            # caption just appears a moment later, or never if the probe
+            # never finishes before the screen closes (`query_one`'s own
+            # `except Exception: pass` below degrades silently).
+            self.run_worker(self._vram_reason_worker, thread=True, name="role-assign-vram-reason")
+
+    def _vram_reason_worker(self) -> None:
+        from halo_harness.model import parse_model_ref
+        from halo_harness.roles import default_role_for_ref, vram_aware_override
+        try:
+            default = default_role_for_ref(self.model_ref)
+            main = parse_model_ref(self.main_ref)
+            _value, reason = vram_aware_override(default, self.model_ref, main_ref=main)
+        except Exception:
+            reason = None
+        if reason:
+            self.app.call_from_thread(self._apply_vram_reason, default, reason)
+
+    def _apply_vram_reason(self, role_name: str, reason: str) -> None:
+        try:
+            option_list = self.query_one("#role-assign-list", OptionList)
+            option_list.replace_option_prompt(role_name, f"{role_name}  (default)  {reason}")
+        except Exception:
+            pass
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """`roles.assign_role` is a local config write (no network) --

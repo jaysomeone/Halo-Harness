@@ -60,6 +60,20 @@ class OllamaStreamToAnthropic:
         self._reasoning_started_emitted = False
         self.tool_order: list = []   # 0-based indices, first-seen order
         self.tool_buf: dict = {}     # index -> {"name": str|None, "arguments": dict, "id": str|None}
+        # Round 5b part 2 (brief item 2, "repair loop"): keyed by the
+        # SYNTHESIZED toolu_ id (same key `agent/repair.py`'s
+        # `tool_call_flags` lookups already use for every other dialect),
+        # `{"malformed_json": True, "raw_input": str, "json_error": str}`
+        # -- Ollama's own API documents `function.arguments` as "a parsed
+        # JSON object, not a string" (research doc Q1), so this branch is
+        # rare (a server bug, or a model whose template emits the field as
+        # a string that then fails to parse) rather than the common case
+        # oai_stream.py's OWN strict_tool_json capture handles -- but
+        # recording it here, instead of silently defaulting to `{}` the
+        # way this module did before this round, is what lets `agent/
+        # loop.py`'s existing `classify_length_tool_call`/`_resolve_tool_
+        # call` machinery (shared with every other dialect) see it at all.
+        self.tool_call_flags: dict = {}
         # True the moment ANY content/thinking/tool-call fragment has been
         # seen -- `providers.stream.stream_ollama_completion`'s one-time
         # "load" retry only ever fires while this is still False (nothing
@@ -160,8 +174,11 @@ class OllamaStreamToAnthropic:
             elif isinstance(args, str):
                 try:
                     parsed = json.loads(args) if args.strip() else {}
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError) as e:
                     parsed = {}
+                    self.tool_call_flags[self.tool_buf[index]["id"]] = {
+                        "malformed_json": True, "raw_input": args, "json_error": str(e),
+                    }
                 self.tool_buf[index]["arguments"] = parsed
 
         if chunk.get("done"):
@@ -204,6 +221,7 @@ class OllamaStreamToAnthropic:
             "done_reason": self.done_reason,
             "reasoning_text": self.reasoning_text or None,
             "timing_ns": dict(self._timing),
+            "tool_call_flags": dict(self.tool_call_flags),
         }
         events.append(message_delta_event(stop_reason, usage, harness_meta=harness_meta))
         events.append({"type": "message_stop"})

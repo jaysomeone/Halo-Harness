@@ -295,12 +295,26 @@ def build_request_body(
     *, system_text: str, messages: list, tools: Optional[list] = None, tool_choice=None,
     route, profile: ProviderProfile, effort: Optional[str] = None,
     context_tokens: int = 128000, prompt_estimate: int = 0, requested_max_tokens: Optional[int] = None,
+    force_response_format: "Optional[dict]" = None,
 ) -> dict:
     """Build the OpenAI-dialect body for one request. `messages` is the
     Anthropic-shaped derived transcript (agent/derive.py); `system_text` is
     the byte-stable system prompt PLUS any dynamic user-role snapshots
     already folded in by the caller (this function only ever emits ONE
-    leading `system` message, per rule 5/D-CFG)."""
+    leading `system` message, per rule 5/D-CFG).
+
+    Halo 2.0.3 round 5b part 2 (brief item 1), FIX PASS (2026-10-04
+    live-run finding): an ORDINARY turn (including right after a tool
+    result) is never constrained here any more -- the removed
+    `local_structured_output` gate forced every such `hf:local/*` turn
+    into the tool-call shape with no way to answer in prose, which on a
+    live run meant a model with nothing useful left to call just
+    repeated a meaningless call for 175 requests/25 minutes (see
+    `providers.ollama_request.build_ollama_request_body`'s own updated
+    docstring for the full story -- the identical failure mode, same
+    fix). `force_response_format` (the repair round's own override,
+    `agent/loop.py`'s `_attempt_tool_repair`) is the ONLY way this
+    function ever puts `response_format` on the wire now."""
     # hooks.system_normalize (fold_into_first_user rows -- Gemma 3, DeepSeek
     # R1) folds `system_text` into the first user turn instead of leaving it
     # a separate leading system message; the empty-assistant placeholder
@@ -339,6 +353,15 @@ def build_request_body(
             if tc == "required" and not profile.tool_choice_required_supported:
                 tc = "auto"  # DeepSeek-V4-thinking 400s on required/named; Kimi K2.x/Qwen/GLM: auto|none only
             body["tool_choice"] = tc
+    if force_response_format is not None:
+        # Round 5b part 2 (brief item 2): the repair call's own override --
+        # see `build_ollama_request_body`'s `force_format` for the
+        # identical reasoning (an isolated, tools-less completion) -- the
+        # ONLY place this function ever puts `response_format` on the
+        # wire (fix pass: an ordinary turn is never constrained, see this
+        # function's own docstring).
+        from halo_harness.providers.tool_call_schema import openai_response_format_for_schema
+        body["response_format"] = openai_response_format_for_schema(force_response_format)
 
     if profile.use_temperature:
         if profile.temperature is not None:

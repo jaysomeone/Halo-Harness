@@ -642,6 +642,18 @@ ollama`/`--provider huggingface` could safely default to without a real
 catalog already cached. See [MODELS.md](MODELS.md)'s Ollama/Hugging Face
 sections and [CONFIG.md](CONFIG.md)'s "Providers" section.
 
+**Halo 2.0.3 round 5b part 2**: both of those two tabs now open with a
+short detection summary -- GPU/unified memory, whether Ollama is already
+reachable and what it has, any running local server, and model folders
+already known -- filled in by a background probe (never the UI thread; a
+slow probe just leaves the "detecting..." placeholder a little longer,
+the rest of the tab is usable immediately either way). For each already-
+installed Ollama model it names the largest fully-resident context
+(learned cap or fit estimate, labelled); for free room, one or two
+illustrative model classes/quantizations that would fit with a 32k
+context -- an estimate, never a download from here. See
+[MODELS.md](MODELS.md)'s "The wizard detects before it asks" section.
+
 ```sh
 halo init --help
 ```
@@ -1297,6 +1309,7 @@ interactive dialog instead (`docs/SLASH-COMMANDS.md`).
 halo ollama calibrate <model>
 halo ollama calibrate <model> --host <name>
 halo ollama calibrate <model> --start <num_ctx>
+halo ollama calibrate <model> --no-up
 ```
 
 Halo 2.0.3 round 5b: loads `<model>` on the chosen host (the default host
@@ -1306,7 +1319,11 @@ memory (`size_vram >= size`) or the candidate drops below 4096, whichever
 comes first -- this loads the model several times in a row, by design.
 `--start` overrides the first candidate tried; left unset, it is the
 GPU-based fit estimate when a local or `ollama.hosts[].ssh` read exists,
-else 32768. Prints the host/model being calibrated, the starting
+else 32768. Once a fitting candidate is found, round 5b part 2 keeps
+STEPPING UP by powers of two (bounded by the model's own trained context
+and the 131072 hard cap) to find the true ceiling rather than settling for
+the first lucky guess -- `--no-up` skips that phase and keeps the first
+fitting candidate. Prints the host/model being calibrated, the starting
 candidate, and the result (the fully-resident `num_ctx` and how many
 steps it took, or "does not fit... even at num_ctx=4096"); either outcome
 is recorded in `~/.halo/ollama-fit.json` (a "does not fit" result is a
@@ -1316,6 +1333,25 @@ a host with no learned cap at all -- `ollama.auto_calibrate: false`
 (`docs/CONFIG.md`) opts out of that; this command is always available
 regardless, for an explicit re-measurement after a GPU/driver/other-
 process change. See [MODELS.md](MODELS.md)'s "Fit calibration" section.
+
+## `halo ollama doctor`
+
+```sh
+halo ollama doctor
+halo ollama doctor --host <name>
+```
+
+Halo 2.0.3 round 5b part 2: the same per-host analysis `halo ollama`
+prints, plus the documented host-tuning recommendations Halo cannot read
+back from any API (`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=
+q8_0`, `OLLAMA_NUM_PARALLEL=1` on a single-user box, `OLLAMA_KEEP_ALIVE`,
+`OLLAMA_CONTEXT_LENGTH`) and exactly where each one lives per OS of the
+HOST -- the OS Halo itself runs on for a local host, all three briefly for
+a remote one. A loopback-only host also gets a one-line "reachable from
+this machine only" hint naming the per-OS switch that would share it on
+the LAN. `halo doctor`'s own Ollama section prints the identical checklist
+text, one line per host. See [MODELS.md](MODELS.md)'s "Host setup
+checklist" section.
 
 ## `halo local`
 

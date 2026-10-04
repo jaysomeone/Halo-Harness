@@ -947,6 +947,19 @@ def _check_ollama_hosts() -> "list[tuple[str, str]]":
         loaded = len(ps.get("models") or [])
         entries.append((cid, f"{OK} Ollama ({host.name}): reachable, version {version}, "
                               f"{loaded} model(s) loaded ({host.url})"))
+        # Round 5b part 2 (brief item 4): "the matching section in `halo
+        # doctor`" -- the SAME `host_setup_checklist` text `halo ollama
+        # doctor` prints, one [OK] line per sentence (never a block) so
+        # this stays inside doctor.py's own one-line-per-fact format.
+        # Cheap (no extra network call beyond the probe/`/api/ps` already
+        # done above) -- never slows `halo doctor` down meaningfully.
+        try:
+            from halo_harness.providers.ollama_panel import host_setup_checklist
+            for i, line in enumerate(host_setup_checklist(host)):
+                entries.append((f"{cid}_setup_{i}", f"{OK} Ollama ({host.name}): {line}"))
+        except Exception as e:
+            entries.append((f"{cid}_setup", f"{WARN} Ollama ({host.name}): could not build the setup "
+                                              f"checklist ({type(e).__name__}: {e})"))
     return entries
 
 

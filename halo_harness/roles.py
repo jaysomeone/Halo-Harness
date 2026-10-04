@@ -273,6 +273,88 @@ def apply_role_preference(roles: dict) -> None:
             set_config_value(key, normalized)
 
 
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 5b part 2 (brief item 3): "VRAM-aware role defaults" --
+# when the SESSION's main model is `ol:` on a host that cannot hold a
+# second model beside it, a SUPPORTING role's TABLE value (never a CLI
+# `--role` override for THIS invocation -- that is the user's own explicit,
+# per-run instruction, never second-guessed) is redirected to the main
+# model itself instead of evicting it. See `providers.ollama_hw.
+# fits_beside_main` for the actual measurement.
+# ---------------------------------------------------------------------------
+
+VRAM_AWARE_ROLE_NAMES = ("small", "researcher", "judge", "subagent_default")
+VRAM_AWARE_REASON = "(same as main: fits beside it: no)"
+
+
+def vram_aware_override(role_name: str, raw_value, *, main_ref, state_dir=None,
+                         hw_runner=None) -> "tuple[object, Optional[str]]":
+    """`(effective_value, reason)` -- `reason` is `VRAM_AWARE_REASON`
+    (brief item 3's own exact wording) when `raw_value` was redirected,
+    else `None` (and `effective_value is raw_value`, unchanged) for every
+    other role name, a `raw_value` that doesn't parse to a model at all,
+    a `main_ref` that isn't `ollama`, a candidate that's already the same
+    model as main, a candidate on a DIFFERENT host (no shared VRAM, no
+    conflict possible), or `providers.ollama_hw.fits_beside_main`
+    returning `True`/`None` (fits, or unknown -- benefit of the doubt,
+    same house policy as every other "never guess, never block" fit
+    check in this codebase). Never raises -- any resolution failure
+    (an unparseable candidate ref, an unreachable host) degrades to "no
+    override", not an exception. `hw_runner` is the same test seam
+    `fits_beside_main`/every `ollama_hw` probe already accepts -- every
+    real caller omits it (the real OS GPU tool runs); never read from
+    `state_dir` either (`state_dir` is accepted only for call-site
+    symmetry with `resolve_role_ref`'s own signature, not used by this
+    function's current logic)."""
+    if role_name not in VRAM_AWARE_ROLE_NAMES:
+        return raw_value, None
+    model, effort = role_value_parts(raw_value)
+    if not model or getattr(main_ref, "provider", None) != "ollama" or model == main_ref.raw:
+        return raw_value, None
+    try:
+        from halo_harness.model import parse_model_ref
+        from halo_harness.providers.ollama import get_catalog, resolve_ollama_host
+        from halo_harness.providers.ollama_hw import fits_beside_main
+        candidate_ref = parse_model_ref(model)
+        if candidate_ref.provider != "ollama":
+            return raw_value, None
+        main_host = resolve_ollama_host(main_ref.host)
+        candidate_host = resolve_ollama_host(candidate_ref.host)
+        if main_host is None or candidate_host is None or main_host.url != candidate_host.url:
+            # Different hosts (or either unconfigured) -- no shared VRAM,
+            # so there is no eviction risk for this rule to guard against.
+            return raw_value, None
+        catalog = get_catalog(main_host)
+        fits = fits_beside_main(main_host, main_model=main_ref.model, candidate_model=candidate_ref.model,
+                                 catalog=catalog, hw_runner=hw_runner)
+    except Exception:
+        fits = None
+    if fits is not False:
+        return raw_value, None
+    new_value = {"model": main_ref.raw, "effort": effort} if effort else main_ref.raw
+    return new_value, VRAM_AWARE_REASON
+
+
+def vram_fit_reason(role_name: str, *, role_table: Optional[dict] = None, cli_overrides: Optional[dict] = None,
+                     main_ref) -> Optional[str]:
+    """The DISPLAY-only twin of `vram_aware_override` -- `/roles`
+    (`resolve_all_roles`) and the picker's `u` action read this to show
+    `VRAM_AWARE_REASON` beside a role without needing `resolve_role_ref`'s
+    own 4-tuple return shape to grow a 5th field (which every existing
+    caller would then have to unpack). `None` whenever a CLI `--role`
+    override is present for `role_name` THIS invocation (never
+    second-guessed, so never a reason to show either) or the table value
+    wouldn't be overridden anyway."""
+    cli_overrides = cli_overrides or {}
+    if cli_overrides.get(role_name) is not None:
+        return None
+    table_raw = (role_table or {}).get(role_name)
+    if table_raw is None:
+        return None
+    _value, reason = vram_aware_override(role_name, table_raw, main_ref=main_ref)
+    return reason
+
+
 def resolve_role_ref(name: str, *, role_table: Optional[dict] = None, cli_overrides: Optional[dict] = None,
                       parent_ref, parent_profile, state_dir, routes: Optional[dict] = None):
     """`(ModelRef, ModelProfile, effort_requested, source)` for role
@@ -284,12 +366,21 @@ def resolve_role_ref(name: str, *, role_table: Optional[dict] = None, cli_overri
     objects" contract). `effort_requested` (brief A.2, new this round) is
     whichever of the two role values actually won carries as its own
     `effort` -- `None` when it didn't ask for one (the route's own
-    default effort applies, same as an agent with no `effort:` override)."""
+    default effort applies, same as an agent with no `effort:` override).
+
+    Round 5b part 2 (brief item 3): a TABLE value (never a CLI override --
+    see `vram_aware_override`'s own docstring) for a VRAM-aware role name
+    is redirected to `parent_ref` itself when it would not fit beside it;
+    `source` stays `"role table"` either way (the reason string is a
+    SEPARATE lookup, `vram_fit_reason`, so this function's return shape
+    never changes for existing callers)."""
     from halo_harness.model import parse_model_ref, resolve_model_profile
     cli_overrides = cli_overrides or {}
     role_table = role_table or {}
     cli_raw = cli_overrides.get(name)
     table_raw = role_table.get(name)
+    if cli_raw is None and table_raw is not None:
+        table_raw, _reason = vram_aware_override(name, table_raw, main_ref=parent_ref, state_dir=state_dir)
     raw = cli_raw if cli_raw is not None else table_raw
     model, effort = role_value_parts(raw)
     if not model:
@@ -447,7 +538,15 @@ def resolve_all_roles(*, role_table: Optional[dict] = None, cli_overrides: Optio
             effort_display = f"{effort_requested} (sent as {effort_sent})"
         else:
             effort_display = effort_sent or "-"
-        rows.append({"role": name, "model": ref.raw, "effort": effort_display, "source": source, **info})
+        # Round 5b part 2 (brief item 3): "the picker's `u` action and
+        # `halo roles` show '(same as main: fits beside it: no)' as the
+        # reason" -- a SEPARATE lookup (`vram_fit_reason`), never folded
+        # into `source` itself, so a caller checking `source == "role
+        # table"` (there are none today, but the field is public) is
+        # never broken by this round.
+        vram_reason = vram_fit_reason(name, role_table=role_table, cli_overrides=cli_overrides, main_ref=parent_ref)
+        rows.append({"role": name, "model": ref.raw, "effort": effort_display, "source": source,
+                     "vram_reason": vram_reason, **info})
     return rows
 
 
@@ -461,9 +560,12 @@ def format_roles_table(rows: "list[dict]") -> str:
     w_price = max(len(r["price"]) for r in rows)
     lines = ["Role table (model/effort/endpoint/path type/price per role):"]
     for r in rows:
+        source_text = r["source"]
+        if r.get("vram_reason"):
+            source_text = f"{source_text}, {r['vram_reason']}"
         lines.append(f"  {r['role'].ljust(w_role)}  {r['model'].ljust(w_model)}  "
                       f"{r.get('effort', '-').ljust(w_effort)}  {r['path_type'].ljust(w_path)}  "
-                      f"{r['price'].ljust(w_price)}  ({r['source']})")
+                      f"{r['price'].ljust(w_price)}  ({source_text})")
     return "\n".join(lines)
 
 

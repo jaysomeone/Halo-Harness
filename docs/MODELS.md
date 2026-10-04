@@ -249,6 +249,30 @@ this origin note. `halo doctor` gains a lightweight one-line-per-host
 Ollama section (reachable, version, loaded count only -- never the full
 per-model `/api/show` fan-out the richer panel does).
 
+**Host setup checklist (`halo ollama doctor [--host NAME]`, round 5b part
+2)**: the SAME per-host analysis above, plus the documented host-tuning
+recommendations Halo cannot read back from any API, as plain sentences,
+never a block: `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`,
+`OLLAMA_NUM_PARALLEL=1` on a single-user box, `OLLAMA_KEEP_ALIVE`,
+`OLLAMA_CONTEXT_LENGTH` -- and WHERE each one actually lives, per OS of
+the HOST (a local host: the OS Halo itself is running on; a remote host:
+unknown, so all three print briefly): **Windows** -- the tray app's own
+"Expose Ollama to the network" switch (its Settings screen) overrides
+`OLLAMA_HOST` outright; setting it yourself is a user-scope environment
+variable plus quitting and relaunching the tray app. **macOS** -- the
+menu-bar app's own "Expose to network" switch, same override relationship;
+setting it yourself is `launchctl setenv OLLAMA_HOST 0.0.0.0:11434` plus
+relaunching the app -- from the research doc's own community-knowledge
+note, NOT independently confirmed live (rolo's own Mac, when available, is
+the live check). **Linux** -- `sudo systemctl edit ollama`, one
+`Environment="VAR=value"` line per variable under `[Service]`, then
+`sudo systemctl daemon-reload` and a restart. A loopback-only host (its
+own configured URL is `127.0.0.1`/`localhost`) gets one extra plain line:
+"this daemon is reachable from this machine only; to share it on the LAN
+flip <the per-OS switch above>." `halo doctor`'s own Ollama section prints
+the identical checklist text per host, one `[OK]`-prefixed line per
+sentence, never a WARN just for this.
+
 **Tool-catalog sizing by context class**: Halo 2.0.3 round 3. The `ol:`
 ProviderProfile's `tools_max` now follows the EFFECTIVE `num_ctx` instead
 of round 2's permanently-unbounded `None`: under 16k tokens -> 16 tools,
@@ -304,6 +328,19 @@ ollama` show every catalog model's learned cap (or "not calibrated") next
 to a "what fits" column and the one-phrase source of that decision
 ("learned cap" / "host max_ctx" / "fit estimate" / "remote default" /
 "trained context" / "hard cap" / "fallback").
+
+**Calibration also steps UP (round 5b part 2)**: once the DOWN-stepping
+loop above finds a candidate that fits fully resident, calibration keeps
+DOUBLING from there -- `halo ollama calibrate`'s own first guess on a
+roomy card is often not the model's true ceiling, and settling for it
+would under-use real headroom. Bounded by the model's own trained context
+and the hard cap (131072) either way, and stopping at the FIRST candidate
+that does NOT fit (never stepping back down to search for a smaller gap)
+-- the recorded `max_full_gpu_ctx` is the LAST value that was still fully
+resident. `halo ollama calibrate --no-up` skips this phase and keeps the
+first fitting guess, for a faster (but possibly smaller) measurement. The
+automatic first-use trigger steps up too, bounded by that model's own
+catalog-reported trained context.
 
 **Context-ownership precedence (round 5b, corrected)**: `num_ctx` is the
 SMALLEST of every candidate that is actually known -- the hard cap
@@ -387,6 +424,77 @@ effect of the SAME read the fit estimate already makes, never a second
 probe) found the model partially in system RAM. `halo ollama` prints the
 last turn's own numbers per host/model, persisted in the same `~/.halo/
 ollama-fit.json` file as the learned caps.
+
+**Reliable tool calls from small models (round 5b part 2, corrected by a
+fix pass the same day)**: local models fail mostly by emitting malformed
+or half-formed tool calls, not by choosing the wrong tool. **Constrained
+decoding is used ONLY to repair a malformed call, never to force one** --
+an ordinary turn, including one right after a tool result, is ALWAYS
+decoded free: the model must always be able to answer in prose. The first
+version of this round instead sent the tool-call schema as an output
+CONSTRAINT on every turn it judged "expected to call a tool" (right after
+a tool result) -- a real run on a local box showed why that is wrong: once
+the model had nothing useful left to call, it could no longer just say so
+in prose, so it emitted one meaningless call (`TaskStop` on a task that
+didn't exist) every time, Halo dispatched it, and the NEXT turn was ALSO
+"right after a tool result" and ALSO constrained -- the session looped for
+25 minutes (175 requests) until killed by hand. That gate (`providers.
+tool_call_schema.expected_to_call_tool`) is deleted outright. Three
+measures remain, all behind the `ollama` dialect (local hosts only -- never
+Ollama Cloud, which the research confirms rejects structured output) and
+`hf:local/*` servers, every other dialect completely untouched:
+
+1. **One local repair round, constrained.** A tool call that fails to
+   parse (bad JSON arguments, or a resolved tool whose arguments fail
+   schema validation -- covering "missing required argument") gets ONE
+   isolated, tools-less, history-less completion: Halo sends the tool's
+   own exact `input_schema` as the output constraint (`format` on `ol:`,
+   the OpenAI `response_format` json_schema shape on `hf:local/*`) plus
+   the parse/validation error, and uses whatever comes back (re-validated
+   against that same schema) as the repaired call -- before anything
+   reaches the user. A second failure (or the repair reply itself not
+   validating) surfaces the ordinary plain error, exactly as it always
+   has. This is the ONLY place either dialect ever puts a structured-
+   output constraint on the wire now -- a real tool call was already
+   ATTEMPTED and failed, so constraining the fix to that one tool's own
+   schema is correct; constraining an attempt that hasn't happened yet is
+   what caused the live-run loop. An UNRESOLVED tool name is never offered
+   this repair round at all -- there is no single schema to constrain
+   against until a name is known, and the existing alias-table/difflib
+   name resolution already recovers the overwhelming majority of near-miss
+   names locally, with no network round trip either.
+2. **Leak-parser promotion stays on regardless.** The generic bare-JSON/
+   fenced-JSON leak extractors (`tool_leak_patterns=("python_repr_args",
+   "json_text_call")`) are enabled for the `ollama`/`huggingface` profiles
+   -- harmless now that nothing forces a model into that shape: if a model
+   spills a `{"name": ..., "arguments": {...}}`-shaped attempt into plain
+   text on its OWN initiative (unprompted), it still gets promoted to a
+   real tool_use via the existing, dialect-agnostic leak_parser call.
+3. **A stricter identical-call loop guard.** Independent of the generic,
+   all-dialect loop breaker (5 denies, 8 ends the turn, counted per turn
+   but NOT required to be consecutive), `ollama`/`huggingface` sessions
+   also track an unbroken run of the IDENTICAL (tool, arguments) pair --
+   three in a row stops the turn immediately with one plain sentence
+   ("... the model repeated the same tool call three times in a row --
+   stopping this turn so you can steer it"), reset every turn, with the
+   same `BashOutput`-polling exemption the generic breaker already has.
+   This is the backstop against a model stuck repeating one call for ANY
+   reason, not just the specific constraint-driven loop above.
+
+**VRAM-aware role defaults (round 5b part 2)**: when the session's main
+model is `ol:` on a host where a SECOND model's own on-disk weight size
+plus the main model's CURRENTLY RESIDENT size (`/api/ps`'s `size_vram` --
+a measured fact, main must actually be loaded) would exceed that host's
+total GPU memory, the `small`/`researcher`/`judge`/`subagent_default`
+roles' TABLE value (never an explicit `--role`/`/roles set` override for
+this run -- that is never second-guessed) is redirected to the main model
+itself instead of evicting it -- `providers.ollama_hw.fits_beside_main`
+is the measurement, `roles.vram_aware_override` the redirection; unknown
+(no GPU read, main not loaded, candidate not in the catalog, different
+hosts) always means "leave it alone," never a guess. `/local <question>`
+applies the SAME redirection at call time to whatever `roles.small`
+resolved to. `halo roles`/`/roles` and the model picker's `u` action show
+`(same as main: fits beside it: no)` as the reason when this fired.
 
 ## Hugging Face
 
@@ -496,6 +604,19 @@ server's own `/props` endpoint (also unconfirmed at the JSON-shape level
 -- degrades to "unknown" rather than guessing). Unknown context falls back
 to the plain `ModelProfile` default, same as an unlisted router model.
 
+**mlx_lm.server (round 5b part 2, Apple Silicon)**: Apple's MLX runtime
+answers the SAME OpenAI-compatible shape on the SAME default port family
+as llama-server (8080) -- the research doc never confirmed `mlx_lm.
+server`'s own exact flags, so Halo tells the two apart by what `/props`
+answers instead of by port: a server that answers `/props` is labelled
+`llama-server` (a confirmed, llama.cpp-specific native endpoint); one that
+does NOT, on Apple Silicon (`sys.platform == "darwin"`) specifically, is
+labelled `mlx` (a heuristic -- the absence of one tool's own marker, not
+a positive MLX signal -- UNCONFIRMED, round 6's live Mac check should
+verify or correct it); on any other platform a missing `/props` stays
+genuinely unlabelled rather than guessing. `/local` shows the label in
+the server's own group name.
+
 **The Hugging Face Hub cache**: `/local` (below) also walks `$HF_HUB_
 CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub` for `models--
 <org>--<name>` directories -- models present on disk (from `hf download`)
@@ -504,7 +625,20 @@ repo id, real on-disk size (summed from `blobs/`, never double-counting
 the `snapshots/` symlinks that point back to them), and the format(s)
 present (`safetensors`/`gguf`, read from the snapshot symlinks' own
 filenames -- a blob's name is a bare content hash). Never follows a
-top-level symlink that resolves outside the cache root.
+top-level symlink that resolves outside the cache root. A repo under the
+`mlx-community` org is labelled "runnable through MLX" in its capability
+column -- the Hub org MLX-quantized repos are actually published under.
+
+**LM Studio's own model folder (round 5b part 2)**: `~/.lmstudio/models`
+(the documented default; `huggingface.lmstudio_models_dir` overrides it
+for a box where LM Studio's own in-app "Model Storage" setting moved it --
+that setting's own persistence was not independently confirmed this
+round) joins the Hub-cache scan as a second on-disk source, under its own
+`LM Studio (cache, not served)` group in `/local`. LM Studio mirrors the
+Hub's `<publisher>/<model>/` folder nesting directly (never the Hub
+cache's content-addressed `models--org--name`/`blobs`/`snapshots`
+structure) -- a bare `.gguf` file in a model folder, or a transformers-
+style folder (`config.json` beside `*.safetensors`), each become one row.
 
 **The shared `/local` view** (round 5): `/local` with no arguments (TUI)
 or `halo local [--refresh]` (CLI) merge THREE sources into one list, in
@@ -530,6 +664,23 @@ Face` tab (paste `HF_TOKEN`, add a dedicated endpoint, add a local server
 by URL with an optional key, or rely on auto-detection -- any subset, all
 optional, both tabs skippable) -- see `docs/CONFIG.md`'s "Providers"
 section for why neither is a `halo init --provider` CLI-flag choice.
+
+**The wizard detects before it asks (round 5b part 2)**: both tabs open
+with a short detection summary, filled in by a background worker (never
+the UI thread -- every field/button renders immediately regardless of
+how long the probe takes; a slow probe just means the summary line stays
+"detecting..." a little longer, never a stuck wizard): GPU or unified
+memory (labelled an estimate where it is one), whether Ollama is
+reachable and what it already has pulled, any running local server, and
+model folders already known. For each already-installed Ollama model it
+names the largest fully-resident context (the learned cap when one
+exists, else the live fit estimate, labelled either way); for whatever
+free room is left, one or two illustrative model classes and quantizations
+that would likely fit with a 32k context -- derived from the same exact
+per-parameter byte table the KV-cache arithmetic uses for weights, plus a
+flat ~2 GiB reservation for the context itself (not that class's own real
+KV formula, which needs an architecture no not-yet-installed model has)
+-- explicitly an estimate, never a download from the wizard itself.
 
 ## Families and their rules
 

@@ -82,12 +82,20 @@ class DetectedLocalServer:
     the configured entry's own name for a manual one. `context_by_model`
     only ever carries entries for a model this probe found a real number
     for (research doc: unknown falls back to the profile default, never a
-    guess here)."""
+    guess here).
+
+    Round 5b part 2 (brief item 6, "mlx_lm.server... tell them apart"):
+    `runtime_label` is `"llama-server"`, `"mlx"`, or `None` (genuinely
+    unknown -- every other OpenAI-compatible server this module treats
+    identically on purpose, see the module docstring's port-8000 note).
+    See `_runtime_label_for` for exactly how, and how little, this is
+    actually confirmed."""
     name: str
     base_url: str
     model_ids: "tuple[str, ...]" = field(default_factory=tuple)
     context_by_model: "dict" = field(default_factory=dict)
     manual: bool = False
+    runtime_label: "Optional[str]" = None
 
 
 def _probe_get(base_url: str, path_suffix: str, *, api_key: Optional[str], timeout: float):
@@ -175,12 +183,37 @@ def probe_llama_server_props(base_url: str, *, timeout: float = _PROPS_TIMEOUT_S
     return None
 
 
+def _runtime_label_for(base_url: str, *, props_ctx: Optional[int]) -> Optional[str]:
+    """Round 5b part 2 (brief item 6): llama-server is the one local
+    runtime in this module's port family (8080) with a CONFIRMED native
+    endpoint of its own (`/props`, research doc section 10 -- the shape
+    is a heuristic per `probe_llama_server_props`'s own docstring, but
+    the endpoint's EXISTENCE is llama.cpp-specific) -- `props_ctx is not
+    None` means `/props` answered, so this is confidently "llama-server".
+    When it did NOT answer, `mlx_lm.server`'s own flags/endpoints were
+    never confirmed by this round's research (docs/harness/GPU-RESEARCH.md
+    section 7: "UNCONFIRMED at the exact-flag level") -- there is no
+    positive signal for MLX at all, only the ABSENCE of llama-server's
+    own marker, so this guesses "mlx" ONLY on Apple Silicon (`sys.
+    platform == "darwin"`, round 5b's own framing: "the Mac is
+    different"), where MLX is the only other well-known local runtime in
+    this exact port family; every other platform stays `None` (genuinely
+    unknown -- could be TGI, vLLM mis-configured onto this port, or
+    anything else) rather than guess wrong. Round 6's live Mac check
+    should confirm or correct this."""
+    if props_ctx is not None:
+        return "llama-server"
+    import sys
+    return "mlx" if sys.platform == "darwin" else None
+
+
 def probe_models_endpoint(base_url: str, *, name: str = "", api_key: Optional[str] = None,
                            manual: bool = False, timeout: float = _PROBE_TIMEOUT_S) -> Optional[DetectedLocalServer]:
     """`GET {base_url}/models` -- `None` when unreachable or not a real
     OpenAI-compatible server (no `data` list back); a `DetectedLocalServer`
     otherwise. Falls back to `probe_llama_server_props` once, for every
-    model that reported no context number of its own."""
+    model that reported no context number of its own -- ALSO what tells
+    `_runtime_label_for` apart (round 5b part 2, brief item 6)."""
     data = _probe_get(base_url, "/models", api_key=api_key, timeout=timeout)
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
         return None
@@ -196,13 +229,13 @@ def probe_models_endpoint(base_url: str, *, name: str = "", api_key: Optional[st
             context_by_model[r["id"]] = ctx
         else:
             missing.append(r["id"])
-    if missing:
-        props_ctx = probe_llama_server_props(base_url)
-        if props_ctx is not None:
-            for mid in missing:
-                context_by_model[mid] = props_ctx
+    props_ctx = probe_llama_server_props(base_url) if missing else None
+    if props_ctx is not None:
+        for mid in missing:
+            context_by_model[mid] = props_ctx
     return DetectedLocalServer(name=name, base_url=base_url.rstrip("/"), model_ids=model_ids,
-                                context_by_model=context_by_model, manual=manual)
+                                context_by_model=context_by_model, manual=manual,
+                                runtime_label=_runtime_label_for(base_url, props_ctx=props_ctx))
 
 
 def auto_detect_local_servers(*, env: Optional[dict] = None, timeout: float = _PROBE_TIMEOUT_S) -> "list":

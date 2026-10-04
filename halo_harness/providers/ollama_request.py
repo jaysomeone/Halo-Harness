@@ -87,6 +87,7 @@ def build_ollama_request_body(
     trained_context: Optional[int] = None, fit_estimate: Optional[int] = None,
     requested_max_tokens: Optional[int] = None,
     learned_cap: Optional[int] = None, remote: bool = False,
+    force_format: "Optional[dict]" = None,
 ) -> dict:
     """Build the native `/api/chat` body. `messages`/`system_text` are the
     SAME Anthropic-shaped derived-transcript inputs `providers.request.
@@ -127,7 +128,30 @@ def build_ollama_request_body(
     (`agent/loop.py`'s `_build_ollama_body_for_ref`) already made to get
     `trained_context`/`fit_estimate` -- passed straight through to
     `compute_num_ctx` rather than re-derived here, so there is exactly
-    ONE lookup of the learned-cap store per request, not two."""
+    ONE lookup of the learned-cap store per request, not two.
+
+    Round 5b part 2 (brief item 1, "reliable tool calls"), FIX PASS
+    (2026-10-04 live-run finding): constrained decoding is used ONLY to
+    REPAIR a malformed call (`force_format`, below -- `agent/loop.py`'s
+    `_attempt_tool_repair`), never to FORCE one on an ordinary turn. The
+    first version of this round set `format` on every turn `providers.
+    tool_call_schema.expected_to_call_tool` judged "expected to call a
+    tool" (right after a tool result) -- that FORCED the model to answer
+    in the tool-call shape on every such turn, with no way to just
+    answer in prose; on a real local box the model had nothing useful
+    left to call, emitted a meaningless call (`TaskStop` on a task that
+    didn't exist) every time, Halo dispatched it, the NEXT turn was
+    STILL constrained post-tool-result, and the session looped for 25
+    minutes (175 requests) until killed by hand. A normal turn -- any
+    turn that isn't an explicit repair -- is always decoded FREE now: the
+    model must always be able to answer in prose. The generic bare-JSON/
+    fenced-JSON leak-parser patterns (`profiles.py`'s `tool_leak_
+    patterns`) stay enabled regardless -- a schema-shaped reply that
+    still arrives as plain text gets promoted to a real tool_use, which
+    is harmless without the constraint forcing it. A STRICTER identical-
+    call loop guard (`agent/loop.py`'s `_identical_call_guard_*`, three
+    in a row on this dialect) is the new backstop against a model stuck
+    repeating one call regardless of why."""
     del tool_choice  # no native-API equivalent (see docstring)
     import dataclasses
     from halo_harness.providers.ollama_fit import resolve_ollama_tools_max
@@ -147,6 +171,14 @@ def build_ollama_request_body(
         body["keep_alive"] = host.keep_alive
     if oai_tools:
         body["tools"] = oai_tools
+    if force_format is not None:
+        # Round 5b part 2 (brief item 2, "repair loop"): `agent/loop.py`'s
+        # `_attempt_tool_repair` wants the tool's OWN exact `input_schema`
+        # as the constraint on an ISOLATED, tools-less completion -- the
+        # ONLY place this module ever sets `format` now (fix pass: an
+        # ordinary turn is never constrained, see this function's own
+        # docstring).
+        body["format"] = force_format
     think = think_value_for_effort(effort, route.upstream_model)
     if think is not None:
         body["think"] = think

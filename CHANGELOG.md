@@ -100,7 +100,53 @@ release prep) is still to come under this SAME version number.
    byte-stable turn to turn (so Ollama/llama.cpp can actually reuse the
    cached prompt prefix); the status bar's model chip and `halo ollama`
    now show the last turn's own tokens/second, prefill seconds, and an
-   "offloaded" marker.
+   "offloaded" marker. Round 5b part 2 (local-model excellence,
+   continued): on the `ollama` dialect (local hosts only) and `hf:local/*`
+   servers, a turn Halo decides is EXPECTED to call a tool (tools are
+   offered, it isn't the first turn, and the last message is a tool
+   result -- `providers/tool_call_schema.py`, the one documented rule
+   every caller shares) sends the tool-call schema as the output
+   constraint (`format` for `ol:`, alongside `tools` unchanged;
+   `response_format` json_schema for `hf:local/*`), falling back to
+   unconstrained decoding on a bare 400; a tool call that still fails to
+   parse (bad JSON, or a resolved tool whose arguments fail schema
+   validation) gets ONE isolated, tools-less local repair round -- the
+   exact schema plus the parse error, re-validated before trusting it --
+   before the existing plain error ever surfaces; the `ollama`/
+   `huggingface` profiles also gain the generic bare-JSON/fenced-JSON
+   leak-parser patterns, so a constrained reply that lands in plain text
+   instead of native `tool_calls` still gets promoted. VRAM-aware role
+   defaults: when the main model is `ol:` on a host where a second
+   model's own weights plus the main model's CURRENTLY RESIDENT size
+   would exceed the host's total GPU memory, `small`/`researcher`/
+   `judge`/`subagent_default`'s TABLE value (never an explicit per-run
+   `--role`/`/roles set` override) redirects to the main model instead of
+   evicting it -- `/local <question>` applies the same redirection at call
+   time; `halo roles`/`/roles` and the picker's `u` action show `(same as
+   main: fits beside it: no)` as the reason. `halo ollama doctor [--host
+   NAME]` (and `halo doctor`'s matching section) prints the documented
+   host-tuning recommendations Halo cannot read back
+   (`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`,
+   `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_CONTEXT_LENGTH`)
+   and exactly where each lives per OS of the host (Windows tray app,
+   macOS menu-bar app plus `launchctl setenv`, Linux `systemctl edit
+   ollama`), with a one-line hint for a loopback-only host. The `Ollama`/
+   `Hugging Face` init-wizard tabs now open with a detection summary (GPU/
+   unified memory, Ollama's own models and what fits, running local
+   servers, model folders known so far), filled in off the UI thread.
+   `mlx_lm.server` (Apple's OpenAI-compatible MLX runtime, same default
+   port family as llama-server) is told apart from llama-server by
+   whether `/props` answers, labelled `MLX` in `/local`; `mlx-community/*`
+   Hub-cache repos are labelled runnable through MLX; LM Studio's own
+   model folder (`~/.lmstudio/models`, `huggingface.lmstudio_models_dir`
+   overridable) joins the Hub-cache scan under its own group. `halo
+   ollama calibrate` now also steps UP from a fitting first guess
+   (bounded by the model's own trained context and the 131072 hard cap)
+   to find the true ceiling instead of settling for the first lucky guess
+   (`--no-up` skips it); the auto-calibrate notice now also surfaces from
+   `call_small_model` (via the log, since that call path has no event
+   stream of its own to protect) and `_run_compaction` (as an ordinary
+   `notification` event), not just the main turn.
 3. **`hf:` route -- Hugging Face Inference Providers router and dedicated
    Inference Endpoints** (round 4): a new `huggingface` provider reusing
    the existing openai-chat request/stream code unchanged (no new wire

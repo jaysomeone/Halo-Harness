@@ -850,8 +850,19 @@ def build_session(
     cli_roles = parse_role_flags(roles_flag)
     persisted_roles = resolve_role_table(provider=model_ref.provider)
     _small_role_raw = cli_roles.get("small")
+    _small_role_from_table = _small_role_raw is None
     if _small_role_raw is None:
         _small_role_raw = persisted_roles.get("small")
+    if _small_role_from_table and _small_role_raw is not None:
+        # Round 5b part 2 (brief item 3): a TABLE value only (never a
+        # `--role small=...` override THIS run -- that stays untouched,
+        # same rule `roles.resolve_role_ref` already applies for every
+        # other role) redirected to the main model when it would not fit
+        # beside it on the SAME Ollama host -- see `roles.vram_aware_
+        # override`'s own docstring. `model_ref` is already resolved
+        # above (the session's own main ref).
+        from halo_harness.roles import vram_aware_override
+        _small_role_raw, _small_vram_reason = vram_aware_override("small", _small_role_raw, main_ref=model_ref)
     _small_role_model, small_effort = role_value_parts(_small_role_raw)
 
     explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
