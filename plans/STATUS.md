@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-04 ~07:00)
+# Status board (updated 2026-10-04 ~07:15)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -48,7 +48,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.3 = local and cloud models: Ollama + Hugging Face (brief file `2.0.5-ollama-brief.md` written under its old number, plus `2.0.3-ollama-round1-research-brief.md`; moved ahead by rolo 2026-10-03; HF + cloud added by rolo 2026-10-03)
 
-- [x] research (f17ec93: `docs/harness/LOCAL-MODELS-RESEARCH.md` + draft `2.0.3-ollama-round2-brief.md` with rounds 2-6), [x] round 2 (2026-10-04 ~07:00): `ol:` provider on the native API, NDJSON decoder with synthesized tool ids, `ollama.hosts` (LAN + ollama.com by api_key), catalog + capability probe, mock_ollama, wired end to end incl. small-model and compaction paths; live on Windows against the real local Ollama (plain turn, Read tool round trip, `@default` host form, thinking model with `think` on the wire); Kali + WSL suites green, [ ] round 3 NEXT: hardware/host analysis `/ollama` + roles for local models (brief section Round 3),  [ ] `hf:` route (HF router with HF_TOKEN, dedicated endpoints, local OpenAI-compatible servers auto-detected: llama-server, transformers serve, vLLM, TGI, LM Studio), [ ] shared local-model discovery (Ollama models, HF cache, running servers) in `/local` with the capability probe (the gym ranking waits for 2.0.5), [ ] hardware and host analysis, [ ] roles for local models, [ ] init tab, docs, [ ] release
+- [x] research (f17ec93: `docs/harness/LOCAL-MODELS-RESEARCH.md` + draft `2.0.3-ollama-round2-brief.md` with rounds 2-6), [x] round 2 (6cf1b52, 2026-10-04 ~07:15): `ol:` provider on the native API, NDJSON decoder with synthesized tool ids, `ollama.hosts` (LAN + ollama.com by api_key), catalog + capability probe, mock_ollama, wired end to end incl. small-model and compaction paths; live on Windows against the real local Ollama (plain turn, Read tool round trip, `@default` host form, thinking model with `think` on the wire); Kali + WSL suites green, [~] round 3 RUNNING: hardware/host analysis `/ollama` + fit estimate + tool-catalog sizing + roles for local models (brief section Round 3 + hand-off notes),  [ ] `hf:` route (HF router with HF_TOKEN, dedicated endpoints, local OpenAI-compatible servers auto-detected: llama-server, transformers serve, vLLM, TGI, LM Studio), [ ] shared local-model discovery (Ollama models, HF cache, running servers) in `/local` with the capability probe (the gym ranking waits for 2.0.5), [ ] hardware and host analysis, [ ] roles for local models, [ ] init tab, docs, [ ] release
 
 ## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
 
