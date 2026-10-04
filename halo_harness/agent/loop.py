@@ -565,7 +565,7 @@ class _StepResult:
     def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None,
                  finish_reason=None, latency_ms=None, ttft_ms=None, retries=0, status="ok",
                  responding_provider=None, ttfb_ms=None, first_reasoning_ms=None, first_text_ms=None,
-                 first_tool_ms=None, reasoning_streamed=False):
+                 first_tool_ms=None, reasoning_streamed=False, timing_ns=None):
         self.assistant_blocks = assistant_blocks
         self.stop_reason = stop_reason
         self.usage = usage
@@ -604,6 +604,13 @@ class _StepResult:
         self.first_text_ms = first_text_ms
         self.first_tool_ms = first_tool_ms
         self.reasoning_streamed = reasoning_streamed
+        # Round 5b (brief item 7): `providers.ollama_stream`'s own
+        # `harness_meta["timing_ns"]` -- {prompt_eval_count, eval_count,
+        # prompt_eval_duration, eval_duration, load_duration,
+        # total_duration}, Ollama's documented nanosecond timing fields --
+        # `None`/`{}` for every non-`ollama` dialect (that key is only ever
+        # set by `OllamaStreamToAnthropic._finalize`).
+        self.timing_ns = timing_ns or {}
 
 
 def _assistant_block_is_replayable(b: dict) -> bool:
@@ -747,6 +754,24 @@ class Session:
         self.cost_meter = CostMeter(price_in=model_profile.price_in, price_out=model_profile.price_out,
                                      price_cache_read=model_profile.price_cache_read,
                                      price_cache_write=model_profile.price_cache_write)
+        # Round 5b: `_maybe_auto_calibrate_ollama`'s own per-process dedupe
+        # (a (host.url, model) pair already attempted this run, success or
+        # failure, is never retried within the SAME process -- a completed
+        # calibration persists to `~/.halo/ollama-fit.json` regardless of
+        # outcome, so a FRESH process finds `has_calibration_entry` already
+        # true and never re-triggers at all) and the plain-notice queue
+        # `_step` flushes as real `notification` events right after
+        # `_derive_and_build` returns.
+        self._ollama_calibrate_attempted: set = set()
+        self._pending_ollama_notices: list = []
+        # Round 5b (brief item 7): throughput for the status bar's model
+        # chip and `halo ollama`'s own "last turn" printout -- `_account_
+        # usage` fills `_last_ollama_throughput` from each `ollama`-route
+        # `_StepResult.timing_ns`; `_build_ollama_body_for_ref` fills the
+        # other two just before the matching request goes out.
+        self._last_ollama_host_url: Optional[str] = None
+        self._last_ollama_offloaded: Optional[bool] = None
+        self._last_ollama_throughput: Optional[dict] = None
         self.tool_registry: ToolRegistry = session_context.tool_registry
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         # item 22 remainder: state_dir threaded through so a Databricks
@@ -2063,6 +2088,41 @@ class Session:
             )
         return system_text, messages, tools, body
 
+    def _maybe_auto_calibrate_ollama(self, host, model: str) -> None:
+        """Halo 2.0.3 round 5b (brief item 2): "run it automatically the
+        first time a model is used on a host with no learned cap."
+        Gated three ways, cheapest check first: (1) this (host.url, model)
+        pair was already attempted THIS PROCESS (`_ollama_calibrate_
+        attempted`, in-memory only -- see `__init__`'s own comment for why
+        that's enough); (2) `BRIDGE_TEST_NO_BACKGROUND_NET` (never touches
+        the network in a hermetic test); (3) `ollama.auto_calibrate: false`
+        (brief's own opt-out) or an entry already on disk (a different
+        process already measured this pair, or an earlier `halo ollama
+        calibrate` did). Any exception anywhere in this path is swallowed
+        and logged at DEBUG -- a failed calibration attempt must never
+        block the ordinary turn it was trying to help."""
+        key = (host.url, model)
+        if key in self._ollama_calibrate_attempted:
+            return
+        self._ollama_calibrate_attempted.add(key)
+        try:
+            from halo_harness.config.paths import background_net_disabled
+            if background_net_disabled():
+                return
+            from halo_harness.providers.ollama_calibrate import (
+                auto_calibrate_enabled, has_calibration_entry, run_auto_calibration,
+            )
+            if not auto_calibrate_enabled():
+                return
+            state_dir = self.state_dir
+            if has_calibration_entry(state_dir, host_url=host.url, model=model):
+                return
+            notice = run_auto_calibration(host, model, state_dir=state_dir)
+            if notice:
+                self._pending_ollama_notices.append(notice)
+        except Exception:
+            log.debug("ollama: auto-calibration for %s@%s failed", model, host.name, exc_info=True)
+
     def _build_ollama_body_for_ref(self, *, ref: ModelRef, route: Route, profile: ProviderProfile,
                                     system_text: str, messages: list, tools, tool_choice=None,
                                     effort: Optional[str], requested_max_tokens: Optional[int]) -> dict:
@@ -2099,6 +2159,12 @@ class Session:
         # -- see that function's own docstring for the full fallback
         # chain; any failure degrades to `None`, same as round 2's own
         # catalog read.
+        # Round 5b: runs (at most once per process per host+model, see the
+        # method's own docstring) BEFORE resolve_context_decision below, so
+        # that if it actually calibrates, THIS SAME request's own
+        # learned_cap lookup -- not just the next one -- already sees the
+        # freshly-written entry.
+        self._maybe_auto_calibrate_ollama(host, ref.model)
         from halo_harness.providers.ollama_hw import resolve_context_decision
         decision = resolve_context_decision(ref, env)
         body = build_ollama_request_body(
@@ -2106,11 +2172,19 @@ class Session:
             route=route, profile=profile, effort=effort, host=host,
             trained_context=decision.trained_context, fit_estimate=decision.fit_estimate,
             requested_max_tokens=requested_max_tokens,
+            learned_cap=decision.learned_cap, remote=decision.remote,
         )
         if ref is self.model_ref:
             num_ctx = (body.get("options") or {}).get("num_ctx")
             if isinstance(num_ctx, int) and num_ctx != self.model_profile.context_tokens:
                 self.model_profile = dataclasses.replace(self.model_profile, context_tokens=num_ctx)
+            # Round 5b (brief item 7): `_account_usage` reads this right
+            # after the matching `_step` call returns, to decide the
+            # status bar's "offloaded" marker -- sourced from `last_known_
+            # offload`'s cache (a side effect of the fit-estimate's own
+            # `/api/ps` read above), never a dedicated extra probe.
+            self._last_ollama_host_url = host.url
+            self._last_ollama_offloaded = decision.offloaded
         return body
 
     def _build_request(self, body: dict, *, route: Optional[Route] = None,
@@ -2222,6 +2296,16 @@ class Session:
             # and points at the judge role (`request.ToolsNotSupported`).
             yield events.error(str(e), turn=turn_no, err_type="tools_not_supported")
             return None
+        # Round 5b: surfaces `_build_ollama_body_for_ref`'s own auto-
+        # calibration notice (queued, never yielded from deep inside a
+        # plain function) right after the body that triggered it was
+        # built -- a plain UI-only `notification` event, never written
+        # into the logged transcript (a snapshot would replay on every
+        # future turn for no reason).
+        if self._pending_ollama_notices:
+            for _notice in self._pending_ollama_notices:
+                yield events.notification(_notice, level="info")
+            self._pending_ollama_notices.clear()
         req = self._build_request(body)
 
         attempts = 0
@@ -2942,7 +3026,8 @@ class Session:
                             retries=attempts - 1, status="ok",
                             responding_provider=harness_meta.get("responding_provider"),
                             ttfb_ms=ttfb_ms, first_reasoning_ms=first_reasoning_ms, first_text_ms=first_text_ms,
-                            first_tool_ms=first_tool_ms, reasoning_streamed=reasoning_streamed)
+                            first_tool_ms=first_tool_ms, reasoning_streamed=reasoning_streamed,
+                            timing_ns=harness_meta.get("timing_ns"))
 
     # H10 Part A: "or"|"dbx"|"ant" -- the coarse routing rail
     # (`ModelRef.provider`), independent of which specific backend actually
@@ -3025,6 +3110,45 @@ class Session:
         total_prompt_tokens = _total_prompt_tokens(result.usage)
         if total_prompt_tokens is not None:
             self._last_prompt_tokens = total_prompt_tokens
+        if self.model_ref.provider == "ollama" and result.timing_ns:
+            self._record_ollama_throughput(result.timing_ns)
+
+    def _record_ollama_throughput(self, timing_ns: dict) -> None:
+        """Round 5b (brief item 7): tokens/second and prefill seconds from
+        one `ol:` step's own `eval_count`/`eval_duration`/`prompt_eval_
+        duration` (Ollama's documented NANOSECOND timing fields) --
+        `None` for a figure whose inputs are missing/zero rather than a
+        divide-by-zero or a misleading 0. Stashed on `self` for `status_
+        event` to include on the NEXT status event (never computed
+        twice), and persisted via `ollama_calibrate.record_last_turn_
+        throughput` so a separate `halo ollama` CLI process can print it
+        too. Never raises -- a malformed timing dict degrades to "nothing
+        learned this step", same as a missing one."""
+        try:
+            eval_count = timing_ns.get("eval_count")
+            eval_duration = timing_ns.get("eval_duration")
+            prompt_eval_duration = timing_ns.get("prompt_eval_duration")
+            tokens_per_second = None
+            if (isinstance(eval_count, int) and isinstance(eval_duration, (int, float))
+                    and eval_duration > 0):
+                tokens_per_second = round(eval_count / (eval_duration / 1_000_000_000.0), 1)
+            prefill_seconds = None
+            if isinstance(prompt_eval_duration, (int, float)) and prompt_eval_duration >= 0:
+                prefill_seconds = round(prompt_eval_duration / 1_000_000_000.0, 2)
+            self._last_ollama_throughput = {
+                "tokens_per_second": tokens_per_second, "prefill_seconds": prefill_seconds,
+                "offloaded": self._last_ollama_offloaded,
+            }
+            if self._last_ollama_host_url:
+                from halo_harness.providers.ollama_calibrate import record_last_turn_throughput
+                record_last_turn_throughput(
+                    self.state_dir, host_url=self._last_ollama_host_url, model=self.model_ref.model,
+                    tokens_per_second=tokens_per_second, prefill_seconds=prefill_seconds,
+                    offloaded=self._last_ollama_offloaded,
+                    output_tokens=eval_count if isinstance(eval_count, int) else None,
+                )
+        except Exception:
+            log.debug("ollama: _record_ollama_throughput failed", exc_info=True)
 
     def _maybe_yield_improve_hint(self) -> Iterator[events.Event]:
         """H10 Part B4: counters only, no model call, fires AT MOST once
@@ -5767,6 +5891,10 @@ class Session:
         # would otherwise read as a lie the moment the next turn goes out.
         from halo_harness.providers.profiles import effort_display_override
         effort_tag = effort_display_override(self.provider_profile) or self.effort
+        # Round 5b (brief item 7): only an `ol:` route's own measured
+        # throughput is ever sent -- a model switch away from `ollama`
+        # must not keep showing a stale reading from the previous model.
+        throughput = self._last_ollama_throughput if self.model_ref.provider == "ollama" else None
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
             context_tokens=context_tokens if context_tokens is not None else (self._last_prompt_tokens or 0),
@@ -5776,6 +5904,9 @@ class Session:
             total_input_tokens=self.cost_meter.total_input_tokens,
             total_output_tokens=self.cost_meter.total_output_tokens,
             effort=effort_tag,
+            ollama_tokens_per_second=(throughput or {}).get("tokens_per_second"),
+            ollama_prefill_seconds=(throughput or {}).get("prefill_seconds"),
+            ollama_offloaded=(throughput or {}).get("offloaded"),
         )
 
     @property

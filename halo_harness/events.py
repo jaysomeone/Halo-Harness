@@ -169,10 +169,13 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
             context_limit: Optional[int] = None, cost_usd: Optional[float] = None, turn: int = 0,
             permission_mode: Optional[str] = None, mcp: Optional[dict] = None,
             session_id: Optional[str] = None, total_input_tokens: Optional[int] = None,
-            total_output_tokens: Optional[int] = None, effort: Optional[str] = None) -> Event:
+            total_output_tokens: Optional[int] = None, effort: Optional[str] = None,
+            ollama_tokens_per_second: Optional[float] = None, ollama_prefill_seconds: Optional[float] = None,
+            ollama_offloaded: Optional[bool] = None) -> Event:
     """data: {phase, model, context_tokens, context_limit, cost_usd, turn,
     permission_mode, mcp: {connected, total}, session_id, total_input_tokens,
-    total_output_tokens, effort}. Emitted at session start, after every
+    total_output_tokens, effort, ollama_tokens_per_second, ollama_prefill_
+    seconds, ollama_offloaded}. Emitted at session start, after every
     message_end, and on a mode/model change (D-Contract). The two token-
     total fields (1.0.1 hotfix 14) are the session's running input/output
     token counts, for a consumer (the status bar) to show `"in 12k out 3k"`
@@ -181,12 +184,17 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
     (`Session.effort`, already clamped to this route's own accepted set --
     see providers/profiles.py's `clamp_effort`), for the status bar's own
     short tag next to the mode glyph; None for a model with no adjustable
-    effort at all."""
+    effort at all. The three `ollama_*` fields (Halo 2.0.3 round 5b, brief
+    item 7) are None for every non-`ol:` route and before the FIRST `ol:`
+    reply of the session -- `Session.status_event` is the only producer,
+    from `Session._last_ollama_throughput`/`_last_ollama_offloaded`."""
     return Event("status", {
         "phase": phase, "model": model, "context_tokens": context_tokens, "context_limit": context_limit,
         "cost_usd": cost_usd, "turn": turn, "permission_mode": permission_mode,
         "mcp": mcp or {"connected": 0, "total": 0}, "session_id": session_id,
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens, "effort": effort,
+        "ollama_tokens_per_second": ollama_tokens_per_second, "ollama_prefill_seconds": ollama_prefill_seconds,
+        "ollama_offloaded": ollama_offloaded,
     }, turn=turn)
 
 

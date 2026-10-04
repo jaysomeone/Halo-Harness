@@ -95,6 +95,42 @@ _TOOLS_MAX_ABOVE_HIGHEST = 128
 
 KV_BYTES_PER_ELEM_F16 = 2.0
 
+# Halo 2.0.3 round 5b (docs/harness/GPU-RESEARCH.md "KV-quantization-per-
+# backend table"): exact bytes/element per KV cache type, hand-summed from
+# `ggml-common.h`'s own block struct definitions (e.g. `block_q4_0 {
+# ggml_half d; uint8_t qs[16];}` = 18 bytes / 32-element block = 0.5625),
+# NOT the rounder 1.0/0.5 the 2.0.5 brief guessed for q8_0/q4_0 -- both of
+# those under-counted memory by 6-12%, the wrong direction for a budget
+# estimate. Selected by an `ollama.hosts[].kv_cache_type` hint (default
+# "f16" -- Ollama's own `OLLAMA_KV_CACHE_TYPE` default -- when the hint is
+# unset/unrecognized; see `kv_bytes_per_elem_for`). f16/bf16/q8_0/q4_0 are
+# confirmed accepted by Ollama's own `OLLAMA_KV_CACHE_TYPE`; the rest
+# (f32, q5_1, q5_0, q4_1, iq4_nl) are llama.cpp-only values, kept here for
+# the SAME formula's sake even though Halo has no llama.cpp-server dialect
+# yet -- harmless to define now, used once one exists.
+KV_BYTES_PER_ELEM = {
+    "f32": 4.0,
+    "f16": KV_BYTES_PER_ELEM_F16,
+    "bf16": 2.0,
+    "q8_0": 1.0625,
+    "q5_1": 0.75,
+    "q5_0": 0.6875,
+    "q4_1": 0.625,
+    "q4_0": 0.5625,
+    "iq4_nl": 0.5625,
+}
+
+
+def kv_bytes_per_elem_for(cache_type: "Optional[str]") -> float:
+    """`KV_BYTES_PER_ELEM[cache_type.lower()]`, defaulting to f16 (2.0) for
+    `None`/unset/anything not in the table -- f16 is Ollama's own
+    documented `OLLAMA_KV_CACHE_TYPE` default AND the conservative choice
+    (it never UNDER-estimates memory use the way guessing a quantized type
+    for an f16 host would). Never raises on a typo'd config value."""
+    if not isinstance(cache_type, str):
+        return KV_BYTES_PER_ELEM["f16"]
+    return KV_BYTES_PER_ELEM.get(cache_type.strip().lower(), KV_BYTES_PER_ELEM["f16"])
+
 
 def tools_max_for_num_ctx(num_ctx: Optional[int], *, floor: Optional[int] = None) -> int:
     """The context-class `tools_max` for `num_ctx` (module docstring's own
@@ -222,6 +258,41 @@ def fit_estimate(*, kv_bytes_per_token: Optional[float], free_memory_bytes: Opti
         return WEIGHTS_DO_NOT_FIT
     max_tokens = int(headroom // kv_bytes_per_token)
     return _power_of_two_floor(max_tokens) if max_tokens > 0 else None
+
+
+def multi_gpu_fit_estimate(*, kv_bytes_per_token: Optional[float], free_bytes_per_card: "list",
+                            resident_weight_bytes: Optional[int], overhead_per_card_bytes: int = 0):
+    """docs/harness/GPU-RESEARCH.md "Multi-GPU fit formula" (round 5b):
+
+        free_total = sum(free_bytes[card]) - overhead_per_card_bytes * len(cards)
+        headroom   = free_total - resident_weight_bytes
+        max_tokens = floor(headroom / kv_bytes_per_token)
+        num_ctx    = largest power of two <= max_tokens
+
+    A SUM across every card -- never the minimum, which would waste every
+    card past the smallest one -- matching Ollama's own documented
+    all-or-nothing spread rule (`docs.ollama.com/faq.md`: fits on one GPU,
+    or spread across every configured one; never a partial subset), with
+    `overhead_per_card_bytes` (from `OLLAMA_GPU_OVERHEAD`, confirmed from
+    `envconfig/config.go`'s own doc comment "Set aside VRAM per GPU") taken
+    out ONCE PER CARD, not once total. `estimate_fit_for_host` calls this
+    only when more than one card was actually probed; a single-card host
+    keeps calling `fit_estimate` directly, which this function reduces to
+    exactly (`len(free_bytes_per_card) == 1` sums to that one card's own
+    free bytes minus one card's overhead). Same contract as `fit_estimate`:
+    `None` when any input is genuinely unknown (an empty/invalid card
+    list, or a bad kv/weight value), `WEIGHTS_DO_NOT_FIT` when every input
+    WAS known and the combined headroom still doesn't cover the weights,
+    else a positive power-of-two int -- never raises."""
+    if not isinstance(free_bytes_per_card, (list, tuple)) or not free_bytes_per_card:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in free_bytes_per_card):
+        return None
+    overhead = (overhead_per_card_bytes if isinstance(overhead_per_card_bytes, (int, float))
+                and not isinstance(overhead_per_card_bytes, bool) and overhead_per_card_bytes > 0 else 0)
+    free_total = sum(free_bytes_per_card) - overhead * len(free_bytes_per_card)
+    return fit_estimate(kv_bytes_per_token=kv_bytes_per_token, free_memory_bytes=free_total,
+                         resident_weight_bytes=resident_weight_bytes)
 
 
 def remote_loaded_context_as_fit_estimate(ps_entry: Optional[dict]) -> Optional[int]:

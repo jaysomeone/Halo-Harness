@@ -70,6 +70,37 @@ release prep) is still to come under this SAME version number.
    force a reload), counts other loaded models' `size_vram` as reclaimable
    headroom, and -- when the weights provably don't fit even after that --
    falls back to a conservative 8192 instead of the 131072 hard cap.
+   Round 5b (local-model excellence) builds directly on this: `halo
+   ollama calibrate <model> [--host NAME] [--start N]` loads a model at a
+   candidate `num_ctx` and steps down by powers of two, reading `/api/ps`
+   back, until it is fully resident -- the measured `max_full_gpu_ctx`
+   (or "does not fit") is recorded in `~/.halo/ollama-fit.json` and never
+   expires on its own (re-measured only by an explicit re-run, or
+   automatically when the model's digest or the server's version
+   changes); the SAME procedure runs automatically the first time a model
+   is used on a host with no learned cap, with one plain notice
+   (`ollama.auto_calibrate: false` opts out). The context-ownership rule
+   now takes that learned cap as its highest-priority "fit" candidate
+   (still just one more entry in the same `min()`, never an override that
+   bypasses the trained-context/hard-cap ceiling), and a REMOTE host with
+   nothing known at all -- the MUST-FIX from a live LAN-host run -- gets a
+   conservative 32768 default instead of silently falling through to the
+   131072 hard cap (`ollama.hosts[].max_ctx` is the documented explicit
+   override). The KV-bytes-per-element constants are corrected from
+   llama.cpp's own `ggml-common.h` block structs (q8_0 1.0625, q4_0
+   0.5625 -- both old approximations under-counted memory by 6-12%),
+   selectable per host via `ollama.hosts[].kv_cache_type`. Multi-GPU: the
+   fit estimate now SUMS every detected card's free memory (never the
+   minimum) minus a per-card overhead. `ollama.hosts[].ssh: "user@host"`
+   adds an OPTIONAL read-only GPU probe over ssh for a remote host
+   (never required). Apple Silicon's unified-memory share is estimated
+   from total RAM (or `iogpu.wired_limit_mb` when set) and always
+   labelled an estimate -- calibration is the ground truth there too. The
+   system message/tools/`options` on an `ol:` session are now pinned
+   byte-stable turn to turn (so Ollama/llama.cpp can actually reuse the
+   cached prompt prefix); the status bar's model chip and `halo ollama`
+   now show the last turn's own tokens/second, prefill seconds, and an
+   "offloaded" marker.
 3. **`hf:` route -- Hugging Face Inference Providers router and dedicated
    Inference Endpoints** (round 4): a new `huggingface` provider reusing
    the existing openai-chat request/stream code unchanged (no new wire

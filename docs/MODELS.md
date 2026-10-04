@@ -284,6 +284,110 @@ discovery view described under "Hugging Face" below.
 array), `format` (structured output) -- see `plans/2.0.3-ollama-round2-
 brief.md` and the rounds after it.
 
+**Fit calibration (round 5b)**: `halo ollama calibrate <model> [--host
+NAME] [--start N]` loads `model` at a candidate `num_ctx` (the GPU-based
+estimate when a local or `ssh:`-configured read exists, else 32768),
+reads `/api/ps` back (`size` vs `size_vram`), and steps DOWN by powers of
+two until it is fully resident in GPU memory -- or stops at 4096 and
+reports "does not fit." The result -- `{host url, model, digest,
+max_full_gpu_ctx, measured_at, ollama_version}` -- is recorded in
+`~/.halo/ollama-fit.json` and takes precedence over everything else once
+known: a MEASURED fact outranks a computed guess. It never expires on its
+own; it is re-measured only by an explicit re-run of the command, or
+automatically the moment the model's own `digest` (re-pulled weights) or
+the host's `ollama_version` (a server upgrade) changes. The FIRST time a
+model is used on a host with no learned cap at all, Halo runs the same
+procedure automatically before the first request, with one plain notice
+line ("Halo calibrated ... fully resident at num_ctx=...") -- opt out
+with `ollama.auto_calibrate: false` (docs/CONFIG.md). `/ollama`/`halo
+ollama` show every catalog model's learned cap (or "not calibrated") next
+to a "what fits" column and the one-phrase source of that decision
+("learned cap" / "host max_ctx" / "fit estimate" / "remote default" /
+"trained context" / "hard cap" / "fallback").
+
+**Context-ownership precedence (round 5b, corrected)**: `num_ctx` is the
+SMALLEST of every candidate that is actually known -- the hard cap
+(131072) always included -- where the "fit" candidate is the learned
+calibration cap when one exists, else the live fit estimate; `host.
+max_ctx`, when configured, is an ordinary candidate in that same
+minimum, not a separate override tier. The one MUST-FIX from a live
+LAN-host run: a REMOTE host (no `ssh:` configured, nothing loaded yet)
+with no `host.max_ctx` and no fit signal at all now gets a conservative
+32768 default instead of silently falling through to the 131072 hard
+cap -- `ollama.hosts[].max_ctx` is the documented explicit override for
+this exact case. A LOCAL host never hits this path (it always has an OS
+GPU probe to fall back on).
+
+**Multi-GPU**: when the local probe (or an `ssh:` read) sees more than
+one card, the fit estimate SUMS every card's free memory -- never the
+minimum, which would waste every card past the smallest -- minus a
+per-card overhead (`OLLAMA_GPU_OVERHEAD`'s own documented meaning,
+"set aside VRAM per GPU," taken out once PER CARD). This matches Ollama's
+own documented spread rule: a model that fits on one card loads there;
+one that doesn't is spread across every configured card, never a partial
+subset.
+
+**Optional ssh GPU read for a remote host**: `ollama.hosts[].ssh:
+"user@host"` runs the exact same vendor probes (NVIDIA/AMD/Apple) over
+`ssh -o BatchMode=yes -o ConnectTimeout=3 user@host '<command>'` instead
+of a local subprocess -- read-only, never prompted for a password (
+`BatchMode` refuses outright rather than hanging). Entirely optional:
+calibration already works without it (it needs no GPU read at all, only
+Ollama's own `/api/ps`). Not covered: the sysfs AMD branch (it reads a
+local file path directly, with no ssh-shaped equivalent) -- a documented
+gap, not a silent one.
+
+**KV cache type per host**: `ollama.hosts[].kv_cache_type` ("f16"
+default, "q8_0", or "q4_0" -- Ollama's own `OLLAMA_KV_CACHE_TYPE` values)
+is a HINT the operator sets to match their server's own flag; Ollama
+exposes no per-model readback of what's actually running, so this is
+never auto-detected. The exact bytes/element the fit arithmetic now uses,
+hand-summed from llama.cpp's own `ggml-common.h` block structs: f16/bf16
+2.0 (unchanged), q8_0 1.0625 (was approximated as 1.0, 6% too low), q4_0
+0.5625 (was approximated as 0.5, 12% too low) -- both old approximations
+under-counted memory, the wrong direction for a budget estimate.
+
+**Apple Silicon memory model**: unified memory, no discrete VRAM to
+query. The local probe reads total RAM (`sysctl hw.memsize`) and, when
+set, `sysctl iogpu.wired_limit_mb` (confirmed from mlx-lm's own README --
+"wires the memory occupied by the model and cache," `sudo sysctl
+iogpu.wired_limit_mb=<N>` is the documented way to raise it); with the
+limit unset, the GPU-usable share is estimated as roughly two-thirds to
+three-quarters of total RAM (the exact fraction is UNCONFIRMED against
+any Apple/mlx-lm primary source -- a wizard/panel FIRST GUESS only,
+always labelled an estimate). `halo ollama calibrate` is the ground
+truth on a Mac exactly as it is everywhere else; the fraction never
+overrides an actual calibration result.
+
+**Stable request prefix**: Ollama/llama.cpp reuse the cached prompt
+prefix when a request is byte-identical up to the first change, so the
+system message, the tools array, and `options` must never carry per-turn
+volatile content (a live timestamp, a context percentage, a counter) on
+an `ol:` session. Pinned directly (`tests/test_ollama_precedence_5b.py`):
+building two consecutive request bodies for the same session produces a
+byte-identical leading system message, tools array, and `options`, even
+when the caller's own tool list happens to arrive in a different order
+each time (`convert_tools`'s own alphabetical sort absorbs that). What
+remains volatile BY DESIGN, never claimed stable: the full messages list
+legitimately GROWS turn to turn (each new turn's own content is new, and
+context pruning may reshape an OLDER tool result's text once the
+transcript grows past a threshold -- a deliberate context-management
+trade-off, not a bug); and `num_ctx` may change exactly ONCE, from
+before a brand-new model's first load to after it, on a host with no
+learned cap yet (round 3's own fix already makes it stable from the
+SECOND turn onward, since a loaded model's context is then read back
+from `/api/ps` as ground truth rather than recomputed).
+
+**Throughput in the UI**: for an `ol:` turn, the status bar's model chip
+shows a compact segment next to the model name -- `"41 tok/s · prefill
+1.2 s"` -- computed from the final NDJSON line's `eval_count`/`eval_
+duration`/`prompt_eval_duration` (Ollama's own documented nanosecond
+timing fields), plus `"· offloaded"` when the last `/api/ps` read (a side
+effect of the SAME read the fit estimate already makes, never a second
+probe) found the model partially in system RAM. `halo ollama` prints the
+last turn's own numbers per host/model, persisted in the same `~/.halo/
+ollama-fit.json` file as the learned caps.
+
 ## Hugging Face
 
 Halo 2.0.3 round 4 (`plans/2.0.3-ollama-round2-brief.md`, design doc

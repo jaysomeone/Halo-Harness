@@ -90,6 +90,29 @@ def test_configured_hosts_list_and_named_selection(ctx: Ctx):
 
 
 @test
+def test_configured_host_parses_round_5b_kv_cache_type_and_ssh(ctx: Ctx):
+    """`ollama.hosts[].kv_cache_type`/`ollama.hosts[].ssh` (round 5b,
+    docs/CONFIG.md) round-trip through the SAME config parsing every
+    other per-host field already does -- never a second mechanism."""
+    from halo_harness.providers.ollama import resolve_ollama_host
+    from halo_harness.theme import set_config_value
+    _fresh_state_dir("ol-hosts-5b-fields-")
+    try:
+        set_config_value("ollama.hosts", [
+            {"name": "tuned", "url": "127.0.0.1:11434", "kv_cache_type": "q4_0", "ssh": "user@gpu-box"},
+            {"name": "plain", "url": "127.0.0.1:11435", "default": True},
+        ])
+        tuned = resolve_ollama_host("tuned")
+        ctx.check(f"kv_cache_type parsed, got {tuned.kv_cache_type!r}", tuned.kv_cache_type == "q4_0")
+        ctx.check(f"ssh parsed, got {tuned.ssh!r}", tuned.ssh == "user@gpu-box")
+        plain = resolve_ollama_host("plain")
+        ctx.check("neither field set on an entry that doesn't configure them",
+                  plain.kv_cache_type is None and plain.ssh is None)
+    finally:
+        _clear_state_dir_env()
+
+
+@test
 def test_malformed_host_entry_skipped_not_crashed(ctx: Ctx):
     from halo_harness.providers.ollama import resolve_ollama_hosts
     from halo_harness.theme import set_config_value

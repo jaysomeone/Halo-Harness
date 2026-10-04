@@ -1283,9 +1283,39 @@ GPU memory. `--host NAME` narrows to one configured entry instead of
 every one; `--refresh` bypasses the short in-memory catalog TTL and
 re-reads `/api/tags`+`/api/show` now. With no `ollama.hosts` configured
 at all, probes the same synthesized default (`OLLAMA_HOST`, else
-`127.0.0.1:11434`) a bare `ol:<model>` ref would use. See
+`127.0.0.1:11434`) a bare `ol:<model>` ref would use. Round 5b adds a
+"what fits" column per catalog model (not just loaded ones) -- the
+learned calibration cap or "not calibrated," and the one-phrase source
+of the num_ctx decision -- plus the last turn's own tokens/second and
+prefill seconds when one has happened on that host/model since. See
 [MODELS.md](MODELS.md)'s Ollama section; the TUI's own `/ollama` opens an
 interactive dialog instead (`docs/SLASH-COMMANDS.md`).
+
+## `halo ollama calibrate`
+
+```sh
+halo ollama calibrate <model>
+halo ollama calibrate <model> --host <name>
+halo ollama calibrate <model> --start <num_ctx>
+```
+
+Halo 2.0.3 round 5b: loads `<model>` on the chosen host (the default host
+when `--host` is omitted) at a candidate `num_ctx` and reads `/api/ps`
+back, stepping DOWN by powers of two until it is fully resident in GPU
+memory (`size_vram >= size`) or the candidate drops below 4096, whichever
+comes first -- this loads the model several times in a row, by design.
+`--start` overrides the first candidate tried; left unset, it is the
+GPU-based fit estimate when a local or `ollama.hosts[].ssh` read exists,
+else 32768. Prints the host/model being calibrated, the starting
+candidate, and the result (the fully-resident `num_ctx` and how many
+steps it took, or "does not fit... even at num_ctx=4096"); either outcome
+is recorded in `~/.halo/ollama-fit.json` (a "does not fit" result is a
+real, remembered fact too, not a failure to retry on the next run). The
+SAME procedure also runs automatically the first time a model is used on
+a host with no learned cap at all -- `ollama.auto_calibrate: false`
+(`docs/CONFIG.md`) opts out of that; this command is always available
+regardless, for an explicit re-measurement after a GPU/driver/other-
+process change. See [MODELS.md](MODELS.md)'s "Fit calibration" section.
 
 ## `halo local`
 

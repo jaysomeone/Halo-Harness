@@ -153,6 +153,102 @@ def test_doctor_ollama_section_unreachable_host(ctx: Ctx):
         _clear_state_dir_env()
 
 
+# ---- round 5b: catalog_fits / learned cap / source phrase ---------------
+
+@test
+def test_analyze_host_catalog_fits_covers_every_catalog_model(ctx: Ctx):
+    """Every DEFAULT_TAGS model gets a ModelFitInfo row, not just the
+    loaded one -- the whole point of "what fits" is knowing ahead of
+    loading it."""
+    from halo_harness.providers.ollama import OllamaHost
+    from halo_harness.providers.ollama_panel import analyze_host
+    _fresh_state_dir("ol-panel-catalogfits-")
+    mock = MockUpstream().start()  # DEFAULT_TAGS: qwen3:30b, gpt-oss:20b -- nothing loaded
+    try:
+        host = OllamaHost(name="mock", url=mock.base_url)
+        analysis = analyze_host(host, hw_runner=_NO_GPU_RUNNER)
+        names = {f.name for f in analysis.catalog_fits}
+        ctx.check(f"both catalog models present, got {names}", names == {"qwen3:30b", "gpt-oss:20b"})
+        for f in analysis.catalog_fits:
+            ctx.check(f"{f.name}: what_fits is a real positive int, got {f.what_fits}",
+                      isinstance(f.what_fits, int) and f.what_fits > 0)
+            ctx.check(f"{f.name}: source is a non-empty phrase, got {f.source!r}",
+                      isinstance(f.source, str) and f.source)
+            ctx.check(f"{f.name}: not calibrated yet -> learned_cap is None", f.learned_cap is None)
+    finally:
+        mock.stop()
+        _clear_state_dir_env()
+
+
+@test
+def test_analyze_host_catalog_fits_shows_a_learned_cap_and_names_its_source(ctx: Ctx):
+    from halo_harness.providers.ollama import OllamaHost
+    from halo_harness.providers.ollama_calibrate import record_calibration
+    from halo_harness.providers.ollama_panel import analyze_host, format_host_analysis
+    d = _fresh_state_dir("ol-panel-learnedcap-")
+    mock = MockUpstream().start()
+    try:
+        record_calibration(d, host_url=mock.base_url, model="qwen3:30b", digest="sha256:deadbeef1",
+                            max_full_gpu_ctx=16384, ollama_version="0.5.0")
+        host = OllamaHost(name="mock", url=mock.base_url)
+        analysis = analyze_host(host, hw_runner=_NO_GPU_RUNNER)
+        row = next(f for f in analysis.catalog_fits if f.name == "qwen3:30b")
+        ctx.check(f"learned_cap is the recorded value, got {row.learned_cap}", row.learned_cap == 16384)
+        ctx.check(f"what_fits uses the learned cap, got {row.what_fits}", row.what_fits == 16384)
+        ctx.check(f"source names the learned cap, got {row.source!r}", row.source == "learned cap")
+        text = format_host_analysis(analysis)
+        ctx.check("formatted text shows the learned cap", "16384 (learned)" in text)
+        ctx.check("formatted text names the source", "learned cap" in text)
+    finally:
+        mock.stop()
+        _clear_state_dir_env()
+
+
+@test
+def test_analyze_host_catalog_fits_stale_digest_shows_not_calibrated(ctx: Ctx):
+    """A digest mismatch (the model was re-pulled) makes the panel show
+    "not calibrated" again, exactly like `lookup_learned_cap` itself."""
+    from halo_harness.providers.ollama import OllamaHost
+    from halo_harness.providers.ollama_calibrate import record_calibration
+    from halo_harness.providers.ollama_panel import analyze_host
+    d = _fresh_state_dir("ol-panel-staledigest-")
+    mock = MockUpstream().start()
+    try:
+        record_calibration(d, host_url=mock.base_url, model="qwen3:30b", digest="sha256:some-older-digest",
+                            max_full_gpu_ctx=16384, ollama_version="0.5.0")
+        host = OllamaHost(name="mock", url=mock.base_url)
+        analysis = analyze_host(host, hw_runner=_NO_GPU_RUNNER)
+        row = next(f for f in analysis.catalog_fits if f.name == "qwen3:30b")
+        ctx.check(f"stale digest -> learned_cap is None, got {row.learned_cap}", row.learned_cap is None)
+    finally:
+        mock.stop()
+        _clear_state_dir_env()
+
+
+@test
+def test_analyze_host_multi_gpu_cards_displayed_as_a_sum(ctx: Ctx):
+    from halo_harness.providers.ollama import OllamaHost
+    from halo_harness.providers.ollama_panel import analyze_host, format_host_analysis
+    from halo_harness.providers import ollama_hw
+    _fresh_state_dir("ol-panel-multigpu-")
+    ollama_hw.reset_local_gpu_cache()
+    mock = MockUpstream().start()
+    try:
+        host = OllamaHost(name="mock", url=mock.base_url)
+
+        def runner(argv, timeout):
+            return "20480, 0, 20480, Card A\n10240, 0, 10240, Card B\n"
+        analysis = analyze_host(host, hw_runner=runner)
+        ctx.check(f"two cards recorded, got {len(analysis.gpu_cards)}", len(analysis.gpu_cards) == 2)
+        text = format_host_analysis(analysis)
+        ctx.check("formatted text mentions the card count", "2 cards" in text)
+        ctx.check("formatted text says sum, not minimum", "sum" in text.lower())
+    finally:
+        mock.stop()
+        ollama_hw.reset_local_gpu_cache()
+        _clear_state_dir_env()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

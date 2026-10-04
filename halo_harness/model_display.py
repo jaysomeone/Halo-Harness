@@ -149,6 +149,28 @@ def format_live_token_count(n) -> str:
     return f"{round(n / 1_000_000)}M"
 
 
+def format_ollama_throughput(tokens_per_second, prefill_seconds, offloaded) -> str:
+    """Halo 2.0.3 round 5b (brief item 7): the status bar's `ol:`-only
+    throughput segment, shown right next to the model chip -- e.g.
+    `"41 tok/s · prefill 1.2 s"`, with `"· offloaded"` appended when the
+    last `/api/ps` read found the model partially in system RAM. `""`
+    (the whole segment omitted -- same "blank, not a placeholder"
+    convention as every other optional status-bar field) when NEITHER
+    figure is known yet (no `ol:` reply this session, or a non-ollama
+    route -- `Session.status_event` never passes these for one)."""
+    parts = []
+    if (isinstance(tokens_per_second, (int, float)) and not isinstance(tokens_per_second, bool)
+            and tokens_per_second > 0):
+        parts.append(f"{tokens_per_second:.0f} tok/s")
+    if (isinstance(prefill_seconds, (int, float)) and not isinstance(prefill_seconds, bool)
+            and prefill_seconds >= 0):
+        parts.append(f"prefill {prefill_seconds:.1f} s")
+    if not parts:
+        return ""
+    text = " · ".join(parts)
+    return f"{text} · offloaded" if offloaded else text
+
+
 def format_elapsed_seconds(seconds) -> str:
     """Halo 2.0.1 W2b (liveness-tips-brief Part A1/A3/A4/A5): the ONE
     "N s" elapsed-time wording every liveness surface shares -- the phase

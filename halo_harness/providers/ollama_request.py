@@ -86,6 +86,7 @@ def build_ollama_request_body(
     route, profile, effort: Optional[str] = None, host: OllamaHost,
     trained_context: Optional[int] = None, fit_estimate: Optional[int] = None,
     requested_max_tokens: Optional[int] = None,
+    learned_cap: Optional[int] = None, remote: bool = False,
 ) -> dict:
     """Build the native `/api/chat` body. `messages`/`system_text` are the
     SAME Anthropic-shaped derived-transcript inputs `providers.request.
@@ -119,13 +120,20 @@ def build_ollama_request_body(
     over a catalog that is physically unable to shrink any further would
     be exactly the kind of gating house policy forbids -- the backstop's
     job is catching round 2's unbounded-`None` bug, not blocking a turn
-    the catalog layer already did everything it could about."""
+    the catalog layer already did everything it could about.
+
+    Round 5b: `learned_cap`/`remote` are pre-resolved by the SAME
+    `providers.ollama_hw.resolve_context_decision` call the caller
+    (`agent/loop.py`'s `_build_ollama_body_for_ref`) already made to get
+    `trained_context`/`fit_estimate` -- passed straight through to
+    `compute_num_ctx` rather than re-derived here, so there is exactly
+    ONE lookup of the learned-cap store per request, not two."""
     del tool_choice  # no native-API equivalent (see docstring)
     import dataclasses
     from halo_harness.providers.ollama_fit import resolve_ollama_tools_max
     oai_messages = _flatten_messages(messages, system_text)
     ollama_messages = _ollama_messages_from_oai(oai_messages)
-    num_ctx = compute_num_ctx(trained_context, host.max_ctx, fit_estimate)
+    num_ctx = compute_num_ctx(trained_context, host.max_ctx, fit_estimate, learned_cap=learned_cap, remote=remote)
     tools_max = max(resolve_ollama_tools_max(num_ctx), len(tools or []))
     tools_profile = profile if tools_max == profile.tools_max else dataclasses.replace(profile, tools_max=tools_max)
     oai_tools = convert_tools(tools, tools_profile)

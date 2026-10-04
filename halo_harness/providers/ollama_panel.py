@@ -16,9 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from halo_harness.providers.ollama import fetch_ps, get_catalog, probe_version, trained_context_for
+from halo_harness.providers.ollama import (
+    fetch_ps, get_catalog, probe_version, resolve_num_ctx_and_source, trained_context_for,
+)
 from halo_harness.providers.ollama_fit import estimate_catalog_prompt_tokens, kv_bytes_per_token, resolve_ollama_tools_max
-from halo_harness.providers.ollama_hw import GpuMemory, catalog_row, get_local_gpu_memory, is_local_host
+from halo_harness.providers.ollama_hw import (
+    GpuMemory, catalog_row, estimate_fit_for_host, get_local_gpu_memories, get_local_gpu_memory,
+    get_ssh_gpu_memory, is_local_host,
+)
 
 # brief item 1: "label its origin in the panel help text" -- shown verbatim
 # by format_host_analysis below, not just left in a docstring/the research doc.
@@ -65,6 +70,23 @@ class LoadedModelAnalysis:
 
 
 @dataclass(frozen=True)
+class ModelFitInfo:
+    """Round 5b (brief item 3): one catalog model's "what fits" row --
+    EVERY catalog model, not just currently-loaded ones (the whole point
+    of calibrating ahead of time is knowing what WOULD fit before loading
+    it). `what_fits` is `resolve_num_ctx_and_source`'s own `num_ctx` --
+    always a real, positive int, the same number a real request for this
+    model would compute right now; `source` is that call's one short
+    phrase. `throughput`, when known, is the brief item 7 "last turn"
+    reading (`ollama_calibrate.get_last_turn_throughput`)."""
+    name: str
+    learned_cap: Optional[int]
+    what_fits: int
+    source: str
+    throughput: Optional[dict] = None
+
+
+@dataclass(frozen=True)
 class HostAnalysis:
     host_name: str
     host_url: str
@@ -73,15 +95,23 @@ class HostAnalysis:
     version: Optional[str]
     loaded: "tuple"  # tuple[LoadedModelAnalysis, ...]
     gpu: Optional[GpuMemory]
+    # Round 5b: every detected local GPU card (len 0 or 1 on a single-card/
+    # no-GPU host, matching `gpu` above; len > 1 on a real multi-GPU box).
+    # `()` (never populated) for a remote host with no `ssh` configured.
+    gpu_cards: "tuple" = ()
+    catalog_fits: "tuple" = ()  # tuple[ModelFitInfo, ...], one per catalog model
 
 
-def analyze_host(host, *, hw_runner=None, force: bool = False) -> HostAnalysis:
+def analyze_host(host, *, hw_runner=None, force: bool = False, state_dir=None) -> HostAnalysis:
     """One host's full picture: reachability + version (`probe_version`),
     loaded models (`/api/ps`, cross-referenced against the catalog's
-    `model_info` for trained context and the KV formula), and -- LOCAL
-    hosts only -- OS-level GPU memory; a REMOTE host's `gpu` field is
-    always `None` (research doc section 3: there is no OS tool to shell
-    out to on a machine Halo isn't running on)."""
+    `model_info` for trained context and the KV formula), OS-level GPU
+    memory (LOCAL hosts always; a REMOTE host only when its config sets
+    `ssh:`, round 5b -- otherwise `gpu`/`gpu_cards` stay empty, research
+    doc section 3's original "no OS tool to shell out to remotely" still
+    holds), and (round 5b) a `catalog_fits` row -- learned cap, "what
+    fits" now, and its one-phrase source -- for EVERY catalog model, not
+    just currently-loaded ones."""
     version_info = probe_version(host)
     reachable = isinstance(version_info, dict)
     version = (version_info or {}).get("version") if isinstance(version_info, dict) else None
@@ -106,9 +136,46 @@ def analyze_host(host, *, hw_runner=None, force: bool = False) -> HostAnalysis:
             tools_max=tools_max, catalog_prompt_tokens=estimate_catalog_prompt_tokens(tools_max),
         ))
     local = is_local_host(host)
-    gpu = get_local_gpu_memory(runner=hw_runner) if local else None
+    gpu_cards: tuple = ()
+    if local:
+        gpu_cards = tuple(get_local_gpu_memories(runner=hw_runner))
+        gpu = gpu_cards[0] if gpu_cards else None
+    elif getattr(host, "ssh", None):
+        # Round 5b: the OPTIONAL ssh GPU read -- a remote host with
+        # nothing configured keeps `gpu=None` exactly as before this
+        # round; `ssh:` opts a specific host into a real reading.
+        ssh_gpu = get_ssh_gpu_memory(host.ssh, runner=hw_runner)
+        gpu_cards = (ssh_gpu,) if ssh_gpu is not None else ()
+        gpu = ssh_gpu
+    else:
+        gpu = None
+    if state_dir is None:
+        from halo_harness.config.paths import bridge_home
+        state_dir = bridge_home()
+    catalog_fits = tuple(_model_fit_info(host, catalog, row, state_dir=state_dir, remote=not local,
+                                          hw_runner=hw_runner)
+                         for row in (catalog.get("models") or []) if isinstance(row, dict))
     return HostAnalysis(host_name=host.name, host_url=host.url, is_local=local, reachable=reachable,
-                         version=version, loaded=tuple(loaded), gpu=gpu)
+                         version=version, loaded=tuple(loaded), gpu=gpu, gpu_cards=gpu_cards,
+                         catalog_fits=catalog_fits)
+
+
+def _model_fit_info(host, catalog: dict, row: dict, *, state_dir, remote: bool, hw_runner=None) -> ModelFitInfo:
+    """One `ModelFitInfo` row (round 5b, brief item 3's "what fits"
+    column + learned-cap + source phrase), reusing the EXACT SAME
+    `resolve_num_ctx_and_source` precedence `agent/loop.py`'s real
+    request path runs -- this panel can never quietly disagree with what
+    a real turn would actually send."""
+    from halo_harness.providers.ollama_calibrate import get_last_turn_throughput, lookup_learned_cap
+    name = row.get("model") or row.get("name") or "?"
+    trained = trained_context_for(catalog, name)
+    learned_cap = lookup_learned_cap(state_dir, host_url=host.url, model=name, digest=row.get("digest"))
+    fit = estimate_fit_for_host(host, name, catalog, runner=hw_runner)
+    what_fits, source = resolve_num_ctx_and_source(trained, host.max_ctx, fit, learned_cap=learned_cap,
+                                                    remote=remote)
+    throughput = get_last_turn_throughput(state_dir, host_url=host.url, model=name)
+    return ModelFitInfo(name=name, learned_cap=learned_cap, what_fits=what_fits, source=source,
+                         throughput=throughput)
 
 
 def format_host_analysis(a: HostAnalysis) -> str:
@@ -119,13 +186,22 @@ def format_host_analysis(a: HostAnalysis) -> str:
         lines.append("  unreachable")
         return "\n".join(lines)
     lines.append(f"  version {a.version or '?'}")
-    if a.gpu is not None:
-        lines.append(f"  GPU ({a.gpu.vendor}{', ' + a.gpu.name if a.gpu.name else ''}): "
-                     f"{human_bytes(a.gpu.free_bytes)} free of {human_bytes(a.gpu.total_bytes)}")
+    if len(a.gpu_cards) > 1:
+        total_free = sum(c.free_bytes for c in a.gpu_cards if isinstance(c.free_bytes, int))
+        total_cap = sum(c.total_bytes for c in a.gpu_cards if isinstance(c.total_bytes, int))
+        lines.append(f"  GPU: {len(a.gpu_cards)} cards, {human_bytes(total_free)} free of "
+                     f"{human_bytes(total_cap)} combined (sum, not minimum -- round 5b multi-GPU fit)")
+    elif a.gpu is not None:
+        label = f"GPU ({a.gpu.vendor}{', ' + a.gpu.name if a.gpu.name else ''})"
+        if getattr(a.gpu, "estimated", False):
+            label += " [estimate -- `halo ollama calibrate` is the ground truth]"
+        elif not a.is_local:
+            label += " [via ssh]"
+        lines.append(f"  {label}: {human_bytes(a.gpu.free_bytes)} free of {human_bytes(a.gpu.total_bytes)}")
     elif a.is_local:
         lines.append("  GPU memory: unknown (no supported OS GPU tool found, or it failed)")
     else:
-        lines.append("  GPU memory: not read (remote host -- inferred from /api/ps only)")
+        lines.append("  GPU memory: not read (remote host, no `ssh:` configured -- inferred from /api/ps only)")
     if not a.loaded:
         lines.append("  no models currently loaded")
     else:
@@ -137,5 +213,18 @@ def format_host_analysis(a: HostAnalysis) -> str:
             kv = f"{m.kv_bytes_per_token:.0f} bytes/token" if m.kv_bytes_per_token else "unknown"
             lines.append(f"      trained context {trained}, loaded at {effective}, KV {kv}, "
                          f"tools_max {m.tools_max} (~{m.catalog_prompt_tokens} prompt tokens)")
+    if a.catalog_fits:
+        lines.append(f"  what fits ({len(a.catalog_fits)} model(s) in the catalog):")
+        for fit_info in a.catalog_fits:
+            cap_str = f"{fit_info.learned_cap} (learned)" if fit_info.learned_cap else "not calibrated"
+            lines.append(f"    {fit_info.name}: num_ctx {fit_info.what_fits} [{fit_info.source}], "
+                         f"learned cap: {cap_str}")
+            if fit_info.throughput:
+                tp = fit_info.throughput
+                tps = tp.get("tokens_per_second")
+                prefill = tp.get("prefill_seconds")
+                offloaded = " (offloaded)" if tp.get("offloaded") else ""
+                if tps or prefill:
+                    lines.append(f"      last turn: {tps or '?'} tok/s, prefill {prefill or '?'} s{offloaded}")
     lines.append(f"  {KV_FORMULA_ORIGIN_NOTE}")
     return "\n".join(lines)

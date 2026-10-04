@@ -13,8 +13,8 @@ from rich.text import Text
 from textual.widgets import Static
 
 from halo_harness.model_display import (
-    format_elapsed_seconds, format_live_token_count, format_status_context, format_status_cost,
-    truncate_label_left,
+    format_elapsed_seconds, format_live_token_count, format_ollama_throughput, format_status_context,
+    format_status_cost, truncate_label_left,
 )
 from halo_harness.tui.theme import mode_glyph
 
@@ -134,6 +134,15 @@ class StatusBar(Static):
         # U5 scope D: the `statusLine` command's own last output (None
         # until the first successful run, or if none is configured).
         self.statusline_text: "str | None" = None
+        # Halo 2.0.3 round 5b (brief item 7): `ol:`-only throughput, right
+        # next to the model chip -- None/None/None (segment omitted
+        # entirely) until the first `ol:` reply of the session, or after a
+        # switch away from `ollama` (`apply_status` always overwrites
+        # these three together, never partially, so a stale reading from
+        # a previous model can never survive a model switch).
+        self.ollama_tokens_per_second: "float | None" = None
+        self.ollama_prefill_seconds: "float | None" = None
+        self.ollama_offloaded: "bool | None" = None
         self._refresh_display()
 
     def set_statusline_text(self, text: "str | None") -> None:
@@ -181,6 +190,17 @@ class StatusBar(Static):
         if isinstance(mcp, dict):
             self.mcp_connected = mcp.get("connected", self.mcp_connected)
             self.mcp_total = mcp.get("total", self.mcp_total)
+        # Halo 2.0.3 round 5b: the three `ollama_*` fields are only ever
+        # sent TOGETHER, by `Session.status_event` -- a partial status dict
+        # from elsewhere in dispatch.py (e.g. a bare `{"phase": ...}`) never
+        # carries this key at all, so checking for its PRESENCE (not just
+        # "not None") is what lets a genuine `None` (the route switched
+        # away from `ollama`) actually CLEAR a stale reading instead of a
+        # bare `.get(...) is not None` guard leaving it stuck forever.
+        if "ollama_tokens_per_second" in data:
+            self.ollama_tokens_per_second = data["ollama_tokens_per_second"]
+            self.ollama_prefill_seconds = data.get("ollama_prefill_seconds")
+            self.ollama_offloaded = data.get("ollama_offloaded")
         phase = data.get("phase")
         if phase and phase != self.phase:
             self.phase = phase
@@ -339,6 +359,12 @@ class StatusBar(Static):
         # genuinely isn't known.
         ctx_str = format_status_context(self.context_tokens, self.context_limit)
         cost_str = format_status_cost(self.cost_usd, self.total_input_tokens, self.total_output_tokens)
+        # Halo 2.0.3 round 5b (brief item 7): "41 tok/s · prefill 1.2 s"
+        # (plus "· offloaded"), right next to the model chip -- "" (no
+        # segment) before the first `ol:` reply of the session, or on any
+        # other route.
+        throughput_str = format_ollama_throughput(self.ollama_tokens_per_second, self.ollama_prefill_seconds,
+                                                    self.ollama_offloaded)
         # H15 part 2 addendum 4: "OR $12.40 left"/"OR $3.21 used" --
         # omitted entirely (blank, no segment at all, same convention as
         # effort_str/permission_str below) until a fetch has ever
@@ -419,11 +445,12 @@ class StatusBar(Static):
         width = self.size.width
         mcp_shown = True
         or_balance_shown = bool(or_balance_str)
+        throughput_shown = bool(throughput_str)
         if width and self.cwd:
-            def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
+            def _overflow(loc: str, mcp_on: bool, bal_on: bool, tp_on: bool) -> int:
                 bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
                                      permission_str, needs_you_str, agents_str, bg_jobs_str, oldest_str,
-                                     mcp_on and mcp_str, spinner_str, new_str) if b]
+                                     mcp_on and mcp_str, tp_on and throughput_str, spinner_str, new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
                 # that separator plus its own trailing space, a close-
@@ -434,39 +461,48 @@ class StatusBar(Static):
                 fixed_width = sum(len(b) + 3 for b in bits) + len(model_label) + 3
                 return fixed_width + len(loc) + 3 - width
 
-            over = _overflow(loc_str, mcp_shown, or_balance_shown)
+            over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             # W2c (live-capture polish): a 140-column terminal used to
             # character-slice the cwd ("/home/kali" -> "/home/kal" -> "/
             # home/k") while the MCP/balance segments stayed fixed-width,
             # untouchable -- unreadable, and not even a real path any more.
             # Low-priority segments now drop WHOLESALE instead, in this
-            # order: MCP, then the OR balance; only once BOTH are already
-            # gone does the cwd itself give way, shortened to just its last
-            # path component (never a character slice). The cwd disappears
-            # entirely, and the model label starts shrinking, only as the
-            # final resort -- unchanged from before this brief.
+            # order: the round-5b throughput segment (newest, least
+            # critical), then MCP, then the OR balance; only once all
+            # three are already gone does the cwd itself give way,
+            # shortened to just its last path component (never a character
+            # slice). The cwd disappears entirely, and the model label
+            # starts shrinking, only as the final resort -- unchanged from
+            # before this brief.
+            if over > 0 and throughput_shown:
+                throughput_shown = False
+                over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             if over > 0 and mcp_shown:
                 mcp_shown = False
-                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+                over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             if over > 0 and or_balance_shown:
                 or_balance_shown = False
-                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+                over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             if over > 0 and loc_str:
                 shortened = _cwd_last_component(self.cwd)
                 loc_str = f"{shortened} ({self.branch})" if self.branch else shortened
-                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+                over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             if over > 0 and loc_str:
                 loc_str = ""
-                over = _overflow(loc_str, mcp_shown, or_balance_shown)
+                over = _overflow(loc_str, mcp_shown, or_balance_shown, throughput_shown)
             if over > 0:
                 model_label = truncate_label_left(model_label, max(4, len(model_label) - over))
         if not mcp_shown:
             mcp_str = ""
         if not or_balance_shown:
             or_balance_str = ""
+        if not throughput_shown:
+            throughput_str = ""
 
         text = Text()
         text.append(f" {model_label} ", style="bold")
+        if throughput_str:
+            text.append(f"{throughput_str} ", style="dim")
         text.append("│ ", style="dim")
         if self.context_limit:
             filled = max(0, min(10, round((self.context_pct or 0) / 10)))

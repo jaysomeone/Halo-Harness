@@ -12,6 +12,13 @@ import sys
 
 
 def cmd_ollama(argv: list) -> int:
+    # Round 5b (brief item 2): `halo ollama calibrate <model> [--host NAME]
+    # [--start N]` is its own subcommand, dispatched the same way `halo`'s
+    # own top-level `cli.py` dispatches "roles"/"local" -- never confused
+    # with the `--host`/`--refresh` flags the bare `halo ollama` (no
+    # subcommand) form already takes.
+    if argv and argv[0] == "calibrate":
+        return cmd_ollama_calibrate(argv[1:])
     from halo_harness.providers.ollama import resolve_ollama_hosts
     from halo_harness.providers.ollama_panel import analyze_host, format_host_analysis
 
@@ -37,4 +44,60 @@ def cmd_ollama(argv: list) -> int:
         if i:
             print()
         print(format_host_analysis(analyze_host(host, force=args.refresh)))
+    return 0
+
+
+def cmd_ollama_calibrate(argv: list) -> int:
+    """`halo ollama calibrate <model> [--host NAME] [--start N]` (brief
+    item 2): the explicit, user-invoked twin of the auto-calibrate trigger
+    `agent/loop.py` runs on first use -- same `providers.ollama_calibrate.
+    run_calibration` stepping loop, same `~/.halo/ollama-fit.json` record,
+    just with its own plain multi-line printout instead of one notice."""
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.ollama import get_catalog, probe_version, resolve_ollama_host
+    from halo_harness.providers.ollama_calibrate import MIN_CALIBRATE_CTX, record_calibration, run_calibration
+    from halo_harness.providers.ollama_hw import catalog_row, estimate_fit_for_host, is_local_host
+
+    parser = argparse.ArgumentParser(
+        prog="halo ollama calibrate", add_help=True,
+        description="Load <model> at decreasing candidate num_ctx values until it is fully resident in GPU "
+                    "memory (or does not fit at all), and remember the result in ~/.halo/ollama-fit.json.",
+    )
+    parser.add_argument("model", help="the Ollama model tag to calibrate, e.g. qwen3-coder:30b")
+    parser.add_argument("--host", default=None, help="a configured ollama.hosts[] name (default host otherwise)")
+    parser.add_argument("--start", type=int, default=None,
+                         help="the first num_ctx to try (default: the GPU-based estimate when a local or ssh "
+                             "read exists, else 32768)")
+    args = parser.parse_args(argv)
+
+    host = resolve_ollama_host(args.host)
+    if host is None:
+        print(f"halo ollama calibrate: no configured host named {args.host!r} (see `ollama.hosts` in "
+              f"~/.halo/config.json)", file=sys.stderr)
+        return 1
+    print(f"Calibrating {args.model} on '{host.name}' ({host.url}) "
+          f"{'locally' if is_local_host(host) else 'over the network'}...")
+    catalog = get_catalog(host, force=True)
+    row = catalog_row(catalog, args.model)
+    if row is None:
+        print(f"halo ollama calibrate: {args.model!r} is not in this host's catalog -- "
+              f"`halo ollama --host {host.name}` lists what is", file=sys.stderr)
+        return 1
+    digest = row.get("digest")
+    version_info = probe_version(host)
+    ollama_version = (version_info or {}).get("version") if isinstance(version_info, dict) else None
+    start = args.start
+    if start is None:
+        estimate = estimate_fit_for_host(host, args.model, catalog)
+        start = estimate if isinstance(estimate, int) and not isinstance(estimate, bool) and estimate > 0 else 32768
+    print(f"  starting candidate: num_ctx={start}")
+    result = run_calibration(host, args.model, start_ctx=start, keep_alive=host.keep_alive)
+    record = record_calibration(bridge_home(), host_url=host.url, model=args.model, digest=digest,
+                                 max_full_gpu_ctx=result.max_full_gpu_ctx, ollama_version=ollama_version)
+    if result.outcome == "fits":
+        print(f"  fits fully in GPU memory at num_ctx={result.max_full_gpu_ctx} ({result.steps} step(s))")
+    else:
+        print(f"  does not fit fully in GPU memory even at num_ctx={MIN_CALIBRATE_CTX} ({result.steps} step(s))")
+        print("  the live fit estimate/remote default will be used instead")
+    print(f"  recorded in ~/.halo/ollama-fit.json (digest {record['digest']!r}, ollama {ollama_version or '?'})")
     return 0

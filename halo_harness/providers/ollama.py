@@ -42,6 +42,17 @@ HARD_CONTEXT_CAP = 131072
 # every later request on the same model uses the real trained context once
 # `/api/show` has been read once.
 FALLBACK_NUM_CTX = 8192
+# Round 5b MUST-FIX (plans/2.0.3-release-notes-for-fix-pass.md, the LAN-
+# host live run): a REMOTE host with NOTHING known at all (no host.max_ctx,
+# no learned cap, no live fit estimate) used to fall through to
+# HARD_CONTEXT_CAP (131072) and load a 30B MoE partially offloaded on a
+# 24 GB card. A remote host can't get an OS-level GPU read (no `ssh`
+# configured) the way a local host always can, so "nothing known" is a
+# real, common outcome for it in a way it mostly isn't locally -- 32768 is
+# the conservative default `resolve_num_ctx_and_source` substitutes for
+# the hard cap in that one specific case; `ollama.hosts[].max_ctx` is the
+# documented explicit override when an operator wants something else.
+REMOTE_UNKNOWN_DEFAULT_NUM_CTX = 32768
 # research doc section 6: compaction trigger for a local route, same 75% of
 # num_ctx the 2.0.5 brief's Phase 1 specifies.
 COMPACTION_TRIGGER_FRACTION = 0.75
@@ -67,6 +78,20 @@ class OllamaHost:
     max_ctx: Optional[int] = None
     num_parallel_hint: Optional[int] = None
     api_key: Optional[str] = None
+    # Round 5b: a hint for this host's `OLLAMA_KV_CACHE_TYPE` server flag
+    # (docs.ollama.com/faq.md: "f16" (default), "q8_0", "q4_0" -- Ollama
+    # exposes no per-model readback of what's actually running, so this is
+    # a HINT the operator sets to match their own server config, never
+    # auto-detected). `None`/unrecognized falls back to f16 in
+    # `providers.ollama_fit.kv_bytes_per_elem_for` -- the conservative
+    # choice (never under-estimates memory the way guessing a smaller
+    # quantized type for an f16 host would).
+    kv_cache_type: Optional[str] = None
+    # Round 5b: `"user@host"` for an OPTIONAL ssh GPU read on a remote
+    # host (`providers.ollama_hw.probe_remote_gpu_memory`) -- never
+    # required, never prompted for; `None` (the default) leaves this
+    # host's fit estimate exactly as before (its own `/api/ps` only).
+    ssh: Optional[str] = None
 
 
 def _normalize_host_url(raw: str) -> str:
@@ -93,6 +118,9 @@ def _host_from_dict(d: dict) -> Optional[OllamaHost]:
                            if isinstance(num_parallel_hint, (int, float)) and not isinstance(num_parallel_hint, bool)
                            else None),
         api_key=d.get("api_key") if isinstance(d.get("api_key"), str) and d.get("api_key") else None,
+        kv_cache_type=d.get("kv_cache_type") if isinstance(d.get("kv_cache_type"), str) and d.get("kv_cache_type")
+        else None,
+        ssh=d.get("ssh") if isinstance(d.get("ssh"), str) and d.get("ssh") else None,
     )
 
 
@@ -181,38 +209,90 @@ def think_value_for_effort(effort: Optional[str], model_id: str):
     return effort != "low"
 
 
-def compute_num_ctx(trained_context: Optional[int], host_max_ctx: Optional[int] = None,
-                     fit_estimate=None, *, hard_cap: int = HARD_CONTEXT_CAP,
-                     fallback_when_unknown: int = FALLBACK_NUM_CTX) -> int:
-    """Round 2's context-ownership rule (research doc section 2/6): `num_ctx
-    = min(trained context, host.max_ctx override, a fit estimate, hard
-    cap)`. `fit_estimate` (round 3's hardware-analysis arithmetic -- VRAM
-    budget divided by the KV-cache-bytes-per-token formula) is one of
-    three things: a positive int (an ordinary candidate, like any other),
-    `None` (genuinely unknown -- simply skipped, the hard cap stands,
-    unchanged from round 2), or `providers.ollama_fit.WEIGHTS_DO_NOT_FIT`
-    (round 3 fix pass, live-run finding: a model whose own WEIGHTS don't
-    fit in free memory got handed the full 131072 hard cap anyway since
-    `None` and "doesn't fit" were conflated -- the next request's
-    `num_ctx` then differed from what the model was already loaded with,
-    forcing Ollama to reload it with a bigger KV cache on every single
-    request). `WEIGHTS_DO_NOT_FIT` is treated like `trained_context is
-    None`: `fallback_when_unknown` (8192, conservative) joins the
-    candidate pool instead of the hard cap being left to win -- a model
-    already spilling to system RAM must not also be handed a 131072-token
-    KV cache budget. When `trained_context` itself is unknown (no
-    `/api/show` read yet for this model), ALSO falls back to
-    `fallback_when_unknown` -- still clamped against `host_max_ctx`/
-    `fit_estimate`/`hard_cap` like any other candidate, so an explicit
-    override always wins even before the catalog has loaded. Always >= 1."""
+def resolve_num_ctx_and_source(trained_context: Optional[int], host_max_ctx: Optional[int] = None,
+                                fit_estimate=None, *, hard_cap: int = HARD_CONTEXT_CAP,
+                                fallback_when_unknown: int = FALLBACK_NUM_CTX,
+                                learned_cap: Optional[int] = None, remote: bool = False,
+                                remote_unknown_ceiling: int = REMOTE_UNKNOWN_DEFAULT_NUM_CTX):
+    """Round 2/3's context-ownership rule, extended by round 5b with a
+    learned calibration cap and a conservative remote-unknown ceiling --
+    returns `(num_ctx, source)` where `source` is ONE short phrase naming
+    whichever candidate actually won ("learned cap", "host max_ctx", "fit
+    estimate", "remote default", "fallback", "trained context", or "hard
+    cap"); `compute_num_ctx` below is the number-only wrapper every
+    pre-5b caller keeps using unchanged.
+
+    Every candidate that's actually known is a SIMULTANEOUS entry in one
+    `min(...)` -- round 5b does NOT turn this into an elif-style override
+    chain where a bigger `host_max_ctx`/`learned_cap` could win over a
+    SMALLER live `fit_estimate` (that would risk the exact overload this
+    whole round exists to prevent); the two round-5b-specific changes are
+    additive:
+
+    - `learned_cap` (`halo ollama calibrate`'s own measured ground truth),
+      when known, REPLACES `fit_estimate` as the "live fit" candidate
+      entirely -- a measured fact always outranks a computed guess, but
+      still only ever competes in the same `min(...)` as everything else,
+      never bypasses `trained_context`/`hard_cap`.
+    - A REMOTE host (`remote=True`) with NOTHING ELSE known at all (no
+      `host_max_ctx`, no usable fit/learned-cap candidate) gets
+      `remote_unknown_ceiling` (32768) as an EXTRA candidate alongside
+      `hard_cap` (131072) -- never REPLACING `hard_cap` (`min` picks the
+      smaller 32768 regardless), so an operator who sets `host_max_ctx`
+      bigger than 32768 still gets exactly that, still never past 131072.
+
+    `fit_estimate` is one of three things: a positive int (an ordinary
+    candidate), `None` (genuinely unknown -- simply skipped), or
+    `providers.ollama_fit.WEIGHTS_DO_NOT_FIT` (round 3 fix pass: a model
+    whose own WEIGHTS don't fit in free memory -- `fallback_when_unknown`
+    joins the pool instead of the hard cap being left to win, UNLESS
+    `learned_cap` is also known, in which case the measured ground truth
+    that it DOES fit at some size wins outright and the fallback is never
+    added at all). When `trained_context` itself is unknown, ALSO falls
+    back to `fallback_when_unknown`. Always >= 1, never raises."""
     from halo_harness.providers.ollama_fit import WEIGHTS_DO_NOT_FIT
     weights_do_not_fit = fit_estimate is WEIGHTS_DO_NOT_FIT
-    fit_candidate = fit_estimate if (isinstance(fit_estimate, int) and not isinstance(fit_estimate, bool)
-                                      and fit_estimate > 0) else None
-    candidates = [c for c in (trained_context, host_max_ctx, fit_candidate, hard_cap) if isinstance(c, int) and c > 0]
-    if trained_context is None or weights_do_not_fit:
-        candidates.append(fallback_when_unknown)
-    return max(1, min(candidates)) if candidates else fallback_when_unknown
+    has_learned = isinstance(learned_cap, int) and not isinstance(learned_cap, bool) and learned_cap > 0
+    effective_fit = learned_cap if has_learned else fit_estimate
+    fit_weights_do_not_fit = weights_do_not_fit and not has_learned
+    fit_candidate = effective_fit if (isinstance(effective_fit, int) and not isinstance(effective_fit, bool)
+                                       and effective_fit > 0) else None
+    fit_label = "learned cap" if has_learned else "fit estimate"
+    has_host_max = isinstance(host_max_ctx, int) and not isinstance(host_max_ctx, bool) and host_max_ctx > 0
+    nothing_known = bool(remote) and not has_host_max and fit_candidate is None
+    candidates = [(hard_cap, "hard cap")]
+    if isinstance(trained_context, int) and not isinstance(trained_context, bool) and trained_context > 0:
+        candidates.append((trained_context, "trained context"))
+    if has_host_max:
+        candidates.append((host_max_ctx, "host max_ctx"))
+    if fit_candidate is not None:
+        candidates.append((fit_candidate, fit_label))
+    if nothing_known:
+        candidates.append((remote_unknown_ceiling, "remote default"))
+    if trained_context is None or fit_weights_do_not_fit:
+        candidates.append((fallback_when_unknown, "fallback"))
+    value = min(v for v, _ in candidates)
+    priority = ("learned cap", "fit estimate", "host max_ctx", "fallback", "trained context",
+                "remote default", "hard cap")
+    label = min((l for v, l in candidates if v == value), key=priority.index)
+    return max(1, value), label
+
+
+def compute_num_ctx(trained_context: Optional[int], host_max_ctx: Optional[int] = None,
+                     fit_estimate=None, *, hard_cap: int = HARD_CONTEXT_CAP,
+                     fallback_when_unknown: int = FALLBACK_NUM_CTX,
+                     learned_cap: Optional[int] = None, remote: bool = False,
+                     remote_unknown_ceiling: int = REMOTE_UNKNOWN_DEFAULT_NUM_CTX) -> int:
+    """The number-only wrapper around `resolve_num_ctx_and_source` -- see
+    that function's own docstring for the full rule. Every pre-5b caller
+    (three positional args, no `learned_cap`/`remote`) gets EXACTLY the
+    same number as before; this is additive, not a breaking change."""
+    value, _source = resolve_num_ctx_and_source(
+        trained_context, host_max_ctx, fit_estimate, hard_cap=hard_cap,
+        fallback_when_unknown=fallback_when_unknown, learned_cap=learned_cap, remote=remote,
+        remote_unknown_ceiling=remote_unknown_ceiling,
+    )
+    return value
 
 
 def compaction_trigger_tokens(num_ctx: int) -> int:
