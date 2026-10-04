@@ -119,6 +119,39 @@ def test_learned_tools_rejected_round_trip(ctx: Ctx):
 
 
 @test
+def test_forget_tools_rejected_clears_before_the_ttl(ctx: Ctx):
+    """Halo 2.0.2 round D leftover 2: `halo mcp learned --forget
+    <endpoint>` -- `forget_tools_rejected` clears a learned rule
+    immediately (before `TOOLS_REJECTED_TTL_S` would), leaves an
+    unrelated endpoint and an unrelated field on the SAME endpoint
+    untouched, and reports False (nothing to forget) the second time."""
+    from halo_harness.providers.learned_rules import (
+        _key, forget_tools_rejected, learn_reasoning_effort_with_tools, learn_tools_rejected,
+        learned_tools_rejected, load_learned_rules,
+    )
+    state_dir = Path(tempfile.mkdtemp(prefix="qwen-tools-rejected-forget-"))
+    ctx.check("nothing to forget yet", forget_tools_rejected(state_dir, _key("databricks", "my-model")) is False)
+    learn_tools_rejected(state_dir, "databricks", "my-model")
+    learn_reasoning_effort_with_tools(state_dir, "databricks", "my-model", "none")
+    learn_tools_rejected(state_dir, "databricks", "other-model")
+    ctx.check("both learned before forgetting",
+              learned_tools_rejected(state_dir, "databricks", "my-model") is True
+              and learned_tools_rejected(state_dir, "databricks", "other-model") is True)
+
+    ok = forget_tools_rejected(state_dir, _key("databricks", "my-model"))
+    ctx.check("forget reports True (a rule existed)", ok is True)
+    ctx.check("tools_rejected cleared well before its TTL would expire it",
+              learned_tools_rejected(state_dir, "databricks", "my-model") is False)
+    row = load_learned_rules(state_dir).get(_key("databricks", "my-model"))
+    ctx.check(f"the UNRELATED reasoning_effort_with_tools field on the SAME endpoint survives, got {row!r}",
+              isinstance(row, dict) and row.get("reasoning_effort_with_tools") == "none")
+    ctx.check("a DIFFERENT endpoint's own rule is untouched",
+              learned_tools_rejected(state_dir, "databricks", "other-model") is True)
+    ctx.check("forgetting again reports False -- nothing left to forget",
+              forget_tools_rejected(state_dir, _key("databricks", "my-model")) is False)
+
+
+@test
 def test_learned_tools_rejected_expires_after_its_ttl(ctx: Ctx):
     """2.0.2 review finding 32 pin: a learned "tools_rejected" row never
     expired before this -- one transient 400 made an endpoint

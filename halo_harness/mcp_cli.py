@@ -1064,6 +1064,41 @@ def _cmd_logout(rest: list) -> int:
     return 0
 
 
+def _cmd_learned(rest: list) -> int:
+    """Halo 2.0.2 round D leftover 2: `halo mcp learned` lists every
+    endpoint `providers/learned_rules.py` has learned something about
+    (the `"<provider>:<model>"` key each row is stored under); `--forget
+    <endpoint>` clears that endpoint's learned tools-rejected rule before
+    its TTL (`TOOLS_REJECTED_TTL_S`) would otherwise expire it, leaving
+    any OTHER learned field for that endpoint untouched."""
+    from halo_harness.config.paths import bridge_home
+    from halo_harness.providers.learned_rules import forget_tools_rejected, load_learned_rules
+    parser = argparse.ArgumentParser(prog="halo mcp learned", add_help=True)
+    parser.add_argument("--forget", metavar="<endpoint>", default=None,
+                         help='an endpoint key, "<provider>:<model>", as printed with no --forget')
+    args = parser.parse_args(rest)
+    state_dir = bridge_home()
+    if args.forget:
+        if forget_tools_rejected(state_dir, args.forget):
+            print(f"halo mcp learned: forgot the learned tools-rejected rule for {args.forget!r}.")
+            return 0
+        print(f"halo mcp learned: no learned tools-rejected rule for {args.forget!r} to forget.", file=sys.stderr)
+        return 1
+    rules = load_learned_rules(state_dir)
+    if not rules:
+        print("No learned provider rules yet.")
+        return 0
+    for endpoint, row in sorted(rules.items()):
+        bits = []
+        if isinstance(row, dict):
+            if row.get("tools_rejected"):
+                bits.append("tools_rejected")
+            if row.get("reasoning_effort_with_tools"):
+                bits.append(f"reasoning_effort_with_tools={row['reasoning_effort_with_tools']}")
+        print(f"{endpoint}: {', '.join(bits) or '(empty)'}")
+    return 0
+
+
 def cmd_mcp(argv: list) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print("Usage: halo mcp [options] [command]\n\n"
@@ -1079,7 +1114,8 @@ def cmd_mcp(argv: list) -> int:
               "  login <name>            OAuth-authenticate a remote MCP server\n"
               "  logout <name>           Clear stored OAuth credentials for a server\n"
               "  fix <name> [--apply]    Diagnose (and, with --apply, fix) a failed server\n"
-              "  test <name>             A tools/list round trip with timing")
+              "  test <name>             A tools/list round trip with timing\n"
+              "  learned [--forget <endpoint>]  List learned provider rules, or forget one's tools-rejected rule")
         return 0
 
     sub, rest = argv[0], argv[1:]
@@ -1091,6 +1127,8 @@ def cmd_mcp(argv: list) -> int:
         return _cmd_fix(rest)
     if sub == "test":
         return _cmd_test(rest)
+    if sub == "learned":
+        return _cmd_learned(rest)
     if sub == "add":
         return _cmd_add(rest)
     if sub == "add-from-claude-desktop":

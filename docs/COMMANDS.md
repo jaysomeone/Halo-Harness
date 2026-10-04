@@ -1141,6 +1141,19 @@ halo mcp test my-server
 halo mcp test: my-server: ok in 42ms -- 7 tool(s).
 ```
 
+### `mcp learned [--forget <endpoint>]`
+Halo 2.0.2 round D: lists every endpoint
+`providers/learned_rules.py` has learned something about (a learned
+`tools_rejected` rule from a live 400, or a learned `reasoning_effort_
+with_tools` override), each under its own `"<provider>:<model>"` key;
+`--forget <endpoint>` clears that endpoint's `tools_rejected` rule before
+its TTL would otherwise expire it naturally, leaving any other learned
+field for that same endpoint untouched:
+```sh
+halo mcp learned
+halo mcp learned --forget databricks:my-endpoint
+```
+
 ## `/mcp` (the repair dialog)
 
 Halo 2.0.2 round 4: lists every configured server and claude.ai connector
@@ -1159,7 +1172,7 @@ cancels the WAIT on it, never the app.
 | `a` | Approve a `pending_approval` project (`.mcp.json`) server, then reconnect it. |
 | `l` | For a local `http`/`sse` server: the 2.0.1 OAuth login flow (`halo mcp login`). For a claude.ai connector row: the re-auth instructions (there is no local OAuth flow for one of these -- the login lives in claude.ai/claude itself). |
 | `L` | A tail of `~/.halo/mcp/<server>.log` (stdio stderr + connect/transport errors, rotated at 1 MB) in a small viewer; Esc returns. |
-| `e` | Edit the entry: opens the source file at that server's own line in `$VISUAL`/`$EDITOR` (`+<line> <file>`), or, with neither set, an inline form (command/args/env, or url/headers) that writes back to the exact same scope file `mcp add` uses; reconnects after either path. |
+| `e` | Edit the entry: opens the source file at that server's own line in `$VISUAL`/`$EDITOR`, using THAT editor's own line syntax (`+<line>` for vim/nvim/nano/emacs, `--goto file:line` for `code`, `file:line` for `subl`; any other editor opens the file plain, with no line argument at all), or, with neither set, an inline form (command/args/env, or url/headers) that writes back to the exact same scope file `mcp add` uses; reconnects after either path. |
 | `i` | An install hint for a command-not-found server, guessed from the missing command itself (`npx`/`node`/`uvx`/`uv`/`pipx`/`pip`/`python`) -- shown as a copyable line, never run for you. |
 | `d` | Disable (or re-enable) the server for THIS directory only -- Claude Code's own per-directory `disabledMcpServers` list, so its definition is untouched and every other project keeps seeing it. |
 | `t` | A `tools/list` round trip with timing, shown in the hint line. |
@@ -1570,8 +1583,12 @@ TUI and print mode, the presets, and the `roles.enabled` mode switch.
 halo org list
 halo org show <name>
 halo org new <name> [--description TEXT]
+halo org install <name> [--force]
 halo org edit <name>
-halo org run [<name>] "<goal>" [--model REF]
+halo org run [<name>] "<goal>" [--model REF] [--yes]
+halo org export <name> [file]
+halo org import <file>
+halo org resume <session-id> [--cwd DIR] [--model REF] [--yes]
 ```
 
 Halo 2.0.2 round 2: manages `~/.halo/orgs/<name>.json` organizations -- a
@@ -1592,8 +1609,31 @@ also gaining a round 7 "start from: solo / release-flow / company /
 <saved>" template picker); `/org load <name>` (TUI-only -- re-installs
 one of the three shipped built-ins, overwriting a local copy) has no CLI
 equivalent, since `edit`/`new` already cover the same ground from a
-script. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
-how a run flows through the tree, budgets, and goals.
+script.
+
+Round D: `install <name>` copies a shipped built-in or a template saved
+under `~/.halo/org-templates/<name>.json` into `~/.halo/orgs/`, refusing
+to overwrite an existing file there without `--force`; `list`/`/org list`
+show each one's own one-line README (its `description` field). `export`/
+`import` move an org as plain JSON -- `export` writes to `file` or stdout
+when omitted; `import` validates the same way any other org write is
+(role names, reports, `budget_usd`), listing every problem it finds, and
+falls back to the file's own basename when the JSON has no "name" field.
+`resume` continues an interrupted run from a PAST session's own saved run
+record and shared task board (open and claimed tasks become the work
+list, done tasks are kept), with that run's own `max_concurrent`/
+`budget_usd` restored from the record even if the org definition has
+since been edited; `/org resume` (no argument) is the TUI/print-mode
+form, for the CURRENT session's own interrupted run. A position with
+`requires_approval: true` holds its just-finished result as a pending
+card in the dock (accept, edit the instruction and re-run, or stop)
+before its own parent continues; with no live dock at all (`run`/
+`resume` from a plain terminal), it prints the result and waits on
+stdin the same way; `--yes` on `run`/`resume`, or the session's own
+`dontAsk` permission mode, accepts every gate automatically instead of
+asking. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
+how a run flows through the tree, budgets, goals, approval gates,
+export/import and resume.
 
 ## `halo setup` / `/setup` (Halo 2.0.2 round 7)
 

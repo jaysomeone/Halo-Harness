@@ -170,6 +170,12 @@ def validate_org(data) -> "list[str]":
         titles.append(p["title"])
         if "budget_usd" in p and p.get("budget_usd") is not None and not _valid_budget(p.get("budget_usd")):
             problems.append(f'position {p["title"]!r}: "budget_usd" must be a non-negative number')
+        # Halo 2.0.2 round D (brief item 2, "approval gates"): a bool-only
+        # field -- `position_agent_specs` reads it straight into `AgentSpec.
+        # requires_approval`, so a non-bool here (e.g. a string "true")
+        # would silently never gate anything instead of erroring up front.
+        if "requires_approval" in p and not isinstance(p.get("requires_approval"), bool):
+            problems.append(f'position {p["title"]!r}: "requires_approval" must be true or false')
     dupes = sorted({t for t in titles if titles.count(t) > 1})
     if dupes:
         problems.append(f"duplicate position title(s): {', '.join(dupes)}")
@@ -418,6 +424,100 @@ def reload_builtin_org(name: str, state_dir=None) -> "tuple[bool, list[str]]":
     return True, []
 
 
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 round D (brief item 1, "org templates with preview and
+# install" -- the Paperclip idea docs/ORGS.md deferred): `halo org install
+# <name>`/`/org install <name>` copies a TEMPLATE into `~/.halo/orgs/`,
+# refusing to overwrite without `--force`. A template's SOURCE is either
+# "shipped" (`_BUILTIN_ORGS` -- already auto-present via `ensure_builtin_
+# orgs`, but still installable by name, e.g. to recreate one after deleting
+# a local copy) or "saved" (a plain org JSON file placed in `org_templates_
+# dir()`, this round's new pool -- distinct from `orgs_dir()`, the LIVE/
+# runnable directory, the same "templates are a separate pool from the live
+# table" split `roles.py::role_templates_dir()` already uses for roles).
+# Each shipped template's one-line README is just its own `description`
+# field -- the SAME field `/org list`/`halo org list` already show for an
+# installed org (docs/ORGS.md's schema table), never a second file format.
+# ---------------------------------------------------------------------------
+
+def org_templates_dir(state_dir=None) -> Path:
+    """`~/.halo/org-templates/` -- the SAVED-template pool (never auto-
+    populated, unlike `orgs_dir()`'s own built-ins; a name only shows up
+    here once something explicitly saves/places a file in it). Created on
+    first write; a read on a fresh box with no directory yet just sees an
+    empty one."""
+    from halo_harness.config.paths import bridge_home
+    base = state_dir if state_dir is not None else bridge_home()
+    return Path(base) / "org-templates"
+
+
+def list_org_templates(state_dir=None) -> "list[dict]":
+    """One `{"name", "description", "source"}` per installable template --
+    every shipped built-in (source="shipped"), sorted, then every saved
+    template (source="saved") not ALREADY a shipped name (a shipped name
+    always wins the listing -- `install_org_template` resolves the same
+    way, see its own docstring). Never raises: a saved template file that
+    fails to parse/validate is silently skipped, same as `load_org`'s own
+    "never raises" contract."""
+    out = [{"name": n, "description": data.get("description") or "", "source": "shipped"}
+           for n, data in sorted(_BUILTIN_ORGS.items())]
+    shipped_names = set(_BUILTIN_ORGS)
+    try:
+        saved_paths = sorted(org_templates_dir(state_dir).glob("*.json"))
+    except OSError:
+        saved_paths = []
+    for path in saved_paths:
+        name = path.stem
+        if name in shipped_names:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if validate_org(data):
+            continue
+        out.append({"name": name, "description": data.get("description") or "", "source": "saved"})
+    return out
+
+
+def find_org_template(name: str, state_dir=None) -> "Optional[tuple[dict, str]]":
+    """`(org_data, source_label)` for template `name` -- shipped wins over
+    a same-named saved template (consistent with `list_org_templates`'
+    own de-duplication); `None` when `name` is neither a shipped nor a
+    valid saved template."""
+    if name in _BUILTIN_ORGS:
+        return dict(_BUILTIN_ORGS[name]), "shipped"
+    path = org_templates_dir(state_dir) / f"{name}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if validate_org(data):
+        return None
+    return data, "saved"
+
+
+def install_org_template(name: str, *, force: bool = False, state_dir=None) -> "tuple[bool, list[str]]":
+    """`halo org install <name>`/`/org install <name>` (brief item 1):
+    copies template `name` (shipped or saved -- `find_org_template`) into
+    `orgs_dir()/<name>.json`, refusing to overwrite an existing file there
+    unless `force` is True. `(False, [reason])` for an unknown template or
+    an existing file with no `force`; never raises."""
+    found = find_org_template(name, state_dir=state_dir)
+    if found is None:
+        known = ", ".join(t["name"] for t in list_org_templates(state_dir=state_dir)) or "(none)"
+        return False, [f"no such organization template: {name!r} (known templates: {known})"]
+    data, _source = found
+    dest = orgs_dir(state_dir) / f"{name}.json"
+    if dest.exists() and not force:
+        return False, [f"{name!r} already exists at {dest} -- use --force to overwrite it"]
+    payload = dict(data)
+    payload.setdefault("name", name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True, []
+
+
 def position_agent_specs(org: dict, *, goal_task_id: Optional[str] = None) -> "dict[str, object]":
     """One `config.agents_md.AgentSpec` per position, keyed by title --
     `agent/subagent.py::run_org_call` hands this whole dict to a fresh
@@ -447,6 +547,12 @@ def position_agent_specs(org: dict, *, goal_task_id: Optional[str] = None) -> "d
             # "role-or-model[, effort=X]" tail for `describe()`.
             dock_label=f"{title} ({_who(p)})",
             source=f"org:{org.get('name', '?')}",
+            # Halo 2.0.2 round D (brief item 2, "approval gates"): read
+            # straight through to `AgentSpec.requires_approval` -- `agent/
+            # subagent.py`'s own gate reads it off the resolved spec, not
+            # the raw position dict, the same way `dock_label`/`delegate_
+            # restriction` already cross that boundary.
+            requires_approval=bool(p.get("requires_approval")),
         )
     return specs
 

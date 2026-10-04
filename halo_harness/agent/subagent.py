@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -686,6 +687,12 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
     child._subagent_live_asks = bool(parent.interactive)
     child._permission_waiters = parent._permission_waiters
     child._question_waiters = parent._question_waiters
+    # Halo 2.0.2 round D (brief item 2, "approval gates"): shared exactly
+    # like the two dicts just above -- a position several hops deep in an
+    # org tree gates through the SAME waiters dict the TOP session's own
+    # `resolve_approval` (Controller.answer_approval) reads from, with no
+    # extra plumbing needed at any level in between.
+    child._approval_waiters = parent._approval_waiters
     child.agent_runtime = AgentRuntime(parent=child, agents=runtime.agents, routes=runtime.routes,
                                         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides,
                                         depth=runtime.depth + 1, tasks=runtime.tasks, lock=runtime.lock,
@@ -1340,6 +1347,163 @@ def _run_one_fanout_child(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: s
                 entry["running_in_process"] = False
 
 
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 round D (brief item 2, "approval gates" -- the Paperclip idea
+# docs/ORGS.md deferred): a position with `requires_approval: true` holds
+# its just-finished result as a PENDING card (accept / edit the instruction
+# and re-run / stop) before the parent that delegated to it ever sees it.
+# Deliberately scoped to the three ordinary call sites that each produce
+# ONE position's own finished text -- `run_agent_call`'s foreground spawn,
+# `_bg_run`'s background spawn, and `_resume_task`'s resume -- never the
+# `count`/`batch` fan-out path (`_run_agent_fanout`): N parallel children
+# each popping their own pending card has no good single-card-at-a-time
+# story the brief doesn't address either, and no org position schema field
+# exists to even mark one as backgrounded/fanned-out, so this gap is
+# inert today regardless.
+# ---------------------------------------------------------------------------
+
+_MAX_APPROVAL_ROUNDS = 5  # a position may be sent back for edits this many times before the gate itself gives up
+
+
+def _ask_approval_live(parent, sink: Callable, request_id: str, *, agent_id: str, spec_name: str, text: str,
+                        is_error: bool) -> "Optional[dict]":
+    """A live dock card is reachable (`sink` is the foreground `on_event`
+    forwarder, or a background call's own `bg_sink`) -- emits `approval_
+    request` through it and blocks on `parent._await_reply`, the EXACT
+    same waiters-dict/Event handshake `_handle_exit_plan_mode`'s own
+    `plan_review` wait already uses, just its own dict (`parent.
+    _approval_waiters`) since more than one position may be pending
+    approval at once (an org with `max_concurrent` > 1 can have several;
+    plan mode never does). `None` on abort/dismiss -- the caller then
+    takes the "stop" branch, never silently "accept"."""
+    parent._approval_waiters[request_id] = {"event": threading.Event(), "decision": None}
+    ev = events.Event("approval_request", {"id": request_id, "position": spec_name, "text": text,
+                                             "is_error": is_error})
+    ev.agent_id = agent_id
+    sink(ev)
+    return parent._await_reply(parent._approval_waiters, request_id)
+
+
+def _ask_approval_headless(*, spec_name: str, text: str, is_error: bool) -> dict:
+    """No live dock reachable at all (print mode / a bare Session, e.g.
+    `halo org run`) -- brief item 2: "print mode prints the result and
+    waits on stdin the way other asks do." The SAME one-stdin-line-read
+    convention `init_cli.py`'s own non-interactive prompts already use
+    (`_prompt_plain`/`_confirm`), never a new kind of blocking primitive.
+    EOF or a blank/unrecognized line is "stop" -- a gate must never wave
+    something through just because nobody answered."""
+    print(f"\n[Approval needed] Position {spec_name!r} finished"
+          f"{' with an error' if is_error else ''} and requires approval:\n")
+    print(text)
+    print("\nAccept, edit and re-run, or stop? [a/e/s] (default: s): ", end="", flush=True)
+    line = (sys.stdin.readline() or "").strip().lower()
+    if line in ("a", "accept", "y", "yes"):
+        return {"action": "accept"}
+    if line in ("e", "edit"):
+        print("Revision instruction (Enter for none): ", end="", flush=True)
+        instruction = (sys.stdin.readline() or "").strip()
+        return {"action": "edit", "instruction": instruction}
+    return {"action": "stop"}
+
+
+def _apply_approval_gate(*, runtime: AgentRuntime, spec: AgentSpec, tool_id: str, tool_name: str,
+                          agent_id: str, description: str, text: str, is_error: bool, on_event, bg_sink,
+                          rounds: int) -> "tuple[str, bool]":
+    """`(text, is_error)`, possibly replaced by a human decision -- a
+    no-op (returns the two arguments unchanged) unless `spec.requires_
+    approval` is set, so every pre-existing caller is unaffected. Auto-
+    accepts outright (brief item 2: "--yes/dontAsk accept automatically")
+    when the session's own permission mode is `dontAsk` -- NOT the usual
+    "dontAsk converts ask to deny" rule (`permissions.py`'s own
+    `_resolve_ask`): an approval gate is never a tool-permission ask, so
+    it gets its own, opposite, explicitly-requested dontAsk behaviour --
+    or when `Session.auto_accept_approvals` is set (stashed directly on
+    the session object by a caller that asked for it, e.g. `halo org
+    run --yes`/`halo org resume --yes`, the same post-construction-
+    attribute convention `_isolation_worktree_path` etc. already use).
+    `rounds` (threaded through a retry's own `tool_input["_approval_
+    round"]`) caps a position at `_MAX_APPROVAL_ROUNDS` total spawns --
+    checked in the "edit" branch BEFORE spawning one more (never after:
+    spawning a retry just to immediately discard its result unseen would
+    waste a model call for nothing), so a reviewer who keeps choosing
+    "edit" gets stopped after exactly that many, never one extra."""
+    if not getattr(spec, "requires_approval", False):
+        return text, is_error
+    parent = runtime.parent
+    if parent.permission_engine.mode == "dontAsk" or bool(getattr(parent, "auto_accept_approvals", False)):
+        return text, is_error
+    if rounds >= _MAX_APPROVAL_ROUNDS:
+        # Defense in depth only -- normal recursion never reaches this
+        # (the "edit" branch below refuses to spawn the round that would
+        # trip it in the first place); kept in case `rounds` ever arrives
+        # already at/over the limit some other way (e.g. a future caller
+        # that doesn't go through the "edit" branch to get here).
+        return (f"[approval gate] position {spec.name!r} reached the {_MAX_APPROVAL_ROUNDS}-revision limit -- "
+                f"stopping instead of asking again.\n\n{text}", True)
+
+    request_id = f"{tool_id}:approval:{rounds}:{_new_agent_id()}"
+    sink = on_event if on_event is not None else bg_sink
+    # Halo 2.0.2 review self-catch: `on_event` is NOT a reliable "is a
+    # human actually watching" signal on its own -- `agent/loop.py`'s own
+    # `_run_agent_batch` passes `on_event=q.put` for EVERY Agent/org call
+    # unconditionally (it's the mechanism that streams a child's events
+    # back into ITS OWN turn, live UI or not), so a print-mode run with
+    # no UI at all would otherwise look "live" and block forever on a
+    # waiter nobody will ever answer. Mirrors the EXACT signal an
+    # ordinary tool-permission ask already uses instead (`_resolve_tool_
+    # call`: "`self.interactive or self._subagent_live_asks`") --
+    # `_subagent_live_asks` is what carries "the TOP of this chain is
+    # interactive" down through however many org-position hops deep this
+    # gate fires at (`_build_child_session` sets it from the SPAWNING
+    # session's own `interactive`, propagated at every hop).
+    is_live = bool(getattr(parent, "interactive", False)) or bool(getattr(parent, "_subagent_live_asks", False))
+    if is_live and sink is not None:
+        decision = _ask_approval_live(parent, sink, request_id, agent_id=agent_id, spec_name=spec.name,
+                                        text=text, is_error=is_error)
+    else:
+        decision = _ask_approval_headless(spec_name=spec.name, text=text, is_error=is_error)
+    action = (decision or {}).get("action", "stop")
+    if action == "accept":
+        return text, is_error
+    if action == "edit":
+        # review self-catch: checked BEFORE spawning the retry, never
+        # after -- the top-of-function `rounds >= _MAX_APPROVAL_ROUNDS`
+        # check alone would let an "edit" at the LAST allowed round still
+        # spawn one more (wasted) model call, whose own gate check would
+        # then immediately discard its result unseen. This way, exactly
+        # `_MAX_APPROVAL_ROUNDS` spawns ever happen for one position
+        # (verified: `_MAX_APPROVAL_ROUNDS` edit answers in a row produce
+        # exactly `_MAX_APPROVAL_ROUNDS` model calls, never one more).
+        if rounds + 1 >= _MAX_APPROVAL_ROUNDS:
+            return (f"[approval gate] position {spec.name!r} reached the {_MAX_APPROVAL_ROUNDS}-revision limit -- "
+                    f"stopping instead of running another revision.\n\n{text}", True)
+        instruction = (decision or {}).get("instruction") or ""
+        retry_prompt = (f"Your previous result was held for review and sent back for a revision.\n\n"
+                        f"Revision requested: {instruction or '(no detail given)'}\n\n"
+                        f"Your previous result was:\n{text}\n\n"
+                        f"Address the requested revision and report your result again.")
+        retry_input = {"subagent_type": spec.name, "prompt": retry_prompt,
+                       "description": f"{description} (revision {rounds + 1})", "_approval_round": rounds + 1}
+        # Recurses through the ordinary foreground spawn path -- its OWN
+        # completion re-applies this same gate to the NEW result (the
+        # `_approval_round` tag above is what lets THAT call know how
+        # many rounds already happened), so "edit" naturally loops
+        # without this function duplicating any spawn/cost/hook logic.
+        # `sink` (never the bare `on_event` parameter): a BACKGROUND
+        # call's own live channel is `bg_sink`, not `on_event` (always
+        # None for it, see `_bg_run`'s own call site) -- using whichever
+        # one actually worked means the retry's own events keep flowing
+        # wherever the original's did.
+        _retry_events, retry_result = run_agent_call(runtime=runtime, tool_id=tool_id, tool_name=tool_name,
+                                                        tool_input=retry_input, on_event=sink)
+        return retry_result.content, retry_result.is_error
+    # "stop" (or an unrecognized/missing action -- fail closed, never
+    # silently accept): the ORIGINAL result is kept below it for
+    # reference, but the headline text is unambiguous about what happened.
+    return (f"[approval gate] position {spec.name!r}'s result was not approved -- stopped before the "
+            f"parent continued.\n\n(the position's own result, for reference:)\n{text}", True)
+
+
 def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str,
                     on_event=None) -> "tuple[list, object]":
     """`(events, ToolResult)` for ONE Agent/Task tool_use. Never raises --
@@ -1667,6 +1831,18 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                     text = f"{text}\n\n{worktree_note}"
                 if budget_note:
                     text = f"{text}\n\n{budget_note}"
+                # Halo 2.0.2 round D (brief item 2): same gate the
+                # foreground path applies, just forwarded through
+                # `bg_sink` (this child's own live channel) instead of
+                # `on_event` (always None here -- a background call never
+                # receives the outer one, see this function's own
+                # docstring) -- blocks THIS background thread, never the
+                # parent's, while a human decides.
+                text, is_error = _apply_approval_gate(
+                    runtime=runtime, spec=spec, tool_id=tool_id, tool_name=tool_name, agent_id=agent_id,
+                    description=description, text=text, is_error=is_error, on_event=None, bg_sink=bg_sink,
+                    rounds=tool_input.get("_approval_round", 0),
+                )
                 notice = (f"[Background sub-agent '{spec.name}' finished (task_id={new_task_id}){status_suffix}]\n"
                           f"{_wrap_task_result(text, new_task_id)}")
                 with parent._agent_notices_lock:
@@ -1745,6 +1921,15 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
         text = f"{text}\n\n{worktree_note}"
     if budget_note:
         text = f"{text}\n\n{budget_note}"
+    # Halo 2.0.2 round D (brief item 2, "approval gates"): a no-op unless
+    # `spec.requires_approval` is set (every pre-existing caller, unchanged)
+    # -- see `_apply_approval_gate`'s own docstring for the accept/edit/
+    # stop contract.
+    text, is_error = _apply_approval_gate(
+        runtime=runtime, spec=spec, tool_id=tool_id, tool_name=tool_name, agent_id=agent_id,
+        description=description, text=text, is_error=is_error, on_event=on_event, bg_sink=None,
+        rounds=tool_input.get("_approval_round", 0),
+    )
     wrapped = _wrap_task_result(text, new_task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)
@@ -1752,7 +1937,7 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
 
 
 def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_name: str,
-                  on_event=None) -> "tuple[list, object]":
+                  on_event=None, org_override: "Optional[dict]" = None) -> "tuple[list, object]":
     """`Agent(org=<name>, prompt=<goal>)` / `/org run <name> "<goal>"`
     (Halo 2.0.2 round 2, brief B): spawns the org's ROOT position as an
     ORDINARY child of `runtime.parent`, through `run_agent_call` itself
@@ -1771,7 +1956,14 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     max_concurrent`). Shares the CALLER's own `tasks`/`lock` so task_id
     resume/`TaskStop` bookkeeping for whatever this spawns stays part of
     the SAME session-wide map. Never raises, matching `run_agent_call`'s
-    own contract -- every failure becomes an `is_error` ToolResult."""
+    own contract -- every failure becomes an `is_error` ToolResult.
+
+    `org_override` (Halo 2.0.2 round D, brief item 4, "/org resume"):
+    `None` for every ordinary caller (unchanged -- `name` is loaded fresh
+    from `~/.halo/orgs/<name>.json`); `resume_org_run` passes an already-
+    loaded dict instead, with caps restored from a prior run's own saved
+    record, so editing the org definition after that run started can
+    never change what the RESUMED run is bound by."""
     from halo_harness.orgs import list_orgs, load_org, org_tree_depth, position_agent_specs, root_position, \
         validate_org
     from halo_harness.tools.base import ToolResult
@@ -1798,14 +1990,25 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     if not goal:
         return [], ToolResult("The prompt parameter is required", is_error=True)
     state_dir = runtime.parent.state_dir
-    org = load_org(name, state_dir=state_dir)
-    if org is None:
-        known = ", ".join(list_orgs(state_dir=state_dir)) or "(none)"
-        return [], ToolResult(f"Unknown organization {name!r} (or it failed validation). "
-                               f"Known organizations: {known}", is_error=True)
-    problems = validate_org(org)
-    if problems:
-        return [], ToolResult(f"Organization {name!r} is invalid: {'; '.join(problems)}", is_error=True)
+    # Halo 2.0.2 round D (brief item 4, "/org resume"): `resume_org_run`
+    # passes an already-loaded org dict with its `max_concurrent`/
+    # `budget_usd` OVERRIDDEN from a prior run's own saved record, so a
+    # resumed run honors the EXACT caps that run started with even if
+    # `~/.halo/orgs/<name>.json` has since been edited -- every other
+    # caller (an ordinary `Agent(org=...)`/`/org run`/`halo org run`)
+    # passes `None` and gets the live, on-disk definition exactly as
+    # before this parameter existed.
+    if org_override is not None:
+        org = org_override
+    else:
+        org = load_org(name, state_dir=state_dir)
+        if org is None:
+            known = ", ".join(list_orgs(state_dir=state_dir)) or "(none)"
+            return [], ToolResult(f"Unknown organization {name!r} (or it failed validation). "
+                                   f"Known organizations: {known}", is_error=True)
+        problems = validate_org(org)
+        if problems:
+            return [], ToolResult(f"Organization {name!r} is invalid: {'; '.join(problems)}", is_error=True)
     root = root_position(org)
     if root is None:
         return [], ToolResult(f"Organization {name!r} has no single root.", is_error=True)
@@ -1828,6 +2031,25 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
     # this org run started.
     from halo_harness.orgs import build_budget_tracker
     org_budget = build_budget_tracker(org, baseline_usd=runtime.parent.cost_meter.total_usd)
+    # Halo 2.0.2 round D (brief item 4, "/org resume"): a best-effort
+    # on-disk record of THIS run's own caps/budget -- `resume_org_run`
+    # reads it back later (possibly from a brand new process entirely) to
+    # restore them. Written AFTER `org_budget`/before `org_runtime` so it
+    # reflects what this run is ACTUALLY about to use; never raises (a
+    # missing/unwritable session_dir just means no record, same as the
+    # goal task above).
+    try:
+        _write_org_run_record(session_dir, {
+            "org": name, "goal": goal, "goal_task_id": goal_task_id,
+            "max_concurrent": org.get("max_concurrent"), "budget_usd": org.get("budget_usd"),
+            "position_budgets": {p["title"]: p["budget_usd"] for p in (org.get("positions") or [])
+                                  if isinstance(p, dict) and p.get("title")
+                                  and isinstance(p.get("budget_usd"), (int, float))
+                                  and not isinstance(p.get("budget_usd"), bool)},
+            "started": time.time(),
+        })
+    except Exception:
+        pass
     org_runtime = AgentRuntime(
         parent=runtime.parent, agents=position_agent_specs(org, goal_task_id=goal_task_id), routes=runtime.routes,
         role_table=runtime.role_table, cli_role_overrides=runtime.cli_role_overrides, depth=runtime.depth,
@@ -1881,6 +2103,138 @@ def run_org_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, tool_
             entry["org_budget"] = org_budget
             entry["goal_task_id"] = goal_task_id
     return result
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 round D (brief item 4, "/org resume" -- the Paperclip idea
+# docs/ORGS.md deferred, "persistent work context"): `<session_dir>/
+# org-run.json`, one small best-effort record per org run (written by
+# `run_org_call` above, right as that run starts), and `resume_org_run`,
+# which reads it back -- together with that SAME session's shared task
+# board (`tools/task_board.py`) -- to continue an interrupted run from a
+# BRAND NEW top-level session (a fresh `halo org resume <session-id>`
+# process has no memory of the old one at all; the TUI's own `/org resume`
+# passes the LIVE session's own session_dir instead, see tui/slash.py).
+# ---------------------------------------------------------------------------
+
+def _org_run_record_path(session_dir: Path) -> Path:
+    return Path(session_dir) / "org-run.json"
+
+
+def _write_org_run_record(session_dir: Path, record: dict) -> None:
+    """Atomic (tmp + `os.replace`), same pattern `tools/task_board.py`'s
+    own `_write_board` already uses -- a reader must never see a torn
+    write. Caller-side best-effort (never raises on its own, but this
+    helper itself doesn't swallow I/O errors -- `run_org_call` wraps its
+    one call site in `try/except Exception: pass`)."""
+    import os
+    path = _org_run_record_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp_path.write_text(json.dumps(record, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _read_org_run_record(session_dir: Path) -> "Optional[dict]":
+    """`None` on a missing/corrupt file or one that isn't even a dict --
+    never raises. A session that ran an org before this round existed, or
+    whose record write failed, simply has nothing to resume from this
+    way (`resume_org_run` reports that plainly instead of guessing)."""
+    try:
+        data = json.loads(_org_run_record_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _build_resume_prompt(goal: str, done: "list[dict]", pending: "list[dict]") -> str:
+    """The root position's own new prompt for a resumed run (brief item 4:
+    "open and claimed tasks become the work list, done tasks are kept") --
+    `done`/`pending` are plain task-board rows (`tools/task_board.py`'s own
+    dict shape), goal/kind rows already excluded by the caller."""
+    lines = [f"Resume this organization's interrupted run. Original goal: {goal}", ""]
+    if done:
+        lines.append("Already done (kept -- do not redo this work):")
+        for t in done:
+            result = f" -- {t['result']}" if t.get("result") else ""
+            lines.append(f"  - {t.get('title', '?')}{result}")
+        lines.append("")
+    if pending:
+        lines.append("Still open or claimed -- this is your work list, continue it:")
+        for t in pending:
+            owner = f" (claimed by {t['owner']})" if t.get("owner") else " (open)"
+            notes = f" -- {t['notes']}" if t.get("notes") else ""
+            lines.append(f"  - {t.get('title', '?')}{owner}{notes}")
+        lines.append("")
+    else:
+        lines.append("No open or claimed tasks were left on the board -- check the done work above, "
+                      "finish anything still missing, and report back.")
+    return "\n".join(lines).strip()
+
+
+def _org_with_record_overrides(org: dict, record: dict) -> dict:
+    """A COPY of `org` with `max_concurrent`/`budget_usd` (org-level and
+    per-position) overridden from a saved run record, wherever the record
+    actually set one -- a field the record left `None`/absent keeps
+    whatever the LIVE org definition currently says, so re-saving an org
+    with no budget at all never "un-sets" a resume's own restored cap.
+    Pure (no I/O) -- directly unit-testable with no Session involved."""
+    org = dict(org)
+    if record.get("max_concurrent") is not None:
+        org["max_concurrent"] = record["max_concurrent"]
+    if record.get("budget_usd") is not None:
+        org["budget_usd"] = record["budget_usd"]
+    position_budgets = record.get("position_budgets") or {}
+    if isinstance(position_budgets, dict) and position_budgets:
+        positions = [dict(p) if isinstance(p, dict) else p for p in (org.get("positions") or [])]
+        for p in positions:
+            if isinstance(p, dict) and p.get("title") in position_budgets:
+                p["budget_usd"] = position_budgets[p["title"]]
+        org["positions"] = positions
+    return org
+
+
+def resume_org_run(*, runtime: AgentRuntime, tool_id: str, tool_name: str, session_dir: Path,
+                    on_event=None) -> "tuple[list, object]":
+    """`/org resume` (TUI, the LIVE session's own `session_dir`) / `halo
+    org resume <session-id>` (CLI, a resolved PAST session's own
+    `session_dir`) -- brief item 4. Reads that session's own `org-run.json`
+    record and its shared task board, builds a resume prompt from the
+    done/open/claimed split, and starts a FRESH `run_org_call` for the
+    SAME org with its `max_concurrent`/`budget_usd` restored from the
+    record (never its `max_depth` -- that's recomputed fresh, correctly,
+    for THIS caller's own depth; a resume's own caller depth is unrelated
+    to whatever the original run's caller depth happened to be). Never
+    raises -- every failure becomes an `is_error` ToolResult, matching
+    `run_org_call`'s own contract."""
+    from halo_harness.orgs import load_org
+    from halo_harness.tools.base import ToolResult
+    from halo_harness.tools.task_board import read_board
+
+    record = _read_org_run_record(session_dir)
+    if record is None:
+        return [], ToolResult(
+            f"No organization run record found under {session_dir} -- nothing to resume "
+            f"(it may predate this feature, or never ran an organization at all).", is_error=True)
+    org_name = record.get("org")
+    if not org_name:
+        return [], ToolResult(f"The run record under {session_dir} has no organization name.", is_error=True)
+    org = load_org(org_name, state_dir=runtime.parent.state_dir)
+    if org is None:
+        return [], ToolResult(
+            f"Organization {org_name!r} (named in the saved run record) is no longer available or valid.",
+            is_error=True)
+    org = _org_with_record_overrides(org, record)
+
+    board = read_board(session_dir)
+    done = [t for t in board if isinstance(t, dict) and t.get("kind", "task") != "goal" and t.get("status") == "done"]
+    pending = [t for t in board if isinstance(t, dict) and t.get("kind", "task") != "goal"
+               and t.get("status") in ("open", "claimed")]
+    prompt = _build_resume_prompt(record.get("goal") or "", done, pending)
+    return run_org_call(
+        runtime=runtime, tool_id=tool_id, tool_name=tool_name, on_event=on_event, org_override=org,
+        tool_input={"org": org_name, "prompt": prompt, "description": f"Resume organization {org_name}"},
+    )
 
 
 def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id: str, *, on_event=None):
@@ -2006,6 +2360,15 @@ def _resume_task(runtime: AgentRuntime, task_id: str, tool_input: dict, tool_id:
         text = f"{text}\n\n{worktree_note}"
     if budget_note:
         text = f"{text}\n\n{budget_note}"
+    # Halo 2.0.2 round D (brief item 2): same gate as a fresh spawn --
+    # `effective_runtime` (never the bare `runtime`), so a resumed ORG
+    # position gates through its own rebuilt org-aware runtime/budget,
+    # exactly like the budget check/rollup just above already do.
+    text, is_error = _apply_approval_gate(
+        runtime=effective_runtime, spec=spec, tool_id=tool_id, tool_name="Agent", agent_id=agent_id,
+        description=spec.description, text=text, is_error=is_error, on_event=on_event, bg_sink=None,
+        rounds=tool_input.get("_approval_round", 0),
+    )
     wrapped = _wrap_task_result(text, task_id)
     capped = spill_and_truncate(wrapped, cap=RESULT_CAP, session_dir=parent.log.dir / parent.log.session_id,
                                  tool_use_id=tool_id)

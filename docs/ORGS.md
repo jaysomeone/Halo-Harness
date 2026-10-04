@@ -55,12 +55,40 @@ existing cost meter:
   calls, so `/tasks`' board tab shows goal -> tasks -> results instead of
   a flat list.
 
-Later, recorded in the roadmap, not this round (Paperclip ideas that
-didn't fit): `halo org install <name>`/`/org install` for ready-made
-template packages with a README per template, approval gates
-(`requires_approval: true` holding a position's result as a pending
-card), export/import (`halo org export`/`import`), and `/org resume` for
-an interrupted run.
+### Approval gates
+
+A third `~/.halo/orgs/<name>.json` position field: **`requires_
+approval`** (bool, per position) holds that position's just-finished
+result as a PENDING card -- `agent/subagent.py::_apply_approval_gate`,
+called right after a position's own spawn (foreground, background, or a
+resumed `task_id`) finishes, before its text ever reaches the parent
+that delegated to it:
+
+- **accept**: the result flows up unchanged.
+- **edit, re-run**: the reviewer's own instruction plus the position's
+  previous result become a fresh prompt for the SAME position (a real
+  new spawn, through the ordinary Agent-tool path -- its own cost/hooks/
+  task-board bookkeeping all apply normally); the NEW result is gated
+  the same way, up to 5 revisions, after which the gate stops the
+  position itself rather than asking again.
+- **stop**: the result becomes a clear refusal instead of whatever the
+  position produced (the original text is kept below it, for reference).
+
+The card reuses the EXACT dock every permission/question/plan-review ask
+already uses (`ApprovalCard`, `tui/widgets/cards.py`; `approval_request`/
+`Session.resolve_approval`/`Controller.answer_approval` mirror `plan_
+review`/`resolve_plan`/`answer_plan` throughout) -- never a new kind of
+prompt. With no live dock reachable at all (`halo org run`/`halo org
+resume` from a plain terminal, or any bare/print-mode session), the gate
+prints the result and waits on one stdin line instead, the SAME
+convention `halo init`'s own non-interactive prompts already use
+(`a`/`e`/`s`, `e` then reads one more line for the instruction; a blank
+or unrecognized line -- including EOF -- is treated as `s`, never a
+silent accept). `--yes` on `halo org run`/`halo org resume`, or the
+session's own `dontAsk` permission mode, accepts every gate
+automatically instead of asking -- the OPPOSITE of `dontAsk`'s usual
+"ask converts to deny" rule (an approval gate is never a tool-permission
+ask).
 
 ## Schema
 
@@ -96,6 +124,7 @@ an interrupted run.
 | `positions[].instructions` | this position's system prompt (its own paragraph -- a rendered view of the whole org chart and of the positions it may itself delegate to is appended automatically, see "Running one" below) |
 | `positions[].tools` | optional tool-name allowlist for this position only; omitted means every tool the PARENT session's own catalog already has (Claude Code's usual default) |
 | `positions[].reports` | the titles this position may delegate to via the Agent tool -- see "The root, and `reports`" below |
+| `positions[].requires_approval` | optional bool (default false) -- see "Approval gates" above |
 
 Neither `role` nor `model` is required: a position with neither resolves
 to the session's own model, exactly like an agent with no role at all.
@@ -138,6 +167,31 @@ back to its shipped form, overwriting your local copy.
 - **`company`** -- `CEO` -> `VP Engineering`/`VP Marketing`/`VP Research`
   -> one manager each -> two workers each (13 positions, sensible
   built-in roles, empty `instructions` slots for you to fill in).
+
+## Templates and installing
+
+`halo org install <name> [--force]` / `/org install <name> [--force]`
+copies a TEMPLATE into `~/.halo/orgs/<name>.json`, refusing to overwrite
+an existing file there unless `--force` -- distinct from the built-ins'
+own automatic, hands-off copy above (which already happens for `solo`/
+`release-flow`/`company` the moment anything asks for the org list), this
+is an explicit, opt-in action, useful for recreating one after deleting
+your own copy, or for installing a SAVED template (below) under its own
+name for the first time.
+
+A template's source is either:
+
+- **shipped** -- the three built-ins above, each already carrying its
+  own one-line README (its `description` field, the SAME one `/org
+  list`/`halo org list` show for an installed org, and the wizard's
+  Organizations step's own tree preview already renders); or
+- **saved** -- a plain org JSON file placed in `~/.halo/org-
+  templates/<name>.json` (`orgs.org_templates_dir()`), a pool separate
+  from the live, runnable `~/.halo/orgs/` directory -- never auto-
+  populated, the mirror of `roles.py`'s own template-pool-vs-live-table
+  split for role templates.
+
+A shipped name always wins a collision with a same-named saved one.
 
 ## Running one
 
@@ -193,6 +247,54 @@ unlinked from the root); `Escape` cancels with nothing written. `halo org
 edit <name>` (CLI) opens `$EDITOR`/`$VISUAL` on the raw JSON file instead
 (creating a one-position starter first if it doesn't exist), re-validating
 on save.
+
+## Export and import
+
+`halo org export <name> [file]` / `/org export <name> [file]` writes the
+org's own validated JSON (`orgs.load_org`'s shape, always carrying a
+`"name"`) to `file`, or to stdout when `file` is omitted so it can be
+piped or redirected. `halo org import <file>` / `/org import <file>`
+reads it back -- validated the SAME way any other org write is
+(`orgs.save_org` -> `validate_org`: role names, reports, `budget_usd`),
+with every problem listed, not just the first; a file with no usable
+`"name"` field falls back to its own basename. Plain JSON, no secrets to
+scrub (an org carries no credentials of its own).
+
+`halo roles template export <name> [file]` / `import <file>` is the same
+pair for a saved ROLE template (`~/.halo/roles/<name>.json`) -- see
+[ROLES.md](ROLES.md).
+
+## Resuming an interrupted run
+
+Every `run_org_call` (`/org run`, `Agent(org=...)`, `halo org run`) writes
+a small record, `<session_dir>/org-run.json` (org name, goal, the goal
+task's own id, and the caps/budget this run actually started with), right
+as the run begins -- best-effort, alongside the goal task itself.
+
+`/org resume` (TUI/print-mode, no argument -- continues THIS session's
+own interrupted run) and `halo org resume <session-id> [--cwd DIR]
+[--model REF] [--yes]` (CLI, a PAST session possibly from a different
+process entirely -- `<session-id>` is whatever `-r`/`--resume` already
+accepts: an exact id, a `.jsonl` path, or a title/first-message substring
+match) both reach `agent/subagent.py::resume_org_run`:
+
+1. Reads that session's own `org-run.json` record and its shared task
+   board (`tools/task_board.py`).
+2. Splits the board into DONE tasks (kept -- named in the new prompt as
+   already finished, never redone) and OPEN/CLAIMED tasks (the new root
+   position's own work list).
+3. Starts a FRESH `run_org_call` for the SAME org, with a goal built from
+   the original goal plus that done/pending split, and with the org's own
+   `max_concurrent`/`budget_usd` (and any per-position `budget_usd`)
+   OVERRIDDEN from the saved record -- never from whatever `~/.halo/
+   orgs/<name>.json` currently says, so editing the org after the
+   original run started can never change what the RESUMED run is bound
+   by. (`max_depth` is the one exception: always recomputed fresh, for
+   the resuming caller's own actual depth, which has nothing to do with
+   the original run's caller.)
+
+A session with no run record at all (one that predates this feature, or
+never ran an organization) reports exactly that instead of guessing.
 
 ## Limits
 

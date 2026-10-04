@@ -68,9 +68,15 @@ _HOOK_SCRIPT_ARGV = [sys.executable, "-m", "tests.helpers.hook_scripts"]
 @contextmanager
 def _fake_claude_env(*, logged_in: bool = True):
     saved = {k: os.environ.get(k) for k in
-             ("BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS")}
+             ("BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS",
+              "FAKE_CLAUDE_CC_TOOL2_WINDOW_S")}
     os.environ["BRIDGE_CLAUDE_EXE"] = '"' + sys.executable + '" "' + str(FAKE_CLAUDE) + '"'
     os.environ["FAKE_CLAUDE_CC_LOGGED_IN"] = "1" if logged_in else "0"
+    # The two-call fake waits up to this long for a steer to arrive between
+    # its calls (it stops waiting the moment one does), so the absorption
+    # test no longer depends on how fast this box moves a line through the
+    # stream; a run without a steer pays the full window once.
+    os.environ["FAKE_CLAUDE_CC_TOOL2_WINDOW_S"] = "4"
     os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)  # the fake's own real "auth status" answers this now
     try:
         yield

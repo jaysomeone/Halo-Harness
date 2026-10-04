@@ -7700,6 +7700,38 @@ def test_pending_dock_sub_agent_ask_names_the_agent(ctx: Ctx):
 
 
 @test
+def test_pending_dock_holds_an_approval_card_and_accept_resolves_it(ctx: Ctx):
+    """Halo 2.0.2 round D (brief item 2, "approval gates"): `approval_
+    request` -> a live `ApprovalCard` through the SAME PendingDock queue
+    every other pending card already uses -- pressing `1` (accept) calls
+    `Controller.answer_approval` (here, its FakeController mirror) and
+    clears the dock, same shape as an existing PermissionCard/QuestionCard
+    round trip."""
+    from halo_harness.tui.widgets.cards import ApprovalCard
+
+    async def body():
+        fake = FakeController(turns=[[
+            ev.user_message("run the org", turn=1),
+            ev.Event("approval_request", {"id": "appr1", "position": "Implementer",
+                                            "text": "Here is my draft implementation.", "is_error": False}, turn=1),
+        ]])
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#prompt-input")
+            await _type(pilot, "run the org")
+            await pilot.press("enter")
+            await _drain_a_few(app, pilot, n=6)
+            ctx.check(f"the dock holds an ApprovalCard, got {type(app.pending_dock.card).__name__}",
+                      isinstance(app.pending_dock.card, ApprovalCard))
+            await pilot.press("1")
+            await pilot.pause(0.1)
+            ctx.check(f"accept resolved through the controller, got {fake.approval_replies}",
+                      fake.approval_replies == [("appr1", {"action": "accept", "instruction": None})])
+            ctx.check("the dock cleared after the decision", app.pending_dock.card is None)
+    asyncio.run(body())
+
+
+@test
 def test_pending_dock_holds_a_question_card_then_a_plan_card(ctx: Ctx):
     from halo_harness.tui.widgets.cards import PlanCard, QuestionCard
 

@@ -311,6 +311,15 @@ class Controller:
     def answer_question(self, request_id: str, answer) -> bool:
         return self.session.resolve_question(request_id, answer)
 
+    def answer_approval(self, request_id: str, decision: dict) -> bool:
+        """Halo 2.0.2 round D (brief item 2): `ApprovalCard`'s reply --
+        direct (see class docstring), like `answer_permission`/`answer_
+        question`/`answer_plan`: the worker is parked in `agent/
+        subagent.py`'s `_ask_approval_live`, not polling the command
+        queue. `decision` is `{"action": "accept"|"edit"|"stop",
+        "instruction": str|None}`."""
+        return self.session.resolve_approval(request_id, decision)
+
     def answer_plan(self, approved: bool, *, feedback: str = "", mode_after: Optional[str] = None) -> None:
         """`PlanCard`'s reply (D-Contract `plan_reply{approved, feedback,
         mode_after}`). Direct (see class docstring), like `answer_permission`/

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from halo_harness.tui.widgets.cards import PermissionCard, PlanCard, QuestionCard, _summarize_call
+from halo_harness.tui.widgets.cards import ApprovalCard, PermissionCard, PlanCard, QuestionCard, _summarize_call
 from halo_harness.tui.widgets.diffview import DiffView
 
 log = logging.getLogger("bridge")
@@ -299,6 +299,29 @@ async def _show_plan_card(app, data: dict, *, agent_id: "str | None" = None) -> 
     await app.enqueue_pending_card(card, marker_text="⏸ plan ready for review, see below")
 
 
+async def _show_approval_card(app, data: dict, *, agent_id: "str | None" = None) -> None:
+    """Halo 2.0.2 round D (brief item 2): `approval_request` -> a live
+    `ApprovalCard`, queued through the SAME PendingDock every other
+    pending card already uses -- `app.controller.answer_approval` ->
+    `Session.resolve_approval` unblocks whichever waiter is actually
+    parked for `request_id` (the top session's own, or a deeply-nested
+    org position's, both share the SAME dict -- see `agent/subagent.py`'s
+    `_build_child_session`)."""
+    request_id = data.get("id", "")
+    position = data.get("position") or "?"
+
+    def on_decide(decision: dict) -> None:
+        ok = app.controller.answer_approval(request_id, decision)
+        if not ok:
+            app.notify("That approval is no longer waiting for a decision (already answered or the run "
+                       "was interrupted).", severity="warning", title="Approval")
+        app.clear_pending_card()
+
+    card = ApprovalCard(request_id=request_id, position=position, text=data.get("text", ""),
+                         is_error=bool(data.get("is_error")), on_decide=on_decide)
+    await app.enqueue_pending_card(card, marker_text=f"⏸ approval needed for {position}, see below")
+
+
 def _format_todos(data: dict) -> str:
     todos = data.get("todos") if isinstance(data.get("todos"), list) else []
     glyphs = {"completed": "✓", "in_progress": "◐", "pending": "○"}
@@ -453,6 +476,13 @@ async def _apply_event_inner(app, event) -> None:
         # "wire the existing queue" scope; `agent_id` is always None here
         # today (a child never reaches this event while non-interactive).
         await _show_plan_card(app, data, agent_id=agent_id)
+    elif kind == "approval_request":
+        # Halo 2.0.2 round D (brief item 2): unlike plan_review, this one
+        # IS widened to any depth already (`_approval_waiters` is shared
+        # the same way `_permission_waiters`/`_question_waiters` are) --
+        # `agent_id` here is whichever position's own result is pending,
+        # same tagging every other child event already carries.
+        await _show_approval_card(app, data, agent_id=agent_id)
     elif kind == "todos":
         await app.transcript.add_note(_format_todos(data), kind="todos")
     elif kind == "status":

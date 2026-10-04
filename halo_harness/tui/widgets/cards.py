@@ -613,6 +613,78 @@ class PlanCard(Static, can_focus=True):
         self._finish({"approved": False, "mode_after": None, "feedback": message})
 
 
+class ApprovalCard(Static, can_focus=True):
+    """Halo 2.0.2 round D (brief item 2, "approval gates"): a `requires_
+    approval: true` org position's just-finished result, held pending a
+    human decision -- `on_decide({"action": "accept"|"edit"|"stop",
+    "instruction": str|None})` fires exactly once. `2`/`e` borrows
+    PromptInput for the revision instruction first (mirrors
+    `PermissionCard.action_choose_deny`'s own deny-feedback flow)."""
+
+    BINDINGS = [
+        Binding("1,a", "choose_accept", "Accept", show=False),
+        Binding("2,e", "choose_edit", "Edit, re-run", show=False),
+        Binding("3,s,escape", "choose_stop", "Stop", show=False),
+    ]
+
+    def __init__(self, *, request_id: str, position: str, text: str, is_error: bool, on_decide: Callable) -> None:
+        super().__init__("", markup=False, classes="approval-card")
+        self.request_id = request_id
+        self.position = position
+        self.text = text
+        self.is_error = is_error
+        # PendingDock's own `o`-pager title fallback reads this (same
+        # attribute name PermissionCard/QuestionCard/PlanCard already use).
+        self.summary = f"Approval needed: {position}"
+        self._on_decide = on_decide
+        self.awaiting_instruction = False
+        self.done = False
+        # 2.0.1 W3a (PendingDock): see PermissionCard's own matching attribute.
+        self.decision_line: "Optional[str]" = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        lines = [f"⚠ Approval needed: {self.position}'s result" + (" (error)" if self.is_error else "")]
+        preview = self.text.strip()
+        lines.append(preview[:2000] + ("…" if len(preview) > 2000 else ""))
+        if self.done:
+            pass
+        elif self.awaiting_instruction:
+            lines.append("  Tell it what to change, or press Enter for no extra detail.")
+        else:
+            lines.append("  [1] Accept   [2] Edit, re-run   [3] Stop")
+        self.update("\n".join(lines))
+
+    def _finish(self, decision: dict) -> None:
+        self.done = True
+        self.awaiting_instruction = False
+        glyph = {"accept": "✓", "edit": "↻"}.get(decision["action"], "✗")
+        label = {"accept": "accepted", "edit": "sent back for edits"}.get(decision["action"], "stopped")
+        self.decision_line = f"{glyph} {label}: {self.position}"
+        self._refresh()
+        self._on_decide(decision)
+
+    def action_choose_accept(self) -> None:
+        if not self.done:
+            self._finish({"action": "accept", "instruction": None})
+
+    def action_choose_edit(self) -> None:
+        if self.done:
+            return
+        self.awaiting_instruction = True
+        self._refresh()
+        self.app.borrow_input(self, placeholder="What should change? (Enter for no extra detail)")
+
+    def action_choose_stop(self) -> None:
+        if not self.done:
+            self._finish({"action": "stop", "instruction": None})
+
+    def resolve_with_message(self, message: str) -> None:
+        if self.done:
+            return
+        self._finish({"action": "edit", "instruction": message})
+
+
 class EffortCard(Static, can_focus=True):
     """1.0.1 hotfix 20.2: the inline `/effort` selector, Claude-Code-style
     -- one horizontal row of THIS route's own accepted effort levels

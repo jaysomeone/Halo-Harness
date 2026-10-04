@@ -58,11 +58,24 @@ EVENT_KINDS = frozenset({
                      # background connector discovery finishing) -- pushed straight
                      # onto Controller.events from whatever thread noticed, never
                      # tied to an active turn's own generator.
+    # Halo 2.0.2 round D (brief item 2, "approval gates"): a `requires_
+    # approval: true` org position's just-finished result, held for a
+    # human decision (accept/edit-and-rerun/stop) -- `agent/subagent.py`'s
+    # `_apply_approval_gate`/`_ask_approval_live`, rendered by the TUI's
+    # own `ApprovalCard` (tui/widgets/cards.py) through the SAME
+    # PendingDock queue a `permission_request`/`question`/`plan_review`
+    # card already uses. data: {id, position, text, is_error}.
+    "approval_request",
 })
 
 COMMAND_KINDS = frozenset({
     "user_input", "interrupt", "set_mode", "set_model", "slash", "permission_reply",
     "question_reply", "plan_reply", "steer", "run_compact", "run_clear",
+    # Halo 2.0.2 round D (brief item 2): safety-net counterpart to
+    # "approval_request" above, mirroring "permission_reply"/"question_
+    # reply"/"plan_reply" -- see agent/loop.py's own matching comment on
+    # its `approval_reply` branch.
+    "approval_reply",
 })
 
 _ids = itertools.count(1)

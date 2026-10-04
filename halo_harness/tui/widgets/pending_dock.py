@@ -80,6 +80,12 @@ class PendingDock(VerticalScroll):
         if input_data:
             body = json.dumps(input_data, indent=2, ensure_ascii=False, default=str)
         else:
+            # Halo 2.0.2 round D (brief item 2): `ApprovalCard`'s own
+            # `text` (the gated position's full result) joins the same
+            # fallback chain -- it has no `input_data`/`plan_text`/
+            # `reason` of its own (there is no tool call behind an
+            # approval gate at all).
             body = (getattr(self.card, "plan_text", None) or getattr(self.card, "reason", None)
-                    or getattr(self.card, "summary", None) or "(no further detail)")
+                    or getattr(self.card, "text", None) or getattr(self.card, "summary", None)
+                    or "(no further detail)")
         self.app.push_screen(PagerScreen(str(title), str(body)))

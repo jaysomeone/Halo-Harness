@@ -614,16 +614,22 @@ def _cmd_role(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_org(args: str, facade: HeadlessFacade) -> str:
-    """Halo 2.0.2 round 2 (brief B): bare `/org` (and `/org list`) lists
-    saved organizations; `/org show <name>` prints its text tree; `/org
-    new <name>` creates a one-position starter; `/org load <name>`
-    re-installs a built-in's shipped definition over a local copy (a
-    plain file write -- unlike `/roles edit`, this never needs the TUI);
-    `/org run <name> "<goal>"` runs it for real against the LIVE session,
-    through the exact same `run_org_call` an `Agent(org=...)` tool call
-    uses. `/org edit <name>` has no headless/print-mode form (the TUI
-    form, `tui/dialogs/org_editor.py`, intercepts it first); here it just
-    names that, like `/roles edit` does."""
+    """Halo 2.0.2 round 2 (brief B), extended round D (brief items 1/3/4):
+    bare `/org` (and `/org list`) lists saved organizations, each with
+    its own one-line README (its `description`); `/org show <name>`
+    prints its text tree; `/org new <name>` creates a one-position
+    starter; `/org load <name>` re-installs a built-in's shipped
+    definition over a local copy (a plain file write -- unlike `/roles
+    edit`, this never needs the TUI); `/org install <name> [--force]`
+    copies a shipped or saved template into `~/.halo/orgs/`; `/org run
+    <name> "<goal>"` runs it for real against the LIVE session, through
+    the exact same `run_org_call` an `Agent(org=...)` tool call uses;
+    `/org export <name> [file]`/`/org import <file>` move an org as
+    plain JSON; `/org resume` continues THIS session's own interrupted
+    run from its saved record and shared task board. `/org edit <name>`
+    has no headless/print-mode form (the TUI form, `tui/dialogs/
+    org_editor.py`, intercepts it first); here it just names that, like
+    `/roles edit` does."""
     session = getattr(facade, "session", None)
     state_dir = getattr(session, "state_dir", None) if session is not None else None
     parts = (args or "").strip().split(None, 1)
@@ -666,6 +672,70 @@ def _cmd_org(args: str, facade: HeadlessFacade) -> str:
         ok, problems = reload_builtin_org(rest, state_dir=state_dir)
         return f"Reloaded built-in organization {rest!r}." if ok else "Could not load: " + "; ".join(problems)
 
+    if sub == "install":
+        # Halo 2.0.2 round D (brief item 1): `--force` as a trailing token
+        # (`/org install <name> --force`) -- this facade path is plain
+        # text, not argparse, so it's parsed by hand the same way other
+        # `/org`/`/roles` subcommands here already split their own rest.
+        if not rest:
+            return "Usage: /org install <name> [--force]"
+        tokens = rest.split()
+        force = "--force" in tokens
+        name = next((t for t in tokens if t != "--force"), "")
+        if not name:
+            return "Usage: /org install <name> [--force]"
+        from halo_harness.orgs import install_org_template
+        ok, problems = install_org_template(name, force=force, state_dir=state_dir)
+        return (f"Installed organization template {name!r} to ~/.halo/orgs/{name}.json."
+                if ok else "Could not install: " + "; ".join(problems))
+
+    if sub == "export":
+        # Halo 2.0.2 round D (brief item 3): `/org export <name> [file]` --
+        # plain JSON; no file given returns it as the command's own text
+        # (headless.py prints that directly, same as every other "core"
+        # command's result) rather than silently writing somewhere unasked.
+        if not rest:
+            return "Usage: /org export <name> [file]"
+        import json
+        from halo_harness.orgs import load_org
+        name, _, file_arg = rest.partition(" ")
+        file_arg = file_arg.strip() or None
+        org = load_org(name, state_dir=state_dir)
+        if org is None:
+            return f"No such organization: {name!r} (or it failed validation)"
+        text = json.dumps(org, indent=2, sort_keys=True) + "\n"
+        if not file_arg:
+            return text
+        try:
+            Path(file_arg).write_text(text, encoding="utf-8")
+        except OSError as e:
+            return f"Could not write {file_arg}: {e}"
+        return f"Exported organization {name!r} to {file_arg}."
+
+    if sub == "import":
+        # Halo 2.0.2 round D (brief item 3): `/org import <file>` -- plain
+        # JSON, validated the same way any other org write is (`orgs.
+        # save_org` -> `validate_org`), with every problem listed.
+        if not rest:
+            return "Usage: /org import <file>"
+        import json
+        from halo_harness.orgs import save_org
+        path = Path(rest)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Could not read {rest}: {e}"
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            return f"{rest} is not valid JSON: {e}"
+        name = data.get("name") if isinstance(data, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            name = path.stem
+        ok, problems = save_org(name, data, state_dir=state_dir)
+        return (f"Imported organization {name!r} from {rest}." if ok
+                else f"{rest} is not a valid organization: " + "; ".join(problems))
+
     if sub == "edit":
         return ("/org edit opens the organization editor form in the TUI only -- "
                 "use `halo org edit <name>` ($EDITOR) from the CLI instead.")
@@ -691,7 +761,22 @@ def _cmd_org(args: str, facade: HeadlessFacade) -> str:
         )
         return result.content
 
-    return f"/org: unknown subcommand {sub!r} (known: list, show, new, load, edit, run)"
+    if sub == "resume":
+        # Halo 2.0.2 round D (brief item 4): `/org resume` (no argument --
+        # the headless/print-mode form has no "current session id" of its
+        # own to type, unlike `halo org resume <session-id>`) continues
+        # THIS session's own interrupted run, from its own saved record +
+        # shared task board.
+        if session is None or getattr(session, "agent_runtime", None) is None:
+            return "Organizations can only be resumed once a session is running."
+        from halo_harness.agent.subagent import resume_org_run
+        session_dir = session.log.dir / session.log.session_id
+        _events, result = resume_org_run(
+            runtime=session.agent_runtime, tool_id="org-resume", tool_name="Agent", session_dir=session_dir,
+        )
+        return result.content
+
+    return f"/org: unknown subcommand {sub!r} (known: list, show, new, load, install, edit, run, export, import, resume)"
 
 
 def _cmd_setup(args: str, facade: HeadlessFacade) -> str:

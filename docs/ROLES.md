@@ -220,8 +220,14 @@ CURRENT table), `/roles load <name>` (apply), `/roles new <name>` (empty),
 `/roles show <name>`, `/roles edit <name>` (a form: one row per role, Enter
 opens the same model picker `/model` uses, then an inline effort prompt;
 `ctrl+s` saves, Esc cancels with nothing written -- `tui/dialogs/
-roles_editor.py`). CLI: `halo roles template list|save|load|new|edit|show`
-(`edit` opens `$EDITOR`/`$VISUAL` on the raw file, no form). Setting
+roles_editor.py`). CLI: `halo roles template
+list|save|load|new|edit|show|export|import` (`edit` opens `$EDITOR`/
+`$VISUAL` on the raw file, no form; `export <name> [file]`/`import
+<file>` move a template as plain JSON -- `export` writes to `file` or
+stdout when omitted, `import` validates the same way any other template
+write is, listing every problem, and falls back to the file's own
+basename when the JSON has no `"name"` field; `halo org export`/`import`
+is the same pair for an organization, see [ORGS.md](ORGS.md)). Setting
 `roles.editor: "external"` in config.json makes the TUI's own `/roles edit`
 use the SAME `$EDITOR` flow instead of opening the form.
 

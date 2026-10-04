@@ -1145,6 +1145,17 @@ class Session:
         # carries no request_id to key on either -- see resolve_plan).
         self._plan_waiters: dict = {}
         self._pending_plan_id: Optional[str] = None
+        # Halo 2.0.2 round D (brief item 2, "approval gates"): a request_
+        # id-keyed dict + threading.Event, same shape as `_permission_
+        # waiters`/`_question_waiters` (several may be pending at once --
+        # an org with `max_concurrent` > 1 can gate more than one position
+        # in parallel, unlike plan mode's own single-flight assumption).
+        # `agent/subagent.py`'s `_build_child_session` shares this SAME
+        # dict onto every descendant, exactly like those two already are,
+        # so a deeply-nested org position's own gate reaches the TOP
+        # session's `resolve_approval` (the UI's `Controller.answer_
+        # approval`) with no extra plumbing.
+        self._approval_waiters: dict = {}
 
         self.log = session_log or SessionLog(cwd)
         # H9 whole-tree review finding 21: this session's own tool-results
@@ -4717,6 +4728,23 @@ class Session:
         slot["event"].set()
         return True
 
+    def resolve_approval(self, request_id: str, decision) -> bool:
+        """Halo 2.0.2 round D (brief item 2): called from the UI THREAD
+        (`Controller.answer_approval`, DIRECTLY -- same reasoning as
+        `resolve_permission`/`resolve_question`/`resolve_plan`: the
+        worker is parked in `agent/subagent.py`'s `_ask_approval_live`,
+        not polling `commands`) to answer a pending approval-gate card.
+        `decision` is `{"action": "accept"|"edit"|"stop", "instruction":
+        str|None}` (`ApprovalCard`'s own shape). Returns False when
+        nothing is waiting for `request_id` (already answered, or the
+        run was interrupted first)."""
+        slot = self._approval_waiters.get(request_id)
+        if slot is None:
+            return False
+        slot["decision"] = decision
+        slot["event"].set()
+        return True
+
     def resolve_plan(self, decision) -> bool:
         """Called from the UI THREAD (`Controller.answer_plan`, DIRECTLY --
         never through the command queue, same reasoning as
@@ -5909,3 +5937,9 @@ class Session:
                 # calls resolve_plan() directly (this branch is unreachable
                 # while that wait is in flight).
                 self.resolve_plan(data)
+            elif kind == "approval_reply":
+                # Halo 2.0.2 round D (brief item 2): safety net only, same
+                # shape as "permission_reply"/"question_reply" above --
+                # Controller.answer_approval normally calls resolve_
+                # approval() directly.
+                self.resolve_approval(data.get("id"), data.get("decision"))

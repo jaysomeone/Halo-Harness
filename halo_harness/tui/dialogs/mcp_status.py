@@ -48,6 +48,44 @@ _STATE_GLYPH = {
 _LEGEND = ("r reconnect  R all  a approve  l login  L log  e edit  "
            "i install  d disable  t test  Esc close")
 
+# Halo 2.0.2 round D leftover 1: `e`'s external-editor launch used to pass
+# vim's own `+<line>` argument to EVERY `$EDITOR`, unconditionally -- fine
+# for vim/nvim/nano/emacs (which all accept it), but `code`/`subl` don't
+# understand `+42` at all and would just try to open a file literally
+# named that. Keyed off the editor's own basename (extension stripped, so
+# `code.cmd`/`vim.exe` on Windows match too) -- any editor not in this
+# table opens the file plain, with no line argument at all, rather than
+# guessing wrong.
+_LINE_ARG_STYLE = {
+    "vim": "plus", "vi": "plus", "nvim": "plus", "nano": "plus", "emacs": "plus",
+    "code": "goto", "code-insiders": "goto", "codium": "goto",
+    "subl": "colon", "sublime_text": "colon",
+}
+
+
+def _editor_command(editor: str, path, line: int) -> str:
+    """The shell command STRING to launch `editor` at `line` in `path`
+    (`shell=True`, matching this dialog's own pre-existing launch
+    convention) -- pure, no I/O, so it's directly unit-testable with no
+    subprocess/Textual involved. `editor` may carry its own flags
+    (`"code --wait"`); only the first whitespace-separated token picks
+    the line-argument style, and the whole string is kept as the command
+    prefix. An editor not in `_LINE_ARG_STYLE` opens the file plain, with
+    no line argument at all, rather than guessing a syntax that might not
+    apply."""
+    import re
+    import shlex
+    first_token = (shlex.split(editor) or [editor])[0]
+    prog = re.sub(r"\.(exe|cmd|bat)$", "", os.path.basename(first_token).lower())
+    style = _LINE_ARG_STYLE.get(prog)
+    if style == "plus":
+        return f'{editor} +{line} "{path}"'
+    if style == "goto":
+        return f'{editor} --goto "{path}:{line}"'
+    if style == "colon":
+        return f'{editor} "{path}:{line}"'
+    return f'{editor} "{path}"'
+
 
 def _row(entry: dict) -> str:
     from halo_harness.mcp_cli import fix_line_for, format_mcp_list_line
@@ -393,7 +431,7 @@ class McpStatus(ModalScreen):
         try:
             import subprocess as sp
             with app.suspend():
-                sp.run(f'{editor} +{line} "{path}"', shell=True)
+                sp.run(_editor_command(editor, path, line), shell=True)
         finally:
             if callable(leave):
                 leave()

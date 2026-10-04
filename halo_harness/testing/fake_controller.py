@@ -86,6 +86,9 @@ class FakeController:
         self.still_ask_request_ids: set = set()
         self.question_replies: list = []
         self.plan_replies: list = []
+        # Halo 2.0.2 round D (brief item 2): test-fixture mirror of
+        # `Controller.answer_approval`.
+        self.approval_replies: list = []
         self.added_rules: list = []
         self.slash_calls: list = []
         self.reconnects = 0
@@ -169,6 +172,15 @@ class FakeController:
         # no existing test touches this (plan mode/`plan_review` didn't
         # exist before U2's PlanCard).
         self.plan_replies.append({"approved": approved, "feedback": feedback, "mode_after": mode_after})
+
+    def answer_approval(self, request_id: str, decision) -> bool:
+        # additive, matches halo_harness.controller.Controller.answer_
+        # approval (Halo 2.0.2 round D, brief item 2) -- returns True
+        # (unlike answer_question's bare None above) so dispatch.py's own
+        # "not ok -> notify" branch never fires for this fake's own
+        # always-successful answer.
+        self.approval_replies.append((request_id, decision))
+        return True
 
     def run_slash(self, name: str, args: str = "") -> str:
         self.slash_calls.append((name, args))

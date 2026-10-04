@@ -1,5 +1,6 @@
-"""halo_harness.roles_cli -- Halo 2.0.2 (W7 round 1, brief A.5): `halo
-roles template list|save|load|new|edit|show` over `~/.halo/roles/
+"""halo_harness.roles_cli -- Halo 2.0.2 (W7 round 1, brief A.5), extended
+round D (brief item 3): `halo roles template
+list|save|load|new|edit|show|export|import` over `~/.halo/roles/
 <name>.json` templates (`halo_harness.roles`'s own CRUD functions do the
 actual file work; this module is just argparse + formatting, same split as
 `bg_cli.py`/`mcp_cli.py`).
@@ -91,6 +92,69 @@ def _cmd_load(rest: list) -> int:
     return 0
 
 
+def _cmd_export(rest: list) -> int:
+    """Halo 2.0.2 round D (brief item 3): `halo roles template export
+    <name> [file]` -- plain JSON (`roles.load_role_template`'s own
+    validated shape), to `file` when given, else stdout."""
+    from halo_harness.roles import load_role_template
+    parser = argparse.ArgumentParser(prog="halo roles template export", add_help=True)
+    parser.add_argument("name")
+    parser.add_argument("file", nargs="?", default=None, help="write here instead of stdout")
+    args = parser.parse_args(rest)
+    template = load_role_template(args.name)
+    if template is None:
+        print(f"halo roles template export: no such template {args.name!r} (or it failed validation)",
+              file=sys.stderr)
+        return 1
+    text = json.dumps(template, indent=2, sort_keys=True) + "\n"
+    if args.file:
+        from pathlib import Path
+        try:
+            Path(args.file).write_text(text, encoding="utf-8")
+        except OSError as e:
+            print(f"halo roles template export: could not write {args.file}: {e}", file=sys.stderr)
+            return 1
+        print(f"halo roles template export: wrote {args.name!r} to {args.file}.", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _cmd_import(rest: list) -> int:
+    """Halo 2.0.2 round D (brief item 3): `halo roles template import
+    <file>` -- plain JSON, validated the same way any other template
+    write is (`roles.save_role_template` -> `validate_role_template`),
+    with every problem listed, not just the first. Falls back to the
+    file's own basename when the JSON has no usable "name" field."""
+    from pathlib import Path
+    from halo_harness.roles import save_role_template
+    parser = argparse.ArgumentParser(prog="halo roles template import", add_help=True)
+    parser.add_argument("file")
+    args = parser.parse_args(rest)
+    path = Path(args.file)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"halo roles template import: could not read {args.file}: {e}", file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        print(f"halo roles template import: {args.file} is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        name = path.stem
+    ok, problems = save_role_template(name, data)
+    if not ok:
+        print(f"halo roles template import: {args.file} is not a valid role template:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+    print(f"Imported role template {name!r} from {args.file}.")
+    return 0
+
+
 def _run_editor(editor: str, path, *, label: str) -> int:
     """2.0.2 review finding 36: same fix as `org_cli.py`'s own `_run_
     editor` (not shared across the two CLI modules -- small and
@@ -144,6 +208,7 @@ def _cmd_edit(rest: list) -> int:
 _TEMPLATE_SUBCOMMANDS = {
     "list": _cmd_list, "show": _cmd_show, "save": _cmd_save,
     "new": _cmd_new, "load": _cmd_load, "edit": _cmd_edit,
+    "export": _cmd_export, "import": _cmd_import,
 }
 
 
@@ -168,15 +233,15 @@ def _cmd_table() -> int:
 
 
 def cmd_roles(argv: list) -> int:
-    """`halo roles template <list|show|save|new|load|edit> [name] [...]`
-    -- the only subcommand GROUP under `halo roles` today (bare `/roles`
-    and `/role` live in the TUI/print-mode slash-command path instead,
-    `commands/builtins.py`)."""
+    """`halo roles template <list|show|save|new|load|edit|export|import>
+    [name] [...]` -- the only subcommand GROUP under `halo roles` today
+    (bare `/roles` and `/role` live in the TUI/print-mode slash-command
+    path instead, `commands/builtins.py`)."""
     if not argv:
         return _cmd_table()
     if argv[0] in ("-h", "--help"):
         print("usage: halo roles                      show the configured role table", file=sys.stderr)
-        print("       halo roles template list|show <name>|save <name>|new <name>|load <name>|edit <name>",
+        print("       halo roles template list|show <name>|save <name>|new <name>|load <name>|edit <name>|export <name> [file]|import <file>",
               file=sys.stderr)
         return 0
     if argv[0] != "template":
@@ -184,7 +249,7 @@ def cmd_roles(argv: list) -> int:
         return 2
     rest = argv[1:]
     if not rest:
-        print("usage: halo roles template list|show <name>|save <name>|new <name>|load <name>|edit <name>",
+        print("usage: halo roles template list|show <name>|save <name>|new <name>|load <name>|edit <name>|export <name> [file]|import <file>",
               file=sys.stderr)
         return 2
     sub, sub_rest = rest[0], rest[1:]

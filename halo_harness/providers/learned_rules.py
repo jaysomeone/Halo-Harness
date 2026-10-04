@@ -117,6 +117,43 @@ def learned_tools_rejected(state_dir, provider: str, model: str) -> bool:
     return True
 
 
+def forget_tools_rejected(state_dir, endpoint: str) -> bool:
+    """Halo 2.0.2 round D leftover 2: `halo mcp learned --forget <endpoint>`
+    -- clears a learned `tools_rejected` rule (and its TTL timestamp)
+    before `TOOLS_REJECTED_TTL_S` would otherwise expire it naturally.
+    `endpoint` is the exact `"<provider>:<model>"` key this file already
+    uses (see `_key`) -- the same string `halo mcp learned` (no
+    `--forget`) prints for each row. Leaves any OTHER learned field for
+    that same endpoint (e.g. `reasoning_effort_with_tools`) untouched --
+    this forgets ONLY the tools-rejected rule, never the whole row.
+    Returns True when a rule actually existed and was cleared, False when
+    there was nothing to forget (unknown endpoint, or a row with no
+    `tools_rejected` flag set at all). Never raises -- a write failure
+    just means the row is still there to retry, same as every other
+    writer in this module."""
+    with _LOCK:
+        rules = load_learned_rules(state_dir)
+        row = rules.get(endpoint)
+        if not isinstance(row, dict) or not row.get("tools_rejected"):
+            return False
+        row = dict(row)
+        row.pop("tools_rejected", None)
+        row.pop("tools_rejected_at", None)
+        if row:
+            rules[endpoint] = row
+        else:
+            rules.pop(endpoint, None)
+        path = _path(state_dir)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_name(path.name + f".tmp{os.getpid()}")
+            tmp_path.write_text(json.dumps(rules, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp_path, path)
+        except OSError:
+            pass
+        return True
+
+
 def learn_tools_rejected(state_dir, provider: str, model: str) -> None:
     """Idempotent-ish, best-effort: always refreshes `tools_rejected_at`
     (unlike `_learn`'s own skip-if-unchanged shortcut, which would leave

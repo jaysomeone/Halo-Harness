@@ -4,6 +4,7 @@ and is covered live per the brief's own verification section, not here.)
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -89,6 +90,66 @@ def test_roles_template_load_applies_to_config_json(ctx: Ctx):
         ctx.check(f"load succeeds, got {out!r}", rc == 0)
         ctx.check(f"config.json now has it, got {configured_role_table()}",
                   configured_role_table().get("coder") == "or:vendor/loaded")
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_roles_template_export_to_file_then_import_round_trip(ctx: Ctx):
+    """Halo 2.0.2 round D (brief item 3): `halo roles template export
+    <name> [file]` / `import <file>` -- plain JSON, round trips."""
+    from halo_harness.roles import load_role_template, save_role_template
+    _fresh_state_dir("roles-cli-export-import-")
+    try:
+        save_role_template("source", {"description": "exportable", "roles": {"coder": "or:vendor/x"}})
+        out_path = Path(tempfile.mkdtemp(prefix="roles-cli-export-out-")) / "source.json"
+        rc, _out, err = _run(["template", "export", "source", str(out_path)])
+        ctx.check(f"export to file succeeds, got rc={rc} err={err!r}", rc == 0 and out_path.is_file())
+        exported = json.loads(out_path.read_text(encoding="utf-8"))
+        ctx.check(f"exported JSON has the role table, got {exported}", exported.get("roles", {}).get("coder"))
+
+        rc2, out2, _err2 = _run(["template", "export", "source"])
+        ctx.check(f"with no file, prints the JSON to stdout, got rc={rc2}",
+                  rc2 == 0 and json.loads(out2).get("name") == "source")
+
+        rc3, out3, _err3 = _run(["template", "import", str(out_path)])
+        ctx.check(f"import under a DIFFERENT name (the file's own content) succeeds, got {out3!r}", rc3 == 0)
+        reimported = load_role_template("source")
+        ctx.check("re-imported template matches the original", reimported["roles"] == {"coder": "or:vendor/x"})
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_roles_template_import_rejects_invalid_shape_with_every_problem(ctx: Ctx):
+    _fresh_state_dir("roles-cli-import-invalid-")
+    try:
+        bad_path = Path(tempfile.mkdtemp(prefix="roles-cli-import-bad-")) / "bad.json"
+        bad_path.write_text(json.dumps({"roles": {"coder": 123, "Bad Name": "or:x"}}), encoding="utf-8")
+        rc, _out, err = _run(["template", "import", str(bad_path)])
+        ctx.check(f"non-zero exit, got {rc}", rc != 0)
+        ctx.check(f"lists what is wrong, got {err!r}", "coder" in err and "Bad Name" in err)
+
+        missing_path = Path(tempfile.mkdtemp(prefix="roles-cli-import-missing-")) / "nope.json"
+        rc2, _out2, err2 = _run(["template", "import", str(missing_path)])
+        ctx.check(f"a missing file is a clean error, not a traceback, got rc={rc2} err={err2!r}",
+                  rc2 != 0 and "nope.json" in err2)
+    finally:
+        _clear_state_dir_env()
+
+
+@test
+def test_roles_template_import_falls_back_to_filename_when_name_missing(ctx: Ctx):
+    from halo_harness.roles import load_role_template
+    _fresh_state_dir("roles-cli-import-noname-")
+    try:
+        path = Path(tempfile.mkdtemp(prefix="roles-cli-import-noname-src-")) / "my-template.json"
+        path.write_text(json.dumps({"description": "no name field", "roles": {}}), encoding="utf-8")
+        rc, out, _err = _run(["template", "import", str(path)])
+        ctx.check(f"import succeeds using the filename, got rc={rc} out={out!r}",
+                  rc == 0 and "my-template" in out)
+        ctx.check("loadable under the filename-derived name",
+                  load_role_template("my-template") is not None)
     finally:
         _clear_state_dir_env()
 

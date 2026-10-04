@@ -145,7 +145,13 @@ setup screens.
    cleared it; this CLI path now does too). See the `/mcp` section and
    `halo mcp fix`/`test` in [docs/COMMANDS.md](docs/COMMANDS.md), and the
    "a server shows failed" walkthrough in
-   [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+   [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Two round D fixes
+   on the way out: `e`'s external-editor launch no longer passes vim's
+   own `+<line>` argument to every `$EDITOR` -- `code`/`subl` get their
+   own line syntax now (`--goto file:line`/`file:line`), anything else
+   opens the file plain; `halo mcp learned [--forget <endpoint>]` lists
+   (or clears, before its TTL) a learned per-endpoint provider rule
+   (`providers/learned_rules.py`, round 5's own "tools_rejected" cache).
 6. **Qwen tool calling at work**: the owner's work-VM "openjev qwen"
    report traced to `databricks-openjev-qwen35-4b`, Databricks' own
    decision-only "evaluates yes/no, choice, and scoring questions"
@@ -246,10 +252,36 @@ setup screens.
    task, `kind: "goal"`, on the shared board before the root position
    runs; every position is told to link its own tasks to it via
    `TaskCreate`'s new `parent`). `orgs.default` (`/org run`/`halo org
-   run` with no name) is new too. Left for a later round (Paperclip
-   ideas that didn't fit this one): `halo org install`/`/org install`
-   with a README per template, approval gates (`requires_approval`),
-   export/import, and `/org resume`.
+   run` with no name) is new too. The rest of brief 3b lands this round
+   too: `halo org install <name> [--force]`/`/org install` copies a
+   shipped built-in or a template saved under `~/.halo/org-templates/`
+   into `~/.halo/orgs/`, refusing to overwrite without `--force` -- each
+   shipped template's own `description` IS its one-line README, shown by
+   `/org list`/`halo org list` (which now prints it) and the wizard's
+   Organizations step (already did, via the tree preview). **Approval
+   gates**: a position with `requires_approval: true` holds its just-
+   finished result as a pending card in the SAME dock a permission/
+   question/plan-review ask already uses (accept, edit the instruction
+   and re-run -- recurses through the ordinary spawn path, capped at 5
+   revisions -- or stop); with no live dock reachable (`halo org run`/
+   `resume` from a plain terminal) it prints the result and waits on
+   stdin instead, the same one-line-read convention `halo init`'s own
+   non-interactive prompts use; `--yes` on `run`/`resume`, or the
+   session's own `dontAsk` permission mode, accepts every gate
+   automatically -- the OPPOSITE of `dontAsk`'s usual "ask converts to
+   deny" rule, since a gate is never a tool-permission ask.
+   **Export/import**: `halo org export <name> [file]` / `import <file>`
+   move an org as plain JSON (import validates role names, reports and
+   budgets, listing every problem); `halo roles template export|import`
+   is the same pair for role templates. **`/org resume`** (and `halo org
+   resume <session-id>`) continues an interrupted run from a session's
+   own saved run record (`<session_dir>/org-run.json`, written when the
+   run starts) and shared task board -- open and claimed tasks become
+   the new root position's own work list, done tasks are named and kept
+   (never redone); the resumed run's own `max_concurrent`/`budget_usd`
+   come from that saved record, not whatever the org definition
+   currently says, so an edit made after the original run started can
+   never change what the resumed run is bound by.
 9. **Release review, two fix rounds**: an Opus review of the whole
    `v2.0.1..` diff found 3 critical, 15 major and 21 minor defects, each
    with a check for whether it was actually confirmed by running or

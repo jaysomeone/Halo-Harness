@@ -270,12 +270,13 @@ def _open_roles_editor(app, name: str, template: dict, models: list) -> None:
 
 async def _handle_org(app, args: str) -> None:
     """Halo 2.0.2 round 2 (brief B) / round 3 (brief C): `/org edit <name>`
-    opens a real form (`tui/dialogs/org_editor.py`); `/org run` gets its
-    OWN live worker (round 3 -- see `_run_org_worker`'s own docstring for
-    why: the old headless-text fallback dumped a raw `<task_result>` XML
-    block into the transcript as a plain note, with no live progress and
-    no status-bar refresh); every other subcommand (`list`/`show`/`new`/
-    `load`, or the bare list) still goes through the SAME headless-text
+    opens a real form (`tui/dialogs/org_editor.py`); `/org run` and (round
+    D, brief item 4) `/org resume` each get their OWN live worker (round 3
+    -- see `_run_org_worker`'s own docstring for why: the old headless-text
+    fallback dumped a raw `<task_result>` XML block into the transcript as
+    a plain note, with no live progress and no status-bar refresh); every
+    other subcommand (`list`/`show`/`new`/`load`/`install`/`export`/
+    `import`, or the bare list) still goes through the SAME headless-text
     fallback every other command uses (`commands/builtins.py::_cmd_org`,
     off the UI thread)."""
     parts = (args or "").strip().split(None, 1)
@@ -296,6 +297,12 @@ async def _handle_org(app, args: str) -> None:
                     'or set a default in /setup orgs.', kind="command")
                 return
         app.run_worker(lambda: _run_org_worker(app, name, goal), thread=True, name="run-org", group="run-org")
+        return
+    if sub == "resume":
+        # Halo 2.0.2 round D (brief item 4): `/org resume` gets the SAME
+        # live-worker treatment `run` already does (real SubAgentCards,
+        # not a raw <task_result> dump) -- see `_run_org_resume_worker`.
+        app.run_worker(lambda: _run_org_resume_worker(app), thread=True, name="resume-org", group="resume-org")
         return
     if sub != "edit":
         app.run_worker(lambda: _run_slash_worker(app, "org", args), thread=True, name="run-slash", group="run-slash")
@@ -354,6 +361,39 @@ def _run_org_worker(app, name: str, goal: str) -> None:
         is_error = result.is_error
     except Exception as e:
         text = f"Organization {name!r} failed to run: {type(e).__name__}: {e}"
+        is_error = True
+    app.call_from_thread(_finish_org_run, app, name, text, is_error)
+
+
+def _run_org_resume_worker(app) -> None:
+    """Halo 2.0.2 round D (brief item 4): `/org resume`'s own live
+    worker, same shape as `_run_org_worker` just above (and the same
+    belt-and-suspenders `try/except` around `resume_org_run`'s own
+    "never raises" contract) -- resumes THIS session's own interrupted
+    run from its saved record + shared task board, instead of a NAMED
+    one."""
+    session = getattr(app.controller, "session", None)
+    if session is None or getattr(session, "agent_runtime", None) is None:
+        app.call_from_thread(app.transcript.add_note,
+                              "Organizations can only be resumed once a session is running.", kind="command")
+        return
+    from halo_harness.agent.subagent import _read_org_run_record, resume_org_run
+    session_dir = session.log.dir / session.log.session_id
+    # Cosmetic only (`_finish_org_run`'s own note reads "org {name!r}
+    # finished") -- the real org name, when a record exists at all, reads
+    # nicer than a bare placeholder; `resume_org_run` itself re-reads the
+    # SAME record and reports clearly if it's missing/invalid either way.
+    record = _read_org_run_record(session_dir)
+    name = (record or {}).get("org") or "(resumed)"
+    try:
+        _events, result = resume_org_run(
+            runtime=session.agent_runtime, tool_id="org-resume", tool_name="Agent", session_dir=session_dir,
+            on_event=app.controller.events.put,
+        )
+        text = _strip_task_result(result.content)
+        is_error = result.is_error
+    except Exception as e:
+        text = f"Could not resume: {type(e).__name__}: {e}"
         is_error = True
     app.call_from_thread(_finish_org_run, app, name, text, is_error)
 

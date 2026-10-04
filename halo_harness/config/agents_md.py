@@ -89,6 +89,15 @@ class AgentSpec:
     # this is purely a DISPLAY label; `name` itself stays the identity
     # every lookup/task-resume/hook payload keys on.
     dock_label: Optional[str] = None
+    # Halo 2.0.2 round D (brief item 2, "approval gates" -- the Paperclip
+    # idea docs/ORGS.md deferred): this position's just-finished result is
+    # held as a pending card (the dock, or -- with no live dock -- a
+    # stdin prompt) for a human to accept, edit the instruction and
+    # re-run, or stop, before the parent that delegated to it continues.
+    # `agent/subagent.py::_apply_approval_gate` reads this; `False` for
+    # every built-in and `.claude/agents/*.md` file (no such frontmatter
+    # key exists for those -- this is an org-position-only concept today).
+    requires_approval: bool = False
     initial_prompt: Optional[str] = None
     body: str = ""
     source: str = ""                      # "managed" | "cli-agents" | "project:<dir>" | "user" | "plugin:<name>" | "built-in"

@@ -105,7 +105,7 @@ AssistantText {
     margin-left: 2;
 }
 
-.permission-card, .question-card, .plan-card, .rewind-card {
+.permission-card, .question-card, .plan-card, .rewind-card, .approval-card {
     border: round $bridge-warning;
     background: $bridge-surface;
     padding: 1 2;

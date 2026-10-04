@@ -166,18 +166,30 @@ that resolves this role picks it up. `<name>` must already be a known role
 (a built-in, or a custom name a team.json/loaded template actually defined)
 -- an unknown name errors with the list of known ones. See `docs/ROLES.md`.
 
-### `/org [list|show <name>|new <name>|load <name>|edit <name>|run [<name>] "<goal>"]`
+### `/org [list|show <name>|new <name>|load <name>|install <name> [--force]|edit <name>|run [<name>] "<goal>"|export <name> [file]|import <file>|resume]`
 Halo 2.0.2 round 2: bare `/org` (and `/org list`) lists saved
-organizations (`~/.halo/orgs/<name>.json`); `show` prints the text tree;
-`new` creates a one-position "Orchestrator" starter; `load` re-installs a
-built-in's shipped definition over a local copy; `edit` opens a form in
-the TUI only (print mode names that instead, like `/roles edit`); `run`
-executes the org's root position on `"<goal>"` against the LIVE session,
-through the exact same machinery an `Agent(org=...)` tool call uses --
-the result flows back like any other sub-agent's. Round 7: `<name>` is
-optional on `run` -- `/org run "<goal>"` (just the goal, quoted) uses
-`orgs.default` (set via `/setup orgs`); with none set, it names the fix
-instead of guessing. See `docs/ORGS.md`.
+organizations (`~/.halo/orgs/<name>.json`), each with its own one-line
+README (its `description`); `show` prints the text tree; `new` creates a
+one-position "Orchestrator" starter; `load` re-installs a built-in's
+shipped definition over a local copy; `edit` opens a form in the TUI only
+(print mode names that instead, like `/roles edit`); `run` executes the
+org's root position on `"<goal>"` against the LIVE session, through the
+exact same machinery an `Agent(org=...)` tool call uses -- the result
+flows back like any other sub-agent's. Round 7: `<name>` is optional on
+`run` -- `/org run "<goal>"` (just the goal, quoted) uses `orgs.default`
+(set via `/setup orgs`); with none set, it names the fix instead of
+guessing. Round D: `install <name> [--force]` copies a shipped or saved
+template into `~/.halo/orgs/`, refusing to overwrite without `--force`;
+`export <name> [file]`/`import <file>` move an org as plain JSON (import
+validates role names, reports and budgets, listing every problem);
+`resume` continues THIS session's own interrupted org run from its saved
+run record and shared task board (open/claimed tasks become the work
+list, done tasks are kept) -- `halo org resume <session-id>` is the CLI
+form, for a past session with no "current" one to resume. A position with
+`requires_approval: true` holds its result as a pending card in the dock
+(accept, edit the instruction and re-run, or stop) before its own parent
+continues; `dontAsk` mode (and `halo org run/resume --yes`) accepts every
+gate automatically instead. See `docs/ORGS.md`.
 
 ### `/setup [roles|orgs]`
 Halo 2.0.2 round 7: opens the init wizard's own Roles/Organizations setup
