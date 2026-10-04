@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~19:50)
+# Status board (updated 2026-10-03 ~20:50)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -39,8 +39,8 @@ is verified on Windows and the Kali VM and pushed as it lands.
 - [x] D (c93480d, round 4): `/mcp` keys r/R/a/l/L/e/i/d/t with legend, reasons and fix lines, per-server logs, reconnect backoff ladder, `halo mcp fix|test`, inline entry form; three platforms green (2744 tests; install-hint path split fixed for Linux), live Kali dialog + CLI on a scratch home with failing servers
 - [x] E (8c5b306, round 5): decision-only endpoints (table patterns openjev/jev-judge) routed to roles.judge, never the session model; learned tools-rejected rule per endpoint; python_repr_args + missing_tool_call_opener repair patterns real, bare </think> stripped; prefixItems rewrite; docs/MODELS.md Qwen at work + FAMILY-BASELINE-qwen.md; three platforms green (2768/0); six shapes unconfirmed until the owner's work-VM bugreport
 - [x] Round 6 (4207480): `halo update --check|apply|--to|--channel` with install-kind detection (PEP 610 + uv receipt + pipx) and the other-session guard, `/update` dialog with update-and-restart (`--continue`), `halo --version` shows the commit, doctor install line, daily startup note, scripts/install-halo.ps1, README + docs/INSTALL.md install and update steps; three platforms green (2808/0), live Kali: guard + dialog + check
-- [~] Round 7 (RUNNING; rolo 2026-10-03, `2.0.2-round7-init-wizard-brief.md`): one init wizard with Back/Skip/Next/Finish buttons (no exit between sections), a Theme step, roles and orgs mode switches (`roles.enabled`, `orgs.enabled`), roles step with template presets and the editor, organizations step with default org and the editor, Paperclip-inspired org features (templates install, budgets, goals on the board, approval gates, export/import, `/org resume`), `halo setup roles|orgs` and `/setup` reopening the same screens inside halo, template pickers in both editors
-- [ ] Release 2.0.2
+- [x] Round 7 (2310d08): one init wizard (Back/Skip/Next/Finish, 8 steps incl. Theme, Roles, Organizations), roles/orgs mode switches, presets balanced/quality/local-first, `halo setup` + `/setup`, template pickers in both editors, org budgets + goals on the task board; three platforms green (2829/0), live Kali wizard walk + /setup; left for the fix pass: org template install, approval gates, export/import, /org resume
+- [~] Release 2.0.2: Opus review of v2.0.1..HEAD RUNNING -> fix pass (`2.0.2-release-fixpass-brief.md`) -> three platforms + Kali live -> tag v2.0.2 -> installs
 
 ## 2.0.3 = local and cloud models: Ollama + Hugging Face (brief file `2.0.5-ollama-brief.md` written under its old number, plus `2.0.3-ollama-round1-research-brief.md`; moved ahead by rolo 2026-10-03; HF + cloud added by rolo 2026-10-03)
 
