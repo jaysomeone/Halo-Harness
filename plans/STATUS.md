@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-03 ~19:15)
+# Status board (updated 2026-10-03 ~19:50)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round
@@ -48,7 +48,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.4 = old 2.0.3 (`2.0.3-brief.md`, `2.0.3-jev.md`, `2.0.3-research.md`) + the legacy env-file drop
 
-- [ ] FIRST ROUND of 2.0.4 (moved out of 2.0.2 by rolo 2026-10-03: wait until after 2.0.3 for the files to sync): the Governor (`2.0.2-round8-governor-brief.md`, report in `governor-import/README.md`; look for governor.py / routing.py / test_governor.py in the vault folder `appDev/governor-rate-limiter/` once they have synced, then review, improve and port; failover to local Ollama needs 2.0.3's `ol:` route)
+- [ ] LAST ROUND of 2.0.4 (rolo 2026-10-03: 'at the tail end of the openAI update version'; kit vendored + reviewed in `governor-import/`): the Governor (`2.0.2-round8-governor-brief.md` + `governor-import/REVIEW.md` with 15 porting changes; sources in `governor-import/governor-kit/`; failover to local Ollama uses 2.0.3's `ol:` route)
 
 - [ ] three picker columns, [ ] balances for every provider, [ ] `cc:`/`ant:` enumeration, [ ] Codex + OpenAI + Responses dialect, [ ] jev, [ ] learned gateway rules, [ ] error translation, [ ] catalog auto-refresh, [ ] command consolidation and group labels, [ ] `cc:` route v2 (control-channel steer, set_model/set_permission_mode, /compact passthrough, native history research, context duplication audit, conformance test), [ ] legacy env file no longer read (announced for 2.0.4 in the 2.0.1 CHANGELOG), [ ] release
 
