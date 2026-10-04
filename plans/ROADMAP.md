@@ -299,3 +299,12 @@ Placement:
   the 2.0.4 `xp:` route needs its own provider profile (no OpenRouter-only
   fields: `usage.include`, `provider` preferences, `transforms`), reading
   cost from `usage.cost`, and the slug grammar accepts ids without a slash.
+- Correction the same afternoon (rolo: "make sure to fully implement
+  experiential labs completely, I just see do research. Add it fully to
+  halo at some point of 2.0.3"): the `xp:` route and everything listed
+  above for 2.0.4 round 1 move INTO 2.0.3 as Round 5h, right after the 5g
+  research (brief `2.0.3-ollama-round2-brief.md`, "Round 5h"). 2.0.4 keeps
+  only the generic picker columns, balances and Codex work, which 5h's
+  catalog columns, credits chip and `/v1/responses` dialect now seed.
+  2.0.3 round order: 5b part 2 (running) -> 5c -> 5d -> 5e -> 5f -> 5g ->
+  5h -> 6 -> Opus review -> fix pass -> tag v2.0.3.
