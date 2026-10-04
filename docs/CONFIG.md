@@ -158,6 +158,7 @@ the files above.
 | `~/.halo/sessions/<project-slug>/<id>.jsonl` | one append-only session log per session (see `docs/ARCHITECTURE.md`) |
 | `~/.halo/sessions/<project-slug>/index.json` | per-session title/first-prompt/turns/cost, for `/resume`'s picker and `-r <text>` |
 | `~/.halo/models.json`, `dbx-endpoints.json`, `models-dev.json`, `cc-models.json` | cached model catalogs (`docs/MODELS.md`) |
+| `~/.halo/ollama-capabilities.json` | the `ol:` capability probe's durable cache, keyed by model digest (`docs/MODELS.md`'s "Ollama" section) -- the `/api/tags`+`/api/show` catalog itself is cached in memory only, short TTL, never written to disk |
 | `~/.halo/stats-cache.json` | telemetry aggregation cache, keyed by (path, size, mtime) |
 | `~/.halo/mcp/tools-cache/<server>.json`, `~/.halo/mcp/<server>.log` | a lazy MCP server's cached tool list, and its stderr |
 | `~/.halo/mcp-approvals.json` | remembered `.mcp.json` server approvals |
@@ -204,6 +205,7 @@ directly by the features that own them:
 | `update.check` | `true` | `halo config set update.check false` turns off `halo update`/`/update`'s own check entirely (never shells out, never touches the network) |
 | `update.notify` | `true` | `halo config set update.notify false` turns off just the once-a-day "update available" startup note (the check itself, and `/update`'s own dialog, still work) |
 | `update.channel` | unset (derived from the install: `stable` when pinned to a `v*` tag, else `main`) | `halo update --channel stable\|main` |
+| `ollama.hosts` | unset (synthesizes one default host from `OLLAMA_HOST`/`127.0.0.1:11434`) | hand-edited; a list of `{name, url, default, keep_alive, max_ctx, num_parallel_hint, api_key}` -- `ol:<model>@<hostname>` selects an entry by `name`; see `docs/MODELS.md`'s "Ollama" section |
 
 ## Every environment variable
 
@@ -250,6 +252,8 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` | consecutive `Stop`-hook-block cap before the turn is force-ended (default 8) |
 | `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | override the `SessionEnd` hook time budget outright |
 | `TMUX` | presence gates `doctor`'s tmux-mouse-mode check |
+| `OLLAMA_HOST` | seeds the `ol:` default host's URL when `ollama.hosts` has no entries configured yet (Ollama's own documented var; a bare `host:port` is normalized to a full URL) |
+| `OLLAMA_API_KEY` | seeds that SAME synthesized default host's `api_key` (Ollama Cloud, `Authorization: Bearer`) -- a configured `ollama.hosts` entry's own `api_key` always wins once one exists |
 
 ## Providers (`halo init --provider ...`)
 

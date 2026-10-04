@@ -19,6 +19,8 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | `cc:<name>` | `cc:opus`, `cc:sonnet` | your Claude subscription, via the installed `claude` binary |
 | `ant:<name>` | `ant:opus`, `ant:claude-3-5-haiku` | `api.anthropic.com` pay-as-you-go (`ANTHROPIC_API_KEY`) |
 | a bare subscription alias, no prefix | `opus`, `sonnet`, `fable`, `haiku` | at a Databricks work box: `dbx:<ANTHROPIC_DEFAULT_*_MODEL>`; else `cc:` if logged in and no key is set; else `ant:` if a key is set; else an error naming both |
+| `ol:<model>` | `ol:qwen3:30b` | Ollama, the default host (see "Ollama" below) |
+| `ol:<model>@<hostname>` | `ol:qwen3:30b@lan`, `ol:gpt-oss:20b@cloud` | Ollama, a named entry in `ollama.hosts` -- local, LAN, or Ollama Cloud |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
 
 Parsing order (`model.py::parse_model_ref`): an exact match in
@@ -100,6 +102,94 @@ credentials/login) but explicitly disabled shows one dim hint line in
 shows each provider's status as one of `auto (detected from <source>)`,
 `disabled by you`, `enabled by you`, or `not set up`, plus reachable/cached
 model count.
+
+## Ollama
+
+Halo 2.0.3 round 2 (`plans/2.0.3-ollama-round2-brief.md`, design doc
+`docs/harness/LOCAL-MODELS-RESEARCH.md`). `ol:<model>` (the default host)
+or `ol:<model>@<hostname>` (a named entry in `~/.halo/config.json`'s
+`ollama.hosts`) -- local, LAN, or Ollama Cloud, all through the SAME
+request shape. An Ollama model tag may itself contain a `:` (`qwen3:30b`);
+the `@<hostname>` split is always on the first (and only) `@`, never on a
+colon. Not yet covered by the fixed provider-enablement table above (that
+table assumes one on/off flag per provider; Ollama is multi-host
+reachability instead) -- an explicit `providers.ollama.enabled: false`
+override still refuses an `ol:` ref the same way it would for any other
+provider name, but nothing auto-detects "enabled" the way a single API key
+would.
+
+**Why the native API, never the OpenAI-compatible shim**: Ollama's
+`/v1/chat/completions` endpoint has no equivalent of `options.num_ctx` --
+its own docs state plainly that context size requires a custom model via
+`Modelfile`, not per-request configuration. `ol:` always uses `/api/chat`
+instead, so Halo can size the context window itself, every request,
+without the user ever having to find a server knob.
+
+**Host config** (`ollama.hosts`, `halo config set ollama.hosts '[...]'`,
+or hand-edited): a list of `{name, url, default, keep_alive, max_ctx,
+num_parallel_hint, api_key}`. With no entries configured at all, Halo
+synthesizes exactly one default host from `OLLAMA_HOST` (Ollama's own env
+var; a bare `host:port` is normalized to a full URL) falling back to
+`127.0.0.1:11434`, picking up an ambient `OLLAMA_API_KEY` for that one
+host's `api_key` too (Ollama Cloud). Every non-loopback host is treated as
+unauthenticated by definition unless its own `api_key` is set -- Ollama
+itself has no auth mechanism at all; a reverse-proxy/bearer setup on a LAN
+host is the user's own responsibility, never assumed.
+
+**Request shape**: `options.num_ctx` on every request (never a Modelfile
+default -- see above), `keep_alive` only when the host entry configures
+one (a request-level `keep_alive` overrides the server's own
+`OLLAMA_KEEP_ALIVE`, so an unconfigured host leaves the field out and the
+server's setting stands), `think` mapped from the session's
+effort level (off for `low` on a bool-only thinking model, graded
+low/medium/high for the gpt-oss family specifically, on for medium and
+above everywhere else; omitted entirely when no effort is configured,
+letting the model's own default apply), and tools in the same OpenAI
+function shape (`{"type": "function", "function": {name, description,
+parameters}}`) the native API already expects -- no second tool-shape
+conversion needed. No `tool_choice` field exists on this dialect.
+
+**Context ownership**: `num_ctx = min(trained context from
+model_info["<family>.context_length"], host.max_ctx override, 131072)`,
+falling back to a conservative 8192 when the trained context isn't known
+yet (before the catalog has loaded for that model once). Compaction
+triggers at 75% of whatever `num_ctx` that request actually sent.
+
+**Streaming and tool-call ids**: the response is NDJSON (one complete
+JSON object per line, never SSE) -- `message.content`/`message.thinking`/
+`message.tool_calls` accumulate per line; `message.thinking` is captured
+for display only and never replayed on a later request (undocumented
+whether Ollama expects it back at all). Ollama sends no id for a tool
+call, only a 0-based `index` -- Halo synthesizes its own stable `toolu_`
+id the moment an index is first seen, so the rest of the tool-result/
+replay machinery never needs a second code path for this provider; a
+tool-result message replays as `{"role": "tool", "tool_name": "<name>",
+"content": "<result>"}` (no id at all, keyed by name). `done_reason:
+"length"` maps onto the ordinary `max_tokens` stop reason; `done_reason:
+"load"` (semantics UNCONFIRMED against a live server) retries the turn
+ONCE, silently, but only while nothing has been shown to the user yet for
+that turn -- real output alongside a "load" reason is never discarded.
+
+**Catalog and capability probe**: `/api/tags` + `/api/show` per model are
+merged into one per-host catalog, cached in memory with a short TTL (never
+written to disk) -- `details.quantization_level`/`family` and
+`model_info`'s trained context come from here. Separately, a background
+`/api/version` probe (honouring the same `BRIDGE_TEST_NO_BACKGROUND_NET`
+test seam every other background probe does) reports whether a host is
+reachable at all. What `/api/show`'s `capabilities` list CLAIMS and what a
+model actually DOES when asked are kept deliberately separate: the first
+time Halo sees a given model digest, it sends one cheap, real tool-call
+turn and records whether `tool_calls` actually came back non-empty --
+cached durably per digest (`~/.halo/ollama-capabilities.json`), so the
+cost (one real inference call) is paid at most once per distinct model
+digest, never once per catalog read. A model re-pulled under the same
+name/tag with different weights (a new digest) is probed again exactly
+once. This is surfaced later as a measured badge, never a vendor claim.
+
+**Not yet in this round**: images (`images`, a user message's base64
+array), `format` (structured output), roles/picker/hardware-panel
+integration, and Hugging Face's own `hf:` route -- see
+`plans/2.0.3-ollama-round2-brief.md` and the rounds after it.
 
 ## Families and their rules
 

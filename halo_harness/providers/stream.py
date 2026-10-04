@@ -51,9 +51,11 @@ from halo_harness.providers.errors import (
     parse_databricks_rate_limit, upstream_error_text,
 )
 from halo_harness.providers.http import (
-    UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat, is_connect_failure_message,
+    UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_ollama_chat, call_openai_chat,
+    is_connect_failure_message,
 )
 from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
+from halo_harness.providers.ollama_stream import OllamaStreamToAnthropic
 from halo_harness.providers.routing import Route
 from halo_harness.providers.translate import anthropic_to_openai
 from halo_harness.providers.anthropic_sse import AnthropicSSEDecoder
@@ -127,6 +129,13 @@ class CompletionRequest:
     # same "prebuilt body, caller already did the profile-driven building"
     # pattern as `prebuilt_oai_body` above.
     prebuilt_anthropic_body: Optional[dict] = None
+    # Halo 2.0.3 round 2: `stream_ollama_completion`'s own sibling field --
+    # the caller always builds this via `providers.ollama_request.
+    # build_ollama_request_body` first (same "prebuilt body" pattern as
+    # `prebuilt_anthropic_body` just above; Ollama's native wire shape is
+    # neither openai-chat nor Anthropic-passthrough, so it gets its own
+    # field rather than overloading either existing one).
+    prebuilt_ollama_body: Optional[dict] = None
 
 
 class ContextOverflow(Exception):
@@ -751,3 +760,206 @@ def stream_anthropic_completion(req: CompletionRequest, abort: "threading.Event 
                 pass
         dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
         dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 2: the `ol:` (Ollama native API) sibling of
+# stream_completion/stream_anthropic_completion. Ollama's NDJSON stream is
+# neither SSE (stream_completion's own dialect) nor Anthropic-native SSE
+# (stream_anthropic_completion's) -- one complete JSON object per line,
+# over a plain chunked HTTP body -- so it gets its own reader thread
+# (_ndjson_reader_thread) instead of reusing sse_reader_thread, which
+# assumes either real SSE framing or a single whole-body JSON fallback.
+# ---------------------------------------------------------------------------
+
+def _ndjson_reader_thread(resp, q: "queue.Queue") -> None:
+    """Background thread reading Ollama's native `/api/chat` NDJSON
+    response (one complete JSON object per line, chunked transfer -- never
+    SSE framing) and posting items to `q`, the SAME `(kind, value)`
+    protocol `sse_reader_thread` uses (`"line"`/`"eof"`/`"exc"`) so
+    `stream_ollama_completion`'s drain loop below can share its shape."""
+    try:
+        while True:
+            line = resp.readline()
+            if not line:
+                if getattr(resp, "chunk_left", None) is None:
+                    q.put(("eof", None))
+                else:
+                    q.put(("exc", ConnectionError("upstream connection closed mid-stream")))
+                break
+            q.put(("line", line))
+    except Exception as e:
+        q.put(("exc", e))
+    finally:
+        resp.close()
+
+
+def _run_phase1_ollama(req: CompletionRequest, abort: "threading.Event | None" = None):
+    """Connect + POST `req.prebuilt_ollama_body` to Ollama's native
+    `/api/chat`. Ollama has no context-overflow 400 to clamp-retry against
+    (a too-long prompt truncates silently server-side, research doc
+    section 2/Q2 -- there is nothing for Halo to detect or retry on a 200),
+    so this is simpler than `_run_phase1_attempts`: connect, POST, and map
+    any non-2xx straight to an UpstreamError. Same one-immediate-redial
+    rule as every other phase1 for a POST-CONNECT failure (never for a
+    genuine connect-phase failure, 2.0.1 finding 18)."""
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    body = req.prebuilt_ollama_body
+    if req.creds is None:
+        raise ProviderNotConfigured("Ollama host not configured")
+
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
+    def _call_upstream():
+        return call_ollama_chat(
+            base_url=req.creds.base_url, api_key=(req.creds.api_key or None), body=body,
+            extra_headers=req.extra_headers, state_dir=req.state_dir, on_connect=_register_sock,
+        )
+
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        for attempt in range(2):
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            try:
+                result = _call_upstream()
+            except UpstreamConnectError as e:
+                if abort is not None and abort.is_set():
+                    raise _Aborted() from e
+                if attempt == 0 and not is_connect_failure_message(str(e)):
+                    continue
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+                raise _upstream_error_from_mapping(status, jbody, hdrs) from e
+            if 200 <= result.status < 300:
+                return body, result
+            raw = result.resp.read() if result.resp else b""
+            try:
+                err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            raise _upstream_error_from_mapping(status, jbody, hdrs)
+        raise UpstreamError(502, "api_error", "upstream failure after retries", True)
+    finally:
+        watcher_done.set()
+
+
+def stream_ollama_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
+    """Drive one `ol:` completion end to end (native `/api/chat`, NDJSON).
+    Same two-phase contract as `stream_completion`/`stream_anthropic_
+    completion`: raises before the first yield on a phase-1 failure;
+    `req.prebuilt_ollama_body` MUST be set (the caller builds it via
+    `providers.ollama_request.build_ollama_request_body` first).
+
+    Round 2 brief: `done_reason: "load"` is treated as "retry once" (the
+    2.0.5 brief's own assumption; UNCONFIRMED against a live server --
+    research doc Q1, round 6's own live-check). The retry is silent only
+    while NOTHING has been shown to the caller yet for this turn (checked
+    via `OllamaStreamToAnthropic.any_output_emitted`, which `message_start`
+    alone never sets) -- real content/thinking/tool-call output alongside
+    a "load" done_reason is treated as an ordinary completion instead,
+    never discarded. Capped at exactly one retry per turn."""
+    try:
+        _body, result = _run_phase1_ollama(req, abort=abort)
+    except _Aborted:
+        return
+
+    estimate = estimate_tokens(req.prebuilt_ollama_body)
+    sm = OllamaStreamToAnthropic(req.model_label, estimate)
+    dumped_lines: list = []
+    dumped_events: list = []
+    start_ev = sm.message_start_event()
+    dumped_events.append(start_ev)
+    yield start_ev
+
+    retried_once = False
+    while True:
+        reader_q: "queue.Queue" = queue.Queue()
+        reader = threading.Thread(target=_ndjson_reader_thread, args=(result.resp, reader_q))
+        reader.daemon = True
+        reader.start()
+        sock = result.conn.sock if result.conn is not None else None
+        terminal_reached = False
+        retry_this_attempt = False
+
+        try:
+            poll_timeout = min(req.ping_interval, 0.25) if req.ping_interval > 0 else 0.25
+            elapsed = 0.0
+            while True:
+                if abort is not None and abort.is_set():
+                    return
+                try:
+                    item = reader_q.get(timeout=poll_timeout)
+                except queue.Empty:
+                    elapsed += poll_timeout
+                    if elapsed >= req.ping_interval:
+                        elapsed = 0.0
+                        yield {"type": "ping"}
+                    continue
+                elapsed = 0.0
+                kind, value = item
+                if kind == "line":
+                    line = value.decode("utf-8", "replace").rstrip("\n")
+                    dumped_lines.append(line)
+                    step_events = sm.feed_line(line)
+                    if sm.done:
+                        terminal_reached = True
+                        if sm.done_reason == "load" and not sm.any_output_emitted and not retried_once:
+                            retry_this_attempt = True  # discard step_events (just the trivial finalize)
+                        else:
+                            for ev in step_events:
+                                dumped_events.append(ev)
+                                yield ev
+                        break
+                    for ev in step_events:
+                        dumped_events.append(ev)
+                        yield ev
+                elif kind == "eof":
+                    for ev in sm.on_eof():
+                        dumped_events.append(ev)
+                        yield ev
+                    terminal_reached = True
+                    break
+                else:  # "exc"
+                    ev = sm.error_event(f"upstream connection error: {value}")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+        finally:
+            if not terminal_reached and sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            conn = getattr(result, "conn", None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        if not retry_this_attempt:
+            break
+        retried_once = True
+        sm = OllamaStreamToAnthropic(req.model_label, estimate, msg_id=sm.msg_id)
+        try:
+            _body, result = _run_phase1_ollama(req, abort=abort)
+        except _Aborted:
+            break
+        except (UpstreamError, ProviderNotConfigured) as e:
+            ev = sm.error_event(str(e))
+            dumped_events.append(ev)
+            yield ev
+            break
+
+    dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
+    dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})

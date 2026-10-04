@@ -74,8 +74,10 @@ from halo_harness.providers.request import (
 from halo_harness.providers.routing import InvalidModelError, Route
 from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
-    UpstreamError, stream_anthropic_completion, stream_completion,
+    UpstreamError, stream_anthropic_completion, stream_completion, stream_ollama_completion,
 )
+from halo_harness.providers.ollama import get_catalog, resolve_ollama_host, trained_context_for
+from halo_harness.providers.ollama_request import build_ollama_request_body
 from halo_harness.tools.base import ToolContext, ToolResult
 from halo_harness.tools.imageutil import sniff_dimensions
 from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
@@ -1820,7 +1822,21 @@ class Session:
         to fail outright on a `cc:` session ("the summarisation call
         failed"). Routed to a quick, stateless one-shot `claude -p`
         instead (never touches this session's own live `_cc_state`/
-        conversation)."""
+        conversation).
+
+        Halo 2.0.3 round 2b: an `ollama`-dialect `ref` (almost always
+        `self.small_model_ref`, a DIFFERENT host/model than `self.
+        model_ref`) builds its body through the SAME `_build_ollama_body_
+        for_ref` helper `_derive_and_build` uses, and streams through
+        `self._stream` (the dialect dispatcher) rather than the bare
+        openai-chat-only `stream_completion`. Credentials for a NON-main
+        ref (`ref is not self.model_ref`) are resolved with the exact
+        resolver `/model` itself uses (`headless._resolve_creds` -- see
+        `apply_next_fallback_model`'s own finding 3/W6a fix for why this
+        matters: `self.creds` is the CURRENT model's creds, wrong for a
+        small model on a different provider), falling back to `self.creds`
+        only when that resolver finds nothing -- every existing same-
+        provider caller is unaffected either way."""
         ref = model_ref or self.small_model_ref or self.model_ref
         if ref.provider == "cc":
             from halo_harness.agent.cc_runtime import one_shot_cc_call
@@ -1833,21 +1849,31 @@ class Session:
         # model (`ref is not self.model_ref`) -- the plain main-model
         # fallback case is completely unchanged.
         effort = self.effort if ref is self.model_ref else (self.small_model_effort or self.effort)
-        body = build_request_body(
-            system_text=system_text,
-            messages=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
-            tools=[], route=route, profile=profile, effort=effort,
-            context_tokens=self.model_profile.context_tokens,
-            prompt_estimate=_rough_estimate("", []),
-            requested_max_tokens=max_tokens,
-        )
-        req = self._build_request(body)
+        messages = [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
+        if route.dialect == "ollama":
+            body = self._build_ollama_body_for_ref(
+                ref=ref, route=route, profile=profile, system_text=system_text, messages=messages,
+                tools=[], tool_choice=None, effort=effort, requested_max_tokens=max_tokens,
+            )
+        else:
+            body = build_request_body(
+                system_text=system_text, messages=messages,
+                tools=[], route=route, profile=profile, effort=effort,
+                context_tokens=self.model_profile.context_tokens,
+                prompt_estimate=_rough_estimate("", []),
+                requested_max_tokens=max_tokens,
+            )
+        creds = self.creds
+        if ref is not self.model_ref:
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(ref, self.settings) or self.creds
+        req = self._build_request(body, route=route, creds=creds)
         abort = threading.Event()
         timer = threading.Timer(max(0.1, timeout_s), abort.set)
         timer.daemon = True
         timer.start()
         text_parts: list = []
-        gen = stream_completion(req, abort=abort)
+        gen = self._stream(req, abort=abort) if route.dialect == "ollama" else stream_completion(req, abort=abort)
         try:
             for ev in gen:
                 kind = ev.get("type")
@@ -1971,6 +1997,18 @@ class Session:
                 profile=self.provider_profile, effort=self.effort,
                 requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
             )
+        elif self.route.dialect == "ollama":
+            # Halo 2.0.3 round 2b: the native `/api/chat` body, via the
+            # shared helper below -- host resolution, the trained-context
+            # catalog read, and keeping `self.model_profile.context_tokens`
+            # in sync with whatever `options.num_ctx` this request actually
+            # sent (round 2's context-ownership rule) all live there, not
+            # inline here, so this method stays readable.
+            body = self._build_ollama_body_for_ref(
+                ref=self.model_ref, route=self.route, profile=self.provider_profile,
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                effort=self.effort, requested_max_tokens=requested_max_tokens,
+            )
         else:
             body = build_request_body(
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
@@ -1981,7 +2019,51 @@ class Session:
             )
         return system_text, messages, tools, body
 
-    def _build_request(self, body: dict) -> CompletionRequest:
+    def _build_ollama_body_for_ref(self, *, ref: ModelRef, route: Route, profile: ProviderProfile,
+                                    system_text: str, messages: list, tools, tool_choice=None,
+                                    effort: Optional[str], requested_max_tokens: Optional[int]) -> dict:
+        """Halo 2.0.3 round 2b: the `ollama` dialect's own body-building
+        step -- shared by `_derive_and_build` (this session's own current
+        model) and `call_small_model` (a `small_model_ref`/hook `ol:` ref,
+        almost always a DIFFERENT model than `self.model_ref`), so neither
+        call site repeats the host-resolve/trained-context/context-
+        ownership-sync dance inline. Resolves `ref.host` against `ollama.
+        hosts` -- a missing entry raises `ProviderNotConfigured` naming the
+        ref's host and `ollama.hosts` rather than silently falling back to
+        some other host -- then reads the model's trained context from the
+        (cached, short-TTL) catalog, with ANY exception or an unreachable
+        host swallowed to `None` (round 3's fit-estimate wiring is the only
+        other input `compute_num_ctx` takes; this round never fails a turn
+        over a best-effort catalog probe). Only when `ref is self.model_ref`
+        (the session's OWN current model, never a small/hook ref on some
+        other model) does a successful build also sync `self.model_profile.
+        context_tokens` to whatever `options.num_ctx` this request actually
+        computed, so the status bar and the compaction trigger both follow
+        the real window instead of a stale pre-catalog guess."""
+        env = self.settings.effective_env if self.settings is not None else None
+        host = resolve_ollama_host(ref.host, env)
+        if host is None:
+            raise ProviderNotConfigured(
+                f"no Ollama host named {ref.host!r} for {ref.raw!r} -- configure it under `ollama.hosts`")
+        try:
+            trained_context = trained_context_for(get_catalog(host), ref.model)
+        except Exception:
+            trained_context = None
+        body = build_ollama_request_body(
+            system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+            route=route, profile=profile, effort=effort, host=host,
+            trained_context=trained_context, fit_estimate=None, requested_max_tokens=requested_max_tokens,
+        )
+        if ref is self.model_ref:
+            num_ctx = (body.get("options") or {}).get("num_ctx")
+            if isinstance(num_ctx, int) and num_ctx != self.model_profile.context_tokens:
+                self.model_profile = dataclasses.replace(self.model_profile, context_tokens=num_ctx)
+        return body
+
+    def _build_request(self, body: dict, *, route: Optional[Route] = None,
+                        creds: Optional[ProviderCreds] = None) -> CompletionRequest:
+        route = route if route is not None else self.route
+        creds = creds if creds is not None else self.creds
         kimi_tool_id_start = 0
         if self.provider_profile.tool_id_format == "kimi_functions_idx":
             # H9 critical review finding 1: seed the per-stream rename
@@ -1991,34 +2073,44 @@ class Session:
             from halo_harness.agent.invariants import highest_kimi_functions_idx
             kimi_tool_id_start = highest_kimi_functions_idx(self.log) + 1
         kwargs = dict(
-            body={"messages": []}, route=self.route,
+            body={"messages": []}, route=route,
             profile={"context_tokens": self.model_profile.context_tokens,
                      "max_output_tokens": self.model_profile.max_output_tokens},
-            creds=self.creds, state_dir=self.state_dir, extra_headers=self.extra_headers,
+            creds=creds, state_dir=self.state_dir, extra_headers=self.extra_headers,
             model_label=self.model_ref.raw, openrouter_base_url=self.openrouter_base_url,
             harness_mode=True, ping_interval=float(env_compat("PING_INTERVAL", default="15")),
             tool_id_format=self.provider_profile.tool_id_format,
             kimi_tool_id_start=kimi_tool_id_start,
         )
-        if self.route.dialect == "anthropic-passthrough":
+        if route.dialect == "anthropic-passthrough":
             kwargs["prebuilt_anthropic_body"] = body
+        elif route.dialect == "ollama":
+            kwargs["prebuilt_ollama_body"] = body
         else:
             kwargs["prebuilt_oai_body"] = body
         return CompletionRequest(**kwargs)
 
     def _stream(self, req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
         """Dispatch to the right dialect's orchestration -- the ONE place
-        that decides `stream_completion` vs `stream_anthropic_completion`,
-        so every `_step`/`_run_compaction` call site stays dialect-blind.
-        `abort`, when given, is used INSTEAD of `self.abort` -- Halo 2.0.1's
-        steer-restart watcher (`_step`) passes a combined `_EitherAbort`
-        (this session's real abort OR a dedicated per-attempt restart
-        event) so a silently-blocked call can be force-closed without ever
-        touching `self.abort` itself (reserved for a genuine user
-        interrupt -- see `_EitherAbort`'s own docstring)."""
+        that decides `stream_completion` vs `stream_anthropic_completion`
+        vs `stream_ollama_completion`, so every `_step`/`_run_compaction`
+        call site stays dialect-blind. Dispatches on `req.route.dialect`
+        (never `self.route.dialect`) so a caller building a request for a
+        DIFFERENT model than this session's own current one (`call_small_
+        model` on a `small_model_ref`/hook ref) still gets routed
+        correctly -- every existing caller passes a `req` whose `route` IS
+        `self.route`, so this is identical for them. `abort`, when given,
+        is used INSTEAD of `self.abort` -- Halo 2.0.1's steer-restart
+        watcher (`_step`) passes a combined `_EitherAbort` (this session's
+        real abort OR a dedicated per-attempt restart event) so a silently-
+        blocked call can be force-closed without ever touching `self.abort`
+        itself (reserved for a genuine user interrupt -- see
+        `_EitherAbort`'s own docstring)."""
         eff_abort = abort if abort is not None else self.abort
-        if self.route.dialect == "anthropic-passthrough":
+        if req.route.dialect == "anthropic-passthrough":
             return stream_anthropic_completion(req, abort=eff_abort)
+        if req.route.dialect == "ollama":
+            return stream_ollama_completion(req, abort=eff_abort)
         return stream_completion(req, abort=eff_abort)
 
     def _abort_sleep(self, delay: float) -> bool:
@@ -2936,6 +3028,19 @@ class Session:
                 profile=self.provider_profile, effort=effort,
                 requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
             )
+        if self.route.dialect == "ollama":
+            # Halo 2.0.3 round 2b: the SAME helper `_derive_and_build` uses.
+            # `self.model_ref`/`self.route`/`self.provider_profile` are
+            # already whichever model is ACTIVE for this call -- the main
+            # session model, or a compactionModel `_compaction_model_
+            # override` swapped in (see that method's own docstring) --
+            # so passing them through is "pass that model's own
+            # ref/route/profile", not necessarily the main model's.
+            return self._build_ollama_body_for_ref(
+                ref=self.model_ref, route=self.route, profile=self.provider_profile,
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                effort=effort, requested_max_tokens=requested_max_tokens,
+            )
         return build_request_body(
             system_text=system_text, messages=messages, tools=tools, route=self.route,
             profile=self.provider_profile, effort=effort,
@@ -3078,14 +3183,23 @@ class Session:
         it used to be resolved and then never read anywhere. Returns a
         `(saved_state_or_None)` token for `_restore_compaction_model`;
         temporarily swaps `self.route`/`self.provider_profile`/
-        `self.model_profile`/`self.model_ref` (everything `_build_request`/
-        `_build_body_for_messages` read off `self`) to the resolved
-        override for the DURATION of the summarisation call(s) only.
-        Same-provider only (falls back to the main model otherwise) --
-        `self.creds` is a single set for the whole Session, same documented
-        limitation as `_call_model_for_hook`'s own `small_model_ref` (true
-        cross-provider routing needs separate credential resolution, a
-        follow-up refinement, not this one-liner).
+        `self.model_profile`/`self.model_ref`/`self.creds` (everything
+        `_build_request`/`_build_body_for_messages` read off `self`) to
+        the resolved override for the DURATION of the summarisation
+        call(s) only.
+
+        Halo 2.0.3 round 2b: a compactionModel on a DIFFERENT provider
+        than the main model now actually runs on that provider, instead
+        of the documented "same-provider only... a follow-up refinement"
+        limitation this used to carry -- credentials for the override ref
+        are resolved with the exact resolver `/model` itself uses
+        (`headless._resolve_creds`, the same fix `call_small_model`'s own
+        `small_model_ref` case got), falling back to `self.creds` only
+        when that resolver finds nothing configured for the override's
+        own provider. `cc:` (the installed Claude binary) is still
+        refused -- same reason `call_small_model` special-cases it before
+        ever building a route/body: there is no HTTP route for a one-shot
+        summarisation call against it at all.
 
         Halo 2.0.2 (brief A.1): "`compaction` is the rung after
         `compactionModel`" -- the `roles.<compaction>` table entry (config.
@@ -3117,22 +3231,27 @@ class Session:
         except InvalidModelError:
             log.warning("compactionModel %r did not resolve to a valid model ref; using the session's main model", raw)
             return None
-        if ref.provider != self.model_ref.provider:
-            log.warning("compactionModel %r is on a different provider (%s) than the session's own creds (%s); "
-                        "using the session's main model for this summary", raw, ref.provider, self.model_ref.provider)
+        if ref.provider == "cc":
+            log.warning("compactionModel %r is cc: (no HTTP route for a one-shot summarisation call); "
+                        "using the session's main model for this summary", raw)
             return None
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
         profile = resolve_profile(route)
         model_profile = resolve_model_profile(ref, self.state_dir, routes)
-        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort)
-        self.route, self.provider_profile, self.model_profile, self.model_ref = route, profile, model_profile, ref
+        creds = self.creds
+        if ref.provider != self.model_ref.provider:
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(ref, self.settings) or self.creds
+        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort, self.creds)
+        self.route, self.provider_profile, self.model_profile, self.model_ref, self.creds = (
+            route, profile, model_profile, ref, creds)
         if compaction_effort:
             self.effort = compaction_effort
         return saved
 
     def _restore_compaction_model(self, saved) -> None:
         if saved is not None:
-            self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort = saved
+            self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort, self.creds = saved
 
     def _run_summary_call(self, system_text: str, call_messages: list, tools, requested_max_tokens: int):
         """One streamed summarisation-call attempt, reusing `_step`'s OWN

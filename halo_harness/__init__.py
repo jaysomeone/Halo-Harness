@@ -30,6 +30,21 @@ template defines is a valid role everywhere, TUI tab completion and shell
 completion (`halo completion bash|zsh|powershell`) for role names and
 model refs, and named, reusable role templates (`~/.halo/roles/<name>.json`
 -- `/roles`/`halo roles template ...`, a TUI editor form or `$EDITOR`).
+
+2.0.3 (in progress -- local and cloud models: Ollama + Hugging Face; round
+2 of `plans/2.0.3-ollama-round2-brief.md` landed so far): `ol:` joins as a
+first-class provider on Ollama's NATIVE `/api/chat` API (never the
+OpenAI-compatible shim, which has no per-request context control) --
+`ol:<model>` (the default host) or `ol:<model>@<hostname>` (a named entry
+in `~/.halo/config.json`'s `ollama.hosts`, local, LAN, or Ollama Cloud, all
+one request shape). `options.num_ctx` is computed and sent on every
+request (`min(trained context, host.max_ctx, 131072)`), `think` is mapped
+from the session's effort level, and Halo synthesizes its own stable
+tool-call ids since Ollama's wire format sends none. A background
+`/api/version` probe, a short-TTL `/api/tags` + `/api/show` catalog per
+host, and a cheap real-tool-call capability probe (cached per model
+digest) round out this round; hardware/host analysis, roles, Hugging Face,
+and docs/release prep are later rounds of the same brief.
 """
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"

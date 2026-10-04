@@ -835,9 +835,14 @@ def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
     """H8 cheap must-do: `compactionModel` (settings.json/config.json,
     resolved by agent/compact.resolve_knobs) is actually used to route the
     summarisation call, instead of being resolved and never read. Both
-    models are on the SAME mock provider/creds (the documented same-
-    provider-only limitation) but are DISTINCT model ids the mock can
-    tell apart."""
+    models are on the SAME mock provider/creds here (DISTINCT model ids
+    the mock can tell apart is all this particular test needs) -- a
+    compactionModel on a genuinely DIFFERENT provider is its own case,
+    covered by tests.test_w5_fallback_model's cross-provider creds
+    resolution pattern (`headless._resolve_creds`) and by
+    tests.test_providers_ollama_session's own compaction test; round 2b
+    removed the same-provider-only restriction this docstring used to
+    describe."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:

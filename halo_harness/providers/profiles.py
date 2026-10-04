@@ -384,6 +384,30 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             model_id=route.upstream_model,
         )
 
+    if route.dialect == "ollama":
+        # Halo 2.0.3 round 2: `ol:` on Ollama's native `/api/chat` -- its
+        # own dedicated request builder (providers/ollama_request.py) and
+        # NDJSON decoder (providers/ollama_stream.py) own every wire detail
+        # this profile would otherwise drive (num_ctx, keep_alive, `think`
+        # mapped from effort) -- map_effort/map_effort_anthropic are never
+        # called for this dialect, so reasoning_effort_supported stays False
+        # and thinking_format stays "none" on purpose: there is no second
+        # "ollama" value for either to teach every other reader of these
+        # fields about. `reasoning_replay="empty"`: whether a replayed
+        # `message.thinking` is expected back by the server at all is
+        # undocumented (research doc Q1/Q8), so a prior turn's thinking text
+        # is never put back on the wire -- display-only, dropped on replay,
+        # same as any family with no reasoning_replay story. No model_table.json
+        # row lookup: that table is Databricks/OpenRouter-keyed only, and a
+        # bare Ollama tag (`qwen3:30b`) would never match a row there anyway.
+        return ProviderProfile(
+            system_vs_developer="system", thinking_format="none",
+            reasoning_replay="empty", reasoning_effort_supported=False,
+            family=family, tool_choice_required_supported=False,
+            tools_supported=True, effort_values_supported=EFFORT_LEVELS,
+            model_id=route.upstream_model,
+        )
+
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
     replay = row.get("reasoning_replay", replay)
     effort_supported = row.get("reasoning_effort_supported", effort_supported)

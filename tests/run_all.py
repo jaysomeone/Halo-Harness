@@ -39,7 +39,10 @@ def discover_test_modules() -> list:
 # 2.0.0 rename: `HALO_` added alongside the pre-existing `BRIDGE_` -- the
 # new canonical prefix for every harness-owned knob (env_compat), guarded
 # here the same way even though nothing sets one via real os.environ yet.
-_GUARDED_ENV_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
+# Halo 2.0.3 round 2: `OLLAMA_` added (`OLLAMA_HOST`/`OLLAMA_API_KEY`,
+# providers.ollama.resolve_ollama_hosts) -- a real one of these in the
+# developer's own shell must never leak into `ol:` host resolution tests.
+_GUARDED_ENV_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_", "OLLAMA_")
 
 
 def _snapshot_guarded_env() -> dict:

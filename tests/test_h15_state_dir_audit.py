@@ -26,7 +26,7 @@ from tests.helpers.runner import Ctx, new_registry, print_results, run_all
 
 test, TESTS = new_registry()
 
-_GUARDED_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_")
+_GUARDED_PREFIXES = ("BRIDGE_", "HALO_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_", "TYPESAFE_", "OLLAMA_")
 
 
 class _Env:

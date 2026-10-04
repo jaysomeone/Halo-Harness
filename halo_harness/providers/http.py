@@ -376,6 +376,49 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
 
 
 
+def call_ollama_chat(base_url: str, api_key: "str | None", body: dict, extra_headers: dict, state_dir: Path,
+                      on_connect=None) -> UpstreamResult:
+    """POST to Ollama's native `/api/chat` (Halo 2.0.3 round 2) -- local,
+    LAN, or Ollama Cloud, all through this one function: only `base_url`
+    and whether `api_key` is set (an unauthenticated local/LAN host passes
+    `None`; a cloud host's own `api_key` becomes `Authorization: Bearer
+    <api_key>`, research doc Q7) ever differ. No `Accept-Encoding: identity`
+    override here -- `/api/chat`'s NDJSON stream is already line-delimited
+    JSON with no gzip framing to fight, unlike the SSE dialects' own
+    override (kept there for a different reason: an intermediary that
+    buffers a whole gzip frame before forwarding it would break SSE's
+    "flush every line" requirement)."""
+    if base_url.endswith("/"):
+        base_url = base_url.rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    tls = parsed.scheme == "https"
+    path = parsed.path.rstrip("/") + "/api/chat"
+    if not path.startswith("/"):
+        path = "/" + path
+
+    body_bytes = jdumps(body)
+    dump_debug(state_dir, "upstream-request", body)
+
+    headers = {"Content-Type": "application/json", "Content-Length": str(len(body_bytes))}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(extra_headers)
+
+    try:
+        conn = open_upstream(host, port, tls, on_connect=on_connect)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
+    try:
+        conn.request("POST", path, body=body_bytes, headers=headers)
+        resp = conn.getresponse()
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        return UpstreamResult(status=resp.status, headers=resp_headers, resp=resp, conn=conn)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_post_connect_error(host, e), host=host) from e
+
+
 def _dbx_post(base_url: str, path: str, api_key: str, req_body: dict, extra_headers: dict, state_dir,
                on_connect=None):
     """POST to a Databricks endpoint, returning (resp, conn) or raising UpstreamConnectError."""

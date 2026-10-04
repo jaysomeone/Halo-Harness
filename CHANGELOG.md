@@ -8,6 +8,36 @@ across the 0.3.x line -- each 0.3.0 milestone below was a working
 checkpoint toward the single 0.3.0 release, not a separate published
 version.
 
+## [2.0.3] - unreleased
+
+Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
+and onward). Round 1 (research) and round 2 landed so far; rounds 3-6
+(hardware/host analysis, roles, Hugging Face, docs/release prep) are still
+to come under this SAME version number.
+
+1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
+   dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
+   through the identical native `/api/chat` request shape --
+   `ol:<model>` (the default host) or `ol:<model>@<hostname>` (an entry in
+   `~/.halo/config.json`'s `ollama.hosts`). `options.num_ctx` is computed
+   and sent on EVERY request (`min(trained context, host.max_ctx,
+   131072)`, never a Modelfile default), `keep_alive` is sent only when
+   the host entry configures one (the server's own `OLLAMA_KEEP_ALIVE`
+   stands otherwise), and `think` is mapped from the session's effort level
+   (graded low/medium/high for gpt-oss, bool for every other thinking
+   model). The NDJSON streaming decoder synthesizes its own stable
+   `toolu_` tool-call ids (Ollama's wire format sends none, only a 0-based
+   index) and maps `done_reason: "length"` onto the existing max-tokens
+   stop handling; `done_reason: "load"` retries the turn once when nothing
+   has been shown yet. A background `/api/version` probe, a short-TTL
+   `/api/tags` + `/api/show` catalog per host, and a cheap real-tool-call
+   capability probe (cached per model digest, independent of what
+   `/api/show` merely declares) round out this round. Round 2b wires the
+   dialect into the agent loop itself (`agent/loop.py`'s request/stream
+   dispatch, `headless.py`'s shared credential resolver) -- an `ol:` model
+   now runs a full turn, including a tool call, end to end in print mode
+   and the TUI.
+
 ## [2.0.2] - 2026-10-04
 
 W7 rounds 1-7 of the 2.0.2 brief (F, A, B, C, D, E, then the init wizard):

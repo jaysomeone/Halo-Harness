@@ -48,7 +48,7 @@ def _run(argv, home: Path, *, stdin: str = "", extra_env: "dict | None" = None, 
     # test only ever sees what THIS test passes in.
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("BRIDGE_", "OPENROUTER_", "DATABRICKS_", "ANTHROPIC_",
-                                "ROLO_CLAUDE_", "HALO_", "TYPESAFE_"))}
+                                "ROLO_CLAUDE_", "HALO_", "TYPESAFE_", "OLLAMA_"))}
     env.update({"BRIDGE_TEST_HOME": str(home), "PYTHONPATH": str(REPO_DIR),
                 "BRIDGE_TEST_CC_AUTH_STATUS": _NOT_LOGGED_IN})
     env.update(extra_env or {})

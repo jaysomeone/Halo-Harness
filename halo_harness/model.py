@@ -27,6 +27,7 @@ _ANT_PREFIX = "ant:"
 _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
 _CC_PREFIX = "cc:"
+_OL_PREFIX = "ol:"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -132,9 +133,14 @@ def _refuse_if_disabled(provider_key: str) -> None:
 @dataclass(frozen=True)
 class ModelRef:
     raw: str
-    provider: str  # "openrouter" | "databricks" | "anthropic"
-    model: str  # bare upstream model id/name, dbx:/or:/ant: prefix stripped
-    dialect: str  # "openai-chat" | "anthropic-passthrough"
+    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama"
+    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol: prefix (and ol:'s own @host suffix) stripped
+    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "ollama"
+    # Halo 2.0.3 round 2: the `@<hostname>` part of `ol:<model>@<hostname>`
+    # (research doc Q6/Q7) -- which entry of `ollama.hosts` this ref names;
+    # `None` means "the default host" (`providers.ollama.resolve_ollama_
+    # host(None)`). Always `None` for every other provider.
+    host: Optional[str] = None
 
 
 def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
@@ -177,6 +183,19 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         bare = resolved[len(_OR_PREFIX):]
         _refuse_if_disabled("openrouter")
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
+    if resolved.startswith(_OL_PREFIX):
+        # Halo 2.0.3 round 2: `ol:<model>` (the default host) or
+        # `ol:<model>@<hostname>` (a named entry in `ollama.hosts` -- a LAN
+        # host or an Ollama Cloud entry addressed by whatever name the user
+        # gave it in config; research doc section 7/Q7: the native request
+        # shape is identical in all three cases, only `host.url`/`api_key`
+        # differ). `partition` (not `split`) on the FIRST "@": an Ollama tag
+        # itself may contain ":" (`qwen3:30b`) but never "@", so this is
+        # unambiguous either way.
+        bare = resolved[len(_OL_PREFIX):]
+        model_part, _, host_part = bare.partition("@")
+        _refuse_if_disabled("ollama")
+        return ModelRef(raw=raw, provider="ollama", model=model_part, dialect="ollama", host=host_part or None)
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
@@ -241,7 +260,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
     hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, vendor/model, "
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, ol:, vendor/model, "
         f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 

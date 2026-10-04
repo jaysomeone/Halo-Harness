@@ -83,6 +83,22 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         if ant is None:
             return None
         return ProviderCreds(base_url=ant.base_url, api_key=ant.api_key)
+    if ref.provider == "ollama":
+        # Halo 2.0.3 round 2b: the ONE place print mode (`build_session`
+        # below), the TUI (`controller.py`'s own `_default_model_resolver`),
+        # `/model`, and the fallback chain (`agent/loop.py`'s
+        # `apply_next_fallback_model`) all resolve an `ol:` ref's
+        # credentials -- no other call site needs its own ollama creds
+        # code. `host.api_key` is unset for every host but an Ollama Cloud
+        # one (research doc Q7); `or ""` keeps `ProviderCreds.api_key` a
+        # plain str (its declared type), matching `stream_ollama_
+        # completion`'s own `req.creds.api_key or None` read on the way
+        # back out.
+        from halo_harness.providers.ollama import resolve_ollama_host
+        host = resolve_ollama_host(getattr(ref, "host", None), env)
+        if host is None:
+            return None
+        return ProviderCreds(base_url=host.url, api_key=host.api_key or "")
     return None
 
 
@@ -725,8 +741,14 @@ def build_session(
                 # every turn with no notice at all. `cc:` (and anything
                 # else `_resolve_creds` doesn't model) needs no
                 # `ProviderCreds` at all -- that is not this check's
-                # business, so it is skipped entirely for those.
-                if (last_ref.provider in ("openrouter", "databricks", "anthropic")
+                # business, so it is skipped entirely for those. Halo
+                # 2.0.3 round 2b: `ollama` added -- a missing/renamed
+                # `ollama.hosts` entry (a stale `ol:<model>@<hostname>`
+                # remembered from a DIFFERENT box that actually had that
+                # named host) is this provider's own equivalent of
+                # "no credentials configured", now that `_resolve_creds`
+                # models it too.
+                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama")
                         and _resolve_creds(last_ref, settings) is None):
                     print(f"halo: the last-used model {last_model_raw!r} has no credentials configured on "
                           f"this box -- using the configured default instead", file=sys.stderr)
