@@ -341,3 +341,13 @@ Metroid theme and a Mario theme.
   ripped sprites, sounds or logos in the repo (it is public). Theme names
   stay as rolo named them. Snapshot tests per theme as for every theme
   today; the toggle-again-restores behaviour pinned once for all three.
+- 5g research clarifications (docs/harness/EXPERIENTIAL-RESEARCH.md,
+  2026-10-04): the GitHub project is a Python-packaged CLI (`pip install
+  experiential`) wrapping a compiled Rust/PyO3 native data plane, so no Rust
+  toolchain is needed; "exp run fronts Ollama and llama.cpp" is an inference
+  from its generic local-model registration mechanism, not a documented
+  integration, so 5h treats the local gateway as any OpenAI-compatible server
+  (port 8000 confirmed); `jev-latest` is TypeSafe's typed-decision model (not
+  a chat model), matching plans/2.0.3-jev.md; a Claude slug's thinking stays
+  native only while an Anthropic-shaped rung serves it; cost APIs split by
+  inference key versus a separate provisioning key.
