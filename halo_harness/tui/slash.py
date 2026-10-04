@@ -488,6 +488,16 @@ def catalog_auto_refresh_worker(app) -> None:
                 summary = format_dbx_diff(diff)
                 if summary != "no changes":
                     notes.append(f"Databricks ({summary})")
+    if is_enabled_with_env("huggingface", env):
+        # Halo 2.0.3 round 4: same shape as the OpenRouter branch above --
+        # `refresh_huggingface_catalog_if_stale` only ever fetches the
+        # router's catalog when HF_TOKEN resolves (an endpoint-only setup
+        # has nothing to refresh here, by design); still background-thread-
+        # only/staleness-gated, so an enabled-but-fresh-cache box costs
+        # nothing extra on every `/model` open.
+        from halo_harness.providers.huggingface_catalog import load_hf_models_json, refresh_huggingface_catalog_if_stale
+        if refresh_huggingface_catalog_if_stale(state_dir, env=env):
+            notes.append(f"Hugging Face ({len(load_hf_models_json(state_dir))} models)")
     if notes:
         app.call_from_thread(app.notify, f"Catalog refreshed: {'; '.join(notes)}", title="/model")
 

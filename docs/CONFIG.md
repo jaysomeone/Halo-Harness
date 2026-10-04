@@ -207,6 +207,8 @@ directly by the features that own them:
 | `update.channel` | unset (derived from the install: `stable` when pinned to a `v*` tag, else `main`) | `halo update --channel stable\|main` |
 | `ollama.hosts` | unset (synthesizes one default host from `OLLAMA_HOST`/`127.0.0.1:11434`) | hand-edited; a list of `{name, url, default, keep_alive, max_ctx, num_parallel_hint, api_key}` -- `ol:<model>@<hostname>` selects an entry by `name`; see `docs/MODELS.md`'s "Ollama" section |
 | `ollama.tools_max` | unset (derived from the effective `num_ctx`'s context class -- under 16k: 16, 16k-32k: 32, 32k-64k: 64, 64k+: 128) | `halo config set ollama.tools_max 64`; overrides the `ol:` ProviderProfile's tool-catalog cap outright, still never below however many built-in tools this platform ships -- see `docs/MODELS.md`'s "Ollama" section |
+| `huggingface.endpoints` | unset (no dedicated endpoints configured) | hand-edited; a list of `{name, url, token, default}` -- `hf:endpoint/<name>` selects an entry by `name`; each entry's own `url`/`token` are used as-is, never the router's `HF_TOKEN`/base URL; see `docs/MODELS.md`'s "Hugging Face" section |
+| `huggingface.bill_to` | unset (no header sent) | `halo config set huggingface.bill_to my-org`; a Team/Enterprise org name sent as `X-HF-Bill-To` on every ROUTER (`hf:<org>/<model>`) request only -- never on an `hf:endpoint/<name>` call |
 
 ## Every environment variable
 
@@ -255,6 +257,8 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `TMUX` | presence gates `doctor`'s tmux-mouse-mode check |
 | `OLLAMA_HOST` | seeds the `ol:` default host's URL when `ollama.hosts` has no entries configured yet (Ollama's own documented var; a bare `host:port` is normalized to a full URL) |
 | `OLLAMA_API_KEY` | seeds that SAME synthesized default host's `api_key` (Ollama Cloud, `Authorization: Bearer`) -- a configured `ollama.hosts` entry's own `api_key` always wins once one exists |
+| `HF_TOKEN` | Hugging Face router credential (`hf:<org>/<model>`) -- the ONLY accepted name; `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT read (neither was confirmed as a router-specific alias) |
+| `HALO_HF_ROUTER_BASE_URL` (legacy `BRIDGE_HF_ROUTER_BASE_URL`) | override the Hugging Face router base URL (default `https://router.huggingface.co/v1`) -- never consulted for `hf:endpoint/<name>`, which always uses that entry's own configured `url` |
 
 ## Providers (`halo init --provider ...`)
 
@@ -269,6 +273,11 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 | `databricks` | `dbx:databricks-deepseek-v4-1-flash` | `DATABRICKS_HOST` + `DATABRICKS_TOKEN` (host often already known -- see `docs/DATABRICKS.md`) |
 | `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
+
+Ollama and Hugging Face are not yet `halo init --provider` choices here --
+configure `HF_TOKEN`/`huggingface.endpoints`/`ollama.hosts` directly (see
+`docs/MODELS.md`'s "Ollama"/"Hugging Face" sections); an interactive `halo
+init` tab for both is Halo 2.0.3 round 5.
 
 ### Default permission mode (1.0.1 hotfix 18)
 

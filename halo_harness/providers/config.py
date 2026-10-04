@@ -428,6 +428,44 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     return OrConfig(api_key=api_key, base_url=base_url)
 
 
+@dataclass
+class HfConfig:
+    """Hugging Face Inference Providers (the router) configuration --
+    Halo 2.0.3 round 4. `api_key` is `HF_TOKEN` (research doc section 9:
+    "Use a single Hugging Face token for all providers" -- confirmed only
+    for this exact name; `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT
+    read here since the research doc never confirmed either as an accepted
+    alias for the router specifically -- see docs/MODELS.md). `base_url`
+    defaults to the router root; `BRIDGE_HF_ROUTER_BASE_URL` (via
+    `env_compat`, so `HALO_HF_ROUTER_BASE_URL`/`ROLO_CLAUDE_HF_ROUTER_
+    BASE_URL` also work) overrides it for tests, exactly like
+    `resolve_openrouter`'s own `OPENROUTER_BASE_URL`."""
+    api_key: str
+    base_url: str = "https://router.huggingface.co/v1"
+
+
+def resolve_huggingface(env: dict | None = None) -> HfConfig | None:
+    """Resolve Hugging Face router config from `env` (must-do 6: the
+    harness passes `Settings.effective_env`; a bare call falls back to the
+    settings-env chain the same way `resolve_openrouter` does, via
+    `_settings_fallback_value`/`_settings_fallback_base_url`). `None` if
+    `HF_TOKEN` isn't set -- `hf:<org>/<model>` is then refused at request
+    time with a plain "Hugging Face not configured" message (providers.
+    stream._run_phase1), same contract as every other provider here.
+
+    This is the ROUTER credential pair only (item 1 of the round 4 brief):
+    `hf:endpoint/<name>` never reads HF_TOKEN at all -- see
+    `providers.huggingface.resolve_huggingface_endpoint` for the fully
+    separate per-entry url/token pair, which must never cross-wire with
+    this one."""
+    env = env if env is not None else os.environ
+    api_key = _settings_fallback_value(env, "HF_TOKEN")
+    if not api_key:
+        return None
+    base_url = _settings_fallback_base_url(env, "HF_ROUTER_BASE_URL", "https://router.huggingface.co/v1")
+    return HfConfig(api_key=api_key, base_url=base_url)
+
+
 def resolve_openrouter_management_key(env: dict | None = None) -> "str | None":
     """H15 part 2 addendum 4 (corrected): `OPENROUTER_MANAGEMENT_KEY` -- a
     SEPARATE, higher-privilege key OpenRouter's own `/credits` endpoint

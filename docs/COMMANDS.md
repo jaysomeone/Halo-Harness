@@ -760,9 +760,9 @@ file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
 plugin-provided MCP servers, the OS/WSL/Kali platform hint, `~/.local/bin` on
 PATH (Linux), tmux mouse mode (inside tmux), the three cached-catalog ages,
 session count + `/improve` config, clipboard backend, configured MCP servers
-(eager vs. lazy), the resolved default model, how many of the five providers
+(eager vs. lazy), the resolved default model, how many of the six providers
 are enabled (`databricks`/`openrouter`/`anthropic`/`claude_subscription`/
-`typesafe` -- see "`halo providers`" below), and the `halo`
+`typesafe`/`huggingface` -- see "`halo providers`" below), and the `halo`
 command itself on PATH. Exit 0 unless something is `[MISSING]` (a `[WARN]`
 alone, e.g. "no Databricks configured", never fails the command).
 
@@ -788,7 +788,7 @@ halo doctor
   [OK] /improve: enabled=True hint=True model=(small/session model) since_days=7 max_candidates=8
   [OK] MCP servers: none configured
   [OK] Default model: not set in config.json -- built-in default 'or:deepseek/deepseek-v4.1-flash' applies (HALO_MODEL/routes.json still win when set)
-  [OK] Providers: 0/5 enabled (none)
+  [OK] Providers: 0/6 enabled (none)
   [WARN] halo command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
 ```
 (trimmed -- a real run has one line per check; see `docs/TROUBLESHOOTING.md`
@@ -854,7 +854,7 @@ update command: uv tool install --reinstall git+https://github.com/roloVibes/Hal
 
 ```
 Usage: halo providers [list|enable <name>|disable <name>|setup <name>]
-Providers: databricks, openrouter, anthropic, claude_subscription, typesafe
+Providers: databricks, openrouter, anthropic, claude_subscription, typesafe, huggingface
 ```
 
 Detected credentials/a real claude.ai login AUTO-enable a provider (H15
@@ -862,11 +862,13 @@ part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe once their key
 is found (env file, shell env, or the settings env chain), Databricks once
 a host AND token are found (same sources, plus `~/.databrickscfg`), Claude
 Code subscription (`cc:`) ONLY when `claude auth status` reports
-`loggedIn` with `authMethod` exactly `claude.ai`. No `halo init` run
+`loggedIn` with `authMethod` exactly `claude.ai`, Hugging Face (Halo 2.0.3
+round 4) once `HF_TOKEN` is found OR at least one `huggingface.endpoints`
+entry is configured. No `halo init` run
 is required for this. `~/.halo/config.json`'s `"providers"` block
 stores OVERRIDES only -- `enable <name>`/`disable <name>` write an explicit
 `true`/`false` there that always wins over auto-detection (`cc`/`ant`/
-`dbx`/`or` are accepted aliases for the canonical names); `setup <name>`
+`dbx`/`or`/`hf` are accepted aliases for the canonical names); `setup <name>`
 needs a real terminal and runs the same per-provider tab `halo init`
 shows.
 

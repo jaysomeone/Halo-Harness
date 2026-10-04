@@ -21,6 +21,9 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | a bare subscription alias, no prefix | `opus`, `sonnet`, `fable`, `haiku` | at a Databricks work box: `dbx:<ANTHROPIC_DEFAULT_*_MODEL>`; else `cc:` if logged in and no key is set; else `ant:` if a key is set; else an error naming both |
 | `ol:<model>` | `ol:qwen3:30b` | Ollama, the default host (see "Ollama" below) |
 | `ol:<model>@<hostname>` | `ol:qwen3:30b@lan`, `ol:gpt-oss:20b@cloud` | Ollama, a named entry in `ollama.hosts` -- local, LAN, or Ollama Cloud |
+| `hf:<org>/<model>` | `hf:Qwen/Qwen3-32B` | Hugging Face Inference Providers (the router), `:fastest` (highest throughput) implied |
+| `hf:<org>/<model>:<suffix>` | `hf:openai/gpt-oss-120b:groq`, `hf:Qwen/Qwen3-32B:cheapest`, `hf:...:preferred` | same router, a specific partner provider or the `:cheapest`/`:preferred` selection mode -- the whole suffix passes through verbatim on the wire |
+| `hf:endpoint/<name>` | `hf:endpoint/my-prod` | a dedicated Hugging Face Inference Endpoint, a named entry in `huggingface.endpoints` (see "Hugging Face" below) |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
 
 Parsing order (`model.py::parse_model_ref`): an exact match in
@@ -73,7 +76,9 @@ Databricks once a host AND token are found (same sources, plus
 `~/.databrickscfg`); Claude Code subscription (`cc:`) ONLY when `claude
 auth status` reports `loggedIn` with `authMethod` exactly `claude.ai` -- a
 `claude` driven by an API token or a custom base URL (a work box's own
-settings-driven login) never auto-enables it. `~/.halo/config.json`'s
+settings-driven login) never auto-enables it; Hugging Face (Halo 2.0.3
+round 4) once `HF_TOKEN` is found OR at least one `huggingface.endpoints`
+entry is configured -- either source alone is enough. `~/.halo/config.json`'s
 `"providers"` block stores OVERRIDES only: `halo providers enable/
 disable <name>` (or `/providers enable/disable <name>`, or completing a
 tab in `halo init`) writes an explicit `true`/`false` there that
@@ -88,7 +93,12 @@ own tabs, `halo providers`/`/providers`, and `doctor`):
 | `or:` | OpenRouter | `openrouter` |
 | `ant:` | Anthropic API (key) | `anthropic` |
 | `cc:` | Claude Code subscription | `claude_subscription` |
+| `hf:` | Hugging Face | `huggingface` |
 | *(none yet)* | TypeSafe | `typesafe` -- stores `TYPESAFE_API_KEY` only, for a later feature |
+
+Ollama (`ol:`) is deliberately NOT in this table -- see "Ollama" below,
+which covers its own multi-host reachability model instead of a single
+on/off flag.
 
 A hand-typed ref whose provider isn't enabled is refused with a one-line
 message -- for `claude_subscription` specifically (when auto-detection
@@ -262,8 +272,84 @@ model` path title generation/`/improve` already use, which builds its
 body directly rather than through `derive_request`.
 
 **Not yet in this round**: images (`images`, a user message's base64
-array), `format` (structured output), and Hugging Face's own `hf:` route
--- see `plans/2.0.3-ollama-round2-brief.md` and the rounds after it.
+array), `format` (structured output) -- see `plans/2.0.3-ollama-round2-
+brief.md` and the rounds after it.
+
+## Hugging Face
+
+Halo 2.0.3 round 4 (`plans/2.0.3-ollama-round2-brief.md`, design doc
+`docs/harness/LOCAL-MODELS-RESEARCH.md` section 9). Two fully separate
+products, both OpenAI-compatible, both reusing the SAME openai-chat
+request/response code every OpenRouter/Databricks-chat call already goes
+through (no second wire format) -- the brief's own framing: "this should
+be mostly config/routing, not a new wire format."
+
+**Inference Providers (the router)**: `hf:<org>/<model>` (optionally
+`:fastest`/`:cheapest`/`:preferred`/`:<provider-name>`, e.g.
+`hf:openai/gpt-oss-120b:groq` -- passed through VERBATIM in the wire
+`model` field, never parsed or validated by Halo) against
+`https://router.huggingface.co/v1`, `Authorization: Bearer $HF_TOKEN`.
+`HF_TOKEN` is the ONLY env var name read for this -- the research doc
+confirmed only this exact name ("Use a single Hugging Face token for all
+providers"); `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT accepted as
+fallbacks since neither was confirmed as an alias for the router
+specifically. `BRIDGE_HF_ROUTER_BASE_URL` (or the `HALO_`/`ROLO_CLAUDE_`
+twin, `config/paths.py::env_compat`) overrides the base URL for tests,
+exactly like `BRIDGE_OPENROUTER_BASE_URL`. A Team/Enterprise
+`huggingface.bill_to` config value (an org name) adds `X-HF-Bill-To` on
+every ROUTER request only -- never on a dedicated endpoint call, which has
+its own compute-time billing with no such header.
+
+**Dedicated Inference Endpoints**: a fundamentally different product (the
+research doc's own framing) -- the user provisions one specific model onto
+its own compute and gets back ITS OWN url and token, billed by compute
+time, never per-token. `hf:endpoint/<name>` looks `<name>` up in
+`huggingface.endpoints` (`~/.halo/config.json`, mirroring `ollama.hosts`'
+own shape: a list of `{name, url, token, default}`) and uses that entry's
+`url`/`token` AS-IS -- never the router's base URL, never `HF_TOKEN`. An
+entry with no `token` sends no `Authorization` header at all (the same
+"unauthenticated unless configured otherwise" default `ollama.hosts`
+uses); a name that isn't configured gives a plain message naming
+`huggingface.endpoints`, never a silent fall-back to the router. The exact
+per-endpoint URL *pattern* was UNCONFIRMED this round (no fetched page
+gave a concrete example) -- irrelevant to Halo either way, since the user
+supplies the full URL directly.
+
+**Dialect**: `openai-chat`, same as OpenRouter -- tools supported,
+reasoning passthrough the same way OpenRouter's own `reasoning.effort`
+field works, no OpenRouter-only fields (`provider`/`reasoning`/`models`/
+`plugins`/`usage`) ever sent to this host. `resolve_model_profile` for an
+`hf:` ref: the router's own cached catalog (below) when the bare
+`<org>/<model>` id -- suffix stripped -- is known, else the bare
+`ModelProfile` dataclass default; a dedicated endpoint ref always gets the
+dataclass default (it was never listed by the router's catalog at all).
+
+**Catalog**: `GET /v1/models` on the router, cached in `~/.halo/
+huggingface-models.json` (a SEPARATE file from OpenRouter's own
+`models.json` -- a colliding bare id between the two routers would
+otherwise cross-contaminate one flat file) with the same TTL knob every
+other network catalog here shares (`databricks.catalog_max_age_hours`,
+default 24h). Refreshed the same way OpenRouter's own catalog is: a
+background, staleness-gated worker on `/model` open and at app launch
+(never on the UI thread, never when the token is absent -- no network at
+all for the picker's first paint), plus an explicit force-refresh. Router
+models appear in the `/model` picker under a "Hugging Face" group once the
+provider is enabled. The router's exact per-entry `GET /v1/models` field
+names were NOT confirmed this round (no fetched page gave a concrete
+response body) -- the parser ASSUMES the same shape `probe_openrouter_
+models` already parses (OpenRouter's own `/models`: top-level
+`context_length`/`pricing.{prompt,completion}`), the closest confirmed
+precedent, and degrades to omitted fields rather than raising if a real
+response differs. Treat context/pricing from this catalog as best-effort
+until verified live.
+
+**Not yet in this round**: `hf:local/*` (llama-server/vLLM/LM
+Studio/TGI/`transformers serve` on default ports, plus manual server
+entries), the Hugging Face Hub cache scan, the shared `/local` discovery
+view, and the `halo init` interactive tab ("paste HF_TOKEN, add a
+dedicated endpoint, or rely on auto-detection") -- all round 5. `/providers`,
+`halo providers`, and `doctor`'s provider count already show Hugging Face
+today (unlike Ollama, which stays out of that generic table -- see above).
 
 ## Families and their rules
 
@@ -647,14 +733,17 @@ per-turn spend, and never conflated with the USD/1M-token prices above.
 ## The `/model` picker
 
 Opening `/model` with no argument triggers a background refresh of the
-Databricks catalog if it's older than `databricks.catalog_max_age_hours`
-(default 24h) -- the picker itself opens immediately with whatever's
-already cached; the refresh only ever notifies afterward if something
-changed. The picker is a filterable, arrow-key list (`Up`/`Down`/
-`PageUp`/`PageDown`/`Home`/`End` move the highlight, typing filters,
-`Enter` confirms, `Esc` cancels -- the filter box itself keeps keyboard
-focus throughout) grouped by provider/family, one header per group:
-OpenRouter, `Claude Code subscription` (shown only when `claude auth status`
+Databricks/OpenRouter/Hugging Face catalogs (each gated on that provider
+being enabled) if older than `databricks.catalog_max_age_hours` (default
+24h, the one shared staleness knob every network catalog here uses) --
+the picker itself opens immediately with whatever's already cached; the
+refresh only ever notifies afterward if something changed. The picker is
+a filterable, arrow-key list (`Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End`
+move the highlight, typing filters, `Enter` confirms, `Esc` cancels -- the
+filter box itself keeps keyboard focus throughout) grouped by provider/
+family, one header per group: OpenRouter, `Hugging Face` (Halo 2.0.3
+round 4 -- the router's own cached catalog, shown once the provider is
+enabled), `Claude Code subscription` (shown only when `claude auth status`
 reports an actual claude.ai login -- never on a box whose `claude` is only
 logged in via, say, a Databricks work box's own settings), and
 `Databricks (<family>)` per family, each row showing which gateway path

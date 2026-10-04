@@ -32,7 +32,12 @@ from __future__ import annotations
 from typing import Optional
 
 # Order matters for display only (the `providers` table/`/providers`).
-PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe")
+# Halo 2.0.3 round 4: "huggingface" added -- unlike "ollama" (round 2/3,
+# surfaced only via its own `/ollama` panel and doctor section, never this
+# generic table), the round 4 brief explicitly asks for `/providers`/
+# `halo providers`/doctor's enabled-count line to show Hugging Face, so it
+# joins this table while "ollama" still deliberately does not.
+PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe", "huggingface")
 
 LABELS = {
     "databricks": "Databricks",
@@ -40,6 +45,7 @@ LABELS = {
     "anthropic": "Anthropic API (key)",
     "claude_subscription": "Claude Code subscription",
     "typesafe": "TypeSafe",
+    "huggingface": "Hugging Face",
 }
 
 # item 21.6: the `dbx:`/`or:`/`ant:`/`cc:` prefix table -- also in
@@ -47,7 +53,7 @@ LABELS = {
 # for a later feature"), so it has no prefix of its own.
 PREFIXES = {
     "databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:",
-    "claude_subscription": "cc:", "typesafe": None,
+    "claude_subscription": "cc:", "typesafe": None, "huggingface": "hf:",
 }
 
 # A caller naturally has `ModelRef.provider` ("cc"), `init_providers.py`'s
@@ -57,6 +63,7 @@ PREFIXES = {
 _ALIASES = {
     "cc": "claude_subscription", "claude": "claude_subscription",
     "dbx": "databricks", "or": "openrouter", "ant": "anthropic",
+    "hf": "huggingface",
 }
 
 
@@ -255,6 +262,15 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
     if name == "claude_subscription":
         from halo_harness.init_providers import claude_login_available
         return claude_login_available()
+    if name == "huggingface":
+        # 2.0.3 round 4 brief item 3: "HF_TOKEN present OR at least one
+        # endpoint configured" -- either source alone is enough (a user who
+        # only ever uses a dedicated endpoint never needs HF_TOKEN at all).
+        from halo_harness.providers.config import resolve_huggingface
+        if resolve_huggingface(env) is not None:
+            return True
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints
+        return bool(resolve_huggingface_endpoints())
     if name == "typesafe":
         import os
         e = env if env is not None else os.environ

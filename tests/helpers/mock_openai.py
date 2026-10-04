@@ -536,6 +536,24 @@ class _Handler(BaseHTTPRequestHandler):
                 "ts": time.monotonic(),
             })
 
+        # Halo 2.0.3 round 4: path/bearer validation, both opt-in via the
+        # constructor (see MockUpstream's own docstring) -- a plain
+        # `MockUpstream()` (every pre-round-4 call site) gets `path_prefix
+        # == "/api/v1"` and `expected_bearer is None`, so `expected_path`
+        # always matches (the request was built from THIS SAME base_url)
+        # and the bearer check is skipped entirely: byte-for-byte the old
+        # behavior.
+        expected_path = mock.path_prefix.rstrip("/") + "/chat/completions"
+        if self.path != expected_path:
+            send_json_response(self, 404, {"error": f"path {self.path!r} not served (expected {expected_path!r})"})
+            return
+        if mock.expected_bearer is not None:
+            auth = self.headers.get("Authorization", "")
+            if auth != f"Bearer {mock.expected_bearer}":
+                send_json_response(self, 401, {"error": {"message": "invalid bearer token for this mock",
+                                                           "type": "authentication_error"}})
+                return
+
         model = (body or {}).get("model", "") or ""
         scenario = model[len("mock/"):] if model.startswith("mock/") else "model"
 
@@ -558,16 +576,69 @@ class _Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
 
     def do_GET(self):
+        # Halo 2.0.3 round 4: `GET <path_prefix>/models` (the Hugging Face
+        # router catalog fetch, and -- same shape -- OpenRouter's own
+        # `/models`) -- served only once a test sets `mock.models_
+        # response`; every pre-round-4 caller never sets it, so this falls
+        # straight through to the original unconditional 404 below.
+        mock: MockUpstream = self.server.mock  # type: ignore[attr-defined]
+        expected_path = mock.path_prefix.rstrip("/") + "/models"
+        if self.path == expected_path and mock.models_response is not None:
+            with mock._lock:
+                mock._requests.append({
+                    "method": "GET", "path": self.path,
+                    "headers": {k.lower(): v for k, v in self.headers.items()}, "body": None,
+                    "ts": time.monotonic(),
+                })
+            if mock.expected_bearer is not None:
+                auth = self.headers.get("Authorization", "")
+                if auth != f"Bearer {mock.expected_bearer}":
+                    send_json_response(self, 401, {"error": {"message": "invalid bearer token for this mock",
+                                                               "type": "authentication_error"}})
+                    return
+            send_json_response(self, 200, mock.models_response)
+            return
         send_json_response(self, 404, {"error": "mock upstream only serves POST"})
 
 
 class MockUpstream:
-    def __init__(self):
+    """Halo 2.0.3 round 4: two constructor options, both optional and
+    both defaulting to the pre-round-4 behavior exactly, so every existing
+    `MockUpstream()` call site (OpenRouter/Databricks-chat tests) is
+    unaffected --
+
+    * `path_prefix` (default `"/api/v1"`, this class's own long-standing
+      default): `base_url` serves from `http://127.0.0.1:<port><path_
+      prefix>`, and `do_POST`/`do_GET` now VALIDATE the incoming request's
+      path against `<path_prefix>/chat/completions` / `<path_prefix>/
+      models` -- a real base_url/path-building bug would now 404 here
+      instead of silently working because the old handler never checked
+      the path at all. Lets the SAME scripted `SCENARIOS` serve as the
+      Hugging Face router stand-in (`/v1`) and the dedicated-endpoint
+      stand-in (an arbitrary prefix), per the round 4 brief's "parameterize
+      ... rather than writing a second fake."
+    * `expected_bearer` (default `None`, meaning "don't check" -- the
+      pre-round-4 behavior): when set, a request whose `Authorization`
+      header isn't exactly `f"Bearer {expected_bearer}"` gets a 401 instead
+      of running its scenario, for the "bearer from HF_TOKEN vs an endpoint
+      token, never cross-wired" pinning tests -- two `MockUpstream`
+      instances with two different `expected_bearer` values, standing in
+      for the router and a dedicated endpoint at once.
+
+    `models_response`, set after construction (never a constructor arg --
+    most callers never need it), is served verbatim on `GET <path_prefix>/
+    models` once set; `None` (the default) keeps `do_GET`'s original
+    unconditional 404."""
+
+    def __init__(self, *, path_prefix: str = "/api/v1", expected_bearer: "str | None" = None):
         self._server: _ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._requests: list[dict] = []
         self._lock = threading.Lock()
         self.disconnect_events: list[dict] = []
+        self.path_prefix = path_prefix
+        self.models_response = None
+        self.expected_bearer = expected_bearer
 
     @property
     def port(self) -> int:
@@ -576,7 +647,7 @@ class MockUpstream:
 
     @property
     def base_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/api/v1"
+        return f"http://127.0.0.1:{self.port}{self.path_prefix}"
 
     @property
     def requests(self) -> list[dict]:

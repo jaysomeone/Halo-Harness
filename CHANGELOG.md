@@ -11,9 +11,10 @@ version.
 ## [2.0.3] - unreleased
 
 Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
-and onward). Rounds 1-3 (research, the `ol:` provider, hardware/host
-analysis and roles) landed so far; rounds 4-6 (Hugging Face, docs/release
-prep) are still to come under this SAME version number.
+and onward). Rounds 1-4 (research, the `ol:` provider, hardware/host
+analysis and roles, and the `hf:` route) landed so far; rounds 5-6
+(`hf:local/*`, the shared `/local` discovery view, docs/release prep) are
+still to come under this SAME version number.
 
 1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
    dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
@@ -69,6 +70,32 @@ prep) are still to come under this SAME version number.
    force a reload), counts other loaded models' `size_vram` as reclaimable
    headroom, and -- when the weights provably don't fit even after that --
    falls back to a conservative 8192 instead of the 131072 hard cap.
+3. **`hf:` route -- Hugging Face Inference Providers router and dedicated
+   Inference Endpoints** (round 4): a new `huggingface` provider reusing
+   the existing openai-chat request/stream code unchanged (no new wire
+   format -- tools supported, reasoning passthrough like OpenRouter's own,
+   no host-specific fields). `hf:<org>/<model>` (optionally `:fastest`/
+   `:cheapest`/`:preferred`/`:<provider>`, passed through verbatim on the
+   wire) against the router (`https://router.huggingface.co/v1`,
+   `Authorization: Bearer $HF_TOKEN`, `BRIDGE_HF_ROUTER_BASE_URL`
+   overridable for tests); `hf:endpoint/<name>` against a fully separate
+   `huggingface.endpoints` config entry's own `url`/`token` (mirroring
+   `ollama.hosts`' shape) -- the two credential sources never cross-wire.
+   An optional `huggingface.bill_to` org name adds `X-HF-Bill-To` on router
+   requests only. The router's `GET /v1/models` catalog is cached
+   (`~/.halo/huggingface-models.json`, the same TTL knob every other
+   network catalog here shares) and surfaces in the `/model` picker under
+   a "Hugging Face" group once enabled, with no network cost to the
+   picker's first paint when the provider isn't configured. Enablement
+   (`HF_TOKEN` present OR at least one endpoint configured), `/providers`/
+   `halo providers`/`doctor`'s provider count, and `resolve_model_profile`
+   all cover the new provider; a missing/misconfigured credential gives a
+   plain message naming the right config key instead of the generic
+   "OpenRouter not configured" every other unconfigured chat-dialect route
+   used to get mislabeled as. `tests/helpers/mock_openai.py`'s `MockUpstream`
+   gained a `path_prefix`/`expected_bearer`/`models_response` constructor
+   option so the SAME scripted scenarios serve as the router and endpoint
+   stand-ins, rather than a second fake server.
 
 ## [2.0.2] - 2026-10-04
 

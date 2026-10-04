@@ -291,6 +291,19 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
             oai_body["max_tokens"] = cached_limit
 
     if req.creds is None:
+        # 2.0.3 round 4: a huggingface route with no creds gets its OWN
+        # message naming BOTH config keys (`HF_TOKEN` for the router,
+        # `huggingface.endpoints` for a named dedicated endpoint) -- before
+        # this branch existed, the two-way Databricks/"everything else"
+        # label below mislabeled it "OpenRouter not configured", which is
+        # wrong and unhelpful for either hf: failure shape (brief item 2:
+        # "a missing entry gives a plain ProviderNotConfigured message
+        # naming the config key").
+        if req.route.provider == "huggingface":
+            raise ProviderNotConfigured(
+                "Hugging Face not configured -- set HF_TOKEN for the router, "
+                "or add this name to huggingface.endpoints"
+            )
         provider_label = "Databricks" if req.route.provider == "databricks" else "OpenRouter"
         raise ProviderNotConfigured(f"{provider_label} not configured")
 

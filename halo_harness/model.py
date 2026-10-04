@@ -28,6 +28,8 @@ _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
 _CC_PREFIX = "cc:"
 _OL_PREFIX = "ol:"
+_HF_PREFIX = "hf:"
+_HF_ENDPOINT_PREFIX = "endpoint/"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -133,13 +135,17 @@ def _refuse_if_disabled(provider_key: str) -> None:
 @dataclass(frozen=True)
 class ModelRef:
     raw: str
-    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama"
-    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol: prefix (and ol:'s own @host suffix) stripped
+    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface"
+    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
     dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "ollama"
     # Halo 2.0.3 round 2: the `@<hostname>` part of `ol:<model>@<hostname>`
     # (research doc Q6/Q7) -- which entry of `ollama.hosts` this ref names;
     # `None` means "the default host" (`providers.ollama.resolve_ollama_
-    # host(None)`). Always `None` for every other provider.
+    # host(None)`). Halo 2.0.3 round 4 reuses this SAME field for
+    # `hf:endpoint/<name>` -- which entry of `huggingface.endpoints` this
+    # ref names (`providers.huggingface.resolve_huggingface_endpoint`);
+    # `None` for an `hf:<org>/<model>` router ref. Always `None` for every
+    # other provider.
     host: Optional[str] = None
 
 
@@ -196,6 +202,39 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         model_part, _, host_part = bare.partition("@")
         _refuse_if_disabled("ollama")
         return ModelRef(raw=raw, provider="ollama", model=model_part, dialect="ollama", host=host_part or None)
+    if resolved.startswith(_HF_PREFIX):
+        # Halo 2.0.3 round 4: `hf:<org>/<model>` (optionally `:fastest`/
+        # `:cheapest`/`:preferred`/`:<provider>`, passed through VERBATIM in
+        # `ref.model` -- research doc section 9: the suffix is part of the
+        # wire `model` field itself, never a separate parameter) routed to
+        # the Inference Providers router, dialect "openai-chat" so this
+        # reuses the SAME request/stream/profile code OpenRouter already
+        # has (`providers.profiles.resolve_profile`'s generic openai-chat
+        # fallback branch -- "tools supported, reasoning passthrough as
+        # OpenRouter does, no host-specific fields" falls out of that
+        # branch for free once `route.provider` is neither "openrouter" nor
+        # "databricks"). `hf:endpoint/<name>` is the OTHER shape (a
+        # dedicated Inference Endpoint, never the router): `host` carries
+        # the bare `<name>` -- the SAME field `ol:<model>@<hostname>` uses
+        # to name a config entry, reused here rather than adding a second
+        # field for the identical concept (headless._resolve_creds checks
+        # `ref.host` to decide which of the two credential sources to
+        # resolve). An endpoint ref's `model` is also the bare `<name>`
+        # (there is no separate model portion in this shape at all -- a
+        # dedicated endpoint serves exactly one model, chosen at
+        # provisioning time, never per request).
+        bare = resolved[len(_HF_PREFIX):]
+        _refuse_if_disabled("huggingface")
+        if bare.startswith(_HF_ENDPOINT_PREFIX):
+            name = bare[len(_HF_ENDPOINT_PREFIX):]
+            if not name:
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:endpoint/ needs a <name> naming a huggingface.endpoints entry)")
+            return ModelRef(raw=raw, provider="huggingface", model=name, dialect="openai-chat", host=name)
+        if not bare:
+            raise InvalidModelError(
+                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix] or endpoint/<name>)")
+        return ModelRef(raw=raw, provider="huggingface", model=bare, dialect="openai-chat")
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
@@ -260,7 +299,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
     hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, ol:, vendor/model, "
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, ol:, hf:, vendor/model, "
         f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 
@@ -402,6 +441,28 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             # (Claude Code resolved it, whatever it is) -- vision=True for
             # the same reason reasoning="native" already is here.
             return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, vision=True, reasoning="native")
+
+    if ref.provider == "huggingface":
+        # Halo 2.0.3 round 4 brief: just two tiers for `hf:` refs -- the
+        # router catalog (below), else the bare dataclass default; never
+        # OpenRouter's own models.json/routes.json profiles tiers (a
+        # colliding id there would be a DIFFERENT model on a different
+        # host) and never the vendored-fallback tier (that's keyed for
+        # databricks/openrouter catalogs specifically). `ref.host` set
+        # means an `hf:endpoint/<name>` ref -- a dedicated endpoint has no
+        # catalog entry of its own (it was never listed by the router's
+        # `GET /v1/models` at all), so this always falls to the dataclass
+        # default for one. A router ref's `:suffix` (`:fastest`/`:cheapest`/
+        # `:preferred`/`:<provider>`) is stripped before the catalog lookup
+        # -- the catalog is keyed by bare `<org>/<model>`, never by the
+        # routing suffix.
+        if ref.host is None:
+            from halo_harness.providers.huggingface_catalog import load_hf_models_json
+            bare_id = ref.model.split(":", 1)[0]
+            entry = load_hf_models_json(state_dir).get(bare_id)
+            if entry:
+                return _profile_from_models_json_entry(entry)
+        return ModelProfile()
 
     models = load_models_json(state_dir)
     entry = models.get(ref.model)

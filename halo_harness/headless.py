@@ -99,6 +99,25 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         if host is None:
             return None
         return ProviderCreds(base_url=host.url, api_key=host.api_key or "")
+    if ref.provider == "huggingface":
+        # Halo 2.0.3 round 4: `ref.host` set means `hf:endpoint/<name>` --
+        # a dedicated Inference Endpoint's OWN url/token, resolved from
+        # `huggingface.endpoints` and used as-is; `ref.host is None` means
+        # the router, resolved from HF_TOKEN. Pinned by
+        # tests/test_providers_huggingface.py: these two sources must never
+        # cross-wire (an endpoint's own token never substitutes for
+        # HF_TOKEN or vice versa).
+        if ref.host:
+            from halo_harness.providers.huggingface import resolve_huggingface_endpoint
+            ep = resolve_huggingface_endpoint(ref.host)
+            if ep is None:
+                return None
+            return ProviderCreds(base_url=ep.url, api_key=ep.token or "")
+        from halo_harness.providers.config import resolve_huggingface
+        hf = resolve_huggingface(env)
+        if hf is None:
+            return None
+        return ProviderCreds(base_url=hf.base_url, api_key=hf.api_key)
     return None
 
 
@@ -747,8 +766,11 @@ def build_session(
                 # remembered from a DIFFERENT box that actually had that
                 # named host) is this provider's own equivalent of
                 # "no credentials configured", now that `_resolve_creds`
-                # models it too.
-                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama")
+                # models it too. 2.0.3 round 4: `huggingface` added for the
+                # SAME reason -- a stale `hf:endpoint/<name>` remembered
+                # from a box whose `huggingface.endpoints` no longer has
+                # that name (or no HF_TOKEN for a stale router ref).
+                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama", "huggingface")
                         and _resolve_creds(last_ref, settings) is None):
                     print(f"halo: the last-used model {last_model_raw!r} has no credentials configured on "
                           f"this box -- using the configured default instead", file=sys.stderr)
@@ -1141,6 +1163,16 @@ def build_session(
         from halo_harness.providers.config import merge_databricks_headers
         dbx_cfg = _resolve_dbx_config_for_headers(settings)
         extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
+    if model_ref.provider == "huggingface" and not model_ref.host:
+        # Halo 2.0.3 round 4 (brief item 1): `X-HF-Bill-To` is a ROUTER-only
+        # header (research doc section 9: Team/Enterprise billing a
+        # specific org) -- `model_ref.host` set means `hf:endpoint/<name>`
+        # (a dedicated endpoint, its own compute-time billing, no such
+        # header), so this is gated to the router shape only.
+        from halo_harness.providers.huggingface import resolve_huggingface_bill_to
+        bill_to = resolve_huggingface_bill_to()
+        if bill_to:
+            extra_headers = {**(extra_headers or {}), "X-HF-Bill-To": bill_to}
     if cli_flags.get("betas"):
         # W4a `--betas`: "Beta headers to include in API requests (API key
         # users only)" -- a comma-joined `anthropic-beta` header, the real

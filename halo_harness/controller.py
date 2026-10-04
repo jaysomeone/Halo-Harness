@@ -762,6 +762,37 @@ class Controller:
                 "dbu": dbu if dbu != "?" else None,
                 "task": e.get("task"),
             })
+        # Halo 2.0.3 round 4 (brief item 4): the router's cached catalog
+        # (`huggingface-models.json`, a pure file read -- the background
+        # worker that WRITES it, tui/slash.py's `catalog_auto_refresh_
+        # worker`, is the only thing that ever touches the network, and
+        # only post-first-paint) -- "router models appear in the picker
+        # under a Hugging Face group when the route is enabled" /
+        # "keep the first paint of the picker unaffected when the token is
+        # absent (no network)": `hf_enabled` gates the read exactly like
+        # `or_enabled` gates OpenRouter's own `load_models_json` above, so
+        # an unconfigured Hugging Face costs this method nothing.
+        hf_detected = credentials_present("huggingface", env=env)
+        hf_enabled = is_enabled("huggingface", detected=hf_detected)
+        try:
+            from halo_harness.providers.huggingface_catalog import load_hf_models_json
+            hf_models = load_hf_models_json(self.state_dir) or {} if hf_enabled else {}
+        except Exception:
+            hf_models = {}
+        for name in sorted(hf_models):
+            ref = f"hf:{name}"
+            if ref in seen:
+                continue
+            entry = hf_models.get(name) or {}
+            pricing = entry.get("pricing") or {}
+            out.append({
+                "ref": ref, "context_tokens": entry.get("context_length"),
+                "max_output_tokens": None,
+                "price_in_per_m": _per_m(pricing.get("prompt")), "price_out_per_m": _per_m(pricing.get("completion")),
+                "provider": "huggingface", "group": label_for("huggingface"),
+            })
+        _maybe_hint("huggingface", detected=hf_detected)
+
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,
