@@ -16,3 +16,6 @@ wheels/
 
 # pip wheel-build artefacts
 build/
+
+# A Windows shell-cache folder that an env-var mishap created in the checkout; never ours
+%SystemDrive%/
