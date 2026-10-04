@@ -148,3 +148,77 @@ the authority for the order after 2.0.2.
   servers. Research first (how users actually run local HF models), in the
   2.0.3 round-1 research brief.
 
+
+## ADDED 2026-10-04 (rolo): local-model excellence and "find and use" join 2.0.3
+
+- rolo, after the Ollama LAN fix on the build host: "being able to use local
+  llms as best as possible or better than anything out there would be a
+  huge win"; the Mac has its own unshared Ollama models; Hugging Face files
+  saved locally must be found and USED, with a way to tell Halo where they
+  are in a session or in the wizard.
+- 2.0.3 gains two rounds between round 5 and the docs round (brief
+  `2.0.3-ollama-round2-brief.md`):
+  - Round 5b "local-model excellence": fit calibration from Ollama's own
+    `/api/ps` telemetry with learned per-host caps (fixes the remote-host
+    overload seen live), optional ssh GPU read for remote hosts, stable
+    request prefix for KV-cache reuse, VRAM-aware role defaults, tokens per
+    second and offload in the UI, a per-OS host checklist (`halo ollama
+    doctor`), Apple Silicon unified-memory handling and the Mac's loopback-
+    only daemon, MLX and LM Studio detection.
+  - Round 5c "find local model files and make them usable": user-named
+    model folders (`huggingface.model_dirs`, `/local add`, a wizard "Local
+    models" step), fit read from GGUF headers and safetensors configs,
+    managed runtime child processes (`halo local serve`) with a consented,
+    checksum-verified fetch of the pinned llama.cpp release when none is
+    installed, and import into Ollama (`halo local import`).
+- Decision recorded (rolo asked about using saved models with no server at
+  all): no in-process inference by default; the managed runtime gives the
+  same engine and speed without tying the model to the TUI process or
+  adding compiled bindings to the install, and it still serves the LAN
+  topology. Parked for 2.0.5 as an optional experiment: an in-process MLX
+  backend on Apple Silicon (pip-only), measured against the managed server
+  before it can become a default.
+
+## ADDED 2026-10-04 (rolo): what makes Halo the best harness for local models
+
+rolo asked for the ideas that give Halo a massive edge for local LLMs and GPU
+hardware. Placed as follows (2.0.3 items are in the brief's Round 5b):
+
+- 2.0.3 (Round 5b): schema-constrained tool calls on hosts that support it
+  plus a one-round local repair loop; the wizard detects hardware and models
+  first and recommends fits in plain sentences.
+- 2.0.5 (hardening, the model gym): the gym runs on THIS machine's models
+  and hardware, scores each local model per role on real Halo tasks
+  (tool-call accuracy, edit success, context recall, tokens per second) and
+  proposes the role table from data; a 60-second local acceptance check in
+  `halo doctor` (load, tool call, structured output, compaction) with
+  PASS/FAIL per model; an enforced offline mode ("nothing leaves this
+  machine": only allow-listed local hosts reachable, shown in the status
+  bar); hybrid escalation rules (local first, cloud when the local judge
+  reports low confidence or tools fail twice) as an explicit, visible
+  policy; a "saved versus cloud" meter per session; the in-process MLX
+  experiment on Apple Silicon.
+- 2.0.6 (embeddings): local embeddings through Ollama or a managed server
+  for memory and search, same fit and calibration rules.
+- 3.0.1.1 (research): peer Halo instances sharing their GPUs on a LAN
+  (the Mac's small model as a helper to the PC's main model and back).
+
+## MOVED 2026-10-04 (rolo): the local-model edge items join 2.0.3
+
+rolo: "Let's do all that and move any you support or research in other
+updates added to 2.0.3." Applied as:
+
+- Into 2.0.3 (brief Rounds 5d and 5e): the model gym on this machine with
+  `halo gym propose` for the role table, the 60-second local acceptance
+  check in `halo doctor --local`, enforced offline mode, explicit hybrid
+  escalation rules, the "saved versus cloud" meter.
+- Stays where it was, with the reason: the in-process MLX backend stays a
+  2.0.5 experiment (it can only be verified on rolo's Mac, which workers
+  cannot reach); peer GPU sharing stays 3.0.1.1 research under rolo's own
+  rule that it starts only after 2.0.9 ships; the embeddings pack stays
+  2.0.6 as its own version (its local fit rules reuse 2.0.3's).
+- 2.0.5 hardening therefore keeps: soak and watchdog, MCP connects off the
+  TUI startup path, CI and release script, invariants, the carried fix-pass
+  items, and the gym's cloud-model ranking extension.
+- 2.0.3 round order: 5 (running) -> 5b -> 5c -> 5d -> 5e -> 6 -> Opus review
+  -> fix pass -> tag v2.0.3.
