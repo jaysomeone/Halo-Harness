@@ -1030,31 +1030,54 @@ def _ollama_worker(app, args: str) -> None:
     app.call_from_thread(app.push_screen, OllamaStatus(analyses, refresh=lambda: _ollama_analyses(args)))
 
 
+def _local_view_rows(args: str) -> list:
+    """Shared by `_handle_local`'s initial load and the dialog's own `r`
+    refresh callback -- `refresh=True` iff `args` is exactly `"refresh"`/
+    `"--refresh"`, the same vocabulary `halo local --refresh` accepts."""
+    from halo_harness.providers.local_models import build_local_view
+    refresh = (args or "").strip().lower() in ("refresh", "--refresh")
+    return build_local_view(refresh=refresh)
+
+
 async def _handle_local(app, args: str) -> None:
-    """Halo 2.0.3 round 3 (brief item 6): answers from `roles.small` (an
-    `ol:` ref this round -- Hugging Face joins in round 5) WITHOUT
-    touching the main transcript's context -- `Session.call_small_model`
-    builds its body directly, never through `derive_request`/`self.log`
-    (see that method's own docstring), so nothing here can leak into a
-    later turn's history regardless of what the small model answers."""
-    question = (args or "").strip()
-    if not question:
-        await app.transcript.add_note(
-            "Usage: /local <question> -- answers from the roles.small model (an ol: ref this round) "
-            "without adding anything to the main conversation.", kind="command")
+    """Halo 2.0.3 round 3 (brief item 6) + round 5 (brief item 4): `/local`
+    with no arguments (or `refresh`/`--refresh`) opens the merged-view
+    dialog (Ollama hosts + Hugging Face local servers + the HF Hub cache),
+    off the UI thread -- every source here can touch the network. Any
+    OTHER argument text is round 3's own behaviour, unchanged: a one-shot
+    question answered from `roles.small` WITHOUT touching the main
+    transcript's context -- `Session.call_small_model` builds its body
+    directly, never through `derive_request`/`self.log` (see that
+    method's own docstring) -- now also accepting an `hf:` small-role ref,
+    not just `ol:` (round 5)."""
+    stripped = (args or "").strip()
+    if not stripped or stripped.lower() in ("refresh", "--refresh"):
+        app.run_worker(lambda: _local_dialog_worker(app, stripped), thread=True, name="local", group="local")
         return
+    question = stripped
     session = getattr(app.controller, "session", None)
     if session is None:
         await app.transcript.add_note("/local: no live session.", kind="command")
         return
     ref = getattr(session, "small_model_ref", None) or session.model_ref
-    if ref.provider != "ollama":
+    if ref.provider not in ("ollama", "huggingface"):
         await app.transcript.add_note(
-            f"/local needs roles.small set to an ol: model (currently resolves to {ref.raw!r}); "
-            f"set one via /roles, the model picker's u action, or `ollama.hosts`/roles.small in config.",
-            kind="command")
+            f"/local needs roles.small set to an ol: or hf: model (currently resolves to {ref.raw!r}); "
+            f"set one via /roles, the model picker's u action, or `ollama.hosts`/`huggingface.*`/roles.small "
+            f"in config.", kind="command")
         return
     app.run_worker(lambda: _local_worker(app, question, ref), thread=True, name="local", group="local")
+
+
+def _local_dialog_worker(app, args: str) -> None:
+    from halo_harness.tui.dialogs.local_status import LocalStatus
+    rows = _local_view_rows(args)
+    # `r` inside the dialog always forces a true refresh (brief: "/local
+    # refresh re-probes everything") regardless of how the dialog was
+    # first opened -- unlike `/ollama`'s own `r` (which replays whatever
+    # args it was first opened with), a stale "configured, not probed"
+    # manual-entry row is exactly the case `r` exists to fix.
+    app.call_from_thread(app.push_screen, LocalStatus(rows, refresh=lambda: _local_view_rows("refresh")))
 
 
 def _local_worker(app, question: str, ref) -> None:

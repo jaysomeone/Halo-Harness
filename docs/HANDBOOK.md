@@ -15,9 +15,11 @@ halo                         # full-screen TUI
 
 1. **`halo init`** walks one wizard, Back/Skip/Next (Finish on the last
    step) in the footer, nothing exiting to the console in between:
-   **Providers** (pick Databricks/OpenRouter/the Anthropic API/your Claude
-   subscription, paste the one credential it's missing, repeat for
-   another); **Default model** (a picker across everything just
+   **Providers** (one tab each for Databricks/OpenRouter/the Anthropic
+   API/your Claude subscription/Ollama/Hugging Face/TypeSafe -- paste the
+   credential a tab is missing, add a local/LAN host or server where that
+   applies, Save, repeat for another, any tab Skippable); **Default
+   model** (a picker across everything just
    configured); **Permission mode** (`auto` recommended); **Theme** (six
    built-ins, a live preview); **Roles** (a switch, default on, plus three
    presets); **Organizations** (a switch, default off, plus a default

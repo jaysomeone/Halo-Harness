@@ -116,14 +116,23 @@ configured entry; `--refresh` bypasses the short-TTL catalog cache. In
 interactive dialog (`r` re-reads live). See `docs/MODELS.md`'s Ollama
 section.
 
-### `/local <question>`
-Halo 2.0.3 round 3 (Ollama-only this round; Hugging Face joins round 5):
-answers `<question>` from the `small` role (an `ol:` ref) via a one-shot
-call that never touches the main transcript's context -- the question
-and answer show up as a note, never as a logged user/assistant turn, so
-nothing here is replayed into a later request. Needs `roles.small` set to
-an `ol:` model (`/roles`, `/role small ol:...`, or the model picker's `u`
-action); errors plainly, never silently, when it isn't.
+### `/local [refresh]` / `/local <question>`
+Halo 2.0.3 round 5 widens this from Ollama-only (round 3). Bare `/local`
+(or `/local refresh`) opens the shared local-model discovery view --
+Ollama hosts, running Hugging Face local servers (auto-detected plus any
+configured `huggingface.local_servers` entry), and the Hugging Face Hub
+cache, merged into one list with a group label per source/host; `[TUI-
+only for the interactive dialog]` -- in `-p`, prints the same text `halo
+local` does (see `docs/COMMANDS.md`); in the TUI, opens an interactive
+dialog (`r` re-reads live, and additionally probes every manual Hugging
+Face entry -- a bare open never does). `/local <question>` (any other
+text) answers `<question>` from the `small` role -- now an `ol:` OR `hf:`
+ref -- via a one-shot call that never touches the main transcript's
+context: the question and answer show up as a note, never as a logged
+user/assistant turn, so nothing here is replayed into a later request.
+Needs `roles.small` set to an `ol:`/`hf:` model (`/roles`, `/role small
+ol:...`, or the model picker's `u` action); errors plainly, never
+silently, when it isn't.
 
 ### `/memory`
 Shows the auto-memory directory path, whether `MEMORY.md` exists, and how

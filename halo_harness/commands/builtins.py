@@ -345,24 +345,35 @@ def _cmd_ollama(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_local(args: str, facade: HeadlessFacade) -> str:
-    """Halo 2.0.3 round 3 (brief item 6): answers `args` from `roles.
-    small` (an `ol:` ref this round) via `Session.call_small_model` --
-    NEVER through `derive_request`/`session.log`, so this never becomes
-    part of the main transcript's context (see that method's own
-    docstring). `facade.session` is the live session when one is
-    running; `None` in a context with no live session at all (e.g. a
-    unit test facade) is reported plainly, never a traceback."""
-    question = (args or "").strip()
-    if not question:
-        return ("Usage: /local <question> -- answers from the roles.small model (an ol: ref this round) "
-                "without adding anything to the main conversation.")
+    """Halo 2.0.3 round 3 (brief item 6) + round 5 (brief item 4): the
+    plain-text fallback (`-p`, or the TUI falling through to `Controller.
+    run_slash`) -- the TUI's own `/local` (`tui/slash.py::_handle_local`)
+    opens the interactive merged-view dialog instead, off the UI thread,
+    the same "print vs. dialog" split `/ollama`/`_cmd_ollama` already use.
+
+    Bare `/local` (or `/local refresh`) prints the SAME merged view `halo
+    local [--refresh]` does (`providers.local_models.build_local_view`/
+    `format_local_view`). Any OTHER argument text answers `args` as a
+    question from `roles.small` (an `ol:` OR `hf:` ref, round 5 widens
+    this from `ol:`-only) via `Session.call_small_model` -- NEVER through
+    `derive_request`/`session.log`, so this never becomes part of the
+    main transcript's context (see that method's own docstring).
+    `facade.session` is the live session when one is running; `None` in a
+    context with no live session at all (e.g. a unit test facade) is
+    reported plainly, never a traceback."""
+    stripped = (args or "").strip()
+    if not stripped or stripped.lower() in ("refresh", "--refresh"):
+        from halo_harness.providers.local_models import build_local_view, format_local_view
+        return format_local_view(build_local_view(refresh=bool(stripped)))
+    question = stripped
     session = facade.session
     if session is None:
         return "/local: no live session."
     ref = getattr(session, "small_model_ref", None) or session.model_ref
-    if ref.provider != "ollama":
-        return (f"/local needs roles.small set to an ol: model (currently resolves to {ref.raw!r}); "
-                f"set one via /roles, the model picker's u action, or `ollama.hosts`/roles.small in config.")
+    if ref.provider not in ("ollama", "huggingface"):
+        return (f"/local needs roles.small set to an ol: or hf: model (currently resolves to {ref.raw!r}); "
+                f"set one via /roles, the model picker's u action, or `ollama.hosts`/`huggingface.*`/roles.small "
+                f"in config.")
     try:
         return session.call_small_model(
             system_text="You are a fast local assistant answering a standalone question directly and "
@@ -1242,8 +1253,8 @@ _BUILTIN_SPECS = {
     "mcp": ("core", "List configured MCP servers", None, _cmd_mcp),
     "ollama": ("core", "Per-host Ollama analysis: reachability, loaded models, context, tool-catalog sizing",
                "[--host NAME] [--refresh]", _cmd_ollama),
-    "local": ("core", "Ask the roles.small model (an ol: ref this round) a standalone question",
-              "<question>", _cmd_local),
+    "local": ("core", "Local models: merged Ollama/Hugging Face/cache view, or ask roles.small a question",
+              "[refresh] | <question>", _cmd_local),
     "memory": ("core", "Show the auto-memory directory and index", None, _cmd_memory),
     "permissions": ("core", "Show the active permission mode and rule counts", None, _cmd_permissions),
     "plan": ("ui", "Review the current plan", None, _cmd_plan),

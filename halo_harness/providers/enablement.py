@@ -266,11 +266,36 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
         # 2.0.3 round 4 brief item 3: "HF_TOKEN present OR at least one
         # endpoint configured" -- either source alone is enough (a user who
         # only ever uses a dedicated endpoint never needs HF_TOKEN at all).
+        # Round 5: a manually-configured `huggingface.local_servers` entry
+        # is a THIRD, equally-sufficient source -- auto-DETECTED servers are
+        # deliberately NOT checked here (that needs a live network probe;
+        # this function's whole contract, shared with every other provider
+        # branch on this page, is config/env reads only, never network).
         from halo_harness.providers.config import resolve_huggingface
         if resolve_huggingface(env) is not None:
             return True
-        from halo_harness.providers.huggingface import resolve_huggingface_endpoints
-        return bool(resolve_huggingface_endpoints())
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints, resolve_huggingface_local_servers
+        if resolve_huggingface_endpoints():
+            return True
+        return bool(resolve_huggingface_local_servers())
+    if name == "ollama":
+        # Round 5: config-only, never a network probe (same contract as
+        # every branch on this page) -- `ollama.hosts` carries at least one
+        # EXPLICIT entry, or `OLLAMA_HOST` names a specific daemon.
+        # Deliberately NOT added to PROVIDER_NAMES/LABELS/PREFIXES/
+        # _ALIASES above -- keeping "ollama" out of the generic
+        # `/providers`/`halo providers`/doctor's enabled-count table is a
+        # decision rounds 3/4 already made on purpose (see PROVIDER_NAMES's
+        # own comment) and round 5 does not revisit it. This branch exists
+        # ONLY so `halo init`'s new Ollama tab (`init_providers.py`) can ask
+        # `reachability.reachability_tag("ollama")` for a real probe
+        # without that tab first joining the generic table.
+        import os
+        e = env if env is not None else os.environ
+        if e.get("OLLAMA_HOST"):
+            return True
+        from halo_harness.theme import get_config_value
+        return bool(get_config_value("ollama.hosts", default=None))
     if name == "typesafe":
         import os
         e = env if env is not None else os.environ

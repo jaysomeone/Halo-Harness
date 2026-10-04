@@ -91,18 +91,24 @@ _EXTENDED_SCAN_ROOTS = ("halo_harness/", "tests/", "docs/", "README.md", "CHANGE
 
 
 def _tracked_files() -> "list[Path]":
-    """`git ls-files` in a git checkout; otherwise (the tar copy the Kali
-    suite runs from, a source archive) a walk of the tree minus the
-    directories git never tracks, so the scan runs on every copy the suites
-    run from instead of erroring out where there is no `.git`."""
+    """`git ls-files` PLUS `git ls-files --others --exclude-standard` (2.0.3
+    round 4 fix-pass note: a worker's own NEW, still-untracked files went
+    unscanned until staged -- two "Bearer <fake-token>" literals in a new
+    test slipped through the worker's own full run this way and only
+    surfaced at review) in a git checkout; otherwise (the tar copy the
+    Kali suite runs from, a source archive) a walk of the tree minus the
+    directories git never tracks, so the scan runs on every copy the
+    suites run from instead of erroring out where there is no `.git`."""
     # This file names every banned string, so it is the one tracked file
     # the scan must never read (untracked while it was written, which hid
     # the self-match until the first git-less run on the Kali copy).
     self_path = Path(__file__).resolve()
     try:
-        out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
-        return [REPO_DIR / line for line in out.stdout.splitlines()
-                if line.strip() and (REPO_DIR / line).resolve() != self_path]
+        tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
+        untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                                    capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
+        lines = list(dict.fromkeys(tracked.stdout.splitlines() + untracked.stdout.splitlines()))
+        return [REPO_DIR / line for line in lines if line.strip() and (REPO_DIR / line).resolve() != self_path]
     except (OSError, subprocess.CalledProcessError):
         pass
     skip_dirs = {".git", "__pycache__", ".venv", "venv", "build", "dist", "wheels", "node_modules",

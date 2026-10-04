@@ -24,6 +24,8 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | `hf:<org>/<model>` | `hf:Qwen/Qwen3-32B` | Hugging Face Inference Providers (the router), `:fastest` (highest throughput) implied |
 | `hf:<org>/<model>:<suffix>` | `hf:openai/gpt-oss-120b:groq`, `hf:Qwen/Qwen3-32B:cheapest`, `hf:...:preferred` | same router, a specific partner provider or the `:cheapest`/`:preferred` selection mode -- the whole suffix passes through verbatim on the wire |
 | `hf:endpoint/<name>` | `hf:endpoint/my-prod` | a dedicated Hugging Face Inference Endpoint, a named entry in `huggingface.endpoints` (see "Hugging Face" below) |
+| `hf:local/<model>` | `hf:local/qwen3-30b` | a local OpenAI-compatible server (llama-server, vLLM, LM Studio, ...) -- a configured `huggingface.local_servers` default entry, else the first auto-detected one (see "Hugging Face" below) |
+| `hf:local/<model>@<name>` | `hf:local/qwen3-30b@bench` | the same, a NAMED entry in `huggingface.local_servers` -- never an auto-detected server, which has no name of its own to address |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
 
 Parsing order (`model.py::parse_model_ref`): an exact match in
@@ -77,8 +79,13 @@ Databricks once a host AND token are found (same sources, plus
 auth status` reports `loggedIn` with `authMethod` exactly `claude.ai` -- a
 `claude` driven by an API token or a custom base URL (a work box's own
 settings-driven login) never auto-enables it; Hugging Face (Halo 2.0.3
-round 4) once `HF_TOKEN` is found OR at least one `huggingface.endpoints`
-entry is configured -- either source alone is enough. `~/.halo/config.json`'s
+round 4, extended round 5) once `HF_TOKEN` is found, OR at least one
+`huggingface.endpoints` entry is configured, OR at least one `huggingface.
+local_servers` entry is configured -- any ONE of the three sources alone
+is enough; an auto-DETECTED local server (no config entry at all) is
+never checked here (that needs a live network probe, out of scope for
+this config/env-only check) -- see `/local`/`halo local` for that.
+`~/.halo/config.json`'s
 `"providers"` block stores OVERRIDES only: `halo providers enable/
 disable <name>` (or `/providers enable/disable <name>`, or completing a
 tab in `halo init`) writes an explicit `true`/`false` there that
@@ -265,11 +272,13 @@ consequence sentence prints ("... can answer questions as the main
 model, but cannot edit files, run commands, or call any other tool") and
 the choice proceeds regardless.
 
-**`/local <question>`** (Ollama-only this round; Hugging Face joins round
-5): a one-shot call to `roles.small`'s model, answered inline and NEVER
-logged into the session's own transcript -- the exact same `call_small_
-model` path title generation/`/improve` already use, which builds its
-body directly rather than through `derive_request`.
+**`/local`** (round 5 widens this from Ollama-only): `/local <question>`
+is a one-shot call to `roles.small`'s model -- an `ol:` OR `hf:` ref --
+answered inline and NEVER logged into the session's own transcript, the
+exact same `call_small_model` path title generation/`/improve` already
+use, which builds its body directly rather than through `derive_request`.
+Bare `/local` (or `/local refresh`) instead opens the shared local-model
+discovery view described under "Hugging Face" below.
 
 **Not yet in this round**: images (`images`, a user message's base64
 array), `format` (structured output) -- see `plans/2.0.3-ollama-round2-
@@ -343,13 +352,80 @@ precedent, and degrades to omitted fields rather than raising if a real
 response differs. Treat context/pricing from this catalog as best-effort
 until verified live.
 
-**Not yet in this round**: `hf:local/*` (llama-server/vLLM/LM
-Studio/TGI/`transformers serve` on default ports, plus manual server
-entries), the Hugging Face Hub cache scan, the shared `/local` discovery
-view, and the `halo init` interactive tab ("paste HF_TOKEN, add a
-dedicated endpoint, or rely on auto-detection") -- all round 5. `/providers`,
-`halo providers`, and `doctor`'s provider count already show Hugging Face
-today (unlike Ollama, which stays out of that generic table -- see above).
+`/providers`, `halo providers`, and `doctor`'s provider count already show
+Hugging Face (unlike Ollama, which stays out of that generic table -- see
+above); round 5's three local-server additions below don't change that.
+
+**`hf:local/*` -- a local OpenAI-compatible server** (round 5, research
+doc section 8/10): `llama-server`, vLLM, `transformers serve`, LM Studio
+or TGI, running ANYWHERE Halo can reach -- `hf:local/<model>` (the default
+server) or `hf:local/<model>@<name>` (a NAMED entry in `huggingface.
+local_servers`, a list of `{name, url, api_key, default}` mirroring
+`ollama.hosts`/`huggingface.endpoints`'s own shape). A manual entry's
+`api_key`, when set, goes out as `Authorization: Bearer` on every call to
+THAT entry -- pinned apart from `HF_TOKEN` and an `huggingface.endpoints`
+token, never a fallback for either. With no manual entry configured (or
+none marked `default`), the default server is the FIRST auto-detected one
+(below); a NAMED ref that doesn't match a manual entry fails plainly,
+never silently falling back to auto-detection. Dialect: `openai-chat`,
+identical to the router/an endpoint -- no new wire format.
+
+**Auto-detection**: a background probe of `GET /v1/models` on 127.0.0.1
+ONLY, on the documented default ports (research doc section 8): **8080**
+(llama-server, TGI), **8000** (vLLM AND `transformers serve` -- both
+plain OpenAI-compatible, deliberately treated identically rather than
+guessing which one answered), **1234** (LM Studio). Jan's own default
+port was never confirmed by the research doc and is NOT guessed -- add it
+as a manual entry instead. Overridable for tests (or an unusual setup)
+by `huggingface.local_probe_ports` (a config.json int list) or
+`HF_LOCAL_PROBE_PORTS` (a comma-separated env var, wins when both are
+set); honours `BRIDGE_TEST_NO_BACKGROUND_NET` like every other background
+probe in this codebase. A manual entry is never probed in the background
+-- only on demand, via `/local refresh` -- using this SAME `GET /v1/
+models` call with its own `api_key` as the bearer. Most of these servers
+fix their context length at launch time rather than per request (research
+doc section 8/10), so Halo reads back whatever `/v1/models` reports (`max_
+model_len` for vLLM; other field names are tried heuristically, since no
+runtime's exact name beyond vLLM's was confirmed this round) or, as a
+secondary best-effort read for any model that reported none, llama-
+server's own `/props` endpoint (also unconfirmed at the JSON-shape level
+-- degrades to "unknown" rather than guessing). Unknown context falls back
+to the plain `ModelProfile` default, same as an unlisted router model.
+
+**The Hugging Face Hub cache**: `/local` (below) also walks `$HF_HUB_
+CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub` for `models--
+<org>--<name>` directories -- models present on disk (from `hf download`)
+but not necessarily being served by anything right now. Reports the
+repo id, real on-disk size (summed from `blobs/`, never double-counting
+the `snapshots/` symlinks that point back to them), and the format(s)
+present (`safetensors`/`gguf`, read from the snapshot symlinks' own
+filenames -- a blob's name is a bare content hash). Never follows a
+top-level symlink that resolves outside the cache root.
+
+**The shared `/local` view** (round 5): `/local` with no arguments (TUI)
+or `halo local [--refresh]` (CLI) merge THREE sources into one list, in
+this order, with a group label per source/host: each configured Ollama
+host's catalog (round 3's analysis, loaded-now and fit included), running
+Hugging Face local servers (auto-detected, always; manual entries too,
+but only probed for real on `/local refresh` -- a bare open shows them as
+"configured, not probed yet"), and the Hugging Face Hub cache. Columns:
+size, quant (Ollama only -- not reported by `/v1/models` or derivable from
+a cached GGUF without opening it), context, a capability badge (`tools:
+probed yes/no` once round 2's own real-inference capability probe has
+run for that Ollama model digest, else `tools: declared yes/no` from the
+catalog's own claim -- a local HF server's `/v1/models` response declares
+no such field at all, so that badge reads `declared: unknown` there), and
+"loaded now" where the concept applies (Ollama only). `/local <question>`
+answers from `roles.small` (now `ol:` OR `hf:`, see "Ollama" above);
+`/local refresh` re-probes everything a bare open doesn't.
+
+**Init tab**: `halo init`'s interactive Providers step gains an `Ollama
+(local or LAN)` tab (detects/registers the local daemon, or add a LAN/
+cloud host with an optional key, writing `ollama.hosts`) and a `Hugging
+Face` tab (paste `HF_TOKEN`, add a dedicated endpoint, add a local server
+by URL with an optional key, or rely on auto-detection -- any subset, all
+optional, both tabs skippable) -- see `docs/CONFIG.md`'s "Providers"
+section for why neither is a `halo init --provider` CLI-flag choice.
 
 ## Families and their rules
 
@@ -755,3 +831,9 @@ section) use this exact same list widget and row format. See
 [DATABRICKS.md](DATABRICKS.md) for exactly how a Databricks model
 reference resolves to a URL, and [COMMANDS.md](COMMANDS.md) for
 `halo models`'s own flags.
+
+Ollama hosts and Hugging Face local servers never appear in THIS picker
+(by design -- an `ol:`/`hf:local/*` model is a `roles.small` pick far more
+often than "the one main model," and listing every host's live catalog
+here would mean a network read on every `/model` open); `/local` (round
+5) is the dedicated discovery view for both.

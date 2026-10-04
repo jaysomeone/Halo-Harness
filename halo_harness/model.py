@@ -30,6 +30,7 @@ _CC_PREFIX = "cc:"
 _OL_PREFIX = "ol:"
 _HF_PREFIX = "hf:"
 _HF_ENDPOINT_PREFIX = "endpoint/"
+_HF_LOCAL_PREFIX = "local/"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -144,9 +145,22 @@ class ModelRef:
     # host(None)`). Halo 2.0.3 round 4 reuses this SAME field for
     # `hf:endpoint/<name>` -- which entry of `huggingface.endpoints` this
     # ref names (`providers.huggingface.resolve_huggingface_endpoint`);
-    # `None` for an `hf:<org>/<model>` router ref. Always `None` for every
-    # other provider.
+    # `None` for an `hf:<org>/<model>` router ref. Round 5 reuses it a
+    # THIRD way for `hf:local/<model>@<name>` -- which entry of
+    # `huggingface.local_servers` this ref names (`providers.huggingface.
+    # resolve_huggingface_local_server`); `None` for a bare `hf:local/
+    # <model>` (the default server -- a configured manual entry, else the
+    # first auto-detected one, see `providers.huggingface_local_probe.
+    # resolve_local_server`). Always `None` for every other provider.
     host: Optional[str] = None
+    # Round 5: True for every `hf:local/*` ref (both the bare and `@<name>`
+    # shapes) -- the ONLY way to tell "a local-server ref with no `@name`"
+    # (host=None, local=True) apart from "a router ref" (host=None,
+    # local=False), since both leave `host` unset. An `hf:endpoint/<name>`
+    # ref always has `host` set AND `local=False` -- never both this flag
+    # and a dedicated endpoint at once. Always `False` for every other
+    # provider/ref shape.
+    local: bool = False
 
 
 def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
@@ -231,9 +245,27 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
                 raise InvalidModelError(
                     f"no route: {raw!r} (hf:endpoint/ needs a <name> naming a huggingface.endpoints entry)")
             return ModelRef(raw=raw, provider="huggingface", model=name, dialect="openai-chat", host=name)
+        if bare.startswith(_HF_LOCAL_PREFIX):
+            # Round 5: `hf:local/<model>` (the default local server -- a
+            # configured `huggingface.local_servers` entry, else the first
+            # auto-detected one) or `hf:local/<model>@<name>` (a NAMED
+            # manual entry) -- `partition` on the first "@", same
+            # unambiguous reasoning `ol:<model>@<hostname>` already uses
+            # above (a local server's model id may itself contain "@" or
+            # ":" about as often as an Ollama tag contains ":", i.e. never
+            # in practice, but partition is still correct either way since
+            # a server NAME is never expected to contain "@" itself).
+            inner = bare[len(_HF_LOCAL_PREFIX):]
+            model_part, _, server_name = inner.partition("@")
+            if not model_part:
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:local/ needs a <model>, e.g. hf:local/qwen3-30b or "
+                    f"hf:local/qwen3-30b@my-server)")
+            return ModelRef(raw=raw, provider="huggingface", model=model_part, dialect="openai-chat",
+                             host=server_name or None, local=True)
         if not bare:
             raise InvalidModelError(
-                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix] or endpoint/<name>)")
+                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix], endpoint/<name>, or local/<model>)")
         return ModelRef(raw=raw, provider="huggingface", model=bare, dialect="openai-chat")
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
@@ -456,6 +488,23 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
         # `:preferred`/`:<provider>`) is stripped before the catalog lookup
         # -- the catalog is keyed by bare `<org>/<model>`, never by the
         # routing suffix.
+        #
+        # Round 5: an `hf:local/*` ref (`ref.local`) is a THIRD tier, never
+        # the router catalog above (a local server was never listed by
+        # `GET /v1/models` on the router either) -- `providers.
+        # huggingface_local_probe.cached_local_context_tokens` reads
+        # whatever the resolved server's OWN `/v1/models` (or llama-
+        # server's `/props`) reports for this exact model id, short-TTL
+        # cached the same way `providers.ollama.get_catalog` is (research
+        # doc section 8/10: most local servers fix context at launch time,
+        # so Halo reads it back rather than requesting one); unknown (the
+        # server is unreachable, or never reported a number) falls back to
+        # the bare dataclass default, same as every other "nothing known
+        # yet" case on this page.
+        if ref.local:
+            from halo_harness.providers.huggingface_local_resolve import cached_local_context_tokens
+            ctx = cached_local_context_tokens(ref.host, ref.model, env=None)
+            return ModelProfile(context_tokens=ctx) if ctx else ModelProfile()
         if ref.host is None:
             from halo_harness.providers.huggingface_catalog import load_hf_models_json
             bare_id = ref.model.split(":", 1)[0]

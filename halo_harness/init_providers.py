@@ -16,17 +16,29 @@ from typing import Optional
 # Order matters: this is the exact row order `init`'s provider picker shows.
 PROVIDERS = ("databricks", "openrouter", "anthropic", "claude")
 
-# H15 Part A: the tabbed init view's own 5 tabs -- PROVIDERS plus TypeSafe,
-# which has no model catalog/default-model concept of its own (it only
-# ever stores TYPESAFE_API_KEY, "for a later feature") and so is kept OUT
-# of PROVIDERS itself -- every model-related helper above/below (the
-# cross-provider default-model pick, `configured_providers()`) must never
-# see it as a provider with models to offer.
-TAB_PROVIDERS = PROVIDERS + ("typesafe",)
+# H15 Part A: the tabbed init view's own tabs -- PROVIDERS plus Ollama,
+# Hugging Face (round 5) and TypeSafe. Deliberately NOT added to PROVIDERS
+# itself: that tuple also drives the OLD sequential `--provider`/`--preset`
+# CLI picker (`init_cli.py`'s own `_step_credentials`/`PROVIDER_LABEL`/
+# `PROVIDER_DEFAULT_MODEL` -- none of which have a branch/sensible
+# hardcoded default model for either, unlike every provider already in
+# PROVIDERS) and the cross-provider "Default model" step's own
+# `configured_providers()` (a few-second live probe for either would be
+# out of place blocking that step's synchronous `body()`) -- same reason
+# TypeSafe (no model catalog/default-model concept of its own) was
+# already kept out. `halo init`'s INTERACTIVE Providers tab (and its own
+# no-TTY/Textual-failure fallback, which is the OLD sequential picker
+# above and so never offers these two either -- a documented, deliberate
+# gap, not an oversight) is the only surface TAB_PROVIDERS drives;
+# `halo setup`/`/setup` never reach a providers step at all (`setup_cli.
+# py`'s own step list is `roles`/`orgs`/`summary` only), so neither is
+# affected by this tuple either way.
+TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "typesafe")
 
 TAB_LABEL = {
     "databricks": "Databricks", "openrouter": "OpenRouter", "anthropic": "Anthropic API (key)",
-    "claude": "Claude Code subscription", "typesafe": "TypeSafe",
+    "claude": "Claude Code subscription", "ollama": "Ollama (local or LAN)", "huggingface": "Hugging Face",
+    "typesafe": "TypeSafe",
 }
 
 PROVIDER_LABEL = {
@@ -172,6 +184,29 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
     if provider == "claude":
         from halo_harness.providers.cc_models import CC_ALIASES
         return _cc_ant_entries("cc", CC_ALIASES)
+    if provider == "huggingface":
+        # Round 5 fix: this branch never existed before (`huggingface` was
+        # never a `model_entries_for_provider` caller until now, since it
+        # was never in PROVIDERS/TAB_PROVIDERS) -- `halo providers`/
+        # `/providers`'s own "models" column (`providers_cli.py::_model_
+        # count`, keyed by `enablement.PROVIDER_NAMES`, which HAS included
+        # "huggingface" since round 4) always showed "-" for it
+        # regardless of configuration; this is the router's own cached
+        # catalog only (mirrors `_openrouter_entries` above) -- a local
+        # server/dedicated endpoint has no persisted catalog of its own to
+        # list here, same reason `refresh_tab_catalog` skips them too.
+        from halo_harness.providers.huggingface_catalog import load_hf_models_json
+        models = load_hf_models_json(state_dir) or {}
+        out = []
+        for mid in sorted(models):
+            entry = models[mid] or {}
+            pricing = entry.get("pricing") or {}
+            out.append({
+                "ref": f"hf:{mid}", "context_tokens": entry.get("context_length"),
+                "price_in_per_m": _price_per_m(pricing.get("prompt")),
+                "price_out_per_m": _price_per_m(pricing.get("completion")),
+            })
+        return out
     return []
 
 
@@ -271,6 +306,55 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
         available = claude_login_available()
         return {"configured": available, "source": "claude.ai login" if available else None,
                 "masked": "logged in" if available else None, "known_host": None, "fields": []}
+    if provider == "ollama":
+        # Round 5: config-only (`ollama.hosts`, never a live probe here --
+        # see this function's own "never computed here" contract).
+        # `fields` stay visible EVEN ONCE configured -- unlike every
+        # provider above, this tab is ADDITIVE ("add a LAN or cloud host"
+        # on top of whatever's already there), never a single secret that
+        # should disappear once set.
+        from halo_harness.theme import get_config_value
+        hosts_cfg = get_config_value("ollama.hosts", default=None)
+        hosts_cfg = [h for h in hosts_cfg if isinstance(h, dict)] if isinstance(hosts_cfg, list) else []
+        names = [h.get("name") or h.get("url") or "?" for h in hosts_cfg]
+        fields = [
+            {"name": "name", "label": "Host name (blank = default)", "secret": False},
+            {"name": "url", "label": "Ollama URL (blank = local daemon, 127.0.0.1:11434)", "secret": False},
+            {"name": "api_key", "label": "API key (optional, e.g. Ollama Cloud)", "secret": True},
+        ]
+        return {"configured": bool(hosts_cfg), "source": "config.json" if hosts_cfg else None,
+                "masked": (f"{len(hosts_cfg)} host(s): " + ", ".join(names)) if hosts_cfg else None,
+                "known_host": None, "fields": fields}
+    if provider == "huggingface":
+        # Round 5: THREE independent, equally-optional sources -- the
+        # router token, a dedicated endpoint, a manual local server --
+        # `fields` cover all three at once and stay visible even once one
+        # is configured, same "additive tab" reasoning as Ollama above
+        # (a user who already pasted HF_TOKEN can still come back and add
+        # a local server entry too).
+        from halo_harness.providers.config import resolve_huggingface
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints, resolve_huggingface_local_servers
+        parts = []
+        hf = resolve_huggingface(env)
+        if hf is not None:
+            parts.append(f"HF_TOKEN set ({redact(hf.api_key)})")
+        endpoints = resolve_huggingface_endpoints()
+        if endpoints:
+            parts.append(f"{len(endpoints)} endpoint(s)")
+        servers = resolve_huggingface_local_servers()
+        if servers:
+            parts.append(f"{len(servers)} local server(s)")
+        fields = [
+            {"name": "token", "label": "HF_TOKEN (router)", "secret": True},
+            {"name": "endpoint_name", "label": "Dedicated endpoint name (optional)", "secret": False},
+            {"name": "endpoint_url", "label": "Dedicated endpoint URL (optional)", "secret": False},
+            {"name": "endpoint_token", "label": "Dedicated endpoint token (optional)", "secret": True},
+            {"name": "local_url", "label": "Local server URL (optional -- blank relies on auto-detection)",
+             "secret": False},
+            {"name": "local_key", "label": "Local server API key (optional)", "secret": True},
+        ]
+        return {"configured": bool(parts), "source": "env file / config.json" if parts else None,
+                "masked": "; ".join(parts) if parts else None, "known_host": None, "fields": fields}
     if provider == "typesafe":
         key = env.get("TYPESAFE_API_KEY")
         if key:
@@ -323,6 +407,61 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
             from halo_harness.roles import apply_role_preference
             apply_role_preference(team_cfg["roles"])
         return True, f"wrote DATABRICKS_HOST/DATABRICKS_TOKEN to {path}"
+    if provider == "ollama":
+        url = (values.get("url") or "").strip()
+        name = (values.get("name") or "").strip() or "default"
+        api_key = (values.get("api_key") or "").strip()
+        from halo_harness.providers.ollama import DEFAULT_OLLAMA_URL, _normalize_host_url
+        from halo_harness.theme import get_config_value, set_config_value
+        normalized = _normalize_host_url(url) if url else DEFAULT_OLLAMA_URL
+        hosts = get_config_value("ollama.hosts", default=None)
+        hosts = [h for h in hosts if isinstance(h, dict)] if isinstance(hosts, list) else []
+        entry = {"name": name, "url": normalized}
+        if api_key:
+            entry["api_key"] = api_key
+        if not hosts:
+            entry["default"] = True
+        hosts = [h for h in hosts if h.get("name") != name] + [entry]
+        set_config_value("ollama.hosts", hosts)
+        return True, f"added Ollama host {name!r} ({normalized}) to ollama.hosts"
+    if provider == "huggingface":
+        from halo_harness.theme import get_config_value, set_config_value
+        wrote = []
+        token = (values.get("token") or "").strip()
+        if token:
+            path = _env_file_path()
+            _write_env_var(path, "HF_TOKEN", token)
+            os.environ["HF_TOKEN"] = token
+            wrote.append("HF_TOKEN")
+        ep_name = (values.get("endpoint_name") or "").strip()
+        ep_url = (values.get("endpoint_url") or "").strip()
+        if ep_name and ep_url:
+            entries = get_config_value("huggingface.endpoints", default=None)
+            entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+            entry = {"name": ep_name, "url": ep_url}
+            ep_token = (values.get("endpoint_token") or "").strip()
+            if ep_token:
+                entry["token"] = ep_token
+            entries = [e for e in entries if e.get("name") != ep_name] + [entry]
+            set_config_value("huggingface.endpoints", entries)
+            wrote.append(f"huggingface.endpoints[{ep_name}]")
+        local_url = (values.get("local_url") or "").strip()
+        if local_url:
+            servers = get_config_value("huggingface.local_servers", default=None)
+            servers = [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
+            local_key = (values.get("local_key") or "").strip()
+            entry = {"name": "default", "url": local_url}
+            if local_key:
+                entry["api_key"] = local_key
+            if not servers:
+                entry["default"] = True
+            servers = [s for s in servers if s.get("name") != "default"] + [entry]
+            set_config_value("huggingface.local_servers", servers)
+            wrote.append("huggingface.local_servers[default]")
+        if not wrote:
+            return False, ("nothing entered -- paste HF_TOKEN, add a dedicated endpoint (name + URL), add a "
+                           "local server (URL), or Skip to rely on auto-detection")
+        return True, "wrote " + ", ".join(wrote)
     if provider in _TAB_KEY_ENV:
         key_env = _TAB_KEY_ENV[provider]
         value = (values.get("key") or "").strip()
@@ -368,4 +507,16 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
         root = derive_workspace_root(dbx.host)
         ok, _diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         return ok, (note if not ok else "catalog refreshed")
-    return True, ""  # claude / anthropic / typesafe: no catalog of their own to cache here
+    if provider == "huggingface":
+        from halo_harness.providers.config import resolve_huggingface
+        hf = resolve_huggingface()
+        if hf is None:
+            return True, ""  # endpoint/local-only setup -- no router catalog to fetch
+        from halo_harness.providers.huggingface_catalog import probe_huggingface_models, write_hf_models_json
+        try:
+            fetched = probe_huggingface_models(hf.base_url, hf.api_key)
+            write_hf_models_json(state_dir, fetched)
+            return True, f"{len(fetched)} model(s) cached"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    return True, ""  # claude / anthropic / ollama / typesafe: no catalog of their own to cache here

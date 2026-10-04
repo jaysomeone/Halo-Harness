@@ -3,7 +3,9 @@
 consequence_note`) and `/local <question>`'s "never touches the main
 transcript" contract (`commands.builtins._cmd_local`), against a real
 `agent.loop.Session` built on a `mock_ollama.MockUpstream` for the one test
-that actually needs a live small-model call.
+that actually needs a live small-model call. Round 5 updates the
+blank-args test for `/local`'s new meaning (the merged `/local` view --
+see tests/test_local_models.py for that view's own pinning tests).
 """
 from __future__ import annotations
 
@@ -96,10 +98,38 @@ def test_main_role_consequence_note_variants(ctx: Ctx):
 # ---- /local: never touches the main transcript --------------------------
 
 @test
-def test_local_cmd_usage_when_blank(ctx: Ctx):
+def test_local_cmd_blank_prints_merged_view(ctx: Ctx):
+    """Round 5 (brief item 4) changes bare `/local`'s own meaning: it now
+    prints the SAME merged view `halo local` does (`providers.local_
+    models`), replacing round 3's plain usage line. Scoped hermetically --
+    a fake, unreachable OLLAMA_HOST (port 1: nothing ever listens there,
+    so this fails fast rather than waiting out a real connect timeout), an
+    HF_HUB_CACHE pointed at a directory that doesn't exist, and
+    BRIDGE_TEST_NO_BACKGROUND_NET so HF auto-detection never touches the
+    network -- this must never read the real `~/.halo`, a real local
+    Ollama daemon, or the real `~/.cache/huggingface/hub`."""
     from halo_harness.commands.builtins import HeadlessFacade, _cmd_local
-    out = _cmd_local("   ", HeadlessFacade(cwd=Path(".")))
-    ctx.check(f"usage line, got {out!r}", out.startswith("Usage: /local"))
+    d = Path(tempfile.mkdtemp(prefix="ol-local-blank-"))
+    env_names = ("BRIDGE_STATE_DIR", "OLLAMA_HOST", "OLLAMA_API_KEY", "HF_HUB_CACHE", "HF_HOME",
+                 "BRIDGE_TEST_NO_BACKGROUND_NET")
+    saved = {k: os.environ.get(k) for k in env_names}
+    os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
+    os.environ["OLLAMA_HOST"] = "http://127.0.0.1:1"
+    os.environ.pop("OLLAMA_API_KEY", None)
+    os.environ["HF_HUB_CACHE"] = str(d / "empty-hf-cache")
+    os.environ.pop("HF_HOME", None)
+    os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = "1"
+    try:
+        out = _cmd_local("   ", HeadlessFacade(cwd=Path(".")))
+        ctx.check(f"no longer the round-3 usage line, got {out!r}", not out.startswith("Usage: /local"))
+        ctx.check(f"reports the (unreachable, fake) Ollama default host, got {out!r}",
+                  "Ollama" in out and "unreachable" in out)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @test

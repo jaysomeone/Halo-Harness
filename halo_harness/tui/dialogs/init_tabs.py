@@ -144,6 +144,15 @@ class InitTabsApp(App):
         if provider == "claude":
             yield Static("Uses your existing `claude` login as-is -- nothing is stored here.",
                          classes="tab-help")
+        if provider == "ollama":
+            yield Static("Leave every field blank and Save to register the local daemon at its default "
+                         "address; fill in a URL to add a LAN or cloud host instead. Running local servers "
+                         "are found automatically by /local, not here.", classes="tab-help")
+        if provider == "huggingface":
+            yield Static("Each of these is independent and optional: paste HF_TOKEN for the router, add one "
+                         "dedicated endpoint (name + URL [+ token]), or add one local server (URL [+ key]). "
+                         "A local server on a default port (llama.cpp, vLLM, LM Studio, ...) is found "
+                         "automatically by /local with none of this.", classes="tab-help")
         if provider == "typesafe":
             yield Static("Stores TYPESAFE_API_KEY only -- for a later feature, no routed models yet.",
                          classes="tab-help")

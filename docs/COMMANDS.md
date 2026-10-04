@@ -628,6 +628,20 @@ script, `--yes`, `--provider`) is unaffected -- it keeps the exact
 sequential-picker/numbered-fallback behaviour the worked example below
 shows.
 
+**Halo 2.0.3 round 5**: the INTERACTIVE Providers step's tab bar gains two
+more tabs beyond the four above -- `Ollama (local or LAN)` (detects/
+registers the local daemon, or add a LAN/cloud host with an optional key)
+and `Hugging Face` (paste `HF_TOKEN`, add a dedicated endpoint, add a
+local server by URL with an optional key, or rely on auto-detection --
+any subset, all optional) -- both Skippable, same Back/Skip/Next footer.
+Deliberately NOT `--provider`/`--preset` CLI-flag choices (the piped/
+non-tty fallback above still only ever offers the original four): neither
+has one sensible hardcoded default model the way the table below's four
+providers each do, so there is nothing non-interactive `--provider
+ollama`/`--provider huggingface` could safely default to without a real
+catalog already cached. See [MODELS.md](MODELS.md)'s Ollama/Hugging Face
+sections and [CONFIG.md](CONFIG.md)'s "Providers" section.
+
 ```sh
 halo init --help
 ```
@@ -1272,6 +1286,29 @@ at all, probes the same synthesized default (`OLLAMA_HOST`, else
 `127.0.0.1:11434`) a bare `ol:<model>` ref would use. See
 [MODELS.md](MODELS.md)'s Ollama section; the TUI's own `/ollama` opens an
 interactive dialog instead (`docs/SLASH-COMMANDS.md`).
+
+## `halo local`
+
+```sh
+halo local
+halo local --refresh
+```
+
+Halo 2.0.3 round 5: the shared local-model discovery view, merging THREE
+sources into one list, in this order, with a group label per source/host:
+each configured Ollama host's own catalog (same analysis `halo ollama`
+shows), running Hugging Face local servers (auto-detected on the default
+ports plus any configured `huggingface.local_servers` entry), and the
+Hugging Face Hub cache (models on disk, from `hf download`, not
+necessarily being served by anything right now). Bare `halo local` never
+probes a MANUAL Hugging Face local-server entry over the network (shown
+as "configured, not probed yet" instead) -- `--refresh` additionally
+probes every one of those, and bypasses the Ollama catalog's own short
+TTL cache; auto-detected servers are probed either way (background-probe-
+gated, same `BRIDGE_TEST_NO_BACKGROUND_NET` seam every other probe in this
+codebase honours). See [MODELS.md](MODELS.md)'s Hugging Face section; the
+TUI's own `/local` (no arguments) opens the same view as an interactive
+dialog instead (`docs/SLASH-COMMANDS.md`).
 
 ## `halo config`
 

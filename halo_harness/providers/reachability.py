@@ -67,6 +67,42 @@ def provider_base_url(name: str) -> Optional[str]:
         from halo_harness.providers.config import resolve_anthropic
         ant = resolve_anthropic()
         return ant.base_url if ant is not None else "https://api.anthropic.com"
+    if name == "huggingface":
+        # Round 5 fix: this branch never existed before (a round 4 gap --
+        # `reachability_tag("huggingface")` always fell through to "not
+        # set up" below regardless of configuration, latent because
+        # "huggingface" never appeared in `init_providers.TAB_PROVIDERS`
+        # until round 5 wired it up; `/providers`/`halo providers` DID
+        # already call this for every `PROVIDER_NAMES` row, including
+        # huggingface, since round 4 -- so this also fixes that table's
+        # own reachable column for an already-configured HF_TOKEN/
+        # endpoint). Same priority order `providers.enablement.
+        # credentials_present("huggingface")` already checks: the router
+        # when HF_TOKEN is set, else the first configured dedicated
+        # endpoint, else the first configured manual local server --
+        # auto-detected servers are never probed from this generic,
+        # config-only lookup (the `/local` view's own probe covers those).
+        from halo_harness.providers.config import resolve_huggingface
+        hf = resolve_huggingface()
+        if hf is not None:
+            return hf.base_url
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints, resolve_huggingface_local_servers
+        endpoints = resolve_huggingface_endpoints()
+        if endpoints:
+            return endpoints[0].url
+        servers = resolve_huggingface_local_servers()
+        return servers[0].url if servers else None
+    if name == "ollama":
+        # Round 5: the resolved DEFAULT host's url (never a specific named
+        # LAN/cloud entry -- there is no single "the" host to pick among
+        # several otherwise) -- `resolve_ollama_hosts` always synthesizes
+        # at least one, so this never returns `None` once `ollama` reaches
+        # this branch at all (only reached once `credentials_present
+        # ("ollama")` already confirmed either an explicit `ollama.hosts`
+        # entry or `OLLAMA_HOST` is set, per that function's own branch).
+        from halo_harness.providers.ollama import resolve_ollama_host
+        host = resolve_ollama_host(None)
+        return host.url if host is not None else None
     return None
 
 

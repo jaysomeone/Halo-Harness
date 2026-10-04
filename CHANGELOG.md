@@ -11,10 +11,10 @@ version.
 ## [2.0.3] - unreleased
 
 Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
-and onward). Rounds 1-4 (research, the `ol:` provider, hardware/host
-analysis and roles, and the `hf:` route) landed so far; rounds 5-6
-(`hf:local/*`, the shared `/local` discovery view, docs/release prep) are
-still to come under this SAME version number.
+and onward). Rounds 1-5 (research, the `ol:` provider, hardware/host
+analysis and roles, the `hf:` route, and `hf:local/*`/the shared `/local`
+view/the init tab) landed so far; round 6 (docs polish, a live check, and
+release prep) is still to come under this SAME version number.
 
 1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
    dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
@@ -96,6 +96,36 @@ still to come under this SAME version number.
    gained a `path_prefix`/`expected_bearer`/`models_response` constructor
    option so the SAME scripted scenarios serve as the router and endpoint
    stand-ins, rather than a second fake server.
+4. **`hf:local/*`, the shared `/local` view, the init tab** (round 5): a
+   new `huggingface.local_servers` config list (`{name, url, api_key,
+   default}`, mirroring `ollama.hosts`/`huggingface.endpoints`) names a
+   MANUAL local/LAN OpenAI-compatible server -- `hf:local/<model>` (the
+   default entry, else the first auto-detected one) or `hf:local/<model>
+   @<name>`; a manual entry's own `api_key` is pinned apart from both
+   `HF_TOKEN` and an endpoint's own token. Auto-detection probes `GET
+   /v1/models` on 127.0.0.1 only, on llama-server/TGI's 8080, vLLM/
+   `transformers serve`'s 8000 (treated identically on purpose), and LM
+   Studio's 1234 -- overridable via `huggingface.local_probe_ports`/
+   `HF_LOCAL_PROBE_PORTS` for tests, gated by `BRIDGE_TEST_NO_BACKGROUND_
+   NET` like every other background probe; a manual entry is only ever
+   probed on demand (`/local refresh`). Context length is read back from
+   `/v1/models` (`max_model_len` for vLLM, other names tried heuristically)
+   or, as a fallback, llama-server's own `/props` -- never requested.
+   `providers.huggingface_hub_cache` walks `$HF_HUB_CACHE`/`$HF_HOME/hub`/
+   `~/.cache/huggingface/hub` for models on disk but not necessarily
+   served, reporting size and format (`safetensors`/`gguf`) without
+   following a symlink outside the cache. The shared `/local` view
+   (`providers.local_models`) merges Ollama hosts, running Hugging Face
+   local servers, and the Hub cache into one grouped list -- `/local` (TUI,
+   no args) opens a dialog, `halo local [--refresh]`/`/local`'s print-mode
+   fallback render the same text; `/local <question>` (round 3) now also
+   accepts an `hf:` `roles.small` ref, not just `ol:`. `halo init`'s
+   interactive Providers step gains `Ollama (local or LAN)` and `Hugging
+   Face` tabs (both additive/skippable; neither joins the OLD sequential
+   `--provider`/`--preset` CLI picker, which has no sensible hardcoded
+   default model for either). `tests/test_privacy_scan.py` now also scans
+   untracked, non-ignored files (`git ls-files --others --exclude-
+   standard`), not just tracked ones.
 
 ## [2.0.2] - 2026-10-04
 

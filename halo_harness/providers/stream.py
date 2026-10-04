@@ -300,9 +300,18 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
         # "a missing entry gives a plain ProviderNotConfigured message
         # naming the config key").
         if req.route.provider == "huggingface":
+            # Round 5: the message now also names `huggingface.local_
+            # servers`/auto-detection -- `req.route` (providers.routing.
+            # Route) carries no field distinguishing router/endpoint/local
+            # at all (it is built from `ModelRef` by dropping `.host`/
+            # `.local`, same as every other Route construction site in
+            # this codebase), so this stays ONE generic message naming
+            # every way to configure Hugging Face, exactly like round 4's
+            # original version already did for router-vs-endpoint.
             raise ProviderNotConfigured(
-                "Hugging Face not configured -- set HF_TOKEN for the router, "
-                "or add this name to huggingface.endpoints"
+                "Hugging Face not configured -- set HF_TOKEN for the router, add this name to "
+                "huggingface.endpoints, or add/run a local server (huggingface.local_servers, "
+                "or auto-detection on a default port)"
             )
         provider_label = "Databricks" if req.route.provider == "databricks" else "OpenRouter"
         raise ProviderNotConfigured(f"{provider_label} not configured")

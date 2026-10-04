@@ -107,6 +107,23 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         # tests/test_providers_huggingface.py: these two sources must never
         # cross-wire (an endpoint's own token never substitutes for
         # HF_TOKEN or vice versa).
+        #
+        # Round 5: `ref.local` (checked FIRST -- a local ref's `host` can
+        # ALSO be `None`, for the bare/default-server shape, which must
+        # never fall into the endpoint/router branches below) resolves
+        # through `providers.huggingface_local_resolve.resolve_local_
+        # server` -- a manual `huggingface.local_servers` entry (named or
+        # default) or, with none configured, the first auto-detected
+        # server; its OWN `api_key` (when set) is sent as this request's
+        # bearer, pinned apart from both HF_TOKEN and an endpoint's token
+        # the exact same way those two are already pinned apart from each
+        # other below.
+        if ref.local:
+            from halo_harness.providers.huggingface_local_resolve import resolve_local_server
+            target = resolve_local_server(ref.host, env)
+            if target is None:
+                return None
+            return ProviderCreds(base_url=target.base_url, api_key=target.api_key or "")
         if ref.host:
             from halo_harness.providers.huggingface import resolve_huggingface_endpoint
             ep = resolve_huggingface_endpoint(ref.host)
@@ -1163,12 +1180,15 @@ def build_session(
         from halo_harness.providers.config import merge_databricks_headers
         dbx_cfg = _resolve_dbx_config_for_headers(settings)
         extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
-    if model_ref.provider == "huggingface" and not model_ref.host:
+    if model_ref.provider == "huggingface" and not model_ref.host and not model_ref.local:
         # Halo 2.0.3 round 4 (brief item 1): `X-HF-Bill-To` is a ROUTER-only
         # header (research doc section 9: Team/Enterprise billing a
         # specific org) -- `model_ref.host` set means `hf:endpoint/<name>`
         # (a dedicated endpoint, its own compute-time billing, no such
-        # header), so this is gated to the router shape only.
+        # header), so this is gated to the router shape only. Round 5:
+        # `not model_ref.local` added -- a bare `hf:local/<model>` ALSO
+        # leaves `host` unset, and a local server gets no router billing
+        # header either.
         from halo_harness.providers.huggingface import resolve_huggingface_bill_to
         bill_to = resolve_huggingface_bill_to()
         if bill_to:

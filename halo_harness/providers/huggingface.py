@@ -2,15 +2,19 @@
 Inference Endpoints config (`huggingface.endpoints`, mirroring `ollama.
 hosts`' shape/resolver style -- providers.ollama.OllamaHost/resolve_ollama_
 host is the pattern) and the `huggingface.bill_to` billing-header config.
-The router's `GET /v1/models` catalog (cached in the state dir with a TTL)
-lives in the sibling module `providers.huggingface_catalog` (kept apart so
-no single write here passes the house 250-line-per-write habit). The `hf:`
-dialect itself reuses the existing openai-chat request/response code
-unchanged (providers/request.py, providers/stream.py's stream_completion)
--- this module owns only config resolution, never a wire-shape concern.
+Round 5 adds `huggingface.local_servers` (MANUAL `hf:local/<model>@<name>`
+entries, same shape/resolver style again) -- auto-DETECTED local servers
+are a fully separate, background-probed list owned by the sibling module
+`providers.huggingface_local_probe`, never config here. The router's `GET
+/v1/models` catalog (cached in the state dir with a TTL) lives in the
+sibling module `providers.huggingface_catalog` (kept apart so no single
+write here passes the house 250-line-per-write habit). The `hf:` dialect
+itself reuses the existing openai-chat request/response code unchanged
+(providers/request.py, providers/stream.py's stream_completion) -- this
+module owns only config resolution, never a wire-shape concern.
 
-Design per `plans/2.0.3-ollama-round2-brief.md` "Round 4" and
-`docs/harness/LOCAL-MODELS-RESEARCH.md` section 9.
+Design per `plans/2.0.3-ollama-round2-brief.md` "Round 4"/"Round 5" and
+`docs/harness/LOCAL-MODELS-RESEARCH.md` sections 8/9/10.
 """
 
 from __future__ import annotations
@@ -95,6 +99,94 @@ def resolve_huggingface_endpoint(name: Optional[str]) -> Optional[HFEndpoint]:
     for ep in entries:
         if ep.default:
             return ep
+    return entries[0]
+
+
+@dataclass(frozen=True)
+class HFLocalServer:
+    """One entry of `huggingface.local_servers` (`~/.halo/config.json`) --
+    Halo 2.0.3 round 5: a MANUALLY-configured OpenAI-compatible local/LAN
+    server (`llama-server`, vLLM, `transformers serve`, LM Studio, TGI, or
+    a LAN box fronting any of those behind a bearer-token proxy -- the
+    "one GPU box, several laptops" case the round 5 brief calls out, only
+    ever reachable through a manual entry since auto-detection is loopback-
+    only). Mirrors `ollama.hosts`/`huggingface.endpoints`' own shape
+    (`name`, `url`, `default`). `api_key`, when set, goes out as
+    `Authorization: Bearer <api_key>` on every call to THIS entry -- PINNED
+    separate from both `HF_TOKEN` (the router's own credential,
+    `providers.config.resolve_huggingface`) and an `HFEndpoint.token` (a
+    dedicated endpoint's own credential) above: never read as a fallback
+    for either, never substitutes for either
+    (tests/test_providers_huggingface_local.py pins this three ways). An
+    entry with no `api_key` sends no `Authorization` header at all, the
+    same "unauthenticated by definition unless configured otherwise"
+    default every other bare local/LAN host in this codebase uses."""
+    name: str
+    url: str
+    default: bool = False
+    api_key: Optional[str] = None
+
+
+def _local_server_from_dict(d: dict) -> Optional[HFLocalServer]:
+    url = d.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    name = d.get("name") if isinstance(d.get("name"), str) and d.get("name") else url
+    return HFLocalServer(
+        name=name, url=url.rstrip("/"), default=bool(d.get("default", False)),
+        api_key=d.get("api_key") if isinstance(d.get("api_key"), str) and d.get("api_key") else None,
+    )
+
+
+def resolve_huggingface_local_servers() -> "list[HFLocalServer]":
+    """`huggingface.local_servers` from `~/.halo/config.json` -- MANUAL
+    entries only (round 5 brief's own "Manual server entries" bullet).
+    Never synthesizes one for an auto-detected server: that is `providers.
+    huggingface_local_probe.auto_detect_local_servers`'s own, separate,
+    background-probed list -- the two are only ever merged by the `/local`
+    view (`providers.local_models`), never here. An empty/absent list is
+    the ordinary case for a box that relies on auto-detection alone. A
+    malformed entry (no `url`) is skipped, logged at DEBUG."""
+    from halo_harness.theme import get_config_value
+    raw = get_config_value("huggingface.local_servers", default=None)
+    out: "list[HFLocalServer]" = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict):
+                s = _local_server_from_dict(entry)
+                if s is not None:
+                    out.append(s)
+                else:
+                    log.debug("huggingface: skipped a config.json huggingface.local_servers entry with no url: %r",
+                              entry)
+    return out
+
+
+def resolve_huggingface_local_server(name: Optional[str]) -> Optional[HFLocalServer]:
+    """The manual entry `hf:local/<model>@<name>` names (or the DEFAULT
+    manual entry for a bare `hf:local/<model>`) -- same selection order as
+    `resolve_huggingface_endpoint`/`providers.ollama.resolve_ollama_host`:
+    an exact case-insensitive name match, else the entry with `default:
+    true`, else the first configured entry, else `None`. `None` here does
+    NOT by itself mean "no server at all" for a bare `hf:local/<model>` --
+    the caller (`headless._resolve_creds`) still falls back to whatever
+    `providers.huggingface_local_probe.auto_detect_local_servers` already
+    found before giving up; an auto-detected server is never required to
+    also be a manual config entry. A NAMED ref (`@<name>`) with no matching
+    entry is never silently retried against auto-detection, though -- a
+    typo'd name should fail plainly, not fall through to a different
+    server than the one asked for."""
+    entries = resolve_huggingface_local_servers()
+    if not entries:
+        return None
+    if name:
+        for s in entries:
+            if s.name.lower() == name.lower():
+                return s
+        return None
+    for s in entries:
+        if s.default:
+            return s
     return entries[0]
 
 

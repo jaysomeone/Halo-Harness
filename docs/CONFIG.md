@@ -209,6 +209,8 @@ directly by the features that own them:
 | `ollama.tools_max` | unset (derived from the effective `num_ctx`'s context class -- under 16k: 16, 16k-32k: 32, 32k-64k: 64, 64k+: 128) | `halo config set ollama.tools_max 64`; overrides the `ol:` ProviderProfile's tool-catalog cap outright, still never below however many built-in tools this platform ships -- see `docs/MODELS.md`'s "Ollama" section |
 | `huggingface.endpoints` | unset (no dedicated endpoints configured) | hand-edited; a list of `{name, url, token, default}` -- `hf:endpoint/<name>` selects an entry by `name`; each entry's own `url`/`token` are used as-is, never the router's `HF_TOKEN`/base URL; see `docs/MODELS.md`'s "Hugging Face" section |
 | `huggingface.bill_to` | unset (no header sent) | `halo config set huggingface.bill_to my-org`; a Team/Enterprise org name sent as `X-HF-Bill-To` on every ROUTER (`hf:<org>/<model>`) request only -- never on an `hf:endpoint/<name>` call |
+| `huggingface.local_servers` | unset (relies on auto-detection alone) | hand-edited, or `halo init`'s Hugging Face tab; a list of `{name, url, api_key, default}` -- `hf:local/<model>@<name>` selects an entry by `name`; `hf:local/<model>` (bare) prefers this list's default entry, else the first AUTO-detected local server; see `docs/MODELS.md`'s "Hugging Face" section |
+| `huggingface.local_probe_ports` | unset (`8080, 8000, 1234` -- see `docs/MODELS.md`) | hand-edited; a list of ints overriding which ports the `hf:local/*` auto-detect sweep probes (loopback only); `HF_LOCAL_PROBE_PORTS` (env) wins over this when both are set |
 
 ## Every environment variable
 
@@ -259,6 +261,9 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `OLLAMA_API_KEY` | seeds that SAME synthesized default host's `api_key` (Ollama Cloud, `Authorization: Bearer`) -- a configured `ollama.hosts` entry's own `api_key` always wins once one exists |
 | `HF_TOKEN` | Hugging Face router credential (`hf:<org>/<model>`) -- the ONLY accepted name; `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT read (neither was confirmed as a router-specific alias) |
 | `HALO_HF_ROUTER_BASE_URL` (legacy `BRIDGE_HF_ROUTER_BASE_URL`) | override the Hugging Face router base URL (default `https://router.huggingface.co/v1`) -- never consulted for `hf:endpoint/<name>`, which always uses that entry's own configured `url` |
+| `HF_HUB_CACHE` | the Hugging Face Hub local cache directory itself (used as-is); `/local`'s hub-cache scan walks this when set, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub` |
+| `HF_HOME` | the Hugging Face Hub root directory -- `/local`'s hub-cache scan walks `$HF_HOME/hub` when `HF_HUB_CACHE` is unset |
+| `HF_LOCAL_PROBE_PORTS` | comma-separated ints overriding which ports the `hf:local/*` auto-detect sweep probes (default `8080,8000,1234` -- see `docs/MODELS.md`); wins over `huggingface.local_probe_ports` when both are set |
 
 ## Providers (`halo init --provider ...`)
 
@@ -274,10 +279,20 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 | `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
 
-Ollama and Hugging Face are not yet `halo init --provider` choices here --
-configure `HF_TOKEN`/`huggingface.endpoints`/`ollama.hosts` directly (see
-`docs/MODELS.md`'s "Ollama"/"Hugging Face" sections); an interactive `halo
-init` tab for both is Halo 2.0.3 round 5.
+Ollama and Hugging Face each get their own tab in `halo init`'s
+INTERACTIVE Providers step (Halo 2.0.3 round 5, `init_providers.
+TAB_PROVIDERS`). `halo setup`/`/setup` never reach a Providers step at all
+(their own step list is `roles`/`orgs`/`summary` only -- see `docs/
+COMMANDS.md`'s `setup` section), so neither tab appears there; only `halo
+init` itself shows them. Neither is a `halo init --provider`/
+`--preset` CLI-flag CHOICE, though, and that's deliberate: that flag
+drives the OLDER sequential, non-interactive picker, which has no sensible
+single hardcoded default model for either (unlike the four providers in
+the table above, which always have one well-known catalog entry) -- the
+same reason that picker's own no-TTY/Textual-failure fallback never offers
+either tab. Configure `HF_TOKEN`/`huggingface.endpoints`/`huggingface.
+local_servers`/`ollama.hosts` directly instead on a non-interactive box
+(see `docs/MODELS.md`'s "Ollama"/"Hugging Face" sections).
 
 ### Default permission mode (1.0.1 hotfix 18)
 
