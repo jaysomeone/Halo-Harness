@@ -308,3 +308,36 @@ Placement:
   catalog columns, credits chip and `/v1/responses` dialect now seed.
   2.0.3 round order: 5b part 2 (running) -> 5c -> 5d -> 5e -> 5f -> 5g ->
   5h -> 6 -> Opus review -> fix pass -> tag v2.0.3.
+
+## ADDED 2026-10-04 (rolo): 2.0.7 becomes a theme pack: DOOM, Metroid, Mario
+
+rolo (voice note, 2026-10-04): when the DOOM theme work starts, also build a
+Metroid theme and a Mario theme.
+
+- Three game-inspired themes, each with its own slash toggle: `/doom`,
+  `/metroid`, `/mario`. Selecting one applies it; selecting the same one
+  again restores the previous theme (the existing `/doom` contract, now
+  shared by all three). All three appear in the theme wizard step and in
+  `/theme`, so they can be chosen and edited the same way as every other
+  theme.
+- Metroid: Super Metroid on the SNES is the reference. Its colour schemes
+  (Crateria's blues and greys, Brinstar's greens and pinks, Norfair's reds
+  and oranges, Maridia's teals, Tourian's greys) as selectable variants or
+  a per-area accent, a status bar styled like the game's HUD (energy tanks
+  and reserve as the context meter, missile and super-missile style
+  counters for turn and tool counts, the area name in place of the cwd), a
+  map-grid look for panels and dialogs, and Samus-visor framing for the
+  input line. "Really Metroid it out as much as possible", in text-mode
+  Unicode only.
+- Mario: Super Mario Bros / Super Mario World palettes (sky blue, brick
+  red, pipe green, coin gold, question-block orange), a HUD-style status bar
+  (coins for cost, a timer-style clock, the world/level slot for the cwd),
+  brick and pipe motifs on panel borders, 1-up and coin cues on finished
+  tasks and sub-agents.
+- DOOM keeps its planned bottom status bar treatment and face indicator
+  concept; the three share one "game HUD" status-bar layout engine so each
+  is a skin on it.
+- Rules: original Unicode and ASCII art only, inspired by the games; no
+  ripped sprites, sounds or logos in the repo (it is public). Theme names
+  stay as rolo named them. Snapshot tests per theme as for every theme
+  today; the toggle-again-restores behaviour pinned once for all three.
