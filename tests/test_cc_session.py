@@ -114,6 +114,34 @@ def _wait_for_event_kind(collected, kind, timeout=5.0):
     return None
 
 
+def _join_bounded_by_progress(t: threading.Thread, session, *, stall_budget_s: float = 10.0) -> None:
+    """Halo 2.0.2 round C: "make the wait bounded by progress, not a
+    fixed deadline, so a loaded machine makes it slower, never red" --
+    seen flaky under load in three separate worker runs, a flat `t.join
+    (timeout=10)` loses a race against real CPU contention even though
+    the turn is still genuinely moving forward, just slower. Polls in
+    short slices instead, resetting the stall budget every time the
+    session's own log visibly grows (proof of real, ongoing activity --
+    `cc_runtime.py` appends a node per tool_use/tool_result/steer-
+    consumed/final-text/usage as a `cc:` turn actually progresses, not
+    just once at the very end) -- only a stretch with NO log growth AT
+    ALL for the full `stall_budget_s` counts as "actually stuck", same
+    distinction a liveness timeout makes everywhere else in this
+    codebase. A genuinely hung thread still gives up in bounded time;
+    a merely slow one never loses the race against an arbitrary
+    deadline just because the box happened to be busy."""
+    last_progress = time.monotonic()
+    last_node_count = len(session.log.nodes())
+    while t.is_alive():
+        t.join(timeout=0.1)
+        node_count = len(session.log.nodes())
+        if node_count != last_node_count:
+            last_node_count = node_count
+            last_progress = time.monotonic()
+        elif time.monotonic() - last_progress > stall_budget_s:
+            break
+
+
 # ---- lazy start / one subprocess per session -------------------------------
 
 @test
@@ -878,7 +906,7 @@ def test_steer_between_tool_calls_is_absorbed_into_one_result(ctx: Ctx):
             time.sleep(0.02)
         ok = session.steer("reply with the single word pong")
         ctx.check("steer accepted while busy", ok)
-        t.join(timeout=10)
+        _join_bounded_by_progress(t, session)
         ctx.check("turn ended normally (never hung)", collected and collected[-1].kind == "turn_done"
                    and collected[-1].data["reason"] == "end_turn")
         usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]
@@ -904,7 +932,7 @@ def test_two_steers_behind_a_running_turn_both_get_answered(ctx: Ctx):
             time.sleep(0.02)
         ctx.check("steer 1 accepted", session.steer("reply with the single word pong"))
         ctx.check("steer 2 accepted", session.steer("also say the word banana"))
-        t.join(timeout=15)
+        _join_bounded_by_progress(t, session)
         ctx.check("turn ended normally (never hung waiting on a result that wasn't coming)",
                    collected and collected[-1].kind == "turn_done" and collected[-1].data["reason"] == "end_turn")
         usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]

@@ -382,6 +382,30 @@ def _check_editor() -> str:
                 f"won't work", cmd="export EDITOR=nano")
 
 
+def _check_terminal_program() -> str:
+    """Halo 2.0.2 round C (the owner's own macOS report): "ctrl+e or
+    command+e does not work on the mac using halo" traced to VS Code's
+    integrated terminal intercepting the chord before halo ever sees it
+    (Cmd+E can never work at all, on ANY terminal app -- the terminal
+    app itself owns Cmd shortcuts; only Ctrl+E can ever reach halo).
+    Always prints TERM_PROGRAM/TERM (useful on its own for any "does a
+    shortcut even reach halo" question, not just this one -- `/keys` is
+    the live version of the same question); when it's exactly "vscode",
+    names BOTH real remedies verbatim (docs/TROUBLESHOOTING.md carries
+    the same two) so there's something to paste straight into
+    settings.json without hunting for the exact wording."""
+    term_program_raw = os.environ.get("TERM_PROGRAM") or ""
+    term_program = term_program_raw or "(not set)"
+    term = os.environ.get("TERM") or "(not set)"
+    if term_program_raw.strip().lower() == "vscode":
+        return (f"{OK} TERM_PROGRAM=vscode, TERM={term} -- if a shortcut (e.g. Ctrl+E) does nothing, add "
+                f'ONE of these to settings.json (Cmd+Shift+P, "Preferences: Open User Settings (JSON)"): '
+                f'"terminal.integrated.sendKeybindingsToShell": true  -- or, to release just that one key: '
+                f'"terminal.integrated.commandsToSkipShell": ["-<command owning ctrl+e>"] (find the exact '
+                f'command id in Keyboard Shortcuts, Cmd+K Cmd+S, search ctrl+e). Check with /keys afterward.')
+    return f"{OK} TERM_PROGRAM={term_program}, TERM={term}"
+
+
 def _check_shell() -> str:
     """H9 OpenCode item 23 (carried-over must-do: "Git Bash (win32)"): the
     Bash tool (halo_harness/tools/bash.py) needs Git Bash on win32
@@ -423,6 +447,68 @@ def _check_platform() -> str:
         hint = " (wsl.exe found -- verify parity there too)" if wsl else " (no wsl.exe found on PATH)"
         return f"{OK} Windows -- build/test host, not the primary target{hint}"
     return f"{OK} {system} -- {platform.release()}"
+
+
+def _check_drain_tick_rate() -> str:
+    """Halo 2.0.2 round C (the owner's own background-streaming report):
+    "halo doctor gains a measured drain-tick rate over 2 s" -- the TUI's
+    real `_drain` timer (tui/app.py) fires at `DRAIN_HZ` (30 Hz) and is
+    the ONLY thing that keeps the status bar's live signal (agents/bg
+    jobs/elapsed) and a sub-agent's own card moving while a turn runs
+    off-thread; if the host's asyncio event loop can't actually sustain
+    that rate (a busy terminal, a starved VM, the owner's own macOS/VS
+    Code report), the screen looks hung even though real work is still
+    happening. Runs a bare asyncio loop at the SAME cadence for 2 REAL
+    seconds and reports how many ticks landed -- never builds a real
+    BridgeApp/Controller/Session (this measures the HOST's own asyncio
+    scheduling under THIS terminal/platform, which is the actual
+    variable in play; a real session would need model/credential setup
+    doctor has no business requiring just to answer this)."""
+    import asyncio
+
+    from halo_harness.tui.keys import DRAIN_HZ
+
+    # Test hygiene: every doctor-touching test in the suite calls
+    # `run_checks()`/`run_checks_structured()` (several call it more than
+    # once), which would otherwise all pay a real 2 s for this one check --
+    # `tests/helpers/provider_env_defaults.ensure_default_provider_
+    # credentials`/`tests/helpers/runner.run_all` both `setdefault` this to
+    # a near-instant window before any test runs (same "scope it down for
+    # tests" rule BRIDGE_TEST_NO_BACKGROUND_NET already follows); a real
+    # `halo doctor` invocation never sets it, so it still measures the full
+    # 2 s the brief asks for.
+    window_s = 2.0
+    override = os.environ.get("BRIDGE_TEST_DRAIN_TICK_WINDOW_S")
+    if override:
+        try:
+            window_s = max(0.05, float(override))
+        except ValueError:
+            pass
+
+    async def _measure() -> int:
+        count = 0
+        interval = 1.0 / DRAIN_HZ
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + window_s
+        while loop.time() < deadline:
+            await asyncio.sleep(interval)
+            count += 1
+        return count
+
+    try:
+        ticks = asyncio.run(_measure())
+    except Exception as e:
+        return f"{WARN} could not measure the drain-tick rate: {type(e).__name__}: {e}"
+    hz = ticks / window_s
+    # Below half the target rate is a real, visible stall (a turn's own
+    # liveness segments would update roughly half as often as designed,
+    # or worse) -- above that, occasional scheduling jitter is normal
+    # and not worth a WARN.
+    if hz < DRAIN_HZ * 0.5:
+        return (f"{WARN} drain-tick rate ~{hz:.1f} Hz measured over {window_s:g} s (target {DRAIN_HZ} Hz) -- "
+                f"this terminal/platform may show stale liveness info (status bar, sub-agent cards) "
+                f"during a long-running turn")
+    return f"{OK} drain-tick rate ~{hz:.1f} Hz measured over {window_s:g} s (target {DRAIN_HZ} Hz)"
 
 
 def _check_catalog_ages() -> list:
@@ -658,7 +744,11 @@ def _check_install() -> str:
     from halo_harness import update as upd
     label = {"uv_tool": "uv tool", "pipx": "pipx", "pip": "pip",
              "editable_checkout": "editable checkout", "dir_checkout": "checkout",
-             "bare_checkout": "checkout on PYTHONPATH", "unknown": "unknown"}
+             "bare_checkout": "checkout on PYTHONPATH",
+             # Halo 2.0.2 round C: "treat it as a known kind (source_dir)
+             # in doctor's install line" -- a plain source directory (no
+             # .git, no dist metadata), never "unknown".
+             "source_dir": "plain source directory (no git metadata)", "unknown": "unknown"}
     try:
         build = upd.installed_build()
         kind = upd.install_kind()
@@ -1419,9 +1509,11 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("playwright", _check_playwright()))
     entries.append(("ripgrep", _check_ripgrep()))
     entries.append(("editor", _check_editor()))
+    entries.append(("terminal_program", _check_terminal_program()))
     entries.append(("shell", _check_shell()))
     entries.append(("plugins", _check_plugins()))
     entries.append(("platform", _check_platform()))
+    entries.append(("drain_tick_rate", _check_drain_tick_rate()))
     entries.append(("local_bin_on_path", _check_local_bin_on_path()))
     entries.append(("tmux_mouse", _check_tmux_mouse()))
     catalog_ids = ("catalog_models_json", "catalog_dbx_endpoints", "catalog_models_dev")

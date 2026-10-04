@@ -8260,6 +8260,63 @@ def test_ctrl_e_opens_the_editor_even_with_the_chat_prompt_focused(ctx: Ctx):
 
 
 @test
+def test_editor_slash_command_is_the_keyboard_independent_twin_of_ctrl_e(ctx: Ctx):
+    """Halo 2.0.2 round C (macOS/VS Code terminal brief): `/editor` reaches
+    the SAME `action_open_editor` Ctrl+E does, so typing the command works
+    even on a terminal that never delivers the chord to halo at all."""
+    from halo_harness.tui.slash import handle_slash
+
+    async def body():
+        old_editor = os.environ.get("EDITOR")
+        old_visual = os.environ.get("VISUAL")
+        os.environ.pop("EDITOR", None)
+        os.environ.pop("VISUAL", None)
+        try:
+            fake = FakeController()
+            app = await _mounted(fake)
+            async with app.run_test(size=(100, 40)):
+                notified = []
+                app.notify = lambda msg, **kw: notified.append(msg)
+                await handle_slash(app, "editor", "")
+                ctx.check(f"typing /editor fired the same 'no $VISUAL/$EDITOR set' notice Ctrl+E "
+                          f"would, got {notified}", any("EDITOR" in m for m in notified))
+        finally:
+            if old_editor is not None:
+                os.environ["EDITOR"] = old_editor
+            if old_visual is not None:
+                os.environ["VISUAL"] = old_visual
+    asyncio.run(body())
+
+
+@test
+def test_keys_slash_command_opens_the_tester_dialog_and_shows_received_keys(ctx: Ctx):
+    """Halo 2.0.2 round C: `/keys` opens a dialog that shows the exact key
+    NAME halo's own app received for a press -- so a user on a terminal
+    that silently eats a shortcut (the owner's own macOS/VS Code report)
+    can tell whether halo ever saw it at all. Esc leaves."""
+    from halo_harness.tui.dialogs.keys_tester import KeysTesterDialog
+    from halo_harness.tui.slash import handle_slash
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await handle_slash(app, "keys", "")
+            await pilot.pause(0.1)
+            ctx.check(f"the key tester dialog opened, got {type(app.screen).__name__}",
+                      isinstance(app.screen, KeysTesterDialog))
+            await pilot.press("a")
+            await pilot.pause(0.1)
+            last_line = _static_text(app.screen.query_one("#keys-tester-last"))
+            ctx.check(f"the 'a' press shows up by name, got {last_line!r}", "'a'" in last_line)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            ctx.check(f"Esc left the dialog, got {type(app.screen).__name__}",
+                      not isinstance(app.screen, KeysTesterDialog))
+    asyncio.run(body())
+
+
+@test
 def test_ctrl_c_toast_says_halo_and_that_the_terminal_stays_open(ctx: Ctx):
     async def body():
         fake = FakeController()
@@ -8562,6 +8619,141 @@ def test_status_bar_shows_agents_running_count(ctx: Ctx):
             ctx.check(f"back to 0 once finished, got {app.status_bar.agents_running}",
                       app.status_bar.agents_running == 0)
             ctx.check("segment omitted again", "agents " not in str(app.status_bar.render()))
+    asyncio.run(body())
+
+
+@test
+def test_subagent_progress_ticks_a_background_cards_phase_word_and_tools(ctx: Ctx):
+    """Halo 2.0.2 round C (the owner's own background-streaming report):
+    a BACKGROUND child's `SubAgentCard` used to sit on its constructor
+    default ("thinking", 0 tools) until `subagent_end` -- no live signal
+    at all while it actually ran. `agent/subagent.py`'s `_bg_run` now
+    translates that child's own `phase`/`tool_use_ready` events into the
+    narrower `subagent_progress` kind; this pins that tui/dispatch.py
+    applies it to the right card and nothing else."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            start_ev = ev.Event("subagent_start", {"name": "Worker"}, turn=1)
+            start_ev.agent_id = "child-1"
+            app._local_events.put(start_ev)
+            await _drain_a_few(app, pilot, n=5, pause=0.02)
+            card = app.transcript.subagent_cards.get("child-1")
+            ctx.check("the card was mounted", card is not None)
+            ctx.check(f"starts on the constructor default, got {card.phase_word!r}", card.phase_word == "thinking")
+
+            progress = ev.subagent_progress(phase_word="tool", tool_call=True, turn=1)
+            progress.agent_id = "child-1"
+            app._local_events.put(progress)
+            await _drain_a_few(app, pilot, n=5, pause=0.02)
+            ctx.check(f"the card's phase word ticked to 'tool', got {card.phase_word!r}", card.phase_word == "tool")
+            ctx.check(f"the card's tool count bumped, got {card.tool_count}", card.tool_count == 1)
+
+            end_ev = ev.Event("subagent_end", {"name": "Worker", "is_error": False,
+                                                 "result_preview": "all done here"}, turn=1)
+            end_ev.agent_id = "child-1"
+            app._local_events.put(end_ev)
+            await _drain_a_few(app, pilot, n=5, pause=0.02)
+            ctx.check("the card is gone (finished and popped)", "child-1" not in app.transcript.subagent_cards)
+            notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+            ctx.check(f"the finish note carries the result preview and a /tasks pointer, got {notes}",
+                      any("all done here" in n and "/tasks" in n for n in notes))
+    asyncio.run(body())
+
+
+@test
+def test_status_bar_shows_bg_jobs_and_oldest_elapsed(ctx: Ctx):
+    """Halo 2.0.2 round C: "the status bar keeps a live signal while the
+    main turn is idle (agents N, bg jobs N, the oldest one's elapsed
+    time)" -- a background Bash job has no live start/end event of its
+    own (agent/jobs.py), so `BridgeApp._tick_background_activity` polls
+    `job_registry.list_jobs()` directly; faked here with a tiny stand-in
+    object rather than a real JobRegistry/subprocess."""
+    from types import SimpleNamespace
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            ctx.check("no 'bg jobs' segment yet", "bg jobs " not in str(app.status_bar.render()))
+            started = time.time() - 5.0
+            fake.session = SimpleNamespace(job_registry=SimpleNamespace(
+                list_jobs=lambda: [{"status": "running", "started_at": started},
+                                    {"status": "completed", "started_at": started}]))
+            app._tick_background_activity()
+            rendered = str(app.status_bar.render())
+            ctx.check(f"only the RUNNING job is counted, got {rendered!r}", "bg jobs 1" in rendered)
+            ctx.check(f"the oldest elapsed segment is shown, got {rendered!r}", "oldest " in rendered)
+            fake.session = SimpleNamespace(job_registry=SimpleNamespace(list_jobs=lambda: []))
+            app._tick_background_activity()
+            rendered = str(app.status_bar.render())
+            ctx.check("segment omitted once nothing is running", "bg jobs " not in rendered)
+    asyncio.run(body())
+
+
+@test
+def test_two_background_jobs_show_live_notes_before_a_prompt_then_one_compact_block(ctx: Ctx):
+    """Halo 2.0.2 round C's own pilot test, verbatim: "two background
+    jobs finish with no input and both notes are on screen before any
+    prompt is sent; then send a prompt and assert exactly one compact
+    notice block reached the model." A REAL `agent.jobs.JobRegistry`
+    against a minimal session stand-in -- proves THAT module's own live
+    `system_note` emission (agent/jobs.py's `_push_notice`), not just
+    dispatch.py's rendering of a hand-built event."""
+    import threading
+    from types import SimpleNamespace
+    from halo_harness.agent.jobs import JobRegistry
+    from halo_harness.agent.loop import _compact_notices_text
+    from halo_harness.config.paths import git_bash
+
+    bash = git_bash()
+    if not bash:
+        raise SkipTest("no Git Bash/sh found on this box")
+
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            session_stand_in = SimpleNamespace(
+                _event_sink=lambda ev: app._local_events.put(ev),
+                _job_notices_lock=threading.Lock(), _pending_job_notices=[],
+            )
+            registry = JobRegistry(session_stand_in)
+            for i in (1, 2):
+                record, err = registry.start_background(
+                    f"echo job-{i}-done", description=f"job {i}", cwd=REPO_DIR,
+                    env=dict(os.environ), shell_path=str(bash))
+                ctx.check(f"job {i} started, got err={err!r}", record is not None)
+
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and len(session_stand_in._pending_job_notices) < 2:
+                await app._drain()
+                await pilot.pause(0.05)
+            ctx.check(f"both jobs completed with no input sent, got "
+                      f"{len(session_stand_in._pending_job_notices)} pending notices",
+                      len(session_stand_in._pending_job_notices) == 2)
+            # the live system_note for each job is queued (sink()) strictly
+            # BEFORE that job's own notice is appended to _pending_job_
+            # notices (see agent/jobs.py's own _push_notice) -- both are
+            # already in the queue by now, just maybe not yet DRAINED into
+            # a mounted widget; a few more ticks flushes it.
+            await _drain_a_few(app, pilot, n=10, pause=0.05)
+            notes = [_static_text(w) for w in app.transcript.children if isinstance(w, SystemNote)]
+            live_job_notes = [n for n in notes if "background job finished" in n]
+            ctx.check(f"BOTH live notes are on screen already, before any prompt, got {live_job_notes}",
+                      len(live_job_notes) == 2)
+            ctx.check(f"each live note points at /tasks, got {live_job_notes}",
+                      all("/tasks" in n for n in live_job_notes))
+
+            # "then send a prompt" -- apply the queue exactly the way
+            # Session._apply_pending_job_notices does for 2+ notices.
+            pending = list(session_stand_in._pending_job_notices)
+            block = _compact_notices_text(pending, noun="job")
+            ctx.check(f"exactly ONE compact block (one head count, not one per job), got {block!r}",
+                      block.count("background jobs finished while you were away") == 1)
+            ctx.check(f"both jobs are still named inside that ONE block, got {block!r}",
+                      block.count("finished, exit code") == 2)
     asyncio.run(body())
 
 

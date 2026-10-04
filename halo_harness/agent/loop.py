@@ -642,6 +642,37 @@ def generated_tokens_for_otpm(usage) -> "int | None":
         return None
     return int(out or 0) + int(reasoning or 0)
 
+
+# Halo 2.0.2 round C (the owner's own background-streaming report, part
+# b -- "one compact block per turn ... never a flood of raw results"):
+# per-notice preview length inside a COMBINED block (2+ notices queued
+# between turns). A single pending notice is left completely untouched
+# by the two `_apply_pending_*_notices` methods below -- one notice was
+# never the "flood" this exists for, and several existing tests already
+# pin that the model sees a single notice's full result text verbatim.
+_COMPACT_NOTICE_PREVIEW_CHARS = 280
+
+
+def _compact_notices_text(notices: "list[str]", *, noun: str) -> str:
+    """2+ queued notices (either `_pending_agent_notices` or `_pending_
+    job_notices`) -> ONE block: a head count, then per item its own
+    FIRST line (already carries its task_id/job_id and status -- see
+    agent/subagent.py's `_bg_run`/agent/jobs.py's `_push_notice`) plus a
+    short preview of the rest, never the full per-item text repeated N
+    times over. Ends with a pointer to `/tasks` (and task_id resume,
+    for an agent) for whoever wants the complete result of any one of
+    them -- the SAME "short result ... task id" shape Claude Code
+    parity (H6 scope F) already promised, just never flooded."""
+    lines = [f"{len(notices)} background {noun}s finished while you were away:"]
+    for text in notices:
+        head, _, rest = text.partition("\n")
+        preview = " ".join(rest.split())
+        if len(preview) > _COMPACT_NOTICE_PREVIEW_CHARS:
+            preview = preview[:_COMPACT_NOTICE_PREVIEW_CHARS].rstrip() + "…"
+        lines.append(f"{head}\n  {preview}" if preview else head)
+    lines.append("(see /tasks, or resume the task_id above, for each one's full result)")
+    return "\n\n".join(lines)
+
 class Session:
     """One conversation against one model. `session_context.system_prompt`
     is computed ONCE by the caller and logged as the session's single
@@ -4711,32 +4742,54 @@ class Session:
 
     def _apply_pending_agent_notices(self, turn_no: int):
         """Pop every queued background-sub-agent-completion notice and
-        apply each as a user-role message (H6 scope F / dsh: "background
+        apply it as a user-role message (H6 scope F / dsh: "background
         jobs ... report completion as a user-role notice in the next
         step") -- called once at the START of `_turn_body`, so the model
         sees any sub-agent that finished while this session was between
         turns (or during a PRIOR turn's own tool dispatch) before it does
-        anything else this turn."""
+        anything else this turn.
+
+        Halo 2.0.2 round C (the owner's own background-streaming report):
+        a SINGLE notice is applied exactly as before (its own full text,
+        one user_message, one notification) -- but 2+, which used to
+        reach the model as that many separate full-length messages back
+        to back ("a flood of raw results"), are now collapsed into ONE
+        block by `_compact_notices_text` first."""
         with self._agent_notices_lock:
             notices, self._pending_agent_notices = self._pending_agent_notices, []
-        for text in notices:
-            self.log.append_user([{"type": "text", "text": text}], kind="agent_notice")
-            yield events.user_message(text, turn=turn_no)
-            yield events.notification(f"Sub-agent finished: {text.splitlines()[0]}")
+        if not notices:
+            return
+        if len(notices) == 1:
+            text = notices[0]
+            notif = f"Sub-agent finished: {text.splitlines()[0]}"
+        else:
+            text = _compact_notices_text(notices, noun="sub-agent")
+            notif = f"{len(notices)} background sub-agents finished while you were away"
+        self.log.append_user([{"type": "text", "text": text}], kind="agent_notice")
+        yield events.user_message(text, turn=turn_no)
+        yield events.notification(notif)
 
     def _apply_pending_job_notices(self, turn_no: int):
         """H8 scope A: the background-Bash-job sibling of
         `_apply_pending_agent_notices` (same dsh rule, same "called once at
-        the START of `_turn_body`" timing) -- a job that finished while this
-        session was between turns (or during a prior turn's own tool
-        dispatch) is applied as a user-role message before the model does
-        anything else this turn."""
+        the START of `_turn_body`" timing, same round-C compacting for 2+
+        queued notices) -- a job that finished while this session was
+        between turns (or during a prior turn's own tool dispatch) is
+        applied as a user-role message before the model does anything
+        else this turn."""
         with self._job_notices_lock:
             notices, self._pending_job_notices = self._pending_job_notices, []
-        for text in notices:
-            self.log.append_user([{"type": "text", "text": text}], kind="job_notice")
-            yield events.user_message(text, turn=turn_no)
-            yield events.notification(f"Background job finished: {text.splitlines()[0]}")
+        if not notices:
+            return
+        if len(notices) == 1:
+            text = notices[0]
+            notif = f"Background job finished: {text.splitlines()[0]}"
+        else:
+            text = _compact_notices_text(notices, noun="job")
+            notif = f"{len(notices)} background jobs finished while you were away"
+        self.log.append_user([{"type": "text", "text": text}], kind="job_notice")
+        yield events.user_message(text, turn=turn_no)
+        yield events.notification(notif)
 
     def _await_reply(self, waiters: dict, request_id: str, *, timeout: Optional[float] = None):
         """Block the WORKER thread until a UI-thread `resolve_*` call answers

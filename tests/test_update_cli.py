@@ -34,12 +34,16 @@ class _Proc:
 
 
 def _patch_all(*, installed_commit="aaaaaaa", available_commit="bbbbbbb", other_pids=None,
-                run_returncode=0, after_version="halo 2.0.3 (bbbbbbb, master)"):
+                run_returncode=0, after_version="halo 2.0.3 (bbbbbbb, master)", ordering=None):
     """One shared fake rig for the whole report-building + apply chain --
-    every test below tweaks just the bits it cares about via the kwargs."""
+    every test below tweaks just the bits it cares about via the kwargs.
+    `ordering` (round C): `commit_is_ancestor`'s own three-way answer --
+    None (the default, "no checkout to ask") keeps every existing test's
+    "available" wording exactly as before this knob existed; a test that
+    wants the new "differs from" wording passes `ordering=False`."""
     orig = {name: getattr(upd, name) for name in
             ("installed_build", "latest_available", "install_kind", "commits_between",
-             "other_halo_pids", "run")}
+             "commit_is_ancestor", "other_halo_pids", "run")}
     upd.installed_build = lambda **kw: {"version": "2.0.2", "commit": installed_commit,
                                          "requested_revision": None, "checkout": None,
                                          "branch": "master", "editable": False}
@@ -49,6 +53,7 @@ def _patch_all(*, installed_commit="aaaaaaa", available_commit="bbbbbbb", other_
                                       "reinstall_cmd": "uv tool install --reinstall "
                                                         "git+https://github.com/roloVibes/Halo-Harness"}
     upd.commits_between = lambda *a, **kw: (["bbbbbbb fix: a thing"], 1)
+    upd.commit_is_ancestor = lambda *a, **kw: ordering
     upd.other_halo_pids = lambda **kw: list(other_pids or [])
 
     def _fake_run(cmd, **kwargs):
@@ -91,6 +96,8 @@ def test_cmd_update_check_exit_10_when_update_available(ctx: Ctx):
         ctx.check(f"lists the commit(s) between, got {out!r}", "bbbbbbb fix: a thing" in out)
         ctx.check(f"names the exact reinstall command, got {out!r}",
                   "uv tool install --reinstall git+https://github.com/roloVibes/Halo-Harness" in out)
+        ctx.check(f"says 'available' (ordering unknown/no checkout keeps the old wording), got {out!r}",
+                  "available (main): bbbbbbb" in out)
     finally:
         _restore_all(orig)
 
@@ -119,6 +126,70 @@ def test_cmd_update_check_never_applies_anything(ctx: Ctx):
     try:
         code, _out, _err = _capture(update_cli.cmd_update, ["--check"])
         ctx.check(f"still reports exit 10, got {code}", code == 10)
+    finally:
+        _restore_all(orig)
+
+
+@test
+def test_cmd_update_without_check_always_queries_live_not_just_with_refresh(ctx: Ctx):
+    """Halo 2.0.2 round C: "an explicit --check or /update always
+    queries ... with the cache only as the fallback" -- a bare `halo
+    update` (no --check, no --refresh) must reach `latest_available`
+    with `refresh=True` regardless; the old code only did that when
+    `--refresh` was ALSO passed, so a within-TTL cache answer could sit
+    stale under an explicit check."""
+    orig = _patch_all(installed_commit="aaaaaaa", available_commit="aaaaaaa")
+    seen = {}
+    real_latest_available = upd.latest_available
+
+    def spy(*a, **kw):
+        seen["refresh"] = kw.get("refresh")
+        return real_latest_available(*a, **kw)
+    upd.latest_available = spy
+    try:
+        _capture(update_cli.cmd_update, ["--check"])
+        ctx.check(f"--check passes refresh=True, got {seen}", seen.get("refresh") is True)
+        _capture(update_cli.cmd_update, [])
+        ctx.check(f"a bare 'halo update' ALSO passes refresh=True (no --refresh given), got {seen}",
+                  seen.get("refresh") is True)
+    finally:
+        _restore_all(orig)
+
+
+@test
+def test_cmd_update_reports_differs_from_when_a_checkout_confirms_not_an_ancestor(ctx: Ctx):
+    """Halo 2.0.2 round C: "'differs from <channel>' when the ordering
+    is unknown and git merge-base --is-ancestor when a checkout exists"
+    -- a real local checkout that confirms the installed commit is NOT
+    an ancestor of the available one (diverged, or pinned to a different
+    ref) must say "differs from", never the "available" wording that
+    implies a clean, ordinary upgrade path."""
+    orig = _patch_all(installed_commit="aaaaaaa", available_commit="bbbbbbb", ordering=False)
+    try:
+        code, out, _err = _capture(update_cli.cmd_update, ["--check"])
+        ctx.check(f"exit code is unchanged (still 10 -- commits differ either way), got {code}", code == 10)
+        ctx.check(f"says 'differs from', not 'available', got {out!r}", "differs from (main): bbbbbbb" in out)
+        ctx.check("the word 'available' never appears as the label itself",
+                  "available (main):" not in out)
+    finally:
+        _restore_all(orig)
+
+
+@test
+def test_apply_update_source_dir_names_the_real_fix_instead_of_could_not_determine(ctx: Ctx):
+    """Halo 2.0.2 round 6/C: a plain source directory (no .git, no dist
+    metadata -- the tar copy the test suite itself runs from is the
+    known real case) used to fall into the generic "could not determine
+    how halo was installed -- nothing to run"; now says plainly that
+    replacing the directory is the fix, naming its real path."""
+    orig = _patch_all(installed_commit="aaaaaaa", available_commit="bbbbbbb")
+    upd.install_kind = lambda **kw: {"kind": "source_dir", "spec": "/opt/halo-source-copy", "reinstall_cmd": None}
+    try:
+        code, _out, err = _capture(update_cli.apply_update)
+        ctx.check(f"exit 1 (nothing to run), got {code}", code == 1)
+        ctx.check(f"names the real path and 'replace the directory', got {err!r}",
+                  "/opt/halo-source-copy" in err and "replace the directory" in err)
+        ctx.check("never the old generic 'could not determine' wording", "could not determine" not in err)
     finally:
         _restore_all(orig)
 

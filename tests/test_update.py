@@ -293,14 +293,22 @@ def test_install_kind_dir_info_without_a_real_git_repo_is_not_a_checkout(ctx: Ct
 
 
 @test
-def test_install_kind_unknown_when_nothing_resolves(ctx: Ctx):
+def test_install_kind_source_dir_when_no_dist_metadata_and_no_git(ctx: Ctx):
+    """Halo 2.0.2 round C: no `direct_url.json` AND no `.git` either (the
+    tar copy the test suite itself runs from is the known real case) is
+    its own named kind, "source_dir" -- not the generic "unknown" this
+    used to fall into, which made `halo update` say "could not determine
+    how halo was installed -- nothing to run" with no actionable next
+    step at all."""
     patch = _patched("_checkout_root_on_pythonpath", lambda: None)
     try:
         k = upd.install_kind(direct_url=None, run_fn=_fake_run({}))
     finally:
         _restore(patch)
-    ctx.check(f"kind is unknown, got {k}", k["kind"] == "unknown")
-    ctx.check("reinstall_cmd is None", k["reinstall_cmd"] is None)
+    ctx.check(f"kind is source_dir, got {k}", k["kind"] == "source_dir")
+    ctx.check(f"spec names a real path (this checkout's own root), got {k}", bool(k["spec"]))
+    ctx.check("reinstall_cmd is None -- nothing to run, only 'replace the directory'",
+              k["reinstall_cmd"] is None)
 
 
 @test
@@ -389,6 +397,92 @@ def test_latest_available_refresh_true_ignores_a_fresh_cache(ctx: Ctx):
         r = upd.latest_available("main", state_dir=state_dir, refresh=True, run_fn=run_fn,
                                   fetch_json=lambda *a, **k: None)
     ctx.check(f"--refresh bypasses even a fresh cache, got {r}", r["commit"] == "3333333")
+
+
+@test
+def test_latest_available_refresh_true_falls_back_to_stale_cache_on_a_failed_live_query(ctx: Ctx):
+    """Halo 2.0.2 round C: "an explicit --check or /update always
+    queries ... with the cache only as the fallback when the network
+    fails" -- a `refresh=True` call whose live query genuinely fails
+    (no git, and the API fetch returns nothing) must still answer with
+    the last known-good cached commit, never bare `commit: None`."""
+    state_dir = _tmp()
+    _seed_cache(state_dir, {"main": {"channel": "main", "commit": "1111111", "ref": "master",
+                                      "reason": None, "checked_at": time.time() - 10}})
+    old_which = upd.shutil.which
+    upd.shutil.which = lambda name: None  # no git on PATH at all
+    try:
+        with _background_net_enabled():
+            r = upd.latest_available("main", state_dir=state_dir, refresh=True,
+                                      run_fn=lambda *a, **k: (_ for _ in ()).throw(
+                                          AssertionError("git is 'missing' -- must not shell out")),
+                                      fetch_json=lambda *a, **k: None)
+    finally:
+        upd.shutil.which = old_which
+    ctx.check(f"the stale cached commit wins over a bare 'unknown', got {r}",
+              r["commit"] == "1111111" and r["source"] == "cache")
+    saved = json.loads((state_dir / "update-check.json").read_text(encoding="utf-8"))
+    ctx.check(f"the cache file is NOT overwritten with the failure, got {saved}",
+              saved["main"]["commit"] == "1111111")
+
+
+@test
+def test_latest_available_cache_ttl_s_config_knob_shortens_the_default_window(ctx: Ctx):
+    """Halo 2.0.2 round C: "update.cache_ttl_s default 3600 for the
+    startup note" -- a cache entry 1900s old is fresh under the new
+    default (3600s, was a flat 24h) but expired once `update.cache_ttl_s`
+    is configured down to 1800s, without passing refresh=True at all."""
+    state_dir = _tmp()
+    old_state_dir_env = os.environ.get("BRIDGE_STATE_DIR")
+    os.environ["BRIDGE_STATE_DIR"] = str(state_dir)  # theme.get_config_value reads bridge_home()
+    try:
+        _seed_cache(state_dir, {"main": {"channel": "main", "commit": "1111111", "ref": "master",
+                                          "reason": None, "checked_at": time.time() - 1900}})
+        def boom(*a, **k): raise AssertionError("must not refetch -- still within the default 3600s TTL")
+        r = upd.latest_available("main", state_dir=state_dir, run_fn=boom, fetch_json=boom)
+        ctx.check(f"1900s old is still fresh under the 3600s default, got {r}",
+                  r["commit"] == "1111111" and r["source"] == "cache")
+
+        from halo_harness.theme import set_config_value
+        set_config_value("update.cache_ttl_s", 1800)
+        run_fn = _fake_run({"ls-remote": _Proc("2222222222222222222222222222222222222222\trefs/heads/master\n")})
+        with _background_net_enabled():
+            r2 = upd.latest_available("main", state_dir=state_dir, run_fn=run_fn, fetch_json=lambda *a, **k: None)
+        ctx.check(f"1900s old is expired once the knob shortens the TTL to 1800s, got {r2}",
+                  r2["commit"] == "2222222" and r2["source"] == "live")
+    finally:
+        if old_state_dir_env is None:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+        else:
+            os.environ["BRIDGE_STATE_DIR"] = old_state_dir_env
+
+
+@test
+def test_commit_is_ancestor_three_way(ctx: Ctx):
+    """Halo 2.0.2 round C: True (a real ancestor), False (a real
+    checkout confirms it's NOT -- diverged/rebased-backward), or None
+    (no checkout to ask, or either commit missing/equal) -- never a
+    guess presented as a checked fact."""
+    checkout = _tmp()
+    run_fn = _fake_run({"merge-base --is-ancestor old new": _Proc(returncode=0),
+                         "merge-base --is-ancestor x y": _Proc(returncode=1)})
+    ctx.check("confirmed ancestor -> True",
+              upd.commit_is_ancestor("old", "new", checkout=checkout, run_fn=run_fn) is True)
+    ctx.check("confirmed NOT an ancestor -> False",
+              upd.commit_is_ancestor("x", "y", checkout=checkout, run_fn=run_fn) is False)
+    # `checkout=None` alone falls back to `_checkout_root_on_pythonpath()`
+    # (this repo's own real checkout, not "no checkout") -- patched to
+    # genuinely simulate "nothing to ask at all".
+    patch = _patched("_checkout_root_on_pythonpath", lambda: None)
+    try:
+        ctx.check("no checkout at all -> None (never guesses)",
+                  upd.commit_is_ancestor("old", "new", checkout=None, run_fn=run_fn) is None)
+    finally:
+        _restore(patch)
+    ctx.check("equal commits -> None (nothing to order)",
+              upd.commit_is_ancestor("same", "same", checkout=checkout, run_fn=run_fn) is None)
+    ctx.check("a missing commit -> None",
+              upd.commit_is_ancestor(None, "new", checkout=checkout, run_fn=run_fn) is None)
 
 
 @test

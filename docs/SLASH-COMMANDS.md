@@ -365,6 +365,26 @@ One step back/forward through the same shadow history `/rewind` uses.
 Prints the fully-resolved `{context: {chord: action}}` keymap (built-in
 defaults merged with `~/.claude/keybindings.json`).
 
+### `/editor` `[TUI-only]`
+Halo 2.0.2 round C: the keyboard-independent twin of Ctrl+E -- opens the
+current prompt draft in `$VISUAL`/`$EDITOR` exactly like the shortcut
+does, so a terminal that never delivers the Ctrl+E chord to halo at all
+(VS Code's integrated terminal on macOS being the reported case -- see
+`docs/TROUBLESHOOTING.md`'s "a shortcut does nothing on macOS") still
+has a way to reach it: typing a command always works. `$EDITOR`/
+`$VISUAL` unset shows the same toast either way. In `-p`, there's no
+prompt draft to edit at all; prints a note saying so.
+
+### `/keys` `[TUI-only]`
+Halo 2.0.2 round C: opens a tester dialog that shows the exact key NAME
+halo's own app received for each press -- so you can tell whether halo
+is receiving a shortcut at all before assuming it's broken (the
+terminal may simply be eating it first). Esc leaves. A key bound to a
+`priority=True` app-level shortcut (Ctrl+E, Ctrl+X, Ctrl+End) still
+shows up here too, even though its own action also still fires -- both
+are useful signal. In `-p`, there are no keystrokes to show; prints a
+note saying so.
+
 ### `/improve` `[TUI-only card review]`
 In `-p`, prints a note pointing at the real headless surface,
 `halo improve` (a *separate top-level subcommand* -- see

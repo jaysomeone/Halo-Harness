@@ -858,7 +858,11 @@ def _cmd_update(args: str, facade: HeadlessFacade) -> str:
     offer the update-and-restart dialog."""
     from halo_harness import update as upd
     build = upd.installed_build()
-    avail = upd.latest_available(upd.default_channel(build))
+    # Halo 2.0.2 round C: an explicit /update always queries live (5 s
+    # cap, cache only as the fallback on failure) -- see latest_
+    # available's own docstring; this path is explicitly "exactly like
+    # halo update --check", which gets the same treatment.
+    avail = upd.latest_available(upd.default_channel(build), refresh=True)
     kind = upd.install_kind()
     lines = [f"installed: {upd.format_version_line(build)}"]
     if avail.get("commit"):
@@ -1032,6 +1036,22 @@ def _cmd_rewind(args: str, facade: HeadlessFacade) -> str:
     return "halo: /rewind needs the interactive TUI (a file's history lives per-session)."
 
 
+def _cmd_editor(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round C (macOS/VS Code terminal brief): the keyboard-
+    independent twin of Ctrl+E -- `tui/slash.py`'s own handler intercepts
+    this in the TUI (opening $VISUAL/$EDITOR on the real prompt draft)
+    before this headless-text fallback is ever reached; there is no
+    prompt draft to edit outside an interactive session."""
+    return "halo: /editor needs the interactive TUI (there's no prompt draft to edit in print mode)."
+
+
+def _cmd_keys(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round C: the key-name tester dialog -- TUI-only (print
+    mode reads no keystrokes at all); `tui/slash.py`'s own handler opens
+    the real dialog there before this fallback is ever reached."""
+    return "halo: /keys needs the interactive TUI (it shows the key name halo receives per press)."
+
+
 def _cmd_undo(args: str, facade: HeadlessFacade) -> str:
     return "halo: /undo needs the interactive TUI."
 
@@ -1126,6 +1146,8 @@ _BUILTIN_SPECS = {
     "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
     "update": ("ui", "Check for a halo update (the TUI can also update and restart in place)",
                None, _cmd_update),
+    "editor": ("ui", "Edit the current prompt draft in $VISUAL/$EDITOR (same as Ctrl+E)", None, _cmd_editor),
+    "keys": ("ui", "Open the key tester dialog (shows the key name halo receives per press)", None, _cmd_keys),
 }
 
 

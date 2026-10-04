@@ -193,6 +193,52 @@ def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
 
 
 @test
+def test_doctor_reports_term_program_and_the_vscode_settings(ctx: Ctx):
+    """Halo 2.0.2 round C (the owner's own macOS report, "ctrl+e or
+    command+e does not work on the mac using halo"): `doctor` always
+    prints TERM_PROGRAM/TERM, and names BOTH real VS Code remedies
+    verbatim specifically when TERM_PROGRAM is vscode -- so a user can
+    paste either straight into settings.json without hunting for the
+    exact wording."""
+    from halo_harness.doctor import _check_terminal_program
+
+    old_term_program, old_term = os.environ.get("TERM_PROGRAM"), os.environ.get("TERM")
+    try:
+        os.environ.pop("TERM_PROGRAM", None)
+        line = _check_terminal_program()
+        ctx.check(f"unset TERM_PROGRAM is still reported plainly, got {line!r}",
+                  line.startswith("[OK]") and "TERM_PROGRAM=(not set)" in line)
+
+        os.environ["TERM_PROGRAM"] = "iTerm.app"
+        line = _check_terminal_program()
+        ctx.check(f"a non-vscode terminal is reported plainly, no settings.json hint, got {line!r}",
+                  "TERM_PROGRAM=iTerm.app" in line and "settings.json" not in line)
+
+        os.environ["TERM_PROGRAM"] = "vscode"
+        line = _check_terminal_program()
+        ctx.check(f"vscode is detected, got {line!r}", "TERM_PROGRAM=vscode" in line)
+        ctx.check('the sendKeybindingsToShell remedy is named verbatim, got {line!r}'.format(line=line),
+                  '"terminal.integrated.sendKeybindingsToShell": true' in line)
+        ctx.check('the commandsToSkipShell remedy is named verbatim, got {line!r}'.format(line=line),
+                  '"terminal.integrated.commandsToSkipShell": ["-<command owning ctrl+e>"]' in line)
+
+        # The real doctor CLI (subprocess) surfaces it too -- `_run`'s own
+        # `_hermetic_child_env()` forwards the parent's current os.environ
+        # (minus BRIDGE_STATE_DIR/HALO_*), so TERM_PROGRAM=vscode (set
+        # just above, still in effect here) reaches the child as-is.
+        home = _fresh_home()
+        result = _run(["doctor"], home)
+        ctx.check("real doctor CLI shows the vscode hint", "sendKeybindingsToShell" in result.stdout)
+    finally:
+        if old_term_program is not None:
+            os.environ["TERM_PROGRAM"] = old_term_program
+        else:
+            os.environ.pop("TERM_PROGRAM", None)
+        if old_term is not None:
+            os.environ["TERM"] = old_term
+
+
+@test
 def test_mcp_list_no_servers(ctx: Ctx):
     """W4b "explain the zero": a truly empty result now also names every
     scope searched (never a bare 0) -- see test_mcp_explain.py for the

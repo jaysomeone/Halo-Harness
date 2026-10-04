@@ -56,7 +56,7 @@ is verified on Windows and the Kali VM and pushed as it lands.
 
 ## 2.0.5 = hardening (`2.0.4-brief.md` minus the env-file drop)
 
-- [ ] model gym (including the local-model ranking), [ ] soak test + watchdog, [ ] CI + release script, [ ] invariants doc + test, [ ] release
+- [ ] model gym (including the local-model ranking), [ ] soak test + watchdog, [ ] MCP connects off the TUI startup path (deferred from 2.0.2 round C: a dead or slow http/sse server still holds the first frame), [ ] CI + release script, [ ] invariants doc + test, [ ] release
 
 ## 2.0.6
 

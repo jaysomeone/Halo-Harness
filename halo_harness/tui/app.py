@@ -665,6 +665,37 @@ class BridgeApp(App):
         # alive and responsive, so its own staleness IS the hang signal.
         self._last_heartbeat_monotonic = time.monotonic()
         self.status_bar.tick_spinner()
+        self._tick_background_activity()
+
+    def _tick_background_activity(self) -> None:
+        """Halo 2.0.2 round C (the owner's own background-streaming
+        report): "the status bar keeps a live signal while the main turn
+        is idle (agents N, bg jobs N, the oldest one's elapsed time)" --
+        riding the SAME once-a-second heartbeat tick as the spinner
+        above, since that is the one timer guaranteed to keep firing
+        whether or not a turn is running. `agents_running` itself is
+        already event-driven (tui/dispatch.py's subagent_start/_end) and
+        untouched here; this only adds the background-Bash-job count
+        (polled from `job_registry.list_jobs()` -- a job has no live
+        start/end event of its own, see agent/jobs.py) and the oldest
+        elapsed time across BOTH (sub-agent start times tracked in
+        `_agents_started_at` by tui/dispatch.py, job start times read
+        straight off each JobRecord)."""
+        starts = list(getattr(self, "_agents_started_at", {}).values())
+        bg_jobs = 0
+        job_registry = getattr(getattr(self.controller, "session", None), "job_registry", None)
+        if job_registry is not None:
+            try:
+                for job in job_registry.list_jobs():
+                    if job.get("status") == "running":
+                        bg_jobs += 1
+                        started = job.get("started_at")
+                        if isinstance(started, (int, float)):
+                            starts.append(started)
+            except Exception:
+                pass
+        oldest_elapsed = (time.time() - min(starts)) if starts else None
+        self.status_bar.set_background_activity(bg_jobs=bg_jobs, oldest_elapsed_s=oldest_elapsed)
 
     # ---- H15 Part B: hang watchdog -----------------------------------
 
@@ -1400,6 +1431,20 @@ class BridgeApp(App):
         pending permission card getting lost -- but this is a net for
         whatever's not yet found), refocus before letting the key proceed,
         so a key never silently goes nowhere."""
+        # Halo 2.0.2 round C (macOS/VS Code terminal brief): `/keys`'s own
+        # KeysTesterDialog, when it's the active screen, is handed every
+        # raw key THROUGH this one always-runs-first observation point --
+        # duck-typed (`halo_keys_tester_receive`, no import coupling
+        # either way) rather than giving that dialog its own `on_key`/
+        # `_on_key` override, so it needs no opinion of its own on the
+        # chord-prefix/self-heal logic below. A key bound to a `priority=
+        # True` app-level action (Ctrl+E, Ctrl+X, Ctrl+End) still reaches
+        # this dialog too -- this method runs regardless of what, if
+        # anything, the SEPARATE binding-resolution pass this docstring's
+        # own first paragraph describes does with the same key.
+        receiver = getattr(self.screen, "halo_keys_tester_receive", None)
+        if receiver is not None:
+            receiver(event.key)
         # 2.0.0 Launch intro: "any keypress ... completes it instantly" --
         # a side effect only, never `event.stop()`/`prevent_default()`, so
         # the SAME keystroke that skips the intro still reaches whatever

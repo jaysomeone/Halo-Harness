@@ -768,6 +768,29 @@ def _tag(ev, *, agent_id: str, parent_tool_use_id: str):
     return ev
 
 
+def _bg_phase_word(state: "Optional[str]", kind: "Optional[str]") -> "Optional[str]":
+    """Halo 2.0.2 round C: the SAME (state, kind) -> short display word
+    mapping `tui/dispatch.py`'s own `_phase_word_for` uses for the main
+    status bar/a foreground child's card -- kept as its own small private
+    copy here (never imported from `tui/`, which would make this agent-
+    loop module depend on the UI layer) so a BACKGROUND child's `_bg_run`
+    can translate a `phase` event into the narrower `subagent_progress`
+    kind (see events.py's own docstring on it) without that import.
+    `None` for a `phase` state that never changes the word on its own,
+    exactly like the function it mirrors."""
+    if state in ("request_sent", "headers"):
+        return "thinking"
+    if state == "first_token":
+        if kind == "reasoning":
+            return "thinking"
+        if kind == "tool":
+            return "tool"
+        return "writing"
+    if state == "waiting_for_model":
+        return "waiting"
+    return None
+
+
 def _run_child_to_completion(child, prompt_text: str, *, agent_id: str, parent_tool_use_id: str,
                               on_event=None) -> list:
     """H5c finding 8: `on_event`, when given, is called SYNCHRONOUSLY on
@@ -797,6 +820,20 @@ def _final_text_from_log(child) -> str:
             if text:
                 return text
     return "(the sub-agent finished without producing a final text answer)"
+
+
+def _one_line_preview(text: str, *, limit: int = 140) -> str:
+    """Halo 2.0.2 round C: the short, single-line result summary a
+    BACKGROUND child's live completion note shows (`tui/dispatch.py`'s
+    own `subagent_end` handler, via `end_ev`'s `result_preview` below) --
+    the first non-blank line of the child's own final answer, collapsed
+    and capped, never the full (possibly multi-KB) text this module
+    already caps separately for the model-facing notice (`RESULT_CAP`)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit] + ("…" if len(line) > limit else "")
+    return ""
 
 
 # H9 whole-tree review finding 26: `turn_done` reasons that mean the child's
@@ -1504,20 +1541,47 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
             # permanently refuse any future resume of this task_id, a worse
             # outcome than the race this flag exists to prevent.
             try:
-                # W4a: forwards ONLY this BACKGROUND child's live ASKS
+                # W4a: forwards this BACKGROUND child's live ASKS
                 # (permission/question/plan) straight into the parent's own
                 # live event queue (`Session._event_sink`, set by `run()` --
                 # the TUI's worker-thread command pump; None for a `-p`/
                 # bare-Session run, where this is exactly the old no-
                 # forwarding behaviour) -- the SAME dock a foreground
-                # child's asks already reach. Deliberately narrower than a
-                # foreground child's own full `on_event` forwarding: the
-                # brief asks for "live permission asks", not making a
-                # background task's whole output stream suddenly live (it
-                # still reports via the existing completion notice).
+                # child's asks already reach.
+                #
+                # Halo 2.0.2 round C (the owner's own background-streaming
+                # report): ALSO translates `phase`/`tool_use_ready` into the
+                # narrower `subagent_progress` kind (events.py's own
+                # docstring on it explains why a raw, unfiltered forward
+                # isn't used here) so this child's `SubAgentCard` keeps
+                # ticking with a real phase word/tool count while it runs,
+                # instead of sitting on "thinking, 0 tools" until
+                # `subagent_end`. Still deliberately narrower than a
+                # foreground child's own full `on_event` forwarding: no
+                # text/thinking content, no tool-card/phase-line widgets --
+                # "not making a background task's whole output stream
+                # suddenly live" (it still reports the real answer via the
+                # existing completion notice).
                 bg_sink = getattr(parent, "_event_sink", None)
-                on_event = ((lambda ev: bg_sink(ev) if ev.kind in ("permission_request", "question", "plan_review")
-                             else None) if bg_sink is not None else None)
+
+                def on_event(ev, _sink=bg_sink):
+                    if _sink is None:
+                        return
+                    if ev.kind in ("permission_request", "question", "plan_review"):
+                        _sink(ev)
+                    elif ev.kind == "phase":
+                        word = _bg_phase_word(ev.data.get("state"), ev.data.get("kind"))
+                        if word:
+                            progress = events.subagent_progress(phase_word=word)
+                            progress.agent_id = agent_id
+                            _sink(progress)
+                    elif ev.kind == "tool_use_ready":
+                        progress = events.subagent_progress(tool_call=True)
+                        progress.agent_id = agent_id
+                        _sink(progress)
+
+                if bg_sink is None:
+                    on_event = None
                 with runtime.concurrency_semaphore:  # 2.0.2 review finding 10: session-wide, not just one pool's own
                     child_events = _run_child_to_completion(child, prompt, agent_id=agent_id,
                                                              parent_tool_use_id=tool_id, on_event=on_event)
@@ -1585,7 +1649,11 @@ def run_agent_call(*, runtime: AgentRuntime, tool_id: str, tool_input: dict, too
                 # change at all.
                 end_ev = events.Event("subagent_end", {"agent_id": agent_id, "name": _dock_name,
                                                           "parent_tool_use_id": tool_id,
-                                                          "task_id": new_task_id, "is_error": is_error})
+                                                          "task_id": new_task_id, "is_error": is_error,
+                                                          # round C: "a one-line result summary and a
+                                                          # `/tasks` pointer" -- see tui/dispatch.py's
+                                                          # own subagent_end handler.
+                                                          "result_preview": _one_line_preview(text)})
                 end_ev.agent_id = agent_id
                 if bg_sink is not None:
                     bg_sink(end_ev)

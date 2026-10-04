@@ -29,11 +29,20 @@ def _retarget_spec(spec: Optional[str], to: str) -> Optional[str]:
     return f"{spec.split('@', 1)[0]}@{to}"
 
 
-def _print_report(build: dict, avail: dict, lines: list, count, cmd: Optional[str]) -> None:
+def _print_report(build: dict, avail: dict, lines: list, count, cmd: Optional[str], *,
+                   ordering: Optional[bool] = None) -> None:
     print(f"installed: {upd.format_version_line(build)}")
     if avail.get("commit"):
         ref = f", {avail['ref']}" if avail.get("ref") else ""
-        print(f"available ({avail.get('channel', '?')}): {avail['commit']}{ref}")
+        # Halo 2.0.2 round C: `ordering` is `upd.commit_is_ancestor`'s own
+        # three-way answer -- False means a real local checkout CHECKED
+        # this and confirmed the installed commit is NOT behind it (a
+        # diverged/rebased-backward history, or a deliberately different
+        # ref); True or None (no checkout to ask, or confirmed a clean
+        # ancestor) both keep the plain "available" wording that already
+        # implies "ahead of you", unchanged.
+        label = "differs from" if ordering is False else "available"
+        print(f"{label} ({avail.get('channel', '?')}): {avail['commit']}{ref}")
     else:
         print(f"available ({avail.get('channel', '?')}): unknown ({avail.get('reason') or 'no reason given'})")
     if lines:
@@ -72,7 +81,15 @@ def apply_update(*, cmd: Optional[str] = None, force: bool = False) -> int:
     if cmd is None:
         cmd = kind.get("reinstall_cmd")
     if not cmd:
-        print("halo update: could not determine how halo was installed -- nothing to run", file=sys.stderr)
+        if kind.get("kind") == "source_dir":
+            # Halo 2.0.2 round 6/C: a plain source directory (no .git, no
+            # dist metadata) has no `git pull` to run and no package
+            # manager that installed it to reinstall through -- say so
+            # plainly instead of the generic "could not determine" below.
+            print(f"halo update: running from a plain source directory ({kind.get('spec')}) with no git "
+                  f"metadata -- replace the directory to update", file=sys.stderr)
+        else:
+            print("halo update: could not determine how halo was installed -- nothing to run", file=sys.stderr)
         return 1
     # Finding 3: a checkout kind's `spec` is the real checkout directory
     # (never a bare "."  -- see update.install_kind) -- running there,
@@ -108,14 +125,23 @@ def cmd_update(argv: "list[str]") -> int:
                          help="stable tracks the newest v* tag, main tracks the branch halo came from")
     parser.add_argument("--force", action="store_true",
                          help="Reinstall even if another halo process looks like it's running")
-    parser.add_argument("--refresh", action="store_true", help="Ignore the 24h cache, always check live")
+    parser.add_argument("--refresh", action="store_true",
+                         help="(always on now -- kept for compatibility) ignore the cache, always check live")
     args = parser.parse_args(argv)
     if args.channel:
         from halo_harness.theme import set_config_value
         set_config_value("update.channel", args.channel)
     build = upd.installed_build()
     channel = args.channel or upd.default_channel(build)
-    avail = upd.latest_available(channel, refresh=args.refresh)
+    # Halo 2.0.2 round C: "an explicit --check or /update always queries
+    # (5 s cap) with the cache only as the fallback" -- ANY invocation of
+    # `halo update` (--check or not) is explicit by definition, so this
+    # no longer waits for --check specifically before always-refreshing
+    # (that flag is now a no-op, kept only so an existing script that
+    # passes it still runs); the cache-first path is `update.cache_ttl_s`
+    # alone now, for the passive startup note only (see latest_
+    # available's own docstring).
+    avail = upd.latest_available(channel, refresh=True)
     kind = upd.install_kind()
     cmd = kind.get("reinstall_cmd")
     if args.to and cmd and kind.get("spec"):
@@ -124,7 +150,8 @@ def cmd_update(argv: "list[str]") -> int:
             cmd = cmd.replace(kind["spec"], retargeted)
     checkout = Path(build["checkout"]) if build.get("checkout") else None
     lines, count = upd.commits_between(build.get("commit"), avail.get("commit"), checkout=checkout)
-    _print_report(build, avail, lines, count, cmd)
+    ordering = upd.commit_is_ancestor(build.get("commit"), avail.get("commit"), checkout=checkout)
+    _print_report(build, avail, lines, count, cmd, ordering=ordering)
     code = _exit_code(build, avail)
     if args.check:
         return code

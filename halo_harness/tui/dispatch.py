@@ -609,6 +609,15 @@ async def _apply_event_inner(app, event) -> None:
         app._agents_running_count = getattr(app, "_agents_running_count", 0) + 1
         app.status_bar.set_agents_running(app._agents_running_count)
         if child_agent_id:
+            # Halo 2.0.2 round C: "the status bar keeps a live signal ...
+            # the oldest one's elapsed time" -- `BridgeApp._tick_
+            # background_activity` (the once-a-second heartbeat tick, the
+            # only thing guaranteed to keep running while the main turn
+            # is idle) reads this dict's own values; popped on
+            # subagent_end below.
+            if not hasattr(app, "_agents_started_at"):
+                app._agents_started_at = {}
+            app._agents_started_at[child_agent_id] = event.ts
             from halo_harness.tui.widgets.cards import SubAgentCard
             card = SubAgentCard(agent_id=child_agent_id, name=name)
             await app.transcript.mount_subagent_card(card)
@@ -619,11 +628,36 @@ async def _apply_event_inner(app, event) -> None:
         app._agents_running_count = max(0, getattr(app, "_agents_running_count", 0) - 1)
         app.status_bar.set_agents_running(app._agents_running_count)
         child_agent_id = data.get("agent_id") or agent_id  # finding 6, see subagent_start's own comment above
+        if child_agent_id:
+            getattr(app, "_agents_started_at", {}).pop(child_agent_id, None)
         card = app.transcript.subagent_cards.pop(child_agent_id, None) if child_agent_id else None
         if card is not None:
             card.finish()
-        widget = await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}", kind="subagent")
+        # Halo 2.0.2 round C: "its completion as a system note with a
+        # one-line result summary and a pointer to /tasks" -- `result_
+        # preview` (agent/subagent.py's `_bg_run`, set just before this
+        # event fires) is only ever present for a BACKGROUND child; a
+        # foreground one's result is already visible inline (its own
+        # text/thinking blocks, rendered live right above this note), so
+        # this stays the plain "finished: NAME" note for that case.
+        preview = data.get("result_preview")
+        suffix = f" -- {preview} (see /tasks)" if preview else ""
+        widget = await app.transcript.add_note(f"← sub-agent finished: {data.get('name', '?')}{suffix}",
+                                                 kind="subagent")
         app.transcript.subagent_marks.append(widget)
+    elif kind == "subagent_progress":
+        # Halo 2.0.2 round C: a BACKGROUND child's own phase/tool-call
+        # signal (agent/subagent.py's `_bg_run`) -- narrower than the
+        # `phase`/`tool_use_ready` handlers above on purpose, see events.
+        # subagent_progress's own docstring; touches only this one card.
+        child_agent_id = data.get("agent_id") or agent_id
+        card = app.transcript.subagent_cards.get(child_agent_id) if child_agent_id else None
+        if card is not None:
+            word = data.get("phase_word")
+            if word:
+                card.set_phase_word(word)
+            if data.get("tool_call"):
+                card.note_tool_call()
     elif kind == "subagent_queued":
         # Halo 2.0.2 round 3 (brief C): a `count`/`batch` fan-out job
         # waiting for a concurrency-pool slot -- `/tasks` (tui/dialogs/

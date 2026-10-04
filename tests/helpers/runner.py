@@ -152,6 +152,10 @@ def run_all(tests: list, ctx: Ctx):
     from tests.helpers.provider_env_defaults import ensure_scoped_state_dir_once
     ensure_scoped_state_dir_once()
     os.environ.setdefault("BRIDGE_TEST_NO_BACKGROUND_NET", "1")
+    # Halo 2.0.2 round C: same backstop as BRIDGE_TEST_NO_BACKGROUND_NET
+    # just above -- see provider_env_defaults.ensure_default_provider_
+    # credentials' own comment on this exact var.
+    os.environ.setdefault("BRIDGE_TEST_DRAIN_TICK_WINDOW_S", "0.15")
     results = []
     passed = failed = skipped = 0
     for name, fn in tests:

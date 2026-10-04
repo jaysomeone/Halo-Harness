@@ -758,6 +758,122 @@ def test_http_transport_raises_the_original_error_when_sse_also_fails(ctx: Ctx):
         http_sse.connect_http, http_sse.connect_sse = orig_http, orig_sse
 
 
+# ---- Halo 2.0.2 round C: connection-refused/DNS-failure fail fast ---------
+
+@test
+def test_preflight_tcp_reachability_raises_fast_on_connection_refused(ctx: Ctx):
+    """Halo 2.0.2 round C: "connection refused ... fail fast ... instead
+    of waiting out MCP_TIMEOUT" -- a FAKE `open_connection` that raises
+    ConnectionRefusedError immediately (standing in for the real OS-level
+    refusal, verified separately to behave this way for real) must come
+    straight back as `ConnectionRefusedError`, never swallowed/retried."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _refused(host, port):
+        raise ConnectionRefusedError(f"[Errno 111] Connection refused: {host}:{port}")
+
+    raised = None
+    try:
+        asyncio.run(http_sse.preflight_tcp_reachability(
+            "http://127.0.0.1:9/mcp", timeout=5.0, open_connection=_refused))
+    except ConnectionRefusedError as e:
+        raised = e
+    ctx.check(f"raises ConnectionRefusedError naming host:port, got {raised!r}",
+              raised is not None and "127.0.0.1:9" in str(raised))
+
+
+@test
+def test_preflight_tcp_reachability_raises_fast_on_dns_failure(ctx: Ctx):
+    """Halo 2.0.2 round C: "DNS failure fail fast" -- `socket.gaierror`
+    IS an `OSError` (same branch as connection-refused), covered by the
+    same fast-fail path."""
+    import asyncio
+    import socket
+    from halo_harness.mcp import http_sse
+
+    async def _no_such_host(host, port):
+        raise socket.gaierror("getaddrinfo failed")
+
+    raised = None
+    try:
+        asyncio.run(http_sse.preflight_tcp_reachability(
+            "http://does-not-resolve.invalid/mcp", timeout=5.0, open_connection=_no_such_host))
+    except ConnectionRefusedError as e:
+        raised = e
+    ctx.check(f"a DNS failure ALSO raises ConnectionRefusedError (never the raw gaierror), got {raised!r}",
+              raised is not None and "does-not-resolve.invalid" in str(raised))
+
+
+@test
+def test_preflight_tcp_reachability_is_inconclusive_for_a_merely_slow_server(ctx: Ctx):
+    """A server that's simply SLOW to accept (never confirmed refused)
+    must not be treated as dead -- this probe's own timeout elapsing
+    returns normally (never raises), leaving the real, longer connect
+    attempt to make the actual call."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _never_returns(host, port):
+        await asyncio.sleep(60)
+        raise AssertionError("should have been cancelled by the probe's own short timeout")
+
+    import time
+    t0 = time.monotonic()
+    asyncio.run(http_sse.preflight_tcp_reachability(
+        "http://slow.example/mcp", timeout=0.2, open_connection=_never_returns))
+    ctx.check(f"returned promptly (bounded by its OWN short timeout), got {time.monotonic()-t0:.2f}s",
+              time.monotonic() - t0 < 2.0)
+
+
+@test
+def test_preflight_tcp_reachability_succeeds_silently_on_a_real_connect(ctx: Ctx):
+    """The ordinary, overwhelmingly common case -- a reachable server --
+    must never raise or otherwise change anything downstream."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    class _FakeWriter:
+        def close(self):
+            pass
+
+    async def _ok(host, port):
+        return object(), _FakeWriter()
+
+    asyncio.run(http_sse.preflight_tcp_reachability(
+        "http://example.com/mcp", timeout=5.0, open_connection=_ok))  # must not raise
+    ctx.check("reaches here -- no exception for a successful connect", True)
+
+
+@test
+def test_connect_http_and_connect_sse_both_run_the_preflight_check_first(ctx: Ctx):
+    """Halo 2.0.2 round C: both transports must run the SAME preflight
+    check before any of the real (SDK-internal) connect work -- proven
+    by a fake `preflight_tcp_reachability` that raises unconditionally;
+    if either transport skipped it, it would instead fail later/
+    differently (or hang, per the real bug this closes) rather than with
+    this EXACT error."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _boom(url, *, timeout, open_connection=None):
+        raise ConnectionRefusedError("preflight fired")
+
+    orig = http_sse.preflight_tcp_reachability
+    http_sse.preflight_tcp_reachability = _boom
+    try:
+        for coro_fn in (http_sse.connect_http, http_sse.connect_sse):
+            raised = None
+            try:
+                asyncio.run(coro_fn(url="http://127.0.0.1:9/mcp", headers={}, connect_timeout=1.0))
+            except ConnectionRefusedError as e:
+                raised = e
+            ctx.check(f"{coro_fn.__name__} ran the preflight check first, got {raised!r}",
+                      raised is not None and "preflight fired" in str(raised))
+    finally:
+        http_sse.preflight_tcp_reachability = orig
+
+
 # ---- Linux/H4 must-do: mcpLazy servers connect for discoverability --------
 
 @test

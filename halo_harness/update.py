@@ -33,6 +33,15 @@ CACHE_TTL_S = 24 * 3600
 # install open; see update_cli.apply_update/other_halo_pids.
 RESTART_EXIT_CODE = 91
 
+# Halo 2.0.2 round C: "update.cache_ttl_s default 3600 for the startup
+# note" -- was 24*3600 before this round, applied to EVERY non-refresh
+# caller (today, only the startup note is one -- see `latest_available`'s
+# own docstring). The config knob's own fallback default, and (unchanged)
+# what `tests/test_update.py` seeds a deliberately-expired cache entry
+# relative to directly (`upd.CACHE_TTL_S`), so that test adapts to
+# whatever this is set to with no edit of its own needed.
+CACHE_TTL_S = 3600
+
 _UNSET = object()
 _TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -240,17 +249,28 @@ def _tool_reinstall_cmd(prefix: str, run_fn, *, editable: bool, path: str = ".")
 def install_kind(*, direct_url: "object" = _UNSET, prefix: Optional[str] = None, run_fn=None) -> dict:
     """{"kind", "spec", "reinstall_cmd"} -- `kind` is one of "uv_tool",
     "pipx", "pip", "editable_checkout", "dir_checkout", "bare_checkout",
-    "unknown".
+    "source_dir", "unknown".
     `reinstall_cmd` is the exact command `halo update`/doctor's fix line
     runs or prints; always a plain string meant to be run with a shell
-    (it may contain `&&`), never argv split for you."""
+    (it may contain `&&`), never argv split for you. `None` for
+    "source_dir" and "unknown" -- see those two kinds' own notes."""
     run_fn = run_fn or run
     prefix = sys.prefix if prefix is None else prefix
     d = _direct_url() if direct_url is _UNSET else direct_url
     if d is None:
         checkout = _checkout_root_on_pythonpath()
         if checkout is None:
-            return {"kind": "unknown", "spec": None, "reinstall_cmd": None}
+            # Halo 2.0.2 round 6/C: no dist metadata (`direct_url.json`)
+            # AND no `.git` here either -- a plain source directory (the
+            # tar copy the test suite runs from being the known real
+            # case) rather than a genuine install of any kind. Its own
+            # named kind, not "unknown" -- `apply_update`/doctor's
+            # install line both say something useful instead of the old
+            # bare "could not determine how halo was installed" (there is
+            # nothing to `git pull` and no package manager to reinstall
+            # through; replacing the directory IS the only real fix).
+            return {"kind": "source_dir", "spec": str(Path(__file__).resolve().parent.parent),
+                    "reinstall_cmd": None}
         spec = str(checkout)
         # Finding 3: never a bare "git pull" -- `-C <checkout>` keeps the
         # pull tied to the real checkout no matter what directory `halo
@@ -389,11 +409,21 @@ def latest_available(channel: Optional[str] = None, *, refresh: bool = False,
                       run_fn=None, fetch_json=None) -> dict:
     """{"channel", "commit", "ref", "reason", "source"} -- never raises,
     `commit` is None with a `reason` when nothing could be determined
-    (offline, no git, rate-limited). Cached 24h per channel in
-    `~/.halo/update-check.json`; `refresh=True` ignores that cache.
-    Honours `BRIDGE_TEST_NO_BACKGROUND_NET=1` and config `update.check:
-    false` -- both return the LAST cached answer (or "unknown") rather
-    than ever touching the network from a test."""
+    (offline, no git, rate-limited). Cached per channel in
+    `~/.halo/update-check.json`, for `update.cache_ttl_s` seconds (config,
+    default `CACHE_TTL_S` -- Halo 2.0.2 round C: "the 24h cache is for the
+    startup note only, and its TTL should be 1h" -- this is the ONLY
+    passive/launch-time caller, `tui/app.py`'s `_update_check_startup_
+    worker`; every explicit caller, `--check`/`/update`, now passes
+    `refresh=True` instead of relying on a short TTL alone). `refresh=True`
+    ignores the cache's own freshness entirely and always queries live
+    (still 5s-capped -- see `_fetch_latest`'s own `timeout=5` call sites)
+    -- but the cache is still consulted as the FALLBACK when that live
+    query genuinely fails (offline, rate-limited): a stale-but-real
+    answer beats reporting "unknown" when something WAS known moments
+    ago. Honours `BRIDGE_TEST_NO_BACKGROUND_NET=1` and config `update.
+    check: false` -- both return the LAST cached answer (or "unknown")
+    rather than ever touching the network from a test."""
     from halo_harness.config.paths import bridge_home, background_net_disabled
     from halo_harness.theme import get_config_value
     run_fn = run_fn or run
@@ -404,7 +434,11 @@ def latest_available(channel: Optional[str] = None, *, refresh: bool = False,
     cache = _load_cache(state_dir)
     cached = cache.get(channel) if isinstance(cache, dict) else None
     now = time.time()
-    if not refresh and isinstance(cached, dict) and (now - cached.get("checked_at", 0)) < CACHE_TTL_S:
+    try:
+        cache_ttl_s = float(get_config_value("update.cache_ttl_s", default=CACHE_TTL_S))
+    except (TypeError, ValueError):
+        cache_ttl_s = CACHE_TTL_S
+    if not refresh and isinstance(cached, dict) and (now - cached.get("checked_at", 0)) < cache_ttl_s:
         return {**cached, "source": "cache"}
     checking_disabled = get_config_value("update.check", True) is False
     if checking_disabled or background_net_disabled():
@@ -413,10 +447,55 @@ def latest_available(channel: Optional[str] = None, *, refresh: bool = False,
         reason = "update.check is off" if checking_disabled else "background network disabled"
         return {"channel": channel, "commit": None, "ref": None, "reason": reason, "source": "disabled"}
     result = _fetch_latest(channel, run_fn=run_fn, fetch_json=fetch_json)
+    if result.get("commit") is None and isinstance(cached, dict):
+        # round C: the live query (5s-capped) genuinely failed -- fall
+        # back to the last known-good cached answer rather than reporting
+        # "unknown" over something that WAS known moments ago. Never
+        # overwrites the cache file with this failure either (the stale
+        # entry is still the most recent REAL data this channel has).
+        return {**cached, "source": "cache"}
     result["checked_at"] = now
     cache[channel] = result
     _save_cache(state_dir, cache)
     return {**result, "source": "live"}
+
+
+def commit_is_ancestor(old_commit: Optional[str], new_commit: Optional[str], *, checkout: Optional[Path] = None,
+                        run_fn=None) -> Optional[bool]:
+    """Halo 2.0.2 round C: "'differs from <channel>' when the ordering
+    is unknown and `git merge-base --is-ancestor` when a checkout
+    exists" -- without this, `old_commit != new_commit` alone was always
+    presented as "an update is available" (old is BEHIND new), which is
+    simply assumed, never actually checked; a diverged or rebased-
+    backward local checkout (or one deliberately pinned to an older/
+    different ref) would print a misleading "update available" for a
+    commit it can never cleanly fast-forward onto. True when `old_commit`
+    really is a git ancestor of `new_commit` in a real local checkout
+    (the ordinary, overwhelmingly common "genuinely behind" case); False
+    when a checkout IS available and confirms it is NOT (`git merge-base
+    --is-ancestor`'s own exit code 1) -- a real, checked "no" rather than
+    a guess. None when there is no local checkout to ask at all (every
+    caller keeps its EXISTING "assume available means ahead" wording in
+    that case, unchanged -- a plain uv_tool/pip install's own commit
+    comes from querying this SAME remote branch, so there is no new
+    ambiguity to introduce just because there is no local git history to
+    double-check it against), or when either commit is missing/equal."""
+    run_fn = run_fn or run
+    if checkout is None:
+        checkout = _checkout_root_on_pythonpath()
+    if checkout is None or not old_commit or not new_commit or old_commit == new_commit:
+        return None
+    try:
+        r = run_fn(["git", "merge-base", "--is-ancestor", old_commit, new_commit],
+                   cwd=str(checkout), capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # `git merge-base --is-ancestor` exits 0 (yes)/1 (no) by design; any
+    # OTHER code (128 "not a valid object", a shallow clone missing one
+    # of the two commits, ...) means the question genuinely couldn't be
+    # answered here, not a confirmed "no" -- stays None, never a false
+    # "diverged".
+    return True if r.returncode == 0 else (False if r.returncode == 1 else None)
 
 
 def commits_between(old_commit: Optional[str], new_commit: Optional[str], *, checkout: Optional[Path] = None,

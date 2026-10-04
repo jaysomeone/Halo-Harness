@@ -11,6 +11,7 @@ acceptance run.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from contextlib import AsyncExitStack
@@ -117,6 +118,53 @@ def _mcp_http_client_factory(headers: Optional[dict] = None, timeout=None, auth=
         return create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
 
 
+async def preflight_tcp_reachability(url: str, *, timeout: float, open_connection=None) -> None:
+    """Halo 2.0.2 round C: "connection refused and DNS failure fail fast
+    (well under a second) instead of waiting out MCP_TIMEOUT". Verified
+    directly against the installed MCP SDK: `streamable_http_client`'s
+    own context-manager entry (what `connect_timeout`/`task_timeout`
+    below actually wrap) is LAZY -- it returns in well under a second
+    regardless of whether anything is even listening -- so neither
+    `connect_http` nor `connect_sse`'s own timeout ever caught a dead
+    server at all; the real first network round trip only happens later
+    inside `ClientSession.initialize()` (called from `mcp/manager.py`,
+    outside this module entirely), which then blocks on a low-level
+    anyio memory-stream wait that a raw `asyncio.Task.cancel()` (this
+    same codebase's own `mcp.client.task_timeout`) could NOT reliably
+    interrupt within its configured window either (verified: it still
+    hadn't returned after the window had long since passed). Rather than
+    fight that SDK-internal cancellation gap, this runs a plain stdlib-
+    shaped TCP connect attempt BEFORE any of that -- verified to raise
+    promptly and cleanly on both failure shapes (a closed port: a real
+    `ConnectionRefusedError` in a couple of seconds on Windows loopback,
+    almost certainly faster on Linux/the project's primary platform; a
+    bad hostname: `socket.gaierror` in well under a second).
+
+    Raises `ConnectionRefusedError` ONLY for a CONFIRMED refusal/DNS
+    failure (any `OSError`, which covers both). Returns normally (never
+    raises) for anything else this can't confirm either way: no host in
+    the URL, this probe's OWN `timeout` elapsing (inconclusive -- a
+    genuinely slow-but-reachable server must still get its usual, longer
+    chance via the real connect attempt that follows, unchanged), or any
+    other surprise -- a false positive here would wrongly fail a server
+    this was never meant to touch at all."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    open_connection = open_connection or asyncio.open_connection
+    try:
+        reader, writer = await asyncio.wait_for(open_connection(host, port), timeout=timeout)
+    except asyncio.TimeoutError:
+        return  # inconclusive (merely slow) -- let the real connect attempt decide
+    except OSError as e:
+        raise ConnectionRefusedError(f"could not reach {host}:{port} ({type(e).__name__}: {e})") from e
+    else:
+        writer.close()
+
+
 async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     """Streamable-HTTP connect. Returns `(stack, session)`, stack OPEN --
     same contract as `stdio.connect`. Headers are carried on a pre-built
@@ -124,11 +172,16 @@ async def connect_http(*, url: str, headers: dict, connect_timeout: float):
     longer takes `headers=` directly -- verified against the installed
     2.2.0 API, not assumed). finding 15: `connect_timeout` uses
     `client.task_timeout` (same-task `Task.cancel()`), not
-    `asyncio.wait_for` -- see `stdio.connect`'s own docstring for why."""
+    `asyncio.wait_for` -- see `stdio.connect`'s own docstring for why.
+
+    Round C: `preflight_tcp_reachability` runs FIRST -- see its own
+    docstring for why a connection-refused/DNS-failure server would
+    otherwise sail straight past every timeout below."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     from halo_harness.mcp.client import task_timeout
 
+    await preflight_tcp_reachability(url, timeout=connect_timeout)
     http_client = _mcp_http_client_factory(headers=headers or {})
     stack = AsyncExitStack()
     try:
@@ -159,11 +212,14 @@ async def connect_sse(*, url: str, headers: dict, connect_timeout: float):
     """Deprecated `sse` transport connect (kept for existing configs that
     still name it -- `manager.py` logs a deprecation notice when it does).
     Returns `(stack, session)`, stack OPEN. finding 15: same
-    `client.task_timeout` swap as `connect_http`/`stdio.connect`."""
+    `client.task_timeout` swap as `connect_http`/`stdio.connect`. Round
+    C: `preflight_tcp_reachability` runs first, same as `connect_http`
+    -- see its own docstring."""
     from mcp import ClientSession
     from mcp.client.sse import sse_client
     from halo_harness.mcp.client import task_timeout
 
+    await preflight_tcp_reachability(url, timeout=connect_timeout)
     stack = AsyncExitStack()
     try:
         async with task_timeout(connect_timeout + 1):

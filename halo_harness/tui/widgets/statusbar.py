@@ -94,6 +94,20 @@ class StatusBar(Static):
         # deliberately NOT counted -- the brief calls this "agents N
         # (running count)"; `/tasks` is where a queued job is visible.
         self.agents_running: int = 0
+        # Halo 2.0.2 round C (the owner's own background-streaming
+        # report): "the status bar keeps a live signal while the main
+        # turn is idle (agents N, bg jobs N, the oldest one's elapsed
+        # time)" -- `bg_jobs_running` mirrors `agents_running`'s own
+        # "0 omits the segment" convention; `oldest_bg_elapsed_s` is the
+        # elapsed time (seconds) of whichever currently-running agent OR
+        # job started longest ago, None when nothing is running at all.
+        # Both are POLLED, not event-driven (`tui/app.py`'s
+        # `_tick_background_activity`, the once-a-second heartbeat tick
+        # that keeps firing whether or not a turn is running) -- a
+        # background Bash job has no live start/end event of its own to
+        # react to (agent/jobs.py).
+        self.bg_jobs_running: int = 0
+        self.oldest_bg_elapsed_s: "float | None" = None
         self.mode = "default"
         self.cwd = cwd
         self.branch = branch
@@ -269,6 +283,17 @@ class StatusBar(Static):
             self.agents_running = count
             self._refresh_display()
 
+    def set_background_activity(self, *, bg_jobs: int, oldest_elapsed_s: "float | None") -> None:
+        """Round C: called every second (`BridgeApp._tick_background_
+        activity`), whether or not a turn is running -- unlike every
+        other setter here, this one ALWAYS redraws (never gated on "did
+        anything change") so the elapsed-seconds text visibly keeps
+        ticking up on its own, the same liveness convention `tick_
+        spinner`'s own live phase segment already follows."""
+        self.bg_jobs_running = max(0, bg_jobs)
+        self.oldest_bg_elapsed_s = oldest_elapsed_s
+        self._refresh_display()
+
     def set_effort(self, effort: "str | None") -> None:
         # 1.0.1 hotfix 20.3: `/effort`'s own immediate UI update -- unlike
         # apply_status's fields, this DOES accept None (a switch to a model
@@ -371,6 +396,14 @@ class StatusBar(Static):
         # Halo 2.0.2 round 3 (brief C): "agents N" (running count), 0 omits
         # it entirely -- same convention as needs_you_str just above.
         agents_str = f"agents {self.agents_running}" if self.agents_running else ""
+        # Halo 2.0.2 round C: "bg jobs N" (background Bash jobs, separate
+        # from sub-agents) plus, when anything at all is running, the
+        # OLDEST one's own elapsed time -- so a quiet screen with real
+        # work still running elsewhere never reads as just "idle".
+        bg_jobs_str = f"bg jobs {self.bg_jobs_running}" if self.bg_jobs_running else ""
+        oldest_str = (f"oldest {format_elapsed_seconds(self.oldest_bg_elapsed_s)}"
+                      if self.oldest_bg_elapsed_s is not None and (self.agents_running or self.bg_jobs_running)
+                      else "")
         loc_str = self.cwd if not self.branch else f"{self.cwd} ({self.branch})"
         model_label = self.model
 
@@ -389,8 +422,8 @@ class StatusBar(Static):
         if width and self.cwd:
             def _overflow(loc: str, mcp_on: bool, bal_on: bool) -> int:
                 bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
-                                     permission_str, needs_you_str, agents_str, mcp_on and mcp_str, spinner_str,
-                                     new_str) if b]
+                                     permission_str, needs_you_str, agents_str, bg_jobs_str, oldest_str,
+                                     mcp_on and mcp_str, spinner_str, new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
                 # that separator plus its own trailing space, a close-
@@ -460,6 +493,12 @@ class StatusBar(Static):
         if agents_str:
             text.append("│ ", style="dim")
             text.append(f"{agents_str} ", style="cyan")
+        if bg_jobs_str:
+            text.append("│ ", style="dim")
+            text.append(f"{bg_jobs_str} ", style="cyan")
+        if oldest_str:
+            text.append("│ ", style="dim")
+            text.append(f"{oldest_str} ", style="dim")
         if loc_str:
             text.append("│ ", style="dim")
             text.append(f"{loc_str} ", style="dim")

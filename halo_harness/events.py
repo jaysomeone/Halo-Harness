@@ -36,6 +36,21 @@ EVENT_KINDS = frozenset({
     # finally picks it up); the job's own ordinary `subagent_start` follows
     # later, once it actually begins.
     "subagent_queued",
+    # Halo 2.0.2 round C (the owner's own background-streaming report):
+    # a BACKGROUND sub-agent's own phase/tool-call signal, forwarded live
+    # by agent/subagent.py's `_bg_run` so its `SubAgentCard` keeps ticking
+    # with a real phase word instead of sitting on "thinking" (the
+    # constructor default) until `subagent_end`. Deliberately its OWN
+    # narrow kind rather than re-forwarding the raw `phase`/`tool_use_
+    # ready` events a FOREGROUND child's events already are (H5c finding
+    # 8) -- those also drive the full transcript phase-line/tool-card
+    # widgets (tui/dispatch.py), which need a matching `message_end`/
+    # `turn_done` to ever close; a background run deliberately never
+    # forwards ITS internal step boundaries live (see _bg_run's own
+    # docstring: "not making a background task's whole output stream
+    # suddenly live"), so those widgets would dangle, half-finished,
+    # forever. This kind only ever touches that one child's own card.
+    "subagent_progress",
     "replay", "notification", "steer_queued", "steer_applied",
     "compaction",  # H5 scope B
     "phase", "steer_restart",  # Halo 2.0.1 W2a (liveness-tips-brief Part A6/GLM-brief item 3)
@@ -278,6 +293,18 @@ def phase(*, state: str, turn: int = 0, model: Optional[str] = None, ttfb_ms: Op
     may emit `request_sent`/`headers` with no `first_token` -- a UI must not
     assume all four always appear for every call."""
     return Event("phase", {"state": state, "model": model, "ttfb_ms": ttfb_ms, "kind": kind}, turn=turn)
+
+
+def subagent_progress(*, phase_word: Optional[str] = None, tool_call: bool = False, turn: int = 0) -> Event:
+    """data: {phase_word, tool_call} -- the caller (agent/subagent.py's
+    `_bg_run`) sets `.agent_id` afterward, same convention as subagent_
+    start/subagent_end. `phase_word` is one of the words `tui/dispatch.
+    py`'s own `_phase_word_for` already produces for the main status bar
+    (thinking/writing/tool/waiting) -- None means "no word change, this
+    is just a tool-call tick" (see `tool_call`). See EVENT_KINDS' own
+    comment on `subagent_progress` for why this is a separate, narrower
+    kind rather than the raw `phase`/`tool_use_ready` events."""
+    return Event("subagent_progress", {"phase_word": phase_word, "tool_call": tool_call}, turn=turn)
 
 
 def steer_restart(text: str, *, turn: int = 0) -> Event:

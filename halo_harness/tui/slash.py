@@ -84,6 +84,13 @@ async def handle_slash(app, name: str, args: str) -> None:
         # Roles/Organizations step(s), pushed onto THIS live app's screen
         # stack (same pattern as /roles edit, /org edit).
         "setup": _handle_setup,
+        # Halo 2.0.2 round C (macOS/VS Code terminal brief): `/editor` is
+        # the keyboard-independent way to reach Ctrl+E's own action --
+        # for a terminal that eats the chord before halo ever sees it
+        # (VS Code's integrated terminal on macOS, the owner's own
+        # report), typing the command always works. `/keys` opens the
+        # key-name tester dialog (same dock Ctrl+T/`/tasks` already use).
+        "editor": _handle_editor, "keys": _handle_keys,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -847,10 +854,15 @@ def _update_worker(app) -> None:
     from halo_harness import update as upd
     from halo_harness.tui.dialogs.update_dialog import UpdateDialog
     build = upd.installed_build()
-    avail = upd.latest_available(upd.default_channel(build))
+    # Halo 2.0.2 round C: "an explicit --check or /update always queries
+    # (5 s cap) with the cache only as the fallback" -- /update is an
+    # explicit, deliberate ask, never the passive startup note just below
+    # (which stays cache-first on purpose).
+    avail = upd.latest_available(upd.default_channel(build), refresh=True)
     kind = upd.install_kind()
     checkout = Path(build["checkout"]) if build.get("checkout") else None
     lines, _count = upd.commits_between(build.get("commit"), avail.get("commit"), checkout=checkout)
+    ordering = upd.commit_is_ancestor(build.get("commit"), avail.get("commit"), checkout=checkout)
     up_to_date = bool(build.get("commit") and avail.get("commit") and build["commit"] == avail["commit"])
     installed_line = upd.format_version_line(build)[len("halo "):]
     if avail.get("commit"):
@@ -858,7 +870,8 @@ def _update_worker(app) -> None:
         available_line = f"{avail['commit']}{ref}"
     else:
         available_line = f"unknown ({avail.get('reason') or 'no reason given'})"
-    dialog = UpdateDialog(installed_line, available_line, lines, kind.get("reinstall_cmd"), up_to_date=up_to_date)
+    dialog = UpdateDialog(installed_line, available_line, lines, kind.get("reinstall_cmd"),
+                           up_to_date=up_to_date, ordering=ordering)
     app.call_from_thread(app.push_screen, dialog, lambda result: _on_update_dialog_result(app, result))
 
 
@@ -877,11 +890,12 @@ def update_check_startup_worker(app) -> None:
     """Halo 2.0.2 round 6: the SAME "stale -> background refresh" shape
     `catalog_auto_refresh_worker` uses, called once at TUI launch
     (`tui/app.py`'s own `on_mount`) -- a one-line transcript note, at most
-    once a day, ONLY when the (cache-first, 24h TTL) check already knows
-    an update is available; never a fresh forced check, never on the UI
-    thread. Off entirely with `update.check: false`/`update.notify:
-    false`, or `BRIDGE_TEST_NO_BACKGROUND_NET=1` (never touch the network
-    from a test)."""
+    once a day, ONLY when the (cache-first, `update.cache_ttl_s` TTL --
+    round C: 3600s default, was a flat 24h) check already knows an update
+    is available; never a fresh forced check (that's `/update`'s own
+    job, `refresh=True` there), never on the UI thread. Off entirely with
+    `update.check: false`/`update.notify: false`, or `BRIDGE_TEST_NO_
+    BACKGROUND_NET=1` (never touch the network from a test)."""
     from halo_harness.config.paths import background_net_disabled
     if background_net_disabled():
         return
@@ -928,6 +942,19 @@ async def _handle_mcp(app, _args: str) -> None:
 
 async def _handle_tasks(app, _args: str) -> None:
     app.action_toggle_tasks()
+
+
+async def _handle_editor(app, _args: str) -> None:
+    """Halo 2.0.2 round C: the keyboard-independent twin of Ctrl+E --
+    SAME action, so $VISUAL/$EDITOR-unset/failure handling is identical;
+    this exists purely so a terminal that never delivers the Ctrl+E chord
+    to halo at all still has a way to reach it (type it instead)."""
+    app.action_open_editor()
+
+
+async def _handle_keys(app, _args: str) -> None:
+    from halo_harness.tui.dialogs.keys_tester import KeysTesterDialog
+    app.push_screen(KeysTesterDialog())
 
 
 async def _handle_clear(app, _args: str) -> None:

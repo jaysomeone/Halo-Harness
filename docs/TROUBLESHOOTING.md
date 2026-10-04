@@ -453,6 +453,43 @@ writes nothing for `permission_mode` (so `settings.json`'s own
 `permissions.defaultMode` keeps working); `model` only ever falls back to
 a guess when there is truly no existing value yet.
 
+## A shortcut does nothing on macOS
+
+- **Cmd+E (or any other Cmd+ chord) does nothing** -- a terminal app owns
+  every Cmd shortcut itself; it never reaches halo (or any other program
+  running inside it) at all. Use the Ctrl+ form instead (Ctrl+E for the
+  prompt-draft editor, etc.) -- see the F1 help for the full list.
+- **Ctrl+E (or another shortcut) still does nothing with the Ctrl+ form**
+  -- first confirm whether halo receives the keystroke AT ALL: run
+  `/keys` and press it. If nothing shows up there either, your terminal
+  is eating it before halo ever sees it; if it DOES show up (or Ctrl+E's
+  own action fires), halo is receiving it fine and the problem is
+  elsewhere. `halo doctor` also prints `TERM_PROGRAM`/`TERM` (the
+  `terminal_program` line) so you can tell which terminal app halo thinks
+  it's running under.
+- **VS Code's own integrated terminal specifically** -- it intercepts a
+  number of chords (Ctrl+E included) before they ever reach the program
+  running inside it. `halo doctor` detects `TERM_PROGRAM=vscode` and
+  prints both of the following; add either one to your User Settings
+  (JSON) (Cmd+Shift+P -> "Preferences: Open User Settings (JSON)"):
+  - `"terminal.integrated.sendKeybindingsToShell": true` -- the blanket
+    fix, forwards keybindings to the shell/program in general.
+  - `"terminal.integrated.commandsToSkipShell": ["-<command owning
+    ctrl+e>"]` -- releases just that one key instead of every
+    keybinding; find the exact command id in Keyboard Shortcuts
+    (Cmd+K Cmd+S), search `ctrl+e`.
+  Either way, re-check with `/keys` afterward to confirm halo now
+  receives it.
+- **iTerm2 (or another terminal with its own profile key mappings)** --
+  check Preferences -> Profiles -> Keys for a mapping that swallows the
+  chord before halo's own terminal input ever sees it; remove or
+  reassign it there.
+- **No keyboard shortcut at all for a command that has a slash-command
+  twin** -- `/editor` opens the prompt draft in `$VISUAL`/`$EDITOR`
+  exactly like Ctrl+E (useful when a terminal never delivers that chord
+  at all, since typing a command always works); `$EDITOR`/`$VISUAL` unset
+  shows a toast either way (`doctor`'s own `editor` line names the fix).
+
 ## Windows specifics
 
 - **`--file <path>` on a path that doesn't exist prints "looks like Claude
