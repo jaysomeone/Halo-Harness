@@ -222,3 +222,12 @@ updates added to 2.0.3." Applied as:
   items, and the gym's cloud-model ranking extension.
 - 2.0.3 round order: 5 (running) -> 5b -> 5c -> 5d -> 5e -> 6 -> Opus review
   -> fix pass -> tag v2.0.3.
+- Correction the same hour (rolo: "Any GPU support or research*"): every
+  GPU-related item joins 2.0.3 after all. The in-process MLX backend becomes
+  2.0.3 Round 5f (experimental extra, live-verified by rolo on the Mac), and
+  a docs-only GPU research round (Round 5a: vendor probes, multi-GPU fit,
+  remote telemetry, the llama.cpp release matrix, KV quantization per
+  backend, power draw, mlx-lm) runs right after round 5. Only the
+  Halo-to-Halo collaboration research stays at 3.0.1.1. Round order:
+  5 (running) -> 5a -> 5b -> 5c -> 5d -> 5e -> 5f -> 6 -> review -> fix pass
+  -> tag v2.0.3.
