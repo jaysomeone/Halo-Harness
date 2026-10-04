@@ -231,3 +231,47 @@ updates added to 2.0.3." Applied as:
   Halo-to-Halo collaboration research stays at 3.0.1.1. Round order:
   5 (running) -> 5a -> 5b -> 5c -> 5d -> 5e -> 5f -> 6 -> review -> fix pass
   -> tag v2.0.3.
+
+## ADDED 2026-10-04 (rolo): Experiential Labs (experientiallabs.ai)
+
+rolo found platform.experientiallabs.ai and asked that Halo "know how to use
+this platform completely and integrate it". What it is (read from its docs
+2026-10-04): an open-source (Apache-2.0, Rust) AI gateway, hosted at
+`https://api.experientiallabs.ai/v1`, keys `xpl_...`, OpenAI-compatible
+chat completions AND `/v1/responses` AND an Anthropic Messages endpoint
+(`/v1/messages`, Claude Code connects with ANTHROPIC_BASE_URL), a catalog
+of about 1,089 hosted models by slug (`claude-opus-5`, `qwen3.8-27b`) with
+pricing, context, tok/s, TTFT and uptime, a per-model "waterfall" of rungs
+(platform credits, BYOK, your own endpoint, a local OpenAI-compatible
+server: the last two Pro-only) with request-level routing controls
+(`gateway.routing.route_id`, `allow_fallbacks`, `gateway.retry`), cached-
+token and `usage.cost` reporting, cost and credits APIs (`/api/v1/credits`,
+`/api/v1/usage`), gateway-side tool search (`defer_loading`), structured
+output with capability errors instead of silent degradation, disclosed
+dropped parameters (`x-experiential-ignored-parameters`), embeddings, and a
+local gateway (`exp run`) that fronts Ollama and llama.cpp. It is NOT a
+model-file hub like Hugging Face: everything is hosted inference or a
+gateway in front of servers you run.
+
+Placement:
+- 2.0.3 Round 5g (docs only, after 5f): `docs/harness/EXPERIENTIAL-RESEARCH.md`
+  covering every docs page (quickstart, authentication, models, waterfall,
+  providers guide, adding models, openai-compatibility, anthropic,
+  embeddings, cost and spend APIs, plans and billing, data controls,
+  telemetry, coding-agents, `exp run` local gateway config and how local
+  models appear), plus the free `jev-latest` model and its relation to the
+  "jev" models already seen on Databricks and OpenRouter.
+- 2.0.4 round 1 (implementation, the cloud-provider pack): an `xp:<slug>`
+  route on the existing openai dialect with the catalog in the picker
+  (pricing, context, tok/s, TTFT, uptime columns: the same columns the
+  picker work in 2.0.4 adds for every provider), `xp:` Claude slugs through
+  the Anthropic Messages passthrough so thinking stays native, cost from
+  `usage.cost` and the credits API feeding the balances item, waterfall
+  controls mapped onto roles and the 5e escalation policy (`allow_fallbacks`
+  off for pinned local-first work), the ignored-parameters header into the
+  error translation and learned rules, the `/v1/responses` dialect shared
+  with the Codex/OpenAI Responses work, and the local `exp run` gateway
+  recognised by `/local` as an OpenAI-compatible server (note its default
+  port 8000 collides with vLLM in Halo's probe; detect by `/v1/models`
+  shape). BYOK rungs and the Pro-only local rung documented as the user's
+  choice; Halo never signs the user up for anything.
