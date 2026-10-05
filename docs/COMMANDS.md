@@ -761,7 +761,7 @@ halo doctor --help
 ```
 ```
 usage: halo doctor [-h] [--work] [--json] [--probe-all] [--both]
-                          [--tools] [--only GLOB]
+                          [--tools] [--only GLOB] [--local] [--model REF]
 
 Check the health of your halo installation.
 
@@ -778,7 +778,22 @@ options:
                anthropic gateway
   --tools      With --probe-all: also check one Read tool-call per endpoint
   --only GLOB  With --probe-all: only endpoints matching this glob
+  --local      Run the 60-second local-model acceptance check (load, tool
+               call, structured output, compaction summary) instead of the
+               general checks
+  --model REF  With --local: the ol: model to check (default: the configured
+               default model if it is ol:, else the first model in the
+               default Ollama host's catalog)
 ```
+
+`halo doctor --local [--model ol:x]` (round 5d) is the 60-second "works out
+of the box" proof for a local model on THIS machine: load, one real Read
+tool call, one structured-output call (the same constrained-decoding path
+the repair loop uses), and one summary of a small fixture transcript, each
+printed as `[PASS]`/`[FAIL]` with a plain reason and the elapsed time, in
+that fixed order even when an earlier step failed. Exit 0 iff all four
+passed. See [MODELS.md](MODELS.md)'s "The 60-second acceptance check"
+section; new local-model users are pointed at this command first.
 
 Bare `halo doctor` checks: Python version, `~/.claude` layout, the env
 file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
@@ -1352,6 +1367,61 @@ this machine only" hint naming the per-OS switch that would share it on
 the LAN. `halo doctor`'s own Ollama section prints the identical checklist
 text, one line per host. See [MODELS.md](MODELS.md)'s "Host setup
 checklist" section.
+
+## `halo gym`
+
+```sh
+halo gym
+halo gym --models ol:qwen3-coder:30b,ol:gpt-oss:20b
+halo gym --roles small,judge
+halo gym --quick
+```
+
+Halo 2.0.3 round 5d: runs the fixed task battery (tool-call accuracy, edit
+success, context recall, instruction adherence, tokens/second, prefill
+seconds -- see [MODELS.md](MODELS.md)'s "The model gym" section for what
+each one means) against each `--models` ref, or every model in the default
+Ollama host's own catalog when `--models` is omitted; a cloud/non-`ol:` ref
+may be named for comparison but is never included by default. `--roles`
+also prints each model's weighted composite for those roles right under
+its card (default: `small`, `researcher`, `judge`, `subagent_default`).
+`--quick` halves the battery size for a faster, noisier read. Every
+model's card is saved to `~/.halo/gym/<host>/<digest>.json` and printed as
+it finishes.
+
+## `halo gym show`
+
+```sh
+halo gym show
+halo gym show qwen3-coder:30b
+```
+
+Prints the saved per-model card(s) from `~/.halo/gym/` -- a bare name or
+full `ol:` ref both match (tag-aware, same as the Ollama catalog's own
+matching); omit it to print every saved card, newest-measured first. Never
+runs a fresh probe -- `halo gym` is what measures.
+
+## `halo gym propose`
+
+```sh
+halo gym propose
+halo gym propose --roles small,judge
+halo gym propose --main ol:qwen3-coder:30b
+halo gym propose --apply
+halo gym propose --apply --name my-local-roles
+```
+
+Turns saved `halo gym` scores into a role-table proposal -- the best LOCAL
+model per supporting role, respecting the round 5b VRAM-aware rule, with
+one plain sentence per role naming the composite score behind it (or
+saying plainly that no local model has a usable score for that role yet).
+`main` is never proposed; `--main REF` only changes which model the VRAM
+rule compares candidates against (the configured default model otherwise).
+`--apply` saves the proposal as a role template through the existing `halo
+roles template import` path (`gym-proposed` by default, `--name` to
+change) -- `halo roles template load <name>` (or the picker) is the
+separate step that makes it the live table. See [ROLES.md](ROLES.md)'s
+"Data-driven roles" section.
 
 ## `halo local`
 

@@ -1630,6 +1630,15 @@ def cmd_doctor(argv: list) -> int:
                          help="With --probe-all: also check one Read tool-call per endpoint")
     parser.add_argument("--only", default=None, metavar="GLOB",
                          help="With --probe-all: only endpoints matching this glob")
+    # Halo 2.0.3 round 5d (brief item 3): the 60-second local-model
+    # acceptance check -- its own preset, same shape as --work just above.
+    parser.add_argument("--local", action="store_true",
+                         help="Run the 60-second local-model acceptance check (load, tool call, structured "
+                             "output, compaction summary against a fixture transcript) instead of the "
+                             "general checks")
+    parser.add_argument("--model", default=None, metavar="REF",
+                         help="With --local: the ol: model to check (default: the configured default "
+                             "model if it is ol:, else the first model in the default Ollama host's catalog)")
     # Findings 22/23 (2.0.1): threaded into listing_effective_env (via
     # run_checks/_check_providers_enabled) so the provider-enablement line
     # never disagrees with what a real session launched against this same
@@ -1651,6 +1660,19 @@ def cmd_doctor(argv: list) -> int:
     migration_note = ensure_providers_migrated()
     if migration_note and not args.json:
         print(migration_note)
+    if args.local:
+        from halo_harness.config.paths import bridge_home
+        from halo_harness.doctor_local import format_acceptance_lines, run_local_acceptance_check
+        print(f"halo doctor --local{f' --model {args.model}' if args.model else ''}")
+        print("  Loads the model, makes one real tool call, one structured-output call, and one "
+              "compaction-style summary -- real requests against the live host this takes a moment.")
+        steps, ok = run_local_acceptance_check(args.model, state_dir=bridge_home())
+        if args.json:
+            print(json.dumps(steps, indent=2))
+        else:
+            for line in format_acceptance_lines(steps):
+                print(f"  {line}")
+        return 0 if ok else 1
     if args.work and args.probe_all:
         from halo_harness.work_matrix import format_table, run_work_matrix
         print("halo doctor --work --probe-all")

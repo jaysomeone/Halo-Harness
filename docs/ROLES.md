@@ -236,6 +236,33 @@ template (explicit, overwrites config.json's `roles` key outright) >
 team.json (idempotent seed, only fills a gap) > whatever was already in
 config.json by hand > the cost-aware defaults below.
 
+## Data-driven roles: `halo gym propose`
+
+```sh
+halo gym                 # measure local models on this machine first
+halo gym propose
+halo gym propose --apply
+```
+
+Halo 2.0.3 round 5d: once `halo gym` has measured at least one local model
+on this machine (`docs/MODELS.md`'s "The model gym" section), `halo gym
+propose` picks the best-scoring LOCAL model for each of `small`,
+`researcher`, `judge`, `subagent_default` -- the SAME four roles
+`VRAM_AWARE_ROLE_NAMES` already names -- weighting each role's own
+measurements by what that role's job leans on most, and respecting the
+round 5b VRAM-aware rule on the winner exactly as a live session would.
+`main`/`orchestrator` is never touched: propose only ever fills the
+supporting roles, same as every other automatic default this page
+documents. One plain sentence per role says which model won and why, or
+that no local model has a usable score for that role yet. `--apply` saves
+the proposal as an ordinary role template -- `~/.halo/roles/gym-proposed.
+json` by default, `--name` to choose another -- through the SAME `halo
+roles template import` path just above; `halo roles template load
+gym-proposed` is the separate, explicit step that makes it the live table
+(this command never edits config.json directly). See
+[COMMANDS.md](COMMANDS.md)'s `halo gym`/`halo gym propose` entries for
+every flag.
+
 ## Shell completion
 
 ```sh

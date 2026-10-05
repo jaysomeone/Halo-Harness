@@ -268,6 +268,40 @@ version number.
    its retained `Popen` handle, or polls `waitpid`/escalates to `SIGKILL`
    after a grace period for a fresh `halo local stop` process with no
    handle at all; Windows' own termination path is unchanged.
+6. **The model gym, data-driven roles, and the 60-second acceptance
+   check** (round 5d): `halo gym [--models ol:a,ol:b,...] [--roles
+   small,judge,...] [--quick]` runs a fixed task battery against each
+   local model on THIS machine's own hardware, through the real request/
+   decode path -- tool-call accuracy (schema-valid Read calls, with
+   malformed/missing ones given exactly one local repair round, counted
+   separately from the headline score), edit success (a real Edit call
+   applied to a scratch fixture file and diffed), context recall (a
+   needle at about 12% depth of a prompt sized to the model's own fitted
+   context), instruction adherence (one word when asked for one word, no
+   preamble when asked for none), and tokens/second + prefill seconds
+   averaged across every real turn sent. `--quick` halves the battery
+   size. Results persist at `~/.halo/gym/<host-slug>/<digest>.json` with
+   the digest/quantization/fitted-context/Ollama-version/timestamps they
+   were measured at; `halo gym show [model]` prints a per-model card.
+   `halo gym propose [--apply] [--roles ...] [--main REF]` turns those
+   scores into a role-table proposal -- the best LOCAL model per
+   supporting role (`small`/`researcher`/`judge`/`subagent_default`),
+   weighted per role's own priorities, with the round 5b VRAM-aware rule
+   applied to the winner via the existing `roles.vram_aware_override`
+   (never a second mechanism); `main` is never touched. One plain
+   sentence per role names the composite score behind the choice; `--apply`
+   saves the proposal as an ordinary role template through the EXISTING
+   `halo roles template import` path. The `/model` picker shows a saved
+   gym score (and tok/s) beside a model when one exists. `halo doctor
+   --local [--model ol:x]` is the 60-second "works out of the box" proof
+   per machine -- load, one real tool call, one structured-output call
+   (the same constrained-decoding path the repair loop uses), and one
+   summary of a fixture transcript, each printed `[PASS]`/`[FAIL]` with a
+   plain reason and the elapsed time, always in that order even after an
+   earlier FAIL; docs point a new local-model user at this command first.
+   17 new tests (`tests/test_gym_5d.py`, `tests/test_gym_propose_5d.py`,
+   `tests/test_doctor_local_5d.py`), hermetic throughout -- never a real
+   model.
 
 ## [2.0.2] - 2026-10-04
 

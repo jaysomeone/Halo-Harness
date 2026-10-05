@@ -525,6 +525,73 @@ applies the SAME redirection at call time to whatever `roles.small`
 resolved to. `halo roles`/`/roles` and the model picker's `u` action show
 `(same as main: fits beside it: no)` as the reason when this fired.
 
+**The model gym (`halo gym`, round 5d)**: a fixed task battery run against
+each local model on THIS machine's own hardware, through the real
+request/decode path (never a second, parallel wire format) -- `halo gym
+[--models ol:a,ol:b,...] [--roles small,judge,...] [--quick]`. Four
+measurements, each a plain ratio (never a vendor claim):
+  - **tool-call accuracy**: out of N real attempts to call a Read tool, how
+    many came back schema-valid on the FIRST try. A malformed/missing call
+    gets exactly ONE local repair round (the SAME constrained-decoding/
+    free-decode choice `supports_constrained_tool_calls` makes for the
+    repair loop below) before counting as failed -- repaired calls and
+    repair rounds are reported SEPARATELY, never blended into the headline
+    number, so a model that leans on the repair loop a lot never looks as
+    good as one that doesn't.
+  - **edit success**: out of N attempts, how many produced a real Edit
+    call that -- actually applied to a scratch fixture file -- left it
+    reading exactly as expected.
+  - **context recall**: out of N attempts, how many answers contained a
+    short needle fact planted at about 12% depth of a prompt sized to this
+    model's own FITTED context (`providers.ollama_hw.resolve_context_
+    decision`'s own `num_ctx`) -- this tests the context size Halo
+    actually grants the model on this host, not the advertised trained one.
+  - **instruction adherence**: out of N attempts at the plain-sentence
+    reply rules (one word when asked for one word, no preamble when asked
+    for none), how many were followed exactly.
+  - **tokens/second and prefill seconds**, averaged across every real
+    battery turn, from the identical `eval_count`/`eval_duration`/
+    `prompt_eval_duration` fields the status bar already reads.
+`--quick` halves N (and context recall's own smaller base count) for a
+faster, noisier read. Results persist at `~/.halo/gym/<host-slug>/
+<digest>.json` with the model name, digest, quantization, fitted context,
+Ollama version, and timestamps measured AT THAT TIME -- `halo gym show
+[model]` prints a per-model card from the saved file, never a fresh probe.
+A cloud/non-`ol:` ref may be named explicitly for comparison; the battery
+never runs against one by default (cost).
+
+**From scores to a role table (`halo gym propose`)**: turns saved gym
+scores into a role-table proposal in the EXISTING roles v2 shape (nothing
+new) -- the best LOCAL model per supporting role (`small`/`researcher`/
+`judge`/`subagent_default`), each role weighting the four raw ratios (plus
+normalized tok/s) by what that role's own job leans on most (documented in
+`gym_propose.py`'s own `ROLE_WEIGHTS`), with the round 5b VRAM-aware rule
+(`roles.vram_aware_override`) applied to the winner exactly as a live
+session would. `main` is never touched -- "left as configured" means
+propose never writes an `orchestrator` entry at all; `--main REF` only
+supplies the reference point the VRAM rule compares candidates against,
+same reason. One plain sentence per role names the composite score and the
+measurements behind it, or says plainly that no local model has a usable
+score for that role yet. `--apply` saves the proposal as an ordinary role
+template through the EXISTING `halo roles template import` path
+(`~/.halo/roles/gym-proposed.json` by default) -- `halo roles template
+load gym-proposed` (or the picker) is the separate, explicit step that
+makes it the live table. The `/model` picker shows a model's gym score
+(and tok/s) beside it, read straight from the saved file, whenever one
+exists.
+
+**The 60-second acceptance check (`halo doctor --local [--model ol:x]`)**:
+the "works out of the box" proof per machine, and the first thing the docs
+below point a new local-model user at. Four steps, always run in this
+order and each printed as `[PASS]`/`[FAIL]` with a plain reason and the
+elapsed time, even when an earlier one failed: load the model (one plain
+turn), one real tool call (Read on a scratch file, dispatched and
+diffed), one structured output (the SAME constrained-decoding path the
+repair loop uses), and one summary of a small fixture transcript (a
+compaction-shaped call, never the full `agent/loop.py` compaction
+machinery itself -- that has its own dedicated tests). Exit 0 iff all four
+passed.
+
 ## Hugging Face
 
 Halo 2.0.3 round 4 (`plans/2.0.3-ollama-round2-brief.md`, design doc

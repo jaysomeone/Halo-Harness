@@ -34,6 +34,17 @@ from halo_harness.model_display import ROW_HEADER, format_model_row
 from halo_harness.tui.dialogs.listnav import NavInput
 
 
+def _gym_score_suffix(model_ref: str) -> str:
+    """Best-effort, synchronous (`gym.picker_score_suffix` only ever reads
+    local `~/.halo/gym/*/*.json` files, never the network) -- "" on any
+    failure so a corrupt/unreadable gym result can never break the picker."""
+    try:
+        from halo_harness.gym import picker_score_suffix
+        return picker_score_suffix(model_ref)
+    except Exception:
+        return ""
+
+
 def _grouped(models: "list[dict]") -> "list[tuple[str, list[dict]]]":
     """Stable-groups `models` by their own `group` tag (ungrouped rows --
     OpenRouter, aliases, the synthesized current-model row -- share one
@@ -115,6 +126,14 @@ class ModelPicker(ModalScreen):
                                                    disabled=True))
                 for m in members:
                     row_text = Text(format_model_row(m), no_wrap=True, overflow="ellipsis")
+                    # Halo 2.0.3 round 5d (brief item 2): "the picker shows
+                    # the gym score beside a model when one exists" -- a
+                    # local-file-only lookup (gym.picker_score_suffix),
+                    # never a network call, so it is safe right here in
+                    # the synchronous row-building loop.
+                    gym_suffix = _gym_score_suffix(m["ref"])
+                    if gym_suffix:
+                        row_text.append(gym_suffix, style="dim")
                     if self.last_used and m["ref"] == self.last_used:
                         row_text.append("  (last used)", style="dim italic")
                     option_list.add_option(Option(row_text, id=m["ref"]))
