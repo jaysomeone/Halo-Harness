@@ -216,6 +216,13 @@ def _pct(window, now: float) -> Optional[int]:
     return int(window["used_percent"])
 
 
+def _reset_at(window) -> Optional[float]:
+    if not isinstance(window, dict):
+        return None
+    resets = window.get("resets_at")
+    return resets if isinstance(resets, (int, float)) and not isinstance(resets, bool) else None
+
+
 def subscription_usage_cache_dir(provider: str, state_dir: Optional[Path] = None, *,
                                  cx_state=None) -> Optional[Path]:
     """The cache directory for the active subscription account.
@@ -240,8 +247,8 @@ def subscription_usage_cache_dir(provider: str, state_dir: Optional[Path] = None
 
 def subscription_usage(provider: str, state_dir: Optional[Path] = None, *,
                        now: Optional[float] = None) -> Optional[dict]:
-    """`{"session_pct", "weekly_pct"}` (either may be None) for a `cc`/`cx`
-    route, None for any other route or before the first reading."""
+    """Percent used and reset time for each subscription window on a
+    `cc`/`cx` route, or None for any other route/before the first reading."""
     now = now if now is not None else time.time()
     if provider == "cc":
         data = load_cc_usage(state_dir)
@@ -252,17 +259,41 @@ def subscription_usage(provider: str, state_dir: Optional[Path] = None, *,
         session, weekly = rl.get("primary"), rl.get("secondary")
     else:
         return None
-    usage = {"session_pct": _pct(session, now), "weekly_pct": _pct(weekly, now)}
-    return usage if any(v is not None for v in usage.values()) else None
+    usage = {
+        "session_pct": _pct(session, now),
+        "session_reset_at": _reset_at(session),
+        "weekly_pct": _pct(weekly, now),
+        "weekly_reset_at": _reset_at(weekly),
+    }
+    return usage if usage["session_pct"] is not None or usage["weekly_pct"] is not None else None
 
 
-def format_usage_segment(usage: Optional[dict]) -> str:
-    """"5h 58% · wk 18%" -- blank when there is no reading at all."""
+def _format_reset_countdown(resets_at, now: float) -> str:
+    if not isinstance(resets_at, (int, float)) or isinstance(resets_at, bool):
+        return ""
+    remaining = max(0, int(resets_at - now))
+    if remaining == 0:
+        return "now"
+    days, remainder = divmod(remaining, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {seconds}s"
+
+
+def format_usage_segment(usage: Optional[dict], *, now: Optional[float] = None) -> str:
+    """"5h 58% (1h 10m) · wk 18% (2d 3h)"; blank without a reading."""
     if not isinstance(usage, dict):
         return ""
+    now = now if now is not None else time.time()
     parts = []
-    if usage.get("session_pct") is not None:
-        parts.append(f"5h {usage['session_pct']}%")
-    if usage.get("weekly_pct") is not None:
-        parts.append(f"wk {usage['weekly_pct']}%")
+    for label, prefix in (("5h", "session"), ("wk", "weekly")):
+        pct = usage.get(f"{prefix}_pct")
+        if pct is None:
+            continue
+        countdown = _format_reset_countdown(usage.get(f"{prefix}_reset_at"), now)
+        parts.append(f"{label} {pct}%" + (f" ({countdown})" if countdown else ""))
     return " · ".join(parts)

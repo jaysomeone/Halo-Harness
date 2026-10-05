@@ -1,5 +1,5 @@
 """tests/test_sub_usage.py -- the `cc:`/`cx:` subscription usage segment
-("5h 58% · wk 18%"): Claude Code's `rate_limit_event` recorded by
+("5h 58% (1h 10m) · wk 18% (2d 3h)"): Claude Code's `rate_limit_event` recorded by
 `agent/cc_runtime.py`, both routes read back by `providers/sub_usage.py`,
 carried on the `status` event, and rendered right after the context bar.
 """
@@ -35,7 +35,10 @@ def test_cc_rate_limit_event_recorded_and_read_back(ctx: Ctx):
     state = _state()
     record_cc_rate_limits(_CC_EVENT["rate_limit_info"], state)
     usage = subscription_usage("cc", state, now=_BEFORE_RESET)
-    ctx.check(f"58% / 18%, got {usage!r}", usage == {"session_pct": 58, "weekly_pct": 18})
+    ctx.check(f"58% / 18% with resets, got {usage!r}", usage == {
+        "session_pct": 58, "session_reset_at": 1791004200,
+        "weekly_pct": 18, "weekly_reset_at": 1791180000,
+    })
 
 
 @test
@@ -45,7 +48,10 @@ def test_cc_single_window_event_keeps_the_other_window(ctx: Ctx):
     record_cc_rate_limits(_CC_EVENT["rate_limit_info"], state)
     record_cc_rate_limits({"rateLimitType": "five_hour", "utilization": 0.61, "resetsAt": 1791004200}, state)
     usage = subscription_usage("cc", state, now=_BEFORE_RESET)
-    ctx.check(f"5 h updated, weekly kept, got {usage!r}", usage == {"session_pct": 61, "weekly_pct": 18})
+    ctx.check(f"5 h updated, weekly kept, got {usage!r}", usage == {
+        "session_pct": 61, "session_reset_at": 1791004200,
+        "weekly_pct": 18, "weekly_reset_at": 1791180000,
+    })
 
 
 @test
@@ -54,7 +60,10 @@ def test_rolled_over_window_reads_zero(ctx: Ctx):
     state = _state()
     record_cc_rate_limits(_CC_EVENT["rate_limit_info"], state)
     usage = subscription_usage("cc", state, now=1791004200 + 1)
-    ctx.check(f"5 h reset -> 0, weekly unchanged, got {usage!r}", usage == {"session_pct": 0, "weekly_pct": 18})
+    ctx.check(f"5 h reset -> 0, weekly unchanged, got {usage!r}", usage == {
+        "session_pct": 0, "session_reset_at": 1791004200,
+        "weekly_pct": 18, "weekly_reset_at": 1791180000,
+    })
 
 
 @test
@@ -67,7 +76,10 @@ def test_cx_reads_the_codex_cache(ctx: Ctx):
                         "primary": {"usedPercent": 5, "windowDurationMins": 300, "resetsAt": later},
                         "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": later}}, state)
     usage = subscription_usage("cx", state)
-    ctx.check(f"5% / 3%, got {usage!r}", usage == {"session_pct": 5, "weekly_pct": 3})
+    ctx.check(f"5% / 3% with resets, got {usage!r}", usage == {
+        "session_pct": 5, "session_reset_at": later,
+        "weekly_pct": 3, "weekly_reset_at": later,
+    })
 
 
 @test
@@ -87,8 +99,10 @@ def test_managed_cx_usage_comes_from_the_active_account_cache(ctx: Ctx):
 
     cache_dir = subscription_usage_cache_dir("cx", state)
     ctx.check(f"active profile cache selected, got {cache_dir!r}", cache_dir == profile.profile_dir)
-    ctx.check("active profile usage read",
-              subscription_usage("cx", cache_dir) == {"session_pct": 21, "weekly_pct": 34})
+    ctx.check("active profile usage read", subscription_usage("cx", cache_dir) == {
+        "session_pct": 21, "session_reset_at": later,
+        "weekly_pct": 34, "weekly_reset_at": later,
+    })
 
 
 @test
@@ -98,7 +112,18 @@ def test_other_routes_and_no_reading_are_none(ctx: Ctx):
     ctx.check("openrouter -> None", subscription_usage("openrouter", state) is None)
     ctx.check("cc before any reading -> None", subscription_usage("cc", state) is None)
     ctx.check("blank segment", format_usage_segment(None) == "")
-    ctx.check("segment text", format_usage_segment({"session_pct": 58, "weekly_pct": 18}) == "5h 58% · wk 18%")
+    ctx.check("segment without reset times", format_usage_segment(
+        {"session_pct": 58, "weekly_pct": 18}) == "5h 58% · wk 18%")
+    usage = {
+        "session_pct": 58, "session_reset_at": 4670,
+        "weekly_pct": 18, "weekly_reset_at": 184600,
+    }
+    ctx.check("segment with reset countdowns", format_usage_segment(usage, now=1000) ==
+              "5h 58% (1h 1m) · wk 18% (2d 3h)")
+    ctx.check("sub-hour countdown includes seconds", format_usage_segment(
+        {"session_pct": 58, "session_reset_at": 1065}, now=1000) == "5h 58% (1m 5s)")
+    ctx.check("elapsed reset is now", format_usage_segment(
+        {"weekly_pct": 0, "weekly_reset_at": 999}, now=1000) == "wk 0% (now)")
 
 
 @test
@@ -257,6 +282,11 @@ def test_status_bar_renders_usage_after_the_context_bar(ctx: Ctx):
     import asyncio
     from halo_harness.testing.fake_controller import FakeController
     from halo_harness.tui.app import BridgeApp
+    from halo_harness.tui.widgets import statusbar
+
+    clock = [1000]
+    saved_formatter = statusbar.format_usage_segment
+    statusbar.format_usage_segment = lambda usage: saved_formatter(usage, now=clock[0])
 
     async def body():
         fake = FakeController()
@@ -265,15 +295,23 @@ def test_status_bar_renders_usage_after_the_context_bar(ctx: Ctx):
         async with app.run_test(size=(240, 40)):
             bar = app.status_bar
             bar.apply_status({"model": "cc:opus-5.5", "context_tokens": 1000, "context_limit": 200000,
-                              "subscription_usage": {"session_pct": 58, "weekly_pct": 18}})
-            bar._refresh_display()
+                              "subscription_usage": {
+                                  "session_pct": 58, "session_reset_at": 4670,
+                                  "weekly_pct": 18, "weekly_reset_at": 184600,
+                              }})
             text = bar.render().plain
-            ctx_pos, usage_pos = text.find("]"), text.find("5h 58% · wk 18%")
+            usage_text = "5h 58% (1h 1m) · wk 18% (2d 3h)"
+            ctx_pos, usage_pos = text.find("]"), text.find(usage_text)
             ctx.check(f"usage right after the context bar, got {text!r}", -1 < ctx_pos < usage_pos)
+
+            clock[0] += 60
+            bar.tick_spinner()
+            ctx.check(f"countdown updates on toolbar tick, got {bar.render().plain!r}",
+                      "5h 58% (1h 0m)" in bar.render().plain)
 
             bar.apply_status({"model": "cc:sonnet-4.5", "subscription_usage": None})
             ctx.check(f"missing cc refresh keeps the last reading, got {bar.render().plain!r}",
-                      "5h 58% · wk 18%" in bar.render().plain)
+                      "5h 58% (1h 0m)" in bar.render().plain)
 
             bar.apply_status({"model": "cx:gpt-5.4",
                               "subscription_usage": {"session_pct": 12, "weekly_pct": 7}})
@@ -282,12 +320,15 @@ def test_status_bar_renders_usage_after_the_context_bar(ctx: Ctx):
 
             bar.apply_status({"model": "cc:opus-5.5", "subscription_usage": None})
             ctx.check(f"returning to cc restores its last reading, got {bar.render().plain!r}",
-                      "5h 58% · wk 18%" in bar.render().plain)
+                      "5h 58% (1h 0m)" in bar.render().plain)
 
             bar.apply_status({"model": "or:some-model", "subscription_usage": None})
             ctx.check(f"cleared on a non-subscription route, got {bar.render().plain!r}",
                       "5h " not in bar.render().plain and "wk " not in bar.render().plain)
-    asyncio.run(body())
+    try:
+        asyncio.run(body())
+    finally:
+        statusbar.format_usage_segment = saved_formatter
 
 
 if __name__ == "__main__":
