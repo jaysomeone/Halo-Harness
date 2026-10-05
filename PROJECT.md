@@ -18,7 +18,8 @@ BUILD
 - Added confirmed-limit failover to another logged-in Codex account. Tool-free turns continue automatically; turns that already executed a tool require an explicit `continue` to prevent duplicate side effects.
 - Verified focused account, command, documentation, compilation, and whitespace checks.
 - Made the status bar retain the last successful five-hour/weekly reading separately for `cc:` and `cx:`, replace it on a successful update, and hide it completely on non-subscription models.
-- Verified the subscription toolbar suite (12/12), managed-account suite (10/10), syntax, and whitespace checks.
+- Made subscription status events read the active Codex account's profile cache so account switches and failover replace the toolbar values correctly.
+- Verified the subscription toolbar suite (13/13), managed-account suite (10/10), syntax, and whitespace checks.
 
 ## Known baseline issue
 

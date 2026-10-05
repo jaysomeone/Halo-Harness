@@ -216,6 +216,28 @@ def _pct(window, now: float) -> Optional[int]:
     return int(window["used_percent"])
 
 
+def subscription_usage_cache_dir(provider: str, state_dir: Optional[Path] = None, *,
+                                 cx_state=None) -> Optional[Path]:
+    """The cache directory for the active subscription account.
+
+    Managed Codex profiles keep their model/usage cache inside the profile,
+    while the legacy/default login and Claude subscription use the session's
+    normal state directory. A live cx state wins because failover may have
+    moved to another account since the persisted selection was read.
+    """
+    if provider != "cx":
+        return state_dir
+    live_dir = getattr(cx_state, "cache_dir", None)
+    if live_dir is not None:
+        return Path(live_dir)
+    try:
+        from halo_harness.accounts import active_codex_profile
+        profile = active_codex_profile(state_dir=state_dir)
+    except Exception:
+        profile = None
+    return profile.profile_dir if profile is not None else state_dir
+
+
 def subscription_usage(provider: str, state_dir: Optional[Path] = None, *,
                        now: Optional[float] = None) -> Optional[dict]:
     """`{"session_pct", "weekly_pct"}` (either may be None) for a `cc`/`cx`

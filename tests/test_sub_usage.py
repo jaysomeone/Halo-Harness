@@ -71,6 +71,27 @@ def test_cx_reads_the_codex_cache(ctx: Ctx):
 
 
 @test
+def test_managed_cx_usage_comes_from_the_active_account_cache(ctx: Ctx):
+    from halo_harness.accounts import prepare_codex_profile, set_active_account
+    from halo_harness.providers.cx_models import record_rate_limits
+    from halo_harness.providers.sub_usage import subscription_usage, subscription_usage_cache_dir
+
+    state = _state()
+    profile = prepare_codex_profile("work", state_dir=state)
+    set_active_account("codex", "work", state_dir=state)
+    later = int(time.time()) + 3600
+    record_rate_limits({"planType": "team",
+                        "primary": {"usedPercent": 21, "windowDurationMins": 300, "resetsAt": later},
+                        "secondary": {"usedPercent": 34, "windowDurationMins": 10080, "resetsAt": later}},
+                       profile.profile_dir)
+
+    cache_dir = subscription_usage_cache_dir("cx", state)
+    ctx.check(f"active profile cache selected, got {cache_dir!r}", cache_dir == profile.profile_dir)
+    ctx.check("active profile usage read",
+              subscription_usage("cx", cache_dir) == {"session_pct": 21, "weekly_pct": 34})
+
+
+@test
 def test_other_routes_and_no_reading_are_none(ctx: Ctx):
     from halo_harness.providers.sub_usage import format_usage_segment, subscription_usage
     state = _state()

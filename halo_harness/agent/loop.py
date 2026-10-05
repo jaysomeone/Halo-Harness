@@ -5384,8 +5384,15 @@ class Session:
         # would otherwise read as a lie the moment the next turn goes out.
         from halo_harness.providers.profiles import effort_display_override
         effort_tag = effort_display_override(self.provider_profile) or self.effort
-        from halo_harness.providers.sub_usage import maybe_refresh_cc_usage, subscription_usage
+        from halo_harness.providers.sub_usage import (
+            maybe_refresh_cc_usage,
+            subscription_usage,
+            subscription_usage_cache_dir,
+        )
         maybe_refresh_cc_usage(self.model_ref.provider)
+        usage_cache_dir = subscription_usage_cache_dir(
+            self.model_ref.provider, self.state_dir, cx_state=getattr(self, "_cx_state", None),
+        )
         return events.status(
             phase=phase, model=self.model_ref.raw, turn=self.turn_count if turn is None else turn,
             context_tokens=context_tokens if context_tokens is not None else (self._last_prompt_tokens or 0),
@@ -5395,7 +5402,7 @@ class Session:
             total_input_tokens=self.cost_meter.total_input_tokens,
             total_output_tokens=self.cost_meter.total_output_tokens,
             effort=effort_tag,
-            subscription_usage=subscription_usage(self.model_ref.provider),
+            subscription_usage=subscription_usage(self.model_ref.provider, usage_cache_dir),
         )
 
     @property
