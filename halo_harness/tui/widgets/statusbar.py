@@ -73,9 +73,12 @@ class StatusBar(Static):
         self.or_balance_fetched_at: "float | None" = None
         # The `cc:`/`cx:` subscription's 5 h / weekly usage
         # (`{session_pct, weekly_pct}`, providers/sub_usage.py), right
-        # after the context bar -- None (segment omitted) on any other
-        # route or before the first reading.
+        # after the context bar. Keep the last successful reading per
+        # subscription provider so a failed/missing refresh cannot make it
+        # flicker away; the active value is still None (segment omitted)
+        # before the first reading or on every non-subscription route.
         self.subscription_usage: "dict | None" = None
+        self._subscription_usage_by_provider: dict[str, dict] = {}
         # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
         # already clamped to this model's own accepted set -- None for a
         # model with no adjustable effort at all (renders no tag).
@@ -136,10 +139,19 @@ class StatusBar(Static):
     def apply_status(self, data: dict) -> None:
         if data.get("model"):
             self.model = data["model"]
-        if "subscription_usage" in data:
-            # Present-but-None is a real "no usage on this route" (a model
-            # switch away from cc:/cx:), so it DOES clear the segment.
-            self.subscription_usage = data["subscription_usage"]
+        provider = self.model.split(":", 1)[0]
+        if provider in ("cc", "cx"):
+            # Only a real reading replaces this provider's last good value.
+            # A background refresh that has not landed yet (or failed and
+            # reported None) therefore cannot make the segment flicker away.
+            usage = data.get("subscription_usage")
+            if isinstance(usage, dict) and any(value is not None for value in usage.values()):
+                self._subscription_usage_by_provider[provider] = dict(usage)
+            self.subscription_usage = self._subscription_usage_by_provider.get(provider)
+        else:
+            # Usage belongs to the active subscription, not to the session
+            # generally: hide it completely on API-key/local/other routes.
+            self.subscription_usage = None
         if data.get("permission_mode"):
             self.mode = data["permission_mode"]
         if data.get("effort") is not None:

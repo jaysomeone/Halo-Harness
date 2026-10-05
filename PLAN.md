@@ -6,3 +6,4 @@
 4. [ ] Add equivalent isolated profiles and guided login for Claude subscriptions.
 5. [ ] Add cross-provider fallback after all accounts on the active provider are unavailable.
 6. [ ] Finish status UI, documentation, regression checks, and release preparation.
+   - [x] Keep the last successful `cc:`/`cx:` usage reading visible on subscription routes and hide it on every other route.

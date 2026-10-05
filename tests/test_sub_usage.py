@@ -249,10 +249,23 @@ def test_status_bar_renders_usage_after_the_context_bar(ctx: Ctx):
             text = bar.render().plain
             ctx_pos, usage_pos = text.find("]"), text.find("5h 58% · wk 18%")
             ctx.check(f"usage right after the context bar, got {text!r}", -1 < ctx_pos < usage_pos)
+
+            bar.apply_status({"model": "cc:sonnet-4.5", "subscription_usage": None})
+            ctx.check(f"missing cc refresh keeps the last reading, got {bar.render().plain!r}",
+                      "5h 58% · wk 18%" in bar.render().plain)
+
+            bar.apply_status({"model": "cx:gpt-5.4",
+                              "subscription_usage": {"session_pct": 12, "weekly_pct": 7}})
+            ctx.check(f"fresh cx reading replaces the visible values, got {bar.render().plain!r}",
+                      "5h 12% · wk 7%" in bar.render().plain)
+
+            bar.apply_status({"model": "cc:opus-5.5", "subscription_usage": None})
+            ctx.check(f"returning to cc restores its last reading, got {bar.render().plain!r}",
+                      "5h 58% · wk 18%" in bar.render().plain)
+
             bar.apply_status({"model": "or:some-model", "subscription_usage": None})
-            bar._refresh_display()
             ctx.check(f"cleared on a non-subscription route, got {bar.render().plain!r}",
-                      "5h " not in bar.render().plain)
+                      "5h " not in bar.render().plain and "wk " not in bar.render().plain)
     asyncio.run(body())
 
 
