@@ -246,6 +246,113 @@ def test_codex_binary_missing_gives_a_precise_error(ctx: Ctx):
             os.environ["HALO_CODEX_EXE"] = saved
 
 
+# ---- aliases use the account catalog only after a real refresh --------
+
+@contextmanager
+def _cx_catalog_env(models=None):
+    # BRIDGE_STATE_DIR is the shared test seam used by bridge_home(), so
+    # parse_model_ref and the display/profile helpers see the same cache
+    # without reading or changing the developer's own account state.
+    keys = ("BRIDGE_STATE_DIR", "BRIDGE_TEST_CODEX_LOGIN_STATUS", "BRIDGE_TEST_CX_LOGIN_STATUS")
+    saved = {k: os.environ.get(k) for k in keys}
+    with tempfile.TemporaryDirectory(prefix="cx-alias-") as tmp:
+        state_dir = Path(tmp)
+        os.environ["BRIDGE_STATE_DIR"] = tmp
+        os.environ["BRIDGE_TEST_CODEX_LOGIN_STATUS"] = "Logged in using ChatGPT"
+        os.environ["BRIDGE_TEST_CX_LOGIN_STATUS"] = "Logged in using ChatGPT"
+        try:
+            if models is not None:
+                (state_dir / "cx-models.json").write_text(json.dumps({"models": models}), encoding="utf-8")
+            yield state_dir
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+@test
+def test_codex_alias_uses_account_model(ctx: Ctx):
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.codex_models import alias_display_detail, profile_fields_for_codex_model
+    with _cx_catalog_env([{"id": "gpt-6-astra", "is_default": True}, {"id": "gpt-5.6-sol"}]):
+        ctx.check("sol uses the account's available id", parse_model_ref("cx:sol").model == "gpt-5.6-sol")
+        ctx.check("detail shows the resolved account id", alias_display_detail("sol") == "-> gpt-5.6-sol")
+        ctx.check("profile follows the same resolution",
+                  profile_fields_for_codex_model("sol") == profile_fields_for_codex_model("gpt-5.6-sol"))
+
+
+@test
+def test_codex_alias_keeps_available_builtin(ctx: Ctx):
+    from halo_harness.model import parse_model_ref
+    with _cx_catalog_env([{"id": "gpt-5-astra"}, {"id": "gpt-6-astra", "is_default": True}]):
+        ctx.check("available built-in wins over an earlier suffix match",
+                  parse_model_ref("cx:astra").model == "gpt-6-astra")
+
+
+@test
+def test_codex_alias_keeps_builtin_without_cache(ctx: Ctx):
+    from halo_harness.model import parse_model_ref
+    with _cx_catalog_env():
+        ctx.check("seed does not override the built-in sol id", parse_model_ref("cx:sol").model == "gpt-6.1-sol")
+
+
+@test
+def test_codex_full_id_passes_through(ctx: Ctx):
+    from halo_harness.model import parse_model_ref
+    with _cx_catalog_env([{"id": "gpt-6.1-sol"}]):
+        ctx.check("verbatim full id is unchanged even when absent from the account",
+                  parse_model_ref("cx:gpt-5.6-sol").model == "gpt-5.6-sol")
+
+
+@test
+def test_codex_alias_visibility_order_and_fallbacks(ctx: Ctx):
+    from unittest.mock import patch
+    from halo_harness.providers.codex_models import resolve_codex_alias
+    with _cx_catalog_env([{"id": "gpt-hidden-sol", "hidden": True},
+                          {"id": "gpt-first-sol"}, {"id": "gpt-second-sol"}]) as state_dir:
+        ctx.check("first visible suffix match wins", resolve_codex_alias("sol", state_dir) == "gpt-first-sol")
+        ctx.check("missing suffix keeps the built-in", resolve_codex_alias("luna", state_dir) == "gpt-6-luna")
+        with patch("halo_harness.providers.cx_models.cx_models", side_effect=OSError("unreadable")):
+            ctx.check("catalog errors keep the built-in", resolve_codex_alias("sol", state_dir) == "gpt-6.1-sol")
+        (state_dir / "cx-models.json").write_text("not json", encoding="utf-8")
+        ctx.check("corrupt cache keeps the built-in", resolve_codex_alias("sol", state_dir) == "gpt-6.1-sol")
+    with _cx_catalog_env([{"id": "gpt-first-sol", "hidden": True}, {"id": "gpt-second-sol", "hidden": True}]):
+        ctx.check("first hidden match is the last resort", resolve_codex_alias("sol") == "gpt-first-sol")
+
+
+@test
+def test_codex_picker_aliases_follow_account_catalog(ctx: Ctx):
+    from types import SimpleNamespace
+    from halo_harness.controller import Controller
+
+    # Keep the active model outside cx: so the picker's deliberate
+    # current-model insertion cannot mask a duplicate alias row.
+    session = SimpleNamespace(model_ref=SimpleNamespace(raw="or:mock/current", provider="openrouter"),
+                              model_profile=SimpleNamespace(context_tokens=128000, max_output_tokens=8192))
+    models = [{"id": "gpt-6-astra", "is_default": True}, {"id": "gpt-5.6-sol"}]
+    with _cx_catalog_env(models) as state_dir:
+        ctrl = Controller(session=session, cwd=REPO_DIR, state_dir=state_dir, routes={})
+        refs = {m.get("ref") for m in ctrl.list_models()}
+        ctx.check("real account models are shown", {"cx:gpt-6-astra", "cx:gpt-5.6-sol"} <= refs)
+        ctx.check("duplicate and unavailable aliases are omitted", not {"cx:astra", "cx:sol", "cx:luna"} & refs)
+        # The two merged blocks have independent login caches. When only
+        # the alias block is available it must still use ctrl.state_dir,
+        # even when the process default points at an unrefreshed catalog.
+        os.environ["BRIDGE_TEST_CX_LOGIN_STATUS"] = "Not logged in"
+        os.environ["BRIDGE_STATE_DIR"] = str(state_dir / "empty")
+        rows = {m.get("ref"): m for m in ctrl.list_models()}
+        ctx.check("supported alias remains when its full id is not shown", "cx:sol" in rows)
+        ctx.check("alias detail uses the controller's catalog", rows["cx:sol"]["detail"] == "-> gpt-5.6-sol")
+        ctx.check("unsupported alias stays omitted", "cx:luna" not in rows)
+    with _cx_catalog_env() as state_dir:
+        ctrl = Controller(session=session, cwd=REPO_DIR, state_dir=state_dir, routes={})
+        rows = {m.get("ref"): m for m in ctrl.list_models()}
+        ctx.check("seed keeps all original aliases", {"cx:astra", "cx:sol", "cx:luna"} <= rows.keys())
+        ctx.check("seed detail keeps built-in sol", rows["cx:sol"]["detail"] == "-> gpt-6.1-sol")
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

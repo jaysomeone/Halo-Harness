@@ -73,14 +73,15 @@ only source once a refresh has run.
 ### `cx:` alias table
 
 Short names Halo adds on top of the documented ChatGPT-plan ids
-(`providers/codex_models.py` `CODEX_ALIASES`) -- every one is a specific,
-pinned id; none of them move the way `cc:opus`/`cc:sonnet` do.
+(`providers/codex_models.py` `CODEX_ALIASES`) -- built-in defaults:
 
 | Alias | `cx:` resolves to |
 |---|---|
 | `astra` | `gpt-6-astra` |
 | `sol` | `gpt-6.1-sol` |
 | `luna` | `gpt-6-luna` |
+
+Aliases resolve against the account's refreshed model list, using a matching suffix when the built-in id is unavailable.
 
 The full id also works directly (`cx:gpt-6-astra`). No live `/models
 refresh` has run against this table (no ChatGPT login on the build host) --

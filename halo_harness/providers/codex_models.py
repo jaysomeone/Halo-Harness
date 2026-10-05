@@ -37,12 +37,33 @@ CODEX_ALIASES: "dict[str, str]" = {
 CODEX_CHATGPT_MODEL_IDS = tuple(CODEX_ALIASES.values())
 
 
-def resolve_codex_alias(bare: str) -> str:
-    return CODEX_ALIASES.get(bare, bare)
+def resolve_codex_alias(bare: str, state_dir: Optional[Path] = None) -> str:
+    """Prefer the built-in target when this account offers it; otherwise
+    use the first visible model with the alias suffix (then a hidden one).
+    Only a refreshed catalog can override the table: the seed list is not
+    evidence of this account's access. Cache errors must never prevent a
+    model ref from parsing, and full ids always pass through unchanged.
+    The catalog helpers default to bridge_home() when state_dir is None.
+    """
+    target = CODEX_ALIASES.get(bare)
+    if target is None:
+        return bare
+    try:
+        from halo_harness.providers.cx_models import cx_catalog_is_seed, cx_models
+        if not cx_catalog_is_seed(state_dir):
+            models = cx_models(state_dir)
+            if target not in {m["id"] for m in models}:
+                matches = [m for m in models if m["id"].endswith(f"-{bare}")]
+                visible = [m for m in matches if not m.get("hidden")]
+                if visible or matches:
+                    return (visible or matches)[0]["id"]
+    except Exception:
+        pass  # unreadable/malformed catalog -- keep the built-in mapping
+    return target
 
 
-def alias_display_detail(alias: str) -> str:
-    resolved = resolve_codex_alias(alias)
+def alias_display_detail(alias: str, state_dir: Optional[Path] = None) -> str:
+    resolved = resolve_codex_alias(alias, state_dir)
     return f"-> {resolved}" if resolved != alias else ""
 
 

@@ -676,7 +676,7 @@ class Controller:
         # cx_models.refresh_cx_catalog; the seed list until the first
         # refresh). Cache-only login read, same rule as cc: above.
         from halo_harness.providers.cx_models import (
-            cached_codex_login_status, cx_models, is_subscription_login, profile_fields_for_cx_model,
+            cached_codex_login_status, cx_catalog_is_seed, cx_models, is_subscription_login, profile_fields_for_cx_model,
         )
         try:
             cx_available = is_subscription_login(cached_codex_login_status())
@@ -868,7 +868,7 @@ class Controller:
         # follows (a login never enables anything on its own).
         from halo_harness.providers.codex_models import (
             CODEX_ALIASES, alias_display_detail as cx_alias_display_detail, cached_codex_auth_status,
-            profile_fields_for_codex_model,
+            profile_fields_for_codex_model, resolve_codex_alias,
         )
         try:
             cx_status = cached_codex_auth_status()
@@ -876,16 +876,26 @@ class Controller:
             cx_status = None
         cx_available = bool(cx_status and cx_status.logged_in and cx_status.auth_method == "chatgpt")
         if cx_available and is_enabled("codex_subscription", detected=cx_available):
+            # Once refreshed, only offer aliases this account can use,
+            # and omit targets already shown by the real-models block.
+            # Before refresh the seed is not an account access check, so
+            # preserve the original alias rows on a fresh installation.
+            cx_seed = cx_catalog_is_seed(self.state_dir)
+            cx_ids = {m["id"] for m in cx_models(self.state_dir)} if not cx_seed else set()
+            cx_shown = {m["ref"] for m in out if m["ref"].startswith("cx:")}
             for alias in CODEX_ALIASES:
                 ref = f"cx:{alias}"
                 if ref in seen:
                     continue
-                fields = profile_fields_for_codex_model(alias) or {}
+                resolved = resolve_codex_alias(alias, self.state_dir)
+                if not cx_seed and (resolved not in cx_ids or f"cx:{resolved}" in cx_shown):
+                    continue
+                fields = profile_fields_for_codex_model(resolved) or {}
                 out.append({
                     "ref": ref, "context_tokens": fields.get("context_tokens"),
                     "max_output_tokens": fields.get("max_output_tokens"),
                     "price_in_per_m": None, "price_out_per_m": None,
-                    "detail": cx_alias_display_detail(alias),
+                    "detail": cx_alias_display_detail(alias, self.state_dir),
                     "provider": "codex", "group": label_for("codex_subscription"),
                 })
         if cx_available and not is_enabled("codex_subscription", detected=cx_available):
