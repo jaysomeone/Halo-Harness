@@ -526,11 +526,18 @@ applies the SAME redirection at call time to whatever `roles.small`
 resolved to. `halo roles`/`/roles` and the model picker's `u` action show
 `(same as main: fits beside it: no)` as the reason when this fired.
 
-**The model gym (`halo gym`, round 5d)**: a fixed task battery run against
-each local model on THIS machine's own hardware, through the real
-request/decode path (never a second, parallel wire format) -- `halo gym
-[--models ol:a,ol:b,...] [--roles small,judge,...] [--quick]`. Four
-measurements, each a plain ratio (never a vendor claim):
+**The model gym (`halo gym`, round 5d; `hf:local/*`/`hf:mlx/*` added round
+5i)**: a fixed task battery run against each local model on THIS
+machine's own hardware, through the real request/decode path (never a
+second, parallel wire format) -- `halo gym [--models ol:a,hf:local/b,...]
+[--roles small,judge,...] [--quick]`. `ol:`, `hf:local/*`, and `hf:mlx/*`
+all count as "local"; every OTHER ref (the router, a dedicated endpoint,
+any cloud provider) may still be NAMED explicitly for comparison but is
+never run by default. `gym_send.send_turn_for` picks the sender -- the
+native Ollama path (round 5d) or `providers.huggingface_send.send_hf_turn`
+(round 5f's shared openai-chat sender, reused as-is here too) -- so the
+same four measurements, each a plain ratio (never a vendor claim), apply
+either way:
   - **tool-call accuracy**: out of N real attempts to call a Read tool, how
     many came back schema-valid on the FIRST try. A malformed/missing call
     gets exactly ONE local repair round (the SAME constrained-decoding/
@@ -544,15 +551,23 @@ measurements, each a plain ratio (never a vendor claim):
     reading exactly as expected.
   - **context recall**: out of N attempts, how many answers contained a
     short needle fact planted at about 12% depth of a prompt sized to this
-    model's own FITTED context (`providers.ollama_hw.resolve_context_
-    decision`'s own `num_ctx`) -- this tests the context size Halo
-    actually grants the model on this host, not the advertised trained one.
+    model's own FITTED context -- `providers.ollama_hw.resolve_context_
+    decision`'s own `num_ctx` for an `ol:` ref, or (round 5i) `model.
+    resolve_model_profile`'s `context_tokens` for an `hf:` one (the local
+    server's own reported context, else the bare 128000 profile default)
+    -- this tests the context size Halo actually grants the model on this
+    host, not the advertised trained one.
   - **instruction adherence**: out of N attempts at the plain-sentence
     reply rules (one word when asked for one word, no preamble when asked
     for none), how many were followed exactly.
   - **tokens/second and prefill seconds**, averaged across every real
     battery turn, from the identical `eval_count`/`eval_duration`/
-    `prompt_eval_duration` fields the status bar already reads.
+    `prompt_eval_duration` fields the status bar already reads -- for an
+    `ol:` model. The shared openai-chat sender exposes no server-side
+    usage/per-phase timing to a caller outside it, so an `hf:` card's
+    `tokens_per_second` is a wall-clock estimate instead (reply length
+    over call duration, never the server's own figure) and its
+    `prefill_seconds` is honestly `None` rather than a guessed number.
 `--quick` halves N (and context recall's own smaller base count) for a
 faster, noisier read. `--show-replies` prints each reply-only task's
 actual reply excerpt (first 200 characters) alongside its score; the same
@@ -567,21 +582,36 @@ decoder never turns `message.thinking` into checked text in the first
 place) and scored a flat, unexplained 0%. Both now request a flat,
 generous 160-token budget; the needle check is also now case-insensitive
 (already tolerant of surrounding punctuation/quotes as a plain substring
-check). Results persist at `~/.halo/gym/<host-slug>/
-<digest>.json` with the model name, digest, quantization, fitted context,
-Ollama version, and timestamps measured AT THAT TIME -- `halo gym show
-[model]` prints a per-model card from the saved file, never a fresh probe.
-A cloud/non-`ol:` ref may be named explicitly for comparison; the battery
-never runs against one by default (cost).
+check). Results persist at `~/.halo/gym/<host-slug>/<id>.json` with the
+model name, a stable id, fitted context, and timestamps measured AT THAT
+TIME -- `halo gym show [model]` prints a per-model card from the saved
+file, never a fresh probe. For an `ol:` ref, `<host-slug>` is the Ollama
+host's own configured name and `<id>` is the model's real digest
+(quantization and the Ollama version are recorded too). For `hf:local/*`/
+`hf:mlx/*` (round 5i), every result groups under the single shared
+`huggingface` host-slug instead (there is no multi-model "host" concept
+for an arbitrary local server the way an Ollama daemon is one), keyed by
+a stable id of its own -- the bare Hugging Face Hub repo id for `hf:mlx/
+*` (`ensure_mlx_server` already names its managed server by that exact
+id), or the resolved server's own configured/auto-detected name for a
+generic `hf:local/*` ref (no per-model digest concept exists for an
+arbitrary OpenAI-compatible server, so the SERVER is the measured unit
+there); neither quantization nor an engine version string is recorded
+for this branch. A cloud/router/endpoint ref may be named explicitly for
+comparison; the battery never runs against one by default (cost).
 
 **From scores to a role table (`halo gym propose`)**: turns saved gym
 scores into a role-table proposal in the EXISTING roles v2 shape (nothing
-new) -- the best LOCAL model per supporting role (`small`/`researcher`/
-`judge`/`subagent_default`), each role weighting the four raw ratios (plus
-normalized tok/s) by what that role's own job leans on most (documented in
-`gym_propose.py`'s own `ROLE_WEIGHTS`), with the round 5b VRAM-aware rule
-(`roles.vram_aware_override`) applied to the winner exactly as a live
-session would. `main` is never touched -- "left as configured" means
+new) -- the best LOCAL (`ol:`/`hf:local/*`/`hf:mlx/*`) model per supporting
+role (`small`/`researcher`/`judge`/`subagent_default`), each role weighting
+the four raw ratios (plus normalized tok/s) by what that role's own job
+leans on most (documented in `gym_propose.py`'s own `ROLE_WEIGHTS`), with
+the round 5b VRAM-aware rule (`roles.vram_aware_override`) applied to the
+winner exactly as a live session would -- that rule already no-ops on its
+own whenever either the winner or `main` isn't an `ollama` ref (its own
+existing guard clauses), so an `hf:` winner, or `--main` pointed at an
+`hf:`/cloud ref, simply skips it with no separate branch needed. `main` is
+never touched -- "left as configured" means
 propose never writes an `orchestrator` entry at all; `--main REF` only
 supplies the reference point the VRAM rule compares candidates against,
 same reason. One plain sentence per role names the composite score and the

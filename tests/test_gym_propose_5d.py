@@ -85,6 +85,27 @@ def test_role_with_no_local_candidate(ctx: Ctx):
 
 
 @test
+def test_hf_local_and_mlx_refs_count_as_local_candidates_vram_skipped(ctx: Ctx):
+    """Round 5i: `hf:local/*`/`hf:mlx/*` are "local" for propose too --
+    never re-derives the VRAM rule's own GPU arithmetic (that's round
+    5b's own suite); this only proves `roles.vram_aware_override` is
+    still called (and naturally no-ops, since neither `main_ref` nor an
+    hf: candidate is ever an `ollama` ref) rather than skipped by a
+    SEPARATE branch that could silently diverge from it."""
+    from halo_harness.gym_propose import propose_role_table
+    from halo_harness.model import parse_model_ref
+    hf_local = _row("hf:local/mock/bench-model", tca=0.9, edit=0.9, recall=0.8, instr=0.8, tps=40.0)
+    hf_mlx = _row("hf:mlx/mlx-community/some-repo", tca=0.8, edit=0.8, recall=0.7, instr=0.9, tps=20.0)
+    main_ref = parse_model_ref("or:vendor/cloud-main")  # never ollama -- the VRAM rule must stay a no-op
+    roles_dict, sentences = propose_role_table([hf_local, hf_mlx], roles=["small", "judge"],
+                                                main_ref_raw=main_ref.raw)
+    ctx.check(f"an hf: ref was actually chosen (never crashed resolving VRAM), got {roles_dict}",
+              set(roles_dict.values()) <= {"hf:local/mock/bench-model", "hf:mlx/mlx-community/some-repo"})
+    ctx.check(f"no VRAM redirection text leaked in (main isn't ollama), got {sentences}",
+              not any("same as main" in s for s in sentences))
+
+
+@test
 def test_vram_aware_rule_is_respected_via_the_existing_function(ctx: Ctx):
     """Never re-derives `fits_beside_main`'s own GPU arithmetic (round 5b
     part 2's own suite already pins that) -- this only proves `gym_

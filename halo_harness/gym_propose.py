@@ -71,12 +71,26 @@ def _sentence(role: str, result: dict, score: float, terms: list, vram_reason: O
     return f"{base} {vram_reason}." if vram_reason else base
 
 
+_LOCAL_REF_PREFIXES = ("ol:", "hf:local/", "hf:mlx/")
+
+
+def _is_local_ref(model_ref) -> bool:
+    return isinstance(model_ref, str) and model_ref.startswith(_LOCAL_REF_PREFIXES)
+
+
 def best_candidate_for_role(results: "list[dict]", role: str, *, main_ref=None) -> "tuple[Optional[dict], Optional[str]]":
     """`(value_for_role_table, one_sentence)` -- `value_for_role_table` is
     `None` when no LOCAL candidate has a usable score for `role` at all
     (brief's own "a role with no candidate" case), in which case the
-    sentence says so in plain English rather than being omitted."""
-    local = [r for r in results if isinstance(r.get("model_ref"), str) and r["model_ref"].startswith("ol:")]
+    sentence says so in plain English rather than being omitted. "Local"
+    (round 5i) is `ol:`/`hf:local/*`/`hf:mlx/*` -- never a router/
+    endpoint/cloud ref. The round 5b VRAM-aware rule below is applied to
+    EVERY winner regardless of provider, never a separate branch here --
+    `roles.vram_aware_override` already no-ops on its own whenever either
+    `main_ref` or the candidate isn't an `ollama` ref (its own existing
+    guard clauses), which is exactly "skipped when no Ollama host is
+    involved" for an hf: winner or an hf:-main `--main`."""
+    local = [r for r in results if _is_local_ref(r.get("model_ref"))]
     tps_values = [r["tokens_per_second"] for r in local if isinstance(r.get("tokens_per_second"), (int, float))]
     max_tps = max(tps_values) if tps_values else None
     scored = []

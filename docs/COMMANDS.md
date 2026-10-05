@@ -1387,8 +1387,11 @@ Halo 2.0.3 round 5d: runs the fixed task battery (tool-call accuracy, edit
 success, context recall, instruction adherence, tokens/second, prefill
 seconds -- see [MODELS.md](MODELS.md)'s "The model gym" section for what
 each one means) against each `--models` ref, or every model in the default
-Ollama host's own catalog when `--models` is omitted; a cloud/non-`ol:` ref
-may be named for comparison but is never included by default. `--roles`
+Ollama host's own catalog when `--models` is omitted; `hf:local/...` and
+`hf:mlx/...` refs run the same battery through their own server (Halo 2.0.3
+round 5f follow-up: tokens/second is then a wall-clock estimate and prefill is
+not reported); a cloud ref may be named for comparison but is never included
+by default. `--roles`
 also prints each model's weighted composite for those roles right under
 its card (default: `small`, `researcher`, `judge`, `subagent_default`).
 `--quick` halves the battery size for a faster, noisier read. Every

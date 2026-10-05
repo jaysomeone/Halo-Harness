@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from halo_harness.gym import RatioScore, ToolCallAccuracy, sample_excerpt
-from halo_harness.gym_send import send_repair, send_turn
+from halo_harness.gym_send import send_repair, send_turn_for
 
 
 def _call_excerpt(turn) -> str:
@@ -57,7 +57,7 @@ def run_tool_call_accuracy_task(*, host, route, profile, decision, scratch_dir: 
     read_def = _tool_def("Read")
     result = ToolCallAccuracy(attempted=n)
     for _ in range(n):
-        turn = send_turn(
+        turn = send_turn_for(
             host=host, route=route, profile=profile, decision=decision,
             system_text="You are a careful tool-using assistant. Use the offered tool exactly once per request.",
             messages=[{"role": "user", "content": [{"type": "text", "text": _READ_PROMPT.format(path=fixture)}]}],
@@ -111,7 +111,7 @@ def run_edit_success_task(*, host, route, profile, decision, scratch_dir: Path, 
     result = RatioScore(attempted=n)
     for _ in range(n):
         fixture.write_text(_EDIT_ORIGINAL, encoding="utf-8")
-        turn = send_turn(
+        turn = send_turn_for(
             host=host, route=route, profile=profile, decision=decision,
             system_text="You are a careful tool-using assistant. Use the offered tool exactly once per request.",
             messages=[{"role": "user", "content": [{"type": "text", "text": _EDIT_PROMPT.format(path=fixture)}]}],

@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from halo_harness.gym import RatioScore, sample_excerpt
-from halo_harness.gym_send import send_turn
+from halo_harness.gym_send import send_turn_for
 
 # Fix pass (2026-10-04 live-run finding, qwen3.8:27b, a thinking-by-
 # default model): both reply-only tasks used to request only 16/32 output
@@ -67,7 +67,7 @@ def run_context_recall_task(*, host, route, profile, decision, n: int, quick: bo
     prompt = _build_recall_prompt(decision.num_ctx, quick=quick)
     result = RatioScore(attempted=n)
     for _ in range(n):
-        turn = send_turn(
+        turn = send_turn_for(
             host=host, route=route, profile=profile, decision=decision,
             system_text="Answer the user's question using only the text they provide.",
             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
@@ -105,7 +105,7 @@ def run_instruction_adherence_task(*, host, route, profile, decision, n: int, st
     for i in range(n):
         one_word_turn = (i % 2 == 0)
         prompt = _ONE_WORD_PROMPT if one_word_turn else _NO_PREAMBLE_PROMPT
-        turn = send_turn(
+        turn = send_turn_for(
             host=host, route=route, profile=profile, decision=decision,
             system_text="Follow the reply-format instruction in the user's message exactly.",
             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],

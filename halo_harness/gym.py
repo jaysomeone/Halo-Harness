@@ -266,7 +266,7 @@ def find_results_for_model(state_dir, model_or_ref: str) -> "list[dict]":
     latest`) still finds its own entry."""
     from halo_harness.providers.ollama import ollama_names_match
     bare = model_or_ref.split("@", 1)[0]
-    for prefix in ("ol:", "hf:local/"):
+    for prefix in ("ol:", "hf:local/", "hf:mlx/"):
         if bare.startswith(prefix):
             bare = bare[len(prefix):]
             break

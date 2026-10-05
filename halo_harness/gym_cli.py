@@ -34,13 +34,13 @@ def _cmd_run(argv: list) -> int:
 
     parser = argparse.ArgumentParser(
         prog="halo gym", add_help=True,
-        description="Run the fixed task battery against local Ollama models on THIS machine's hardware "
-                    "and score each one -- tool-call accuracy, edit success, context recall, instruction "
-                    "adherence, tokens/second, prefill seconds.")
+        description="Run the fixed task battery against local models on THIS machine's hardware and score "
+                    "each one -- tool-call accuracy, edit success, context recall, instruction adherence, "
+                    "tokens/second, prefill seconds. ol:, hf:local/*, and hf:mlx/* refs are all local.")
     parser.add_argument("--models", default=None, metavar="REF,REF,...",
-                         help="comma-separated ol: refs (default: every model in the default Ollama host's "
-                             "own catalog); a cloud/non-ol: ref is accepted for comparison but never run by "
-                             "default")
+                         help="comma-separated ol:/hf:local/hf:mlx refs (default: every model in the default "
+                             "Ollama host's own catalog); a cloud/router/endpoint ref is accepted for "
+                             "comparison but never run by default")
     parser.add_argument("--roles", default=None, metavar="ROLE,ROLE,...",
                          help="also print each model's weighted composite for these roles (default: "
                              f"{', '.join(SUPPORTING_ROLES)})")

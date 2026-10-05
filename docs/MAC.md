@@ -194,14 +194,23 @@ llama-server/Ollama do -- useful to know either way.
 halo gym --models hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit,ol:qwen2.5:7b --quick
 ```
 
-**You should see**: two cards, one per model -- tokens/second, prefill
-seconds, and the engine-version pair (mlx-lm's version alongside Ollama's)
-printed on each, so a stale comparison is visibly stale rather than
-silently misleading. Note the comparison is NOT apples-to-apples weight-
-for-weight (MLX's own 4-bit quantization and GGUF's `q4_K_M` are different
-schemes, round 5f's own research says so explicitly) -- it's a real,
-measured "how does this engine feel on THIS Mac" comparison, not a
-benchmark of the model itself.
+**You should see**: two cards, one per model, through round 5i's own
+`hf:`/`ol:` dispatch in `gym_send.send_turn_for`. Both show the same four
+scores (tool-call accuracy, edit success, context recall, instruction
+adherence) and a tokens/second figure. Prefill seconds and the quant/
+engine-version line are honestly asymmetric, not a guessed pair: the
+Ollama card has real prefill seconds (from `/api/chat`'s own
+`prompt_eval_duration`) and Ollama's version string; the `hf:mlx` card's
+`tokens_per_second` is a wall-clock estimate (the shared openai-chat
+sender exposes no per-phase timing to a caller outside it) and its
+prefill seconds comes back `None` rather than a faked number -- no
+mlx-lm version is captured either. A stale comparison is still visible
+from the scores and tok/s alone; it just isn't a version-string diff.
+Note the comparison is also NOT apples-to-apples weight-for-weight (MLX's
+own 4-bit quantization and GGUF's `q4_K_M` are different schemes, round
+5f's own research says so explicitly) -- it's a real, measured "how does
+this engine feel on THIS Mac" comparison, not a benchmark of the model
+itself.
 
 **Please paste back regardless of pass/fail**: both full cards. This is
 the actual deliverable rolo asked for -- "measurements, as the roadmap

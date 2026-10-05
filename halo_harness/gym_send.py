@@ -8,11 +8,21 @@ uses for the openai/anthropic dialects (a `CompletionRequest` built
 directly, no `agent.loop.Session` needed). This is "the real request/
 decode path against the live host" the brief asks tool-call accuracy to
 be measured through -- never a second, hand-rolled wire format.
-"""
+
+Round 5i (after round 5f's `hf:mlx`/shared `providers.huggingface_send`):
+`send_turn_for` below is the gym's OWN provider dispatcher -- Ollama stays
+`send_turn` unchanged; an `hf:local/*`/`hf:mlx/*` ref goes through
+`providers.huggingface_send.send_hf_turn` (round 5f's shared sender,
+reused here AS IS, never re-implemented a third time -- that module's own
+docstring is explicit about this). Every gym task function calls `send_
+turn_for` (never `send_turn` directly) so the battery's own logic stays
+provider-agnostic; only this function (and `send_repair`) knows two
+senders exist."""
 
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -39,6 +49,39 @@ class TurnResult:
     # for the budget fix; `thinking` here is what makes a repeat of that
     # failure mode immediately visible instead of a bare, unexplained 0%.
     thinking: str = ""
+
+
+@dataclass(frozen=True)
+class HFHost:
+    """Round 5i: the gym's own duck-typed stand-in for an `ollama.
+    OllamaHost`, same shape as `doctor_local.py`'s private `_HFHost` --
+    NOT imported from there (that name is underscore-private to that
+    module, and the fix/extension rounds for `gym*.py`/`doctor_local.py`
+    run concurrently per the coordinator's own file-ownership split) --
+    just enough (`base_url`/`api_key`/`name`, `url` aliasing `base_url`
+    for `name`-only display text) for `send_turn_for`'s huggingface
+    branch and `gym_run.py`'s result-file bookkeeping."""
+    base_url: str
+    api_key: Optional[str]
+    name: str
+
+    @property
+    def url(self) -> str:
+        return self.base_url
+
+
+@dataclass(frozen=True)
+class HFContextDecision:
+    """Round 5i: the huggingface branch's own minimal stand-in for
+    `providers.ollama_hw.OllamaContextDecision` -- every gym task function
+    reads only `decision.num_ctx` (grepped: `gym_reply_tasks.py`'s own
+    `_build_recall_prompt` is the ONE call site outside this module), so
+    this is the one field that needs a real value; `max_output_tokens`
+    is consulted by `send_turn_for` alone, for `send_hf_turn`'s own
+    `max_output_tokens` knob (the openai-chat dialect has no context-
+    ownership rule of its own to derive one from)."""
+    num_ctx: int = 128000
+    max_output_tokens: int = 16384
 
 
 def send_turn(*, host, route, profile, decision, system_text: str, messages: list,
@@ -117,6 +160,40 @@ def send_turn(*, host, route, profile, decision, system_text: str, messages: lis
                        timing_ns=timing_ns, error=error, thinking=thinking)
 
 
+def send_turn_for(*, host, route, profile, decision, **kwargs) -> TurnResult:
+    """The gym's provider dispatcher (module docstring) -- `kwargs` are
+    exactly `send_turn`'s own `system_text`/`messages`/`tools`/
+    `requested_max_tokens`/`force_format`/`state_dir`, which `providers.
+    huggingface_send.send_hf_turn` also accepts verbatim (its own
+    signature is a deliberate superset). `timing_ns` for the huggingface
+    branch is wall-clock ONLY (that sender exposes no server-side `usage`/
+    per-phase timing to a caller outside it, unlike Ollama's native
+    `eval_duration`/`prompt_eval_duration`) -- `eval_count` is the SAME
+    `len(text)//4` chars-per-token heuristic `providers.ollama_fit.
+    estimate_catalog_prompt_tokens` already uses elsewhere, `eval_duration`
+    is the measured wall-clock call time; `prompt_eval_duration` is left
+    OUT entirely (never guessed), so `gym_run._average_throughput` --
+    unchanged, reads this same dict shape -- naturally reports a real
+    `tokens_per_second` but `prefill_seconds=None` for an hf: card,
+    documented as a real limitation rather than a faked number."""
+    if route.provider == "huggingface":
+        from halo_harness.providers.huggingface_send import send_hf_turn
+        t0 = time.monotonic()
+        hf_result = send_hf_turn(
+            base_url=host.base_url, api_key=host.api_key, model_id=route.upstream_model,
+            context_tokens=getattr(decision, "num_ctx", None) or 8192,
+            max_output_tokens=getattr(decision, "max_output_tokens", None) or 4096,
+            **kwargs,
+        )
+        elapsed = time.monotonic() - t0
+        timing_ns = {}
+        if not hf_result.error and elapsed > 0:
+            timing_ns = {"eval_count": max(1, len(hf_result.text) // 4), "eval_duration": elapsed * 1_000_000_000.0}
+        return TurnResult(text=hf_result.text, tool_blocks=hf_result.tool_blocks,
+                           stop_reason=hf_result.stop_reason, error=hf_result.error, timing_ns=timing_ns)
+    return send_turn(host=host, route=route, profile=profile, decision=decision, **kwargs)
+
+
 def send_repair(*, host, route, profile, decision, tool_name: str, schema: Optional[dict],
                  error_message: str, raw_input, state_dir) -> "tuple[Optional[dict], Optional[str]]":
     """ONE local repair round, identical in spirit to `agent/loop.py`'s
@@ -128,15 +205,25 @@ def send_repair(*, host, route, profile, decision, tool_name: str, schema: Optio
     no single schema to constrain (or even just validate) against."""
     if schema is None or not tool_name:
         return None, "no schema resolved for this tool -- repair needs one to constrain/validate against"
-    from halo_harness.providers.ollama_hw import is_local_host
     from halo_harness.providers.tool_call_schema import repair_prompt_for, supports_constrained_tool_calls
-    constrained = supports_constrained_tool_calls(provider="ollama", dialect="ollama", local=is_local_host(host))
+    if route.provider == "huggingface":
+        # Round 5i: an hf:local/*/hf:mlx/* ref resolved by the gym is
+        # ALWAYS "local" in this gate's sense (never the router/a
+        # dedicated endpoint) -- same reasoning `doctor_local.py`'s own
+        # `_structured_output` step already documents for this exact
+        # provider/dialect pair, never `ollama_hw.is_local_host` (an
+        # Ollama-host-shaped hostname check that would not even apply to
+        # an `HFHost`).
+        constrained = supports_constrained_tool_calls(provider="huggingface", dialect="openai-chat", local=True)
+    else:
+        from halo_harness.providers.ollama_hw import is_local_host
+        constrained = supports_constrained_tool_calls(provider="ollama", dialect="ollama", local=is_local_host(host))
     system_text, user_text = repair_prompt_for(
         tool_name=tool_name, schema=schema, error_message=error_message, raw_input=raw_input)
     messages = [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
-    result = send_turn(host=host, route=route, profile=profile, decision=decision, system_text=system_text,
-                        messages=messages, tools=[], requested_max_tokens=256,
-                        force_format=schema if constrained else None, state_dir=state_dir)
+    result = send_turn_for(host=host, route=route, profile=profile, decision=decision, system_text=system_text,
+                            messages=messages, tools=[], requested_max_tokens=256,
+                            force_format=schema if constrained else None, state_dir=state_dir)
     if result.error:
         return None, result.error
     try:
