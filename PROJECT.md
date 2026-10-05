@@ -22,10 +22,13 @@ BUILD
 - Verified the subscription toolbar suite (13/13), managed-account suite (10/10), syntax, and whitespace checks.
 - Added live session and weekly reset countdowns beside the subscription usage percentages in the toolbar, with reset timestamps carried for both Claude and Codex subscriptions.
 - Installed this local fork into the pipx `halo-harness` environment and verified `halo accounts list` plus the interactive `/accounts` registration.
+- Fixed `cx:` follow-up turns failing with "the codex subprocess ended unexpectedly": `codex exec resume` rejects `-s`, so the sandbox is now passed as `-c sandbox_mode=...`. The fake Codex now rejects `-s` on resume, and the resume test checks the second turn has no error.
 
 ## Known baseline issue
 
 `tests/test_cx_session.py` currently has 11 broken-pipe failures. The same failures reproduce from the untouched `d1a603a` source, so they predate this feature and are not caused by the account-profile milestone.
+
+`tests/test_codex_session.py::test_tool_call_runs_through_bridge_and_logs_result` also fails on the unmodified `aa899d6` source.
 
 ## Next action
 
