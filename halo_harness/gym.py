@@ -79,18 +79,38 @@ def context_recall_n(quick: bool) -> int:
     return CONTEXT_RECALL_N_QUICK if quick else CONTEXT_RECALL_N_FULL
 
 
+# Fix pass (2026-10-04 live-run finding, qwen3.8:27b): a thinking-by-
+# default model can spend its ENTIRE small output budget on reasoning
+# before emitting any real content -- `turn.text` then comes back
+# genuinely EMPTY (never thinking text mistaken for the answer; see
+# `gym_send.TurnResult`'s own docstring), which scored as a flat 0% with
+# no way to tell why. Every per-attempt excerpt below (truncated to this
+# many characters) is what makes that diagnosable from the saved JSON
+# alone, and what `--show-replies` prints live.
+SAMPLE_EXCERPT_CHARS = 200
+
+
+def sample_excerpt(text: "Optional[str]") -> str:
+    text = (text or "").strip()
+    return text[:SAMPLE_EXCERPT_CHARS]
+
+
 @dataclass
 class ToolCallAccuracy:
     """Tool-call accuracy, repair rounds counted SEPARATELY (brief item 1:
     "counting repair rounds separately") -- `score` (the headline number)
     is `valid_first_try / attempted` ONLY; `repaired_score` is the more
     forgiving `(valid_first_try + valid_after_repair) / attempted`, shown
-    alongside but never substituted for `score`."""
+    alongside but never substituted for `score`. `samples`: one `sample_
+    excerpt` per attempt (the tool call's own short repr, or the plain
+    text reply when none was made) -- so a 0% is diagnosable, never a
+    bare number."""
     attempted: int = 0
     valid_first_try: int = 0
     valid_after_repair: int = 0
     failed: int = 0
     repair_rounds: int = 0
+    samples: "list" = field(default_factory=list)
 
     @property
     def score(self) -> Optional[float]:
@@ -107,9 +127,11 @@ class ToolCallAccuracy:
 class RatioScore:
     """The shared shape for edit_success/context_recall/instruction_
     adherence -- a plain `succeeded / attempted` ratio, `None` (never 0.0)
-    when nothing was attempted."""
+    when nothing was attempted. `samples`: one `sample_excerpt` of the
+    actual reply per attempt -- see `ToolCallAccuracy.samples`."""
     attempted: int = 0
     succeeded: int = 0
+    samples: "list" = field(default_factory=list)
 
     @property
     def score(self) -> Optional[float]:
@@ -276,13 +298,21 @@ def picker_score_suffix(model_ref: str, state_dir=None) -> str:
     return f"  gym {score:.2f}{tps_text}"
 
 
-def format_card(result: dict) -> str:
+def format_card(result: dict, *, show_replies: bool = False) -> str:
     """`halo gym show [model]`'s per-model card -- plain lines, never a
-    block/table (house style for anything printed from a CLI command)."""
+    block/table (house style for anything printed from a CLI command).
+    `show_replies` (`--show-replies`, fix pass): appends each metric's
+    saved `samples` excerpts right under its own line -- off by default
+    (the samples are ALWAYS stored in the result JSON regardless; this
+    only controls whether the CLI also prints them)."""
     tca = result.get("tool_call_accuracy") or {}
     edit = result.get("edit_success") or {}
     ctx = result.get("context_recall") or {}
     instr = result.get("instruction_adherence") or {}
+
+    def _replies(m: dict) -> "list[str]":
+        samples = m.get("samples") or []
+        return [f"    reply: {s!r}" for s in samples] if show_replies and samples else []
 
     def _pct(m: dict) -> str:
         s = m.get("score")
@@ -298,9 +328,13 @@ def format_card(result: dict) -> str:
         f"  tool-call accuracy: {_pct(tca)}"
         + (f", +{tca.get('valid_after_repair', 0)} more after repair ({tca.get('repair_rounds', 0)} repair round(s))"
            if tca.get("repair_rounds") else ""),
+        *_replies(tca),
         f"  edit success:       {_pct(edit)}",
+        *_replies(edit),
         f"  context recall:     {_pct(ctx)}",
+        *_replies(ctx),
         f"  instruction adherence: {_pct(instr)}",
+        *_replies(instr),
         f"  throughput: {result.get('tokens_per_second') if result.get('tokens_per_second') is not None else 'n/a'} tok/s, "
         f"prefill {result.get('prefill_seconds') if result.get('prefill_seconds') is not None else 'n/a'}s",
     ]

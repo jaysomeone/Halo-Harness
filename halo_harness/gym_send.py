@@ -24,6 +24,21 @@ class TurnResult:
     stop_reason: Optional[str] = None
     timing_ns: dict = field(default_factory=dict)
     error: Optional[str] = None
+    # Fix pass (2026-10-04 live-run finding): `text` is built ONLY from
+    # `content_block_delta`/`text_delta` events below -- `providers.
+    # ollama_stream.OllamaStreamToAnthropic` never turns `message.thinking`
+    # into one of those (it only ever accumulates into `harness_meta
+    # ["reasoning_text"]`, display-only) -- so `text`/`thinking` can never
+    # be confused with one another on THIS side. Captured here, separate
+    # from `text`, purely for diagnosability (`gym.format_card`'s/`halo
+    # gym --show-replies`'s own samples) -- the real live-run bug turned
+    # out to be `requested_max_tokens` being too small for a thinking-by-
+    # default model to clear its own reasoning before the budget ran out
+    # (`text` came back genuinely EMPTY, `stop_reason="max_tokens"`, never
+    # thinking text masquerading as the answer) -- see `gym_reply_tasks.py`
+    # for the budget fix; `thinking` here is what makes a repeat of that
+    # failure mode immediately visible instead of a bare, unexplained 0%.
+    thinking: str = ""
 
 
 def send_turn(*, host, route, profile, decision, system_text: str, messages: list,
@@ -58,6 +73,7 @@ def send_turn(*, host, route, profile, decision, system_text: str, messages: lis
     raw_json: dict = {}
     stop_reason = None
     timing_ns: dict = {}
+    thinking = ""
     error = None
     try:
         for ev in stream_ollama_completion(req):
@@ -83,6 +99,8 @@ def send_turn(*, host, route, profile, decision, system_text: str, messages: lis
                 meta = ev.get("harness_meta")
                 if isinstance(meta, dict) and isinstance(meta.get("timing_ns"), dict):
                     timing_ns = meta["timing_ns"]
+                if isinstance(meta, dict) and isinstance(meta.get("reasoning_text"), str):
+                    thinking = meta["reasoning_text"]
             elif et == "error":
                 error = (ev.get("error") or {}).get("message", "upstream error")
     except Exception as e:
@@ -96,7 +114,7 @@ def send_turn(*, host, route, profile, decision, system_text: str, messages: lis
             parsed = {}
         tool_blocks.append({"name": blocks[idx].get("name"), "input": parsed if isinstance(parsed, dict) else {}})
     return TurnResult(text="".join(text_parts), tool_blocks=tool_blocks, stop_reason=stop_reason,
-                       timing_ns=timing_ns, error=error)
+                       timing_ns=timing_ns, error=error, thinking=thinking)
 
 
 def send_repair(*, host, route, profile, decision, tool_name: str, schema: Optional[dict],

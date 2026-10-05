@@ -46,6 +46,9 @@ def _cmd_run(argv: list) -> int:
                              f"{', '.join(SUPPORTING_ROLES)})")
     parser.add_argument("--quick", action="store_true", help="halve the battery size N for a faster, "
                                                               "noisier read")
+    parser.add_argument("--show-replies", action="store_true",
+                         help="print each reply-only task's actual excerpt (first 200 chars) alongside its "
+                             "score -- samples are always saved in the result JSON regardless of this flag")
     args = parser.parse_args(argv)
     try:
         models = _parse_csv(args.models) or None
@@ -60,7 +63,7 @@ def _cmd_run(argv: list) -> int:
 
     def _on_each(ref, result) -> None:
         print()
-        print(format_card(result))
+        print(format_card(result, show_replies=args.show_replies))
         tps_values = [result["tokens_per_second"]] if isinstance(result.get("tokens_per_second"), (int, float)) else []
         max_tps = max(tps_values) if tps_values else None
         for role in roles:
@@ -85,6 +88,8 @@ def _cmd_show(argv: list) -> int:
                                       description="Print the saved per-model gym card(s).")
     parser.add_argument("model", nargs="?", default=None, help="only this model's card (default: every "
                                                                 "saved result, newest first)")
+    parser.add_argument("--show-replies", action="store_true",
+                         help="also print each reply-only task's saved reply excerpts")
     args = parser.parse_args(argv)
     state_dir = bridge_home()
     rows = find_results_for_model(state_dir, args.model) if args.model else iter_results(state_dir)
@@ -95,7 +100,7 @@ def _cmd_show(argv: list) -> int:
     for i, row in enumerate(rows):
         if i:
             print()
-        print(format_card(row))
+        print(format_card(row, show_replies=args.show_replies))
     return 0
 
 

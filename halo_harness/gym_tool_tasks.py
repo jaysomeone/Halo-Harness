@@ -9,8 +9,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from halo_harness.gym import RatioScore, ToolCallAccuracy
+from halo_harness.gym import RatioScore, ToolCallAccuracy, sample_excerpt
 from halo_harness.gym_send import send_repair, send_turn
+
+
+def _call_excerpt(turn) -> str:
+    """Fix pass: one `sample_excerpt`-ready line describing what a turn
+    actually produced -- the error, the plain text reply (no tool call at
+    all), or a short repr of the first tool call -- so a tool task's own
+    `samples` are just as diagnosable as a plain-text task's."""
+    if turn.error:
+        return f"[error] {turn.error}"
+    if not turn.tool_blocks:
+        return f"[no tool call] {turn.text!r}" if turn.text else "[no tool call, empty reply]"
+    call = turn.tool_blocks[0]
+    return f"{call.get('name')}({call.get('input')!r})"
 
 _READ_PROMPT = "Call the Read tool on exactly this file, then stop: {path}"
 _EDIT_PROMPT = (
@@ -52,6 +65,7 @@ def run_tool_call_accuracy_task(*, host, route, profile, decision, scratch_dir: 
         )
         if timing is not None and not turn.error and turn.timing_ns:
             timing.append(turn.timing_ns)
+        result.samples.append(sample_excerpt(_call_excerpt(turn)))
         if turn.error or not turn.tool_blocks:
             result.failed += 1
             continue
@@ -105,6 +119,7 @@ def run_edit_success_task(*, host, route, profile, decision, scratch_dir: Path, 
         )
         if timing is not None and not turn.error and turn.timing_ns:
             timing.append(turn.timing_ns)
+        result.samples.append(sample_excerpt(_call_excerpt(turn)))
         if turn.error or not turn.tool_blocks:
             continue
         call = turn.tool_blocks[0]

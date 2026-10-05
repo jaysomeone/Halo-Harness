@@ -37,6 +37,24 @@ def _text_reply(text: str, **timing) -> dict:
     return base
 
 
+def _thinking_then_text_lines(thinking: str, text: str, **timing) -> list:
+    """Fix pass (2026-10-04 live-run finding, qwen3.8:27b): the exact
+    shape a real thinking-by-default model streams -- one or more
+    `message.thinking`-only chunks (`done: False`, the SAME shape
+    `mock_ollama.py`'s own `_scn_thinking` scenario uses) before the
+    final `message.content` chunk. Pins that `gym_send.send_turn`'s
+    `text` never absorbs the thinking half."""
+    base = {"message": {"role": "assistant", "content": text}, "done": True, "done_reason": "stop",
+            "prompt_eval_count": 50, "eval_count": 40, "prompt_eval_duration": 80_000_000,
+            "eval_duration": 150_000_000}
+    base.update(timing)
+    return [
+        {"message": {"role": "assistant", "content": "", "thinking": thinking[: len(thinking) // 2]}, "done": False},
+        {"message": {"role": "assistant", "content": "", "thinking": thinking[len(thinking) // 2:]}, "done": False},
+        base,
+    ]
+
+
 def _tool_reply(name: str, arguments: dict) -> dict:
     return {"message": {"role": "assistant", "content": "", "tool_calls": [
             {"function": {"name": name, "arguments": arguments}}]},
@@ -265,6 +283,137 @@ def test_battery_half_scenario_counts_repairs_separately(ctx: Ctx):
             from halo_harness.gym import format_card
             card = format_card(result)
             ctx.check("the card mentions the repair rounds", "repair round" in card)
+        finally:
+            mock.stop()
+
+
+@test
+def test_thinking_chunks_never_pollute_the_checked_text(ctx: Ctx):
+    """Fix pass: `send_turn`'s `text` must be exactly the content half,
+    never the thinking half, and `thinking` (new field) must carry the
+    thinking half separately -- the live-run bug turned out to be too
+    small a token budget (see the next test), not this, but this is the
+    explicit, direct pin the coordinator asked for."""
+    from halo_harness.gym_send import send_turn
+    with _Env() as env:
+        mock = MockUpstream(scenarios={"thinker": lambda h, b: _finish(
+            h, _thinking_then_text_lines("Let me think about grass colors carefully. ", "Green"))}).start()
+        try:
+            os.environ["OLLAMA_HOST"] = mock.base_url
+            from halo_harness.model import parse_model_ref
+            from halo_harness.providers.ollama import resolve_ollama_host
+            from halo_harness.providers.ollama_hw import resolve_context_decision
+            from halo_harness.providers.profiles import resolve_profile
+            from halo_harness.providers.routing import Route
+            ref = parse_model_ref("ol:thinker")
+            host = resolve_ollama_host(ref.host)
+            route = Route(provider="ollama", upstream_model=ref.model, dialect="ollama")
+            profile = resolve_profile(route, state_dir=env.state_dir)
+            decision = resolve_context_decision(ref)
+            turn = send_turn(host=host, route=route, profile=profile, decision=decision,
+                              system_text="reply with one word", messages=[
+                                  {"role": "user", "content": [{"type": "text", "text": "grass color?"}]}],
+                              tools=None, requested_max_tokens=160, state_dir=env.state_dir)
+            ctx.check(f"text is exactly the content half, got {turn.text!r}", turn.text == "Green")
+            ctx.check(f"thinking is captured separately, got {turn.thinking!r}",
+                      "Let me think" in turn.thinking and "Green" not in turn.thinking)
+        finally:
+            mock.stop()
+
+
+@test
+def test_reply_only_tasks_send_a_thinking_safe_token_budget(ctx: Ctx):
+    """Fix pass regression pin: the ACTUAL live-run bug -- a thinking
+    model given only 16/32 output tokens spends them all reasoning and
+    never reaches the real answer, so `text` comes back empty. Asserts
+    the wire-level fix directly: every reply-only request (no `tools` on
+    the wire) carries a generous `num_predict`, never the old 16/32."""
+    with _Env() as env:
+        mock = MockUpstream(scenarios={"budget-check": lambda h, b: _finish(h, [_text_reply("ok")])}).start()
+        try:
+            os.environ["OLLAMA_HOST"] = mock.base_url
+            _run_one(mock, "budget-check", quick=True, state_dir=env.state_dir)
+            reply_only = [r for r in mock.requests if r["method"] == "POST" and r["path"].rstrip("/") == "/api/chat"
+                          and not (r["body"] or {}).get("tools")]
+            ctx.check("at least one reply-only request was sent (recall + instruction adherence)",
+                      len(reply_only) >= 2)
+            budgets = [(r["body"].get("options") or {}).get("num_predict") for r in reply_only]
+            ctx.check(f"every reply-only request asks for >= 64 tokens, got {budgets}",
+                      all(isinstance(b, int) and b >= 64 for b in budgets))
+        finally:
+            mock.stop()
+
+
+@test
+def test_recall_task_passes_with_thinking_chunks_before_the_needle(ctx: Ctx):
+    from halo_harness.gym_reply_tasks import run_context_recall_task
+    with _Env() as env:
+        mock = MockUpstream(scenarios={"recall-thinker": lambda h, b: _finish(
+            h, _thinking_then_text_lines("Scanning the text for the checkpoint code... ", "7k2p9"))}).start()
+        try:
+            os.environ["OLLAMA_HOST"] = mock.base_url
+            from halo_harness.model import parse_model_ref
+            from halo_harness.providers.ollama import resolve_ollama_host
+            from halo_harness.providers.ollama_hw import resolve_context_decision
+            from halo_harness.providers.profiles import resolve_profile
+            from halo_harness.providers.routing import Route
+            ref = parse_model_ref("ol:recall-thinker")
+            host = resolve_ollama_host(ref.host)
+            route = Route(provider="ollama", upstream_model=ref.model, dialect="ollama")
+            profile = resolve_profile(route, state_dir=env.state_dir)
+            decision = resolve_context_decision(ref)
+            result = run_context_recall_task(host=host, route=route, profile=profile, decision=decision,
+                                              n=1, quick=True, state_dir=env.state_dir)
+            ctx.check(f"passes despite the thinking preamble, got {result}", result.score == 1.0)
+        finally:
+            mock.stop()
+
+
+@test
+def test_recall_check_is_tolerant_of_case_and_punctuation(ctx: Ctx):
+    from halo_harness.gym_reply_tasks import run_context_recall_task
+    with _Env() as env:
+        mock = MockUpstream(scenarios={"recall-quoted": lambda h, b: _finish(
+            h, [_text_reply("The checkpoint code is '7K2P9'.")])}).start()
+        try:
+            os.environ["OLLAMA_HOST"] = mock.base_url
+            from halo_harness.model import parse_model_ref
+            from halo_harness.providers.ollama import resolve_ollama_host
+            from halo_harness.providers.ollama_hw import resolve_context_decision
+            from halo_harness.providers.profiles import resolve_profile
+            from halo_harness.providers.routing import Route
+            ref = parse_model_ref("ol:recall-quoted")
+            host = resolve_ollama_host(ref.host)
+            route = Route(provider="ollama", upstream_model=ref.model, dialect="ollama")
+            profile = resolve_profile(route, state_dir=env.state_dir)
+            decision = resolve_context_decision(ref)
+            result = run_context_recall_task(host=host, route=route, profile=profile, decision=decision,
+                                              n=1, quick=True, state_dir=env.state_dir)
+            ctx.check(f"uppercase + quotes + trailing period still match, got {result}", result.score == 1.0)
+        finally:
+            mock.stop()
+
+
+@test
+def test_samples_are_stored_and_show_replies_prints_them(ctx: Ctx):
+    from halo_harness.gym import format_card
+    with _Env() as env:
+        mock = MockUpstream(scenarios={"gym-pass2": GymScenario("pass")},
+                             tags_response={"models": [{"name": "gym-pass2", "model": "gym-pass2",
+                                            "digest": "sha256:p2", "details": {"family": "x"}}]},
+                             show_responses={"gym-pass2": {"capabilities": ["tools"], "details": {"family": "x"},
+                                             "model_info": {"x.context_length": 8192}}}).start()
+        try:
+            os.environ["OLLAMA_HOST"] = mock.base_url
+            result = _run_one(mock, "gym-pass2", quick=True, state_dir=env.state_dir)
+            ctx.check(f"instruction_adherence samples saved, got {result['instruction_adherence']}",
+                      len(result["instruction_adherence"]["samples"]) == result["instruction_adherence"]["attempted"])
+            ctx.check(f"context_recall samples saved, got {result['context_recall']}",
+                      len(result["context_recall"]["samples"]) == result["context_recall"]["attempted"])
+            default_card = format_card(result)
+            verbose_card = format_card(result, show_replies=True)
+            ctx.check("replies are hidden by default", "reply:" not in default_card)
+            ctx.check("replies appear with show_replies=True", "reply:" in verbose_card)
         finally:
             mock.stop()
 

@@ -9,8 +9,21 @@ from __future__ import annotations
 
 from typing import Optional
 
-from halo_harness.gym import RatioScore
+from halo_harness.gym import RatioScore, sample_excerpt
 from halo_harness.gym_send import send_turn
+
+# Fix pass (2026-10-04 live-run finding, qwen3.8:27b, a thinking-by-
+# default model): both reply-only tasks used to request only 16/32 output
+# tokens -- too small for a model that spends its OWN tokens reasoning
+# before ever emitting the real answer. Measured directly against the
+# live daemon: the one-word/no-preamble prompts came back completely
+# EMPTY at 16 tokens (`stop_reason="max_tokens"`, every token spent on
+# thinking) and needed 64+ to reliably finish; the recall prompt (much
+# longer, so more to reason about) needed 64+ too, after coming back
+# empty at 32. 160 is a generous, flat margin above every measured
+# threshold -- cheap for a non-thinking model (it stops at `end_turn`
+# long before 160 regardless) and safe for a thinking one.
+_THINKING_SAFE_MAX_TOKENS = 160
 
 # A FIXED needle (never randomized) -- this task measures whether a fact
 # planted at a known depth survives this host's actual context handling,
@@ -46,8 +59,11 @@ def run_context_recall_task(*, host, route, profile, decision, n: int, quick: bo
     """N attempts at the SAME needle-at-depth prompt, sized to this
     model's own fitted context (`decision.num_ctx`) -- brief: "a needle at
     about 12 percent depth of a prompt sized to the model's fitted
-    window". `succeeded` requires the exact needle code to appear in the
-    reply text."""
+    window". `succeeded` requires the needle code to appear in the reply
+    text (case-insensitive, and tolerant of surrounding punctuation/quotes
+    -- a plain substring check already is, since "'7k2p9'." still
+    contains "7k2p9"; case-folding is the one further tolerance added by
+    this fix pass)."""
     prompt = _build_recall_prompt(decision.num_ctx, quick=quick)
     result = RatioScore(attempted=n)
     for _ in range(n):
@@ -55,11 +71,12 @@ def run_context_recall_task(*, host, route, profile, decision, n: int, quick: bo
             host=host, route=route, profile=profile, decision=decision,
             system_text="Answer the user's question using only the text they provide.",
             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            tools=None, requested_max_tokens=32, state_dir=state_dir,
+            tools=None, requested_max_tokens=_THINKING_SAFE_MAX_TOKENS, state_dir=state_dir,
         )
         if timing is not None and not turn.error and turn.timing_ns:
             timing.append(turn.timing_ns)
-        if not turn.error and _NEEDLE_CODE in turn.text:
+        result.samples.append(sample_excerpt(turn.text) if not turn.error else sample_excerpt(f"[error] {turn.error}"))
+        if not turn.error and _NEEDLE_CODE.lower() in turn.text.lower():
             result.succeeded += 1
     return result
 
@@ -92,10 +109,11 @@ def run_instruction_adherence_task(*, host, route, profile, decision, n: int, st
             host=host, route=route, profile=profile, decision=decision,
             system_text="Follow the reply-format instruction in the user's message exactly.",
             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            tools=None, requested_max_tokens=16, state_dir=state_dir,
+            tools=None, requested_max_tokens=_THINKING_SAFE_MAX_TOKENS, state_dir=state_dir,
         )
         if timing is not None and not turn.error and turn.timing_ns:
             timing.append(turn.timing_ns)
+        result.samples.append(sample_excerpt(turn.text) if not turn.error else sample_excerpt(f"[error] {turn.error}"))
         if turn.error:
             continue
         passed = _check_one_word(turn.text) if one_word_turn else _check_no_preamble(turn.text)
