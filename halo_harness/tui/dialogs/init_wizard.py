@@ -50,11 +50,12 @@ from textual.widgets import Button, Input, Static, TabbedContent, TabPane
 
 from halo_harness.init_providers import TAB_LABEL, TAB_PROVIDERS, tab_credential_state
 
-ALL_STEP_KEYS = ("providers", "default_model", "permission_mode", "theme", "roles", "orgs", "linux_fixes", "summary")
+ALL_STEP_KEYS = ("providers", "local_models", "default_model", "permission_mode", "theme", "roles", "orgs",
+                 "linux_fixes", "summary")
 STEP_TITLES = {
-    "providers": "Providers", "default_model": "Default model", "permission_mode": "Permission mode",
-    "theme": "Theme", "roles": "Roles", "orgs": "Organizations", "linux_fixes": "Linux fixes",
-    "summary": "Summary",
+    "providers": "Providers", "local_models": "Local models", "default_model": "Default model",
+    "permission_mode": "Permission mode", "theme": "Theme", "roles": "Roles", "orgs": "Organizations",
+    "linux_fixes": "Linux fixes", "summary": "Summary",
 }
 
 
@@ -570,6 +571,116 @@ class ProvidersStep(StepScreen):
 
 
 STEP_FACTORIES["providers"] = ProvidersStep
+
+
+# ---------------------------------------------------------------------------
+# Step: Local models -- Halo 2.0.3 round 5c (brief item 1): "the wizard
+# gets a 'Local models' step (detects Ollama and running servers, scans
+# the default caches, offers 'add a folder', and asks which runtime to
+# prefer for files that are not served yet)". The detection summary reuses
+# `providers.local_models.detection_summary_lines` verbatim (round 5b part
+# 2's own text, already covering Ollama/running-servers/caches) -- this
+# step adds ONLY the two things that summary can't do by itself: adding a
+# `huggingface.model_dirs` folder, and the preferred-runtime choice.
+# ---------------------------------------------------------------------------
+
+class LocalModelsStep(StepScreen):
+    DEFAULT_CSS = """
+    LocalModelsStep #wiz-local-detect { margin-top: 1; color: $text-muted; }
+    LocalModelsStep #wiz-local-dirs { margin-top: 1; }
+    LocalModelsStep #wiz-local-runtime-status { margin-top: 1; color: $text-muted; }
+    LocalModelsStep .wizard-extra-buttons { height: 3; margin-top: 1; }
+    LocalModelsStep .wizard-extra-buttons Button { margin-right: 1; }
+    """
+
+    def _dirs_text(self) -> str:
+        from halo_harness.providers.local_model_dirs import resolve_model_dirs
+        dirs = resolve_model_dirs()
+        return ("Folders scanned for .gguf/safetensors/MLX models: " + ", ".join(str(d) for d in dirs)) if dirs \
+            else "No folders added yet (huggingface.model_dirs is empty)."
+
+    def _runtime_status_text(self) -> str:
+        from halo_harness.theme import get_config_value
+        preferred = get_config_value("huggingface.preferred_runtime", default=None)
+        return f"Preferred runtime: {preferred}" if preferred else "Preferred runtime: not set (Halo picks " \
+            "llama-server for GGUF, mlx_lm for safetensors on Apple Silicon, either way)."
+
+    def body(self) -> list:
+        return [
+            Static("Folders Halo scans for .gguf files and safetensors/MLX model folders, on top of the "
+                   "Hugging Face Hub cache, LM Studio's own folder, and Ollama's own store.",
+                   classes="dialog-title"),
+            Static("detecting what's already on this machine…", id="wiz-local-detect", classes="tab-help"),
+            Static(self._dirs_text(), id="wiz-local-dirs"),
+            Input(placeholder="/path/to/a/models/folder", id="wiz-local-folder-input"),
+            Button("Add folder", id="wiz-local-folder-add"),
+            Static("Preferred runtime for a file `halo local serve` isn't told --runtime for explicitly:",
+                   classes="tab-help"),
+            Horizontal(Button("llama-server (GGUF)", id="wiz-local-runtime-llama"),
+                       Button("mlx_lm (Apple Silicon)", id="wiz-local-runtime-mlx"),
+                       classes="wizard-extra-buttons"),
+            Static(self._runtime_status_text(), id="wiz-local-runtime-status"),
+        ]
+
+    def on_mount(self) -> None:
+        self.run_worker(self._detect_worker, thread=True, name="wiz-local-detect")
+
+    def _detect_worker(self) -> None:
+        from halo_harness.providers.local_models import detection_summary_lines
+        try:
+            lines = detection_summary_lines()
+        except Exception:
+            lines = []
+        text = "\n".join(lines) if lines else "nothing detected on this machine yet (no Ollama daemon, no " \
+                                               "local server, no cached model files)."
+        self.app.call_from_thread(self._apply_detect_text, text)
+
+    def _apply_detect_text(self, text: str) -> None:
+        try:
+            self.query_one("#wiz-local-detect", Static).update(text)
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # See ProvidersStep.on_button_pressed's own comment -- must never
+        # re-handle wiz-back/skip/next (StepScreen already does).
+        bid = event.button.id or ""
+        if bid == "wiz-local-folder-add":
+            self._add_folder()
+        elif bid == "wiz-local-runtime-llama":
+            self._set_preferred_runtime("llama-server")
+        elif bid == "wiz-local-runtime-mlx":
+            self._set_preferred_runtime("mlx_lm")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "wiz-local-folder-input":
+            self._add_folder()
+
+    def _add_folder(self) -> None:
+        from halo_harness.providers.local_model_dirs import add_model_dir
+        try:
+            field = self.query_one("#wiz-local-folder-input", Input)
+            dirs_static = self.query_one("#wiz-local-dirs", Static)
+        except Exception:
+            return
+        path = field.value.strip()
+        if not path:
+            return
+        ok, message = add_model_dir(path)
+        if ok:
+            field.value = ""
+        dirs_static.update(self._dirs_text() + f"\n({message})")
+
+    def _set_preferred_runtime(self, runtime: str) -> None:
+        from halo_harness.theme import set_config_value
+        set_config_value("huggingface.preferred_runtime", runtime)
+        try:
+            self.query_one("#wiz-local-runtime-status", Static).update(self._runtime_status_text())
+        except Exception:
+            pass
+
+
+STEP_FACTORIES["local_models"] = LocalModelsStep
 
 
 # ---------------------------------------------------------------------------

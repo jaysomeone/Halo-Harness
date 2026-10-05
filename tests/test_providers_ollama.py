@@ -430,6 +430,132 @@ def test_compaction_trigger_is_75_percent_of_num_ctx(ctx: Ctx):
     ctx.check("always at least 1", compaction_trigger_tokens(1) == 1)
 
 
+# ---- FIX PASS: <name>/<name>:latest normalization ---------------------------
+
+@test
+def test_ollama_names_match_untagged_and_latest(ctx: Ctx):
+    from halo_harness.providers.ollama import normalize_ollama_model_name, ollama_names_match
+    ctx.check('"foo" normalizes to "foo:latest"', normalize_ollama_model_name("foo") == "foo:latest")
+    ctx.check('an explicit tag is left alone', normalize_ollama_model_name("foo:v1") == "foo:v1")
+    ctx.check("foo matches foo:latest", ollama_names_match("foo", "foo:latest"))
+    ctx.check("foo:latest matches foo", ollama_names_match("foo:latest", "foo"))
+    ctx.check("foo:latest matches foo:latest", ollama_names_match("foo:latest", "foo:latest"))
+    ctx.check("foo:v1 does NOT match foo (a real, different tag)", not ollama_names_match("foo:v1", "foo"))
+    ctx.check("empty/None never vacuously match", not ollama_names_match("", "foo") and not ollama_names_match(None, "foo"))
+
+
+@test
+def test_trained_context_for_resolves_an_untagged_ref_against_its_latest_row(ctx: Ctx):
+    """Pin: a tags entry `foo:latest` resolves for `ol:foo` AND
+    `ol:foo:latest` -- the live-run root cause (`halo-live-test` imported
+    with no tag, stored/reported as `halo-live-test:latest`, previously
+    went unmatched against the bare `ol:halo-live-test` ref)."""
+    from halo_harness.providers.ollama import trained_context_for
+    catalog = {"models": [{"model": "foo:latest", "name": "foo:latest",
+                            "model_info": {"llama.context_length": 8192}}]}
+    ctx.check("bare ref resolves", trained_context_for(catalog, "foo") == 8192)
+    ctx.check("tagged ref resolves too", trained_context_for(catalog, "foo:latest") == 8192)
+    ctx.check("a genuinely different model does not", trained_context_for(catalog, "bar") is None)
+
+
+# ---- FIX PASS: Ollama's real exceed_context_size_error 400 ------------------
+
+def _ollama_completion_request_overflow(mock, scenario: str, *, ceiling=None):
+    """Same shape as `_ollama_completion_request` above, but exposed here
+    so the overflow tests can set `ollama_ctx_retry_ceiling` afterwards
+    (that field postdates this file's own shared helper)."""
+    req = _ollama_completion_request(mock, scenario)
+    req.ollama_ctx_retry_ceiling = ceiling
+    return req
+
+
+@test
+def test_context_overflow_400_retries_once_with_a_bigger_num_ctx_then_succeeds(ctx: Ctx):
+    """Live run, build 0.34.2: Ollama answers 400 `exceed_context_size_
+    error` on overflow -- round 2's docstring wrongly assumed silent
+    truncation. When a bigger window is actually allowed (the ceiling
+    here mirrors `min(learned_cap, host.max_ctx, fit_estimate, hard_cap)`
+    -- 131072, nothing else configured), Halo retries ONCE with the
+    smallest power of two that holds `n_prompt_tokens` plus the output
+    budget, never reaching compaction at all."""
+    from tests.helpers.mock_ollama import MockUpstream, ScriptedByCallCount, send_json
+    from halo_harness.providers.stream import stream_ollama_completion
+
+    def _overflow_400(h, body):
+        send_json(h, 400, {"error": {"code": 400, "message": "request (100000 tokens) exceeds the available "
+                                       "context size (40960 tokens), try increasing it",
+                            "type": "exceed_context_size_error", "n_prompt_tokens": 100000, "n_ctx": 40960}})
+
+    with MockUpstream() as mock:
+        mock.scenarios["overflow-then-ok"] = ScriptedByCallCount([
+            _overflow_400,
+            [{"message": {"role": "assistant", "content": "recovered"}, "done": True, "done_reason": "stop",
+              "prompt_eval_count": 100000, "eval_count": 2}],
+        ])
+        req = _ollama_completion_request_overflow(mock, "overflow-then-ok", ceiling=131072)
+        events = list(stream_ollama_completion(req))
+        ctx.check(f"a normal message_start..message_stop stream, got {events[0]} .. {events[-1]}",
+                  events[0]["type"] == "message_start" and events[-1]["type"] == "message_stop")
+        chats = [r for r in mock.requests if r["path"].rstrip("/") == "/api/chat"]
+        ctx.check(f"exactly two attempts (overflow, then the bigger retry), got {len(chats)}", len(chats) == 2)
+        first_ctx = (chats[0]["body"].get("options") or {}).get("num_ctx")
+        second_ctx = (chats[1]["body"].get("options") or {}).get("num_ctx")
+        ctx.check(f"the retry used a strictly BIGGER num_ctx, got first={first_ctx} second={second_ctx}",
+                  isinstance(second_ctx, int) and isinstance(first_ctx, int) and second_ctx > first_ctx)
+        ctx.check(f"the smallest power of two that holds 100000 prompt tokens + the output budget, got {second_ctx}",
+                  second_ctx == 131072)
+
+
+@test
+def test_context_overflow_400_with_no_room_to_grow_raises_context_overflow(ctx: Ctx):
+    """The OTHER half of the same pin: when even the full ceiling can't
+    hold the prompt, Halo never retries -- it raises the SAME
+    `ContextOverflow` it always did, for the existing compaction-and-
+    retry path (`agent/loop.py`) to pick up unchanged."""
+    from tests.helpers.mock_ollama import MockUpstream, send_json
+    from halo_harness.providers.stream import ContextOverflow, stream_ollama_completion
+
+    def _overflow_400_huge(h, body):
+        send_json(h, 400, {"error": {"code": 400, "message": "nope", "type": "exceed_context_size_error",
+                                       "n_prompt_tokens": 9_999_999, "n_ctx": 40960}})
+
+    with MockUpstream() as mock:
+        mock.scenarios["overflow-no-room"] = _overflow_400_huge
+        req = _ollama_completion_request_overflow(mock, "overflow-no-room", ceiling=131072)
+        try:
+            list(stream_ollama_completion(req))
+            ctx.check("must raise ContextOverflow when no bigger context fits", False)
+        except ContextOverflow as e:
+            ctx.check(f"limit/prompt_tokens carried through from the 400, got limit={e.limit} "
+                      f"prompt_tokens={e.prompt_tokens}", e.limit == 40960 and e.prompt_tokens == 9_999_999)
+        chats = [r for r in mock.requests if r["path"].rstrip("/") == "/api/chat"]
+        ctx.check(f"exactly ONE attempt -- no retry was even tried, got {len(chats)}", len(chats) == 1)
+
+
+@test
+def test_context_overflow_400_with_no_ceiling_known_raises_immediately(ctx: Ctx):
+    """`ollama_ctx_retry_ceiling` unset (its dataclass default) -- the
+    SAME terminal behaviour as "no room to grow", never a crash on a
+    missing ceiling."""
+    from tests.helpers.mock_ollama import MockUpstream, send_json
+    from halo_harness.providers.stream import ContextOverflow, stream_ollama_completion
+
+    def _overflow_400(h, body):
+        send_json(h, 400, {"error": {"code": 400, "message": "nope", "type": "exceed_context_size_error",
+                                       "n_prompt_tokens": 50000, "n_ctx": 40960}})
+
+    with MockUpstream() as mock:
+        mock.scenarios["overflow-no-ceiling"] = _overflow_400
+        req = _ollama_completion_request(mock, "overflow-no-ceiling")  # ollama_ctx_retry_ceiling left at its default
+        try:
+            list(stream_ollama_completion(req))
+            ctx.check("must raise ContextOverflow with no ceiling known", False)
+        except ContextOverflow:
+            pass
+        chats = [r for r in mock.requests if r["path"].rstrip("/") == "/api/chat"]
+        ctx.check(f"exactly ONE attempt, got {len(chats)}", len(chats) == 1)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

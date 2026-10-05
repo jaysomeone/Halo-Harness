@@ -184,6 +184,35 @@ when it happens to be loaded there already, else unknown. Either way
 `None` (unknown) simply drops out of the `min(...)` -- never a crash,
 never a guessed number.
 
+**An untagged name IS its own `:latest`** (fix pass after a live run
+surfaced the gap): Ollama stores a model created/imported with no
+explicit tag (`ollama create foo`, `halo local import ... --name foo`)
+as `foo:latest`, and reports it that way from `/api/tags`/`/api/ps` --
+every name comparison Halo makes (the catalog lookup, the trained-
+context lookup, the fit estimate's `/api/ps` matching, calibration,
+panel rows, `/local`) normalizes both sides through ONE helper
+(`providers.ollama.ollama_names_match`) before comparing, so `ol:foo`
+and `ol:foo:latest` are always treated as the same model. Before this
+fix, an untagged model's own catalog row went unmatched, `trained_
+context` silently came back `None`, and `num_ctx` fell all the way to
+the conservative 8192 fallback -- discovered live when a model imported
+without `--name`'s tag then overflowed on an ordinary prompt.
+
+**Ollama DOES answer a 400 on overflow** (the SAME live run corrected a
+second wrong assumption): a prompt longer than `num_ctx` is NOT silently
+truncated server-side -- build 0.34.2 answers `HTTP 400 {"error":
+{"code":400,"message":"...","type":"exceed_context_size_error",
+"n_prompt_tokens":N,"n_ctx":M}}`. Halo now handles it in two tiers: if a
+BIGGER `num_ctx` is actually allowed (the smallest of whichever of the
+learned cap, `host.max_ctx`, and the live fit estimate are known, never
+exceeding the usual 131072 hard cap) covers `n_prompt_tokens` plus the
+turn's own output budget, Halo retries that ONE request once more at the
+smallest power-of-two context that holds both -- no compaction, the
+model never even sees a shorter prompt. Only when no bigger window is
+available (or the retry overflows too) does this become an ordinary
+context-overflow event, triggering the existing compaction-and-retry
+path exactly like every other dialect.
+
 **Three outcomes, not two** (fix pass after a live run surfaced the gap):
 `/api/ps` is checked FIRST, local hosts included. (1) **Already loaded**
 -- that model's own loaded `context_length` IS the fit estimate, full
@@ -681,6 +710,113 @@ per-parameter byte table the KV-cache arithmetic uses for weights, plus a
 flat ~2 GiB reservation for the context itself (not that class's own real
 KV formula, which needs an architecture no not-yet-installed model has)
 -- explicitly an estimate, never a download from the wizard itself.
+
+**Finding and using file-backed models (round 5c)**
+
+A model you already have as files on disk -- downloaded by hand, by `hf
+download`, or by LM Studio -- does nothing by itself until something
+loads it. This is Halo's answer to "I have model files somewhere, how do
+I actually talk to them."
+
+**Where Halo looks**: the Hugging Face Hub cache and LM Studio's folder
+(both above) plus `huggingface.model_dirs`, a list of your OWN folders
+(docs/CONFIG.md) Halo scans recursively (a symlinked subfolder is never
+followed, matching every other scanner in this codebase) for three
+shapes: a bare `.gguf` file anywhere, a folder holding `config.json`
+beside one or more `*.safetensors` files (an ordinary Hugging Face
+"transformers" model folder), and the same safetensors shape again when
+it looks like an MLX-quantized model (its folder name mentions "mlx", or
+its `config.json` carries mlx-lm's own `quantization` key -- a best-
+effort guess, not a confirmed marker). Manage the list from a running
+session with `/local add <path>`/`/local forget <path>` (persisted to
+`huggingface.model_dirs` right away), or from `halo init`'s own "Local
+models" step, which also shows the same detection summary the Ollama/
+Hugging Face tabs show (round 5b part 2, above) and lets you pick a
+preferred runtime (below) before you've served anything at all.
+
+**`halo local`** (the merged view above) lists every file it finds this
+way with its format, its on-disk size, and -- read directly from the
+file's own header, never by loading it -- its trained context length and
+quantization where the file says so: a `.gguf` file's own metadata block
+(magic, version, then key-value pairs that already include the context
+length, layer count, attention head counts and the quantization name) or
+a safetensors folder's `config.json` (`max_position_embeddings`,
+`num_hidden_layers`, `num_key_value_heads`, `hidden_size`,
+`num_attention_heads`). The same arithmetic the Ollama panel uses
+(`/ollama`, above) turns those numbers into a fitted context size for
+this machine's free GPU/unified memory -- nothing new, no model ever
+opened to learn any of this. The capability column also says whether
+anything on this machine can actually run the file right now, and names
+the exact command.
+
+**Option A -- serve it.** `halo local serve <path-or-name> [--runtime
+llama-server|mlx_lm] [--port N] [--keep]` (or, in the TUI, the `s` key on
+`/local`'s own view) starts a small background program on your own
+machine, listening on a free port on `127.0.0.1` only, that answers the
+same OpenAI-compatible shape every other local server in this doc does --
+`llama-server` for a `.gguf` file, `mlx_lm` for a safetensors/MLX folder
+on an Apple Silicon Mac (nothing else serves that shape today; option B
+is the answer for it elsewhere). Halo picks the context size itself, from
+the fit arithmetic above, and once it's running you can use it for the
+rest of the session as `hf:local/<name>` -- no config edit needed. It
+keeps running only as long as the Halo process that started it does,
+unless you pass `--keep`; `halo local stop <name>` stops it by hand
+either way.
+
+If neither runtime is anywhere Halo can find it (on your `PATH`, or
+already fetched into `~/.halo/runtimes/`), `llama-server` is the one Halo
+offers to fetch for you: it names the file(s), their size, and where they
+will go, and does nothing until you say yes (`--yes`, or type it when
+asked). A live run found llama.cpp's actual releases page a little
+different from the first-pass assumption: `GET /releases/latest` points
+at the project's own most recent NON-binary release, not a compiled
+build, so Halo instead lists recent releases and walks them newest-first
+looking for one tagged `b<number>` that actually carries what this OS/GPU
+needs. For CUDA specifically: it reads your NVIDIA driver's own reported
+CUDA version and picks the newest build with the SAME major version whose
+minor doesn't exceed the driver's (a driver reporting CUDA 13.2 skips a
+13.4 build -- its minor is too new -- and falls back to the newest
+available 12.x build instead); with no matching major AND no 12.x build
+either, or with no NVIDIA driver at all, it falls back to a cross-vendor
+Vulkan build; Metal is always the pick on a Mac. `--backend cuda|vulkan|
+cpu|metal` overrides this choice outright. A CUDA pick also downloads the
+paired `cudart-*` redistributable runtime UNLESS a CUDA toolkit is already
+on your machine (detected by a `cudart64_*.dll` on `PATH` on Windows, or
+`libcudart.so*` on Linux) -- the consent sentence names both downloads,
+their combined size, and mentions the smaller, slower `--backend vulkan`
+build as an alternative. Every downloaded file is checked against the
+exact byte-for-byte digest GitHub's own API reports for it (llama.cpp
+doesn't publish a checksum file of its own) before being unpacked into
+`~/.halo/runtimes/<tag>/` -- never onto your `PATH`. Say no and Halo just
+tells you the one-line install command for your OS instead (Homebrew,
+winget, or the release page) and stops there. `halo local runtime remove
+[VERSION]` deletes a fetched copy. `mlx_lm` is never fetched this way --
+it's a small Python package (`pip install mlx-lm`); Halo tells you that
+one line too, if it's missing.
+
+**Option B -- import it into Ollama.** If you already run Ollama, `halo
+local import <path-or-name> [--name NAME]` is the other way to use a
+`.gguf` file: Halo tells you the file's size and that it's about to be
+copied into Ollama's own model store, and once you say yes, it does
+exactly that -- the result is an ordinary `ol:<name>`, with every one of
+this doc's own Ollama rules (context sizing, roles, calibration) applying
+to it automatically. Under the hood (a live run corrected the first-pass
+assumption here too: Ollama's OLDER "write a Modelfile, `FROM <path>`"
+approach now answers `HTTP 400`, "neither 'from' or 'files' was
+specified"): Halo computes the file's own sha256, asks Ollama whether it
+already has a blob by that digest, uploads the raw bytes only if it
+doesn't (streamed from disk, never held fully in memory -- these files
+are commonly hundreds of MB to tens of GB, with a plain progress line
+while it happens), and then creates the model by naming that blob. This
+round only imports `.gguf` files: Ollama's own documentation of which
+other model shapes (safetensors folders) it can import directly wasn't
+found this round, so Halo doesn't guess -- option A is the answer for
+those.
+
+**Roles**: either way, a model that becomes usable this way defaults to
+the `small` role, the same as any other local model -- never picked as
+the session's main model without you asking for it (see "Roles" above/
+docs/ROLES.md).
 
 ## Families and their rules
 

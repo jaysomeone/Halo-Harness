@@ -189,6 +189,153 @@ def test_halo_local_cli_prints_the_formatted_view(ctx: Ctx):
         ctx.check(f"prints the Ollama group, got {buf.getvalue()!r}", "Ollama" in buf.getvalue())
 
 
+def _write_gguf_fixture(d: Path) -> Path:
+    import struct
+
+    def enc_str(s):
+        b = s.encode("utf-8")
+        return struct.pack("<Q", len(b)) + b
+
+    def enc_kv(key, vtype, value):
+        out = enc_str(key) + struct.pack("<I", vtype)
+        return out + (struct.pack("<I", value) if vtype == 4 else enc_str(value))
+
+    kvs = [enc_kv("general.architecture", 8, "qwen3"), enc_kv("general.file_type", 4, 2),
+           enc_kv("qwen3.context_length", 4, 4096), enc_kv("qwen3.block_count", 4, 2),
+           enc_kv("qwen3.attention.head_count", 4, 2), enc_kv("qwen3.attention.head_count_kv", 4, 1),
+           enc_kv("qwen3.embedding_length", 4, 128)]
+    data = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kvs)) + b"".join(kvs)
+    p = d / "folder-model.gguf"
+    p.write_bytes(data)
+    return p
+
+
+@test
+def test_huggingface_model_dirs_source_shows_format_context_and_runnability(ctx: Ctx):
+    """Round 5c (brief item 1's closing sentence): `halo local` lists a
+    `huggingface.model_dirs` file with format, size, trained context
+    (read from the file itself, no server/no model load), and whether
+    anything can run it -- group label distinct from the hub cache/LM
+    Studio sources it's merged alongside."""
+    from halo_harness.providers.local_models import build_local_view
+    with _Env() as e:
+        folder = Path(tempfile.mkdtemp(prefix="model-dirs-"))
+        gguf_path = _write_gguf_fixture(folder)
+        from halo_harness.theme import set_config_value
+        set_config_value("huggingface.model_dirs", [str(folder)])
+        rows = build_local_view(env=dict(os.environ), state_dir=e.state_dir)
+        group = "Local folders (huggingface.model_dirs, not served)"
+        matches = [r for r in rows if r.group == group]
+        ctx.check(f"exactly one row from model_dirs, got {[r.name for r in rows]}", len(matches) == 1)
+        row = matches[0]
+        ctx.check(f"size matches the real file, got {row.size_bytes}", row.size_bytes == gguf_path.stat().st_size)
+        ctx.check(f"quant read from the file, got {row.quant!r}", row.quant == "Q4_0")
+        ctx.check(f"trained context read from the file, got {row.context}", row.context == 4096)
+        ctx.check(f"capability names a runtime and the exact serve command, got {row.capability!r}",
+                  "llama-server" in row.capability and "halo local serve" in row.capability
+                  and str(gguf_path) in row.capability)
+        ctx.check(f"capability also mentions the import path, got {row.capability!r}",
+                  "halo local import" in row.capability)
+
+
+@test
+def test_hub_cache_gguf_entry_gets_quant_and_context_enrichment(ctx: Ctx):
+    """The pre-existing hub-cache source (round 5) now carries the SAME
+    read-the-file enrichment once a real `.gguf` path resolves -- this
+    fixture writes the snapshot entry as a plain file (never a symlink),
+    exercising the exact same code path a real content-addressed blob
+    symlink would, with no dependency on this host's symlink privilege."""
+    from halo_harness.providers.local_models import build_local_view
+    with _Env() as e:
+        hub_root = Path(tempfile.mkdtemp(prefix="hubcache-gguf-fit-"))
+        model_dir = hub_root / "models--Qwen--Qwen3-Tiny"
+        snapshot_dir = model_dir / "snapshots" / "main"
+        snapshot_dir.mkdir(parents=True)
+        (model_dir / "blobs").mkdir(parents=True)
+        gguf_path = _write_gguf_fixture(snapshot_dir)
+        os.environ["HF_HUB_CACHE"] = str(hub_root)
+        rows = build_local_view(env=dict(os.environ), state_dir=e.state_dir)
+        matches = [r for r in rows if r.group == "Hugging Face (cache, not served)"]
+        ctx.check(f"the entry is present, got {[r.name for r in rows]}", len(matches) == 1)
+        ctx.check(f"quant read from the file, got {matches[0].quant!r}", matches[0].quant == "Q4_0")
+        ctx.check(f"trained context read from the file, got {matches[0].context}", matches[0].context == 4096)
+        del gguf_path
+
+
+_STUB_LISTENS = '''
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[sys.argv.index("--port") + 1])
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def do_GET(self):
+        body = json.dumps({"object": "list", "data": [{"id": "stub-model"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+'''
+
+
+@test
+def test_view_and_ref_resolution_see_a_managed_server_from_the_registry_file_alone(ctx: Ctx):
+    """FIX PASS item C: `halo local`/`/local` must show a file-backed
+    model as currently SERVING (not just "servable") once a managed
+    server for it is recorded, and `hf:local/<name>` must resolve for it
+    -- both read ONLY `~/.halo/run/local-servers.json`, exactly as a
+    SEPARATE `halo` process (sharing no in-memory state with whatever
+    `halo local serve` call wrote that file) would have to. `serve` runs
+    via `start_managed_server` against the SAME fake-runtime-stub seam
+    `tests/test_local_runtime.py` already uses (never a real llama-
+    server); the view/resolution calls right after it then touch ONLY
+    `e.state_dir`'s own registry file, never the `ManagedServer` object
+    `start_managed_server` returned."""
+    from halo_harness.providers.local_models import build_local_view
+    from halo_harness.providers.local_runtime import start_managed_server, stop_all_managed_servers_except_kept
+    from halo_harness.providers.local_use import model_id_for_path
+    with _Env() as e:
+        model_dir = Path(tempfile.mkdtemp(prefix="model-dirs-serving-"))
+        gguf_path = _write_gguf_fixture(model_dir)
+        from halo_harness.theme import set_config_value
+        set_config_value("huggingface.model_dirs", [str(model_dir)])
+        stub_dir = Path(tempfile.mkdtemp(prefix="local-models-stub-"))
+        stub = stub_dir / "stub_runtime.py"
+        stub.write_text(_STUB_LISTENS, encoding="utf-8")
+        model_id = model_id_for_path(gguf_path, "gguf")
+        entry, reason = start_managed_server(model=model_id, runtime="llama-server",
+                                              binary_argv=[sys.executable, str(stub)], model_path=gguf_path,
+                                              state_dir=e.state_dir, startup_timeout=10.0)
+        try:
+            ctx.check(f"the fake server actually started, got reason={reason!r}", entry is not None)
+
+            # "A separate call that only sees the registry file" -- neither
+            # call below is given `entry` at all, only `e.state_dir`.
+            rows = build_local_view(env=dict(os.environ), state_dir=e.state_dir)
+            matches = [r for r in rows if r.group == "Local folders (huggingface.model_dirs, not served)"]
+            ctx.check(f"the row is present, got {[r.name for r in rows]}", len(matches) == 1)
+            row = matches[0]
+            ctx.check(f"capability says it's SERVING, not just servable, got {row.capability!r}",
+                      "serving on port" in row.capability and str(entry.port) in row.capability)
+            ctx.check(f"the ref is the hf:local/<name> that already works, got {row.ref!r}",
+                      row.ref == f"hf:local/{model_id}")
+
+            from halo_harness.providers.huggingface_local_resolve import resolve_local_server
+            os.environ["BRIDGE_TEST_NO_BACKGROUND_NET"] = "1"  # never let auto-detect touch the real network
+            resolved = resolve_local_server(None, dict(os.environ))
+            ctx.check(f"hf:local/<model> (bare) resolves from the registry alone, got {resolved}",
+                      resolved is not None and resolved.base_url == entry.base_url)
+        finally:
+            stop_all_managed_servers_except_kept(state_dir=e.state_dir)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

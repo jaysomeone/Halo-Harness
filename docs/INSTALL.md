@@ -93,7 +93,7 @@ halo init
 
 ```sh
 cd ~                 # or /tmp, or any other project directory at all
-halo init            # one time: a wizard -- provider, model, permission mode, theme, roles, orgs, doctor, pong
+halo init            # one time: a wizard -- provider, local models, model, permission mode, theme, roles, orgs, doctor, pong
 halo                 # full-screen TUI -- reads THIS directory's CLAUDE.md, rules, settings, .mcp.json
 ```
 

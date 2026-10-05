@@ -118,6 +118,23 @@ def _probe_nvidia(*, timeout: float, runner=None, probe_all: bool = False):
     return cards[0] if cards else None
 
 
+def probe_nvidia_cuda_version(*, timeout: float = _GPU_PROBE_TIMEOUT_S, runner=None) -> Optional[str]:
+    """Halo 2.0.3 round 5c (GPU-RESEARCH.md section 4, "driver-version
+    rule"): `nvidia-smi -q`'s own "CUDA Version" line (GitHub's own docs
+    call the identical field "CUDA UMD Version") -- the highest CUDA
+    toolkit the INSTALLED DRIVER supports, read directly rather than
+    maintained as a hand-written driver/toolkit lookup table. `providers.
+    local_runtime_fetch`'s asset picker uses this to choose a llama.cpp
+    CUDA build: the highest `cuda-<VER>` release asset whose `<VER>` is
+    `<=` this reported number. `None` on anything unexpected (no
+    `nvidia-smi`, no such line in the output) -- never a guess."""
+    out = _run_tool(["nvidia-smi", "-q"], timeout=timeout, runner=runner)
+    if not out:
+        return None
+    m = re.search(r"CUDA Version\s*:\s*([\d.]+)", out)
+    return m.group(1) if m else None
+
+
 def _probe_amd_rocm_smi(*, timeout: float, runner=None) -> Optional[GpuMemory]:
     """UNCONFIRMED (research doc section 3): no AMD/ROCm hardware
     available to verify this round -- `rocm-smi --showmeminfo vram`'s
@@ -400,9 +417,12 @@ def catalog_row(catalog: Optional[dict], model: str) -> Optional[dict]:
     fetched `catalog` (`providers.ollama.get_catalog`'s own shape) --
     shared by this module's `estimate_fit_for_host` and `providers.
     ollama_panel.analyze_host`, so there is exactly one lookup to keep in
-    sync with that shape."""
+    sync with that shape. FIX PASS: matched via `ollama_names_match` (an
+    untagged `model` must still find its own `:latest`-qualified row)."""
+    from halo_harness.providers.ollama import ollama_names_match
     for row in (catalog or {}).get("models") or []:
-        if isinstance(row, dict) and (row.get("model") == model or row.get("name") == model):
+        if isinstance(row, dict) and (ollama_names_match(row.get("model"), model)
+                                       or ollama_names_match(row.get("name"), model)):
             return row
     return None
 
@@ -468,12 +488,12 @@ def estimate_fit_for_host(host, model: str, catalog: Optional[dict], *, runner=N
     row = catalog_row(catalog, model)
     if row is None:
         return None
-    from halo_harness.providers.ollama import fetch_ps
+    from halo_harness.providers.ollama import fetch_ps, ollama_names_match
     ps = fetch_ps(host) or {}
     ps_models = [e for e in (ps.get("models") or []) if isinstance(e, dict)]
     loaded_entry = None
     for entry in ps_models:
-        if entry.get("model") == model or entry.get("name") == model:
+        if ollama_names_match(entry.get("model"), model) or ollama_names_match(entry.get("name"), model):
             loaded_entry = entry
             break
     _record_last_known_offload(host.url, model, loaded_entry)
@@ -587,11 +607,12 @@ def fits_beside_main(host, *, main_model: str, candidate_model: str, catalog: Op
     configured, else always `None` -- same reachability rule every other
     GPU read in this module already follows). `True`/`False` only when
     every input was a real measurement."""
-    from halo_harness.providers.ollama import fetch_ps
+    from halo_harness.providers.ollama import fetch_ps, ollama_names_match
     ps = fetch_ps(host) or {}
     main_entry = None
     for entry in (ps.get("models") or []):
-        if isinstance(entry, dict) and (entry.get("model") == main_model or entry.get("name") == main_model):
+        if isinstance(entry, dict) and (ollama_names_match(entry.get("model"), main_model)
+                                         or ollama_names_match(entry.get("name"), main_model)):
             main_entry = entry
             break
     if main_entry is None:

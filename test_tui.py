@@ -9419,7 +9419,13 @@ def test_init_wizard_choosing_default_org_writes_orgs_default(ctx: Ctx):
 
 @test
 def test_init_wizard_start_step_five_opens_on_roles(ctx: Ctx):
-    """Brief Tests section: "start_step=5 opens on roles"."""
+    """Brief Tests section: "start_step=5 opens on roles" -- Halo 2.0.3
+    round 5c inserted a new "local_models" step right after "providers",
+    shifting every later step's 1-based ORDINAL by one; this test now
+    resolves by the step's own KEY ("roles") instead of the ordinal that
+    described, since `_resolve_start_index` has always documented BOTH
+    forms and the key is the one that stays correct across a step-list
+    change like this one (see that function's own docstring)."""
     from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState, _resolve_start_index, \
         full_step_keys
 
@@ -9428,7 +9434,7 @@ def test_init_wizard_start_step_five_opens_on_roles(ctx: Ctx):
         try:
             step_keys = full_step_keys()
             state = WizardState(cwd=REPO_DIR, step_keys=step_keys,
-                                 index=_resolve_start_index(5, step_keys), no_live=True)
+                                 index=_resolve_start_index("roles", step_keys), no_live=True)
             app = InitWizardApp(state)
             async with app.run_test(size=(100, 45)) as pilot:
                 await pilot.pause(0.1)
@@ -9436,6 +9442,43 @@ def test_init_wizard_start_step_five_opens_on_roles(ctx: Ctx):
                           type(app.screen).__name__ == "RolesStep")
                 ctx.check("Back is enabled (earlier steps are still reachable from a mid-wizard start)",
                           not app.screen.query_one("#wiz-back").disabled)
+        finally:
+            _restore_state_dir_env(old)
+    asyncio.run(body())
+
+
+@test
+def test_init_wizard_local_models_step_add_folder_and_preferred_runtime_persist(ctx: Ctx):
+    """Halo 2.0.3 round 5c (brief item 1): the wizard's "Local models"
+    step -- "add a folder" and the preferred-runtime choice both persist
+    immediately on press, the same Save-on-press pattern every other
+    wizard step's own credential fields already use (brief Tests
+    section: "the wizard step's Save for every path")."""
+    from halo_harness.tui.dialogs.init_wizard import InitWizardApp, WizardState
+    from halo_harness.theme import get_config_value
+    from textual.widgets import Input
+
+    async def body():
+        old, _home = _scoped_state_dir_env("wizard-local-models-")
+        folder = tempfile.mkdtemp(prefix="wizard-local-models-folder-")
+        try:
+            state = WizardState(cwd=REPO_DIR, step_keys=("local_models",), no_live=True)
+            app = InitWizardApp(state)
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause(0.1)
+                ctx.check(f"opened on the Local models step, got {type(app.screen).__name__}",
+                          type(app.screen).__name__ == "LocalModelsStep")
+                field = app.screen.query_one("#wiz-local-folder-input", Input)
+                field.value = folder
+                app.screen.query_one("#wiz-local-folder-add").press()
+                await pilot.pause(0.2)
+                dirs = get_config_value("huggingface.model_dirs", default=[])
+                ctx.check(f"the folder was persisted to huggingface.model_dirs, got {dirs}",
+                          any(Path(d).resolve() == Path(folder).resolve() for d in dirs))
+                app.screen.query_one("#wiz-local-runtime-mlx").press()
+                await pilot.pause(0.2)
+                ctx.check(f"preferred runtime persisted, got {get_config_value('huggingface.preferred_runtime', default=None)!r}",
+                          get_config_value("huggingface.preferred_runtime", default=None) == "mlx_lm")
         finally:
             _restore_state_dir_env(old)
     asyncio.run(body())

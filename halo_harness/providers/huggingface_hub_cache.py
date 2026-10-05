@@ -57,6 +57,11 @@ class HubCacheModel:
     dirname: str
     size_bytes: int
     formats: "tuple[str, ...]" = field(default_factory=tuple)
+    # Halo 2.0.3 round 5c addition: the `.gguf` file, or the safetensors
+    # folder (`config.json` beside `*.safetensors`), `providers.local_fit`
+    # reads for "format, size, trained context, whether anything can run
+    # it" -- `None` for an entry whose shape wasn't recognized.
+    path: "Optional[Path]" = None
 
 
 def _repo_id_from_dirname(dirname: str) -> str:
@@ -81,15 +86,31 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def _formats_in_snapshots(snapshots_dir: Path) -> "tuple[str, ...]":
+def _scan_snapshots(snapshots_dir: Path) -> "tuple[tuple, Optional[Path]]":
+    """`(formats, path)` -- Halo 2.0.3 round 5c addition: `path` is the
+    FIRST `.gguf` file found (sorted, for determinism), else the first
+    `<revision>/` snapshot directory that itself holds `config.json`
+    beside a `*.safetensors` file -- exactly the shape `providers.
+    local_fit.read_fit_inputs_for_path` expects for `fmt="gguf"`/
+    `"safetensors"`, so a hub-cache row gets the identical fit-from-file
+    treatment a `huggingface.model_dirs` discovery gets. `None` when
+    neither shape is found (an unrecognized/partial cache entry)."""
     found = set()
+    gguf_path: Optional[Path] = None
+    safetensors_dir: Optional[Path] = None
     for root, _dirs, names in os.walk(snapshots_dir, followlinks=False):
-        for n in names:
+        lower_names = {n.lower() for n in names}
+        for n in sorted(names):
             low = n.lower()
             for suffix in _FORMAT_SUFFIXES:
                 if low.endswith(suffix):
                     found.add(suffix.lstrip("."))
-    return tuple(sorted(found))
+            if low.endswith(".gguf") and gguf_path is None:
+                gguf_path = Path(root) / n
+        if safetensors_dir is None and "config.json" in lower_names and any(n.lower().endswith(".safetensors")
+                                                                              for n in names):
+            safetensors_dir = Path(root)
+    return tuple(sorted(found)), (gguf_path or safetensors_dir)
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -122,7 +143,7 @@ def scan_hub_cache(root: Optional[Path] = None, env: Optional[dict] = None) -> "
         blobs_dir = entry / "blobs"
         size_bytes = _dir_size_bytes(blobs_dir) if blobs_dir.is_dir() else _dir_size_bytes(entry)
         snapshots_dir = entry / "snapshots"
-        formats = _formats_in_snapshots(snapshots_dir) if snapshots_dir.is_dir() else ()
+        formats, path = _scan_snapshots(snapshots_dir) if snapshots_dir.is_dir() else ((), None)
         out.append(HubCacheModel(repo_id=_repo_id_from_dirname(entry.name), dirname=entry.name,
-                                  size_bytes=size_bytes, formats=formats))
+                                  size_bytes=size_bytes, formats=formats, path=path))
     return out

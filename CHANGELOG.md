@@ -13,8 +13,10 @@ version.
 Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
 and onward). Rounds 1-5 (research, the `ol:` provider, hardware/host
 analysis and roles, the `hf:` route, and `hf:local/*`/the shared `/local`
-view/the init tab) landed so far; round 6 (docs polish, a live check, and
-release prep) is still to come under this SAME version number.
+view/the init tab) landed so far, plus round 5c (finding and serving/
+importing file-backed models, folded into item 4 below); round 6 (docs
+polish, a live check, and release prep) is still to come under this SAME
+version number.
 
 1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
    dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
@@ -203,6 +205,69 @@ release prep) is still to come under this SAME version number.
    default model for either). `tests/test_privacy_scan.py` now also scans
    untracked, non-ignored files (`git ls-files --others --exclude-
    standard`), not just tracked ones.
+
+   Round 5c adds a fourth discovery source the user controls directly:
+   `huggingface.model_dirs`, a list of folders scanned recursively
+   (depth-limited, never following a symlinked subdirectory) for `.gguf`
+   files and safetensors/MLX model folders (`config.json` beside
+   `*.safetensors`) -- managed with `/local add <path>`/`/local forget
+   <path>` (persisted immediately) or the init wizard's new "Local
+   models" step (right after Providers; a folder field, a preferred-
+   runtime choice, and the SAME detection summary round 5b part 2 already
+   built). The fit estimate for any of these three on-disk sources (Hub
+   cache, LM Studio, `model_dirs`) now comes straight from the FILE: a
+   minimal GGUF header reader (`providers.gguf_header`, magic/version/
+   key-value metadata, never reading past the metadata block) and a
+   safetensors `config.json` reader (`providers.safetensors_config`) both
+   build the identical `model_info` shape `/api/show` already produces,
+   feeding round 3's `kv_bytes_per_token`/`fit_estimate` unchanged --
+   `halo local` now shows format, size, trained context, quantization,
+   and whether anything on this machine can actually run each file.
+   Two ways to use one: `halo local serve <model> [--runtime llama-
+   server|mlx_lm] [--port N] [--keep]` (or the `/local` dialog's `s` key)
+   starts a managed child process on a free loopback port, recorded in
+   `~/.halo/run/local-servers.json` and stopped when Halo exits unless
+   `--keep`; when no runtime is found, Halo offers to fetch the pinned
+   llama.cpp release for this OS/GPU backend (asset chosen from the
+   NVIDIA driver's own reported CUDA version, Metal on macOS, Vulkan
+   otherwise; verified against the GitHub Releases API's own per-asset
+   `digest`, since llama.cpp publishes no checksum file of its own) into
+   `~/.halo/runtimes/<version>/`, never on PATH, after a plain consent
+   sentence (`--yes` or a stdin yes/no) -- `halo local runtime remove`
+   deletes it. `halo local import <model> [--name NAME]` is the other
+   way: a Modelfile (`FROM <path>`) and Ollama's own `/api/create`
+   (streamed status lines as progress) turn a `.gguf` file into an
+   ordinary `ol:<name>` -- GGUF only this round, since Ollama's own
+   documented list of importable safetensors architectures wasn't found
+   in this round's research. Either way the new model defaults to the
+   `small` role, same as any other local model.
+
+   Fix pass after a live run found two defects: the runtime fetch listed
+   `GET /releases/latest`, which points at llama.cpp's own most recent
+   NON-binary release (the actual compiled builds are prereleases tagged
+   `b<number>`) -- Halo now lists `GET /releases` and walks it newest-tag-
+   first for one that actually carries the needed asset; the CUDA pick is
+   now "same major as the driver with minor <= the driver's, else the
+   newest 12.x build, else Vulkan" (a driver reporting CUDA 13.2 with only
+   12.4/13.4 builds available correctly falls back to 12.4, never silently
+   picks a build its own minor version can't actually run), pulls in the
+   paired `cudart-*` redistributable unless a CUDA toolkit is already
+   installed, and the consent sentence now names the smaller `--backend
+   vulkan` alternative's size; `--backend cuda|vulkan|cpu|metal` overrides
+   the pick outright. Separately, the import path's `modelfile`/`FROM
+   <path>` form turned out obsolete on a real daemon (`HTTP 400`,
+   "neither 'from' or 'files' was specified") -- it now computes the
+   file's sha256, uploads the blob (`POST /api/blobs/sha256:<hex>`,
+   streamed from disk) only when `HEAD` says Ollama doesn't already have
+   it, and calls `/api/create` with a `files` map naming that blob,
+   exactly matching a live daemon (build 0.34.2). A second fix pass closed
+   a POSIX-only zombie-process bug in the managed-server registry: a bare
+   `SIGTERM` with no `wait()`/`waitpid()` left a stopped server as a
+   zombie on Kali/WSL (gone in every practical sense, but still "alive" to
+   a bare `os.kill(pid, 0)`) -- stopping now reaps a same-process child via
+   its retained `Popen` handle, or polls `waitpid`/escalates to `SIGKILL`
+   after a grace period for a fresh `halo local stop` process with no
+   handle at all; Windows' own termination path is unchanged.
 
 ## [2.0.2] - 2026-10-04
 

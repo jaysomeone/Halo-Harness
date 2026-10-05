@@ -215,6 +215,8 @@ directly by the features that own them:
 | `huggingface.local_servers` | unset (relies on auto-detection alone) | hand-edited, or `halo init`'s Hugging Face tab; a list of `{name, url, api_key, default}` -- `hf:local/<model>@<name>` selects an entry by `name`; `hf:local/<model>` (bare) prefers this list's default entry, else the first AUTO-detected local server; see `docs/MODELS.md`'s "Hugging Face" section |
 | `huggingface.local_probe_ports` | unset (`8080, 8000, 1234` -- see `docs/MODELS.md`) | hand-edited; a list of ints overriding which ports the `hf:local/*` auto-detect sweep probes (loopback only); `HF_LOCAL_PROBE_PORTS` (env) wins over this when both are set |
 | `huggingface.lmstudio_models_dir` | unset (`~/.lmstudio/models`, LM Studio's own documented default) | `halo config set huggingface.lmstudio_models_dir /path/to/models`; only needed when LM Studio's own in-app "Model Storage" setting moved the folder -- see `docs/MODELS.md`'s "LM Studio's own model folder" |
+| `huggingface.model_dirs` | unset (nothing scanned) | `/local add <path>`/`/local forget <path>` (persisted immediately), `halo init`'s "Local models" step, or hand-edited; a list of folder paths Halo scans recursively for `.gguf` files and safetensors/MLX model folders -- see `docs/MODELS.md`'s "Finding and using file-backed models" |
+| `huggingface.preferred_runtime` | unset (Halo picks the only valid runtime per file format: `llama-server` for `.gguf`, `mlx_lm` for safetensors/MLX on Apple Silicon) | `halo init`'s "Local models" step; `"llama-server"` or `"mlx_lm"` -- a `halo local serve --runtime` flag always wins over this; stored for a future round where the same file could genuinely be served more than one way |
 
 ## Every environment variable
 
@@ -296,7 +298,11 @@ the table above, which always have one well-known catalog entry) -- the
 same reason that picker's own no-TTY/Textual-failure fallback never offers
 either tab. Configure `HF_TOKEN`/`huggingface.endpoints`/`huggingface.
 local_servers`/`ollama.hosts` directly instead on a non-interactive box
-(see `docs/MODELS.md`'s "Ollama"/"Hugging Face" sections).
+(see `docs/MODELS.md`'s "Ollama"/"Hugging Face" sections). The wizard's
+own "Local models" step (round 5c, right after the Providers step) is
+the SAME kind of interactive-only addition -- `huggingface.model_dirs`/
+`huggingface.preferred_runtime` above are its two config keys; `/local
+add`/`forget` manage the first one from a non-interactive box instead.
 
 ### Default permission mode (1.0.1 hotfix 18)
 

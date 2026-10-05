@@ -76,7 +76,9 @@ from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
     UpstreamError, stream_anthropic_completion, stream_completion, stream_ollama_completion,
 )
-from halo_harness.providers.ollama import get_catalog, resolve_ollama_host, trained_context_for
+from halo_harness.providers.ollama import (
+    get_catalog, ollama_overflow_retry_ceiling, resolve_ollama_host, trained_context_for,
+)
 from halo_harness.providers.ollama_request import build_ollama_request_body
 from halo_harness.tools.base import ToolContext, ToolResult
 from halo_harness.tools.imageutil import sniff_dimensions
@@ -2219,6 +2221,13 @@ class Session:
             requested_max_tokens=requested_max_tokens,
             learned_cap=decision.learned_cap, remote=decision.remote,
         )
+        # Halo 2.0.3 round 5c FIX PASS: `_build_request`'s own side-channel
+        # read, same lazy-attribute pattern as `_last_ollama_host_url`/
+        # `_last_ollama_offloaded` just below -- UNCONDITIONAL (every
+        # ollama ref, not just `self.model_ref`), since a small-model/hook
+        # call needs the SAME overflow-retry ceiling as the main turn.
+        self._last_ollama_ctx_ceiling = ollama_overflow_retry_ceiling(
+            host_max_ctx=host.max_ctx, fit_estimate=decision.fit_estimate, learned_cap=decision.learned_cap)
         if ref is self.model_ref:
             num_ctx = (body.get("options") or {}).get("num_ctx")
             if isinstance(num_ctx, int) and num_ctx != self.model_profile.context_tokens:
@@ -2258,6 +2267,10 @@ class Session:
             kwargs["prebuilt_anthropic_body"] = body
         elif route.dialect == "ollama":
             kwargs["prebuilt_ollama_body"] = body
+            # FIX PASS: set unconditionally by `_build_ollama_body_for_ref`
+            # just above for THIS exact ref -- `getattr` only guards a
+            # hypothetical ollama request built some other way.
+            kwargs["ollama_ctx_retry_ceiling"] = getattr(self, "_last_ollama_ctx_ceiling", None)
         else:
             kwargs["prebuilt_oai_body"] = body
         return CompletionRequest(**kwargs)

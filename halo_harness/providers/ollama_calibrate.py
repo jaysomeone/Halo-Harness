@@ -185,8 +185,12 @@ def _load_model_at_num_ctx(host, model: str, *, num_ctx: int, keep_alive: Option
 
 
 def _ps_entry_for_model(ps: Optional[dict], model: str) -> Optional[dict]:
+    """FIX PASS: matched via `ollama_names_match` (an untagged `model`
+    must still find its own `:latest`-qualified `/api/ps` entry)."""
+    from halo_harness.providers.ollama import ollama_names_match
     for entry in (ps or {}).get("models") or []:
-        if isinstance(entry, dict) and (entry.get("model") == model or entry.get("name") == model):
+        if isinstance(entry, dict) and (ollama_names_match(entry.get("model"), model)
+                                         or ollama_names_match(entry.get("name"), model)):
             return entry
     return None
 

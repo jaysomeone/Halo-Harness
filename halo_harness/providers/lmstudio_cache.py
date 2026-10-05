@@ -96,7 +96,7 @@ def scan_lmstudio_models(root: Optional[Path] = None, env: Optional[dict] = None
         if has_config and safetensors:
             size = _dir_size_bytes(current)
             out.append(HubCacheModel(repo_id=_relative_name(current, root), dirname=current.name,
-                                      size_bytes=size, formats=("safetensors",)))
+                                      size_bytes=size, formats=("safetensors",), path=current))
             seen_dirs.add(current)
             dirs[:] = []  # a transformers folder's own subdirs (checkpoints, etc.) are never scanned further
             continue
@@ -108,5 +108,5 @@ def scan_lmstudio_models(root: Optional[Path] = None, env: Optional[dict] = None
                 except OSError:
                     continue
                 out.append(HubCacheModel(repo_id=_relative_name(p, root), dirname=p.name,
-                                          size_bytes=size, formats=("gguf",)))
+                                          size_bytes=size, formats=("gguf",), path=p))
     return out

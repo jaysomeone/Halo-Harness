@@ -79,6 +79,15 @@ def test_default_role_for_ref_ol_is_small_others_main(ctx: Ctx):
               default_role_for_ref("ol:qwen3:30b@lan") == "small")
     ctx.check("a non-ollama ref defaults to orchestrator (main)",
               default_role_for_ref("or:vendor/model") == "orchestrator")
+    # Round 5c: a file-backed model served through a managed runtime
+    # (hf:local/*) gets the identical "small by default" treatment as an
+    # ol: ref -- see roles.default_role_for_ref's own updated docstring.
+    ctx.check("hf:local/* defaults to small, same as ol:",
+              default_role_for_ref("hf:local/qwen3-30b") == "small")
+    ctx.check("a named hf:local/*@server ref still defaults to small",
+              default_role_for_ref("hf:local/qwen3-30b@my-server") == "small")
+    ctx.check("a non-local hf: ref (router/cloud) still defaults to orchestrator",
+              default_role_for_ref("hf:org/model") == "orchestrator")
 
 
 @test

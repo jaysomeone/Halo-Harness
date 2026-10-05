@@ -294,8 +294,12 @@ def test_build_budget_tracker_reads_org_and_position_budgets(ctx: Ctx):
 @test
 def test_resolve_start_index_accepts_ordinal_or_key(ctx: Ctx):
     from halo_harness.tui.dialogs.init_wizard import ALL_STEP_KEYS, _resolve_start_index
-    ctx.check('start_step=5 (1-based ordinal) resolves to "roles"',
-              ALL_STEP_KEYS[_resolve_start_index(5, ALL_STEP_KEYS)] == "roles")
+    # Halo 2.0.3 round 5c inserted "local_models" right after "providers",
+    # shifting "roles" from the 5th to the 6th 1-based ordinal -- the KEY
+    # form (tested right below) is what actually stays correct across a
+    # step-list change like this one; this ordinal is updated to match.
+    ctx.check('start_step=6 (1-based ordinal) resolves to "roles"',
+              ALL_STEP_KEYS[_resolve_start_index(6, ALL_STEP_KEYS)] == "roles")
     ctx.check('start_step="orgs" (the key itself) resolves to "orgs"',
               ALL_STEP_KEYS[_resolve_start_index("orgs", ALL_STEP_KEYS)] == "orgs")
     ctx.check("an out-of-range ordinal falls back to step 1", _resolve_start_index(99, ALL_STEP_KEYS) == 0)
@@ -306,14 +310,16 @@ def test_resolve_start_index_accepts_ordinal_or_key(ctx: Ctx):
 @test
 def test_linux_fixes_step_key_never_shifts_roles_or_orgs(ctx: Ctx):
     """Whether or not `linux_fixes` survives into `full_step_keys()`,
-    "roles" and "orgs" must stay at the SAME 1-based ordinal (5 and 6) --
-    `linux_fixes` sits AFTER both, never between them."""
+    "roles" and "orgs" must stay at the SAME 1-based ordinal (6 and 7,
+    after Halo 2.0.3 round 5c's "local_models" insertion right after
+    "providers" shifted both of these by one) -- `linux_fixes` sits AFTER
+    both, never between them."""
     from halo_harness.tui.dialogs.init_wizard import ALL_STEP_KEYS
-    ctx.check(f"roles is step 5, got {ALL_STEP_KEYS}", ALL_STEP_KEYS[4] == "roles")
-    ctx.check(f"orgs is step 6, got {ALL_STEP_KEYS}", ALL_STEP_KEYS[5] == "orgs")
+    ctx.check(f"roles is step 6, got {ALL_STEP_KEYS}", ALL_STEP_KEYS[5] == "roles")
+    ctx.check(f"orgs is step 7, got {ALL_STEP_KEYS}", ALL_STEP_KEYS[6] == "orgs")
     without_linux_fixes = tuple(k for k in ALL_STEP_KEYS if k != "linux_fixes")
-    ctx.check("still true with linux_fixes dropped", without_linux_fixes[4] == "roles"
-              and without_linux_fixes[5] == "orgs")
+    ctx.check("still true with linux_fixes dropped", without_linux_fixes[5] == "roles"
+              and without_linux_fixes[6] == "orgs")
 
 
 if __name__ == "__main__":

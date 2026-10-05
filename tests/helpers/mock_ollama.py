@@ -45,6 +45,12 @@ DEFAULT_SHOW = {
 
 DEFAULT_PS = {"models": []}
 
+# Halo 2.0.3 round 5c: the default scripted `/api/create` progress sequence
+# -- a plain "it worked" streamed response; `MockUpstream.create_responses`
+# overrides per-model-name for an error/custom-sequence test.
+DEFAULT_CREATE_LINES = [{"status": "reading model metadata"}, {"status": "creating model layer"},
+                        {"status": "writing manifest"}, {"status": "success"}]
+
 
 def partial_offload_ps_entry(model: str, *, size: int, size_vram: int, context_length: int,
                               expires_at: str = "2026-01-01T01:00:00Z") -> dict:
@@ -290,11 +296,54 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             send_json(self, 404, {"error": f"mock ollama: unknown GET path {self.path!r}"})
 
+    def do_HEAD(self):
+        # Halo 2.0.3 round 5c FIX PASS: `providers.ollama.check_blob_exists`'s
+        # own `HEAD /api/blobs/sha256:<hex>` -- 200 when `mock.known_blobs`
+        # (per-instance, never module state) already has this digest, 404
+        # otherwise (the real daemon's own "needs uploading" signal).
+        mock: MockUpstream = self.server.mock  # type: ignore[attr-defined]
+        self._record("HEAD", None)
+        path = self.path.rstrip("/")
+        if path.startswith("/api/blobs/sha256:"):
+            digest = path[len("/api/blobs/sha256:"):]
+            with mock._lock:
+                known = digest in mock.known_blobs
+            self.send_response(200 if known else 404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         mock: MockUpstream = self.server.mock  # type: ignore[attr-defined]
+        path = self.path.rstrip("/")
+        if path.startswith("/api/blobs/sha256:"):
+            # `providers.ollama.upload_blob`'s own raw-bytes POST -- NEVER
+            # routed through `_read_json_body` (it would silently discard
+            # binary content as unparseable JSON and record `{}`).
+            digest = path[len("/api/blobs/sha256:"):]
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except (ValueError, TypeError):
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            import hashlib
+            actual = hashlib.sha256(raw).hexdigest()
+            with mock._lock:
+                mock._requests.append({"method": "POST", "path": self.path,
+                                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                                        "body": {"_blob_digest_in_url": digest, "_raw_len": len(raw),
+                                                  "_digest_matches_bytes": actual == digest},
+                                        "ts": time.monotonic()})
+                mock.known_blobs.add(digest)
+            self.send_response(201)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = self._read_json_body()
         self._record("POST", body)
-        path = self.path.rstrip("/")
         if path == "/api/show":
             name = (body or {}).get("model")
             show = mock.show_responses.get(name)
@@ -302,6 +351,20 @@ class _Handler(BaseHTTPRequestHandler):
                 send_json(self, 404, {"error": f"model '{name}' not found"})
             else:
                 send_json(self, 200, show)
+            return
+        if path == "/api/create":
+            # Halo 2.0.3 round 5c: `providers.ollama.create_model`'s own
+            # NDJSON streamed-status endpoint -- `create_responses` scripts
+            # an error/custom sequence per model NAME (the request's own
+            # "model" field, i.e. the NEW name being created, never the
+            # source model); unscripted names get `DEFAULT_CREATE_LINES`.
+            name = (body or {}).get("model") or ""
+            lines = mock.create_responses.get(name, list(DEFAULT_CREATE_LINES))
+            try:
+                _finish_chat(self, lines)
+            except ClientDisconnected:
+                with mock._lock:
+                    mock.disconnect_events.append({"scenario": f"create:{name}", "ts": time.monotonic()})
             return
         if path == "/api/chat":
             scenario = (body or {}).get("model") or ""
@@ -329,12 +392,22 @@ class MockUpstream:
     = ScriptedByCallCount([...])` before issuing the request it scripts."""
 
     def __init__(self, *, scenarios: "dict | None" = None, version_response=None,
-                 tags_response=None, show_responses=None, ps_response=None):
+                 tags_response=None, show_responses=None, ps_response=None, create_responses: "dict | None" = None,
+                 known_blobs: "set | None" = None):
         self._server: "_ThreadingHTTPServer | None" = None
         self._thread: "threading.Thread | None" = None
         self._requests: list = []
         self._lock = threading.Lock()
         self.disconnect_events: list = []
+        # Halo 2.0.3 round 5c: model NAME -> scripted list of /api/create
+        # NDJSON status-line dicts (an `{"error": ...}` entry scripts the
+        # failure path) -- see do_POST's own "/api/create" branch.
+        self.create_responses: dict = dict(create_responses) if create_responses else {}
+        # FIX PASS: sha256 hex digests this mock already "has" -- HEAD
+        # /api/blobs/sha256:<hex> answers 200 for one of these, 404
+        # otherwise; a successful POST to the same path adds to this set
+        # (mirrors the real daemon's own blob store).
+        self.known_blobs: set = set(known_blobs) if known_blobs else set()
         self.scenarios = dict(SCENARIOS)
         if scenarios:
             self.scenarios.update(scenarios)

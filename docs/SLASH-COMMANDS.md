@@ -116,8 +116,9 @@ configured entry; `--refresh` bypasses the short-TTL catalog cache. In
 interactive dialog (`r` re-reads live). See `docs/MODELS.md`'s Ollama
 section.
 
-### `/local [refresh]` / `/local <question>`
-Halo 2.0.3 round 5 widens this from Ollama-only (round 3). Bare `/local`
+### `/local [refresh]` / `/local add <path>` / `/local forget <path>` / `/local <question>`
+Halo 2.0.3 round 5 widens this from Ollama-only (round 3); round 5c adds
+`add`/`forget`. Bare `/local`
 (or `/local refresh`) opens the shared local-model discovery view --
 Ollama hosts, running Hugging Face local servers (auto-detected plus any
 configured `huggingface.local_servers` entry), and the Hugging Face Hub
@@ -136,7 +137,16 @@ silently, when it isn't. Round 5b part 2: when the session's main model
 is also `ol:` on the SAME host and `roles.small` resolves to a DIFFERENT
 local model that would not fit beside it in GPU memory, `/local` answers
 from the main model instead for this one question -- see
-`docs/MODELS.md`'s "VRAM-aware role defaults" section.
+`docs/MODELS.md`'s "VRAM-aware role defaults" section. `/local add <path>`
+adds a folder to `huggingface.model_dirs` (scanned recursively for
+`.gguf` files and safetensors/MLX folders -- the fourth source the merged
+view above shows); `/local forget <path>` removes one -- both persist to
+`~/.halo/config.json` immediately and print a plain confirmation or
+refusal, in `-p` and the TUI alike (there is no separate dialog for
+these two -- see `docs/MODELS.md`'s "Finding and using file-backed
+models"). Serving/importing a file (`halo local serve|import`, or the
+`/local` dialog's `s` key) is a CLI/dialog action, not a second `/local`
+sub-verb -- see `docs/COMMANDS.md`.
 
 ### `/memory`
 Shows the auto-memory directory path, whether `MEMORY.md` exists, and how

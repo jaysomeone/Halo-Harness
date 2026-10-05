@@ -217,6 +217,25 @@ def _power_of_two_floor(n: int) -> int:
     return power
 
 
+def power_of_two_ceil(n: int) -> int:
+    """Halo 2.0.3 round 5c FIX PASS: the smallest power of two `>= n` --
+    `providers.stream._run_phase1_ollama`'s own "the server said this
+    prompt exceeds num_ctx" retry sizing (`n` = `n_prompt_tokens` plus
+    the max output budget). The sibling of `_power_of_two_floor` (which
+    this module's OWN fit-estimate arithmetic always wants, "never ask
+    for more than free memory holds") -- this one is for the OPPOSITE
+    question, "how big a window actually holds this exact prompt",
+    where rounding UP is correct: rounding down could re-produce the
+    identical too-small `num_ctx` that just overflowed. `1` for `n <= 1`
+    (never zero or negative)."""
+    if n <= 1:
+        return 1
+    power = 1
+    while power < n:
+        power *= 2
+    return power
+
+
 class _WeightsDoNotFit:
     """Sentinel (round 3 fix pass, live-run finding): `free_memory_bytes
     - resident_weight_bytes <= 0` -- the model's own WEIGHTS alone do not

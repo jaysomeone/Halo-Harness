@@ -360,11 +360,25 @@ def _cmd_local(args: str, facade: HeadlessFacade) -> str:
     main transcript's context (see that method's own docstring).
     `facade.session` is the live session when one is running; `None` in a
     context with no live session at all (e.g. a unit test facade) is
-    reported plainly, never a traceback."""
+    reported plainly, never a traceback.
+
+    Round 5c (brief item 1): `/local add <path>` and `/local forget <path>`
+    manage `huggingface.model_dirs` -- persisted immediately (the SAME
+    `providers.local_model_dirs.add_model_dir`/`forget_model_dir` the
+    wizard's "Local models" step calls), never deferred to session end."""
     stripped = (args or "").strip()
     if not stripped or stripped.lower() in ("refresh", "--refresh"):
         from halo_harness.providers.local_models import build_local_view, format_local_view
         return format_local_view(build_local_view(refresh=bool(stripped)))
+    for verb, fn_name in (("add", "add_model_dir"), ("forget", "forget_model_dir")):
+        prefix = verb + " "
+        if stripped.lower() == verb or stripped.lower().startswith(prefix):
+            path = stripped[len(prefix):].strip() if stripped.lower().startswith(prefix) else ""
+            if not path:
+                return f"/local {verb}: a folder path is required, e.g. /local {verb} ~/models"
+            from halo_harness.providers import local_model_dirs
+            ok, message = getattr(local_model_dirs, fn_name)(path)
+            return f"/local {verb}: {message}"
     question = stripped
     session = facade.session
     if session is None:
@@ -1265,8 +1279,9 @@ _BUILTIN_SPECS = {
     "mcp": ("core", "List configured MCP servers", None, _cmd_mcp),
     "ollama": ("core", "Per-host Ollama analysis: reachability, loaded models, context, tool-catalog sizing",
                "[--host NAME] [--refresh]", _cmd_ollama),
-    "local": ("core", "Local models: merged Ollama/Hugging Face/cache view, or ask roles.small a question",
-              "[refresh] | <question>", _cmd_local),
+    "local": ("core", "Local models: merged Ollama/Hugging Face/cache view, manage model_dirs, or ask "
+                       "roles.small a question",
+              "[refresh] | add <path> | forget <path> | <question>", _cmd_local),
     "memory": ("core", "Show the auto-memory directory and index", None, _cmd_memory),
     "permissions": ("core", "Show the active permission mode and rule counts", None, _cmd_permissions),
     "plan": ("ui", "Review the current plan", None, _cmd_plan),

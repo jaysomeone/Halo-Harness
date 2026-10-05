@@ -103,6 +103,35 @@ def _normalize_host_url(raw: str) -> str:
     return raw.rstrip("/")
 
 
+def normalize_ollama_model_name(name: Optional[str]) -> Optional[str]:
+    """Halo 2.0.3 round 5c FIX PASS (live run): Ollama's own tag
+    convention -- a name with no explicit `:<tag>` means `:latest`.
+    Confirmed live: `halo local import <gguf> --name halo-live-test` (no
+    tag) is stored by Ollama as `halo-live-test:latest`, so `/api/tags`/
+    `/api/ps` both report THAT name back -- a bare `ol:halo-live-test`
+    ref then failed to match its own catalog/loaded-model row anywhere
+    names were compared by raw string equality, silently losing the
+    trained-context lookup and falling back to the conservative 8192
+    default, which then overflowed on a real prompt. `None`/empty is
+    returned as-is (nothing to normalize)."""
+    if not name:
+        return name
+    return name if ":" in name else f"{name}:latest"
+
+
+def ollama_names_match(a: Optional[str], b: Optional[str]) -> bool:
+    """The ONE helper every Ollama name comparison in this codebase must
+    go through (catalog lookup, trained-context lookup, the fit
+    estimate's `/api/ps` matching, VRAM-aware role checks, calibration,
+    panel rows, `/local`) -- comparing raw strings directly silently
+    misses an untagged ref against its own `:latest`-qualified catalog/
+    loaded-model row (this fix pass's own root cause). `False` when
+    either side is empty/None -- never a vacuous match."""
+    if not a or not b:
+        return False
+    return normalize_ollama_model_name(a) == normalize_ollama_model_name(b)
+
+
 def _host_from_dict(d: dict) -> Optional[OllamaHost]:
     url = d.get("url")
     if not isinstance(url, str) or not url:
@@ -295,6 +324,26 @@ def compute_num_ctx(trained_context: Optional[int], host_max_ctx: Optional[int] 
     return value
 
 
+def ollama_overflow_retry_ceiling(*, host_max_ctx: Optional[int] = None, fit_estimate=None,
+                                   learned_cap: Optional[int] = None, hard_cap: int = HARD_CONTEXT_CAP) -> int:
+    """Halo 2.0.3 round 5c FIX PASS: the retry ceiling `providers.stream.
+    _run_phase1_ollama`'s "prompt exceeds num_ctx" 400 handler checks
+    before asking for a bigger window -- `min(learned_cap, host_max_ctx,
+    fit_estimate, hard_cap)` for whichever of the first three are
+    actually known positive ints (never `trained_context`/the
+    conservative fallback -- see `providers.stream.CompletionRequest.
+    ollama_ctx_retry_ceiling`'s own docstring for why those two are
+    deliberately excluded). `fit_estimate` may be `None` or `providers.
+    ollama_fit.WEIGHTS_DO_NOT_FIT` (neither is an int, both are simply
+    skipped). Always returns an int (never `None`) -- `hard_cap` alone
+    when nothing else is known."""
+    candidates = [hard_cap]
+    for v in (host_max_ctx, fit_estimate, learned_cap):
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            candidates.append(v)
+    return min(candidates)
+
+
 def compaction_trigger_tokens(num_ctx: int) -> int:
     """75% of `num_ctx` (research doc section 6) -- the same local-route
     compaction trigger the 2.0.5 brief's Phase 1 specifies, computed from
@@ -381,6 +430,163 @@ def fetch_ps(host: OllamaHost, *, timeout: float = _READ_TIMEOUT_S) -> Optional[
     return _get_json(host, "/api/ps", timeout=timeout)
 
 
+def _open_conn(host: OllamaHost, *, timeout: float):
+    from halo_harness.providers.http import open_upstream
+    parsed = urllib.parse.urlparse(host.url)
+    hostname = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    tls = parsed.scheme == "https"
+    conn = open_upstream(hostname, port, tls, connect_timeout=timeout)
+    if conn.sock:
+        conn.sock.settimeout(timeout)
+    return conn, parsed.path.rstrip("/")
+
+
+def check_blob_exists(host: OllamaHost, digest_hex: str, *, timeout: float = 30.0) -> Optional[bool]:
+    """Halo 2.0.3 round 5c FIX PASS (live run, build 0.34.2): `HEAD /api/
+    blobs/sha256:<hex>` -- `True` (200, already present), `False` (404,
+    needs uploading), `None` (unreachable/unexpected -- the caller treats
+    this the same as `False`, i.e. "try uploading anyway", since a create
+    attempt would fail for the same reason regardless)."""
+    import http.client
+    from halo_harness.providers.http import UpstreamConnectError
+    conn = None
+    try:
+        conn, root = _open_conn(host, timeout=timeout)
+        headers = {"Accept-Encoding": "identity"}
+        headers.update(_auth_headers(host))
+        conn.request("HEAD", f"{root}/api/blobs/sha256:{digest_hex}", headers=headers)
+        resp = conn.getresponse()
+        resp.read()
+        if resp.status == 200:
+            return True
+        if resp.status == 404:
+            return False
+        return None
+    except (UpstreamConnectError, OSError, ValueError, http.client.HTTPException) as e:
+        log.debug("ollama: check_blob_exists failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def upload_blob(host: OllamaHost, digest_hex: str, file_path, *, on_progress=None,
+                 timeout: float = 600.0) -> "tuple[bool, str]":
+    """Halo 2.0.3 round 5c FIX PASS: `POST /api/blobs/sha256:<hex>` with
+    the file's RAW bytes streamed from disk in fixed-size chunks (never
+    reading the whole file into memory -- these are commonly hundreds of
+    MB) -- 201 on success. `on_progress(bytes_sent, total_bytes)`, when
+    given, is called after every chunk."""
+    import http.client
+    from pathlib import Path as _Path
+    from halo_harness.providers.http import UpstreamConnectError
+    path = _Path(file_path)
+    size = path.stat().st_size
+    conn = None
+    try:
+        conn, root = _open_conn(host, timeout=timeout)
+        headers = {"Accept-Encoding": "identity", "Content-Type": "application/octet-stream",
+                   "Content-Length": str(size)}
+        headers.update(_auth_headers(host))
+        conn.putrequest("POST", f"{root}/api/blobs/sha256:{digest_hex}")
+        for k, v in headers.items():
+            conn.putheader(k, v)
+        conn.endheaders()
+        sent = 0
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                conn.send(chunk)
+                sent += len(chunk)
+                if on_progress is not None:
+                    try:
+                        on_progress(sent, size)
+                    except Exception:
+                        log.debug("ollama: upload_blob on_progress callback raised", exc_info=True)
+        resp = conn.getresponse()
+        resp.read()
+        if resp.status in (200, 201):
+            return True, f"uploaded {sent} bytes"
+        return False, f"HTTP {resp.status}"
+    except (UpstreamConnectError, OSError, ValueError, http.client.HTTPException) as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def create_model(host: OllamaHost, name: str, *, files: dict, on_status=None,
+                  timeout: float = 300.0) -> "tuple[bool, str]":
+    """Halo 2.0.3 round 5c (brief item 4, "option B"), FIX PASS: `POST
+    /api/create {"model": name, "files": {"<basename>": "sha256:<hex>"},
+    "stream": true}` -- the live run found the OLDER `modelfile` form
+    obsolete (`HTTP 400 {"error":"neither 'from' or 'files' was
+    specified"}` on build 0.34.2); `files` names already-uploaded blobs
+    by their own sha256 digest (`check_blob_exists`/`upload_blob` above
+    run first). Streams NDJSON status lines (the same one-object-per-line
+    shape `/api/chat`'s own stream uses) to `on_status`. Returns `(True,
+    "success")` on the final `{"status": "success"}` line, `(False,
+    message)` on an `{"error": ...}` line, a non-200 response, or any
+    transport failure."""
+    import http.client
+    from halo_harness.providers.http import UpstreamConnectError
+    conn = None
+    try:
+        conn, root = _open_conn(host, timeout=timeout)
+        headers = {"Accept-Encoding": "identity", "Content-Type": "application/json"}
+        headers.update(_auth_headers(host))
+        body = json.dumps({"model": name, "files": files, "stream": True}).encode("utf-8")
+        conn.request("POST", f"{root}/api/create", body=body, headers=headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return False, f"HTTP {resp.status}"
+        last_status = None
+        while True:
+            raw_line = resp.readline()
+            if not raw_line:
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if on_status is not None:
+                try:
+                    on_status(obj)
+                except Exception:
+                    log.debug("ollama: create_model on_status callback raised", exc_info=True)
+            if obj.get("error"):
+                return False, str(obj["error"])
+            if obj.get("status"):
+                last_status = obj["status"]
+                if last_status == "success":
+                    return True, "success"
+        return (last_status == "success"), (last_status or "no response from /api/create")
+    except UpstreamConnectError as e:
+        return False, f"unreachable: {e}"
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 _CATALOG_LOCK = threading.Lock()
 _CATALOG_CACHE: dict = {}  # host.url -> (monotonic_ts, catalog_dict)
 
@@ -434,9 +640,12 @@ def trained_context_for(catalog: dict, model: str) -> Optional[int]:
     """`model_info["<family>.context_length"]` for `model` in an already-
     fetched `catalog` (research doc Q1/Q2) -- `None` when the model isn't in
     the catalog yet, or the field isn't present under any key ending in
-    `.context_length` (the exact `<family>` prefix varies per model)."""
+    `.context_length` (the exact `<family>` prefix varies per model).
+    FIX PASS: matched via `ollama_names_match` (an untagged `model` must
+    still find its own `:latest`-qualified catalog row)."""
     for row in catalog.get("models") or []:
-        if not isinstance(row, dict) or (row.get("model") != model and row.get("name") != model):
+        if not isinstance(row, dict) or not (ollama_names_match(row.get("model"), model)
+                                              or ollama_names_match(row.get("name"), model)):
             continue
         info = row.get("model_info") or {}
         family = (row.get("details") or {}).get("family")

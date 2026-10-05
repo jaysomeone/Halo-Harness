@@ -1372,9 +1372,56 @@ as "configured, not probed yet" instead) -- `--refresh` additionally
 probes every one of those, and bypasses the Ollama catalog's own short
 TTL cache; auto-detected servers are probed either way (background-probe-
 gated, same `BRIDGE_TEST_NO_BACKGROUND_NET` seam every other probe in this
-codebase honours). See [MODELS.md](MODELS.md)'s Hugging Face section; the
-TUI's own `/local` (no arguments) opens the same view as an interactive
-dialog instead (`docs/SLASH-COMMANDS.md`).
+codebase honours). Round 5c adds a fourth source to that merged list:
+every `.gguf` file/safetensors or MLX folder found under `huggingface.
+model_dirs` (`/local add`/`forget` manage that list, below), each row
+carrying its format, size, and -- read from the file itself -- trained
+context and quantization where the file says so. See
+[MODELS.md](MODELS.md)'s Hugging Face section; the TUI's own `/local` (no
+arguments) opens the same view as an interactive dialog instead
+(`docs/SLASH-COMMANDS.md`).
+
+### `halo local add <path>` / `halo local forget <path>`
+
+Adds/removes one folder from `huggingface.model_dirs`, persisted to
+`~/.halo/config.json` immediately -- the CLI twin of `/local add`/`/local
+forget` (`docs/SLASH-COMMANDS.md`). `add` refuses a path that isn't an
+existing directory, or one already in the list; `forget` refuses a path
+that isn't in the list. Neither touches the network.
+
+### `halo local serve <model> [--runtime llama-server|mlx_lm] [--port N] [--keep]`
+
+Starts a managed `llama-server` (`.gguf`) or `mlx_lm` (a safetensors/MLX
+folder, Apple Silicon only) child process on a free loopback port, sized
+to this machine's own fitted context, and records it in `~/.halo/run/
+local-servers.json`. `<model>` is either an exact path, or a name shown by
+a bare `halo local`. Stopped when Halo exits unless `--keep` is given.
+When the chosen runtime isn't found (on `PATH`, or already fetched into
+`~/.halo/runtimes/`), `llama-server` is offered as a download (named size
+and URL, verified against the GitHub Releases API's own per-asset
+`digest`) -- nothing downloads without a `y`/`--yes`; declining prints the
+one-line install hint for this OS instead. See [MODELS.md](MODELS.md)'s
+"Finding and using file-backed models" section for the full story.
+
+### `halo local stop <model>`
+
+Stops a model `halo local serve` (or the `/local` dialog's `s` key)
+started, by the SAME `<model>` name it was started with. Works even in a
+brand new `halo` process -- it reads `~/.halo/run/local-servers.json` and
+kills by the recorded pid, rather than needing a live handle.
+
+### `halo local import <model> [--name NAME] [--host NAME] [--yes]`
+
+Copies a `.gguf` file into an Ollama host's own model store (writes a
+Modelfile, calls `/api/create`) -- after naming the file's size and that
+it's about to be copied, nothing happens without a `y`/`--yes`. The result
+is an ordinary `ol:<name>` (default: the file's own name). Only `.gguf`
+files are offered this path this round -- see [MODELS.md](MODELS.md).
+
+### `halo local runtime remove [VERSION]`
+
+Deletes a fetched `llama-server` runtime from `~/.halo/runtimes/` -- one
+version, or every version when none is named.
 
 ## `halo config`
 

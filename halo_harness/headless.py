@@ -1301,6 +1301,11 @@ def build_session(
     # session's own claude subprocess -- a no-op session.close_cc() when
     # cc: was never used.
     atexit.register(session.close_cc)
+    # Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits unless
+    # keep: true" -- same belt-and-suspenders atexit safety net alongside
+    # the two just above; a no-op when `halo local serve` was never used
+    # this run (an empty/absent registry file).
+    atexit.register(_stop_managed_local_servers_quietly)
 
     command_registry = Registry.discover(cwd, home(), plugin_roots=plugin_roots)
     if not bare:
@@ -1363,6 +1368,21 @@ def maybe_create_worktree(cwd: Path, cli_flags: dict) -> Path:
     print(f"halo: --worktree could not create a worktree ({wt_error}) -- "
           f"continuing in the current directory", file=sys.stderr)
     return cwd
+
+
+def _stop_managed_local_servers_quietly() -> None:
+    """Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits unless
+    keep: true" -- called from BOTH the explicit `finally:` block below
+    AND the `atexit.register` safety net right after `SessionBuild`
+    (mirrors `session.job_registry.kill_all`/`session.close_cc`'s own
+    belt-and-suspenders pair). Idempotent (an already-empty registry is a
+    no-op) and never raises -- a managed server is a nice-to-have cleanup,
+    never worth crashing the exit path over."""
+    try:
+        from halo_harness.providers.local_runtime import stop_all_managed_servers_except_kept
+        stop_all_managed_servers_except_kept()
+    except Exception:
+        pass
 
 
 def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
@@ -1755,6 +1775,10 @@ def run_print_mode(
             session.job_registry.kill_all()
         except Exception:
             pass
+        # Halo 2.0.3 round 5c (brief item 3): a model served by `halo local
+        # serve`/the `/local` dialog's `s` key must never outlive the
+        # session that started it either, unless `keep: true`.
+        _stop_managed_local_servers_quietly()
         if mcp_manager is not None:
             mcp_manager.close_all()
         if cli_flags.get("no_session_persistence"):

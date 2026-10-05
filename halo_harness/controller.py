@@ -172,6 +172,14 @@ class Controller:
                 self.session.close_cc()
             except Exception:
                 pass
+            # Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits
+            # unless keep: true" -- same belt-and-suspenders spot
+            # headless.py's own print-mode finally/atexit pair uses.
+            try:
+                from halo_harness.providers.local_runtime import stop_all_managed_servers_except_kept
+                stop_all_managed_servers_except_kept()
+            except Exception:
+                pass
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         return self.exit_code

@@ -437,13 +437,17 @@ def assign_role(role_name: str, model_ref: str) -> "tuple[bool, list[str]]":
 def default_role_for_ref(model_ref: str) -> str:
     """The role the picker's `u` action pre-selects for `model_ref`
     (brief item 5: "local ol: models default to a supporting role...
-    never main by default") -- `small` for any `ol:` ref, `orchestrator`
-    (meaning: the session's main model) for everything else, matching
-    every OTHER provider's existing, no-extra-step eligibility as main.
-    A pre-selected default, never an enforced one: the picker's role list
-    still offers every other role, `orchestrator` included, for the user
-    to pick instead."""
-    return "small" if (model_ref or "").startswith("ol:") else "orchestrator"
+    never main by default") -- `small` for any `ol:` ref OR an `hf:local/*`
+    ref (round 5c: a file-backed model served through a managed runtime or
+    just imported into Ollama is exactly as "local" as an `ol:` model, so
+    it gets the identical treatment -- round 5c's own "roles follow"
+    item), `orchestrator` (meaning: the session's main model) for
+    everything else, matching every OTHER provider's existing, no-extra-
+    step eligibility as main. A pre-selected default, never an enforced
+    one: the picker's role list still offers every other role,
+    `orchestrator` included, for the user to pick instead."""
+    raw = model_ref or ""
+    return "small" if raw.startswith("ol:") or raw.startswith("hf:local/") else "orchestrator"
 
 
 def main_role_consequence_note(model_ref: str, *, catalog_capabilities: "Optional[list]" = None) -> "Optional[str]":

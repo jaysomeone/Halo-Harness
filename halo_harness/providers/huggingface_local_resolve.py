@@ -46,7 +46,17 @@ def resolve_local_server(name: Optional[str], env: Optional[dict] = None) -> Opt
     `BRIDGE_TEST_NO_BACKGROUND_NET` a BARE ref with no manual entry simply
     resolves to `None` (nothing detected), which a hermetic test can
     always avoid by configuring a manual entry instead (`/local`'s own
-    print-mode end-to-end test does exactly that)."""
+    print-mode end-to-end test does exactly that).
+
+    Round 5c (brief item 3): a BARE ref with no manual entry and nothing
+    live-auto-detected falls through once more to `providers.local_runtime`'s
+    on-disk managed-server registry (`~/.halo/run/local-servers.json`) --
+    the one source of truth for "what did `halo local serve` just start",
+    read directly rather than duplicated into a second, in-memory
+    registration step, so a SEPARATE `halo` process started after the
+    `serve` call can resolve it too. The MOST RECENTLY STARTED entry wins
+    when more than one is running -- a documented, explicit tie-break, not
+    a guess."""
     from halo_harness.providers.huggingface import resolve_huggingface_local_server
     manual = resolve_huggingface_local_server(name)
     if manual is not None:
@@ -54,10 +64,22 @@ def resolve_local_server(name: Optional[str], env: Optional[dict] = None) -> Opt
     if name:
         return None  # a NAMED ref that isn't configured must fail plainly, never fall back to auto-detect
     detected = auto_detect_local_servers(env=env)
-    if not detected:
+    if detected:
+        first = detected[0]
+        return ResolvedLocalServer(name=first.name, base_url=first.base_url, api_key=None)
+    managed = _most_recent_managed_server()
+    if managed is None:
         return None
-    first = detected[0]
-    return ResolvedLocalServer(name=first.name, base_url=first.base_url, api_key=None)
+    return ResolvedLocalServer(name=managed.get("model"), base_url=managed.get("base_url"), api_key=None)
+
+
+def _most_recent_managed_server(state_dir=None) -> Optional[dict]:
+    from halo_harness.providers.local_runtime import load_registry
+    if state_dir is None:
+        from halo_harness.config.paths import bridge_home
+        state_dir = bridge_home()
+    entries = load_registry(state_dir)
+    return entries[-1] if entries else None
 
 
 _context_cache_lock = threading.Lock()

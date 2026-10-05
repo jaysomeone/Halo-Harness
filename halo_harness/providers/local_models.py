@@ -1,15 +1,20 @@
 """halo_harness.providers.local_models -- Halo 2.0.3 round 5: the shared
-`/local` discovery view. `build_local_view` merges THREE sources, in this
-fixed order (round 5 brief item 4): (1) each configured Ollama host's
-catalog (round 3's `providers.ollama_panel.analyze_host`, loaded-now and
-fit included), (2) running Hugging Face local servers -- auto-detected
-PLUS manual `huggingface.local_servers` entries, and (3) the Hugging Face
-Hub cache -- models on disk but not necessarily served by anything right
-now. `halo local` (`local_cli.py`), `/local`'s print-mode fallback
-(`commands/builtins.py`) and the TUI dialog (`tui/dialogs/local_status.py`)
-all render the SAME `build_local_view`/`format_local_view` pair, so none of
-the three can quietly disagree -- the exact reason `ollama_panel.py` is
-split the same way.
+`/local` discovery view. `build_local_view` merges several sources, in
+this fixed order (round 5 brief item 4, widened by round 5b part 2's LM
+Studio addition and round 5c's `huggingface.model_dirs` addition): (1)
+each configured Ollama host's catalog (round 3's `providers.ollama_panel.
+analyze_host`, loaded-now and fit included), (2) running Hugging Face
+local servers -- auto-detected PLUS manual `huggingface.local_servers`
+entries, (3) the Hugging Face Hub cache, (4) LM Studio's own model
+folder, and (5) `huggingface.model_dirs` -- the last three all "on disk,
+not necessarily served by anything right now," each its own group label,
+each now carrying format/size/trained-context/runnability read straight
+from the file (`providers.local_fit`, round 5c). `halo local`
+(`local_cli.py`), `/local`'s print-mode fallback (`commands/builtins.py`)
+and the TUI dialog (`tui/dialogs/local_status.py`) all render the SAME
+`build_local_view`/`format_local_view` pair, so none of the three can
+quietly disagree -- the exact reason `ollama_panel.py` is split the same
+way.
 """
 
 from __future__ import annotations
@@ -79,10 +84,13 @@ def _ollama_rows(host, *, refresh: bool, hw_runner, state_dir) -> "list[LocalMod
     analysis = analyze_host(host, hw_runner=hw_runner, force=refresh)
     if not analysis.reachable:
         return [LocalModelRow(group=group, name="(unreachable)", reachable=False)]
-    from halo_harness.providers.ollama import get_catalog, trained_context_for
+    from halo_harness.providers.ollama import get_catalog, normalize_ollama_model_name, trained_context_for
     catalog = get_catalog(host)
     cap_cache = load_capability_cache(state_dir)
-    loaded_by_name = {m.name: m for m in analysis.loaded}
+    # FIX PASS: normalized on BOTH sides -- an untagged catalog/`/api/ps`
+    # name must still line up with its own `:latest`-qualified sibling
+    # (see `providers.ollama.ollama_names_match`'s own docstring).
+    loaded_by_name = {normalize_ollama_model_name(m.name): m for m in analysis.loaded}
     out = []
     for row in catalog.get("models") or []:
         name = row.get("model") or row.get("name")
@@ -91,7 +99,7 @@ def _ollama_rows(host, *, refresh: bool, hw_runner, state_dir) -> "list[LocalMod
         details = row.get("details") or {}
         probed = cap_cache.get(row.get("digest"), {}).get("tool_calls") if row.get("digest") else None
         cap_text = _capability_text(declared="tools" in (row.get("capabilities") or []), probed=probed)
-        loaded_entry = loaded_by_name.get(name)
+        loaded_entry = loaded_by_name.get(normalize_ollama_model_name(name))
         context = loaded_entry.effective_context if loaded_entry else trained_context_for(catalog, name)
         ref = f"ol:{name}" if host.default else f"ol:{name}@{host.name}"
         out.append(LocalModelRow(group=group, name=name, ref=ref,
@@ -121,6 +129,86 @@ def _hf_server_rows(info, *, reachable: bool, addressable: bool) -> "list[LocalM
         out.append(LocalModelRow(group=group, name=mid, ref=ref, context=info.context_by_model.get(mid),
                                   capability="declared: unknown (not reported by /v1/models)", reachable=reachable))
     return out
+
+
+def _registry_entry_for_model_id(model_id: str, *, state_dir) -> Optional[dict]:
+    """FIX PASS item C: `~/.halo/run/local-servers.json`'s entry for this
+    exact file (matched by `providers.local_use.model_id_for_path`'s own
+    id), when a managed server for it is currently recorded. Reads the
+    FILE directly -- never anything in-memory -- so a `halo local serve`
+    started by a DIFFERENT `halo` process still shows up here."""
+    from halo_harness.providers.local_runtime import load_registry
+    for entry in load_registry(state_dir):
+        if entry.get("model") == model_id:
+            return entry
+    return None
+
+
+def _runnability_text(fmt: str, path, *, state_dir, running: "Optional[dict]" = None) -> str:
+    """Halo 2.0.3 round 5c (brief item 1's closing sentence: "whether
+    anything here can run it"): the exact `halo local serve`/`import`
+    invocation, plus whether the managed runtime it would use is actually
+    installed right now -- read-only (`shutil.which`/a directory listing
+    under `~/.halo/runtimes/`), never a live probe of the model itself.
+    FIX PASS item C: `running`, when given (a `_registry_entry_for_
+    model_id` match), means a managed server for THIS exact file is
+    recorded as currently started -- the row says so, and names the
+    `hf:local/<name>` ref that already works for it, instead of a
+    `halo local serve` invocation that would just start a SECOND one."""
+    from halo_harness.providers.local_runtime import find_runtime_binary, runtime_for_format
+    if path is None:
+        return "declared: unknown (not currently served)"
+    if running is not None:
+        # The `[hf:local/<name>]` ref itself is appended by `format_
+        # local_view`'s own shared `_format_row` (same as every other
+        # addressable row in this view, e.g. an Ollama row's `[ol:<name>]`)
+        # whenever `LocalModelRow.ref` is set -- never repeated here too.
+        return f"serving on port {running.get('port')} via {running.get('runtime')}"
+    runtime = runtime_for_format(fmt)
+    if runtime is None:
+        text = f"no managed runtime for {fmt} on this platform"
+    else:
+        found = find_runtime_binary(runtime, state_dir=state_dir)
+        hint = "" if found else (" (not installed -- `halo local serve` offers to fetch it)"
+                                  if runtime == "llama-server" else " (not installed -- pip install mlx-lm)")
+        text = f"servable: {runtime}{hint} [halo local serve {path}]"
+    if fmt == "gguf":
+        text += f"  or `halo local import {path}`"
+    return text
+
+
+def _file_backed_row(group: str, name: str, path, fmt: str, size_bytes, *, state_dir,
+                      extra_capability_note: Optional[str] = None) -> LocalModelRow:
+    """One row for a discovered-but-not-yet-served file/folder (round 5c
+    item 1's own three sources: the HF hub cache, LM Studio's folder, and
+    `huggingface.model_dirs`) -- `quant`/`context` read straight from the
+    file (`providers.local_fit`, no GPU probe: the listing never needs the
+    live fit_estimate, only `halo local serve` does). `extra_capability_
+    note` is round 5b part 2's own pre-existing "-- runnable through MLX"
+    suffix for an `mlx-community/*` hub-cache repo with no resolvable
+    `path` (no `config.json` in the fixture/real cache entry at all) --
+    kept verbatim so that pinned wording survives this round's richer,
+    path-dependent runnability text, which can only ever fire once a real
+    `path` resolves."""
+    from halo_harness.providers.local_fit import read_fit_inputs_for_path, trained_context_from_model_info
+    if path is None:
+        model_info, quant_name = {}, None
+    else:
+        model_info, quant_name, _weight_bytes = read_fit_inputs_for_path(path, fmt=fmt)
+    running = None
+    ref = None
+    if path is not None:
+        from halo_harness.providers.local_use import model_id_for_path
+        model_id = model_id_for_path(path, fmt)
+        running = _registry_entry_for_model_id(model_id, state_dir=state_dir)
+        if running is not None:
+            ref = f"hf:local/{model_id}"
+    capability = _runnability_text(fmt, path, state_dir=state_dir, running=running)
+    if path is None and extra_capability_note:
+        capability += extra_capability_note
+    return LocalModelRow(group=group, name=name, ref=ref, size_bytes=size_bytes, quant=quant_name,
+                          context=trained_context_from_model_info(model_info), capability=capability,
+                          reachable=(True if running is not None else None))
 
 
 def build_local_view(*, refresh: bool = False, env: Optional[dict] = None, state_dir=None,
@@ -160,20 +248,27 @@ def build_local_view(*, refresh: bool = False, env: Optional[dict] = None, state
     for m in scan_hub_cache(env=env):
         out_name = m.repo_id + (f" ({'/'.join(m.formats)})" if m.formats else "")
         # Round 5b part 2 (brief item 6): "MLX repos in the hub cache
-        # (mlx-community/*) labelled as runnable through MLX" -- a plain
-        # org-name check (research doc section 7's own framing of
-        # `mlx-community` as the Hub org MLX-quantized repos live under),
-        # never a guess at the repo's OWN internal format.
-        cap = "declared: unknown (not currently served)"
-        if m.repo_id.lower().startswith("mlx-community/"):
-            cap += " -- runnable through MLX"
-        rows.append(LocalModelRow(group="Hugging Face (cache, not served)", name=out_name, size_bytes=m.size_bytes,
-                                   capability=cap))
+        # (mlx-community/*)" -- a plain org-name check (research doc
+        # section 7's own framing of `mlx-community` as the Hub org MLX-
+        # quantized repos live under); round 5c reuses it to pick `fmt`
+        # for `_file_backed_row`'s own runtime lookup, in place of the
+        # previous bare "-- runnable through MLX" suffix string.
+        is_mlx = m.repo_id.lower().startswith("mlx-community/")
+        fmt = "gguf" if (m.path is not None and m.path.suffix.lower() == ".gguf") else ("mlx" if is_mlx
+                                                                                         else "safetensors")
+        rows.append(_file_backed_row("Hugging Face (cache, not served)", out_name, m.path, fmt, m.size_bytes,
+                                      state_dir=state_dir,
+                                      extra_capability_note=" -- runnable through MLX" if is_mlx else None))
     from halo_harness.providers.lmstudio_cache import scan_lmstudio_models
     for m in scan_lmstudio_models(env=env):
         out_name = m.repo_id + (f" ({'/'.join(m.formats)})" if m.formats else "")
-        rows.append(LocalModelRow(group="LM Studio (cache, not served)", name=out_name, size_bytes=m.size_bytes,
-                                   capability="declared: unknown (not currently served)"))
+        fmt = "gguf" if (m.path is not None and m.path.suffix.lower() == ".gguf") else "safetensors"
+        rows.append(_file_backed_row("LM Studio (cache, not served)", out_name, m.path, fmt, m.size_bytes,
+                                      state_dir=state_dir))
+    from halo_harness.providers.local_model_dirs import scan_model_dirs
+    for entry in scan_model_dirs(env=env):
+        rows.append(_file_backed_row("Local folders (huggingface.model_dirs, not served)", str(entry.path),
+                                      entry.path, entry.format, entry.size_bytes, state_dir=state_dir))
     return rows
 
 

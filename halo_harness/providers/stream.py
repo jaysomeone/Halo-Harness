@@ -136,6 +136,20 @@ class CompletionRequest:
     # neither openai-chat nor Anthropic-passthrough, so it gets its own
     # field rather than overloading either existing one).
     prebuilt_ollama_body: Optional[dict] = None
+    # Halo 2.0.3 round 5c FIX PASS: the retry CEILING for `_run_phase1_
+    # ollama`'s own "the server said this prompt exceeds num_ctx" 400 --
+    # `min(learned_cap, host_max_ctx, fit_estimate, hard_cap)` for
+    # whichever of those four are known (the task's own exact candidate
+    # list -- NOT `trained_context`/the conservative fallback, since
+    # those are already reflected in `prebuilt_ollama_body["options"]
+    # ["num_ctx"]` and second-guessing either would risk asking for more
+    # context than the model was actually trained for). `agent/loop.py`'s
+    # `_build_ollama_body_for_ref` is the only populator; `None` (every
+    # non-ollama dialect, and any ollama caller that predates this fix)
+    # means "no bigger number ctx is known to be available" -- `_run_
+    # phase1_ollama` then raises the SAME plain `ContextOverflow` it
+    # always did, straight to the existing compaction path.
+    ollama_ctx_retry_ceiling: Optional[int] = None
 
 
 class ContextOverflow(Exception):
@@ -816,18 +830,82 @@ def _ndjson_reader_thread(resp, q: "queue.Queue") -> None:
         resp.close()
 
 
-def _run_phase1_ollama(req: CompletionRequest, abort: "threading.Event | None" = None):
-    """Connect + POST `req.prebuilt_ollama_body` to Ollama's native
-    `/api/chat`. Ollama has no context-overflow 400 to clamp-retry against
-    (a too-long prompt truncates silently server-side, research doc
-    section 2/Q2 -- there is nothing for Halo to detect or retry on a 200),
-    so this is simpler than `_run_phase1_attempts`: connect, POST, and map
-    any non-2xx straight to an UpstreamError. Same one-immediate-redial
-    rule as every other phase1 for a POST-CONNECT failure (never for a
-    genuine connect-phase failure, 2.0.1 finding 18)."""
+def _ollama_overflow_info(status: int, err_obj) -> "Optional[dict]":
+    """Halo 2.0.3 round 5c FIX PASS (live run, build 0.34.2): Ollama DOES
+    answer a 400 when a prompt exceeds `num_ctx` -- confirmed live:
+    ``{"error": {"code": 400, "message": "request (N tokens) exceeds the
+    available context size (M tokens), try increasing it", "type":
+    "exceed_context_size_error", "n_prompt_tokens": N, "n_ctx": M}}``.
+    NOTE `error` is an OBJECT here, unlike Ollama's usual bare-string
+    `{"error": "..."}` shape elsewhere in this codebase. `{"n_prompt_
+    tokens", "n_ctx"}` when this exact shape matches, else `None` (any
+    other 400, or a malformed/incomplete one, falls through to the
+    ordinary `map_upstream_error` path unchanged)."""
+    if status != 400 or not isinstance(err_obj, dict):
+        return None
+    inner = err_obj.get("error")
+    if not isinstance(inner, dict) or inner.get("type") != "exceed_context_size_error":
+        return None
+    n_prompt_tokens, n_ctx = inner.get("n_prompt_tokens"), inner.get("n_ctx")
+    if not isinstance(n_prompt_tokens, int) or not isinstance(n_ctx, int):
+        return None
+    return {"n_prompt_tokens": n_prompt_tokens, "n_ctx": n_ctx}
+
+
+def _ollama_overflow_retry_num_ctx(req: CompletionRequest, body: dict, overflow: dict) -> "Optional[int]":
+    """The bigger `num_ctx` to retry with, or `None` when no larger
+    number is known to be available. Brief: "when the fit allows a
+    larger num_ctx (learned cap, host max_ctx, fit estimate, hard cap)
+    retry once with the smallest power of two that holds n_prompt_tokens
+    plus the max output budget" -- `req.ollama_ctx_retry_ceiling` is
+    exactly that `min(...)` of the four named candidates (see this
+    module's own `CompletionRequest.ollama_ctx_retry_ceiling` docstring
+    for why `trained_context`/the conservative fallback are deliberately
+    excluded from it). The output budget is `options.num_predict` on
+    THIS request when set (the tightest known bound), else `req.
+    profile["max_output_tokens"]` (the model's own configured ceiling, a
+    looser but always-available bound)."""
+    from halo_harness.providers.ollama_fit import power_of_two_ceil
+    ceiling = req.ollama_ctx_retry_ceiling
+    if not isinstance(ceiling, int) or ceiling <= 0:
+        return None
+    output_budget = (body.get("options") or {}).get("num_predict")
+    if not isinstance(output_budget, int) or output_budget <= 0:
+        # `req.profile` is a plain dict in every REAL agent/loop.py ollama
+        # request (`_build_request`'s own `{"context_tokens":...,
+        # "max_output_tokens":...}`) -- `getattr` as a defensive fallback
+        # for any other caller/test that passes a dataclass instead.
+        profile = req.profile
+        output_budget = (profile.get("max_output_tokens") if isinstance(profile, dict)
+                          else getattr(profile, "max_output_tokens", None)) or 16384
+    needed = power_of_two_ceil(overflow["n_prompt_tokens"] + output_budget)
+    current = (body.get("options") or {}).get("num_ctx")
+    if needed <= ceiling and (not isinstance(current, int) or needed > current):
+        return needed
+    return None
+
+
+def _body_with_num_ctx(body: dict, num_ctx: int) -> dict:
+    new_body = dict(body)
+    new_body["options"] = dict(body.get("options") or {})
+    new_body["options"]["num_ctx"] = num_ctx
+    return new_body
+
+
+def _run_phase1_ollama_attempt(req: CompletionRequest, body: dict, abort: "threading.Event | None" = None):
+    """Connect + POST `body` (a PARAMETER, not necessarily `req.
+    prebuilt_ollama_body` -- the ctx-overflow retry below calls this a
+    second time with a bumped `options.num_ctx`) to Ollama's native
+    `/api/chat`. Same one-immediate-redial rule as every other phase1
+    for a POST-CONNECT failure (never for a genuine connect-phase
+    failure, 2.0.1 finding 18). Returns `(body, result, overflow_info)`
+    on EITHER a 2xx (`overflow_info=None`) or the specific "prompt
+    exceeds num_ctx" 400 (`result=None`, `overflow_info` set) -- the
+    caller decides what to do with the overflow; every OTHER non-2xx (or
+    a connect failure after its own retry) still raises directly, exactly
+    as this function always has."""
     if abort is not None and abort.is_set():
         raise _Aborted()
-    body = req.prebuilt_ollama_body
     if req.creds is None:
         raise ProviderNotConfigured("Ollama host not configured")
 
@@ -861,17 +939,43 @@ def _run_phase1_ollama(req: CompletionRequest, abort: "threading.Event | None" =
                 status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
                 raise _upstream_error_from_mapping(status, jbody, hdrs) from e
             if 200 <= result.status < 300:
-                return body, result
+                return body, result, None
             raw = result.resp.read() if result.resp else b""
             try:
                 err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
             except (json.JSONDecodeError, ValueError):
                 err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            overflow = _ollama_overflow_info(result.status, err_obj)
+            if overflow is not None:
+                return body, None, overflow
             status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
             raise _upstream_error_from_mapping(status, jbody, hdrs)
         raise UpstreamError(502, "api_error", "upstream failure after retries", True)
     finally:
         watcher_done.set()
+
+
+def _run_phase1_ollama(req: CompletionRequest, abort: "threading.Event | None" = None):
+    """`req.prebuilt_ollama_body` through `_run_phase1_ollama_attempt`,
+    with ONE extra retry for the specific "prompt exceeds num_ctx" 400
+    (FIX PASS -- round 2's own docstring assumed Ollama "truncates
+    silently"; a live run on build 0.34.2 found it answers this 400
+    instead): when `_ollama_overflow_retry_num_ctx` finds a bigger
+    number actually available, bump `options.num_ctx` and try exactly
+    once more; otherwise (or if that retry ALSO overflows) raise the
+    SAME `ContextOverflow` this function always raised, unchanged --
+    `agent/loop.py`'s existing compaction-and-retry path picks it up
+    from there with no changes of its own needed."""
+    body, result, overflow = _run_phase1_ollama_attempt(req, req.prebuilt_ollama_body, abort=abort)
+    if overflow is None:
+        return body, result
+    retry_num_ctx = _ollama_overflow_retry_num_ctx(req, body, overflow)
+    if retry_num_ctx is not None:
+        retry_body = _body_with_num_ctx(body, retry_num_ctx)
+        body, result, overflow = _run_phase1_ollama_attempt(req, retry_body, abort=abort)
+        if overflow is None:
+            return body, result
+    raise ContextOverflow(overflow["n_ctx"], overflow["n_prompt_tokens"], overflow["n_prompt_tokens"])
 
 
 def stream_ollama_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
