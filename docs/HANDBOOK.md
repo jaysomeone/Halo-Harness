@@ -13,14 +13,21 @@ halo init                    # pick a provider, set credentials, doctor, live po
 halo                         # full-screen TUI
 ```
 
-1. **`halo init`** lets you pick which provider to set up -- Databricks,
-   OpenRouter, the Anthropic API, or your Claude subscription -- asks for the
-   one credential it's missing, picks a default model from that provider's
-   own catalog, and ends with a real "pong" from it; it then offers to set up
-   another provider, looping until you're done (with more than one
-   configured, one last pick chooses the overall default) -- see
-   `docs/COMMANDS.md`'s `init` section for exactly what each step reads and
-   writes.
+1. **`halo init`** walks one wizard, Back/Skip/Next (Finish on the last
+   step) in the footer, nothing exiting to the console in between:
+   **Providers** (one tab each for Databricks/OpenRouter/the Anthropic
+   API/your Claude subscription/Ollama/Hugging Face/TypeSafe -- paste the
+   credential a tab is missing, add a local/LAN host or server where that
+   applies, Save, repeat for another, any tab Skippable); **Default
+   model** (a picker across everything just
+   configured); **Permission mode** (`auto` recommended); **Theme** (six
+   built-ins, a live preview); **Roles** (a switch, default on, plus three
+   presets); **Organizations** (a switch, default off, plus a default
+   org); **Linux fixes** (skipped when nothing needs it); **Summary**
+   (what was written, doctor, a live "pong"). Reach Roles/Organizations
+   again later with `/setup roles`/`/setup orgs` or `halo setup roles`/
+   `halo setup orgs` -- see `docs/COMMANDS.md`'s `init`/`setup` sections
+   for exactly what each step reads and writes.
 2. **The first session** opens with an empty prompt line and a status bar
    showing the model, permission mode, and MCP server count. Type a prompt
    and press `Enter`.
@@ -104,6 +111,42 @@ Bare `halo` (no `-p`) checks `stdin.isatty()` before importing
 `textual`; outside a real terminal it prints one line to stderr and exits 2
 instead of hanging -- expected, use `-p` for anything non-interactive
 (cron, CI, a subprocess).
+
+## Updating
+
+```sh
+halo update --check    # report only: installed vs. available, the exact command
+halo update             # apply it -- or /update inside the TUI
+```
+
+`halo update --check` prints what's installed (version, commit, branch --
+`halo --version`/`halo doctor` show the same), what's available (cached up
+to 24h; `--channel stable` tracks the newest `v*` tag instead of the
+branch halo came from), the commits between them, and the exact reinstall
+command for however this install was made (uv tool, pipx, pip, an
+editable checkout, or a bare checkout on PYTHONPATH). Exit 0 up to date,
+10 an update is available, 1 unknown (offline, no git, rate-limited).
+
+`halo update` (no `--check`) runs that command live and reports the
+before/after commit from a fresh `halo --version`. It refuses (exit 1) if
+another `halo` process looks like it's running on this machine, excluding
+itself -- a reinstall under a running TUI has broken the install on
+Windows before, since the venv can't be replaced while a process still
+has it open; `--force` overrides once you're sure nothing else is
+actually using it. `--to <tag|branch|commit>` picks an exact revision
+instead of the channel's latest.
+
+`/update` in the TUI runs the same check off the UI thread and opens a
+dialog with the report plus `Enter: update and restart halo` / `Esc: not
+now`. Enter quits the TUI, runs the update with its output visible, and
+relaunches with `--continue` so the session resumes on the new code --
+the only safe order on Windows (quit, then update, then relaunch; never
+while the TUI itself is still holding the install open). A background
+check also adds a one-line "update available" note at startup, at most
+once a day, when one is already known to be available -- off with
+`update.check: false` or `update.notify: false` in `~/.halo/config.json`.
+See "Update" in [docs/INSTALL.md](INSTALL.md) for the manual command per
+install kind.
 
 ## Config reuse from Claude Code
 
@@ -310,18 +353,73 @@ stays the general harness across all four routes above.
 
 ### Roles
 
-`orchestrator`/`coder`/`reviewer`/`researcher`/`small` (V2c) let a team
-point different kinds of work at different models -- cheap for exploration,
-strong for planning/review -- without hand-editing every agent file.
-`~/.halo/config.json`'s (or a shared `team.json`'s) `roles` table
-sets a model per role; built-in agents (`general-purpose`, `Explore`,
-`Researcher`, `Plan`, `Reviewer`, `Coder`) each carry a fixed default role, a
-custom `.claude/agents/*.md` sets one with a `role:` frontmatter key, and
-`--role NAME=MODEL`/`Agent(role=...)` override one for a single run/call.
-`/roles` shows the resolved table (model, endpoint/path type, price) per
-role; `halo stats --roles` sums sub-agent spend per role. See
-[docs/ROLES.md](../docs/ROLES.md) for the full resolution precedence and the
+Ten built-in roles (V2c, widened in Halo 2.0.2 --
+`orchestrator`/`planner`/`coder`/`reviewer`/`judge`/`researcher`/`tester`/
+`compaction`/`small`/`subagent_default`) let a team point different kinds of
+work at different models -- cheap for exploration, strong for planning/
+review -- without hand-editing every agent file; a role VALUE is a bare
+model string or `{"model", "effort"}` (Halo 2.0.2), so a role can also pin
+its own reasoning effort, not just its model. `~/.halo/config.json`'s (or a
+shared `team.json`'s, or a loaded `~/.halo/roles/<name>.json` template's)
+`roles` table sets this per role; built-in agents (`general-purpose`,
+`Explore`, `Researcher`, `Plan`, `Reviewer`, `Coder`, `Judge`, `Tester`) each
+carry a fixed default role, a custom `.claude/agents/*.md` sets one with a
+`role:` frontmatter key, and `--role NAME=MODEL[:EFFORT]`/`Agent(role=...)`/
+`/role NAME MODEL [EFFORT]` override one for a single run/call/session. Any
+OTHER syntactically-valid name (`[a-z][a-z0-9_]*`) a team.json or a loaded
+template actually defines is an equally valid role name everywhere above.
+`/roles` shows the resolved table (model, effort, endpoint/path type, price)
+per role and manages templates (`templates`/`save`/`load`/`new`/`edit`/
+`show`); `halo roles template ...` is the CLI equivalent; `halo stats
+--roles` sums sub-agent spend per role; `halo completion bash|zsh|
+powershell` completes role names and cached model refs too. A switch,
+`roles.enabled` (default on), turns the whole table off (every role
+resolves to the session model); the init wizard's Roles step (`halo
+init`, `/setup roles`, `halo setup roles`) offers three shipped presets
+(`balanced`/`quality`/`local-first`) with a live preview. See
+[docs/ROLES.md](../docs/ROLES.md) for the full resolution precedence
+(including the new `compaction`/`subagent_default` rungs) and the
 (documented, never automatic beyond one specific case) cost-aware defaults.
+
+### Organizations
+
+A tree of positions (each a role or a pinned model, plus effort,
+instructions and the titles it may itself delegate to) saved as
+`~/.halo/orgs/<name>.json`; three built-ins ship copied in on first use
+and are never overwritten once present -- `solo` (one orchestrator),
+`release-flow` (the brief -> implement -> test -> review -> fix -> retest
+-> report loop this project is itself built with), and `company` (CEO ->
+VPs -> managers -> workers). `/org run <name> "<goal>"` (or
+`Agent(org=<name>, prompt=<goal>)`) spawns the root position as an
+ordinary sub-agent that delegates through the SAME Agent-tool machinery
+roles/custom agents already use, each position restricted to only the
+positions it itself may call; depth comes from the org's own tree shape,
+concurrency from `agents.max_concurrent` (config, default 4) unless the
+org sets its own. `/org list|show|new|edit|load` manage them; `halo org
+list|show|new|edit|run` is the CLI equivalent. A switch, `orgs.enabled`
+(default OFF, unlike roles), gates discoverability only (`/org`, the
+`/tasks` board tab, the Agent tool's own `org=` -- never whether a named
+org actually runs); the init wizard's Organizations step (`halo init`,
+`/setup orgs`, `halo setup orgs`) picks a default org (`orgs.default`,
+used by `halo org run "<goal>"` with no name) and offers budgets
+(`budget_usd` on the org/a position, enforced through the cost meter)
+and goals (the run's own goal becomes a root task on the shared board).
+See [docs/ORGS.md](../docs/ORGS.md).
+
+### Sub-agent visibility and scale
+
+`/tasks` (or Ctrl+T) opens a panel listing every running, queued,
+background and finished sub-agent of this session, with a second tab for
+the shared task board; Enter opens a live transcript viewer of the
+highlighted one. `agents.max_concurrent` (config, default 4) and
+`agents.max_depth` (config, default 1, up to 3; an org's own tree shape
+overrides this, unclamped) govern how many sub-agents may run at once
+and how deep they may delegate; the Agent tool's `count`/`batch`
+parameters spawn several in one call (one combined result, in spawn
+order), queueing past the cap. The shared task board (`TaskCreate`/
+`TaskUpdate`/`TaskList` tools, `~/.halo/sessions/<id>/tasks.json`) lets
+an organization's workers claim and report on open work. See
+[docs/SUBAGENTS.md](../docs/SUBAGENTS.md).
 
 ## Permissions and auto mode
 

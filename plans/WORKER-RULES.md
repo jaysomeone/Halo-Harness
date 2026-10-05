@@ -49,3 +49,19 @@ Hand-back format: RESULT LINES (one per brief item: DONE / FIXED /
 PARTIAL with evidence and the pinning test names), FILES TOUCHED
 (production, tests, docs), WHAT YOU FOUND (anything beyond the brief, and
 anything left open with the reason). No commit, no push.
+
+## Test cadence from 2026-10-04 evening (rolo asked why rounds take so long)
+
+- A worker runs ONLY the test modules it touched or added, plus
+  `python test_bridge.py`, before handing back. It does not run
+  `tests/run_all.py` or `test_tui.py` unless the orchestrator's brief asks
+  for it (release rounds, fix passes before a tag).
+- The orchestrator runs the changed modules on Kali and WSL every round,
+  the full three-platform suites once per two rounds and always before the
+  Opus review and the tag, and a short live check on real hardware EVERY
+  round: the live checks are where the defects have shown up.
+- One commit per round stays, so a defect the batched suites find later is
+  traceable to its round.
+- Docs-only research rounds may run in parallel with an implementation
+  round (they write one new file under docs/harness/); implementation
+  rounds stay one at a time on the tree.

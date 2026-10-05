@@ -48,6 +48,15 @@ os.environ["BRIDGE_TEST_HOME"] = tempfile.mkdtemp(prefix="cc-session-scratchhome
 # failure is still exercised turn-time, inside cc_runtime's own
 # `_preflight_cc`, exactly as these tests were written to check.
 ensure_default_provider_credentials()
+# W6b section E: that call now also defaults BRIDGE_TEST_CC_AUTH_STATUS
+# (closes a WSL hang in an unrelated module that never managed it at all,
+# tests/test_doctor_mcp_config_cli.py) -- popped right back off here, once,
+# to preserve the "deliberately NOT a blanket default" contract documented
+# just above: the two tests it names need the REAL absence of this var to
+# exercise the actual claude-binary-missing/not-logged-in code paths
+# turn-time, not a default masking them underneath `enable("claude_
+# subscription")`'s own auto-detection bypass.
+os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)
 
 test, TESTS = new_registry()
 
@@ -59,9 +68,15 @@ _HOOK_SCRIPT_ARGV = [sys.executable, "-m", "tests.helpers.hook_scripts"]
 @contextmanager
 def _fake_claude_env(*, logged_in: bool = True):
     saved = {k: os.environ.get(k) for k in
-             ("BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS")}
+             ("BRIDGE_CLAUDE_EXE", "FAKE_CLAUDE_CC_LOGGED_IN", "BRIDGE_TEST_CC_AUTH_STATUS",
+              "FAKE_CLAUDE_CC_TOOL2_WINDOW_S")}
     os.environ["BRIDGE_CLAUDE_EXE"] = '"' + sys.executable + '" "' + str(FAKE_CLAUDE) + '"'
     os.environ["FAKE_CLAUDE_CC_LOGGED_IN"] = "1" if logged_in else "0"
+    # The two-call fake waits up to this long for a steer to arrive between
+    # its calls (it stops waiting the moment one does), so the absorption
+    # test no longer depends on how fast this box moves a line through the
+    # stream; a run without a steer pays the full window once.
+    os.environ["FAKE_CLAUDE_CC_TOOL2_WINDOW_S"] = "4"
     os.environ.pop("BRIDGE_TEST_CC_AUTH_STATUS", None)  # the fake's own real "auth status" answers this now
     try:
         yield
@@ -103,6 +118,34 @@ def _wait_for_event_kind(collected, kind, timeout=5.0):
                 return e
         time.sleep(0.02)
     return None
+
+
+def _join_bounded_by_progress(t: threading.Thread, session, *, stall_budget_s: float = 10.0) -> None:
+    """Halo 2.0.2 round C: "make the wait bounded by progress, not a
+    fixed deadline, so a loaded machine makes it slower, never red" --
+    seen flaky under load in three separate worker runs, a flat `t.join
+    (timeout=10)` loses a race against real CPU contention even though
+    the turn is still genuinely moving forward, just slower. Polls in
+    short slices instead, resetting the stall budget every time the
+    session's own log visibly grows (proof of real, ongoing activity --
+    `cc_runtime.py` appends a node per tool_use/tool_result/steer-
+    consumed/final-text/usage as a `cc:` turn actually progresses, not
+    just once at the very end) -- only a stretch with NO log growth AT
+    ALL for the full `stall_budget_s` counts as "actually stuck", same
+    distinction a liveness timeout makes everywhere else in this
+    codebase. A genuinely hung thread still gives up in bounded time;
+    a merely slow one never loses the race against an arbitrary
+    deadline just because the box happened to be busy."""
+    last_progress = time.monotonic()
+    last_node_count = len(session.log.nodes())
+    while t.is_alive():
+        t.join(timeout=0.1)
+        node_count = len(session.log.nodes())
+        if node_count != last_node_count:
+            last_node_count = node_count
+            last_progress = time.monotonic()
+        elif time.monotonic() - last_progress > stall_budget_s:
+            break
 
 
 # ---- lazy start / one subprocess per session -------------------------------
@@ -665,6 +708,39 @@ def test_ask_user_question_shows_card_and_answer_becomes_tool_result(ctx: Ctx):
 
 
 @test
+def test_ask_user_question_for_a_cc_subagent_uses_the_namespaced_request_id(ctx: Ctx):
+    """Release review finding 22: for a `cc:` SUB-AGENT (agent_id set),
+    `_resolve_tool_call` parks the question under `question_request_id`
+    (`f"{agent_id}:{tool_id}"`, namespaced -- same reasoning as the
+    `ask_request_id` permission branch right above it in cc_runtime.py) and
+    registers the waiter dict under THAT key. Before the fix, cc_runtime.py
+    emitted and awaited the bare tool_use_id instead, so the waiter it
+    looked up was never the one actually registered: `resolve_question`
+    with the id the card itself reported would silently fail (no such
+    waiter), and the tool returned "did not answer" on its own, with no
+    way for the answer to ever reach it."""
+    with _fake_claude_env():
+        session, _ = _new_cc_session(interactive=True)
+        session.agent_id = "child-1"  # makes this a cc: SUB-agent, not top-level
+        question_input = {"questions": [{"question": "pick one", "options": [{"label": "a"}, {"label": "b"}]}]}
+        collected = []
+        t = threading.Thread(target=lambda: collected.extend(
+            session.turn("TOOL:AskUserQuestion:" + json.dumps(question_input))))
+        t.start()
+        q = _wait_for_event_kind(collected, "question")
+        ctx.check("question card shown", q is not None)
+        ctx.check(f"the event's own id is namespaced with the agent_id, got {q.data.get('id') if q else None}",
+                   q is not None and q.data.get("id", "").startswith("child-1:"))
+        ok = session.resolve_question(q.data["id"], "a") if q else False
+        ctx.check("resolve_question finds the waiter registered under that SAME namespaced id", ok)
+        t.join(timeout=10)
+        results = [e for e in collected if e.kind == "tool_result"]
+        ctx.check(f"the real answer reached the tool result (not 'did not answer'), got {results}",
+                   results and results[0].data["ok"] is True and "a" in results[0].data.get("content", ""))
+        session.close_cc()
+
+
+@test
 def test_always_allow_rule_persists_via_apply_permission_decision(ctx: Ctx):
     """finding 17: the bridge reuses `_apply_permission_decision` -- an
     "always allow" answer must add a session rule, same as every other
@@ -836,7 +912,7 @@ def test_steer_between_tool_calls_is_absorbed_into_one_result(ctx: Ctx):
             time.sleep(0.02)
         ok = session.steer("reply with the single word pong")
         ctx.check("steer accepted while busy", ok)
-        t.join(timeout=10)
+        _join_bounded_by_progress(t, session)
         ctx.check("turn ended normally (never hung)", collected and collected[-1].kind == "turn_done"
                    and collected[-1].data["reason"] == "end_turn")
         usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]
@@ -862,7 +938,7 @@ def test_two_steers_behind_a_running_turn_both_get_answered(ctx: Ctx):
             time.sleep(0.02)
         ctx.check("steer 1 accepted", session.steer("reply with the single word pong"))
         ctx.check("steer 2 accepted", session.steer("also say the word banana"))
-        t.join(timeout=15)
+        _join_bounded_by_progress(t, session)
         ctx.check("turn ended normally (never hung waiting on a result that wasn't coming)",
                    collected and collected[-1].kind == "turn_done" and collected[-1].data["reason"] == "end_turn")
         usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]

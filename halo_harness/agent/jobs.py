@@ -331,11 +331,29 @@ class JobRegistry:
             output = output[-self._NOTICE_OUTPUT_TAIL_CHARS:] + hint
         if status == "killed":
             text = f"[Background job {record.job_id} ({label}) was stopped before it finished]"
+            one_line = f"{label} -- stopped before it finished"
             if output:
                 text += f"\nOutput so far:\n{output}"
         else:
             text = f"[Background job {record.job_id} ({label}) finished, exit code {exit_code}]"
             text += f"\n{output}" if output else "\n(no output)"
+            one_line = f"{label} -- exit {exit_code}"
+        # Halo 2.0.2 round C (the owner's own background-streaming
+        # report): a bash job had NO live signal of its own at all before
+        # this -- only the pending-notice text below, which nothing shows
+        # until the session's NEXT turn. Fired straight into the parent's
+        # live event queue (`Session._event_sink`, set by `run()` -- the
+        # TUI's worker-thread command pump; None for a `-p`/bare-Session
+        # run, a no-op there exactly like before this existed), the same
+        # channel agent/subagent.py's `_bg_run` already uses for a
+        # background sub-agent's own completion note.
+        sink = getattr(self.parent, "_event_sink", None)
+        if sink is not None:
+            try:
+                from halo_harness import events
+                sink(events.system_note(f"← background job finished: {one_line} (see /tasks)"))
+            except Exception:
+                pass
         notices_lock = getattr(self.parent, "_job_notices_lock", None)
         notices = getattr(self.parent, "_pending_job_notices", None)
         if notices_lock is None or notices is None:

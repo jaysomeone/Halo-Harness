@@ -8,45 +8,846 @@ across the 0.3.x line -- each 0.3.0 milestone below was a working
 checkpoint toward the single 0.3.0 release, not a separate published
 version.
 
-## [Unreleased] - Codex subscription route (`cx:`)
+## [2.0.3] - unreleased
 
-The Codex half of the 2.0.3 brief's item C2.1 (`plans/2.0.3-brief.md`),
-shipped ahead of its round; the `oai:` OpenAI API route is still open.
+Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
+and onward). Rounds 1-5 (research, the `ol:` provider, hardware/host
+analysis and roles, the `hf:` route, and `hf:local/*`/the shared `/local`
+view/the init tab) landed so far, plus round 5c (finding and serving/
+importing file-backed models, folded into item 4 below); round 6 (docs
+polish, a live check, and release prep) is still to come under this SAME
+version number.
 
-1. **`cx:<model>` runs a turn on your ChatGPT subscription** (Plus, Pro,
-   Team, Enterprise, Edu) through the installed `codex` binary, the way
-   `cc:` uses the Claude subscription. Halo drives `codex app-server` (the
-   JSON-RPC protocol the Codex IDE extension uses) instead of the brief's
-   `codex exec`: one process per session, real streaming, `turn/steer`
-   for steering, `turn/interrupt` for Esc, and `model/list` for the exact
-   models this account may use. Halo never reads `~/.codex/auth.json`;
-   it runs `codex login status`.
-2. **Halo's tools, Halo's rules**: Codex reaches Halo's tools through the
-   same `ccbridge` MCP bridge `cc:` uses (`mcp__halo__<Name>`), so
-   permission rules, hooks, plan mode, AskUserQuestion and sub-agents
-   behave as on every other route. Codex's own shell, browser, image and
-   plugin tools are switched off for the thread, as are the user's own
-   Codex MCP servers. The thread runs with approvals on and a read-only
-   sandbox, so a native `apply_patch` (kept by some models) arrives as an
-   approval request that Halo decides as a Write/Edit call first.
-3. **Where it shows up**: a "Codex subscription (ChatGPT)" group in
-   `/model`, a `codex` tab in `halo init`, a `codex_subscription` row in
-   `halo providers`/`/providers` with the plan's 5-hour and weekly usage
-   windows, and a live `5h N% · wk N%` status-bar segment on both `cx:` and
-   `cc:` subscription routes; `halo models --cx [--refresh]`, a doctor line
-   with the tested codex range (`providers/cx_tested.json`, 0.153.4), a tip, and
-   `/effort` offering each model's own levels. Auto-enabled only on a
-   ChatGPT login (an API-key login says so instead).
-4. **Conversation**: one Codex thread per session, resumed by id after a
-   restart, model switch or `halo --resume`; `/fork` forks it; a thread
-   Codex no longer has falls back to a fresh one carrying the conversation
-   so far. Titles, prompt hooks and `/improve` use a one-shot ephemeral
-   thread.
-5. **Tests**: `tests/test_cx_session.py` (18 tests) against
-   `tests/helpers/fake_codex_cx.py`, a fake app-server that is a real MCP
-   client of the real bridge. `cc_runtime`'s bridged dispatch now takes an
-   `emit` callback and exposes `resolve_bridged_call` and
-   `halo_context_parts` for reuse; `cc:` behaviour is unchanged.
+1. **`ol:` provider on Ollama's native API** (round 2): a new `ollama`
+   dialect reaches a local daemon, a named LAN host, or Ollama Cloud, all
+   through the identical native `/api/chat` request shape --
+   `ol:<model>` (the default host) or `ol:<model>@<hostname>` (an entry in
+   `~/.halo/config.json`'s `ollama.hosts`). `options.num_ctx` is computed
+   and sent on EVERY request (`min(trained context, host.max_ctx,
+   131072)`, never a Modelfile default), `keep_alive` is sent only when
+   the host entry configures one (the server's own `OLLAMA_KEEP_ALIVE`
+   stands otherwise), and `think` is mapped from the session's effort level
+   (graded low/medium/high for gpt-oss, bool for every other thinking
+   model). The NDJSON streaming decoder synthesizes its own stable
+   `toolu_` tool-call ids (Ollama's wire format sends none, only a 0-based
+   index) and maps `done_reason: "length"` onto the existing max-tokens
+   stop handling; `done_reason: "load"` retries the turn once when nothing
+   has been shown yet. A background `/api/version` probe, a short-TTL
+   `/api/tags` + `/api/show` catalog per host, and a cheap real-tool-call
+   capability probe (cached per model digest, independent of what
+   `/api/show` merely declares) round out this round. Round 2b wires the
+   dialect into the agent loop itself (`agent/loop.py`'s request/stream
+   dispatch, `headless.py`'s shared credential resolver) -- an `ol:` model
+   now runs a full turn, including a tool call, end to end in print mode
+   and the TUI.
+2. **Hardware/host analysis, the fit estimate, and roles** (round 3):
+   `/ollama` (TUI dialog) and `halo ollama [--host NAME] [--refresh]`
+   (CLI) render one page per configured host -- reachable, version,
+   loaded models' `size` vs `size_vram` as one plain offload sentence,
+   trained vs. effective context, and the KV-bytes/token figure (standard
+   GGML/llama.cpp accounting, not independently re-derived); `halo doctor`
+   gains a one-line-per-host Ollama section. The context-ownership rule's
+   `fit_estimate` (round 2 always passed `None`) is now real: the largest
+   power-of-two context that fits in free GPU memory after a model's own
+   weights, from the OS GPU tool for a LOCAL host (`nvidia-smi` on
+   Windows/Linux, verified live this round) or a REMOTE host's own
+   already-loaded `/api/ps` context when there's one to read, cached
+   about a minute so a turn never shells out more than once in that
+   window. The `ol:` ProviderProfile's `tools_max` now follows that
+   effective context's class (under 16k/16k-32k/32k-64k/64k+ -> 16/32/
+   64/128 tools, `ollama.tools_max` overridable, never below this
+   platform's own built-in tool count) instead of round 2's permanently-
+   unbounded `None` -- the SAME SessionCatalog cap-shrink/LRU-evict `/
+   model` already runs on a provider switch does the actual shrinking,
+   never a second capping path. Local `ol:` models default to a
+   supporting role (the picker's new `u` action pre-selects `small`,
+   never main); choosing one as the session's main model anyway prints
+   the plain consequence sentence when it doesn't declare tool-calling
+   support, and proceeds regardless. `/local <question>` (Ollama-only
+   this round) answers from `roles.small` inline, without adding
+   anything to the main transcript's context. Fix pass after a live run:
+   the fit estimate now consults `/api/ps` before any GPU-memory
+   arithmetic (an already-loaded model's own loaded context wins outright,
+   never recomputed, so concurrent requests can no longer disagree and
+   force a reload), counts other loaded models' `size_vram` as reclaimable
+   headroom, and -- when the weights provably don't fit even after that --
+   falls back to a conservative 8192 instead of the 131072 hard cap.
+   Round 5b (local-model excellence) builds directly on this: `halo
+   ollama calibrate <model> [--host NAME] [--start N]` loads a model at a
+   candidate `num_ctx` and steps down by powers of two, reading `/api/ps`
+   back, until it is fully resident -- the measured `max_full_gpu_ctx`
+   (or "does not fit") is recorded in `~/.halo/ollama-fit.json` and never
+   expires on its own (re-measured only by an explicit re-run, or
+   automatically when the model's digest or the server's version
+   changes); the SAME procedure runs automatically the first time a model
+   is used on a host with no learned cap, with one plain notice
+   (`ollama.auto_calibrate: false` opts out). The context-ownership rule
+   now takes that learned cap as its highest-priority "fit" candidate
+   (still just one more entry in the same `min()`, never an override that
+   bypasses the trained-context/hard-cap ceiling), and a REMOTE host with
+   nothing known at all -- the MUST-FIX from a live LAN-host run -- gets a
+   conservative 32768 default instead of silently falling through to the
+   131072 hard cap (`ollama.hosts[].max_ctx` is the documented explicit
+   override). The KV-bytes-per-element constants are corrected from
+   llama.cpp's own `ggml-common.h` block structs (q8_0 1.0625, q4_0
+   0.5625 -- both old approximations under-counted memory by 6-12%),
+   selectable per host via `ollama.hosts[].kv_cache_type`. Multi-GPU: the
+   fit estimate now SUMS every detected card's free memory (never the
+   minimum) minus a per-card overhead. `ollama.hosts[].ssh: "user@host"`
+   adds an OPTIONAL read-only GPU probe over ssh for a remote host
+   (never required). Apple Silicon's unified-memory share is estimated
+   from total RAM (or `iogpu.wired_limit_mb` when set) and always
+   labelled an estimate -- calibration is the ground truth there too. The
+   system message/tools/`options` on an `ol:` session are now pinned
+   byte-stable turn to turn (so Ollama/llama.cpp can actually reuse the
+   cached prompt prefix); the status bar's model chip and `halo ollama`
+   now show the last turn's own tokens/second, prefill seconds, and an
+   "offloaded" marker. Round 5b part 2 (local-model excellence,
+   continued): on the `ollama` dialect (local hosts only) and `hf:local/*`
+   servers, a turn Halo decides is EXPECTED to call a tool (tools are
+   offered, it isn't the first turn, and the last message is a tool
+   result -- `providers/tool_call_schema.py`, the one documented rule
+   every caller shares) sends the tool-call schema as the output
+   constraint (`format` for `ol:`, alongside `tools` unchanged;
+   `response_format` json_schema for `hf:local/*`), falling back to
+   unconstrained decoding on a bare 400; a tool call that still fails to
+   parse (bad JSON, or a resolved tool whose arguments fail schema
+   validation) gets ONE isolated, tools-less local repair round -- the
+   exact schema plus the parse error, re-validated before trusting it --
+   before the existing plain error ever surfaces; the `ollama`/
+   `huggingface` profiles also gain the generic bare-JSON/fenced-JSON
+   leak-parser patterns, so a constrained reply that lands in plain text
+   instead of native `tool_calls` still gets promoted. VRAM-aware role
+   defaults: when the main model is `ol:` on a host where a second
+   model's own weights plus the main model's CURRENTLY RESIDENT size
+   would exceed the host's total GPU memory, `small`/`researcher`/
+   `judge`/`subagent_default`'s TABLE value (never an explicit per-run
+   `--role`/`/roles set` override) redirects to the main model instead of
+   evicting it -- `/local <question>` applies the same redirection at call
+   time; `halo roles`/`/roles` and the picker's `u` action show `(same as
+   main: fits beside it: no)` as the reason. `halo ollama doctor [--host
+   NAME]` (and `halo doctor`'s matching section) prints the documented
+   host-tuning recommendations Halo cannot read back
+   (`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`,
+   `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_CONTEXT_LENGTH`)
+   and exactly where each lives per OS of the host (Windows tray app,
+   macOS menu-bar app plus `launchctl setenv`, Linux `systemctl edit
+   ollama`), with a one-line hint for a loopback-only host. The `Ollama`/
+   `Hugging Face` init-wizard tabs now open with a detection summary (GPU/
+   unified memory, Ollama's own models and what fits, running local
+   servers, model folders known so far), filled in off the UI thread.
+   `mlx_lm.server` (Apple's OpenAI-compatible MLX runtime, same default
+   port family as llama-server) is told apart from llama-server by
+   whether `/props` answers, labelled `MLX` in `/local`; `mlx-community/*`
+   Hub-cache repos are labelled runnable through MLX; LM Studio's own
+   model folder (`~/.lmstudio/models`, `huggingface.lmstudio_models_dir`
+   overridable) joins the Hub-cache scan under its own group. `halo
+   ollama calibrate` now also steps UP from a fitting first guess
+   (bounded by the model's own trained context and the 131072 hard cap)
+   to find the true ceiling instead of settling for the first lucky guess
+   (`--no-up` skips it); the auto-calibrate notice now also surfaces from
+   `call_small_model` (via the log, since that call path has no event
+   stream of its own to protect) and `_run_compaction` (as an ordinary
+   `notification` event), not just the main turn.
+3. **`hf:` route -- Hugging Face Inference Providers router and dedicated
+   Inference Endpoints** (round 4): a new `huggingface` provider reusing
+   the existing openai-chat request/stream code unchanged (no new wire
+   format -- tools supported, reasoning passthrough like OpenRouter's own,
+   no host-specific fields). `hf:<org>/<model>` (optionally `:fastest`/
+   `:cheapest`/`:preferred`/`:<provider>`, passed through verbatim on the
+   wire) against the router (`https://router.huggingface.co/v1`,
+   `Authorization: Bearer $HF_TOKEN`, `BRIDGE_HF_ROUTER_BASE_URL`
+   overridable for tests); `hf:endpoint/<name>` against a fully separate
+   `huggingface.endpoints` config entry's own `url`/`token` (mirroring
+   `ollama.hosts`' shape) -- the two credential sources never cross-wire.
+   An optional `huggingface.bill_to` org name adds `X-HF-Bill-To` on router
+   requests only. The router's `GET /v1/models` catalog is cached
+   (`~/.halo/huggingface-models.json`, the same TTL knob every other
+   network catalog here shares) and surfaces in the `/model` picker under
+   a "Hugging Face" group once enabled, with no network cost to the
+   picker's first paint when the provider isn't configured. Enablement
+   (`HF_TOKEN` present OR at least one endpoint configured), `/providers`/
+   `halo providers`/`doctor`'s provider count, and `resolve_model_profile`
+   all cover the new provider; a missing/misconfigured credential gives a
+   plain message naming the right config key instead of the generic
+   "OpenRouter not configured" every other unconfigured chat-dialect route
+   used to get mislabeled as. `tests/helpers/mock_openai.py`'s `MockUpstream`
+   gained a `path_prefix`/`expected_bearer`/`models_response` constructor
+   option so the SAME scripted scenarios serve as the router and endpoint
+   stand-ins, rather than a second fake server.
+4. **`hf:local/*`, the shared `/local` view, the init tab** (round 5): a
+   new `huggingface.local_servers` config list (`{name, url, api_key,
+   default}`, mirroring `ollama.hosts`/`huggingface.endpoints`) names a
+   MANUAL local/LAN OpenAI-compatible server -- `hf:local/<model>` (the
+   default entry, else the first auto-detected one) or `hf:local/<model>
+   @<name>`; a manual entry's own `api_key` is pinned apart from both
+   `HF_TOKEN` and an endpoint's own token. Auto-detection probes `GET
+   /v1/models` on 127.0.0.1 only, on llama-server/TGI's 8080, vLLM/
+   `transformers serve`'s 8000 (treated identically on purpose), and LM
+   Studio's 1234 -- overridable via `huggingface.local_probe_ports`/
+   `HF_LOCAL_PROBE_PORTS` for tests, gated by `BRIDGE_TEST_NO_BACKGROUND_
+   NET` like every other background probe; a manual entry is only ever
+   probed on demand (`/local refresh`). Context length is read back from
+   `/v1/models` (`max_model_len` for vLLM, other names tried heuristically)
+   or, as a fallback, llama-server's own `/props` -- never requested.
+   `providers.huggingface_hub_cache` walks `$HF_HUB_CACHE`/`$HF_HOME/hub`/
+   `~/.cache/huggingface/hub` for models on disk but not necessarily
+   served, reporting size and format (`safetensors`/`gguf`) without
+   following a symlink outside the cache. The shared `/local` view
+   (`providers.local_models`) merges Ollama hosts, running Hugging Face
+   local servers, and the Hub cache into one grouped list -- `/local` (TUI,
+   no args) opens a dialog, `halo local [--refresh]`/`/local`'s print-mode
+   fallback render the same text; `/local <question>` (round 3) now also
+   accepts an `hf:` `roles.small` ref, not just `ol:`. `halo init`'s
+   interactive Providers step gains `Ollama (local or LAN)` and `Hugging
+   Face` tabs (both additive/skippable; neither joins the OLD sequential
+   `--provider`/`--preset` CLI picker, which has no sensible hardcoded
+   default model for either). `tests/test_privacy_scan.py` now also scans
+   untracked, non-ignored files (`git ls-files --others --exclude-
+   standard`), not just tracked ones.
+
+   Round 5c adds a fourth discovery source the user controls directly:
+   `huggingface.model_dirs`, a list of folders scanned recursively
+   (depth-limited, never following a symlinked subdirectory) for `.gguf`
+   files and safetensors/MLX model folders (`config.json` beside
+   `*.safetensors`) -- managed with `/local add <path>`/`/local forget
+   <path>` (persisted immediately) or the init wizard's new "Local
+   models" step (right after Providers; a folder field, a preferred-
+   runtime choice, and the SAME detection summary round 5b part 2 already
+   built). The fit estimate for any of these three on-disk sources (Hub
+   cache, LM Studio, `model_dirs`) now comes straight from the FILE: a
+   minimal GGUF header reader (`providers.gguf_header`, magic/version/
+   key-value metadata, never reading past the metadata block) and a
+   safetensors `config.json` reader (`providers.safetensors_config`) both
+   build the identical `model_info` shape `/api/show` already produces,
+   feeding round 3's `kv_bytes_per_token`/`fit_estimate` unchanged --
+   `halo local` now shows format, size, trained context, quantization,
+   and whether anything on this machine can actually run each file.
+   Two ways to use one: `halo local serve <model> [--runtime llama-
+   server|mlx_lm] [--port N] [--keep]` (or the `/local` dialog's `s` key)
+   starts a managed child process on a free loopback port, recorded in
+   `~/.halo/run/local-servers.json` and stopped when Halo exits unless
+   `--keep`; when no runtime is found, Halo offers to fetch the pinned
+   llama.cpp release for this OS/GPU backend (asset chosen from the
+   NVIDIA driver's own reported CUDA version, Metal on macOS, Vulkan
+   otherwise; verified against the GitHub Releases API's own per-asset
+   `digest`, since llama.cpp publishes no checksum file of its own) into
+   `~/.halo/runtimes/<version>/`, never on PATH, after a plain consent
+   sentence (`--yes` or a stdin yes/no) -- `halo local runtime remove`
+   deletes it. `halo local import <model> [--name NAME]` is the other
+   way: a Modelfile (`FROM <path>`) and Ollama's own `/api/create`
+   (streamed status lines as progress) turn a `.gguf` file into an
+   ordinary `ol:<name>` -- GGUF only this round, since Ollama's own
+   documented list of importable safetensors architectures wasn't found
+   in this round's research. Either way the new model defaults to the
+   `small` role, same as any other local model.
+
+   Fix pass after a live run found two defects: the runtime fetch listed
+   `GET /releases/latest`, which points at llama.cpp's own most recent
+   NON-binary release (the actual compiled builds are prereleases tagged
+   `b<number>`) -- Halo now lists `GET /releases` and walks it newest-tag-
+   first for one that actually carries the needed asset; the CUDA pick is
+   now "same major as the driver with minor <= the driver's, else the
+   newest 12.x build, else Vulkan" (a driver reporting CUDA 13.2 with only
+   12.4/13.4 builds available correctly falls back to 12.4, never silently
+   picks a build its own minor version can't actually run), pulls in the
+   paired `cudart-*` redistributable unless a CUDA toolkit is already
+   installed, and the consent sentence now names the smaller `--backend
+   vulkan` alternative's size; `--backend cuda|vulkan|cpu|metal` overrides
+   the pick outright. Separately, the import path's `modelfile`/`FROM
+   <path>` form turned out obsolete on a real daemon (`HTTP 400`,
+   "neither 'from' or 'files' was specified") -- it now computes the
+   file's sha256, uploads the blob (`POST /api/blobs/sha256:<hex>`,
+   streamed from disk) only when `HEAD` says Ollama doesn't already have
+   it, and calls `/api/create` with a `files` map naming that blob,
+   exactly matching a live daemon (build 0.34.2). A second fix pass closed
+   a POSIX-only zombie-process bug in the managed-server registry: a bare
+   `SIGTERM` with no `wait()`/`waitpid()` left a stopped server as a
+   zombie on Kali/WSL (gone in every practical sense, but still "alive" to
+   a bare `os.kill(pid, 0)`) -- stopping now reaps a same-process child via
+   its retained `Popen` handle, or polls `waitpid`/escalates to `SIGKILL`
+   after a grace period for a fresh `halo local stop` process with no
+   handle at all; Windows' own termination path is unchanged.
+6. **The model gym, data-driven roles, and the 60-second acceptance
+   check** (round 5d): `halo gym [--models ol:a,ol:b,...] [--roles
+   small,judge,...] [--quick]` runs a fixed task battery against each
+   local model on THIS machine's own hardware, through the real request/
+   decode path -- tool-call accuracy (schema-valid Read calls, with
+   malformed/missing ones given exactly one local repair round, counted
+   separately from the headline score), edit success (a real Edit call
+   applied to a scratch fixture file and diffed), context recall (a
+   needle at about 12% depth of a prompt sized to the model's own fitted
+   context), instruction adherence (one word when asked for one word, no
+   preamble when asked for none), and tokens/second + prefill seconds
+   averaged across every real turn sent. `--quick` halves the battery
+   size. Results persist at `~/.halo/gym/<host-slug>/<digest>.json` with
+   the digest/quantization/fitted-context/Ollama-version/timestamps they
+   were measured at; `halo gym show [model]` prints a per-model card.
+   `halo gym propose [--apply] [--roles ...] [--main REF]` turns those
+   scores into a role-table proposal -- the best LOCAL model per
+   supporting role (`small`/`researcher`/`judge`/`subagent_default`),
+   weighted per role's own priorities, with the round 5b VRAM-aware rule
+   applied to the winner via the existing `roles.vram_aware_override`
+   (never a second mechanism); `main` is never touched. One plain
+   sentence per role names the composite score behind the choice; `--apply`
+   saves the proposal as an ordinary role template through the EXISTING
+   `halo roles template import` path. The `/model` picker shows a saved
+   gym score (and tok/s) beside a model when one exists. `halo doctor
+   --local [--model ol:x]` is the 60-second "works out of the box" proof
+   per machine -- load, one real tool call, one structured-output call
+   (the same constrained-decoding path the repair loop uses), and one
+   summary of a fixture transcript, each printed `[PASS]`/`[FAIL]` with a
+   plain reason and the elapsed time, always in that order even after an
+   earlier FAIL; docs point a new local-model user at this command first.
+   17 new tests (`tests/test_gym_5d.py`, `tests/test_gym_propose_5d.py`,
+   `tests/test_doctor_local_5d.py`), hermetic throughout -- never a real
+   model.
+
+   Fix pass (2026-10-04, live run on qwen3.8:27b, a thinking-by-default
+   model): context recall and instruction adherence scored a flat,
+   unexplained 0% -- a 16/32-token output budget left no room for the
+   model's own reasoning before the real answer, so the reply came back
+   genuinely empty (the NDJSON decoder never turns `message.thinking`
+   into checked text in the first place, confirmed with a dedicated
+   pin). Both tasks now request a flat 160-token budget; `halo gym
+   [show] --show-replies` prints each reply-only task's actual excerpt,
+   and the same excerpts are always saved in the result JSON under each
+   metric's own `samples` key, so a future 0% is diagnosable without
+   re-running anything; the needle check is also now case-insensitive. 5
+   more tests pin the thinking/text separation, the new token budget on
+   the wire, the tolerant needle match, and the samples/`--show-replies`
+   round trip -- live-verified against the real qwen3.8:27b daemon
+   (instruction adherence and context recall both went from 0% to 100%).
+7. **`hf:mlx/<org>/<repo>` -- Apple Silicon in-process backend, experimental**
+   (round 5f): an optional extra, `uv tool install "halo-harness[mlx]"`
+   (`pyproject.toml`'s own `mlx` group, an environment marker restricting
+   it to macOS on arm64 -- never attempted on any other platform), adds a
+   route that resolves a Hugging Face Hub repo id straight to a Halo-
+   managed `mlx_lm.server` on a free loopback port: started with `--model
+   <repo>` (mlx-lm downloads/reuses the Hub cache itself on first use; a
+   plain notice names the repo, its approximate cached size when known,
+   and the cache destination), recorded in round 5c's own managed-server
+   registry (`~/.halo/run/local-servers.json`), reused by an EXACT repo-id
+   match on every later use (never the generic `hf:local/*` "most
+   recently started wins" fallback, which would silently hand a specific
+   `hf:mlx/<repo>` ref a DIFFERENT repo's server), stopped when the
+   session that started it exits unless kept, and stoppable by hand with
+   `halo local stop <repo>`. Rides the EXISTING `hf:local/*` tiers
+   end to end (`ModelRef.local=True` alongside the new `ModelRef.mlx=True`):
+   tools, the repair loop and constrained decoding, the `small`-by-default
+   role, the fit arithmetic, tokens/second, `halo doctor --local --model
+   hf:mlx/<repo>`, and `halo gym --models hf:mlx/<repo>,ol:<model>`; on
+   any platform that isn't Apple Silicon, resolving the ref gives exactly
+   one plain sentence, "MLX runs on Apple Silicon only," and nothing else
+   changes (`halo doctor` itself only ever mentions the extra on Apple
+   Silicon too). `halo local serve <repo> --runtime mlx_lm` is the
+   explicit, non-`--model` form of the same route; the `/local` view
+   labels an `mlx-community/*` Hub-cache repo with this exact `hf:mlx/*`
+   ref and the explicit `--runtime mlx_lm` serve hint. `doctor_local.py`
+   gained a second, provider-agnostic request sender (`providers.
+   huggingface_send`, the openai-chat dialect `gym_send.py`'s Ollama-only
+   sender has no branch for) so `halo doctor --local` now also accepts an
+   `hf:local/*`/`hf:mlx/*` `--model`, not just `ol:`. New tests across
+   `tests/test_providers_huggingface_mlx.py`, `tests/test_doctor_local_
+   mlx.py`, and `tests/test_huggingface_mlx_extras.py` -- hermetic
+   throughout (a fake stub process stands in for `mlx_lm.server`, the
+   Apple-Silicon platform check is injectable, and the non-macOS sentence
+   is pinned on this suite's own real, non-Apple-Silicon host); the live
+   check is the owner running [docs/MAC.md](docs/MAC.md)'s quick-start
+   on his own Mac.
+8. **Trust and escalation: enforced offline mode, hybrid escalation, saved
+   versus cloud** (round 5e): `halo --offline`/`/offline on|off`/
+   `network.offline` make the one HTTP choke point (`providers/http.py`'s
+   `open_upstream`/`urlopen_tls`) refuse any connection whose host isn't
+   loopback or an allow-listed local host (every `ollama.hosts`,
+   `huggingface.local_servers`, or managed-local-server-registry entry) --
+   update checks, catalog refreshes, the Hugging Face router, OpenRouter,
+   Databricks, Anthropic, and the WebFetch/WebSearch tools all refuse the
+   same way (one plain sentence, "offline mode: not connecting to
+   \<host\>", never retried); the claude.ai connectors bridge's background
+   discovery is skipped instead (its real network call runs inside a
+   spawned `claude` subprocess, outside this choke point) while an
+   explicit `--refresh`/reconnect still runs it. A new invariant test
+   greps the tracked tree for every raw `urllib`/`http.client` call site
+   and fails on one outside the choke point with no listed, reasoned
+   exception (today's exceptions: the MCP SDK's own httpx/websockets
+   transport for `http`/`sse`/`ws` MCP servers and `mcp/oauth.py`'s token
+   calls -- a separate, user-configured-server concern, not this round's
+   scope). **Hybrid escalation** (`routing.escalation`: `{to, when:
+   [low_confidence, tool_failures, context_overflow], ask}`) is local-
+   first and only ever evaluated on an `ol:`/`hf:local/*`/`hf:mlx/*`
+   session: `low_confidence` reuses the EXACT role-resolution + one-shot-
+   call shape `roles.small` answers already use, pointed at the `judge`
+   role instead (never a new judging mechanism); `tool_failures` counts
+   `is_error` tool results in the current turn; `context_overflow` is the
+   existing compaction-overflow retry path. `ask: true` (default) only
+   notifies; `ask: false` switches for the rest of the turn (the two mid-
+   turn triggers) or from the next model call on (`low_confidence`), with
+   a transcript note; a role-table entry's own `"escalation": false` turns
+   it off per role. `/escalation` shows the policy and this session's last
+   decisions. **Saved versus cloud**: the cost meter also prices an `ol:`/
+   `hf:local/*`/`hf:mlx/*` turn's tokens against the session's escalation
+   target (or, when none is configured, the median price across the
+   package's own vendored fallback catalogs -- no network call, works
+   identically under `--offline`), accumulating the difference; the status
+   bar's cost chip gains a " · saved $x" suffix and `/cost` prints the
+   full breakdown (turns, tokens, the reference price and why). Docs:
+   `docs/CONFIG.md` (`network.offline`, `routing.escalation`),
+   `docs/COMMANDS.md` (`--offline`), `docs/SLASH-COMMANDS.md` (`/offline`,
+   `/escalation`, the extended `/cost`), `docs/MODELS.md` (one section
+   each). Manual verification on the build host: `halo --offline -p
+   "reply with the single word pong" --model ol:qwen3-coder:30b` (loopback,
+   succeeds) and the same with `--model or:<any>` (refuses with the plain
+   sentence).
+9. **`oai:` -- the real OpenAI API, chat completions and a new Responses
+   dialect** (round 5i part 1, `docs/harness/OPENAI-RESEARCH.md`):
+   `oai:<model>` (group "OpenAI API (key)") against `https://
+   api.openai.com/v1`, `OPENAI_API_KEY` auto-enabling it the same way
+   every other single-key provider does; `BRIDGE_OPENAI_BASE_URL`/
+   `HALO_OPENAI_BASE_URL` overrides the base URL for tests. Chat
+   completions (the default) reuses the existing OpenAI-family compat
+   profile unchanged; a NEW `openai-responses` dialect (`POST /v1/
+   responses`: `instructions` for the system prompt, `input` items
+   including `function_call`/`function_call_output` for tool use, tools
+   as flat function items, `reasoning: {effort}`, `store: false` and
+   NEVER `previous_response_id` -- Halo always keeps owning the
+   transcript) is wired into the same three dialect-dispatch points the
+   `ollama` dialect uses, plus the small-model and compaction paths,
+   selected per model by an exact-id table (`gpt-6-astra`, `gpt-6.1-sol`
+   -- exactly the two ids the Responses API reference names as requiring
+   it for function calling, confirmed live 2026-10-04; similarly-named
+   ids the same page does not name are deliberately left on chat
+   completions) and `openai.dialect_overrides` config, either direction.
+   Reasoning is carried for display only, never replayed on the wire
+   (the documented scope cut: `store:false` rules out
+   `previous_response_id`, and encrypted-reasoning-content replay is not
+   implemented this round). `GET /v1/models` cached in its own state
+   file with a TTL (no price/context on this endpoint, confirmed live --
+   those come from a new vendored models.dev `openai` fallback, 53 ids);
+   error shapes (401, 429 `insufficient_quota`, 404) need no new mapping
+   code at all -- the existing OpenAI-shaped error path already produces
+   the real plain sentences, pinned with new tests instead. `/providers`
+   says plainly that the OpenAI API has no public balance endpoint for
+   ordinary keys and shows computed spend instead; the init wizard gets
+   an "OpenAI API (key)" tab (same pattern as Hugging Face's). **No
+   OpenAI key exists on the build host -- every behaviour above is
+   verified against the parameterized `tests/helpers/mock_openai.py`
+   fake only, including a live Read-tool round trip on the Responses
+   dialect; unverified against the real API until a key is available.**
+   Docs: `docs/MODELS.md` ("OpenAI API" section + the ref-form table),
+   `docs/CONFIG.md` (`OPENAI_API_KEY`, `HALO_OPENAI_BASE_URL`, `openai.
+   dialect_overrides`), `docs/COMMANDS.md` (`halo doctor`/`halo
+   providers`).
+10. **`cx:` -- the Codex subscription route, and Codex settings/AGENTS.md
+    read beside Claude Code's** (round 5i part 2, `docs/harness/
+    CODEX-RESEARCH.md`): `cx:<model>` (group "Codex subscription
+    (ChatGPT)") drives the installed `codex` CLI headlessly under the
+    user's own ChatGPT login, mirroring the `cc:` design wherever Codex's
+    architecture allows it: detection is the `codex` binary on PATH plus
+    `codex login status`'s plain-text answer (never `~/.codex/auth.json`;
+    only `"Logged in using ChatGPT"` counts, an API-key/Bedrock/token
+    login points at `oai:` instead); short aliases `astra`/`sol`/`luna`
+    for the documented ChatGPT-plan ids, reusing the `oai:` route's own
+    vendored models.dev catalog for context/output (price is always
+    `None` -- a subscription isn't metered). Unlike `cc:` (one held-open
+    `claude` process fed one stdin line per turn), `codex exec` has no
+    stdin-streaming protocol at all -- each Halo turn spawns a FRESH
+    `codex exec [resume <thread-id>] --json <prompt>` subprocess and runs
+    it to completion, so steering is a documented fallback (queued, sent
+    as its own follow-up `resume` call the moment the current turn ends,
+    repeating until nothing is queued, before one `turn_done` closes the
+    whole chain) rather than a live mid-turn channel. Codex keeps its own
+    native shell/apply_patch tools running in its own sandbox (no flag
+    disables them the way `cc:`'s `--tools ""` does) while Halo's own
+    tool catalog is ADDITIONALLY exposed through an inline `-c
+    mcp_servers.halo.<field>=<value>` override at the SAME bridge `cc:`
+    uses -- a native Codex action is logged read-only after the fact, a
+    real `mcp_servers.halo` call is dispatched through Halo's own
+    permission engine/hooks exactly like every other route's tools; the
+    bridge's own token/socket address ride on the subprocess's
+    environment, forwarded to the MCP child by name
+    (`mcp_servers.halo.env_vars`), never spelled out on Codex's command
+    line. Halo's permission mode maps onto `approval_policy`/
+    `sandbox_mode`: bypass/auto -> `never`/`danger-full-access`, default
+    -> `on-request`/`workspace-write`, manual -> `untrusted`/`read-only`.
+    Also reads (never writes) Codex's own `config.toml` (`$CODEX_HOME`
+    plus a trusted project's `.codex/config.toml`, a small hand-rolled
+    reader -- this repo ships no TOML dependency) and its `AGENTS.md`
+    chain (global override-or-plain, then the SAME rule from the git
+    root down to cwd, 32 KiB cap -- a DIFFERENT walk than Halo's existing
+    CLAUDE.md/AGENTS.md loader, kept deliberately separate) into one
+    merged view beside Claude Code's own settings/CLAUDE.md
+    (`providers/settings_merge.py`): non-overlapping entries merge (a
+    Codex-only MCP server joins the list, its AGENTS.md is its own
+    block); overlapping entries follow halo's own config, then Claude
+    Code, then Codex, except on a live `cx:` session where Codex's own
+    model/reasoning-effort/approval-and-sandbox policy leads;
+    `settings.primary: "claude"|"codex"` flips the Claude-Code-vs-Codex
+    half of that order. New `/settings [primary claude|codex]` command,
+    `halo doctor`'s `codex_settings` line, and the init wizard's
+    "Settings sources" step all show/set the same merged view. **No one
+    is logged into Codex on the build host -- every behaviour above is
+    verified against the parameterized `tests/helpers/fake_codex.py`
+    only, including a real MCP tool-call round trip through the bridge
+    and the steer-fallback's follow-up `resume` call; unverified against
+    the real CLI until a ChatGPT login is available.** Docs:
+    `docs/MODELS.md` ("Codex subscription (ChatGPT)" and "Codex settings
+    and instructions" sections + the ref-form/alias tables),
+    `docs/CONFIG.md` (the Codex-files section, `settings.primary`),
+    `docs/COMMANDS.md` (`halo models --cx`, the init wizard tabs/step),
+    `docs/SLASH-COMMANDS.md` (`/settings`, the `/providers` row).
+
+## [2.0.2] - 2026-10-04
+
+W7 rounds 1-7 of the 2.0.2 brief (F, A, B, C, D, E, then the init wizard):
+the terminal tab title fix, roles v2, organizations, sub-agent visibility
+and scale, MCP repair actions, Qwen tool calling at work, `halo update`,
+and one init wizard with Back/Skip/Next buttons plus Roles/Organizations
+setup screens.
+
+1. **Terminal tab title stays `halo`**: root cause confirmed by reading
+   every `claude`-spawning call site -- each one pipes the child's stdout/
+   stderr for its own parsing but never detaches it from the shared
+   console/tty, and a real `claude` binary sets the console/terminal title
+   itself at startup through a side channel independent of those redirected
+   handles (Windows: the console title is a property of the console object
+   any attached process can set, regardless of its own stdout; POSIX: an
+   OSC 2 write most terminals honour however it arrives) and never restores
+   it -- while Textual's own `BridgeApp.TITLE` has never touched the real
+   terminal at all (it's only ever the in-app Header widget's text).
+   `halo_harness.termtitle` (new) re-asserts `halo` via OSC 2 plus, on
+   Windows, a `SetConsoleTitleW` fallback for legacy `conhost`: at TUI
+   start and on `/resume`, after every `claude` child exits
+   (`agent/cc_process.py`, `providers/cc_models.py`'s probes, `mcp/
+   connectors.py`'s discovery), and once more on the drain tick that
+   follows one, as insurance. Print mode (`-p`) saves whatever title was
+   there at start and restores it at exit; the OSC 2 write itself is
+   skipped on a non-interactive default stdout (never spliced into a
+   `--output-format json/stream-json` consumer's own piped output).
+2. **Roles v2**: `ROLE_NAMES` grows from five to ten -- `planner` (the
+   `Plan` agent's own role now, moved off `reviewer`), `judge` and `tester`
+   (two new built-in agents with matching roles), `compaction` (a rung
+   between `compactionModel` and the session's main model), and
+   `subagent_default` (the last rung before the session model, for a
+   sub-agent with no role at all). A role's table value may now be
+   `{"model", "effort"}` instead of a bare string, applied through the same
+   path the session's own effort takes; `/roles` and the role resolver show
+   `requested (sent as X)` when a role's effort maps to a different one on
+   its route. Any syntactically-valid custom role name (`[a-z][a-z0-9_]*`)
+   a team.json or a loaded template defines is now a valid role everywhere
+   a built-in one is -- `--role NAME=MODEL[:EFFORT]`, `/role <name> <model>
+   [effort]` (new) and `/roles set` all validate against the live set of
+   known names. TUI tab completion for `/role`/`/roles set`'s arguments
+   (role name, then model ref, then effort -- ranked prefix-then-substring,
+   `tui/completion.py::filter_items`) and shell completion (`halo
+   completion bash|zsh|powershell`, reading the cached model catalog with
+   no network call) are both new. Role TEMPLATES
+   (`~/.halo/roles/<name>.json`) are a new named, reusable role table:
+   `/roles templates|save|load|new|edit|show` in the TUI (`edit` opens a
+   form, `tui/dialogs/roles_editor.py`, or `$EDITOR` when `roles.editor:
+   "external"` is configured) and `halo roles template list|save|load|new|
+   edit|show` from the CLI.
+3. **Organizations**: `halo_harness/orgs.py` (new) -- a named, reusable
+   TREE of sub-agent positions (`role`/`model`, `effort`, `instructions`,
+   a tool allowlist, and the OTHER positions it may itself delegate to)
+   saved as `~/.halo/orgs/<name>.json`, with exactly one root (the title
+   nobody else's own `reports` names). Three built-ins ship copied in on
+   first use and are never overwritten once present: `solo` (one
+   orchestrator), `release-flow` (the brief -> implement -> test -> review
+   -> fix -> retest -> report loop this project is itself built with --
+   `Fixer` delegates back to the SAME `Tester` position `Implementer`
+   delegated to earlier, a reused edge rather than a second copy), and
+   `company` (CEO -> three VPs -> one manager each -> two workers each).
+   Running one (`/org run <name> "<goal>"`, `Agent(org=<name>,
+   prompt=<goal>)`, or `halo org run <name> "<goal>"`) turns every position
+   into a real `AgentSpec` and spawns the root through the EXACT sub-agent
+   machinery an ordinary `Agent` call already uses -- each position's own
+   `reports` becomes its `agent_type_restriction` (a call outside it is
+   refused with a clear tool error, the same check a `tools:
+   ["Agent(name)"]`-restricted agent file already enforced, now actually
+   reaching a child for the first time), depth comes from the org's own
+   tree shape instead of the usual depth-1 cap, and concurrency is the new
+   `agents.max_concurrent` config knob (default 4, applies to every
+   session now, org or not) unless the org sets its own. The dock shows a
+   running position as `<title> (<role>)` instead of the bare title
+   (`AgentSpec.dock_label`). `/org list|show|new|load|edit|run` in the TUI
+   (`edit` opens a tree-view-left/fields-right form, `tui/dialogs/
+   org_editor.py`; `load` re-installs a built-in over a local copy) and
+   `halo org list|show|new|edit|run` from the CLI. See
+   [docs/ORGS.md](docs/ORGS.md).
+4. **Sub-agent visibility and scale**: `/tasks`/Ctrl+T (new, `tui/dialogs/
+   tasks.py`) -- a full-height panel listing every running, queued,
+   background and finished sub-agent (and background job) of this
+   session, an org run's own descendants indented under their parent;
+   Enter opens a live, follow-mode transcript viewer of that agent's own
+   log (`PgUp`/`PgDn` scroll, `o` the full pager); a second tab shows the
+   new shared task board. The status bar shows `agents N` (running
+   count) when N > 0. `agents.max_depth` (config, default 1, up to 3; an
+   org's own tree shape overrides it, unclamped) joins `agents.max_
+   concurrent` as a real config knob instead of a hard-coded constant.
+   The Agent tool gains `count` (N identical copies of `prompt`) and
+   `batch` (a list of `{prompt, role?, model?, effort?}` objects) --
+   spawns several sub-agents in one call, capped at `agents.max_
+   concurrent` (excess ones queue, announced to the panel immediately via
+   a new `subagent_queued` event, and start as slots free); the parent
+   waits on all of them and gets back one combined result, one
+   `<task_result>` section per child, in spawn order. A new shared task
+   board (`TaskCreate`/`TaskUpdate`/`TaskList` tools, `~/.halo/sessions/
+   <id>/tasks.json`) lets every sub-agent of a session -- an
+   organization's workers, most usefully -- claim and report on open
+   work; claiming an already-claimed task is refused, never a lost
+   update. Two `/org run` gaps closed on the way: its own result used to
+   land in the transcript as a raw `<task_result task_id="...">` block
+   with no live progress at all (it now streams through the same live
+   sub-agent machinery an `Agent(org=...)` tool call already uses, so the
+   root position -- and everything it delegates to -- gets a real card
+   with its own position title, and the final text is unwrapped before
+   display); and an org run's own spend, though it was already rolling
+   into the session's cost meter correctly, never reached the status bar
+   (nothing re-reads it once a slash command finishes outside the normal
+   turn loop) -- it now pushes a fresh status refresh once the run
+   completes. See [docs/SUBAGENTS.md](docs/SUBAGENTS.md).
+5. **MCP repair actions**: `/mcp` gains a key legend plus the rest of the
+   repair surface -- `R` reconnect every server, `l` login (the 2.0.1
+   OAuth flow for a local `http`/`sse` server, or the claude.ai connector
+   re-auth pointer), `L` a tail of `~/.halo/mcp/<server>.log` (stdio
+   stderr PLUS connect/transport errors, both appended to the one file
+   now, rotated at 1 MB instead of 5), `e` edit the entry at its own line
+   in `$EDITOR`, or an inline form with no `$EDITOR` set (`tui/dialogs/
+   mcp_entry_form.py`, new), `i` an install hint for a command-not-found
+   server guessed from the missing command (`npx`/`node`/`uvx`/`uv`/
+   `pipx`/`pip`/`python`), `d` disable/enable per directory (Claude
+   Code's own `disabledMcpServers`), and `t` a timed `tools/list` round
+   trip. Every failed/needs_auth/pending_approval/disabled row carries
+   its reason and one fix line (`mcp_cli.fix_line_for`, shared code --
+   `halo mcp fix <name> [--apply]` prints and, with `--apply`, runs the
+   exact same diagnosis from the CLI; `halo mcp test <name>` is `t` from
+   the CLI). A server that dies mid-session reconnects on its next use
+   with backoff (1, 2, 4, 8s, then every 30s, giving up after 10 minutes)
+   instead of retrying on every single call; the row shows the attempt
+   count and next retry, and a manual `r`/`R`/`--apply` always resets it.
+   `(McpManager.reconnect_manual`/`McpServerHandle` backoff fields, `mcp/
+   manager.py`.) Fixed along the way: approving a pending `.mcp.json`
+   server from `halo mcp fix --apply` left the live handle's own stale
+   `pending_approval` flag set, so the reconnect that's supposed to
+   follow silently no-op'd every time (the TUI's own `a` action already
+   cleared it; this CLI path now does too). See the `/mcp` section and
+   `halo mcp fix`/`test` in [docs/COMMANDS.md](docs/COMMANDS.md), and the
+   "a server shows failed" walkthrough in
+   [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Two round D fixes
+   on the way out: `e`'s external-editor launch no longer passes vim's
+   own `+<line>` argument to every `$EDITOR` -- `code`/`subl` get their
+   own line syntax now (`--goto file:line`/`file:line`), anything else
+   opens the file plain; `halo mcp learned [--forget <endpoint>]` lists
+   (or clears, before its TTL) a learned per-endpoint provider rule
+   (`providers/learned_rules.py`, round 5's own "tools_rejected" cache).
+6. **Qwen tool calling at work**: the owner's work-VM "openjev qwen"
+   report traced to `databricks-openjev-qwen35-4b`, Databricks' own
+   decision-only "evaluates yes/no, choice, and scoring questions"
+   endpoint -- never a chat/tool-calling model. Classified from DATA
+   (`model_table.json`'s top-level `decision_only_name_patterns` substring
+   net, plus the row's own `capabilities.decision_only`), never a
+   hardcoded id check: the `/model` picker now groups it under "Databricks
+   (judge / decision)" with that one-line description, `/model`/picking it
+   never installs it as the session model -- it's routed to the `judge`
+   role automatically instead, with a plain notice -- and a request that
+   still carries `tools` for it (or for ANY Databricks endpoint a live
+   request already proved rejects tools, learned per-endpoint in
+   `~/.halo/learned-rules.json`, even with no table row at all) gets one
+   clear error naming the model and the judge role instead of a wire 400
+   (`providers.request.ToolsNotSupported`; the live-400 twin lives in
+   `agent/loop.py` via the new `providers.errors.is_tools_rejected_
+   message`). Separately, two leak-repair patterns every Qwen row had
+   declared since H2 but `providers/hooks.py` never implemented are now
+   real: `python_repr_args` (a bare single-quoted Python-dict-literal tool
+   call, no wrapper at all) and `missing_tool_call_opener` (Qwen3-Coder
+   #475's own shape -- a `}</tool_call>` tail with no opening tag).
+   `think_tag_strip` now also strips a bare leading `</think>` with no
+   opener (Qwen3-235B-Thinking-2507/QwQ's documented replay shape), and
+   `providers/request.py`'s Databricks schema simplifier now rewrites a
+   forbidden `prefixItems` keyword to `items` plus a `description` note
+   instead of leaving it on the wire (the 16-key cap was already enforced
+   by the time this round started -- the research doc's claim otherwise
+   was stale, not a live defect). See
+   [docs/harness/QWEN-RESEARCH.md](docs/harness/QWEN-RESEARCH.md),
+   [docs/harness/FAMILY-BASELINE-qwen.md](docs/harness/FAMILY-BASELINE-qwen.md)
+   and the new "Qwen at work" section in
+   [docs/MODELS.md](docs/MODELS.md). Still unconfirmed until the owner
+   sends a real `halo bugreport`: the exact endpoint/HTTP body, whether a
+   400 or a silently-ignored 200 is what it actually returns for a
+   tool-bearing call, and whether `tools` were present on the first
+   failing turn or a later one.
+
+7. **`halo update` and `/update`**: `halo_harness/update.py` (new) knows
+   what's installed (PEP 610 `direct_url.json` -- commit and requested
+   revision for a git install, `git rev-parse`/`git branch` in the
+   checkout for an editable install or a bare PYTHONPATH run) and what's
+   available upstream (`git ls-remote` against GitHub, or the REST API
+   with no git on PATH; cached 24h in `~/.halo/update-check.json`,
+   honouring `update.check: false` and `BRIDGE_TEST_NO_BACKGROUND_NET`).
+   `halo --version` now prints `halo 2.0.2 (c93480d, master)` once the
+   commit is known; `halo doctor` gains an "install" line naming how,
+   from where, and which commit. `halo update --check` reports installed
+   vs. available, the commits between them, and the exact reinstall
+   command, exiting 0/10/1 (up to date/available/unknown); `halo update`
+   (apply, `update_cli.py`) refuses while another halo process looks like
+   it's running on this machine (excluding itself) unless `--force` --
+   a reinstall under a running TUI has broken the install on Windows
+   before -- then runs the command live and reports the before/after
+   commit from a fresh `halo --version`. `/update` in the TUI runs the
+   same check on a worker and opens a dialog with `Enter: update and
+   restart halo` / `Esc: not now`; Enter exits the TUI with a sentinel
+   return code, and `cli.main` -- only now past the TUI, which has
+   already torn down -- runs the update with its output visible and
+   relaunches with `--continue`, the only safe order on Windows (quit,
+   then update, then relaunch). A cached "update available" note shows
+   once a day at TUI startup, off with `update.check`/`update.notify:
+   false`. `scripts/install-halo.ps1` (new) mirrors `install-halo.sh` for
+   Windows PowerShell. README/docs/INSTALL.md gain matching Install and
+   Update sections; docs/INSTALL.md also gains an Uninstall section.
+8. **One init wizard, Roles/Organizations setup screens**: owner report
+   -- "I have to press esc then it exits then brings up the next
+   section ... there should be a button you select to move it forward
+   ... there should be an init step that lets you set up roles first too
+   or skip for later ... a setup screen should pop up to set those
+   features up in addition to doing it within halo ... selection of
+   templates would be good". `tui/dialogs/init_wizard.py` (new): ONE
+   Textual app for the whole interactive `halo init`, `Step N of M: <name>`
+   header, `Back`/`Skip`/`Next` (`Finish` on the last step) footer, Esc
+   asking "Quit setup? What you saved so far stays" instead of ending
+   silently -- Providers (the existing tabs content, moved in), Default
+   model, Permission mode, **Theme** (new: the six built-in themes, a
+   live preview), **Roles** (new: a `roles.enabled` switch, default on,
+   three shipped presets -- `balanced`/`quality`/`local-first` -- with a
+   preview, `Edit roles...` opening the round-1 form inline), **Organizations**
+   (new: an `orgs.enabled` switch, default off, a default-org pick,
+   `Edit org...` opening the round-2 form inline), Linux fixes (skipped
+   automatically when nothing needs fixing), Summary. Both modes gate
+   discoverability only (`/roles`/`/role`/`/org` hidden from `/help`/
+   completion/the rotating tips, the `/tasks` board tab, and the `Agent`
+   tool's own `org=` parameter while off) -- never a functional gate; an
+   org/role invoked by name still works either way. `halo setup
+   [roles|orgs]` (new `setup_cli.py`) and `/setup [roles|orgs]` (`tui/
+   slash.py`) reopen the Roles/Organizations screens later -- a bare
+   `halo setup`/`/setup` chains roles -> orgs -> a short summary; with no
+   TTY, `halo setup` prints the current roles table/orgs list and exits
+   0. The round-1 roles editor and round-2 org editor both gain a "start
+   from a template" picker at their top (roles also gains `Save as
+   template...`). Paperclip-derived additions to organizations (brief
+   3b): **budgets** (`budget_usd` on an org and/or a position, enforced
+   through the existing cost meter -- a hard stop refuses a FURTHER
+   delegation once reached, a warning at 80%; the call already running
+   always finishes) and **goals** (`/org run`'s own goal becomes a root
+   task, `kind: "goal"`, on the shared board before the root position
+   runs; every position is told to link its own tasks to it via
+   `TaskCreate`'s new `parent`). `orgs.default` (`/org run`/`halo org
+   run` with no name) is new too. The rest of brief 3b lands this round
+   too: `halo org install <name> [--force]`/`/org install` copies a
+   shipped built-in or a template saved under `~/.halo/org-templates/`
+   into `~/.halo/orgs/`, refusing to overwrite without `--force` -- each
+   shipped template's own `description` IS its one-line README, shown by
+   `/org list`/`halo org list` (which now prints it) and the wizard's
+   Organizations step (already did, via the tree preview). **Approval
+   gates**: a position with `requires_approval: true` holds its just-
+   finished result as a pending card in the SAME dock a permission/
+   question/plan-review ask already uses (accept, edit the instruction
+   and re-run -- recurses through the ordinary spawn path, capped at 5
+   revisions -- or stop); with no live dock reachable (`halo org run`/
+   `resume` from a plain terminal) it prints the result and waits on
+   stdin instead, the same one-line-read convention `halo init`'s own
+   non-interactive prompts use; `--yes` on `run`/`resume`, or the
+   session's own `dontAsk` permission mode, accepts every gate
+   automatically -- the OPPOSITE of `dontAsk`'s usual "ask converts to
+   deny" rule, since a gate is never a tool-permission ask.
+   **Export/import**: `halo org export <name> [file]` / `import <file>`
+   move an org as plain JSON (import validates role names, reports and
+   budgets, listing every problem); `halo roles template export|import`
+   is the same pair for role templates. **`/org resume`** (and `halo org
+   resume <session-id>`) continues an interrupted run from a session's
+   own saved run record (`<session_dir>/org-run.json`, written when the
+   run starts) and shared task board -- open and claimed tasks become
+   the new root position's own work list, done tasks are named and kept
+   (never redone); the resumed run's own `max_concurrent`/`budget_usd`
+   come from that saved record, not whatever the org definition
+   currently says, so an edit made after the original run started can
+   never change what the resumed run is bound by.
+9. **Release review, two fix rounds**: an Opus review of the whole
+   `v2.0.1..` diff found 3 critical, 15 major and 21 minor defects, each
+   with a check for whether it was actually confirmed by running or
+   tracing the code; both fix rounds closed every one with a test that
+   failed before and passed after. Round A (criticals/majors): `halo
+   init`'s Default model step
+   no longer saves the first catalog row when you press Next without
+   picking (RolesStep's own "Next overwrites your current roles" bug,
+   reintroduced by the wizard, closed the same way); a decision-only
+   endpoint can no longer become the session default from the picker or
+   a remembered model, and the Judge sub-agent runs tool-less against one
+   instead of raising `ToolsNotSupported`. `halo update`/`/update` work
+   on Windows now -- the uv launcher that stays alive as this process's
+   own parent is no longer mistaken for another session, and an
+   editable/checkout install's `git pull` + reinstall runs in the
+   checkout, never whatever directory you happened to be sitting in.
+   `/org run` and a resumed org task no longer take the TUI down on an
+   unresolvable model, org budgets are enforced against a real per-org
+   total instead of a baseline that never moved, a delegating org's
+   nested sub-agent cards keep their own identity instead of all ticking
+   under the root's, org depth is relative to the caller's own depth, and
+   the per-call concurrency cap became one session-wide (or org-wide)
+   gate so two fan-out calls in the same turn -- or a nested one -- can
+   no longer double the configured cap. MCP repair: OAuth login from
+   `/mcp` can be cancelled and the dialog dismissed while it waits, the
+   inline entry form's args field accepts spaces and several lines
+   without splitting them, and `R` skips a server you disabled. The
+   `/tasks` panel refreshes on a worker thread with a cached parse per
+   log file instead of re-reading every agent log on the UI thread every
+   second. Roles: the `small` role is actually consulted now, and
+   `roles.enabled`/`roles.editor` stop being misread as role names.
+   Round B (the minors): the `/mcp` dialog re-reads each server's real
+   state from the Controller after an action instead of guessing it from
+   the result text (a failed `t` no longer flips a row to "connected");
+   `/tasks`' transcript viewer keeps your scroll position while the log
+   keeps growing, and its own board tab is reachable with `orgs.enabled`
+   off too, since the board itself always worked. `count`/`batch` apply
+   the call's own `effort`, reject an unknown `role` by name (listing the
+   known ones, the same as an unknown `subagent_type` already did) on
+   every surface (single spawn, fan-out, resume), and their combined
+   result is capped and spilled to disk like every other tool's instead
+   of returning megabytes raw. `/role`/`/roles set` now land where the
+   model-resolution chain actually treats as winning over an agent file's
+   own `model:`, with the model and effort validated; its own effort
+   completion reads the model you actually typed, not the role name or
+   the literal word "set". An org run's sub-agents list parent-before-
+   children instead of by whatever order their random ids sorted into,
+   and the tasks panel restores your highlighted row by id, not index.
+   The `balanced`/`quality`/`local-first` presets skip a free/negative-
+   priced or tool-less catalog entry instead of picking OpenRouter's own
+   router alias as "the cheapest model". An org's root position is
+   visible to the tasks panel's live cost/phase lookup now (it used to
+   get its own disconnected bookkeeping). `halo update`'s relaunch on
+   Windows waits for a real child process instead of exiting this one
+   outright and racing the console with it. The real terminal title is
+   written through Textual's own output thread while the TUI runs
+   instead of racing its frames directly on `stdout`. A learned "this
+   endpoint rejects tool calls" rule now expires after a day instead of
+   needing a hand edit to `learned-rules.json` to undo. The `Agent` tool's
+   own description lists the live, configured role names instead of a
+   stale fixed five, and no longer claims a sub-agent can never delegate
+   further (true only at the default depth). The shared task board
+   survives an interrupted write (atomic replace) and keeps a corrupted
+   one aside instead of silently replacing it with a single fresh task.
+   A long tool-less Qwen answer no longer costs seconds in a leak-
+   pattern regex. `halo org edit`/`halo roles template edit` no longer
+   crash with a bare traceback when `$EDITOR` is multi-word (`"code
+   --wait"`) or needs Windows' own PATH extension resolution. `halo
+   completion` lists `update`/`org`/`setup` (missing outright before) and
+   its zsh/bash scripts handle a `:`-bearing model ref correctly. The org
+   editor's Ctrl+D (delete position) now reaches the screen even with a
+   field focused -- Textual's own Input/TextArea binding AND an unrelated
+   app-level "quit on empty/delete-right in the chat box" binding were
+   both intercepting it first -- and a bare model alias typed into "Role
+   or model" (`haiku`, `sonnet`) saves as a model, never a role that then
+   fails validation. `/org run <name> "<goal>"` strips the quotes from
+   the goal instead of sending and recording them literally.
 
 ## [2.0.0] - 2026-10-01
 
@@ -139,7 +940,7 @@ alias notices below -- every 1.0.1 fix ships exactly as it was.
    Windows' 260-character limit under a long home or cwd, which git itself
    refuses without this setting.
 
-## [2.0.1] - 2026-10-01
+## [2.0.1] - 2026-10-03
 
 The "run from any directory" release: `halo` already discovered a
 directory's `CLAUDE.md` chain, `.claude/rules`, settings, `.mcp.json`,
@@ -352,9 +1153,187 @@ claim with tests, rather than changing that discovery behavior itself.
      instead of slicing a path mid-word.
 10. **Deprecation notice**: the legacy env file `~/.config/vibes-hacker/env`
     (still read as a fallback behind the new `~/.config/halo/env`, see the
-    2.0.0 entry above) stops being read starting in 2.0.3 -- move any
-    credential that still lives only in the old file into the new one
-    (`halo init`, or hand-edit) before upgrading past 2.0.2.
+    2.0.0 entry above) stops being read starting in 2.0.4 (the hardening
+    release) -- move any credential that still lives only in the old file
+    into the new one (`halo init`, or hand-edit) before upgrading past 2.0.3.
+11. **MCP "explain the zero"**: `/mcp`, `halo mcp list` and `doctor` now
+    name every scope they actually searched -- user scope, this
+    directory's project-local scope, this directory's own `.mcp.json`,
+    plugins, managed -- with the count found in each, and name another
+    directory's `.mcp.json` the user's own history remembers (never a
+    bare "0 servers" with no indication where it looked). A server that
+    fails to connect now says why instead of a bare "Failed to connect":
+    command not found on PATH, connection refused on `host:port`, or a
+    disabled transport's own reason.
+12. **claude.ai connectors reachable from any model**: when `claude` is
+    installed and logged into claude.ai, each account-side connector
+    becomes a `connector__<slug>` tool any model can call
+    (`{request, tool, args}`) -- it runs a headless `claude -p` scoped to
+    just that connector's own tools and returns the result through the
+    usual MCP caps, so a connector is no longer usable only from inside a
+    real `claude` session. Discovery runs in the background from `claude
+    mcp list` and the stream-json init line, cached under `~/.halo/mcp/
+    connectors.json`; `/mcp` shows each connector's status and the
+    re-auth step; config `connectors.bridge` and a per-connector
+    `enabled`/`alwaysLoad`; a settings rule written for the Claude Code
+    tool name applies to the bridge tool too.
+    - **Cold start**: with an empty cache, `claude` on PATH and a claude.ai
+      login, `halo mcp list` discovers synchronously (a 20s cap) and shows
+      the connectors without `--refresh`; a print-mode run does the same
+      before its tool catalog freezes only when a connector is actually
+      wanted (`--tools` naming one, a ToolSearch that asks for one, or
+      `connectors.discover_on_start: true`), so a plain `-p` call is never
+      held up by a login probe it did not need.
+    - **Landing live in a running TUI**: when the cache was cold at
+      startup, the background kick used to run before any claude.ai auth
+      status was even cached, so eligibility refused it and a cold-cache
+      TUI never learned its connectors at all for the whole session (no
+      note, 0/0 connectors). The startup worker that primes the auth
+      cache now re-kicks the same once-per-process discovery the moment
+      its own refresh says claude.ai login, and the connector tools join
+      the catalog with one transcript note saying how many arrived,
+      typically within 8s of a cold start. The auth-cache priming `halo
+      mcp list`/`halo providers` do is skipped once the cache is already
+      fresh, so repeated CLI calls stop re-running the `claude` probe
+      every time.
+13. **`halo mcp serve`, importing from Claude Desktop, and a real OAuth
+    login**: no `mcp` subcommand is a stub any more. `halo mcp serve` runs
+    Halo's own built-in tools as a stdio MCP server (driven by a real MCP
+    client in the tests); `add-from-claude-desktop` imports Claude
+    Desktop's own server config; `reset-project-choices` clears a
+    project's remembered `.mcp.json` approvals. `halo mcp login`/`logout`
+    run a generic OAuth 2.0 authorization-code flow with PKCE, endpoint
+    discovery and a local callback, naming no vendor, with tokens under
+    `~/.halo/mcp/oauth/`; the tokens are now actually used -- http/sse
+    servers send `Authorization: Bearer <access_token>`, a 401 refreshes
+    the token once, and otherwise says to run `halo mcp login <name>`
+    (tested against a local fake authorization server, never a real one).
+14. **14 more hook events, and the flag list finished**: Setup,
+    UserPromptExpansion, MessageDisplay, TaskCreated/TaskCompleted
+    (sub-agents), StopFailure, InstructionsLoaded, ConfigChange,
+    CwdChanged, DirectoryAdded, FileChanged, WorktreeCreated,
+    PreModelSwitch and PostModelSwitch now fire from their natural
+    trigger points with documented payloads; only WorktreeRemoved
+    (nothing removed a worktree yet -- fixed two parts later, see below)
+    and the two MCP elicitation events (no elicitation protocol in this
+    build) stayed accepted-and-ignored, and the README/handbook/
+    architecture doc say exactly that. No CLI flag is left "not yet": 21
+    are real (`--restricted`, `--brief`, `--environment`, `--autocompact`,
+    `--include-hook-events`, `--permission-prompt-tool`,
+    `--permission-prompts`, `--plugin-dir`/`--plugin-url`, `--betas`,
+    `--tmux`, `--worktree`, `--ax-screen-reader`, `--bg`,
+    `--no-session-persistence`, `--prompt-suggestions`,
+    `--fallback-model`, `--forward-subagent-text`,
+    `--exclude-dynamic-system-prompt-sections`, `--system-prompt-
+    snapshot`) and 7 cloud/IDE flags are declared not applicable with a
+    one-line reason each (`--cloud`, `--teleport`, `--remote-control` and
+    its prefix, `--from-pr`, `--ide`, `--safe-mode`, accepted with no
+    effect); `docs/COMMANDS.md` documents each one.
+15. **Skills inside sub-agents, their asks reach the dock, `/rewind`
+    covers files a step touched**: a skill with `context: fork` or
+    `agent` runs in a general-purpose sub-agent instead of reporting "not
+    implemented"; AskUserQuestion and permission asks from a child --
+    including a background one -- reach the parent's own pending dock
+    tagged with the agent's name and are answered there. `/rewind`/
+    `/undo`/`/redo` now cover more than the logged conversation: a step's
+    own new files are deleted on undo and recreated on redo, NotebookEdit
+    changes are shadow-copied, and a Bash command's new files in a git
+    repo are captured through a status diff; a Bash shadow also captures
+    TRACKED files a command modified, not just new ones, so rewinding
+    past an edit a command itself made restores them too (a file already
+    dirty before the command ran is a documented limit either way).
+16. **Clipboard quality, and Ctrl+C says what it does**: copying from the
+    transcript or a tool card now copies the widget's own SOURCE text,
+    never the screen cells -- trailing spaces gone, soft wraps intact,
+    the transcript's own glyphs/borders removed, a multi-widget selection
+    joined in document order, a code block kept exactly as written, `\n`
+    line endings everywhere (`clipboard.crlf` for CRLF). New copy actions
+    need no mouse: `/copy` (last reply), `/copy code`/`/copy code N`
+    (fenced blocks), `/copy tool` (last tool output), `y` on a focused
+    tool card or in the pager (its full content), `Y` (the whole current
+    turn); every copy ends with a toast naming what was copied and how
+    many characters. OSC 52 is trusted only where the terminal actually
+    relays it (Windows Terminal yes, a plain conhost window no); a real
+    `clip.exe` fallback (UTF-16 input) exists on Windows and `pbcopy` on
+    macOS, and `doctor` names the mechanism actually in use. Ctrl+C's
+    toast reads "Press Ctrl+C again to exit halo (your terminal stays
+    open)"; config `quit_on_double_ctrl_c: false` turns the double-press
+    exit off entirely, so only `/exit`, Ctrl+D or Ctrl+Q leave, and the F1
+    help, TROUBLESHOOTING.md and the input placeholder's own rotating tip
+    all say so.
+17. **Fallback models, background-job hooks, plugin skills/hooks/MCP,
+    worktree removal, and more flags wired for real**: `--fallback-model`
+    is wired into the retry ladder -- when a retryable provider failure
+    exhausts its retries, the session swaps to the next fallback model
+    for the rest of the turn with one notice naming both. Background
+    Bash jobs now fire TaskCreated/TaskCompleted with the job id,
+    command, status and exit code, the way sub-agents already did.
+    `--plugin-dir`/`--plugin-url` load a plugin's skills, hooks and MCP
+    servers as well as its agents, following Claude Code's own plugin
+    layout; plugin skills are namespaced `<plugin>:<skill>` and reachable
+    by the Skill tool, not only from the slash menu. `halo worktree rm
+    <path>` and config `worktree.remove_on_exit` fire WorktreeRemoved --
+    removal itself had never worked at all before this: it ran `git` from
+    a directory that was not a working tree, and on Windows from inside
+    the very directory being deleted. `--betas` sends the
+    `anthropic-beta` header only on Anthropic-family routes (it had been
+    leaking to OpenRouter and Databricks chat requests); `--prompt-
+    suggestions` also works in the stream-json multi-turn loop; `halo bg
+    list|logs|stop|rm` manage a detached `--bg` run.
+18. **Process-group kills can no longer hit the harness itself**: `halo bg
+    stop`, the Bash tool's timeout kill and the `cc:` child's interrupt/
+    kill now signal a child's own process group only when that group is
+    not the harness's own, and a PID sharing our group is killed alone;
+    killed children are reaped, so a zombie no longer counts as "still
+    alive". Found because a new `halo bg stop` test spawned a plain child
+    inside the suite runner's own process group and, on Linux, killed the
+    runner, its wrapper shell and the whole SSH session every time the
+    suite reached that test. The suite runner is now line-buffered too,
+    so a run killed mid-way still leaves its true last line on disk
+    instead of a stale module header stuck in a block buffer.
+19. **A runbook for the checks that need a real terminal or login,
+    steadier suites, and a privacy scan test**: `docs/harness/
+    LIVE-CHECKS.md` lists exactly what to run and look for the checks a
+    mock upstream can't stand in for (a real terminal, a real `claude`
+    login, a real MCP server), gated behind `HALO_LIVE=1` in
+    `tests/live/`. The `cc:` session, CLI-flag and chrome/playwright smoke
+    tests now poll with a bounded deadline instead of a fixed sleep, so a
+    loaded machine makes them slower, never red; the flaky first-run
+    `cc:` session case on Linux is covered by three standalone repeats in
+    the Kali run. Fixture homes, example paths and sample MCP server
+    names across tests and docs are synthetic now, never a real machine/
+    project/hobby-gear name; `tests/test_privacy_scan.py` fails the suite
+    outright if one of those comes back, or a real LAN address, home path
+    or key-shaped string does (`tests/privacy_scan_allowlist.txt` holds
+    the deliberate test fakes) -- it walks the tree directly rather than
+    erroring out on a copy with no `.git` (the Kali suite runs from a tar
+    copy).
+20. **Two rounds of release review, before the tag**: a full read of the
+    whole 2.0.1 diff against every part's own commit message. Round A
+    found 2 critical and 16 major defects -- among them a
+    `--no-session-persistence` run with `-c`/`--resume` that deleted the
+    very conversation it resumed, the TUI silently ignoring
+    `--restricted`/`--fallback-model`/`--plugin-dir`/`--betas`/`--brief`/
+    `-w`, a cross-provider `--fallback-model` that sent the fallback's
+    request with the PRIMARY provider's key, and `isolation: worktree`
+    sub-agents whose edits landed outside their own permission scope --
+    each fixed with its own pinning test, alongside the
+    `--restricted`/`--betas`/`--brief` parity gaps above. Round B found 20
+    more minors and the remaining 7 parity gaps: a background sub-agent's
+    own dock card that never finalized once it actually finished; a
+    steer-restart that silently inflated the next real retry's backoff; a
+    `git worktree remove --force` fallback that discarded a session's own
+    uncommitted edits on exit; `@server:uri`/`git@host:path` false
+    positives in the unresolved-mention warning (and that warning finally
+    reaching the user, not just the model, as documented); Windows
+    Ctrl+V/`clip.exe` mangling non-ASCII paste/copy text; a connector call
+    missing `--no-session-persistence` and running in the wrong cwd; an
+    `--autocompact` flag a settings.json `env` block could silently
+    outrank; and several telemetry, doctor and timeline-text fixes.
+    Docstrings that quoted the owner by name or a private project
+    directory were reworded, and the privacy scan above now also checks,
+    case-insensitively, for the owner's hobby-gear tool names and the
+    owner's own name.
 
 ## [1.0.1] - 2026-09-30
 

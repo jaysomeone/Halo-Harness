@@ -87,6 +87,36 @@ def test_theme_rejects_invalid_name_without_raising(ctx: Ctx):
 
 
 @test
+def test_org_install_facade_path(ctx: Ctx):
+    """Halo 2.0.2 round D (brief item 1): `/org install <name> [--force]`
+    through the SAME headless-text fallback `/org list`/`show`/`new`
+    already use (`commands/builtins.py::_cmd_org`) -- no live Session
+    attached (`facade.session` is None, same as every other test in this
+    file), so `state_dir` falls through to `bridge_home()`, scoped here
+    via `BRIDGE_TEST_HOME` like every other hermetic test must."""
+    import tempfile
+    fh = build_fake_home()
+    facade, registry = _facade_for(fh)
+    old = os.environ.get("BRIDGE_TEST_HOME")
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="org-install-facade-")))
+    try:
+        out = registry.resolve("org").run("install solo", facade)
+        ctx.check(f"installs cleanly, got {out!r}", "Installed" in out and "solo" in out)
+        out2 = registry.resolve("org").run("install solo", facade)
+        ctx.check(f"refused the second time without --force, got {out2!r}",
+                  "Could not install" in out2 and "--force" in out2)
+        out3 = registry.resolve("org").run("install solo --force", facade)
+        ctx.check(f"--force succeeds, got {out3!r}", "Installed" in out3)
+        out4 = registry.resolve("org").run("install", facade)
+        ctx.check(f"no name shows usage, got {out4!r}", "Usage:" in out4)
+    finally:
+        if old is None:
+            os.environ.pop("BRIDGE_TEST_HOME", None)
+        else:
+            os.environ["BRIDGE_TEST_HOME"] = old
+
+
+@test
 def test_add_dir_without_args_shows_usage(ctx: Ctx):
     fh = build_fake_home()
     facade, registry = _facade_for(fh)

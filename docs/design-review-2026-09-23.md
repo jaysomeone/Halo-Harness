@@ -19,7 +19,7 @@ Claude Code 2.1.280 binary)* were checked on the home box.
 ## 1. Defects and gaps in the plan
 
 1. **Too many tools — blocks the home box.** With tool search off every request carries all of
-   rolo's 250+ tools; OpenAI-style APIs cap at 128 functions → 400 on every turn.
+   the owner's 250+ tools; OpenAI-style APIs cap at 128 functions → 400 on every turn.
    - Launcher sets `ENABLE_TOOL_SEARCH=true` for openai-chat refs.
    - Bridge sends the non-deferred tools plus every name found in any
      `{"type":"tool_reference"}` block in the history (key `tool_name` or `name`).

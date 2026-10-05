@@ -58,9 +58,17 @@ def cmd_worktree(argv: list) -> int:
         return 1
     from halo_harness.worktree import remove_worktree
 
-    if not remove_worktree(path):
-        print(f"halo worktree rm: failed to remove {path} -- run `git worktree list` to inspect it",
-              file=sys.stderr)
+    removed, reason = remove_worktree(path)
+    if not removed:
+        if reason == "dirty":
+            # review finding 28: never force-removed -- those uncommitted
+            # changes are real, and discarding them is not this command's
+            # call to make silently.
+            print(f"halo worktree rm: {path} has uncommitted changes -- kept (inspect or commit/discard "
+                  f"them yourself, then run this again)", file=sys.stderr)
+        else:
+            print(f"halo worktree rm: failed to remove {path} -- run `git worktree list` to inspect it",
+                  file=sys.stderr)
         return 1
     _fire_worktree_removed(Path.cwd(), path)
     print(f"halo: removed worktree {path}", file=sys.stderr)

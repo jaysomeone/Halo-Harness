@@ -107,10 +107,34 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) for how compaction/retries work.
 
 ## MCP servers
 
-- **A server shows `✗ Failed to connect`** -- `halo mcp get <name>`
-  prints the real underlying error (a missing binary, a bad URL, ...);
-  `halo doctor`'s MCP line shows the eager/lazy split and each lazy
-  server's cache age.
+- **A server shows `✗ Failed to connect`** (or `! Needs authentication`/
+  `⏸ Pending approval`) -- the round4 walkthrough: open `/mcp`, highlight
+  the row. The line already names WHY (command not found on PATH,
+  connection refused on host:port, or the approval/auth state) and ends
+  with a `-> fix:` line naming the ONE thing to do -- the same text `halo
+  mcp fix <name>` prints from a script. From there:
+  - **command not found on PATH** -- press `i` for a copyable install
+    line (guessed from the missing command: `npx`/`node`/`uvx`/`uv`/
+    `pipx`/`pip`/`python`), or run `halo mcp fix <name>` to see it without
+    opening the dialog.
+  - **pending approval** (a `.mcp.json` project server) -- press `a`, or
+    `halo mcp fix <name> --apply`.
+  - **needs authentication** (a local `http`/`sse` server, or a claude.ai
+    connector row) -- press `l` (the 2.0.1 OAuth flow, or the connector
+    re-auth pointer), or `halo mcp fix <name> --apply`.
+  - **anything else** -- press `t` to re-test it (a timed `tools/list`
+    round trip) and `L` to read its log (`~/.halo/mcp/<name>.log`, stdio
+    stderr plus connect/transport errors, rotated at 1 MB); press `e` to
+    open its entry at the right line in `$EDITOR`, or fill in an inline
+    form with no `$EDITOR` set, if the command/args/url itself is wrong.
+  - If it died PARTWAY through the session (it was connected, then
+    wasn't) -- it reconnects on its own next use, backed off (1, 2, 4, 8s,
+    then every 30s, giving up after 10 minutes of failure); the row shows
+    the attempt count and next retry. `r`/`R` always reconnect right now
+    and reset that backoff, since asking by hand is itself the reset.
+  - `halo mcp get <name>`/`halo doctor`'s MCP line are the read-only,
+    non-interactive versions of the same information (status/error, and
+    the eager/lazy split with each lazy server's cache age).
 - **A tool isn't visible to the model** -- check whether it's a deferred
   tool from a *lazy* server that hasn't been called yet (`ToolSearch` finds
   it by name/description without connecting anything), or excluded by
@@ -441,6 +465,43 @@ over whatever was actually configured. A fresh box with nothing chosen now
 writes nothing for `permission_mode` (so `settings.json`'s own
 `permissions.defaultMode` keeps working); `model` only ever falls back to
 a guess when there is truly no existing value yet.
+
+## A shortcut does nothing on macOS
+
+- **Cmd+E (or any other Cmd+ chord) does nothing** -- a terminal app owns
+  every Cmd shortcut itself; it never reaches halo (or any other program
+  running inside it) at all. Use the Ctrl+ form instead (Ctrl+E for the
+  prompt-draft editor, etc.) -- see the F1 help for the full list.
+- **Ctrl+E (or another shortcut) still does nothing with the Ctrl+ form**
+  -- first confirm whether halo receives the keystroke AT ALL: run
+  `/keys` and press it. If nothing shows up there either, your terminal
+  is eating it before halo ever sees it; if it DOES show up (or Ctrl+E's
+  own action fires), halo is receiving it fine and the problem is
+  elsewhere. `halo doctor` also prints `TERM_PROGRAM`/`TERM` (the
+  `terminal_program` line) so you can tell which terminal app halo thinks
+  it's running under.
+- **VS Code's own integrated terminal specifically** -- it intercepts a
+  number of chords (Ctrl+E included) before they ever reach the program
+  running inside it. `halo doctor` detects `TERM_PROGRAM=vscode` and
+  prints both of the following; add either one to your User Settings
+  (JSON) (Cmd+Shift+P -> "Preferences: Open User Settings (JSON)"):
+  - `"terminal.integrated.sendKeybindingsToShell": true` -- the blanket
+    fix, forwards keybindings to the shell/program in general.
+  - `"terminal.integrated.commandsToSkipShell": ["-<command owning
+    ctrl+e>"]` -- releases just that one key instead of every
+    keybinding; find the exact command id in Keyboard Shortcuts
+    (Cmd+K Cmd+S), search `ctrl+e`.
+  Either way, re-check with `/keys` afterward to confirm halo now
+  receives it.
+- **iTerm2 (or another terminal with its own profile key mappings)** --
+  check Preferences -> Profiles -> Keys for a mapping that swallows the
+  chord before halo's own terminal input ever sees it; remove or
+  reassign it there.
+- **No keyboard shortcut at all for a command that has a slash-command
+  twin** -- `/editor` opens the prompt draft in `$VISUAL`/`$EDITOR`
+  exactly like Ctrl+E (useful when a terminal never delivers that chord
+  at all, since typing a command always works); `$EDITOR`/`$VISUAL` unset
+  shows a toast either way (`doctor`'s own `editor` line names the fix).
 
 ## Windows specifics
 

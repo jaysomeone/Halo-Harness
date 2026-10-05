@@ -107,6 +107,7 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
         cost_str = f"${cm.total_usd:.4f}" if cm.has_cost_data else "n/a (provider does not report cost)"
         line = f"Total cost: {cost_str} across {cm.turns} turn(s) (model: {facade.model_ref or '?'})"
     else:
+        cm = None
         line = (f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s) "
                 f"(model: {facade.model_ref or '?'})")
     # H15 part 2 addendum 4: the same OpenRouter balance figure the status
@@ -114,7 +115,73 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
     # line) when no fetch has ever succeeded (not enabled, or offline).
     from halo_harness.providers.openrouter_account import format_balance_line
     balance_line = format_balance_line()
-    return f"{line}\n{balance_line}" if balance_line else line
+    lines = [line]
+    if balance_line:
+        lines.append(balance_line)
+    # Halo 2.0.3 round 5e: "saved versus cloud" breakdown -- omitted
+    # entirely on a cloud-model session (cm.saved_turns stays 0 there,
+    # `CostMeter.add_savings` never even tries -- see its own docstring).
+    if cm is not None and cm.saved_turns:
+        price_in_per_m = cm.saved_price_in * 1_000_000 if cm.saved_price_in is not None else None
+        price_out_per_m = cm.saved_price_out * 1_000_000 if cm.saved_price_out is not None else None
+        lines.append(
+            f"Saved vs cloud: ${cm.saved_usd:.4f} across {cm.saved_turns} turn(s) -- reference price "
+            f"${price_in_per_m:.2f}/M in, ${price_out_per_m:.2f}/M out ({cm.saved_price_source})"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_offline(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 5e: `/offline` (bare) reports the current state and
+    its source; `/offline on|off` persists `network.offline` to
+    `~/.halo/config.json` (`/offline on|off` is the persisted twin of
+    `--offline`, which only ever sets `HALO_OFFLINE=1` for the one process
+    that passed it) AND sets `HALO_OFFLINE` for THIS process too, so the
+    very next network attempt sees the new state with no restart."""
+    from halo_harness.providers.http import offline_mode_enabled
+    requested = (args or "").strip().lower()
+    if requested in ("on", "off"):
+        import os
+        from halo_harness.theme import set_config_value
+        value = requested == "on"
+        set_config_value("network.offline", value)
+        os.environ["HALO_OFFLINE"] = "1" if value else "0"
+        return f"Offline mode: {'on' if value else 'off'} (saved to ~/.halo/config.json)"
+    if requested:
+        return "Usage: /offline [on|off]"
+    now = offline_mode_enabled()
+    import os
+    source = "this process (--offline/HALO_OFFLINE)" if os.environ.get("HALO_OFFLINE") in ("0", "1") \
+        else "~/.halo/config.json (network.offline)"
+    return (f"Offline mode: {'on' if now else 'off'} (source: {source})\n"
+            f"  When on, every network call refuses any host that isn't loopback or an allow-listed "
+            f"local host (ollama.hosts, huggingface.local_servers, a managed local server).")
+
+
+def _cmd_escalation(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 5e: shows `routing.escalation`'s policy and this
+    session's last few decisions -- read-only (the policy itself is set
+    with `halo config set routing.escalation ...`, same as any other
+    nested config key; this command has no sub-actions of its own)."""
+    from halo_harness.agent.escalation import format_decision_line, load_escalation_policy
+    policy = load_escalation_policy()
+    if policy is None:
+        lines = ["No hybrid-escalation policy configured (routing.escalation).",
+                 "  Set one with: halo config set routing.escalation "
+                 '\'{"to": "or:anthropic/claude-haiku-4.5", "when": ["low_confidence", "tool_failures", '
+                 '"context_overflow"], "ask": true}\'']
+    else:
+        lines = [f"Escalation policy: to {policy.to}, when {', '.join(policy.when)}, "
+                 f"ask={'true' if policy.ask else 'false'}"]
+    session = getattr(facade, "session", None)
+    decisions = getattr(session, "_escalation_decisions", None) if session is not None else None
+    if decisions:
+        lines.append("Last decisions this session:")
+        for d in decisions[-5:]:
+            lines.append(f"  {format_decision_line(d)}")
+    elif session is not None:
+        lines.append("No escalation decisions yet this session.")
+    return "\n".join(lines)
 
 
 def _cmd_context(args: str, facade: HeadlessFacade) -> str:
@@ -246,10 +313,6 @@ def _cmd_models(args: str, facade: HeadlessFacade) -> str:
     elif dbx_enabled:
         lines.append("Databricks is not configured -- nothing to refresh (see `halo doctor --work`).")
 
-    if is_enabled("codex_subscription"):
-        from halo_harness.providers.cx_models import models_summary_line
-        lines.append(models_summary_line(state_dir, refresh=wants_refresh))
-
     if is_enabled("openrouter"):
         if wants_refresh:
             from halo_harness.providers.databricks import CATALOG_REFRESH_BUSY, REFRESH_BUSY_NOTE
@@ -324,6 +387,93 @@ def _cmd_mcp(args: str, facade: HeadlessFacade) -> str:
         kind = spec.get("type", "stdio") if isinstance(spec, dict) else "stdio"
         lines.append(f"  {name} ({kind}) - not checked (no MCP client ran this session)")
     return "\n".join(lines)
+
+
+def _cmd_ollama(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 3 (brief item 4): the plain-text fallback (`-p`,
+    or the TUI falling through to `Controller.run_slash`) -- reports
+    exactly like `halo ollama [--host NAME] [--refresh]`; the TUI's own
+    `/ollama` (`tui/slash.py::_handle_ollama`) opens the interactive
+    dialog instead, off the UI thread (a real network read)."""
+    from halo_harness.providers.ollama import resolve_ollama_hosts
+    from halo_harness.providers.ollama_panel import analyze_host, format_host_analysis
+    tokens = (args or "").split()
+    force = "--refresh" in tokens
+    names = [t for t in tokens if t != "--refresh"]
+    hosts = resolve_ollama_hosts()
+    if names:
+        wanted = {n.lower() for n in names}
+        hosts = [h for h in hosts if h.name.lower() in wanted]
+        if not hosts:
+            return f"/ollama: no configured host matching {', '.join(names)!r}"
+    if not hosts:
+        return "No Ollama hosts configured."
+    return "\n\n".join(format_host_analysis(analyze_host(h, force=force)) for h in hosts)
+
+
+def _cmd_local(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 3 (brief item 6) + round 5 (brief item 4): the
+    plain-text fallback (`-p`, or the TUI falling through to `Controller.
+    run_slash`) -- the TUI's own `/local` (`tui/slash.py::_handle_local`)
+    opens the interactive merged-view dialog instead, off the UI thread,
+    the same "print vs. dialog" split `/ollama`/`_cmd_ollama` already use.
+
+    Bare `/local` (or `/local refresh`) prints the SAME merged view `halo
+    local [--refresh]` does (`providers.local_models.build_local_view`/
+    `format_local_view`). Any OTHER argument text answers `args` as a
+    question from `roles.small` (an `ol:` OR `hf:` ref, round 5 widens
+    this from `ol:`-only) via `Session.call_small_model` -- NEVER through
+    `derive_request`/`session.log`, so this never becomes part of the
+    main transcript's context (see that method's own docstring).
+    `facade.session` is the live session when one is running; `None` in a
+    context with no live session at all (e.g. a unit test facade) is
+    reported plainly, never a traceback.
+
+    Round 5c (brief item 1): `/local add <path>` and `/local forget <path>`
+    manage `huggingface.model_dirs` -- persisted immediately (the SAME
+    `providers.local_model_dirs.add_model_dir`/`forget_model_dir` the
+    wizard's "Local models" step calls), never deferred to session end."""
+    stripped = (args or "").strip()
+    if not stripped or stripped.lower() in ("refresh", "--refresh"):
+        from halo_harness.providers.local_models import build_local_view, format_local_view
+        return format_local_view(build_local_view(refresh=bool(stripped)))
+    for verb, fn_name in (("add", "add_model_dir"), ("forget", "forget_model_dir")):
+        prefix = verb + " "
+        if stripped.lower() == verb or stripped.lower().startswith(prefix):
+            path = stripped[len(prefix):].strip() if stripped.lower().startswith(prefix) else ""
+            if not path:
+                return f"/local {verb}: a folder path is required, e.g. /local {verb} ~/models"
+            from halo_harness.providers import local_model_dirs
+            ok, message = getattr(local_model_dirs, fn_name)(path)
+            return f"/local {verb}: {message}"
+    question = stripped
+    session = facade.session
+    if session is None:
+        return "/local: no live session."
+    ref = getattr(session, "small_model_ref", None) or session.model_ref
+    # Round 5b part 2 (brief item 3): "/local <question> follows the same
+    # rule" -- a DIFFERENT local ol: model configured for the small role
+    # that would not fit beside the session's own main model falls back
+    # to the main model for THIS question, same redirection `roles.
+    # vram_aware_override` already applies at config-resolution time (this
+    # is the RUNTIME twin, for whatever `small_model_ref` actually ended
+    # up resolving to this session).
+    if ref is not session.model_ref and ref.provider == "ollama" and session.model_ref.provider == "ollama":
+        from halo_harness.roles import vram_aware_override
+        _value, _reason = vram_aware_override("small", ref.raw, main_ref=session.model_ref)
+        if _reason:
+            ref = session.model_ref
+    if ref.provider not in ("ollama", "huggingface"):
+        return (f"/local needs roles.small set to an ol: or hf: model (currently resolves to {ref.raw!r}); "
+                f"set one via /roles, the model picker's u action, or `ollama.hosts`/`huggingface.*`/roles.small "
+                f"in config.")
+    try:
+        return session.call_small_model(
+            system_text="You are a fast local assistant answering a standalone question directly and "
+                        "concisely. This exchange is not part of any other conversation.",
+            user_text=question, model_ref=ref)
+    except Exception as e:
+        return f"/local: {type(e).__name__}: {e}"
 
 
 def _cmd_memory(args: str, facade: HeadlessFacade) -> str:
@@ -454,16 +604,99 @@ def _cmd_agents(args: str, facade: HeadlessFacade) -> str:
 
 
 def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
-    """V2c (H15): the role table (`orchestrator`/`coder`/`reviewer`/
-    `researcher`/`small`) -- model, endpoint/path type, and price per role,
+    """V2c (H15), extended Halo 2.0.2 (brief A.2/A.5): bare `/roles` --
+    the role table (model, effort, endpoint/path type, price per role),
     read from the LIVE session's own `agent_runtime.role_table`/
     `.cli_role_overrides` (the SAME table `Agent(role=...)`/a role-bearing
     agent actually resolves against) when one is running, exactly like
-    `/agents` above."""
+    `/agents` above. `/roles templates|save <name>|load <name>|new <name>|
+    show <name>` manage `~/.halo/roles/<name>.json` templates; `/roles set
+    <name> <model> [effort]` is the long form of `/role` (below) -- both
+    set ONE role for THIS session only, mutating the live `session.roles`
+    dict in place (the SAME object `session.agent_runtime.role_table`
+    already points at). `/roles edit <name>` has no headless/print-mode
+    form (the TUI form, `tui/dialogs/roles_editor.py`, intercepts it
+    first); here it just names that."""
+    session = getattr(facade, "session", None)
+    state_dir = getattr(session, "state_dir", None) if session is not None else None
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "templates":
+        from halo_harness.roles import list_role_templates
+        names = list_role_templates(state_dir=state_dir)
+        if not names:
+            return "No role templates saved yet. /roles save <name> saves the current table as one."
+        return "Role templates:\n" + "\n".join(f"  {n}" for n in names)
+
+    if sub == "save":
+        if not rest:
+            return "Usage: /roles save <name>"
+        from halo_harness.roles import save_role_template
+        runtime = getattr(session, "agent_runtime", None) if session is not None else None
+        role_table = getattr(runtime, "role_table", None) or getattr(session, "roles", None) or {}
+        ok, problems = save_role_template(rest, {"roles": role_table}, state_dir=state_dir)
+        return (f"Saved the current role table as template {rest!r}." if ok
+                else "Could not save: " + "; ".join(problems))
+
+    if sub == "new":
+        if not rest:
+            return "Usage: /roles new <name>"
+        from halo_harness.roles import save_role_template
+        ok, problems = save_role_template(rest, {"roles": {}}, state_dir=state_dir)
+        return f"Created an empty role template {rest!r}." if ok else "Could not create: " + "; ".join(problems)
+
+    if sub == "show":
+        if not rest:
+            return "Usage: /roles show <name>"
+        from halo_harness.roles import load_role_template, role_value_parts
+        template = load_role_template(rest, state_dir=state_dir)
+        if template is None:
+            return f"No such role template: {rest!r} (or it failed validation)"
+        lines = [f"{template['name']} -- {template['description'] or '(no description)'}"]
+        for role_name, value in sorted(template["roles"].items()):
+            model, effort = role_value_parts(value)
+            lines.append(f"  {role_name}: {model}" + (f" ({effort})" if effort else ""))
+        return "\n".join(lines)
+
+    if sub == "load":
+        if not rest:
+            return "Usage: /roles load <name>"
+        from halo_harness.roles import apply_role_template, load_role_template
+        ok, problems = apply_role_template(rest, state_dir=state_dir)
+        if not ok:
+            return "Could not load: " + "; ".join(problems)
+        # Takes effect immediately for THIS live session too -- without
+        # this, a running session would only pick up the template after
+        # the next full restart (config.json is re-read at session start,
+        # never mid-session).
+        if session is not None:
+            template = load_role_template(rest, state_dir=state_dir)
+            runtime = getattr(session, "agent_runtime", None)
+            role_table = getattr(runtime, "role_table", None)
+            if template and isinstance(role_table, dict):
+                role_table.update(template["roles"])
+            elif template and hasattr(session, "roles"):
+                session.roles.update(template["roles"])
+        return f"Loaded role template {rest!r}."
+
+    if sub == "edit":
+        return ("/roles edit opens the roles editor form in the TUI only -- "
+                "use /roles set <name> <model> [effort] here instead.")
+
+    if sub == "set":
+        return _set_one_role(rest, facade)
+
+    return _render_roles_table(facade)
+
+
+def _render_roles_table(facade: HeadlessFacade) -> str:
     from halo_harness.roles import format_roles_table, resolve_all_roles, resolve_role_table
+    hint = "(tip: /setup roles opens a guided setup screen with templates)\n"
     session = getattr(facade, "session", None)
     if session is None:
-        return "Nothing to show yet: /roles needs a live session to resolve against."
+        return hint + "Nothing to show yet: /roles needs a live session to resolve against."
     runtime = getattr(session, "agent_runtime", None)
     role_table = getattr(runtime, "role_table", None)
     if role_table is None:
@@ -474,7 +707,246 @@ def _cmd_roles(args: str, facade: HeadlessFacade) -> str:
         parent_profile=session.model_profile, state_dir=session.state_dir,
         routes=getattr(runtime, "routes", None),
     )
-    return format_roles_table(rows)
+    return hint + format_roles_table(rows)
+
+
+def _set_one_role(rest: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 brief A.4: `/role <name> <model> [effort]` and `/roles
+    set <name> <model> [effort]` are the same operation -- sets ONE role
+    for THIS session only (never persisted; `/roles save <name>` is the
+    explicit "keep this" action), the same live-mutation pattern
+    `_cmd_effort` above uses for `session.effort`.
+
+    2.0.2 review finding 23: this used to write into `runtime.role_table`
+    (or a throwaway `session.roles` dict when no runtime was attached),
+    which `resolve_agent_model`'s own chain (config/agents_md.py) ranks
+    BELOW both an `--role` CLI override and an agent file's own `model:`
+    -- so `/role coder X` reported success but changed nothing whenever
+    either of those applied, although ROLES.md says `/role` always wins.
+    `runtime.cli_role_overrides` is the rung that chain actually treats
+    as "wins even over the agent file's own model:", and it is never
+    None (a real dict by construction) -- so the `session.roles` escape
+    hatch now only matters for a session with no `agent_runtime` at all."""
+    from halo_harness.model import parse_model_ref
+    from halo_harness.providers.profiles import EFFORT_LEVELS
+    from halo_harness.roles import known_role_names
+    session = getattr(facade, "session", None)
+    if session is None:
+        return "Roles can only be set once a session is running."
+    parts = rest.split()
+    if len(parts) < 2:
+        return "Usage: /role <name> <model> [effort] (or /setup roles for a guided setup screen)"
+    name, model = parts[0], parts[1]
+    effort = parts[2] if len(parts) > 2 else None
+    if effort is not None and effort not in EFFORT_LEVELS:
+        return f"Unknown effort {effort!r} (expected one of {', '.join(EFFORT_LEVELS)})"
+    if model not in ("inherit", "haiku"):
+        try:
+            parse_model_ref(model)
+        except Exception as e:
+            return f"{model!r} is not a valid model reference: {e}"
+    runtime = getattr(session, "agent_runtime", None)
+    overrides = getattr(runtime, "cli_role_overrides", None)
+    if not isinstance(overrides, dict):
+        if not hasattr(session, "roles") or not isinstance(session.roles, dict):
+            session.roles = {}
+        overrides = session.roles
+    known = known_role_names(getattr(runtime, "role_table", None), overrides)
+    if name not in known:
+        return f"Unknown role {name!r} (expected one of {', '.join(known)})"
+    overrides[name] = {"model": model, "effort": effort} if effort else model
+    effort_note = f" (effort: {effort})" if effort else ""
+    return f"Role {name!r} set to {model!r}{effort_note} for this session."
+
+
+def _cmd_role(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 brief A.4: `/role <name> <model> [effort]` -- the short
+    form of `/roles set` (see `_set_one_role`'s own docstring)."""
+    if not (args or "").strip():
+        return "Usage: /role <name> <model> [effort] (or /setup roles for a guided setup screen)"
+    return _set_one_role(args.strip(), facade)
+
+
+def _cmd_org(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 2 (brief B), extended round D (brief items 1/3/4):
+    bare `/org` (and `/org list`) lists saved organizations, each with
+    its own one-line README (its `description`); `/org show <name>`
+    prints its text tree; `/org new <name>` creates a one-position
+    starter; `/org load <name>` re-installs a built-in's shipped
+    definition over a local copy (a plain file write -- unlike `/roles
+    edit`, this never needs the TUI); `/org install <name> [--force]`
+    copies a shipped or saved template into `~/.halo/orgs/`; `/org run
+    <name> "<goal>"` runs it for real against the LIVE session, through
+    the exact same `run_org_call` an `Agent(org=...)` tool call uses;
+    `/org export <name> [file]`/`/org import <file>` move an org as
+    plain JSON; `/org resume` continues THIS session's own interrupted
+    run from its saved record and shared task board. `/org edit <name>`
+    has no headless/print-mode form (the TUI form, `tui/dialogs/
+    org_editor.py`, intercepts it first); here it just names that, like
+    `/roles edit` does."""
+    session = getattr(facade, "session", None)
+    state_dir = getattr(session, "state_dir", None) if session is not None else None
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("", "list"):
+        from halo_harness.orgs import list_orgs, load_org
+        names = list_orgs(state_dir=state_dir)
+        lines = ["Organizations (~/.halo/orgs/):"]
+        for n in names:
+            org = load_org(n, state_dir=state_dir)
+            desc = org.get("description") if org else None
+            lines.append(f"  {n}" + (f" -- {desc}" if desc else ""))
+        return "\n".join(lines)
+
+    if sub == "show":
+        if not rest:
+            return "Usage: /org show <name>"
+        from halo_harness.orgs import describe, load_org
+        org = load_org(rest, state_dir=state_dir)
+        if org is None:
+            return f"No such organization: {rest!r} (or it failed validation)"
+        return describe(org)
+
+    if sub == "new":
+        if not rest:
+            return "Usage: /org new <name>"
+        from halo_harness.orgs import save_org
+        ok, problems = save_org(rest, {"name": rest, "positions": [
+            {"title": "Orchestrator", "role": "orchestrator", "reports": [], "instructions": ""}]},
+            state_dir=state_dir)
+        return (f"Created organization {rest!r} with a single 'Orchestrator' root position." if ok
+                else "Could not create: " + "; ".join(problems))
+
+    if sub == "load":
+        if not rest:
+            return "Usage: /org load <name>"
+        from halo_harness.orgs import reload_builtin_org
+        ok, problems = reload_builtin_org(rest, state_dir=state_dir)
+        return f"Reloaded built-in organization {rest!r}." if ok else "Could not load: " + "; ".join(problems)
+
+    if sub == "install":
+        # Halo 2.0.2 round D (brief item 1): `--force` as a trailing token
+        # (`/org install <name> --force`) -- this facade path is plain
+        # text, not argparse, so it's parsed by hand the same way other
+        # `/org`/`/roles` subcommands here already split their own rest.
+        if not rest:
+            return "Usage: /org install <name> [--force]"
+        tokens = rest.split()
+        force = "--force" in tokens
+        name = next((t for t in tokens if t != "--force"), "")
+        if not name:
+            return "Usage: /org install <name> [--force]"
+        from halo_harness.orgs import install_org_template
+        ok, problems = install_org_template(name, force=force, state_dir=state_dir)
+        return (f"Installed organization template {name!r} to ~/.halo/orgs/{name}.json."
+                if ok else "Could not install: " + "; ".join(problems))
+
+    if sub == "export":
+        # Halo 2.0.2 round D (brief item 3): `/org export <name> [file]` --
+        # plain JSON; no file given returns it as the command's own text
+        # (headless.py prints that directly, same as every other "core"
+        # command's result) rather than silently writing somewhere unasked.
+        if not rest:
+            return "Usage: /org export <name> [file]"
+        import json
+        from halo_harness.orgs import load_org
+        name, _, file_arg = rest.partition(" ")
+        file_arg = file_arg.strip() or None
+        org = load_org(name, state_dir=state_dir)
+        if org is None:
+            return f"No such organization: {name!r} (or it failed validation)"
+        text = json.dumps(org, indent=2, sort_keys=True) + "\n"
+        if not file_arg:
+            return text
+        try:
+            Path(file_arg).write_text(text, encoding="utf-8")
+        except OSError as e:
+            return f"Could not write {file_arg}: {e}"
+        return f"Exported organization {name!r} to {file_arg}."
+
+    if sub == "import":
+        # Halo 2.0.2 round D (brief item 3): `/org import <file>` -- plain
+        # JSON, validated the same way any other org write is (`orgs.
+        # save_org` -> `validate_org`), with every problem listed.
+        if not rest:
+            return "Usage: /org import <file>"
+        import json
+        from halo_harness.orgs import save_org
+        path = Path(rest)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"Could not read {rest}: {e}"
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            return f"{rest} is not valid JSON: {e}"
+        name = data.get("name") if isinstance(data, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            name = path.stem
+        ok, problems = save_org(name, data, state_dir=state_dir)
+        return (f"Imported organization {name!r} from {rest}." if ok
+                else f"{rest} is not a valid organization: " + "; ".join(problems))
+
+    if sub == "edit":
+        return ("/org edit opens the organization editor form in the TUI only -- "
+                "use `halo org edit <name>` ($EDITOR) from the CLI instead.")
+
+    if sub == "run":
+        if not rest:
+            return 'Usage: /org run [<name>] "<goal>" (no name uses orgs.default, see /setup orgs)'
+        from halo_harness.orgs import default_org_name, parse_run_args
+        name, goal = parse_run_args(rest)
+        if not goal:
+            return 'Usage: /org run [<name>] "<goal>" (no name uses orgs.default, see /setup orgs)'
+        if name is None:
+            name = default_org_name(state_dir=state_dir)
+            if name is None:
+                return ('No organization name given, and no default is set -- /org run <name> "<goal>", '
+                         'or set a default in /setup orgs.')
+        if session is None or getattr(session, "agent_runtime", None) is None:
+            return "Organizations can only be run once a session is running."
+        from halo_harness.agent.subagent import run_org_call
+        _events, result = run_org_call(
+            runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
+            tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
+        )
+        return result.content
+
+    if sub == "resume":
+        # Halo 2.0.2 round D (brief item 4): `/org resume` (no argument --
+        # the headless/print-mode form has no "current session id" of its
+        # own to type, unlike `halo org resume <session-id>`) continues
+        # THIS session's own interrupted run, from its own saved record +
+        # shared task board.
+        if session is None or getattr(session, "agent_runtime", None) is None:
+            return "Organizations can only be resumed once a session is running."
+        from halo_harness.agent.subagent import resume_org_run
+        session_dir = session.log.dir / session.log.session_id
+        _events, result = resume_org_run(
+            runtime=session.agent_runtime, tool_id="org-resume", tool_name="Agent", session_dir=session_dir,
+        )
+        return result.content
+
+    return f"/org: unknown subcommand {sub!r} (known: list, show, new, load, install, edit, run, export, import, resume)"
+
+
+def _cmd_setup(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 7: `/setup [roles|orgs]` -- the guided setup
+    SCREEN only exists in the TUI (`tui/slash.py::_handle_setup`
+    intercepts this first, same split as `/roles edit`/`/org edit`); this
+    headless fallback (a bare `-p "/setup"`, or a custom command/skill
+    that happens to invoke it) just names the real surfaces instead of
+    half-implementing a form with no screen to draw it on."""
+    sub = (args or "").strip().lower()
+    if sub == "roles":
+        return "/setup roles opens the roles setup screen in the TUI only -- use `halo setup roles` from the CLI."
+    if sub == "orgs":
+        return "/setup orgs opens the organizations setup screen in the TUI only -- use `halo setup orgs` from the CLI."
+    return ("/setup opens the roles and organizations setup screens in the TUI only -- "
+            "use `halo setup` from the CLI, or `/roles`/`/org` here.")
 
 
 def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
@@ -500,8 +972,15 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
             from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
             if cached_auth_status_is_stale():
                 refresh_cached_claude_auth_status()
-            from halo_harness.providers.cx_models import prime_codex_login_cache
-            prime_codex_login_cache()
+        except Exception:
+            pass
+        try:
+            from halo_harness.providers.codex_models import (
+                cached_auth_status_is_stale as cx_auth_status_is_stale,
+                refresh_cached_codex_auth_status,
+            )
+            if cx_auth_status_is_stale():
+                refresh_cached_codex_auth_status()
         except Exception:
             pass
         # Findings 22/23 (2.0.1): this session's OWN cwd, and (when a real
@@ -512,7 +991,19 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
         # actually launched via --cwd/--settings (same fix `/doctor` already
         # had for --cwd via facade.cwd, below).
         live_env = facade.settings.effective_env if getattr(facade, "settings", None) is not None else None
-        return format_providers_table(provider_rows(cwd=facade.cwd, env=live_env))
+        # Round 5i part 1: when a LIVE session is attached and it's
+        # actually on an `oai:` model with real cost data, show the exact
+        # figure `/cost` would -- the standalone `halo providers` CLI (no
+        # session at all) and a session on any other provider both leave
+        # this None, which `format_providers_table` turns into a plain
+        # "see /cost" pointer instead of a number.
+        openai_spend_line = None
+        session = getattr(facade, "session", None)
+        if session is not None and getattr(session.route, "provider", None) == "openai":
+            cm = session.cost_meter
+            if cm.has_cost_data:
+                openai_spend_line = f"this session: ${cm.total_usd:.4f} across {cm.turns} turn(s)"
+        return format_providers_table(provider_rows(cwd=facade.cwd, env=live_env), openai_spend_line=openai_spend_line)
     action = tokens[0]
     if action in ("enable", "disable"):
         if len(tokens) < 2:
@@ -531,6 +1022,28 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
     return "Usage: /providers [list|enable <name>|disable <name>|setup <name>]"
 
 
+def _cmd_settings(args: str, facade: HeadlessFacade) -> str:
+    """Round 5i part 2: the merged Claude-Code/Codex/Halo settings view
+    (`providers.settings_merge.effective_settings`) -- `halo doctor`'s
+    `codex_settings` line is the one-line summary of the SAME thing; this
+    is the full table. Bare `/settings`: the view. `/settings primary
+    claude|codex`: persists `settings.primary` (flips which of Claude
+    Code's/Codex's own values wins when they disagree and Halo's own
+    config and an active `cx:` session don't already decide it -- see
+    that module's own docstring for the exact chain)."""
+    from halo_harness.providers.settings_merge import effective_settings, render_settings_text, set_settings_primary
+    tokens = (args or "").split()
+    if tokens[:1] == ["primary"]:
+        if len(tokens) < 2 or tokens[1] not in ("claude", "codex"):
+            return "Usage: /settings primary claude|codex"
+        set_settings_primary(tokens[1])
+        return f"settings.primary: {tokens[1]}"
+    session = facade.session
+    session_provider = getattr(getattr(session, "model_ref", None), "provider", None) if session else None
+    view = effective_settings(facade.cwd, session_provider=session_provider)
+    return render_settings_text(view)
+
+
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     """1.0.1 hotfix 19/20. Bare `/effort`: the effective level, its source,
     and this route's own accepted levels (print mode's whole answer; the
@@ -547,7 +1060,7 @@ def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
     Before this fix, `/effort <anything>` was pure decoration: the
     registration was `kind=None` (show-only) and this function ignored
     `args` completely, so typing `/effort medium` printed whatever
-    `facade.effort` was snapshotted as at session start (rolo's own report:
+    `facade.effort` was snapshotted as at session start (the owner's own report:
     "every time I change the effort level it only selects xhigh") --
     `facade.effort` is a one-time snapshot (see the class docstring), never
     updated, which is exactly why the live `facade.session` reference is
@@ -616,6 +1129,35 @@ def _cmd_init(args: str, facade: HeadlessFacade) -> str:
 def _cmd_doctor(args: str, facade: HeadlessFacade) -> str:
     from halo_harness.doctor import run_checks
     lines, _ok = run_checks(cwd=facade.cwd)
+    return "\n".join(lines)
+
+
+def _cmd_update(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round 6: the plain-text fallback (`-p`, or the TUI
+    falling through to `Controller.run_slash` for any reason) -- reports
+    exactly like `halo update --check`, but never applies anything; only
+    the TUI's own `/update` (`tui/slash.py::_handle_update`) can actually
+    offer the update-and-restart dialog."""
+    from halo_harness import update as upd
+    build = upd.installed_build()
+    # Halo 2.0.2 round C: an explicit /update always queries live (5 s
+    # cap, cache only as the fallback on failure) -- see latest_
+    # available's own docstring; this path is explicitly "exactly like
+    # halo update --check", which gets the same treatment.
+    avail = upd.latest_available(upd.default_channel(build), refresh=True)
+    kind = upd.install_kind()
+    lines = [f"installed: {upd.format_version_line(build)}"]
+    if avail.get("commit"):
+        ref = f", {avail['ref']}" if avail.get("ref") else ""
+        lines.append(f"available ({avail.get('channel')}): {avail['commit']}{ref}")
+    else:
+        lines.append(f"available ({avail.get('channel')}): unknown ({avail.get('reason') or 'no reason given'})")
+    lines.append(f"update command: {kind.get('reinstall_cmd') or '(unknown)'}")
+    if build.get("commit") and avail.get("commit") and build["commit"] == avail["commit"]:
+        lines.append("Already up to date.")
+    else:
+        lines.append("Run `halo update` from a shell, or open the full-screen TUI and use /update there "
+                      "to update and restart in place.")
     return "\n".join(lines)
 
 
@@ -748,23 +1290,48 @@ def _cmd_stats(args: str, facade: HeadlessFacade) -> str:
 def _cmd_tasks(args: str, facade: HeadlessFacade) -> str:
     """H8 scope A: lists every background Bash job this session has
     started (via `run_in_background` or a timed-out foreground command
-    moved to the background), most-recently-started last."""
+    moved to the background), most-recently-started last. Halo 2.0.2
+    round 3 (brief C item 1): in the TUI, `/tasks`/Ctrl+T instead opens
+    a live panel covering sub-agents too (plus the shared task board) --
+    `tui/slash.py`'s own handler intercepts it there before this
+    headless-text fallback is ever reached; this plain-text form (used
+    from print mode/the CLI, where no such panel exists) still only ever
+    lists background Bash jobs, with one line pointing at the richer
+    TUI panel added."""
     session = getattr(facade, "session", None)
     registry = getattr(session, "job_registry", None)
     jobs = registry.list_jobs() if registry is not None else []
     if not jobs:
-        return "No background jobs in this session."
+        return "No background jobs in this session. (The TUI's own /tasks/Ctrl+T also shows sub-agents " \
+               "and the shared task board.)"
     lines = ["Background jobs:"]
     for job in jobs:
         cmd = job["command"]
         if len(cmd) > 60:
             cmd = cmd[:60] + "..."
         lines.append(f"  {job['id']}  [{job['status']}]  {job['description'] or cmd}")
+    lines.append("(The TUI's own /tasks/Ctrl+T also shows sub-agents and the shared task board.)")
     return "\n".join(lines)
 
 
 def _cmd_rewind(args: str, facade: HeadlessFacade) -> str:
     return "halo: /rewind needs the interactive TUI (a file's history lives per-session)."
+
+
+def _cmd_editor(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round C (macOS/VS Code terminal brief): the keyboard-
+    independent twin of Ctrl+E -- `tui/slash.py`'s own handler intercepts
+    this in the TUI (opening $VISUAL/$EDITOR on the real prompt draft)
+    before this headless-text fallback is ever reached; there is no
+    prompt draft to edit outside an interactive session."""
+    return "halo: /editor needs the interactive TUI (there's no prompt draft to edit in print mode)."
+
+
+def _cmd_keys(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.2 round C: the key-name tester dialog -- TUI-only (print
+    mode reads no keystrokes at all); `tui/slash.py`'s own handler opens
+    the real dialog there before this fallback is ever reached."""
+    return "halo: /keys needs the interactive TUI (it shows the key name halo receives per press)."
 
 
 def _cmd_undo(args: str, facade: HeadlessFacade) -> str:
@@ -826,7 +1393,7 @@ def _cmd_accounts(args: str, facade: HeadlessFacade) -> str:
             set_active_account("codex", tokens[2], state_dir=state_dir)
         except AccountSetupError as exc:
             return f"/accounts: {exc}"
-        return f"Codex account {tokens[2]!r} will be used when the next Codex app-server starts."
+        return f"Codex account {tokens[2]!r} will be used for new Halo sessions."
     return ("Use /accounts add codex <name> in the interactive Halo interface, or run "
             "`halo accounts add codex --name <name>` in a terminal.")
 
@@ -842,6 +1409,11 @@ _BUILTIN_SPECS = {
     "models": ("core", "List/refresh the Databricks endpoint catalog", "[refresh]", _cmd_models),
     "dbx": ("core", "Alias for /models refresh", None, _cmd_dbx),
     "mcp": ("core", "List configured MCP servers", None, _cmd_mcp),
+    "ollama": ("core", "Per-host Ollama analysis: reachability, loaded models, context, tool-catalog sizing",
+               "[--host NAME] [--refresh]", _cmd_ollama),
+    "local": ("core", "Local models: merged Ollama/Hugging Face/cache view, manage model_dirs, or ask "
+                       "roles.small a question",
+              "[refresh] | add <path> | forget <path> | <question>", _cmd_local),
     "memory": ("core", "Show the auto-memory directory and index", None, _cmd_memory),
     "permissions": ("core", "Show the active permission mode and rule counts", None, _cmd_permissions),
     "plan": ("ui", "Review the current plan", None, _cmd_plan),
@@ -850,11 +1422,22 @@ _BUILTIN_SPECS = {
     "config": ("core", "Show or set a config value", "[key=value]", _cmd_config),
     "skills": ("core", "List discovered skills", None, _cmd_skills),
     "agents": ("core", "List available sub-agents", None, _cmd_agents),
-    "roles": ("core", "Show the role table (model/endpoint/price per role)", None, _cmd_roles),
+    "roles": ("core", "Show the role table, or manage role templates/set a role",
+              "[templates|save|load|new|edit|show <name>|set <name> <model> [effort]]", _cmd_roles),
+    "role": ("core", "Set one role's model/effort for this session", "<name> <model> [effort]", _cmd_role),
+    "org": ("core", "List/show/run organizations (trees of sub-agent positions)",
+             "[list|show|new|load|edit|run [<name>] \"<goal>\"]", _cmd_org),
+    "setup": ("core", "Open the roles/organizations guided setup screens", "[roles|orgs]", _cmd_setup),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:/cx:)", "[list|enable|disable <name>]",
                   _cmd_providers),
-    "accounts": ("core", "List or add subscription accounts", "[list|add codex <name>|use codex <name>]", _cmd_accounts),
+    "accounts": ("core", "List or select subscription accounts", "[list|add codex <name>|use codex <name>]",
+                 _cmd_accounts),
+    "settings": ("core", "Show the merged Claude Code / Codex / halo settings view", "[primary claude|codex]",
+                 _cmd_settings),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
+    "offline": ("core", "Show or change enforced offline mode (network.offline)", "[on|off]", _cmd_offline),
+    "escalation": ("core", "Show the hybrid-escalation policy and this session's last decisions", None,
+                   _cmd_escalation),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
     "export": ("ui", "Export the conversation", None, _cmd_export),
@@ -877,6 +1460,10 @@ _BUILTIN_SPECS = {
     "keybindings": ("core", "Show the active keybindings", None, _cmd_keybindings),
     "tips": ("core", "List tips for using halo's features", None, _cmd_tips),
     "improve": ("ui", "Review self-improvement candidates from recent sessions", None, _cmd_improve),
+    "update": ("ui", "Check for a halo update (the TUI can also update and restart in place)",
+               None, _cmd_update),
+    "editor": ("ui", "Edit the current prompt draft in $VISUAL/$EDITOR (same as Ctrl+E)", None, _cmd_editor),
+    "keys": ("ui", "Open the key tester dialog (shows the key name halo receives per press)", None, _cmd_keys),
 }
 
 

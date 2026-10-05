@@ -146,6 +146,38 @@ entirely.
   servers) and `hooks/hooks.json` (hooks), with `${CLAUDE_PLUGIN_ROOT}`
   expanded to that plugin's own install directory.
 
+## Codex CLI files -- read only, never written
+
+Halo 2.0.3 round 5i part 2 (`providers/codex_settings.py`,
+`providers/settings_merge.py`). Read for `/settings`/`halo doctor`'s
+`codex_settings` line/the init wizard's "Settings sources" step only --
+never consulted when building a request for any OTHER route, and a
+`cx:` session's actual execution reads these files itself (Codex loads
+its own config/AGENTS.md the moment `codex exec` starts, same as Claude
+Code does for a `cc:` session), so there is nothing to feed it from here
+either.
+
+- **`config.toml`**: `$CODEX_HOME/config.toml` (`CODEX_HOME` defaults to
+  `~/.codex`), with `<project-root>/.codex/config.toml` layered over it
+  for a trusted project. Parsed by a small hand-rolled reader (this repo
+  ships no TOML dependency) that handles plain `key = value` scalars and
+  `[table]`/`[table.sub]` headers -- enough for the documented keys
+  (`model`, `model_provider`, `model_reasoning_effort`, `approval_policy`,
+  `sandbox_mode`, `mcp_servers.<name>`, `profiles.<name>`,
+  `shell_environment_policy`, `notify`, `history`), not a full TOML
+  implementation; an unparseable line is skipped, never raised.
+- **`AGENTS.md` chain**: `$CODEX_HOME/AGENTS.override.md` else
+  `$CODEX_HOME/AGENTS.md` (global, first non-empty wins), then the SAME
+  override-or-plain rule walked from the git repository root down to the
+  working directory, concatenated root-to-leaf, capped at
+  `project_doc_max_bytes` (32 KiB default). A DIFFERENT walk than Halo's
+  own CLAUDE.md/AGENTS.md loader (`config/claude_md.py`, a filesystem-root
+  walk with no git-root concept) -- kept as its own, separate reader since
+  the two rules genuinely differ; see `docs/MODELS.md`'s "Codex settings
+  and instructions" section.
+- **`.codex/config.toml`**: a project's own scoped config (MCP servers,
+  mainly), read the same way as the home one and layered over it.
+
 ## halo's own files
 
 None of these are read by Claude Code; nothing here is ever confused with
@@ -158,6 +190,7 @@ the files above.
 | `~/.halo/sessions/<project-slug>/<id>.jsonl` | one append-only session log per session (see `docs/ARCHITECTURE.md`) |
 | `~/.halo/sessions/<project-slug>/index.json` | per-session title/first-prompt/turns/cost, for `/resume`'s picker and `-r <text>` |
 | `~/.halo/models.json`, `dbx-endpoints.json`, `models-dev.json`, `cc-models.json` | cached model catalogs (`docs/MODELS.md`) |
+| `~/.halo/ollama-capabilities.json` | the `ol:` capability probe's durable cache, keyed by model digest (`docs/MODELS.md`'s "Ollama" section) -- the `/api/tags`+`/api/show` catalog itself is cached in memory only, short TTL, never written to disk |
 | `~/.halo/stats-cache.json` | telemetry aggregation cache, keyed by (path, size, mtime) |
 | `~/.halo/mcp/tools-cache/<server>.json`, `~/.halo/mcp/<server>.log` | a lazy MCP server's cached tool list, and its stderr |
 | `~/.halo/mcp-approvals.json` | remembered `.mcp.json` server approvals |
@@ -201,6 +234,23 @@ directly by the features that own them:
 | `quit_on_double_ctrl_c` | `true` | `halo config set quit_on_double_ctrl_c false` turns off the second-Ctrl+C quit (only `/exit`/`Ctrl+D`/`Ctrl+Q` leave) |
 | `clipboard.crlf` | `false` | hand-edited; `true` makes a copy use `\r\n` line endings instead of `\n` |
 | `worktree.remove_on_exit` | `false` | `halo config set worktree.remove_on_exit true`; a `-w/--worktree` session removes its OWN worktree (fires `WorktreeRemoved`) when it ends instead of leaving it on disk |
+| `update.check` | `true` | `halo config set update.check false` turns off `halo update`/`/update`'s own check entirely (never shells out, never touches the network) |
+| `update.notify` | `true` | `halo config set update.notify false` turns off just the once-a-day "update available" startup note (the check itself, and `/update`'s own dialog, still work) |
+| `update.channel` | unset (derived from the install: `stable` when pinned to a `v*` tag, else `main`) | `halo update --channel stable\|main` |
+| `ollama.hosts` | unset (synthesizes one default host from `OLLAMA_HOST`/`127.0.0.1:11434`) | hand-edited; a list of `{name, url, default, keep_alive, max_ctx, num_parallel_hint, api_key, kv_cache_type, ssh}` -- `ol:<model>@<hostname>` selects an entry by `name`; see `docs/MODELS.md`'s "Ollama" section |
+| `ollama.tools_max` | unset (derived from the effective `num_ctx`'s context class -- under 16k: 16, 16k-32k: 32, 32k-64k: 64, 64k+: 128) | `halo config set ollama.tools_max 64`; overrides the `ol:` ProviderProfile's tool-catalog cap outright, still never below however many built-in tools this platform ships -- see `docs/MODELS.md`'s "Ollama" section |
+| `ollama.auto_calibrate` | `true` | `halo config set ollama.auto_calibrate false`; opts out of running `halo ollama calibrate`'s own stepping procedure automatically the first time a model is used on a host with no learned cap -- see `docs/MODELS.md`'s "Fit calibration" section |
+| `ollama.hosts[].kv_cache_type` | unset (`f16`, the conservative default -- never under-estimates memory) | per-host-entry field in `ollama.hosts` (not its own top-level key); `"q8_0"`/`"q4_0"` when that host's own `OLLAMA_KV_CACHE_TYPE` server flag is set to match -- a HINT Halo cannot read back on its own, see `docs/MODELS.md`'s "KV cache type per host" |
+| `ollama.hosts[].ssh` | unset (no ssh GPU read; the fit estimate relies on calibration/`/api/ps` alone) | per-host-entry field, e.g. `"ssh": "user@host"` -- an OPTIONAL read-only GPU probe over ssh for a REMOTE host, never required, never prompted for; see `docs/MODELS.md`'s "Optional ssh GPU read" section |
+| `huggingface.endpoints` | unset (no dedicated endpoints configured) | hand-edited; a list of `{name, url, token, default}` -- `hf:endpoint/<name>` selects an entry by `name`; each entry's own `url`/`token` are used as-is, never the router's `HF_TOKEN`/base URL; see `docs/MODELS.md`'s "Hugging Face" section |
+| `huggingface.bill_to` | unset (no header sent) | `halo config set huggingface.bill_to my-org`; a Team/Enterprise org name sent as `X-HF-Bill-To` on every ROUTER (`hf:<org>/<model>`) request only -- never on an `hf:endpoint/<name>` call |
+| `huggingface.local_servers` | unset (relies on auto-detection alone) | hand-edited, or `halo init`'s Hugging Face tab; a list of `{name, url, api_key, default}` -- `hf:local/<model>@<name>` selects an entry by `name`; `hf:local/<model>` (bare) prefers this list's default entry, else the first AUTO-detected local server; see `docs/MODELS.md`'s "Hugging Face" section |
+| `huggingface.local_probe_ports` | unset (`8080, 8000, 1234` -- see `docs/MODELS.md`) | hand-edited; a list of ints overriding which ports the `hf:local/*` auto-detect sweep probes (loopback only); `HF_LOCAL_PROBE_PORTS` (env) wins over this when both are set |
+| `huggingface.lmstudio_models_dir` | unset (`~/.lmstudio/models`, LM Studio's own documented default) | `halo config set huggingface.lmstudio_models_dir /path/to/models`; only needed when LM Studio's own in-app "Model Storage" setting moved the folder -- see `docs/MODELS.md`'s "LM Studio's own model folder" |
+| `huggingface.model_dirs` | unset (nothing scanned) | `/local add <path>`/`/local forget <path>` (persisted immediately), `halo init`'s "Local models" step, or hand-edited; a list of folder paths Halo scans recursively for `.gguf` files and safetensors/MLX model folders -- see `docs/MODELS.md`'s "Finding and using file-backed models" |
+| `huggingface.preferred_runtime` | unset (Halo picks the only valid runtime per file format: `llama-server` for `.gguf`, `mlx_lm` for safetensors/MLX on Apple Silicon) | `halo init`'s "Local models" step; `"llama-server"` or `"mlx_lm"` -- a `halo local serve --runtime` flag always wins over this; stored for a future round where the same file could genuinely be served more than one way |
+| `openai.dialect_overrides` | unset (the built-in table alone: `gpt-6-astra`/`gpt-6.1-sol` default to the Responses dialect, every other `oai:` id to chat completions) | `halo config set openai.dialect_overrides '{"gpt-5": "responses"}'`; a map of bare `oai:` model id to `"chat"`/`"responses"` -- always wins over the table, in either direction; see `docs/MODELS.md`'s "OpenAI API" section |
+| `settings.primary` | `"claude"` | `/settings primary claude\|codex`, `halo config set settings.primary codex`, or the init wizard's "Settings sources" step; which of Claude Code's or Codex's own setting wins the merged `/settings`/doctor view when BOTH are set and halo's own config and a live `cx:` session don't already decide it -- see `docs/MODELS.md`'s "Codex settings and instructions" section |
 
 ## Every environment variable
 
@@ -248,6 +298,15 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` | consecutive `Stop`-hook-block cap before the turn is force-ended (default 8) |
 | `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | override the `SessionEnd` hook time budget outright |
 | `TMUX` | presence gates `doctor`'s tmux-mouse-mode check |
+| `OLLAMA_HOST` | seeds the `ol:` default host's URL when `ollama.hosts` has no entries configured yet (Ollama's own documented var; a bare `host:port` is normalized to a full URL) |
+| `OLLAMA_API_KEY` | seeds that SAME synthesized default host's `api_key` (Ollama Cloud, `Authorization: Bearer`) -- a configured `ollama.hosts` entry's own `api_key` always wins once one exists |
+| `HF_TOKEN` | Hugging Face router credential (`hf:<org>/<model>`) -- the ONLY accepted name; `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT read (neither was confirmed as a router-specific alias) |
+| `HALO_HF_ROUTER_BASE_URL` (legacy `BRIDGE_HF_ROUTER_BASE_URL`) | override the Hugging Face router base URL (default `https://router.huggingface.co/v1`) -- never consulted for `hf:endpoint/<name>`, which always uses that entry's own configured `url` |
+| `HF_HUB_CACHE` | the Hugging Face Hub local cache directory itself (used as-is); `/local`'s hub-cache scan walks this when set, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub` |
+| `HF_HOME` | the Hugging Face Hub root directory -- `/local`'s hub-cache scan walks `$HF_HOME/hub` when `HF_HUB_CACHE` is unset |
+| `HF_LOCAL_PROBE_PORTS` | comma-separated ints overriding which ports the `hf:local/*` auto-detect sweep probes (default `8080,8000,1234` -- see `docs/MODELS.md`); wins over `huggingface.local_probe_ports` when both are set |
+| `OPENAI_API_KEY` | the real OpenAI API credential (`oai:<model>`) -- the ONLY name read, same as every other provider's single-key env var here |
+| `HALO_OPENAI_BASE_URL` (legacy `BRIDGE_OPENAI_BASE_URL`) | override the OpenAI API base URL (default `https://api.openai.com/v1`) -- the test seam that stands in for the real API everywhere this round's own fake is used |
 
 ## Providers (`halo init --provider ...`)
 
@@ -263,6 +322,29 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 | `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
 | `codex` | `cx:default` | none -- uses your existing `codex` ChatGPT login as-is |
+
+Ollama, Hugging Face, OpenAI API (key) and Codex subscription each get
+their own tab in `halo init`'s INTERACTIVE Providers step (Halo 2.0.3
+round 5 for Ollama/Hugging Face, round 5i for OpenAI/Codex --
+`init_providers.TAB_PROVIDERS`). `halo setup`/`/setup` never reach a
+Providers step at all (their own step list is `roles`/`orgs`/`summary`
+only -- see `docs/COMMANDS.md`'s `setup` section), so none of these tabs
+appear there; only `halo init` itself shows them. None of the four is a
+`halo init --provider`/`--preset` CLI-flag CHOICE, though, and that's
+deliberate: that flag drives the OLDER sequential, non-interactive
+picker, which has no sensible single hardcoded default model for any of
+them (unlike the four providers in the table above, which always have
+one well-known catalog entry) -- the same reason that picker's own
+no-TTY/Textual-failure fallback never offers any of these tabs. Configure
+`HF_TOKEN`/`huggingface.endpoints`/`huggingface.local_servers`/
+`ollama.hosts`/`OPENAI_API_KEY` directly instead on a non-interactive
+box, or run `codex login` directly for Codex (see `docs/MODELS.md`'s
+"Ollama"/"Hugging Face"/"OpenAI API"/"Codex subscription" sections). The
+wizard's
+own "Local models" step (round 5c, right after the Providers step) is
+the SAME kind of interactive-only addition -- `huggingface.model_dirs`/
+`huggingface.preferred_runtime` above are its two config keys; `/local
+add`/`forget` manage the first one from a non-interactive box instead.
 
 ### Default permission mode (1.0.1 hotfix 18)
 
@@ -290,6 +372,72 @@ just before it) only ever writes a value you actually chose THIS run --
 `config.json` unchanged (writing nothing at all for `permission_mode` on a
 fresh box, so layer 4 above still applies) instead of forcing `auto`/an
 arbitrary other-provider's model over it.
+
+### `network.offline` (Halo 2.0.3 round 5e)
+
+`~/.halo/config.json`'s `network.offline` -- `true`/`false`, default
+`false`. Set directly (`halo config set network.offline true`) or through
+`/offline on|off` (persists the same key); `--offline`/`HALO_OFFLINE=1`
+override it for one process WITHOUT persisting anything (checked first,
+ahead of this key). While on, the one HTTP choke point
+(`halo_harness.providers.http`'s `open_upstream`/`urlopen_tls`) refuses any
+connection whose host is not loopback (`127.0.0.1`/`localhost`/`::1`) or an
+allow-listed local host:
+
+- every `ollama.hosts[].url` entry (this section's own LAN-Ollama config),
+- every `huggingface.local_servers[].url` entry,
+- every entry in the managed local-server registry (`halo local serve`'s
+  own `~/.halo/run/local-servers.json` -- always loopback by construction).
+
+Covers update checks, catalog refreshes, the Hugging Face router,
+OpenRouter, Databricks, Anthropic, and the WebFetch/WebSearch tools; the
+claude.ai connectors bridge's own background/cold-start discovery is
+skipped (one DEBUG line) rather than refused, since its real network call
+happens inside a spawned `claude` subprocess, outside this process's own
+choke point -- an explicit `halo mcp list --refresh`/`/mcp` reconnect still
+runs that subprocess regardless (same as running `claude mcp list`
+directly in an offline shell would). A refusal is always one plain
+sentence: `offline mode: not connecting to <host>` -- never retried, never
+treated as a reason to try a `--fallback-model` entry. See
+[COMMANDS.md](COMMANDS.md)'s `--offline` and
+[SLASH-COMMANDS.md](SLASH-COMMANDS.md)'s `/offline`.
+
+### `routing.escalation` (Halo 2.0.3 round 5e)
+
+`~/.halo/config.json`'s `routing.escalation` -- hybrid escalation as an
+explicit policy, local-first:
+
+```json
+{
+  "routing": {
+    "escalation": {
+      "to": "or:anthropic/claude-haiku-4.5",
+      "when": ["low_confidence", "tool_failures", "context_overflow"],
+      "ask": true
+    }
+  }
+}
+```
+
+- `to`: the cloud model ref to escalate to.
+- `when`: any of `low_confidence` (the `judge` role's own one-word
+  confidence check on the local model's final reply -- see `docs/
+  ROLES.md`), `tool_failures` (two or more `is_error` tool results in the
+  current turn), `context_overflow` (the existing compaction-overflow path
+  fired this turn).
+- `ask`: `true` (default) asks -- a plain notification naming the trigger
+  and target, stays on the local model; `false` switches automatically for
+  the rest of the turn (`tool_failures`/`context_overflow`) or from the
+  next model call on (`low_confidence`, since the turn that triggered it
+  is already over), with a transcript note ("escalated to \<ref\>:
+  \<trigger\>").
+
+Only ever evaluated on a local-model session (`ol:`/`hf:local`/`hf:mlx`) --
+never on a cloud-model session. A role-table entry's own `"escalation":
+false` turns it off for every sub-agent built under that role (`halo
+roles`/`docs/ROLES.md`), regardless of this top-level setting. `/escalation`
+shows the active policy and this session's last few decisions. See
+[MODELS.md](MODELS.md)'s "Hybrid escalation" section.
 
 ## What is never written
 

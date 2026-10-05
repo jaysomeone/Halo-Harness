@@ -172,6 +172,14 @@ class Controller:
                 self.session.close_cc()
             except Exception:
                 pass
+            # Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits
+            # unless keep: true" -- same belt-and-suspenders spot
+            # headless.py's own print-mode finally/atexit pair uses.
+            try:
+                from halo_harness.providers.local_runtime import stop_all_managed_servers_except_kept
+                stop_all_managed_servers_except_kept()
+            except Exception:
+                pass
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         return self.exit_code
@@ -225,11 +233,28 @@ class Controller:
 
     def set_model(self, model: str) -> Optional[str]:
         """Resolve `model` and hand the swap to the worker. Returns an error
-        string (nothing sent) when the reference doesn't resolve."""
+        string (nothing sent) when the reference doesn't resolve.
+
+        Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-only/
+        judge endpoint (`databricks-openjev-qwen35-4b` and any other
+        `providers.profiles.decision_only_info` match) is NEVER installed
+        as the session model, from either `/model <ref>` or picking it in
+        the interactive picker (both funnel through this one method --
+        `tui/slash.py`'s `_apply_model`) -- it is routed to the `judge`
+        role automatically instead, and the returned string (shown the
+        same way an unresolvable ref's error already is) says so plainly
+        rather than silently doing nothing."""
         try:
             ref, profile, creds = self.model_resolver(model)
         except Exception as e:  # InvalidModelError and anything else a bad ref can raise
             return f"{e}"
+        if ref.provider == "databricks":
+            from halo_harness.providers.profiles import decision_only_notice
+            notice = decision_only_notice(ref.model)
+            if notice:
+                from halo_harness.theme import set_config_value
+                set_config_value("roles.judge", ref.raw)
+                return f"{notice}\n`judge` role set to {ref.raw} -- the session model is unchanged."
         self.commands.put(events.Command("set_model", {"model_ref": ref, "model_profile": profile, "creds": creds}))
         return None
 
@@ -294,6 +319,15 @@ class Controller:
     def answer_question(self, request_id: str, answer) -> bool:
         return self.session.resolve_question(request_id, answer)
 
+    def answer_approval(self, request_id: str, decision: dict) -> bool:
+        """Halo 2.0.2 round D (brief item 2): `ApprovalCard`'s reply --
+        direct (see class docstring), like `answer_permission`/`answer_
+        question`/`answer_plan`: the worker is parked in `agent/
+        subagent.py`'s `_ask_approval_live`, not polling the command
+        queue. `decision` is `{"action": "accept"|"edit"|"stop",
+        "instruction": str|None}`."""
+        return self.session.resolve_approval(request_id, decision)
+
     def answer_plan(self, approved: bool, *, feedback: str = "", mode_after: Optional[str] = None) -> None:
         """`PlanCard`'s reply (D-Contract `plan_reply{approved, feedback,
         mode_after}`). Direct (see class docstring), like `answer_permission`/
@@ -326,6 +360,55 @@ class Controller:
         except Exception:
             pass
         return rows
+
+    def list_agent_tasks(self) -> list:
+        """Halo 2.0.2 round 3 (brief C): every running/queued/background/
+        finished sub-agent AND background Bash job of this session, for
+        the `/tasks` panel -- sub-agent rows from `agent.subagent.list_
+        agent_task_rows` (read straight off disk: meta.json + each
+        child's own jsonl log, correct even right after a `-c` resume),
+        PLUS one row per `agent.jobs.JobRegistry.list_jobs()` entry
+        (H8 scope A's own docstring already named this exact use: "the
+        `/tasks` slash command's own data source" -- written long before
+        `/tasks` itself existed) adapted into the SAME row shape, `agent_
+        id` prefixed `job-` so it can never collide with a real agent_id
+        and `log_path` left None (no transcript viewer for a bash job --
+        BashOutput/the pager already cover its captured output)."""
+        rows: list = []
+        if getattr(self.session, "agent_runtime", None) is not None:
+            try:
+                from halo_harness.agent.subagent import list_agent_task_rows
+                rows = list_agent_task_rows(self.session)
+            except Exception:
+                rows = []
+        job_registry = getattr(self.session, "job_registry", None)
+        if job_registry is not None:
+            import time
+            now = time.time()
+            for job in job_registry.list_jobs():
+                started = job.get("started_at")
+                rows.append({
+                    "agent_id": f"job-{job['id']}", "task_id": job["id"],
+                    "title": job.get("description") or (job.get("command") or "")[:60], "model": "(bash)",
+                    "status": job.get("status") or "running",
+                    "is_error": job.get("status") in ("failed", "killed"), "tool_count": 0, "cost_usd": None,
+                    "started": started,
+                    "elapsed_s": max(0.0, now - started) if isinstance(started, (int, float)) else None,
+                    "depth": 0, "parent_agent_id": None, "log_path": None,
+                })
+        return rows
+
+    def read_task_board(self) -> list:
+        """Halo 2.0.2 round 3 (brief C): the shared task board (`TaskCreate`/
+        `TaskUpdate`/`TaskList` tools) for the tasks panel's second tab --
+        `tools.task_board.read_board`'s own list of `{id, title, status,
+        owner, notes, result}` dicts, `[]` if nothing has been created yet
+        or this session has no log directory at all."""
+        try:
+            from halo_harness.tools.task_board import read_board
+            return read_board(self.session.log.dir / self.session.log.session_id)
+        except Exception:
+            return []
 
     def list_permission_rules(self) -> list:
         """`[{"action": "allow"|"ask"|"deny", "source": ..., "rule": ...},
@@ -659,7 +742,7 @@ class Controller:
         # picker never shows that wrong answer as if it were real data.
         old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
         from halo_harness.model_display import databricks_row_fields
-        from halo_harness.providers.profiles import load_model_table
+        from halo_harness.providers.profiles import decision_only_info, load_model_table
         model_table = load_model_table()
         # 1.0.1 fixpass finding 1: loaded ONCE for the whole loop below, not
         # once per endpoint (databricks_row_fields's own `live_models_dev`/
@@ -698,14 +781,117 @@ class Controller:
             except Exception:
                 fields = {}
             path_display = PATH_TYPE_DISPLAY.get(path_type, path_type)
+            # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-
+            # only/judge endpoint (databricks-openjev-qwen35-4b and any
+            # future one `decision_only_info`'s own table/pattern match
+            # recognizes) groups separately from its family's ordinary
+            # chat rows -- "the picker shows it under a 'judge / decision'
+            # group with that note" -- never silently listed as if it
+            # were just another qwen chat model.
+            decision = decision_only_info(name, model_table)
             out.append({
                 "ref": ref, "context_tokens": fields.get("context_tokens"),
                 "max_output_tokens": fields.get("max_output_tokens"),
                 "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
-                "provider": "databricks", "group": f"Databricks ({family})", "path_type": path_type,
-                "detail": f"{family} · {path_display}", "dbu": dbu if dbu != "?" else None,
+                "provider": "databricks",
+                "group": "Databricks (judge / decision)" if decision else f"Databricks ({family})",
+                "path_type": path_type,
+                "detail": decision["reason"] if decision else f"{family} · {path_display}",
+                "dbu": dbu if dbu != "?" else None,
                 "task": e.get("task"),
             })
+        # Halo 2.0.3 round 4 (brief item 4): the router's cached catalog
+        # (`huggingface-models.json`, a pure file read -- the background
+        # worker that WRITES it, tui/slash.py's `catalog_auto_refresh_
+        # worker`, is the only thing that ever touches the network, and
+        # only post-first-paint) -- "router models appear in the picker
+        # under a Hugging Face group when the route is enabled" /
+        # "keep the first paint of the picker unaffected when the token is
+        # absent (no network)": `hf_enabled` gates the read exactly like
+        # `or_enabled` gates OpenRouter's own `load_models_json` above, so
+        # an unconfigured Hugging Face costs this method nothing.
+        hf_detected = credentials_present("huggingface", env=env)
+        hf_enabled = is_enabled("huggingface", detected=hf_detected)
+        try:
+            from halo_harness.providers.huggingface_catalog import load_hf_models_json
+            hf_models = load_hf_models_json(self.state_dir) or {} if hf_enabled else {}
+        except Exception:
+            hf_models = {}
+        for name in sorted(hf_models):
+            ref = f"hf:{name}"
+            if ref in seen:
+                continue
+            entry = hf_models.get(name) or {}
+            pricing = entry.get("pricing") or {}
+            out.append({
+                "ref": ref, "context_tokens": entry.get("context_length"),
+                "max_output_tokens": None,
+                "price_in_per_m": _per_m(pricing.get("prompt")), "price_out_per_m": _per_m(pricing.get("completion")),
+                "provider": "huggingface", "group": label_for("huggingface"),
+            })
+        _maybe_hint("huggingface", detected=hf_detected)
+
+        # Halo 2.0.3 round 5i part 1: the real OpenAI API's own cached id
+        # list (`GET /v1/models`, no price/context of its own -- docs/
+        # harness/OPENAI-RESEARCH.md section 3) -- price/context merged
+        # in from the SEPARATE models.dev cross-check (`providers.openai_
+        # catalog.oai_picker_fields`), same source `model.resolve_model_
+        # profile`'s own "openai" branch uses. Same first-paint-safe gate
+        # as the huggingface group just above: a pure file read, gated on
+        # enablement, never a network call from this method itself.
+        oai_detected = credentials_present("openai", env=env)
+        oai_enabled = is_enabled("openai", detected=oai_detected)
+        try:
+            from halo_harness.providers.openai_catalog import load_oai_models_json, oai_picker_fields
+            oai_models = load_oai_models_json(self.state_dir) or {} if oai_enabled else {}
+        except Exception:
+            oai_models = {}
+        for name in sorted(oai_models):
+            ref = f"oai:{name}"
+            if ref in seen:
+                continue
+            fields = oai_picker_fields(name, self.state_dir)
+            out.append({
+                "ref": ref, "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": None,
+                "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
+                "provider": "openai", "group": label_for("openai"),
+            })
+        _maybe_hint("openai", detected=oai_detected)
+
+        # Halo 2.0.3 round 5i part 2: the "Codex subscription (ChatGPT)"
+        # group -- the `cx:` counterpart of the "Claude Code subscription"
+        # block above, substituting `codex_models.cached_codex_auth_
+        # status()` for `cc_models.cached_claude_auth_status()`. Shown
+        # only once a real ChatGPT login is BOTH detected AND enabled, same
+        # two-gate rule every subscription route on this page already
+        # follows (a login never enables anything on its own).
+        from halo_harness.providers.codex_models import (
+            CODEX_ALIASES, alias_display_detail as cx_alias_display_detail, cached_codex_auth_status,
+            profile_fields_for_codex_model,
+        )
+        try:
+            cx_status = cached_codex_auth_status()
+        except Exception:
+            cx_status = None
+        cx_available = bool(cx_status and cx_status.logged_in and cx_status.auth_method == "chatgpt")
+        if cx_available and is_enabled("codex_subscription", detected=cx_available):
+            for alias in CODEX_ALIASES:
+                ref = f"cx:{alias}"
+                if ref in seen:
+                    continue
+                fields = profile_fields_for_codex_model(alias) or {}
+                out.append({
+                    "ref": ref, "context_tokens": fields.get("context_tokens"),
+                    "max_output_tokens": fields.get("max_output_tokens"),
+                    "price_in_per_m": None, "price_out_per_m": None,
+                    "detail": cx_alias_display_detail(alias),
+                    "provider": "codex", "group": label_for("codex_subscription"),
+                })
+        if cx_available and not is_enabled("codex_subscription", detected=cx_available):
+            hints.append({"hint": f"{label_for('codex_subscription')} detected but not enabled -- "
+                                   f"run `halo providers enable codex_subscription`"})
+
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,
@@ -774,7 +960,14 @@ class Controller:
         the Session's own log is reopened on it (see
         `halo_harness.tui.app` for the swap)."""
         from halo_harness.agent.log import SessionLog
+        from halo_harness.termtitle import set_terminal_title
 
+        # Halo 2.0.2 W7 round 1 (brief F): "set it ... on resume" -- this
+        # is the one method both the command palette's session pick
+        # (tui/app.py's own `_on_palette_pick`) and the `/resume` picker
+        # (tui/slash.py's `_open_resume_picker`) call, so hooking it here
+        # covers both triggers with no duplication.
+        set_terminal_title("halo")
         log = SessionLog(self.cwd, session_id=session_id)
         self.replay_messages = _messages_from_nodes(log.nodes())
         if self.replay_messages:
@@ -872,6 +1065,123 @@ class Controller:
         mcp_setup.record_mcp_approval(name, raw_entry)
         handle.config.pending_approval = False
         return self.reconnect_mcp(name, abort=abort)
+
+    def reconnect_all_mcp(self, abort=None) -> list:
+        """round4 brief item 1: `R` in `/mcp` -- every configured server
+        AND cached connector row, each through `reconnect_mcp` (so a
+        connector name's own special handling, see `tui/bootstrap.py`'s
+        `_reconnect_fn`, and the manual-reconnect backoff reset, see
+        `McpManager.reconnect_manual`, both apply exactly as a single `r`
+        would). Sequential, not parallel -- simple, and each call is
+        already its own timeout-bounded, abortable wait; `abort` stops
+        the whole loop between servers, not mid-reconnect of the one in
+        flight (same "abandoned, not stopped" caveat as everywhere else)."""
+        lines: list = []
+        for row in self.list_mcp_servers():
+            name = row.get("name")
+            if not name:
+                continue
+            lines.extend(self.reconnect_mcp(name, abort=abort))
+            if abort is not None and abort.is_set():
+                lines.append("cancelled -- any remaining servers were left unchanged.")
+                break
+        if not lines:
+            lines.append("No MCP servers configured.")
+        return lines
+
+    def login_mcp_server(self, name: str, abort=None, print_fn=None) -> list:
+        """round4 brief item 1: `l` in `/mcp` -- the 2.0.1 OAuth flow for
+        a local http/sse server (`mcp_cli.run_login`, the SAME helper
+        `halo mcp login` uses), or, for a claude.ai connector row, the
+        re-auth instructions line the bridge already produces (there is
+        no local OAuth flow for one of those -- the login lives in
+        claude.ai/claude itself).
+
+        2.0.2 review finding 14: `abort` used to only ever reach the
+        POST-login `reconnect_mcp` call below -- the login round trip
+        itself (where the real, up-to-120s blocking wait actually lives)
+        never saw it at all, so Esc on the TUI's own dialog could not
+        actually cancel a login in progress. `print_fn` (new) is how that
+        SAME dialog gets the "open this URL" line to show up somewhere
+        visible at all -- Textual drops a bare `print()` from a worker
+        thread entirely."""
+        if name.startswith("connector__"):
+            from halo_harness.mcp import connectors_bridge
+            slug = name[len("connector__"):]
+            info = next((c for c in connectors_bridge.get_connectors() if c.slug == slug), None)
+            if info is None:
+                return [f"{name}: no longer reported by `claude mcp list`."]
+            text = connectors_bridge.reauth_instructions(info)
+            return [text or f"{info.name}: already authorized -- nothing to do."]
+        from halo_harness.mcp_cli import run_login
+        lines, ok = run_login(name, self.cwd, settings=self.settings, abort=abort, print_fn=print_fn)
+        if ok:
+            lines += self.reconnect_mcp(name, abort=abort)
+        return lines
+
+    def test_mcp_server(self, name: str, abort=None) -> list:
+        """round4 brief item 1: `t` in `/mcp` -- a `tools/list` round
+        trip with timing, straight off `McpManager.test_server`."""
+        if name.startswith("connector__"):
+            return [f"{name}: claude.ai connectors are tested through `claude` itself, not halo's own manager."]
+        if self.mcp_manager is None:
+            return [f"MCP support is not connected in this build ({name} unchanged)."]
+        result = self.mcp_manager.test_server(name, abort=abort)
+        ms = result["elapsed_s"] * 1000
+        if result["ok"]:
+            return [f"{name}: tools/list ok in {ms:.0f}ms -- {result['tool_count']} tool(s)."]
+        return [f"{name}: tools/list failed after {ms:.0f}ms -- {result['error']}"]
+
+    def set_mcp_server_disabled(self, name: str, disabled: bool) -> list:
+        """round4 brief item 1: `d` in `/mcp` -- scope-aware disable/
+        enable (`mcp_cli.set_server_disabled_in_config`, Claude Code's own
+        per-directory `disabledMcpServers`), plus the matching LIVE effect
+        on this session's manager so the dialog reflects it immediately
+        rather than only after a restart."""
+        from halo_harness.mcp_cli import set_server_disabled_in_config
+        try:
+            where = set_server_disabled_in_config(name, cwd=self.cwd, disabled=disabled)
+        except (OSError, ValueError) as e:
+            return [f"{name}: could not update config: {type(e).__name__}: {e}"]
+        if self.mcp_manager is None:
+            return [f"{name}: {'disabled' if disabled else 'enabled'} ({where}); no live MCP session to update."]
+        if disabled:
+            handle = self.mcp_manager.handles.get(name)
+            if handle is not None:
+                handle.close(timeout=5.0)
+                handle.state = "disabled"
+                handle.error = "disabled by the user (`/mcp` d)"
+                handle.config.disabled_reason = handle.error
+            return [f"{name}: disabled ({where})."]
+        try:
+            from halo_harness.config.claude_json import load_claude_json
+            from halo_harness.mcp.manager import resolve_server_configs
+            fresh, _notices = resolve_server_configs(cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
+        except Exception:
+            fresh = {}
+        cfg = fresh.get(name)
+        if cfg is None:
+            return [f"{name}: enabled ({where}), but could not re-resolve its config -- restart halo to pick it up."]
+        self.mcp_manager.resync_from({name: cfg})
+        handle = self.mcp_manager.handles.get(name)
+        if handle is not None and handle.state == "pending":
+            handle.start()
+        return [f"{name}: enabled ({where})."]
+
+    def resolve_mcp_config(self, name: str):
+        """round4 brief item 1: `e` in `/mcp` -- the LIVE, freshly re-
+        resolved `McpServerConfig` for one server (scope/command/args/
+        env/url/headers), straight from the same `resolve_server_configs`
+        the session itself used, so the `$EDITOR` jump / inline form
+        always reflects what's on disk right now. `None` for an unknown
+        name (a connector row, or one no longer configured)."""
+        from halo_harness.config.claude_json import load_claude_json
+        from halo_harness.mcp.manager import resolve_server_configs
+        try:
+            resolved, _notices = resolve_server_configs(cwd=self.cwd, claude_json=load_claude_json(), settings=self.settings)
+        except Exception:
+            return None
+        return resolved.get(name)
 
     def memory_path(self):
         from halo_harness.config.paths import memory_dir
@@ -1004,6 +1314,22 @@ class Controller:
                 warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
                 self.session.queue_log_write(
                     "snapshot", {"blocks": [{"type": "text", "text": warning}], "snapshot_kind": "at_mention"})
+                # review finding 23 / parity gap: the snapshot above is
+                # model-only context (same "never inlined, separate block"
+                # rule every @mention here follows) -- the commit this
+                # shipped in says the warning itself "warns visibly", which
+                # only ever happened to the MODEL. A live TUI session gets
+                # an actual notice too, the same sink a background sub-
+                # agent's own live asks use (`_event_sink`, set by `run()`;
+                # None for -p/a bare Session, where there is no live UI to
+                # notice at all -- headless.py's own identical call site
+                # prints a stderr line instead for that case).
+                sink = getattr(self.session, "_event_sink", None)
+                if sink is not None:
+                    try:
+                        sink(events.notification(warning))
+                    except Exception:
+                        pass
         except Exception:
             pass
 

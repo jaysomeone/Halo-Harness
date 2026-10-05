@@ -203,12 +203,12 @@ def tool_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
 def cc_child_env(env: dict, *, env_file_path: Optional[Path] = None) -> dict:
     stripped = tool_child_env(env, env_file_path=env_file_path)
     # `CLAUDE*` (not just `CLAUDE_CODE_*`) also catches CLAUDECODE and
-    # rolo's OWN hook/skill template vars (CLAUDE_EFFORT, CLAUDE_PROJECT_
+    # the owner's OWN hook/skill template vars (CLAUDE_EFFORT, CLAUDE_PROJECT_
     # DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_ENV_FILE, ...) -- verified live from
     # INSIDE an actual nested launch: CLAUDE_EFFORT alone survived a
     # narrower `CLAUDE_CODE_`-only prefix check because it has no "_CODE_"
     # in it, yet is explicitly named in finding 2's own repro. None of
-    # rolo's own `CLAUDE*` namespace means anything to the real `claude`
+    # the owner's own `CLAUDE*` namespace means anything to the real `claude`
     # binary, so the broader prefix costs nothing.
     return {k: v for k, v in stripped.items() if not k.startswith("CLAUDE") and not k.startswith("ANTHROPIC_")}
 
@@ -428,6 +428,72 @@ def resolve_openrouter(env: dict | None = None) -> OrConfig | None:
     return OrConfig(api_key=api_key, base_url=base_url)
 
 
+@dataclass
+class HfConfig:
+    """Hugging Face Inference Providers (the router) configuration --
+    Halo 2.0.3 round 4. `api_key` is `HF_TOKEN` (research doc section 9:
+    "Use a single Hugging Face token for all providers" -- confirmed only
+    for this exact name; `HUGGING_FACE_HUB_TOKEN`/`HF_API_TOKEN` are NOT
+    read here since the research doc never confirmed either as an accepted
+    alias for the router specifically -- see docs/MODELS.md). `base_url`
+    defaults to the router root; `BRIDGE_HF_ROUTER_BASE_URL` (via
+    `env_compat`, so `HALO_HF_ROUTER_BASE_URL`/`ROLO_CLAUDE_HF_ROUTER_
+    BASE_URL` also work) overrides it for tests, exactly like
+    `resolve_openrouter`'s own `OPENROUTER_BASE_URL`."""
+    api_key: str
+    base_url: str = "https://router.huggingface.co/v1"
+
+
+def resolve_huggingface(env: dict | None = None) -> HfConfig | None:
+    """Resolve Hugging Face router config from `env` (must-do 6: the
+    harness passes `Settings.effective_env`; a bare call falls back to the
+    settings-env chain the same way `resolve_openrouter` does, via
+    `_settings_fallback_value`/`_settings_fallback_base_url`). `None` if
+    `HF_TOKEN` isn't set -- `hf:<org>/<model>` is then refused at request
+    time with a plain "Hugging Face not configured" message (providers.
+    stream._run_phase1), same contract as every other provider here.
+
+    This is the ROUTER credential pair only (item 1 of the round 4 brief):
+    `hf:endpoint/<name>` never reads HF_TOKEN at all -- see
+    `providers.huggingface.resolve_huggingface_endpoint` for the fully
+    separate per-entry url/token pair, which must never cross-wire with
+    this one."""
+    env = env if env is not None else os.environ
+    api_key = _settings_fallback_value(env, "HF_TOKEN")
+    if not api_key:
+        return None
+    base_url = _settings_fallback_base_url(env, "HF_ROUTER_BASE_URL", "https://router.huggingface.co/v1")
+    return HfConfig(api_key=api_key, base_url=base_url)
+
+
+@dataclass
+class OaiConfig:
+    """The OpenAI API (`oai:`) -- Halo 2.0.3 round 5i part 1. `api_key` is
+    `OPENAI_API_KEY`; `base_url` defaults to the real API root and is
+    overridden for tests by `BRIDGE_OPENAI_BASE_URL` (or the `HALO_`/
+    `ROLO_CLAUDE_` twins, `config/paths.py::env_compat`) -- same shape as
+    every other single-key provider on this page (`resolve_openrouter`/
+    `resolve_anthropic`)."""
+    api_key: str
+    base_url: str = "https://api.openai.com/v1"
+
+
+def resolve_openai(env: dict | None = None) -> OaiConfig | None:
+    """`None` if `OPENAI_API_KEY` isn't set -- `oai:<model>` is then
+    refused at request time with a plain "OpenAI API not configured"
+    message (`providers.stream._run_phase1`), same contract as every
+    other provider here. A bare call (no `env`) falls back to the
+    settings-env chain the same way `resolve_openrouter`/`resolve_
+    anthropic` do (`_settings_fallback_value`/`_settings_fallback_
+    base_url`)."""
+    env = env if env is not None else os.environ
+    api_key = _settings_fallback_value(env, "OPENAI_API_KEY")
+    if not api_key:
+        return None
+    base_url = _settings_fallback_base_url(env, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    return OaiConfig(api_key=api_key, base_url=base_url)
+
+
 def resolve_openrouter_management_key(env: dict | None = None) -> "str | None":
     """H15 part 2 addendum 4 (corrected): `OPENROUTER_MANAGEMENT_KEY` -- a
     SEPARATE, higher-privilege key OpenRouter's own `/credits` endpoint
@@ -447,7 +513,7 @@ class AntConfig:
     `api.anthropic.com` directly. Deliberately never reads bare
     `os.environ`'s own `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` --
     those are Databricks' (or another gateway's) own Claude-Code-
-    compatible env vars at rolo's work box, and conflating them here
+    compatible env vars at the owner's work box, and conflating them here
     would silently point `ant:` at the wrong host for whoever has that
     pair set in their shell. finding 5 (W6a): a trusted project/user
     settings.json `env` block's own (bare-named) `ANTHROPIC_BASE_URL` is

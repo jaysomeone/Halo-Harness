@@ -43,7 +43,7 @@ Request bodies checked field by field, built from a one-step synthetic log exact
    - saving memory "ONLY inside that memory directory" (there is no Write tool and the path is never given);
    - "running a test" (there is no Bash tool);
    - Kimi ids "preserved exactly as issued" (false, see finding 1);
-   - "No MCP servers are configured" (false for rolo's 15 user MCP servers).
+   - "No MCP servers are configured" (false for the owner's 15 user MCP servers).
 
    — Models claim to have saved memory or run tests, and tell the user MCP servers don't exist. — Build the capability sentences from the registry, say "MCP tools are not available in this build", put the memory directory path in the memory snapshot, and drop the id sentence until finding 1 lands.
 

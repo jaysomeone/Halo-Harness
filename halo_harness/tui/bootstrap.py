@@ -134,7 +134,14 @@ def build_controller(args) -> "tuple[Controller, object, object]":
             return [connectors_bridge.status_line(info)]
         if build.mcp_manager is None:
             return [f"MCP support is not enabled this session ({name} unchanged)."]
-        ok = build.mcp_manager.reconnect(name, abort=abort)
+        # round4 brief item 2: `reconnect_manual` (not the plain
+        # `reconnect`) -- this closure is ONLY ever reached from a manual
+        # `/mcp` r/R or `Controller.approve_mcp_server`, never from the
+        # automatic reconnect-on-next-use inside `McpManager.call()`, so
+        # it always resets any armed backoff first ("R resets the
+        # backoff"; a single r does too, since asking by hand IS the
+        # reset) and re-arms a fresh one on failure.
+        ok = build.mcp_manager.reconnect_manual(name, abort=abort)
         row = next((r for r in build.mcp_manager.status() if r.get("name") == name), None)
         state = row.get("state") if row else "unknown"
         return [f"{name}: {'connected' if ok else 'failed'} (state={state})"]

@@ -283,9 +283,20 @@ class ClaudeCodeProcess:
 
     def wait(self, timeout: Optional[float] = None) -> Optional[int]:
         try:
-            return self._proc.wait(timeout=timeout)
+            rc = self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+        # Halo 2.0.2 W7 round 1 (brief F): a non-None rc means this
+        # `claude` child is CONFIRMED exited -- the one moment it can no
+        # longer scribble the terminal/console title again, so this is
+        # where halo re-asserts its own (see halo_harness.termtitle's own
+        # docstring for the confirmed root cause). Every real caller of
+        # `wait()` already calls it right at close/kill time (agent/
+        # cc_runtime.py), so this fires on every normal or aborted cc:
+        # session end with no extra plumbing there.
+        from halo_harness.termtitle import reassert_after_claude_child
+        reassert_after_claude_child()
+        return rc
 
     def stderr_tail(self, max_chars: int = 2000) -> str:
         text = "\n".join(self._stderr_buf)

@@ -526,12 +526,23 @@ def _chat_capable_dbx_entries(state_dir) -> "list[dict]":
     from halo_harness.model_display import databricks_row_fields
     from halo_harness.providers.databricks import dbx_endpoints_cache_is_old_shape, load_dbx_endpoints_json
     from halo_harness.providers.dbx_routing import PATH_TYPE_DISPLAY, classify_family, default_path_type, is_chat_task
+    from halo_harness.providers.profiles import decision_only_info, load_model_table
     endpoints = load_dbx_endpoints_json(state_dir)
     old_shape = dbx_endpoints_cache_is_old_shape(endpoints)
+    # 2.0.2 review finding 8 (major): a decision-only/judge endpoint is
+    # chat-shaped (`is_chat_task` alone lets it through) but takes no
+    # tools at all -- shown here as an ordinary family row with nothing
+    # marking it different, it could become `config.model`/the session's
+    # default via init/the wizard's own default-model picker, after which
+    # every real turn failed with ToolsNotSupported. Loaded ONCE for the
+    # whole list rather than per-row.
+    _decision_only_model_table = load_model_table()
     out = []
     for name in sorted(endpoints):
         e = endpoints[name] if isinstance(endpoints[name], dict) else {}
         if not is_chat_task(e.get("task")):
+            continue
+        if decision_only_info(name, _decision_only_model_table) is not None:
             continue
         family = classify_family(name, foundation_model_name=e.get("foundation_model_name") or "",
                                   model_class=e.get("model_class") or "")
@@ -994,8 +1005,39 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
     return model_ref_raw, written, doctor_lines, pong_ok
 
 
+def _run_init_wizard_flow(args, console: Console, cwd: Path) -> "Optional[int]":
+    """Halo 2.0.2 round 7: `cmd_init`'s own interactive entry point --
+    runs the ONE-APP wizard (`tui/dialogs/init_wizard.py`) covering every
+    step from Providers through Summary. Returns the process exit code
+    on success -- the wizard's OWN Summary step already printed doctor
+    lines/the written-files list/the "Run it from any directory" PATH
+    check ON SCREEN, so nothing is re-printed to the plain console here,
+    unlike the old tabs-then-console-steps flow this replaces. Returns
+    `None` only when the wizard app itself could not run at all (a
+    Textual import/runtime failure -- never a provider failure, which
+    the wizard's own Summary step reports instead), the same "interactive
+    picker failed -> fallback" shape every other picker in this file
+    already uses."""
+    try:
+        from halo_harness.tui.dialogs.init_wizard import run_init_wizard
+        app = run_init_wizard(cwd=cwd, team=getattr(args, "team", None), no_live=args.no_live)
+    except Exception as e:
+        console.print(f"[WARN] the setup wizard failed ({type(e).__name__}: {e}) -- "
+                       f"falling back to the one-provider-at-a-time picker.")
+        return None
+    for w in app.state.team_warnings:
+        console.print(f"   [WARN] {w}")
+    return 0 if (args.no_live or app.state.pong_ok) else 1
+
+
 def _run_init_tabs(args, console: Console, cwd: Path) -> "Optional[tuple]":
-    """H15 Part A: runs the tabbed provider view; returns `(configured_
+    """No longer called from `cmd_init` (Halo 2.0.2 round 7: `_run_init_
+    wizard_flow` above replaces it on the interactive path) -- kept for
+    its own dedicated test coverage (`tests/test_h15_init_tabs.py`'s pure-
+    logic tests, `test_tui.py`'s own `InitTabsApp` pilot block) and as a
+    building block nothing else in this file still calls directly.
+
+    H15 Part A: runs the tabbed provider view; returns `(configured_
     this_run, written, doctor_lines, picked_per_provider)` on success --
     including an ordinary "nothing configured" close (Esc with nothing set
     up still returns a real, empty result, never None) -- or None only
@@ -1079,27 +1121,24 @@ def cmd_init(argv: list) -> int:
         console.print("[red]--provider needs at least one value.[/red]")
         return 2
 
-    # H15 Part A: the tabbed provider view replaces the one-at-a-time
-    # picker loop below on a REAL terminal -- same TTY gate every other
-    # interactive picker in this file already uses (item 2/5/13's own
-    # convention), so a piped/non-tty run (every existing test, any script)
-    # is byte-for-byte unaffected and keeps using the sequential loop +
-    # numbered fallback exactly as before this item.
+    # Halo 2.0.2 round 7: the ONE-APP init wizard (providers through
+    # summary, Back/Skip/Next/Finish buttons -- owner 2026-10-03: "I have
+    # to press esc then it exits then brings up the next section ...
+    # there should be a button you select to move it forward") replaces
+    # the old tabs-app-then-plain-console-steps flow on a REAL terminal --
+    # same TTY gate every other interactive picker in this file already
+    # used for that flow (item 2/5/13's own convention), so a piped/
+    # non-tty run (every existing test, any script) is byte-for-byte
+    # unaffected and keeps using the sequential loop + numbered fallback
+    # exactly as before this round.
     if interactive_loop and sys.stdin.isatty() and sys.stdout.isatty() and not args.yes:
-        tabs_result = _run_init_tabs(args, console, cwd)
-        if tabs_result is not None:
-            configured_this_run, written, doctor_lines, picked_per_provider = tabs_result
-            pong_ok = True
-            final_model = _step_finalize_default_model(args, console, configured_this_run, picked_per_provider)
-            _step_pick_permission_mode(args, console)
-            written.extend(_step_linux_fixes(args, console))
-            _step_summary(console, written, pong_ok, doctor_lines, no_live=args.no_live,
-                          configured_this_run=configured_this_run, final_model=final_model)
-            return 0 if (args.no_live or pong_ok) else 1
-        # The tabs app failed to run at all (not a provider failure --
-        # see _run_init_tabs's own docstring) -- fall through to the
-        # sequential loop below, same "picker failed -> fallback" shape
-        # every OTHER interactive picker in this file already uses.
+        wizard_rc = _run_init_wizard_flow(args, console, cwd)
+        if wizard_rc is not None:
+            return wizard_rc
+        # The wizard app failed to run at all (not a provider failure --
+        # see _run_init_wizard_flow's own docstring) -- fall through to
+        # the sequential loop below, same "picker failed -> fallback"
+        # shape every OTHER interactive picker in this file already uses.
 
     # 2.0.1 launch-hang fix: `claude_login_available()` (read below by
     # `_step_select_provider`/`detect_default_provider`, `_run_provider_

@@ -76,6 +76,42 @@ def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
     return 0
 
 
+def _cmd_models_cx(state_dir, *, refresh: bool) -> int:
+    """Round 5i part 2: `halo models --cx` -- the Codex counterpart of
+    `_cmd_models_cc`. Never touches `~/.codex/auth.json` -- only `codex
+    login status` (plain text) and, with --refresh, a handful of cheap
+    `codex exec --ephemeral` one-token pings (providers.codex_models.
+    refresh_cx_catalog)."""
+    from halo_harness.providers.codex_models import (
+        CODEX_ALIASES, codex_login_status, load_cx_models_cache, profile_fields_for_codex_model,
+        refresh_cx_catalog,
+    )
+    status = codex_login_status()
+    if status is None:
+        print("Codex subscription: codex not found -- cx: models unavailable (install Codex CLI)")
+    elif not status.logged_in:
+        print("Codex subscription: codex found but not logged in -- run `codex login` once to log in")
+    elif status.auth_method != "chatgpt":
+        print(f"Codex subscription: logged in via {status.auth_method or 'an unrecognized method'}, not "
+              f"ChatGPT -- cx: will not use this (that's the oai: route)")
+    else:
+        print("Codex subscription: logged in (ChatGPT) -- cx: models available")
+
+    if refresh:
+        refresh_cx_catalog(state_dir=state_dir)
+        print("(refreshed cx-models.json from live codex exec pings)\n")
+    refused = set(load_cx_models_cache(state_dir).get("refused") or [])
+
+    print(f"{'alias':<8} {'cx: target':<16} {'context':>10} {'out cap':>9} {'status':<10}")
+    for alias, model_id in CODEX_ALIASES.items():
+        fields = profile_fields_for_codex_model(alias) or {}
+        ctx = fields.get("context_tokens", "?")
+        out_cap = fields.get("max_output_tokens", "?")
+        tag = "refused" if alias in refused else "ok"
+        print(f"{alias:<8} {model_id:<16} {str(ctx):>10} {str(out_cap):>9} {tag:<10}")
+    return 0
+
+
 def _endpoint_url_for_path_type(root: str, name: str, path_type: str) -> str:
     """The exact URL for an already-computed `path_type` (1.0.1 hotfix 4:
     split out of the old `_endpoint_url_and_path_type` so `_dbx_rows` can
@@ -172,48 +208,6 @@ def format_dbx_table_lines(rows: dict, *, urls: bool = False) -> "list[str]":
     return lines
 
 
-def _cmd_models_cx(state_dir, *, refresh: bool, as_json: bool = False) -> int:
-    """2.0.2: `halo models --cx` -- the models this ChatGPT account may use
-    through the installed codex (`cx:`), their effort levels, the plan and
-    its usage windows. `--refresh` asks codex's own app-server (model/list,
-    account/read, account/rateLimits/read); no model call, nothing spent."""
-    from halo_harness.providers.cx_models import (
-        codex_login_status, cx_catalog_is_seed, cx_models, format_rate_limits, load_cx_models_cache,
-        profile_fields_for_cx_model, refresh_cx_catalog,
-    )
-    status = codex_login_status()
-    if refresh and status is not None and status.logged_in:
-        refresh_cx_catalog(state_dir=state_dir)
-    cache = load_cx_models_cache(state_dir)
-    models = cx_models(state_dir)
-    if as_json:
-        print(json.dumps({"login": status.method if status else None, "account": cache.get("account"),
-                          "rate_limits": cache.get("rate_limits"), "models": models,
-                          "seed": cx_catalog_is_seed(state_dir)}, indent=2, default=str))
-        return 0
-    if status is None:
-        print("Codex subscription: codex not found -- cx: models unavailable "
-              "(npm install -g @openai/codex, then `codex login`)")
-    elif not status.logged_in:
-        print("Codex subscription: codex found but not logged in -- run `codex login` (Sign in with ChatGPT)")
-    elif status.method != "chatgpt":
-        print("Codex subscription: codex is logged in with an API key -- cx: needs a ChatGPT login "
-              "(`codex logout`, then `codex login`)")
-    else:
-        usage = format_rate_limits(cache.get("rate_limits"))
-        print("Codex subscription: logged in with ChatGPT -- cx: models available"
-              + (f"\n  {usage}" if usage else ""))
-    if cx_catalog_is_seed(state_dir):
-        print("(built-in list -- run `halo models --cx --refresh` for this account's own models)")
-    print(f"\n{'model':<26} {'effort levels':<34} {'context':>9}  notes")
-    for m in models:
-        fields = profile_fields_for_cx_model(m["id"], state_dir)
-        notes = ", ".join(x for x in ("default" if m.get("is_default") else "",
-                                      "hidden" if m.get("hidden") else "") if x)
-        print(f"{'cx:' + m['id']:<26} {'/'.join(fields['efforts']) or '?':<34} {fields['context_tokens']:>9}  {notes}")
-    return 0
-
-
 def cmd_models(argv) -> int:
     parser = argparse.ArgumentParser(prog="halo models", add_help=True)
     parser.add_argument("--refresh", action="store_true", help="Re-probe OpenRouter/Databricks instead of using the cache")
@@ -222,8 +216,9 @@ def cmd_models(argv) -> int:
                               "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
                               "confirm its current canonical id")
     parser.add_argument("--cx", action="store_true",
-                         help="List the Codex subscription models (cx:) this ChatGPT account may use, with "
-                              "effort levels and usage windows; with --refresh, re-reads them from codex")
+                         help="List the Codex subscription models (cx: aliases) instead of the "
+                              "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
+                              "confirm it is accepted (marks refused ids)")
     parser.add_argument("--urls", action="store_true",
                          help="Databricks endpoints: also print the exact URL and path type each one resolves to")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
@@ -236,7 +231,7 @@ def cmd_models(argv) -> int:
     if args.cc:
         return _cmd_models_cc(state_dir, refresh=args.refresh)
     if args.cx:
-        return _cmd_models_cx(state_dir, refresh=args.refresh, as_json=args.json)
+        return _cmd_models_cx(state_dir, refresh=args.refresh)
     # 1.0.1 hotfix 3: bare `halo models` (no --refresh) NEVER touches
     # the network, full stop -- not even "the first time the cache is
     # empty" (the old behavior here, and still `--cc`'s own documented
@@ -271,12 +266,6 @@ def cmd_models(argv) -> int:
             dbx_diff = diff
         else:
             print(f"halo models: could not refresh from Databricks: {note}", file=sys.stderr)
-
-    if args.refresh and is_enabled("codex_subscription"):
-        # 2.0.2: codex's own model/list for this ChatGPT account (no model call).
-        from halo_harness.providers.cx_models import refresh_cx_catalog
-        if not refresh_cx_catalog(state_dir=state_dir).get("models"):
-            print("halo models: could not refresh the Codex subscription models", file=sys.stderr)
 
     if args.refresh and is_enabled("anthropic"):
         from halo_harness.providers.anthropic_catalog import refresh_anthropic_catalog_if_stale

@@ -13,6 +13,7 @@ copies drifting apart.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Optional
@@ -35,6 +36,28 @@ class ToolCatalogTooLarge(Exception):
         self.count = count
         self.limit = limit
         super().__init__(f"{count} tools exceeds this provider's {limit}-tool cap")
+
+
+class ToolsNotSupported(Exception):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 1/4): raised instead of
+    ever putting `tools` on the wire for a route whose `ProviderProfile.
+    tools_supported` is False -- a decision-only/judge endpoint
+    (`profile.decision_only`, e.g. `databricks-openjev-qwen35-4b`) or any
+    other endpoint a prior live request already proved rejects tools
+    (`providers.learned_rules.learned_tools_rejected`). Mirrors
+    `ToolCatalogTooLarge`'s own role: a clear, immediate error instead of
+    a wasted round trip or a confusing wire 400 -- `agent/loop.py` catches
+    this at the exact same two call sites it already catches
+    `ToolCatalogTooLarge`."""
+
+    def __init__(self, model_id: str, reason: Optional[str] = None):
+        self.model_id = model_id
+        self.reason = reason
+        msg = f"{model_id} does not accept tool calls"
+        if reason:
+            msg += f" ({reason})"
+        msg += " -- use the judge role instead of the session model"
+        super().__init__(msg)
 
 
 # H2 finding 8: `_flatten_messages` silently DROPS an assistant message
@@ -90,8 +113,10 @@ _DATABRICKS_STRIP_KEYWORDS = frozenset({"$schema", "$defs", "definitions", "anyO
 
 def simplify_schema_for_databricks(schema: dict, *, max_keys: int = 16) -> dict:
     """Databricks structured-output/tool schemas: at most `max_keys`
-    top-level `properties` entries and no `$ref`/`$defs`/`anyOf`/`pattern`
-    AS SCHEMA KEYWORDS (coordinator research, glm_qwen_minimax_adapters.md).
+    top-level `properties` entries and no `$ref`/`$defs`/`anyOf`/`pattern`/
+    `prefixItems` AS SCHEMA KEYWORDS (coordinator research,
+    glm_qwen_minimax_adapters.md; `prefixItems` added Halo 2.0.2 round 5
+    per docs/harness/QWEN-RESEARCH.md's own confirmed Databricks fetch).
 
     Finding 13: the pre-H2 version stripped these keyword NAMES at every
     dict level, including inside `properties`/`$defs` -- where the keys
@@ -139,6 +164,29 @@ def simplify_schema_for_databricks(schema: dict, *, max_keys: int = 16) -> dict:
                     replaced.setdefault(fk, fv)
                 log.debug("databricks schema: replaced %s with its first typed variant %r", kw, fallback)
                 node = replaced
+        # Halo 2.0.2 round 5 (Qwen-at-work brief, item 4): Databricks
+        # forbids `prefixItems` outright (confirmed today,
+        # docs/harness/QWEN-RESEARCH.md §2) -- unlike anyOf/oneOf there is
+        # no single typed variant to fall back to (each TUPLE POSITION may
+        # have its own type), so this rewrites to one permissive `items`
+        # schema (the shared type when every position agrees, else a bare
+        # object) plus a `description` note that preserves the original
+        # per-position intent for the model to read, instead of silently
+        # losing it the way a blanket keyword-strip would.
+        prefix_items = node.get("prefixItems")
+        if isinstance(prefix_items, list) and "prefixItems" in node:
+            types = {b.get("type") for b in prefix_items if isinstance(b, dict) and b.get("type")}
+            if len(types) == 1 and isinstance(prefix_items[0], dict):
+                items_schema = dict(prefix_items[0])
+            else:
+                items_schema = {"type": "object"}
+            note = f"originally a fixed-length tuple of {len(prefix_items)} positions: {json.dumps(prefix_items, ensure_ascii=False)}"
+            replaced = dict(node)
+            replaced.pop("prefixItems", None)
+            replaced["items"] = items_schema
+            replaced["description"] = f"{replaced['description']} ({note})" if replaced.get("description") else note
+            log.debug("databricks schema: rewrote prefixItems (%d positions) to items=%r", len(prefix_items), items_schema)
+            node = replaced
         out = {}
         for k, v in node.items():
             if k in _DATABRICKS_STRIP_KEYWORDS:
@@ -170,6 +218,11 @@ def convert_tools(tools: Optional[list], profile: ProviderProfile) -> Optional[l
     when the caller violates `profile.tools_max`."""
     if not tools:
         return None
+    if not profile.tools_supported:
+        # item 1/4: checked BEFORE the tools_max cap below -- a decision-
+        # only/tools-rejecting endpoint never gets this far at all,
+        # regardless of how many (or how few) tools were offered.
+        raise ToolsNotSupported(profile.model_id or "this model", profile.decision_only_reason)
     if profile.tools_max is not None and len(tools) > profile.tools_max:
         raise ToolCatalogTooLarge(len(tools), profile.tools_max)
     ordered = sorted(tools, key=lambda t: t.get("name", ""))
@@ -242,12 +295,26 @@ def build_request_body(
     *, system_text: str, messages: list, tools: Optional[list] = None, tool_choice=None,
     route, profile: ProviderProfile, effort: Optional[str] = None,
     context_tokens: int = 128000, prompt_estimate: int = 0, requested_max_tokens: Optional[int] = None,
+    force_response_format: "Optional[dict]" = None,
 ) -> dict:
     """Build the OpenAI-dialect body for one request. `messages` is the
     Anthropic-shaped derived transcript (agent/derive.py); `system_text` is
     the byte-stable system prompt PLUS any dynamic user-role snapshots
     already folded in by the caller (this function only ever emits ONE
-    leading `system` message, per rule 5/D-CFG)."""
+    leading `system` message, per rule 5/D-CFG).
+
+    Halo 2.0.3 round 5b part 2 (brief item 1), FIX PASS (2026-10-04
+    live-run finding): an ORDINARY turn (including right after a tool
+    result) is never constrained here any more -- the removed
+    `local_structured_output` gate forced every such `hf:local/*` turn
+    into the tool-call shape with no way to answer in prose, which on a
+    live run meant a model with nothing useful left to call just
+    repeated a meaningless call for 175 requests/25 minutes (see
+    `providers.ollama_request.build_ollama_request_body`'s own updated
+    docstring for the full story -- the identical failure mode, same
+    fix). `force_response_format` (the repair round's own override,
+    `agent/loop.py`'s `_attempt_tool_repair`) is the ONLY way this
+    function ever puts `response_format` on the wire now."""
     # hooks.system_normalize (fold_into_first_user rows -- Gemma 3, DeepSeek
     # R1) folds `system_text` into the first user turn instead of leaving it
     # a separate leading system message; the empty-assistant placeholder
@@ -286,6 +353,15 @@ def build_request_body(
             if tc == "required" and not profile.tool_choice_required_supported:
                 tc = "auto"  # DeepSeek-V4-thinking 400s on required/named; Kimi K2.x/Qwen/GLM: auto|none only
             body["tool_choice"] = tc
+    if force_response_format is not None:
+        # Round 5b part 2 (brief item 2): the repair call's own override --
+        # see `build_ollama_request_body`'s `force_format` for the
+        # identical reasoning (an isolated, tools-less completion) -- the
+        # ONLY place this function ever puts `response_format` on the
+        # wire (fix pass: an ordinary turn is never constrained, see this
+        # function's own docstring).
+        from halo_harness.providers.tool_call_schema import openai_response_format_for_schema
+        body["response_format"] = openai_response_format_for_schema(force_response_format)
 
     if profile.use_temperature:
         if profile.temperature is not None:

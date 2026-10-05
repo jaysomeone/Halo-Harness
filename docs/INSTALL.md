@@ -68,13 +68,38 @@ Nothing to `cd` into first -- good for a box that only ever needs to RUN
 pull` (there is no local clone); re-run the same command to pick up a new
 release instead.
 
+### Windows
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/roloVibes/Halo-Harness/master/scripts/install-halo.ps1 | iex"
+```
+
+Mirrors `install-halo.sh` exactly: installs `uv` if missing, offers to
+uninstall an old `rolo-claude` (uv, pipx or pip), clones to
+`%USERPROFILE%\Halo-Harness` (or pulls an existing clone), runs `uv tool
+install --reinstall .`, checks PATH, and finishes with `halo doctor`.
+Same options too: `-Yes`, `-NoClone`, `-DryRun`, `-CloneDir <path>`. By
+hand, from PowerShell:
+
+```powershell
+git clone https://github.com/roloVibes/Halo-Harness.git
+cd Halo-Harness
+uv tool install --reinstall .
+cd ~
+halo init
+```
+
 ## Then: cd anywhere, type `halo`
 
 ```sh
 cd ~                 # or /tmp, or any other project directory at all
-halo init            # one time: pick a provider, credentials, default model, doctor, live pong
+halo init            # one time: a wizard -- provider, local models, model, permission mode, theme, roles, orgs, doctor, pong
 halo                 # full-screen TUI -- reads THIS directory's CLAUDE.md, rules, settings, .mcp.json
 ```
+
+`halo init`'s wizard has Back/Skip/Next buttons and never exits to the
+console between steps; `halo setup roles`/`halo setup orgs` reopen its
+Roles/Organizations screens later without repeating the provider steps.
 
 That's the whole point of installing it: `halo`, once on PATH, is a real
 console script, not a script that only works from inside this checkout --
@@ -108,6 +133,39 @@ The exact same reinstall command as the first install, every time --
 `halo doctor`/`halo init`'s PATH check names this command for your box if
 you ever forget and the installed copy drifts out of date.
 
+## Update
+
+```sh
+halo update            # or /update inside halo
+```
+
+`halo update --check` prints installed vs. available and the exact
+command for however `halo` was installed, then (unless `--check`) runs
+it and reports the before/after commit by re-running `halo --version`.
+The manual command, per install kind: `uv tool install --reinstall
+<spec>` (uv tool), `pipx install --force <spec>` (pipx), `python -m pip
+install --upgrade <spec>` (pip), `git pull` then the same reinstall
+(editable checkout), or plain `git pull` (bare checkout on PYTHONPATH).
+
+**Windows note:** close other `halo` sessions first -- the install can't
+be replaced while any of them still has it open. `/update` inside the
+TUI does this for you: `Enter` quits, updates (output visible in the
+terminal), and relaunches with `--continue` so the session resumes;
+`halo update` run on its own refuses with the same reason when another
+session is running (`--force` overrides once you're sure none is
+actually using the install).
+
+## Uninstall
+
+```sh
+uv tool uninstall halo-harness      # or: pipx uninstall halo-harness
+                                     # or: pip uninstall halo-harness
+rm -rf ~/.halo                      # optional -- state, sessions, cached catalogs
+```
+
+A clone made for `git pull` (not needed to RUN `halo`, see above) can
+just be deleted too.
+
 ## Upgrading from rolo-claude 1.0.1
 
 `halo` is a rename, not a fresh product -- 1.0.1's installed console
@@ -128,6 +186,12 @@ separate 1.0.1 install must not be run again afterward).
 halo --version          # halo 2.0.1
 halo doctor              # read-only environment check -- every WARN/MISSING line names its own fix
 ```
+
+**On an Apple Silicon Mac**, once the install above is verified, see
+[docs/MAC.md](MAC.md) for a full quick-start covering the Mac's own
+Ollama daemon and the optional, experimental `uv tool install
+"halo-harness[mlx]"` extra (`hf:mlx/<org>/<repo>`, round 5f) -- off by
+default and only installable on macOS/arm64 in the first place.
 
 See the [README](../README.md) for the 10-minute walkthrough and
 [docs/harness/INSTALL.md](harness/INSTALL.md) for everything this page

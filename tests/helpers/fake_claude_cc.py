@@ -362,8 +362,18 @@ async def _run_round(mcp_session, session_id: str, lines: list, turn_index: int,
                     # A real window for a steer sent right after this
                     # round started to actually land BEFORE the next call
                     # -- two real (fast) tool calls back to back leave no
-                    # such window at all on their own.
-                    await asyncio.sleep(0.5)
+                    # such window at all on their own. The window ends as
+                    # soon as a line is waiting, or after
+                    # FAKE_CLAUDE_CC_TOOL2_WINDOW_S (default 0.5 s): on a
+                    # loaded Windows box the steer took longer than the
+                    # old fixed half second to travel through the stream
+                    # and became its own round, failing the absorption
+                    # test only there.
+                    window = float(os.environ.get("FAKE_CLAUDE_CC_TOOL2_WINDOW_S", "0.5") or 0.5)
+                    waited = 0.0
+                    while waited < window and line_queue.empty():
+                        await asyncio.sleep(0.05)
+                        waited += 0.05
                     absorbed_notes.extend(await _drain_absorbed(mcp_session, session_id, msg_id, line_queue))
         elif m1:
             name, raw_args = m1.group(1), m1.group(2)

@@ -100,7 +100,7 @@ def test_disable_compact_env_wins(ctx: Ctx):
 @test
 def test_h5b_f01_real_models_json_zero_trigger_rows_now_get_a_sane_trigger(ctx: Ctx):
     """finding 1: 29 of 105 real DeepSeek/Kimi/GLM/Qwen/MiniMax rows in
-    rolo's own ~/.halo/models.json got a trigger of EXACTLY 0 (21
+    the owner's own ~/.halo/models.json got a trigger of EXACTLY 0 (21
     more under 40k) because the gate subtracted the model's raw advertised
     max_output_tokens -- often close to the whole context window -- with
     no 32k cap. Fixture = the exact (context_length, max_output_tokens)
@@ -196,7 +196,7 @@ def test_h5c_f24_the_exact_zero_trigger_rows_the_finding_names_are_fixed(ctx: Ct
     only covers finding 1's 8 LARGE-window rows (Kimi/Qwen3.5/MiniMax/
     GLM-5/DeepSeek-v3.2) -- never the actual ZERO-trigger rows finding 3
     itself names. These 5 exact (context_length, max_output_tokens) pairs
-    are copied verbatim from rolo's real ~/.halo/models.json on
+    are copied verbatim from the owner's real ~/.halo/models.json on
     2026-09-24 for the finding's own named ids, and verified below to
     genuinely give the OLD formula a trigger of exactly 0 (matching
     finding 3's "21 of 458 real models.json rows still have a trigger of
@@ -248,6 +248,39 @@ def test_window_override_env_wins_over_settings(ctx: Ctx):
 
     knobs2 = resolve_knobs(FakeSettings(), {})
     ctx.check("falls back to settings.autoCompactWindow when env is absent", knobs2.window_override == 500_000)
+
+
+@test
+def test_window_override_cli_flag_wins_over_env_and_settings(ctx: Ctx):
+    """Release review finding 34: a settings.json env block setting
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` used to silently outrank the
+    explicit `--autocompact` flag (cli.py wrote the flag's value into the
+    LOWEST/shell layer of `effective_env`, which a settings env block
+    then overrides). `cli_autocompact` now wins over everything else."""
+    class FakeSettings:
+        auto_compact_window = 500_000
+        auto_compact_enabled = True
+        compaction_model = None
+        raw = {}
+
+    knobs = resolve_knobs(FakeSettings(), {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "20000"},
+                           cli_autocompact="9000")
+    ctx.check(f"the CLI flag wins over BOTH env and settings, got {knobs.window_override}",
+              knobs.window_override == 9_000)
+
+    knobs_k_suffix = resolve_knobs(FakeSettings(), {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "20000"},
+                                    cli_autocompact="9k")
+    ctx.check(f"a k-suffixed CLI value is parsed as thousands, got {knobs_k_suffix.window_override}",
+              knobs_k_suffix.window_override == 9_000)
+
+    knobs_auto = resolve_knobs(FakeSettings(), {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "20000"},
+                                cli_autocompact="auto")
+    ctx.check(f"--autocompact auto defers to the next-lower source (env), got {knobs_auto.window_override}",
+              knobs_auto.window_override == 20_000)
+
+    knobs_none = resolve_knobs(FakeSettings(), {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "20000"})
+    ctx.check(f"no CLI flag at all still falls back to env, got {knobs_none.window_override}",
+              knobs_none.window_override == 20_000)
 
 
 @test

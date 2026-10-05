@@ -52,6 +52,13 @@ used so far (this key's spend so far -- no limit set, no management key
 configured; ...)". Omitted entirely when OpenRouter isn't enabled or
 nothing has been fetched yet. See `docs/ARCHITECTURE.md`'s status bar
 section for exactly where the figure comes from and how often it refreshes.
+Halo 2.0.3 round 5e: on an `ol:`/`hf:local`/`hf:mlx` session, a third line
+("Saved vs cloud: ...") shows the running total of what the SAME input/
+output tokens would have cost against the session's reference price (the
+configured `routing.escalation.to`, or the vendored catalog's median price
+when none is set), the reference price itself, and which one it is --
+omitted entirely on a cloud-model session. See [MODELS.md](MODELS.md)'s
+"Saved versus cloud" section for the arithmetic.
 
 ### `/context`
 A live breakdown of the current request's system/tools/messages/pruned
@@ -106,6 +113,48 @@ argument typed after it.
 with live health in `-p`; in the TUI, opens an interactive status dialog
 (reconnect a server, approve a pending `.mcp.json` entry).
 
+### `/ollama [--host NAME] [--refresh]`
+Halo 2.0.3 round 3: per-configured-host Ollama analysis -- reachable,
+version, loaded models (`size` vs `size_vram` as one plain offload
+sentence, trained vs. effective context, the KV-bytes/token figure), and
+-- local hosts only -- OS-level GPU memory. `--host` narrows to one
+configured entry; `--refresh` bypasses the short-TTL catalog cache. In
+`-p`, prints the same text `halo ollama` does; in the TUI, opens an
+interactive dialog (`r` re-reads live). See `docs/MODELS.md`'s Ollama
+section.
+
+### `/local [refresh]` / `/local add <path>` / `/local forget <path>` / `/local <question>`
+Halo 2.0.3 round 5 widens this from Ollama-only (round 3); round 5c adds
+`add`/`forget`. Bare `/local`
+(or `/local refresh`) opens the shared local-model discovery view --
+Ollama hosts, running Hugging Face local servers (auto-detected plus any
+configured `huggingface.local_servers` entry), and the Hugging Face Hub
+cache, merged into one list with a group label per source/host; `[TUI-
+only for the interactive dialog]` -- in `-p`, prints the same text `halo
+local` does (see `docs/COMMANDS.md`); in the TUI, opens an interactive
+dialog (`r` re-reads live, and additionally probes every manual Hugging
+Face entry -- a bare open never does). `/local <question>` (any other
+text) answers `<question>` from the `small` role -- now an `ol:` OR `hf:`
+ref -- via a one-shot call that never touches the main transcript's
+context: the question and answer show up as a note, never as a logged
+user/assistant turn, so nothing here is replayed into a later request.
+Needs `roles.small` set to an `ol:`/`hf:` model (`/roles`, `/role small
+ol:...`, or the model picker's `u` action); errors plainly, never
+silently, when it isn't. Round 5b part 2: when the session's main model
+is also `ol:` on the SAME host and `roles.small` resolves to a DIFFERENT
+local model that would not fit beside it in GPU memory, `/local` answers
+from the main model instead for this one question -- see
+`docs/MODELS.md`'s "VRAM-aware role defaults" section. `/local add <path>`
+adds a folder to `huggingface.model_dirs` (scanned recursively for
+`.gguf` files and safetensors/MLX folders -- the fourth source the merged
+view above shows); `/local forget <path>` removes one -- both persist to
+`~/.halo/config.json` immediately and print a plain confirmation or
+refusal, in `-p` and the TUI alike (there is no separate dialog for
+these two -- see `docs/MODELS.md`'s "Finding and using file-backed
+models"). Serving/importing a file (`halo local serve|import`, or the
+`/local` dialog's `s` key) is a CLI/dialog action, not a second `/local`
+sub-verb -- see `docs/COMMANDS.md`.
+
 ### `/memory`
 Shows the auto-memory directory path, whether `MEMORY.md` exists, and how
 many topic files are indexed.
@@ -148,21 +197,69 @@ Lists every discovered sub-agent definition (built-ins plus
 the live session's own agent runtime when one is attached so it never
 drifts from what an `Agent(subagent_type=...)` call would actually see.
 
-### `/roles`
-V2c (H15): shows the resolved role table (`orchestrator`/`coder`/`reviewer`/
-`researcher`/`small`) -- model, endpoint/path type, and price per role,
-pulled from the live session's own `agent_runtime.role_table`/
-`.cli_role_overrides` (the SAME table a role-bearing `Agent`/`Task` call
-actually resolves against) so it never drifts from real behavior. See
-`docs/ROLES.md`.
+### `/roles [templates|save <name>|load <name>|new <name>|edit <name>|show <name>|set <name> <model> [effort]]`
+V2c (H15), extended Halo 2.0.2: bare `/roles` shows the resolved role table
+(model, effort, endpoint/path type, price per role), pulled from the live
+session's own `agent_runtime.role_table`/`.cli_role_overrides` (the SAME
+table a role-bearing `Agent`/`Task` call actually resolves against) so it
+never drifts from real behavior. `templates`/`save`/`load`/`new`/`show`
+manage `~/.halo/roles/<name>.json` templates; `edit` opens a form in the TUI
+only (print mode names that instead); `set` is the long form of `/role`
+below. Round 5b part 2: a VRAM-aware role redirected to the main model
+(`docs/MODELS.md`'s "VRAM-aware role defaults") shows `(same as main:
+fits beside it: no)` next to that role's own source. See `docs/ROLES.md`.
+
+### `/role <name> <model> [effort]`
+Halo 2.0.2: sets ONE role for THIS session only -- mutates the live
+session's own role table directly (never persisted; `/roles save <name>`
+is the explicit "keep this" action), so the very next `Agent`/`Task` call
+that resolves this role picks it up. `<name>` must already be a known role
+(a built-in, or a custom name a team.json/loaded template actually defined)
+-- an unknown name errors with the list of known ones. See `docs/ROLES.md`.
+
+### `/org [list|show <name>|new <name>|load <name>|install <name> [--force]|edit <name>|run [<name>] "<goal>"|export <name> [file]|import <file>|resume]`
+Halo 2.0.2 round 2: bare `/org` (and `/org list`) lists saved
+organizations (`~/.halo/orgs/<name>.json`), each with its own one-line
+README (its `description`); `show` prints the text tree; `new` creates a
+one-position "Orchestrator" starter; `load` re-installs a built-in's
+shipped definition over a local copy; `edit` opens a form in the TUI only
+(print mode names that instead, like `/roles edit`); `run` executes the
+org's root position on `"<goal>"` against the LIVE session, through the
+exact same machinery an `Agent(org=...)` tool call uses -- the result
+flows back like any other sub-agent's. Round 7: `<name>` is optional on
+`run` -- `/org run "<goal>"` (just the goal, quoted) uses `orgs.default`
+(set via `/setup orgs`); with none set, it names the fix instead of
+guessing. Round D: `install <name> [--force]` copies a shipped or saved
+template into `~/.halo/orgs/`, refusing to overwrite without `--force`;
+`export <name> [file]`/`import <file>` move an org as plain JSON (import
+validates role names, reports and budgets, listing every problem);
+`resume` continues THIS session's own interrupted org run from its saved
+run record and shared task board (open/claimed tasks become the work
+list, done tasks are kept) -- `halo org resume <session-id>` is the CLI
+form, for a past session with no "current" one to resume. A position with
+`requires_approval: true` holds its result as a pending card in the dock
+(accept, edit the instruction and re-run, or stop) before its own parent
+continues; `dontAsk` mode (and `halo org run/resume --yes`) accepts every
+gate automatically instead. See `docs/ORGS.md`.
+
+### `/setup [roles|orgs]`
+Halo 2.0.2 round 7: opens the init wizard's own Roles/Organizations setup
+screen(s) over the live session (a modal screen stack, not a separate
+program) -- bare `/setup` chains Roles -> Organizations -> a short
+summary; `/setup roles`/`/setup orgs` open just one. Saving a role
+template here updates the LIVE session's own role table immediately, no
+restart needed. `halo setup [roles|orgs]` is the CLI equivalent (prints
+the current roles table/orgs list with no TTY instead of blocking). See
+`docs/ROLES.md`/`docs/ORGS.md`.
 
 ### `/providers [list|enable <name>|disable <name>|setup <name>]`
 H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-
 enablement table -- status, reachable, cached model count -- for
 `databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`),
-`codex_subscription` (`cx:`, with the plan's usage windows under the table), and
-`typesafe` (stores `TYPESAFE_API_KEY` only, for a later feature; no routed
-models yet). Each row's status is `auto (detected from <source>)` once a
+`codex_subscription` (`cx:`, round 5i part 2), `huggingface` (`hf:`),
+`openai` (`oai:`, round 5i part 1), and `typesafe` (stores
+`TYPESAFE_API_KEY` only, for a later feature; no routed models yet). Each
+row's status is `auto (detected from <source>)` once a
 real credential/login is found (no `init` step required), `disabled by
 you`/`enabled by you` once an explicit override exists, or `not set up`.
 Bare `/providers` (or `list`) prints the table, plus a trailing OpenRouter
@@ -178,15 +275,28 @@ section for the full prefix/label table and the exact per-provider
 detection rule.
 
 ### `/accounts [list|add codex <name>|use codex <name>]`
-Lists subscription accounts managed in isolated Halo profiles. In the TUI,
-`/accounts add codex <name>` creates a private `CODEX_HOME`, forces Codex's
-file credential store inside it, and opens the official browser login in a
-background worker. Halo checks `codex login status` afterward but never reads
-or prints `auth.json`. `/accounts use codex <name>` selects which profile the
-next Codex app-server uses. Account names accept letters, numbers, dots,
-dashes, and underscores. Outside the TUI, use
-`halo accounts add codex --name <name>` or `halo accounts use codex --name
-<name>`.
+Lists isolated Codex subscription profiles. `add` creates a private
+`CODEX_HOME` and launches the official browser login without reading or
+printing `auth.json`; `use` selects the profile for new Halo sessions on the
+`cx:` route. The CLI equivalents are `halo accounts list`, `halo accounts add
+codex --name <name>`, and `halo accounts use codex --name <name>`.
+
+### `/settings [primary claude|codex]`
+Halo 2.0.3 round 5i part 2. Bare `/settings` prints the merged Claude
+Code / Codex / halo settings view (`providers.settings_merge.
+effective_settings`): one row per tracked setting (model, permission/
+approval mode, sandbox, reasoning effort) showing every source's own
+value and which one is effective, the Codex-only MCP servers found, and
+how many Claude Code instruction files / Codex `AGENTS.md` chain files
+were found. `/settings primary claude|codex` persists `settings.primary`
+(`~/.halo/config.json`) -- which of Claude Code's or Codex's own value
+wins when both are set and halo's own config and a live `cx:` session
+don't already decide it. Read-only otherwise: halo never writes to
+either Claude Code's or Codex's own files. `halo doctor`'s
+`codex_settings` line is the one-line summary of the same view; the init
+wizard's "Settings sources" step is the interactive equivalent. See
+`docs/MODELS.md`'s "Codex settings and instructions" section for the
+exact precedence rule.
 
 ### `/effort [level]`
 1.0.1 hotfix 19/20. Bare `/effort` shows the effective level, its source
@@ -208,6 +318,31 @@ when nothing more specific was set anywhere. See
 [MODELS.md](MODELS.md)'s "Reasoning effort" section for the accepted-level
 table per route family.
 
+### `/offline [on|off]`
+Halo 2.0.3 round 5e. Bare `/offline` reports whether offline mode is on and
+where that reading came from (`--offline`/`HALO_OFFLINE` for this one
+process, or the persisted `network.offline` key). `/offline on`/`/offline
+off` persists `network.offline` to `~/.halo/config.json` AND takes effect
+immediately for the rest of this process (no restart) -- in the TUI the
+status bar's "offline" chip updates right away, the same "direct push, no
+event round-trip" pattern `/effort` uses. While on, the one HTTP choke
+point (`providers/http.py`) refuses any connection whose host isn't
+loopback or an allow-listed local host (every `ollama.hosts` entry, every
+`huggingface.local_servers` entry, every managed local-server-registry
+entry); the refusal is always the one plain sentence "offline mode: not
+connecting to \<host\>". See [CONFIG.md](CONFIG.md)'s `network.offline`
+section and [COMMANDS.md](COMMANDS.md)'s `--offline`.
+
+### `/escalation`
+Halo 2.0.3 round 5e. Shows the configured hybrid-escalation policy
+(`routing.escalation` -- set with `halo config set routing.escalation
+'{"to": "...", "when": [...], "ask": true|false}'`, there is no `/escalation
+<args>` form of its own) and this session's last few escalation decisions
+(trigger, target, whether it asked or switched). Only ever relevant on a
+local-model session (`ol:`/`hf:local`/`hf:mlx`) -- see
+[MODELS.md](MODELS.md)'s "Hybrid escalation" section for the three
+triggers and what "ask" vs. auto actually do.
+
 ### `/init`
 A **prompt**-kind command: its body is a fixed instruction asking the
 model to analyze the codebase and write/update `CLAUDE.md` -- the model
@@ -217,6 +352,18 @@ anything itself.
 ### `/doctor`
 Runs the same read-only checks as `halo doctor` and prints the
 lines inline in the transcript.
+
+### `/update`
+Checks the installed build against what's available (cached up to 24h) and
+prints installed vs. available, the commits between them, and the exact
+reinstall command. In `-p`/a plain fallback this is report-only, same as
+`halo update --check`. In the TUI it opens a dialog with that same report
+plus two keys: `Enter` updates and restarts halo in place (quits, runs the
+reinstall with its output visible, then relaunches with `--continue` so the
+session resumes); `Esc` leaves everything untouched. A background check
+(off with `update.check: false`/`update.notify: false` in config.json) adds
+a one-line transcript note, at most once a day, when one is already known
+to be available -- see `docs/INSTALL.md`'s "Update" section.
 
 ### `/export` `[TUI-only]`
 In `-p`, prints a note that export needs the TUI's file picker (use
@@ -300,10 +447,17 @@ switch to the richer cross-session telemetry aggregation (run off the UI
 thread in the TUI) documented under `halo stats` in
 `docs/COMMANDS.md`.
 
-### `/tasks`
-Lists every background Bash job started this session
+### `/tasks` (Ctrl+T)
+H8 scope A: lists every background Bash job started this session
 (`run_in_background`, or a foreground command that outran its timeout),
-with status and a truncated command line.
+with status and a truncated command line. Halo 2.0.2 round 3: in the
+TUI, `/tasks`/Ctrl+T instead opens a full-height panel -- every
+running, queued, background and finished sub-agent of this session
+(an org run's own descendants indented under their parent), plus the
+shared task board on a second tab (`Tab` switches); Enter opens a live
+transcript viewer of the highlighted agent; Ctrl+T again, or Esc,
+closes it. Print mode has no panel, so it keeps the original plain-text
+background-jobs listing. See `docs/SUBAGENTS.md`.
 
 ### `/rewind [step-id]` `[TUI-only]`
 Restores the working tree (every file a Write/Edit/NotebookEdit touched,
@@ -324,6 +478,26 @@ One step back/forward through the same shadow history `/rewind` uses.
 ### `/keybindings`
 Prints the fully-resolved `{context: {chord: action}}` keymap (built-in
 defaults merged with `~/.claude/keybindings.json`).
+
+### `/editor` `[TUI-only]`
+Halo 2.0.2 round C: the keyboard-independent twin of Ctrl+E -- opens the
+current prompt draft in `$VISUAL`/`$EDITOR` exactly like the shortcut
+does, so a terminal that never delivers the Ctrl+E chord to halo at all
+(VS Code's integrated terminal on macOS being the reported case -- see
+`docs/TROUBLESHOOTING.md`'s "a shortcut does nothing on macOS") still
+has a way to reach it: typing a command always works. `$EDITOR`/
+`$VISUAL` unset shows the same toast either way. In `-p`, there's no
+prompt draft to edit at all; prints a note saying so.
+
+### `/keys` `[TUI-only]`
+Halo 2.0.2 round C: opens a tester dialog that shows the exact key NAME
+halo's own app received for each press -- so you can tell whether halo
+is receiving a shortcut at all before assuming it's broken (the
+terminal may simply be eating it first). Esc leaves. A key bound to a
+`priority=True` app-level shortcut (Ctrl+E, Ctrl+X, Ctrl+End) still
+shows up here too, even though its own action also still fires -- both
+are useful signal. In `-p`, there are no keystrokes to show; prints a
+note saying so.
 
 ### `/improve` `[TUI-only card review]`
 In `-p`, prints a note pointing at the real headless surface,

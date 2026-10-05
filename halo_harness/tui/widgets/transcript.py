@@ -465,7 +465,7 @@ class Transcript(VerticalScroll):
         # one-shot `scroll_end()` at MOUNT time -- a long streamed answer
         # mounts once, one line tall, then grows for hundreds of deltas
         # with nothing re-scrolling after, so the view stayed wherever the
-        # user's own prompt was (rolo's report: "auto scroll does not
+        # user's own prompt was (the owner's report: "auto scroll does not
         # work... I have to scroll down to see the new answers").
         self.anchor()
 

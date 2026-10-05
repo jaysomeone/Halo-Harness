@@ -134,11 +134,75 @@ def test_leak_parser_glm_arg_key(ctx: Ctx):
 
 
 @test
+def test_leak_parser_missing_tool_call_opener(ctx: Ctx):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 3): declared by every
+    Qwen row (model_table.json) but never implemented until now --
+    Qwen3-Coder #475's own shape, a bare JSON call with no OPENING
+    `<tool_call>` tag after a prose lead-in, closed by `</tool_call>`."""
+    profile = _profile("openrouter", "qwen/qwen3-coder")
+    ctx.check("row declares missing_tool_call_opener", "missing_tool_call_opener" in profile.tool_leak_patterns)
+    text = 'Sure, reading it now:\n{"name": "Read", "arguments": {"file_path": "a.py"}}</tool_call>'
+    got = hooks.leak_parser(text, profile)
+    ctx.check(f"parsed despite the missing opener, got {got}", got is not None and got["name"] == "Read")
+    ctx.check("arguments parsed", got["arguments"] == {"file_path": "a.py"})
+
+
+@test
+def test_missing_tool_call_opener_is_fast_on_a_long_brace_heavy_answer(ctx: Ctx):
+    """2.0.2 review finding 35 pin: `(\\{.*?\\})\\s*</tool_call>` tried
+    every single `{` in the text as a candidate match start when there
+    was no `</tool_call>` anywhere at all -- O(n x braces), measured at
+    0.77s for 68KB and 4.8s for 170KB of code-like text, and this runs
+    at the end of EVERY tool-less Qwen turn. A 200KB brace-heavy answer
+    with no `</tool_call>` must now finish in well under a second (the
+    fix anchors the opening brace to the real shape, `{"name"...`, which
+    a plain code snippet essentially never starts with)."""
+    profile = _profile("openrouter", "qwen/qwen3-coder")
+    chunk = 'def f(x):\n    return {"a": x, "b": {"c": 1, "d": [1, 2, 3]}}\n'
+    text = chunk * (200_000 // len(chunk))  # ~200KB, brace-heavy, no </tool_call> anywhere
+    ctx.check("no </tool_call> in the benchmark text (the pathological case)", "</tool_call>" not in text)
+    t0 = time.monotonic()
+    got = hooks.leak_parser(text, profile)
+    elapsed = time.monotonic() - t0
+    ctx.check(f"finishes in well under a second, got {elapsed:.3f}s", elapsed < 1.0)
+    ctx.check("no leak found (there genuinely isn't one)", got is None)
+
+
+@test
+def test_leak_parser_python_repr_args(ctx: Ctx):
+    """Declared by every Qwen row but never implemented until now --
+    agno#10231's own shape: a BARE Python-dict-literal call, single quotes
+    and Python True/False/None, no `<tool_call>`/fence wrapper at all."""
+    profile = _profile("openrouter", "qwen/qwen3-coder")
+    ctx.check("row declares python_repr_args", "python_repr_args" in profile.tool_leak_patterns)
+    text = "{'name': 'Read', 'arguments': {'file_path': 'x', 'ok': True}}"
+    got = hooks.leak_parser(text, profile)
+    ctx.check(f"parsed the bare repr dict, got {got}", got is not None and got["name"] == "Read")
+    ctx.check("single-quoted + Python True decoded correctly",
+              got["arguments"] == {"file_path": "x", "ok": True})
+    ctx.check("a bare dict with no real argument-carrying key is NOT promoted",
+              hooks.leak_parser("{'name': 'my-cli', 'version': '1.0'}", profile) is None)
+
+
+@test
 def test_think_tag_strip_matches_the_old_scope_c_function(ctx: Ctx):
     from halo_harness.providers.oai_stream import strip_display_artifacts
     ctx.check("re-exported under the old name, same behavior",
               hooks.think_tag_strip is strip_display_artifacts)
     ctx.check("strips a leading think block", hooks.think_tag_strip("<think>x</think>answer") == "answer")
+
+
+@test
+def test_think_tag_strip_bare_unpaired_closer(ctx: Ctx):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief): Qwen3-235B-Thinking-2507
+    and QwQ's own model cards document replayed history may contain only
+    a closing `</think>` with no opening tag -- the old regex only matched
+    a PAIRED block and leaked this straight into displayed text."""
+    ctx.check("bare leading closer stripped", hooks.think_tag_strip("</think>the final answer") == "the final answer")
+    ctx.check("a PAIRED block is still handled exactly as before (no double-strip)",
+              hooks.think_tag_strip("<think>reasoning</think>the answer") == "the answer")
+    ctx.check("ordinary text with no think markup at all is untouched",
+              hooks.think_tag_strip("just a plain reply") == "just a plain reply")
 
 
 @test
@@ -254,7 +318,7 @@ def test_host_allowlist_merges_pin_and_forces_require_parameters(ctx: Ctx):
     # the ingestion script merges the row's informal fallback_order into
     # order (with allow_fallbacks forced true) -- see
     # tools/ingest_model_table.py's compile_openrouter_pin, verified live
-    # against rolo's own OpenRouter account (Guardrails/ZDR settings
+    # against the owner's own OpenRouter account (Guardrails/ZDR settings
     # otherwise hard-fail the primary-only, no-fallback pin outright).
     pin_order = profile.openrouter_pin.get("order")
     ctx.check(f"row has a pin, primary first, got {pin_order}", pin_order[0] == "deepseek" and len(pin_order) > 1)

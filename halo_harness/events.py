@@ -28,6 +28,29 @@ EVENT_KINDS = frozenset({
     "tool_use_start", "tool_use_ready", "tool_progress", "tool_result",
     "permission_request", "question", "plan_review", "todos", "status",
     "message_end", "error", "turn_done", "subagent_start", "subagent_end",
+    # Halo 2.0.2 round 3 (brief C): a `count`/`batch` Agent-tool fan-out
+    # job minted its agent_id/task_id and is waiting for a concurrency-pool
+    # slot to free -- fired once per job, in spawn order, BEFORE any of
+    # them actually starts (so the tasks panel can list every one
+    # immediately instead of only learning about a job once a worker
+    # finally picks it up); the job's own ordinary `subagent_start` follows
+    # later, once it actually begins.
+    "subagent_queued",
+    # Halo 2.0.2 round C (the owner's own background-streaming report):
+    # a BACKGROUND sub-agent's own phase/tool-call signal, forwarded live
+    # by agent/subagent.py's `_bg_run` so its `SubAgentCard` keeps ticking
+    # with a real phase word instead of sitting on "thinking" (the
+    # constructor default) until `subagent_end`. Deliberately its OWN
+    # narrow kind rather than re-forwarding the raw `phase`/`tool_use_
+    # ready` events a FOREGROUND child's events already are (H5c finding
+    # 8) -- those also drive the full transcript phase-line/tool-card
+    # widgets (tui/dispatch.py), which need a matching `message_end`/
+    # `turn_done` to ever close; a background run deliberately never
+    # forwards ITS internal step boundaries live (see _bg_run's own
+    # docstring: "not making a background task's whole output stream
+    # suddenly live"), so those widgets would dangle, half-finished,
+    # forever. This kind only ever touches that one child's own card.
+    "subagent_progress",
     "replay", "notification", "steer_queued", "steer_applied",
     "compaction",  # H5 scope B
     "phase", "steer_restart",  # Halo 2.0.1 W2a (liveness-tips-brief Part A6/GLM-brief item 3)
@@ -35,11 +58,24 @@ EVENT_KINDS = frozenset({
                      # background connector discovery finishing) -- pushed straight
                      # onto Controller.events from whatever thread noticed, never
                      # tied to an active turn's own generator.
+    # Halo 2.0.2 round D (brief item 2, "approval gates"): a `requires_
+    # approval: true` org position's just-finished result, held for a
+    # human decision (accept/edit-and-rerun/stop) -- `agent/subagent.py`'s
+    # `_apply_approval_gate`/`_ask_approval_live`, rendered by the TUI's
+    # own `ApprovalCard` (tui/widgets/cards.py) through the SAME
+    # PendingDock queue a `permission_request`/`question`/`plan_review`
+    # card already uses. data: {id, position, text, is_error}.
+    "approval_request",
 })
 
 COMMAND_KINDS = frozenset({
     "user_input", "interrupt", "set_mode", "set_model", "slash", "permission_reply",
     "question_reply", "plan_reply", "steer", "run_compact", "run_clear",
+    # Halo 2.0.2 round D (brief item 2): safety-net counterpart to
+    # "approval_request" above, mirroring "permission_reply"/"question_
+    # reply"/"plan_reply" -- see agent/loop.py's own matching comment on
+    # its `approval_reply` branch.
+    "approval_reply",
 })
 
 _ids = itertools.count(1)
@@ -114,18 +150,25 @@ def thinking_delta(text: str, *, index: int = 0, turn: int = 0) -> Event:
 def message_end(*, turn: int = 0, stop_reason: Optional[str] = None, usage: Optional[dict] = None,
                  cost_usd: Optional[float] = None, context_pct: Optional[float] = None,
                  context_tokens: Optional[int] = None, context_limit: Optional[int] = None,
-                 total_input_tokens: Optional[int] = None, total_output_tokens: Optional[int] = None) -> Event:
+                 total_input_tokens: Optional[int] = None, total_output_tokens: Optional[int] = None,
+                 saved_usd: Optional[float] = None) -> Event:
     """data: {stop_reason, usage, cost_usd, context_pct, context_tokens,
-    context_limit, total_input_tokens, total_output_tokens}. The last four
-    (1.0.1 hotfix 14) are the RAW numbers `context_pct` was already derived
-    from, plus the session's running token totals -- added so a consumer
-    (the TUI status bar) can render `"ctx 12k/1M 1%"`/`"in 12k out 3k"`
-    without re-deriving anything itself; `context_pct` is kept for any
-    existing consumer that only ever wanted the percentage."""
+    context_limit, total_input_tokens, total_output_tokens, saved_usd}. The
+    four token/context fields (1.0.1 hotfix 14) are the RAW numbers
+    `context_pct` was already derived from, plus the session's running
+    token totals -- added so a consumer (the TUI status bar) can render
+    `"ctx 12k/1M 1%"`/`"in 12k out 3k"` without re-deriving anything itself;
+    `context_pct` is kept for any existing consumer that only ever wanted
+    the percentage. `saved_usd` (Halo 2.0.3 round 5e) is `CostMeter.
+    saved_usd`'s running total -- None on every turn that isn't ol:/
+    hf:local/hf:mlx (the status bar's own `apply_status` only overwrites
+    its reading when this is NOT None, so a later cloud-model turn in the
+    same session never blanks out an earlier real saved-$ figure)."""
     return Event("message_end", {
         "stop_reason": stop_reason, "usage": usage or {}, "cost_usd": cost_usd, "context_pct": context_pct,
         "context_tokens": context_tokens, "context_limit": context_limit,
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens,
+        "saved_usd": saved_usd,
     }, turn=turn)
 
 
@@ -134,10 +177,12 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
             permission_mode: Optional[str] = None, mcp: Optional[dict] = None,
             session_id: Optional[str] = None, total_input_tokens: Optional[int] = None,
             total_output_tokens: Optional[int] = None, effort: Optional[str] = None,
-            subscription_usage: Optional[dict] = None) -> Event:
+            ollama_tokens_per_second: Optional[float] = None, ollama_prefill_seconds: Optional[float] = None,
+            ollama_offloaded: Optional[bool] = None, subscription_usage: Optional[dict] = None) -> Event:
     """data: {phase, model, context_tokens, context_limit, cost_usd, turn,
     permission_mode, mcp: {connected, total}, session_id, total_input_tokens,
-    total_output_tokens, effort, subscription_usage}. Emitted at session start, after every
+    total_output_tokens, effort, ollama_tokens_per_second, ollama_prefill_
+    seconds, ollama_offloaded}. Emitted at session start, after every
     message_end, and on a mode/model change (D-Contract). The two token-
     total fields (1.0.1 hotfix 14) are the session's running input/output
     token counts, for a consumer (the status bar) to show `"in 12k out 3k"`
@@ -146,15 +191,17 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
     (`Session.effort`, already clamped to this route's own accepted set --
     see providers/profiles.py's `clamp_effort`), for the status bar's own
     short tag next to the mode glyph; None for a model with no adjustable
-    effort at all. `subscription_usage` (`{session_pct, weekly_pct}`, see
-    providers/sub_usage.py) is the account's 5 h / weekly usage for a `cc:`
-    or `cx:` route; None for every other route or before the first reading."""
+    effort at all. The three `ollama_*` fields (Halo 2.0.3 round 5b, brief
+    item 7) are None for every non-`ol:` route and before the FIRST `ol:`
+    reply of the session -- `Session.status_event` is the only producer,
+    from `Session._last_ollama_throughput`/`_last_ollama_offloaded`."""
     return Event("status", {
         "phase": phase, "model": model, "context_tokens": context_tokens, "context_limit": context_limit,
         "cost_usd": cost_usd, "turn": turn, "permission_mode": permission_mode,
         "mcp": mcp or {"connected": 0, "total": 0}, "session_id": session_id,
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens, "effort": effort,
-        "subscription_usage": subscription_usage,
+        "ollama_tokens_per_second": ollama_tokens_per_second, "ollama_prefill_seconds": ollama_prefill_seconds,
+        "ollama_offloaded": ollama_offloaded, "subscription_usage": subscription_usage,
     }, turn=turn)
 
 
@@ -274,6 +321,18 @@ def phase(*, state: str, turn: int = 0, model: Optional[str] = None, ttfb_ms: Op
     may emit `request_sent`/`headers` with no `first_token` -- a UI must not
     assume all four always appear for every call."""
     return Event("phase", {"state": state, "model": model, "ttfb_ms": ttfb_ms, "kind": kind}, turn=turn)
+
+
+def subagent_progress(*, phase_word: Optional[str] = None, tool_call: bool = False, turn: int = 0) -> Event:
+    """data: {phase_word, tool_call} -- the caller (agent/subagent.py's
+    `_bg_run`) sets `.agent_id` afterward, same convention as subagent_
+    start/subagent_end. `phase_word` is one of the words `tui/dispatch.
+    py`'s own `_phase_word_for` already produces for the main status bar
+    (thinking/writing/tool/waiting) -- None means "no word change, this
+    is just a tool-call tick" (see `tool_call`). See EVENT_KINDS' own
+    comment on `subagent_progress` for why this is a separate, narrower
+    kind rather than the raw `phase`/`tool_use_ready` events."""
+    return Event("subagent_progress", {"phase_word": phase_word, "tool_call": tool_call}, turn=turn)
 
 
 def steer_restart(text: str, *, turn: int = 0) -> Event:

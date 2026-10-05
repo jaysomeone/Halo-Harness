@@ -251,8 +251,15 @@ def test_version_flag(ctx: Ctx):
                              capture_output=True, text=True, timeout=15)
     ctx.check(f"exit 0, got {result.returncode}", result.returncode == 0)
     from halo_harness import __version__
-    ctx.check(f"prints halo {__version__}, got {result.stdout!r}",
-              result.stdout.strip() == f"halo {__version__}")
+    # Halo 2.0.2 round 6: `(commit, branch)` is appended once the install's
+    # own commit is known -- this subprocess runs straight from the repo
+    # checkout (PYTHONPATH), which always has a real git commit/branch to
+    # report, so it's never just the bare "halo 2.0.2" -- see
+    # update.format_version_line/installed_build.
+    import re
+    ctx.check(f"prints halo {__version__}, optionally with (commit, branch), got {result.stdout!r}",
+              re.match(rf"^halo {re.escape(__version__)}( \([0-9a-f]{{7}}(, \S+)?\))?\s*$",
+                        result.stdout) is not None)
 
 
 def _hermetic_child_env() -> dict:

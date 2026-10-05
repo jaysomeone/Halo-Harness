@@ -233,6 +233,73 @@ def test_h9b_f03_child_background_bash_job_notice_reaches_the_parent(ctx: Ctx):
 
 
 @test
+def test_round_c_single_pending_notice_is_applied_unchanged(ctx: Ctx):
+    """Halo 2.0.2 round C: a SINGLE queued notice (the common case) must
+    keep reaching the model exactly as before this round -- its own full
+    text, one user_message, one notification -- so nothing about the
+    owner's complaint fix changes behaviour for the case that was never
+    "a flood" in the first place."""
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(mock=mock, model="or:mock/round-c-single")
+        session._pending_job_notices.append("[Background job bash_abc (echo hi) finished, exit code 0]\nhi")
+        job_events = list(session._apply_pending_job_notices(1))
+        job_msgs = [e for e in job_events if e.kind == "user_message"]
+        ctx.check(f"exactly one user_message for one job notice, got {len(job_msgs)}", len(job_msgs) == 1)
+        ctx.check("the job notice's full text is unchanged (no header/preview wrapping)",
+                  job_msgs[0].data.get("text") == "[Background job bash_abc (echo hi) finished, exit code 0]\nhi")
+        ctx.check("the queue was drained", session._pending_job_notices == [])
+
+        session._pending_agent_notices.append('[Background sub-agent \'worker\' finished (task_id=t1)]\n'
+                                                '<task_result task_id="t1">\nthe answer is 42\n</task_result>')
+        agent_events = list(session._apply_pending_agent_notices(1))
+        agent_msgs = [e for e in agent_events if e.kind == "user_message"]
+        ctx.check(f"exactly one user_message for one agent notice, got {len(agent_msgs)}", len(agent_msgs) == 1)
+        ctx.check("the agent notice's full text is unchanged, answer included verbatim",
+                  "the answer is 42" in agent_msgs[0].data.get("text", "")
+                  and agent_msgs[0].data.get("text", "").startswith("[Background sub-agent"))
+    finally:
+        mock.stop()
+
+
+@test
+def test_round_c_two_pending_notices_combine_into_one_compact_block(ctx: Ctx):
+    """Halo 2.0.2 round C (the owner's own background-streaming report,
+    part b): 2+ notices queued between turns used to reach the model as
+    that many SEPARATE full-length user-role messages ("a flood of raw
+    results") -- now collapsed into exactly ONE block, each item's own
+    task_id/job_id still present (from its own first line) plus a short
+    preview, never the full per-item text repeated. Checked for BOTH
+    queues (`_pending_job_notices` and `_pending_agent_notices` are
+    combined independently -- see loop.py's own `_compact_notices_text`)."""
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(mock=mock, model="or:mock/round-c-two")
+        session._pending_job_notices.append("[Background job bash_aaa (job one) finished, exit code 0]\nfirst output")
+        session._pending_job_notices.append("[Background job bash_bbb (job two) finished, exit code 1]\nsecond output")
+        job_events = list(session._apply_pending_job_notices(1))
+        job_msgs = [e for e in job_events if e.kind == "user_message"]
+        job_notifs = [e for e in job_events if e.kind == "notification"]
+        ctx.check(f"exactly ONE compact block reached the model, got {len(job_msgs)}", len(job_msgs) == 1)
+        ctx.check("exactly one notification toast, not two", len(job_notifs) == 1)
+        block = job_msgs[0].data.get("text", "")
+        ctx.check("both job ids are present in the one block", "bash_aaa" in block and "bash_bbb" in block)
+        ctx.check("the block never repeats a full per-item body twice (a short preview only)",
+                  len(block) < len("first output") + len("second output") + 400)
+        ctx.check("the queue was drained", session._pending_job_notices == [])
+
+        session._pending_agent_notices.append("[Background sub-agent 'a' finished (task_id=ta)]\nresult A")
+        session._pending_agent_notices.append("[Background sub-agent 'b' finished (task_id=tb)]\nresult B")
+        agent_events = list(session._apply_pending_agent_notices(1))
+        agent_msgs = [e for e in agent_events if e.kind == "user_message"]
+        ctx.check(f"exactly ONE compact block for the agent queue too, got {len(agent_msgs)}", len(agent_msgs) == 1)
+        agent_block = agent_msgs[0].data.get("text", "")
+        ctx.check("both task ids are present", "task_id=ta" in agent_block and "task_id=tb" in agent_block)
+    finally:
+        mock.stop()
+
+
+@test
 def test_h9b_f03_sighup_kills_the_process_and_its_background_job_on_posix(ctx: Ctx):
     """Verified (finding 3): SIGHUP to a `-p` run -- what closing the
     terminal or an SSH drop actually sends -- used to exit -1 and leave the

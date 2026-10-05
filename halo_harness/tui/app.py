@@ -150,6 +150,12 @@ class BridgeApp(App):
         Binding("ctrl+l", "clear_view", "Clear", show=False),
         Binding("ctrl+o", "toggle_verbose", "Verbose", show=False),
         Binding("ctrl+r", "history_search", "History", show=False),
+        # Halo 2.0.2 round 3 (brief C item 1): the tasks panel -- a plain
+        # (non-priority) binding, same as ctrl+r just above; TasksPanel's
+        # OWN "ctrl+t" binding (tui/dialogs/tasks.py) closes it again once
+        # that screen is focused, giving the toggle its "again closes it"
+        # behaviour without this action needing to inspect `self.screen`.
+        Binding("ctrl+t", "toggle_tasks", "Tasks", show=False),
         Binding("f1", "show_help", "Help", show=False),
         # U5 scope A: brand-new keys, no existing single-key binding to
         # conflict with -- ctrl+p (palette) and ctrl+e (external editor)
@@ -159,7 +165,15 @@ class BridgeApp(App):
         # focus -- see `_on_key`'s own docstring for how the SECOND
         # keystroke of the chord is then captured.
         Binding("ctrl+p", "command_palette", "Palette", show=False),
-        Binding("ctrl+e", "open_editor", "Editor", show=False),
+        # Round B fix pass (macOS/VS Code terminal item): Textual's own
+        # Input/TextArea bind `ctrl+e` (alongside bare `end`) to "cursor
+        # to end of line" -- with the chat prompt (a TextArea) focused,
+        # the overwhelmingly common case, that widget-level binding used
+        # to win outright and `open_editor` never fired. `priority=True`
+        # (the same rung ctrl+c/ctrl+d/ctrl+x/ctrl+end above already use)
+        # makes this the app's own first refusal, checked before any
+        # focused widget's own bindings.
+        Binding("ctrl+e", "open_editor", "Editor", show=False, priority=True),
         Binding("ctrl+x", "chord_prefix", "Chord", priority=True, show=False),
         # 1.0.1 hotfix 16: re-anchor the transcript to follow new output.
         # `ctrl+end` is `priority=True` since nothing else binds it (always
@@ -282,6 +296,14 @@ class BridgeApp(App):
         self._history_draft = ""
         self._completion_kind = ""
         self._completion_items: "list[str]" = []
+        # 2.0.2 review finding 24: `_complete_role_command_arg`'s model-
+        # ref candidates (`controller.list_models()` -- models.json + the
+        # dbx catalog + the model table) used to be rebuilt on EVERY
+        # keystroke while that argument's popup stayed open. A short TTL
+        # (not tied to popup open/close, which fires from several call
+        # sites) is enough to collapse a typing burst into one real call.
+        self._role_model_cache: "Optional[list]" = None
+        self._role_model_cache_at: float = 0.0
         # U5 scope A: the merged {context: {chord: action}} keymap (our
         # defaults + ~/.claude/keybindings.json), loaded once here (a
         # user editing that file mid-session picks it up on the next
@@ -392,6 +414,38 @@ class BridgeApp(App):
         self.pending_dock = self.query_one(PendingDock)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
+        # Halo 2.0.3 round 5e: the "offline" chip's own initial reading --
+        # `--offline`/a persisted `network.offline` -- pushed once here,
+        # the same "direct push, no event round-trip" pattern `/offline`
+        # itself uses for a live toggle mid-session (tui/slash.py's own
+        # `_handle_offline`).
+        from halo_harness.providers.http import offline_mode_enabled
+        self.status_bar.set_offline(offline_mode_enabled())
+        # Halo 2.0.2 W7 round 1 (brief F): `TITLE`/`self.title` above is
+        # only ever this app's OWN in-app Header widget text -- Textual
+        # never touches the REAL terminal/console title on its own (see
+        # halo_harness.termtitle's own docstring). Asserted once here, at
+        # TUI start, so a `claude` child that ran and left ITS OWN title
+        # behind BEFORE this app even launched (e.g. a `claude auth
+        # status` probe from a previous `halo doctor` run in the same
+        # window) is corrected immediately rather than only after the
+        # first child this session itself spawns exits.
+        from halo_harness.termtitle import activate_tui_mode, set_terminal_title, set_tui_driver
+        # 2.0.2 review finding 31: `set_tui_driver` BEFORE the first title
+        # write below -- Textual 8 writes every frame from its own
+        # `textual-output` WriterThread, never the UI thread, so a raw
+        # direct write to `sys.__stdout__` (the old unconditional path)
+        # could land in the middle of a frame's own escape sequence.
+        # While this is set, `emit_osc2`'s default-stream path queues the
+        # OSC sequence through `self._driver.write(...)` instead, so it's
+        # ordered with frames the same way Textual's own OSC 52 write is
+        # (`copy_to_clipboard` above).
+        set_tui_driver(self._driver)
+        set_terminal_title("halo")
+        # From here on, spawn-site hooks on worker threads only record a
+        # claude child's exit; `_drain` re-asserts the title on this (UI)
+        # thread, the one that also owns Textual's terminal writes.
+        activate_tui_mode()
         # B2: the compose()-time placeholder was fitted against a guessed
         # width (prompt_input.size isn't real until after the first layout
         # pass) -- recompute now that it is, and start the 15s idle-
@@ -421,10 +475,12 @@ class BridgeApp(App):
         # now, never spawns the `claude auth status` subprocess itself.
         self.run_worker(self._prime_auth_status_worker, thread=True, name="auth-status-startup",
                          group="auth-status-startup")
-        # 2.0.2: the Codex subscription's own login check, in its own
-        # worker so it never delays the Claude check above.
-        self.run_worker(self._prime_codex_login, thread=True, name="codex-login-startup",
-                         group="codex-login-startup")
+        # Round 5i part 2: the `cx:` counterpart, same reasoning -- primes
+        # `codex_models.cached_codex_auth_status()` off the UI thread so
+        # `Controller.list_models()`'s own cx: group never spawns `codex
+        # login status` itself.
+        self.run_worker(self._prime_codex_auth_status_worker, thread=True, name="codex-auth-status-startup",
+                         group="codex-auth-status-startup")
         # H15 part 2 addendum 3.2a: the SAME staleness-gated, every-
         # enabled-provider catalog refresh `/model` triggers on open also
         # runs once at launch -- a provider set up with just a key/token
@@ -432,6 +488,11 @@ class BridgeApp(App):
         # the FIRST time `/model` is opened, not only after.
         self.run_worker(self._catalog_startup_refresh_worker, thread=True, name="catalog-startup-refresh",
                          group="catalog-startup-refresh")
+        # Halo 2.0.2 round 6: a one-line transcript note, at most once a
+        # day, when the CACHED update check already knows one is
+        # available -- see tui/slash.py::update_check_startup_worker.
+        self.run_worker(self._update_check_startup_worker, thread=True, name="update-check-startup",
+                         group="update-check-startup")
         # H15 part 2 addendum 4: the OpenRouter balance status-bar segment --
         # one fetch now (force=True, the launch case), then again every
         # BALANCE_REFRESH_INTERVAL_S (5 minutes) for as long as the app runs;
@@ -474,6 +535,14 @@ class BridgeApp(App):
             from halo_harness.tui.slash import _resume_list_worker
             self.run_worker(lambda: _resume_list_worker(self, self._initial_resume_filter),
                              thread=True, name="list-sessions-startup")
+
+    def on_unmount(self) -> None:
+        # Leaving the TUI: spawn-site hooks go back to re-asserting the
+        # title synchronously (print mode and one-shot probes have no
+        # drain tick to do it for them).
+        from halo_harness.termtitle import deactivate_tui_mode, set_tui_driver
+        deactivate_tui_mode()
+        set_tui_driver(None)
 
     def _git_branch(self) -> str:
         try:
@@ -559,23 +628,20 @@ class BridgeApp(App):
             except Exception:
                 pass
 
-    def _prime_codex_login(self) -> None:
-        """2.0.2: the same once-per-launch check for the Codex subscription
-        (`codex login status`, ~0.3 s, this worker thread only), with the
-        same quiet one-line notice when it is usable."""
+    def _prime_codex_auth_status_worker(self) -> None:
+        """Round 5i part 2: the `cx:` counterpart of `_prime_auth_status_
+        worker` just above -- same reasoning, no connectors-discovery kick
+        (codex has no equivalent concept)."""
         try:
-            from halo_harness.providers.cx_models import (
-                codex_installed, is_subscription_login, refresh_cached_codex_login_status,
-            )
-            if not codex_installed():
-                return
-            if is_subscription_login(refresh_cached_codex_login_status()):
-                self.call_from_thread(
-                    self.notify, "Codex subscription detected -- cx: models available (see /model).",
-                    title="providers", timeout=4,
-                )
+            from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
+            status = refresh_cached_codex_auth_status()
         except Exception:
-            pass
+            return
+        if status and status.logged_in and status.auth_method == "chatgpt":
+            self.call_from_thread(
+                self.notify, "Codex subscription detected -- cx: models available (see /model).",
+                title="providers", timeout=4,
+            )
 
     def _catalog_startup_refresh_worker(self) -> None:
         """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see
@@ -585,6 +651,17 @@ class BridgeApp(App):
         try:
             from halo_harness.tui.slash import catalog_auto_refresh_worker
             catalog_auto_refresh_worker(self)
+        except Exception:
+            pass
+
+    def _update_check_startup_worker(self) -> None:
+        """Halo 2.0.2 round 6: see `tui/slash.py::update_check_startup_
+        worker`'s own docstring -- best-effort, same "a failure here just
+        leaves things as they were" contract as the catalog refresh just
+        above."""
+        try:
+            from halo_harness.tui.slash import update_check_startup_worker
+            update_check_startup_worker(self)
         except Exception:
             pass
 
@@ -616,6 +693,37 @@ class BridgeApp(App):
         # alive and responsive, so its own staleness IS the hang signal.
         self._last_heartbeat_monotonic = time.monotonic()
         self.status_bar.tick_spinner()
+        self._tick_background_activity()
+
+    def _tick_background_activity(self) -> None:
+        """Halo 2.0.2 round C (the owner's own background-streaming
+        report): "the status bar keeps a live signal while the main turn
+        is idle (agents N, bg jobs N, the oldest one's elapsed time)" --
+        riding the SAME once-a-second heartbeat tick as the spinner
+        above, since that is the one timer guaranteed to keep firing
+        whether or not a turn is running. `agents_running` itself is
+        already event-driven (tui/dispatch.py's subagent_start/_end) and
+        untouched here; this only adds the background-Bash-job count
+        (polled from `job_registry.list_jobs()` -- a job has no live
+        start/end event of its own, see agent/jobs.py) and the oldest
+        elapsed time across BOTH (sub-agent start times tracked in
+        `_agents_started_at` by tui/dispatch.py, job start times read
+        straight off each JobRecord)."""
+        starts = list(getattr(self, "_agents_started_at", {}).values())
+        bg_jobs = 0
+        job_registry = getattr(getattr(self.controller, "session", None), "job_registry", None)
+        if job_registry is not None:
+            try:
+                for job in job_registry.list_jobs():
+                    if job.get("status") == "running":
+                        bg_jobs += 1
+                        started = job.get("started_at")
+                        if isinstance(started, (int, float)):
+                            starts.append(started)
+            except Exception:
+                pass
+        oldest_elapsed = (time.time() - min(starts)) if starts else None
+        self.status_bar.set_background_activity(bg_jobs=bg_jobs, oldest_elapsed_s=oldest_elapsed)
 
     # ---- H15 Part B: hang watchdog -----------------------------------
 
@@ -848,6 +956,18 @@ class BridgeApp(App):
         self.transcript.tick_phase_lines()
         self.transcript.tick_tool_cards()
         self.transcript.tick_subagent_cards()
+        # Halo 2.0.2 W7 round 1 (brief F): re-assert `halo` on the drain
+        # tick that FOLLOWS a `claude` child's exit -- the child itself
+        # (agent/cc_process.py, providers/cc_models.py, mcp/connectors.py)
+        # already re-asserts synchronously the moment it observes the
+        # exit; this is additional insurance for a title write that lands
+        # on the real console slightly after that point (observed on a
+        # slow legacy conhost). `consume_claude_child_exit()` is cheap
+        # (two int compares) and returns True at most once per exit, so
+        # this costs nothing extra on an idle drain tick.
+        from halo_harness.termtitle import consume_claude_child_exit, set_terminal_title
+        if consume_claude_child_exit():
+            set_terminal_title("halo")
 
     def on_turn_done(self, reason: str) -> None:
         if reason == "interrupted":
@@ -1153,7 +1273,7 @@ class BridgeApp(App):
         card = PermissionCard(request_id=request_id, summary=f"Bash({command})",
                                reason=getattr(decision, "reason", "") or "runs now, outside the model turn (! prefix)",
                                suggested_rule=getattr(decision, "suggested_rule", None), on_decide=on_decide,
-                               on_resolved_externally=on_decide)
+                               on_resolved_externally=on_decide, input_data={"command": command})
         # Halo 2.0.1 W3a (finding 16 / PendingDock): same queued path every
         # other permission/question/plan ask goes through now.
         await self.enqueue_pending_card(card, marker_text=f"⏸ permission needed for Bash({command}), see below")
@@ -1339,6 +1459,20 @@ class BridgeApp(App):
         pending permission card getting lost -- but this is a net for
         whatever's not yet found), refocus before letting the key proceed,
         so a key never silently goes nowhere."""
+        # Halo 2.0.2 round C (macOS/VS Code terminal brief): `/keys`'s own
+        # KeysTesterDialog, when it's the active screen, is handed every
+        # raw key THROUGH this one always-runs-first observation point --
+        # duck-typed (`halo_keys_tester_receive`, no import coupling
+        # either way) rather than giving that dialog its own `on_key`/
+        # `_on_key` override, so it needs no opinion of its own on the
+        # chord-prefix/self-heal logic below. A key bound to a `priority=
+        # True` app-level action (Ctrl+E, Ctrl+X, Ctrl+End) still reaches
+        # this dialog too -- this method runs regardless of what, if
+        # anything, the SEPARATE binding-resolution pass this docstring's
+        # own first paragraph describes does with the same key.
+        receiver = getattr(self.screen, "halo_keys_tester_receive", None)
+        if receiver is not None:
+            receiver(event.key)
         # 2.0.0 Launch intro: "any keypress ... completes it instantly" --
         # a side effect only, never `event.stop()`/`prevent_default()`, so
         # the SAME keystroke that skips the intro still reaches whatever
@@ -1418,6 +1552,10 @@ class BridgeApp(App):
         self._completion_kind = event.kind
         if event.kind == "slash":
             self._completion_items = [inv for inv, _desc in complete_slash(event.token, self.registry)]
+        elif event.kind == "arg":
+            self._completion_items = self._complete_role_command_arg(event.token)
+        elif event.kind == "orgarg":
+            self._completion_items = self._complete_org_command_arg(event.token)
         else:
             self._completion_items = complete_at_path(event.token, str(self.cwd))
         self.completion_popup.show(self._completion_items)
@@ -1426,6 +1564,103 @@ class BridgeApp(App):
         # itself sets `display = bool(items)`, so an empty result (nothing
         # matches the filter) correctly falls back to ordinary Up/Down.
         self.prompt_input.set_completion_open(bool(self._completion_items))
+
+    def _complete_role_command_arg(self, token: str) -> "list":
+        """Halo 2.0.2 brief A.4: ranks candidates for `/role <name>
+        <model> [effort]` / `/roles set <name> <model> [effort]`'s
+        CURRENT argument -- role names first, then model refs (the same
+        enumerated catalog `/model`'s own picker uses, via `controller.
+        list_models()`), then the effort levels valid for whichever
+        model was typed into the PREVIOUS argument. Which argument this
+        even is comes from the live prompt's own full first line +
+        cursor column (`current_token`'s own parameters) -- read directly
+        off the widget here rather than widening `CompletionQuery` (kept
+        a plain 2-field message, unchanged for "slash"/"at")."""
+        from halo_harness.tui.completion import filter_items, role_command_arg_index, role_command_args
+
+        row, col = self.prompt_input.cursor_location
+        line = self.prompt_input.document.get_line(row)
+        arg_index = role_command_arg_index(line, col)
+        if arg_index is None:
+            return []
+        if arg_index == 0:
+            from halo_harness.roles import known_role_names
+            runtime = getattr(getattr(self.controller, "session", None), "agent_runtime", None)
+            candidates = list(known_role_names(getattr(runtime, "role_table", None),
+                                                getattr(runtime, "cli_role_overrides", None)))
+            return filter_items(candidates, token)
+        if arg_index == 1:
+            # finding 24: cheap time-based cache -- collapses a typing
+            # burst (one keystroke = one completion query) into one real
+            # `list_models()` call instead of rebuilding the whole
+            # models.json + dbx catalog + model table candidate list on
+            # every keystroke while this argument's popup stays open.
+            now = time.monotonic()
+            if self._role_model_cache is None or (now - self._role_model_cache_at) > 2.0:
+                try:
+                    rows = self.controller.list_models()
+                except Exception:
+                    rows = []
+                # Real `Controller.list_models()` rows are dicts with a
+                # "ref" key; `testing.fake_controller.FakeController`'s
+                # own (a TUI-pilot-test stand-in, never the real thing)
+                # are bare strings -- both accepted so this never crashes
+                # under either.
+                candidates = [r.get("ref") for r in rows if isinstance(r, dict) and r.get("ref")]
+                candidates += [r for r in rows if isinstance(r, str) and r]
+                self._role_model_cache = candidates
+                self._role_model_cache_at = now
+            return filter_items(self._role_model_cache, token)
+        # finding 24: `pieces[1]` of the FULL line used to be read as "the
+        # model just typed" -- that's the role name for `/role ... <effort>`
+        # and the literal word "set" for `/roles set ... <effort>`. The
+        # model is always argument 1 (0 = role name) once the command's
+        # own `/role`/`/roles set` prefix is stripped off -- which is
+        # exactly what `role_command_args` (shared with `role_command_arg_
+        # index` above) does.
+        pieces = role_command_args(line) or []
+        model_text = pieces[1] if len(pieces) > 1 else ""
+        return filter_items(self._effort_levels_for(model_text), token)
+
+    def _complete_org_command_arg(self, token: str) -> "list":
+        """Round B fix pass ("No Tab completion for org/position names in
+        `/org ...`", confirmed): ranks candidates for the org-NAME
+        argument of `/org show|edit|run|load <name> ...` -- every saved
+        organization's own name (`halo_harness.orgs.list_orgs`, the same
+        listing `/org`/`/org list` itself prints)."""
+        from halo_harness.orgs import list_orgs
+        from halo_harness.tui.completion import filter_items
+        try:
+            names = list_orgs(state_dir=getattr(self.controller, "state_dir", None))
+        except Exception:
+            names = []
+        if token in names:
+            # The typed name is ALREADY a complete, exact match -- no
+            # popup needed (and, for `show`/`edit`/`load`, where the name
+            # is the command's own LAST argument, this is also what lets
+            # a follow-up Enter submit normally instead of being read as
+            # "accept the highlighted completion", which `_accept_
+            # completion` never submits for a non-"slash" kind).
+            return []
+        return filter_items(names, token)
+
+    def _effort_levels_for(self, model_text: str) -> "list":
+        """The effort words a just-typed (possibly partial/invalid) model
+        ref's own route accepts -- every harness-wide level when
+        `model_text` is empty/unresolvable, never raises."""
+        from halo_harness.providers.profiles import EFFORT_LEVELS
+        if not model_text:
+            return list(EFFORT_LEVELS)
+        try:
+            from halo_harness.model import parse_model_ref
+            from halo_harness.providers.effort import effort_set
+            from halo_harness.providers.routing import Route
+            ref = parse_model_ref(model_text, getattr(self.controller, "routes", None))
+            route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
+            allowed = effort_set(route, state_dir=getattr(self.controller, "state_dir", None)).allowed
+            return list(allowed) if allowed else list(EFFORT_LEVELS)
+        except Exception:
+            return list(EFFORT_LEVELS)
 
     def on_prompt_input_completion_dismissed(self, _event: PromptInput.CompletionDismissed) -> None:
         self.completion_popup.hide()
@@ -1703,7 +1938,7 @@ class BridgeApp(App):
         blocked in `Session._await_permission_decision` is untouched by it,
         so without this it sits there forever even once `auto`/
         `bypassPermissions` would have allowed it. Root-cause match for
-        rolo's report: he pressed Shift+Tab to `auto`, the status bar
+        the owner's report: he pressed Shift+Tab to `auto`, the status bar
         updated, but the turn never continued -- the pending ask underneath
         was never re-decided.
 
@@ -1722,15 +1957,42 @@ class BridgeApp(App):
         whatever card was ACTUALLY pending by then instead)."""
         from halo_harness.tui.widgets.cards import PermissionCard
         card = self.pending_card
-        if not isinstance(card, PermissionCard) or card.done or card.awaiting_feedback:
+        if isinstance(card, PermissionCard) and not card.done and not card.awaiting_feedback:
+            action = self.controller.reevaluate_pending_permission(card.request_id)
+            if action in ("allow", "deny"):  # else still "ask" under the new mode -- leave it up
+                card.resolve_externally(action)
+                if self._borrowing_card is card:
+                    self._borrowing_card = None
+                self.clear_pending_card()
+        # review finding 21: the ACTIVE card is handled above; anything still
+        # parked in `_pending_queue` (Halo 2.0.1 W3a's PendingDock FIFO -- a
+        # second, third, ... ask that arrived while an earlier one was still
+        # up) used to keep asking under the new mode no matter how many of
+        # them auto/bypassPermissions now decides outright -- each had to be
+        # answered by hand regardless of the mode switch that just resolved
+        # the one on top. Re-evaluate every queued card the same way,
+        # dropping (and resolving) the ones the new mode actually decides; a
+        # card still "ask" is left exactly where it was, in the same order.
+        if not self._pending_queue:
             return
-        action = self.controller.reevaluate_pending_permission(card.request_id)
-        if action not in ("allow", "deny"):
-            return  # still "ask" under the new mode (or nothing pending any more) -- leave it up
-        card.resolve_externally(action)
-        if self._borrowing_card is card:
-            self._borrowing_card = None
-        self.clear_pending_card()
+        still_queued = []
+        dropped_any = False
+        for queued in self._pending_queue:
+            if not isinstance(queued, PermissionCard) or queued.done or queued.awaiting_feedback:
+                still_queued.append(queued)
+                continue
+            action = self.controller.reevaluate_pending_permission(queued.request_id)
+            if action not in ("allow", "deny"):
+                still_queued.append(queued)
+                continue
+            queued.resolve_externally(action)
+            marker = self._pending_markers.pop(id(queued), None)
+            if marker is not None:
+                marker.set_text(getattr(queued, "decision_line", None) or "(resolved)")
+            dropped_any = True
+        if dropped_any:
+            self._pending_queue = still_queued
+            self._refresh_needs_you_tag()
 
     def action_scroll_transcript_end(self) -> None:
         """1.0.1 hotfix 16: End/Ctrl+End (bound above) and a click on the
@@ -1953,9 +2215,9 @@ class BridgeApp(App):
             else:
                 self.controller.interrupt()
         if quit_on_double:
-            # W4c item 4: the exact wording rolo asked for -- "I worry that
-            # doing ctrl c in a windows operating system will close the
-            # terminal" -- Ctrl+C here only ever closes HALO, never the
+            # W4c item 4: the exact wording the owner asked for -- "I worry
+            # that doing ctrl c in a windows operating system will close
+            # the terminal" -- Ctrl+C here only ever closes HALO, never the
             # terminal it's running in.
             self.notify("Press Ctrl+C again to exit halo (your terminal stays open)",
                         timeout=DOUBLE_CTRL_C_WINDOW_S)
@@ -1992,6 +2254,23 @@ class BridgeApp(App):
             )
 
     def action_quit_on_empty(self) -> None:
+        # 2.0.2 review finding 38 (discovered while fixing it): this is an
+        # APP-level `priority=True` binding (see its own BINDINGS comment
+        # above), which Textual checks BEFORE any screen's own priority
+        # bindings -- with a MODAL dialog open (OrgEditor, roles editor,
+        # the MCP entry form, ...), this used to fire FIRST regardless,
+        # either quitting the whole app (chat prompt empty) or editing
+        # the chat prompt's OWN text (deleting a character there) while
+        # the user was focused on a completely different widget in the
+        # dialog -- either way, the dialog's own ctrl+d binding (e.g.
+        # OrgEditor's "delete position") never ran at all. `SkipAction`
+        # tells Textual "this binding declines the key," which lets the
+        # SAME key fall through to the next namespace in the chain (the
+        # modal screen itself) instead of being swallowed here.
+        from textual.actions import SkipAction
+        from textual.screen import ModalScreen
+        if isinstance(self.screen, ModalScreen):
+            raise SkipAction()
         if self.prompt_input.text.strip():
             self.prompt_input.action_delete_right()  # restore TextArea's own Ctrl+D (forward-delete)
         else:
@@ -2100,6 +2379,18 @@ class BridgeApp(App):
                 self.prompt_input.move_cursor(self.prompt_input.document.end)
 
         self.push_screen(HistorySearchDialog(display), _on_pick)
+
+    def action_toggle_tasks(self) -> None:
+        """Halo 2.0.2 round 3 (brief C item 1): `/tasks`/Ctrl+T -- pushes
+        the panel; TasksPanel's own `ctrl+t`/`escape` bindings close it
+        again once it's the focused screen (see this action's own
+        BINDINGS comment above), so this method only ever needs to handle
+        "open a new one". `read_task_board` is an optional Controller
+        method (a bare/legacy stand-in may not have it)."""
+        from halo_harness.tui.dialogs.tasks import TasksPanel
+        list_tasks = getattr(self.controller, "list_agent_tasks", None) or (lambda: [])
+        read_board = getattr(self.controller, "read_task_board", None)
+        self.push_screen(TasksPanel(list_agent_tasks=list_tasks, read_task_board=read_board))
 
     def apply_theme(self, name: str) -> None:
         self.theme_name = name

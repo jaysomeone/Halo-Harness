@@ -146,7 +146,7 @@ def test_build_entry_http_shape_with_headers(ctx: Ctx):
 
 @test
 def test_claude_json_add_remove_byte_identical_on_non_ascii_no_trailing_newline_fixture(ctx: Ctx):
-    """finding 8, verified against rolo's real 66837-byte ~/.claude.json
+    """finding 8, verified against the owner's real 66837-byte ~/.claude.json
     (non-ASCII text, no trailing newline): ensure_ascii=False, the
     source's own trailing-newline state is reproduced, and add+remove of
     the SAME entry restores the file byte for byte (byte compare, not
@@ -243,6 +243,40 @@ def test_parse_add_argv_flags_before_name_only(ctx: Ctx):
 def test_parse_kv_list(ctx: Ctx):
     ctx.check("env-shaped", C._parse_kv_list(["A=1", "B=2", "malformed"], "=") == {"A": "1", "B": "2"})
     ctx.check("header-shaped", C._parse_kv_list(["Authorization: Bearer x"], ":") == {"Authorization": "Bearer x"})
+
+
+@test
+def test_cmd_learned_lists_then_forgets(ctx: Ctx):
+    """Halo 2.0.2 round D leftover 2: `halo mcp learned` lists every
+    learned endpoint; `--forget <endpoint>` clears its tools-rejected
+    rule and exits 0, a SECOND forget of the same endpoint exits 1 (and
+    says so), and an unknown endpoint also exits 1."""
+    import contextlib
+    import io
+    def _run(home):
+        from halo_harness.providers.learned_rules import learn_tools_rejected
+        os.environ["BRIDGE_STATE_DIR"] = str(home)
+        try:
+            learn_tools_rejected(home, "databricks", "my-model")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = C.cmd_mcp(["learned"])
+            ctx.check(f"lists the endpoint, rc={rc}, got {out.getvalue()!r}",
+                      rc == 0 and "databricks:my-model" in out.getvalue() and "tools_rejected" in out.getvalue())
+
+            out2 = io.StringIO()
+            with contextlib.redirect_stdout(out2):
+                rc2 = C.cmd_mcp(["learned", "--forget", "databricks:my-model"])
+            ctx.check(f"forgets, rc={rc2}, got {out2.getvalue()!r}", rc2 == 0 and "forgot" in out2.getvalue())
+
+            err3 = io.StringIO()
+            with contextlib.redirect_stderr(err3):
+                rc3 = C.cmd_mcp(["learned", "--forget", "databricks:my-model"])
+            ctx.check(f"forgetting again fails (nothing left), rc={rc3}, got {err3.getvalue()!r}",
+                      rc3 == 1 and "no learned" in err3.getvalue())
+        finally:
+            os.environ.pop("BRIDGE_STATE_DIR", None)
+    _with_claude_json_path(_run)
 
 
 if __name__ == "__main__":

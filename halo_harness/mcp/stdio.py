@@ -27,7 +27,10 @@ from typing import Optional
 
 from halo_harness.config.paths import bridge_home
 
-_ROTATE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB, matches binary-facts sec.9's own server log rotation
+_ROTATE_MAX_BYTES = 1 * 1024 * 1024  # 1 MB -- round4 brief item 1 (was 5 MB under binary-facts
+# sec.9); tightened because `manager.py` now also appends connect/transport-error lines to this
+# SAME file (see `manager._append_server_log`/`manager.tail_server_log`), not just raw child
+# stderr, so it fills faster than before and the `L` tail should stay recent.
 
 
 def errlog_path(server_name: str) -> Path:
@@ -48,7 +51,8 @@ def _rotate_if_oversized(path: Path, max_bytes: int) -> None:
 
 def open_errlog(server_name: str, max_bytes: int = _ROTATE_MAX_BYTES):
     """A REAL file object at `~/.halo/mcp/<server>.log`, rotated to
-    a single `.log.1` backup first if it's already over 5 MB.
+    a single `.log.1` backup first if it's already over 1 MB (round4
+    brief item 1).
 
     `mcp.client.stdio.stdio_client`'s `errlog=` is handed straight to the
     OS as the child process's stderr redirect target (it needs a real file

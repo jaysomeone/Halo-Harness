@@ -439,6 +439,55 @@ def test_leaked_text_embedded_call_is_promoted_and_dispatched(ctx: Ctx):
 
 
 @test
+def test_qwen_missing_opener_leak_is_promoted_and_dispatched(ctx: Ctx):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 3): the Qwen3-Coder
+    #475 shape -- a bare JSON tool call with NO opening `<tool_call>` tag
+    (only the closing one survives) -- end to end through a real
+    `Session.turn()`, the same way `test_leaked_text_embedded_call_is_
+    promoted_and_dispatched` already proves for the paired-tag shape.
+    `missing_tool_call_opener` was declared by every Qwen row but never
+    implemented before this round."""
+    fh = build_fake_home()
+    target = fh["proj"] / "missing_opener_target.txt"
+    target.write_text("missing opener worked\n", encoding="utf-8")
+
+    def _scn(h, body):
+        messages = (body or {}).get("messages") or []
+        if any(m.get("role") == "tool" for m in messages):
+            _finish(h, _final_text_chunk("missing opener worked"))
+        else:
+            # No opening <tool_call> tag at all -- only the closer.
+            leaked_text = ("Sure, reading it now:\n"
+                           + json.dumps({"name": "Read", "arguments": {"file_path": str(target)}})
+                           + "</tool_call>")
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"content": leaked_text}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ])
+
+    SCENARIOS["h2-missing-opener"] = _scn
+    mock = MockUpstream().start()
+    try:
+        session = _make_session(fh, mock, scenario="h2-missing-opener",
+                                 extra_profile_fields={"tool_leak_patterns": ("missing_tool_call_opener",)})
+        seen = list(session.turn("read it"))
+        ready = [e for e in seen if e.kind == "tool_use_ready"]
+        results = [e for e in seen if e.kind == "tool_result"]
+        ctx.check(f"exactly one promoted tool_use_ready despite the missing opener, got {ready}", len(ready) == 1)
+        ctx.check("the promoted call resolved to Read", ready[0].data.get("name") == "Read")
+        ctx.check("a real (minted) id, never empty -- the existing promotion path's own id normalisation",
+                  bool(ready[0].data.get("id")))
+        ctx.check(f"the tool actually ran and succeeded, got {results}", results and results[0].data.get("ok") is True)
+        final_text = "".join(e.data.get("text", "") for e in seen if e.kind == "text_delta")
+        ctx.check(f"the final answer reflects the real file content, got {final_text!r}",
+                  "missing opener worked" in final_text)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
 def test_tool_choice_required_retry_recovers_a_malformed_leak(ctx: Ctx):
     """When the text looks like an ATTEMPTED (but malformed/truncated) leak
     that leak_parser's own regex can't cleanly parse, and the profile row

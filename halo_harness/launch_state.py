@@ -1,9 +1,10 @@
 """halo_harness.launch_state -- 2.0.1 W3a: "launch with the last session's
-model and effort" (rolo, live: "have the last session's model choice and
-effort start every time you launch it, it defers back to deepseek each
-time"). Persists the last `/model`/`/effort` choice to `~/.halo/state.json`
-(tmp + os.replace, same convention as `providers.databricks._atomic_write_
-json`) -- NEVER to Claude Code's own files. Two scopes are kept per field:
+model and effort" (a user report, live: "have the last session's model
+choice and effort start every time you launch it, it defers back to
+deepseek each time"). Persists the last `/model`/`/effort` choice to
+`~/.halo/state.json` (tmp + os.replace, same convention as `providers.
+databricks._atomic_write_json`) -- NEVER to Claude Code's own files. Two
+scopes are kept per field:
 `global` (the most recent choice made ANYWHERE) and `by_cwd` (keyed by a
 normalized cwd string) -- `resolve_*`'s own `memory` parameter picks
 cwd-then-global (the default) or global-only, matching the new

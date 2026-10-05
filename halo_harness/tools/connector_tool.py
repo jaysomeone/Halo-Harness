@@ -174,7 +174,11 @@ class ConnectorTool(Tool):
         disallowed = self._per_tool_rules_as_mcp_names(ctx, prefix)
         allowed_tools_value = f"{prefix}__{tool}" if tool else f"{prefix}__*"
         full_argv = argv + [
-            "-p", "--output-format", "json", "--max-turns", str(self.max_turns),
+            # review finding 29: without this, every connector__* call adds
+            # a "Request: ..." entry to Claude Code's own /resume list --
+            # this inner claude is a one-shot tool call, never a
+            # conversation worth resuming.
+            "-p", "--output-format", "json", "--max-turns", str(self.max_turns), "--no-session-persistence",
             "--allowedTools", allowed_tools_value,
         ] + (["--disallowedTools", ",".join(disallowed)] if disallowed else []) + [
             "--append-system-prompt", _SYSTEM_PROMPT_TEMPLATE.format(prefix=prefix),
@@ -190,8 +194,12 @@ class ConnectorTool(Tool):
         # start_new_session on POSIX), polled against `ctx.abort`, with
         # the WHOLE group killed on abort or timeout.
         from halo_harness.tools._proc import run_streamed
+        # review finding 29: `os.getcwd()` is the HALO PROCESS's own cwd,
+        # not this session's -- under `--cwd <other-project>` the inner
+        # claude read `<other-project>`'s own settings/.mcp.json instead of
+        # the session's.
         output, exit_code, timed_out, aborted = run_streamed(
-            full_argv, cwd=os.getcwd(), env=_claude_subprocess_env(),
+            full_argv, cwd=ctx.cwd, env=_claude_subprocess_env(),
             timeout_s=DEFAULT_WALL_CLOCK_TIMEOUT_S, abort=ctx.abort,
         )
         if aborted:

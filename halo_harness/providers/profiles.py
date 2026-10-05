@@ -64,6 +64,16 @@ OPENAI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 # instead of the general `EFFORT_LEVELS` above.
 ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "max")
 
+# Halo 2.0.3 round 5i part 1 (docs/harness/OPENAI-RESEARCH.md section 5,
+# confirmed live against the Responses API reference, 2026-10-04): the
+# `reasoning.effort` enum on this dialect is wider than the harness's own
+# EFFORT_LEVELS (adds "none"/"minimal") -- a strict superset, so
+# `clamp_effort` never needs to narrow a value the harness's own
+# `--effort`/`/effort` vocabulary can send; this profile exists so a
+# future config/settings value using "none"/"minimal" directly is still
+# accepted rather than clamped to this route's own default.
+OPENAI_RESPONSES_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
 
 def _model_table_path() -> Path:
     return Path(__file__).resolve().parent / "model_table.json"
@@ -124,6 +134,60 @@ def model_family(model_id: str) -> str:
     if "gpt" in low or low.startswith("openai") or "o1" in low or "o3" in low:
         return "gpt"
     return "generic"
+
+
+def decision_only_info(model_id: str, model_table: Optional[dict] = None) -> Optional[dict]:
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): `{"reason": str}`
+    when `model_id` is a DECISION-ONLY endpoint -- one that answers with a
+    verdict (yes/no, a choice, a score) and was never meant to receive
+    `tools`/`tool_choice` at all. `None` for every ordinary chat/tool-
+    calling model. The owner's work-VM "openjev qwen" bugreport is the
+    motivating case: Databricks documents `databricks-openjev-qwen35-4b`
+    as exactly this shape (docs/harness/QWEN-RESEARCH.md).
+
+    Checked two ways, either one enough -- deliberately DATA, not code, so
+    a wrong guess is a one-line model_table.json edit:
+    1. A specific row's own `capabilities.decision_only` (the confirmed,
+       tabled case) -- its `capabilities.description` is Databricks' own
+       one-line wording when present.
+    2. A case-insensitive substring match of the top-level
+       `decision_only_name_patterns.patterns` list against the bare
+       model id -- the untabled-endpoint net ("for endpoints matching
+       openjev/jev-judge names"), so a differently-named judge-style
+       endpoint Halo has never seen gets classified correctly from editing
+       that list alone, never this function.
+
+    Consulted by `resolve_profile` (`ProviderProfile.decision_only`/
+    `tools_supported`), `controller.list_models()` (the picker's "judge /
+    decision" group) and `Controller.set_model`/`headless.build_session`
+    (never the session model -- routed to the `judge` role instead)."""
+    model_table = model_table if model_table is not None else load_model_table()
+    low = (model_id or "").lower()
+    for host_key in ("databricks", "openrouter"):
+        row = (model_table.get(host_key) or {}).get(model_id)
+        caps = (row or {}).get("capabilities") if isinstance(row, dict) else None
+        if isinstance(caps, dict) and caps.get("decision_only"):
+            return {"reason": caps.get("description") or
+                    "this endpoint only answers yes/no, choice and scoring questions -- it does not take tools"}
+    patterns = (model_table.get("decision_only_name_patterns") or {}).get("patterns") or []
+    for pat in patterns:
+        if isinstance(pat, str) and pat and pat.lower() in low:
+            return {"reason": f"this endpoint's name matches the known decision-only/judge naming pattern {pat!r} "
+                               "-- it answers yes/no, choice and scoring questions, not tool calls"}
+    return None
+
+
+def decision_only_notice(model_id: str, model_table: Optional[dict] = None) -> Optional[str]:
+    """One line for a human -- the picker's note, the "never the session
+    model" refusal, and the clear tools-present request error all share
+    this EXACT wording (single source) rather than each phrasing it
+    separately. `None` when `model_id` isn't decision-only."""
+    info = decision_only_info(model_id, model_table)
+    if info is None:
+        return None
+    reason = info["reason"].rstrip(". ")
+    return (f"{model_id} {reason}. Use the judge role instead of the session model "
+            f"(`/roles set judge {model_id}`, or `Agent(role=\"judge\")`).")
 
 
 def edit_hint_for(provider: str, model_id: str, model_table: Optional[dict] = None) -> Optional[str]:
@@ -251,6 +315,28 @@ class ProviderProfile:
     # explicit `--effort`/`/effort` value still goes through the clamp map
     # exactly as written (so `xhigh` -> `max` stays a deliberate choice).
     default_effort_when_unset: bool = False
+    # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): True for a
+    # decision-only/judge endpoint (`decision_only_info` above) --
+    # `decision_only_reason` is its human-readable "why" (Databricks' own
+    # wording when tabled). `tools_supported` is the narrower, purely
+    # mechanical flag `providers/request.py::build_request_body` actually
+    # gates on before putting `tools` on the wire: False whenever
+    # `decision_only` is True, OR (Databricks only) a prior live request
+    # against this exact endpoint already proved it rejects tools
+    # (`providers.learned_rules.learned_tools_rejected` -- a model with NO
+    # row/pattern match at all can still end up here after one real 400).
+    # A decision-only row is therefore always `tools_supported=False`, but
+    # the reverse need not hold.
+    decision_only: bool = False
+    decision_only_reason: Optional[str] = None
+    tools_supported: bool = True
+    # The bare upstream model id this profile was resolved for
+    # (`route.upstream_model`) -- None only for a profile built by hand in
+    # a test, never for one `resolve_profile` returns. Exists so a clear
+    # error (`providers.request.ToolsNotSupported`) can name the actual
+    # model without `convert_tools`/`build_request_body` needing their own
+    # separate `route`/model-id parameter just for a message string.
+    model_id: Optional[str] = None
 
 
 def _fallback_family_defaults(family: str, dialect: str) -> "tuple[str, str, bool]":
@@ -291,6 +377,13 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
     family = model_family(route.upstream_model)
     host_key = route.provider if route.provider in ("databricks", "openrouter") else None
     row = ((model_table.get(host_key) or {}).get(route.upstream_model) or {}) if host_key else {}
+    # Halo 2.0.2 round 5 item 1: computed ONCE, shared by every branch below
+    # (including the anthropic-passthrough early return -- a native Claude
+    # route is never decision-only, but this keeps every ProviderProfile
+    # this function can return carrying the same two fields regardless).
+    _decision = decision_only_info(route.upstream_model, model_table)
+    decision_only = _decision is not None
+    decision_only_reason = _decision.get("reason") if _decision else None
 
     if route.provider == "cx":
         # 2.0.2: the effort levels Codex's own model/list reports for this
@@ -309,6 +402,84 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             reasoning_replay="thinking", reasoning_effort_supported=True,
             family=family, edit_format=row.get("edit_format", "diff"),
             effort_values_supported=ANTHROPIC_EFFORT_LEVELS,
+            model_id=route.upstream_model,
+        )
+
+    if route.dialect == "ollama":
+        # Halo 2.0.3 round 2: `ol:` on Ollama's native `/api/chat` -- its
+        # own dedicated request builder (providers/ollama_request.py) and
+        # NDJSON decoder (providers/ollama_stream.py) own every wire detail
+        # this profile would otherwise drive (num_ctx, keep_alive, `think`
+        # mapped from effort) -- map_effort/map_effort_anthropic are never
+        # called for this dialect, so reasoning_effort_supported stays False
+        # and thinking_format stays "none" on purpose: there is no second
+        # "ollama" value for either to teach every other reader of these
+        # fields about. `reasoning_replay="empty"`: whether a replayed
+        # `message.thinking` is expected back by the server at all is
+        # undocumented (research doc Q1/Q8), so a prior turn's thinking text
+        # is never put back on the wire -- display-only, dropped on replay,
+        # same as any family with no reasoning_replay story. No model_table.json
+        # row lookup: that table is Databricks/OpenRouter-keyed only, and a
+        # bare Ollama tag (`qwen3:30b`) would never match a row there anyway.
+        # Halo 2.0.3 round 3 (brief item 3): `tools_max` here is only the
+        # INITIAL value -- this call site has no host/catalog in scope, so
+        # it can't know the real effective num_ctx yet. `None` (round 2's
+        # value) made `convert_tools`'s ToolCatalogTooLarge check a no-op
+        # for every ollama route, which is how the hand-off's "every
+        # request carried the full 24-tool catalog" bug happened.
+        # `tools_max_for_num_ctx(None)` is the SAME smallest-class,
+        # conservative default `providers.ollama_fit.resolve_ollama_
+        # tools_max` falls back to before any catalog has loaded --
+        # `providers.ollama_request.build_ollama_request_body` (which DOES
+        # know the real num_ctx) and `agent/loop.py`'s `_sync_ollama_tools_
+        # cap` both refine this to the real, context-aware number once a
+        # host/catalog read succeeds.
+        from halo_harness.providers.ollama_fit import tools_max_for_num_ctx
+        return ProviderProfile(
+            system_vs_developer="system", thinking_format="none",
+            reasoning_replay="empty", reasoning_effort_supported=False,
+            family=family, tool_choice_required_supported=False,
+            tools_supported=True, effort_values_supported=EFFORT_LEVELS,
+            model_id=route.upstream_model, tools_max=tools_max_for_num_ctx(None),
+            # Round 5b part 2 (brief item 1), kept by the fix pass (brief
+            # item 1's own turn-level CONSTRAINT was removed -- see
+            # providers/ollama_request.py's docstring -- but this stays
+            # enabled regardless): the generic bare-dict/fenced-JSON leak
+            # extractors (providers/hooks.py's own `_LEAK_EXTRACTORS`,
+            # already tested for every other family) catch a `{"name":
+            # ..., "arguments": {...}}`-shaped reply that a model leaks as
+            # plain `message.content` text on its OWN initiative, never
+            # forced into that shape by Halo -- enabling them here is what
+            # turns that into a real dispatched tool_use via `agent/
+            # loop.py::_turn_body`'s EXISTING leak_parser call (unchanged,
+            # dialect-agnostic) -- no new promotion code needed, and
+            # harmless since nothing here ever REQUIRES the model to
+            # answer in this shape.
+            tool_leak_patterns=("python_repr_args", "json_text_call"),
+        )
+
+    if route.dialect == "openai-responses":
+        # Halo 2.0.3 round 5i part 1: `oai:gpt-6-astra`/`oai:gpt-6.1-sol`
+        # by default, or any `oai:` model `openai.dialect_overrides`
+        # names (`providers.responses_request.resolve_openai_dialect`).
+        # `thinking_format="openai_responses"` is its OWN value (never
+        # "anthropic_thinking"/"fmapi_blocks"/"openrouter_details" --
+        # none of those wire shapes apply to this dialect) so nothing
+        # downstream mistakes this dialect's reasoning for one of theirs.
+        # `reasoning_replay="empty"`: reasoning is carried for DISPLAY
+        # only, never replayed on the wire -- `docs/harness/OPENAI-
+        # RESEARCH.md`'s own documented scope cut (`store: false` means
+        # no `previous_response_id`, and the encrypted-reasoning-content
+        # replay alternative is out of scope this round). No model_table.
+        # json row lookup: that table is Databricks/OpenRouter-keyed
+        # only, and a bare OpenAI id would never match a row there anyway
+        # (same reasoning the "ollama" branch above already gives).
+        return ProviderProfile(
+            system_vs_developer="none", thinking_format="openai_responses",
+            reasoning_replay="empty", reasoning_effort_supported=True,
+            family=family, tools_supported=True, tools_max=128,
+            effort_values_supported=OPENAI_RESPONSES_EFFORT_LEVELS,
+            model_id=route.upstream_model,
         )
 
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
@@ -344,9 +515,22 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         databricks_rate_limits=row.get("rate_limits"),
         unverified=tuple(row.get("unverified") or ()),
         sampling_unsupported_params=tuple(row.get("sampling_unsupported_params") or ()),
+        decision_only=decision_only,
+        decision_only_reason=decision_only_reason,
     )
 
     if route.provider == "databricks":
+        # item 1/4: never sent to a decision-only endpoint; also learns
+        # False for an UNTABLED endpoint once a live request already
+        # proved it rejects tools (see agent/loop.py's `_step`, the
+        # `is_tools_rejected_message` branch that calls
+        # `learn_tools_rejected` -- the same shape `reasoning_effort_
+        # with_tools`'s own learned-rule lookup below already uses).
+        tools_supported = not decision_only
+        if tools_supported and state_dir is not None:
+            from halo_harness.providers.learned_rules import learned_tools_rejected
+            if learned_tools_rejected(state_dir, "databricks", route.upstream_model):
+                tools_supported = False
         default_use_temp = family not in ("deepseek", "kimi", "glm", "qwen", "qwen-coder")
         # 1.0.1 fixpass finding 12: this rule is Databricks-only (the
         # ORIGINAL hotfix 22 put it in the shared `hook_fields` dict above,
@@ -383,7 +567,7 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         # `reasoning_effort`; "max" is the GATEWAY's own SILENT fallback for
         # anything else (medium/minimal/xhigh/none -- never a 400), which is
         # why a harness-level "medium" used to run as an undocumented "max"
-        # with no error at all (rolo's "it pauses" report: a thinking phase
+        # with no error at all (a user report, "it pauses": a thinking phase
         # at the model's MOST expensive setting, not a harness hang). A
         # row's own explicit `reasoning_default_effort`/
         # `effort_values_supported`/`effort_clamp_map` still wins via
@@ -416,11 +600,17 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             effort_values_supported=databricks_effort_values,
             effort_clamp_map=databricks_effort_clamp_map,
             default_effort_when_unset=bool(row.get("default_effort_when_unset", family == "glm")),
+            tools_supported=tools_supported,
+            model_id=route.upstream_model,
             **hook_fields,
         )
 
-    # openrouter (also the fallback for any other openai-chat-dialect host)
-    return ProviderProfile(
+    # openrouter (also the fallback for any other openai-chat-dialect host,
+    # which per model.py's own routing is "huggingface" or "openai" (the
+    # chat-completions dialect of the `oai:` route, round 5i part 1 --
+    # "openai-responses" already returned above) and nothing else -- see
+    # the round 5b part 2 override just below the ProviderProfile call)
+    profile = ProviderProfile(
         system_vs_developer="system", max_tokens_field="max_tokens",
         reasoning_effort_supported=effort_supported, thinking_format="openrouter_details",
         reasoning_replay=replay if replay != "text" else "details",
@@ -451,8 +641,23 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         # "openrouter"."openai/gpt-6" row) ever sets this here.
         reasoning_effort_with_tools=row.get("reasoning_effort_with_tools"),
         effort_values_supported=effort_values_supported,
+        tools_supported=not decision_only,
+        model_id=route.upstream_model,
         **hook_fields,
     )
+    if route.provider == "huggingface":
+        # Round 5b part 2 (brief item 1/2): the "huggingface" profile the
+        # brief names is this SAME generic openai-chat profile -- there is
+        # no distinct "huggingface" dialect in `model.py`'s own routing
+        # (`hf:` always resolves `dialect="openai-chat"`) -- narrowed here
+        # by `route.provider` alone so an OpenRouter route through this
+        # identical branch is never touched. Same `tool_leak_patterns`
+        # reasoning as the `ollama` branch above (see its own comment);
+        # kept as a single-field `replace` rather than duplicating the
+        # whole `ProviderProfile(...)` call a second time.
+        from dataclasses import replace
+        profile = replace(profile, tool_leak_patterns=("python_repr_args", "json_text_call"))
+    return profile
 
 
 _DISABLING_EFFORTS = frozenset({"none", "disabled", "off", "minimal"})

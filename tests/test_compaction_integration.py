@@ -835,9 +835,14 @@ def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
     """H8 cheap must-do: `compactionModel` (settings.json/config.json,
     resolved by agent/compact.resolve_knobs) is actually used to route the
     summarisation call, instead of being resolved and never read. Both
-    models are on the SAME mock provider/creds (the documented same-
-    provider-only limitation) but are DISTINCT model ids the mock can
-    tell apart."""
+    models are on the SAME mock provider/creds here (DISTINCT model ids
+    the mock can tell apart is all this particular test needs) -- a
+    compactionModel on a genuinely DIFFERENT provider is its own case,
+    covered by tests.test_w5_fallback_model's cross-provider creds
+    resolution pattern (`headless._resolve_creds`) and by
+    tests.test_providers_ollama_session's own compaction test; round 2b
+    removed the same-provider-only restriction this docstring used to
+    describe."""
     fh = build_fake_home()
     mock = MockUpstream().start()
     try:
@@ -854,6 +859,88 @@ def test_h8_compaction_model_actually_used_by_the_summariser(ctx: Ctx):
                   "mock/compaction-good-summary" in models_called)
         ctx.check("the session's own model_ref is restored after the summary call",
                   session.model_ref.raw == "or:mock/model")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h202_compaction_role_is_the_rung_after_compaction_model(ctx: Ctx):
+    """Halo 2.0.2 brief A.1: "`compaction` is the rung after
+    `compactionModel`" -- consulted ONLY when `compactionModel` itself
+    resolved to nothing."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model=None)  # nothing set at the compactionModel rung
+        session.roles = {"compaction": "or:mock/compaction-from-role"}
+
+        list(session._run_compaction(1, trigger="manual"))
+        models_called = {r.get("body", {}).get("model") for r in mock.requests}
+        ctx.check(f"the summarisation call used the compaction ROLE's model, got {models_called}",
+                  "mock/compaction-from-role" in models_called)
+        ctx.check("the session's own model_ref is restored after the summary call",
+                  session.model_ref.raw == "or:mock/model")
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h202_compaction_model_still_beats_the_compaction_role(ctx: Ctx):
+    """`compactionModel` stays the higher-precedence rung -- a configured
+    `compaction` role must never override it."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        session.log.append_user([{"type": "text", "text": "hello"}])
+        session.log.append_assistant(content=[{"type": "text", "text": "hi"}], stop_reason="end_turn")
+
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model="or:mock/compaction-good-summary")
+        session.roles = {"compaction": "or:mock/compaction-from-role"}
+
+        list(session._run_compaction(1, trigger="manual"))
+        models_called = {r.get("body", {}).get("model") for r in mock.requests}
+        ctx.check(f"compactionModel still wins, got {models_called}",
+                  "mock/compaction-good-summary" in models_called
+                  and "mock/compaction-from-role" not in models_called)
+    finally:
+        mock.stop()
+        os.environ.pop("BRIDGE_TEST_HOME", None)
+        os.environ.pop("BRIDGE_OPENROUTER_BASE_URL", None)
+
+
+@test
+def test_h202_compaction_role_effort_is_applied_and_restored(ctx: Ctx):
+    """2.0.2 review finding 12 (major), second half: the `compaction`
+    role's own `effort` (a `{"model", "effort"}` table value) used to be
+    unpacked (`raw, _compaction_effort = role_value_parts(...)`) and then
+    dropped outright -- the summary call ran on the swapped-in model but
+    the SESSION's own ordinary effort, never a role-specific one."""
+    fh = build_fake_home()
+    mock = MockUpstream().start()
+    try:
+        session = _new_session(fh, mock, model="or:mock/model")
+        from halo_harness.agent.compact import CompactionKnobs
+        session._compaction_knobs = CompactionKnobs(compaction_model=None)
+        session.roles = {"compaction": {"model": "or:mock/compaction-from-role", "effort": "high"}}
+        session.effort = "low"  # the session's own ordinary effort, before any swap
+
+        saved = session._compaction_model_override()
+        ctx.check(f"the role's own effort is applied for the summary call, got {session.effort!r}",
+                  session.effort == "high")
+        session._restore_compaction_model(saved)
+        ctx.check(f"the session's own ordinary effort is restored afterward, got {session.effort!r}",
+                  session.effort == "low")
     finally:
         mock.stop()
         os.environ.pop("BRIDGE_TEST_HOME", None)

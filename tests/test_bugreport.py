@@ -116,6 +116,58 @@ def test_bugreport_redacts_a_planted_fake_key_in_every_source(ctx: Ctx):
         ctx.check("a <redacted> marker appears where the key would have been", "<redacted>" in text)
 
 
+@test
+def test_include_content_flag_adds_prompt_and_output_text_excerpts(ctx: Ctx):
+    """Release review finding 33: --include-content is documented
+    ("Include prompt/output text, not just shapes") but only ever
+    appended `tool_result=ok|error` -- the real excerpt now appears too,
+    gated strictly on the flag."""
+    from halo_harness.agent.log import SessionLog
+    from halo_harness.bugreport import _LogOnlySession, build_bugreport_text
+
+    with _Env() as env:
+        cwd = env.home / "proj"
+        cwd.mkdir(parents=True, exist_ok=True)
+        log = SessionLog(cwd)
+        log.append_user([{"type": "text", "text": "please summarize this unique marker UNIQUE-PROMPT-TEXT-42"}])
+        log.append_assistant(content=[{"type": "text", "text": "here is the summary UNIQUE-OUTPUT-TEXT-77"}],
+                              stop_reason="end_turn")
+        session = _LogOnlySession(log)
+
+        without = build_bugreport_text(session=session, state_dir=env.state_dir, cwd=cwd, include_content=False)
+        ctx.check("without the flag, the prompt text is absent", "UNIQUE-PROMPT-TEXT-42" not in without)
+        ctx.check("without the flag, the output text is absent", "UNIQUE-OUTPUT-TEXT-77" not in without)
+
+        with_content = build_bugreport_text(session=session, state_dir=env.state_dir, cwd=cwd, include_content=True)
+        ctx.check("with the flag, the prompt text appears", "UNIQUE-PROMPT-TEXT-42" in with_content)
+        ctx.check("with the flag, the output text appears too", "UNIQUE-OUTPUT-TEXT-77" in with_content)
+
+
+@test
+def test_timeline_steers_text_is_redacted_by_default_and_shown_with_the_flag(ctx: Ctx):
+    """Release review finding 33: the user's own real steer TEXT used to
+    be dumped into the bugreport's timeline JSON unconditionally -- every
+    OTHER piece of real content in this report already respects
+    --include-content, this was the one exception."""
+    from halo_harness.bugreport import _timeline_lines
+
+    class _FakeLog:
+        def read_all(self):
+            return [{"type": "meta", "timeline": {"turn": 1, "steers": ["REAL-STEER-TEXT-99"], "tools": []}}]
+
+    class _FakeSession:
+        log = _FakeLog()
+
+    without = "\n".join(_timeline_lines(_FakeSession(), include_content=False))
+    ctx.check(f"without the flag, the real steer text is absent, got {without!r}",
+              "REAL-STEER-TEXT-99" not in without)
+    ctx.check("without the flag, a placeholder explains it was omitted", "omitted" in without)
+
+    with_content = "\n".join(_timeline_lines(_FakeSession(), include_content=True))
+    ctx.check(f"with the flag, the real steer text appears, got {with_content!r}",
+              "REAL-STEER-TEXT-99" in with_content)
+
+
 # ---------------------------------------------------------------------------
 # redact.redact_for_bugreport's own extra capabilities.
 # ---------------------------------------------------------------------------
@@ -189,6 +241,36 @@ def test_cmd_bugreport_out_flag_writes_to_the_named_file(ctx: Ctx):
 
 
 @test
+def test_copy_to_clipboard_delegates_to_the_shared_external_tool_helper(ctx: Ctx):
+    """Release review finding 25: `copy_to_clipboard` used to pipe raw
+    UTF-8 bytes straight into `clip` on Windows, with no BOM/UTF-16LE
+    re-encoding -- `clip.exe` reads stdin as the console's current,
+    possibly lossy, codepage unless told otherwise, so non-ASCII text was
+    mangled (the exact bug part 9 already fixed for the TUI's own copy
+    path, `tui/clipboard.py::_copy_windows_clipboard`). Pinned by delegation
+    rather than re-deriving the encoding fix a second time: whatever
+    `copy_via_external_tool` is given and returns, this must pass straight
+    through."""
+    import halo_harness.bugreport as bugreport_mod
+
+    calls = []
+
+    def _fake_copy_via_external_tool(text, **kwargs):
+        calls.append(text)
+        return True
+
+    import halo_harness.tui.clipboard as clipboard_mod
+    old = clipboard_mod.copy_via_external_tool
+    clipboard_mod.copy_via_external_tool = _fake_copy_via_external_tool
+    try:
+        ok = bugreport_mod.copy_to_clipboard("café — non-ascii")
+        ctx.check("delegates and returns the helper's own verdict", ok is True)
+        ctx.check(f"passed the exact text through, got {calls}", calls == ["café — non-ascii"])
+    finally:
+        clipboard_mod.copy_via_external_tool = old
+
+
+@test
 def test_bugreport_and_timeline_are_registered_builtin_slash_commands(ctx: Ctx):
     from halo_harness.commands.builtins import _BUILTIN_SPECS
     ctx.check("/bugreport is registered", "bugreport" in _BUILTIN_SPECS)
@@ -232,6 +314,35 @@ def test_debug_timeline_records_phases_tools_and_message_end(ctx: Ctx):
               and record["tools"][0]["status"] == "ok")
     ctx.check("message_end_ms recorded", record["message_end_ms"] is not None)
     ctx.check("last_turn() returns the same record", debug_timeline.last_turn() == record)
+
+
+@test
+def test_debug_timeline_records_and_renders_hooks_permission_waits_and_compactions(ctx: Ctx):
+    """Release review parity gap: hooks/permission-waits/compactions WERE
+    recorded (W3b item 11, `debug_timeline.TurnTimeline.start_turn`'s own
+    `_current` dict) but `format_timeline_record` (the ONE text formatter
+    `/timeline` and `halo timeline` share) never rendered any of the
+    three -- only `--json`/the bugreport's raw `json.dumps` did."""
+    from halo_harness import debug_timeline, events as ev
+    from halo_harness.bugreport_timeline_cli import format_timeline_record
+    debug_timeline.reset_turns()
+    debug_timeline.start_turn(1)
+    debug_timeline.record_hook("PreToolUse", 12.5)
+    debug_timeline.record_permission_wait(100, 2500, "allow")
+    debug_timeline.record_turn_event(ev.compaction(phase="done", trigger="auto", turn=1,
+                                                      tokens_before=50000, tokens_after=8000))
+    debug_timeline.record_turn_event(ev.turn_done(turn=1))
+    record = debug_timeline.end_turn()
+
+    ctx.check(f"the record itself carries all three, got {record}",
+              record["hooks"] and record["permission_waits"] and record["compactions"])
+
+    text = format_timeline_record(record)
+    ctx.check(f"the hook run is rendered, got {text!r}", "PreToolUse" in text and "12.5" in text)
+    ctx.check(f"the permission wait is rendered, got {text!r}",
+              "permission_wait" in text and "allow" in text and "+100ms" in text and "+2500ms" in text)
+    ctx.check(f"the compaction is rendered with its token counts, got {text!r}",
+              "compaction done" in text and "50000->8000" in text)
 
 
 @test

@@ -62,6 +62,46 @@ async def handle_slash(app, name: str, args: str) -> None:
         "intro": _handle_intro,
         # W4c item 2: /copy, /copy code [N], /copy tool.
         "copy": _handle_copy,
+        # Halo 2.0.2 brief A.5: only `/roles edit <name>` needs real
+        # interactive behavior (a form, or $EDITOR) -- every other /roles
+        # subcommand (and /role, and the bare table) stays on the generic
+        # headless-text fallback below.
+        "roles": _handle_roles,
+        # Halo 2.0.2 round 2 (brief B): same split as /roles -- only
+        # `/org edit <name>` needs a real form; `/org run` (which can run
+        # a whole real sub-agent tree) also needs its OWN handler so it
+        # never blocks the UI thread, even though it stays on the plain
+        # headless-text fallback underneath.
+        "org": _handle_org,
+        # Halo 2.0.2 round 3 (brief C item 1): same toggle Ctrl+T uses.
+        "tasks": _handle_tasks,
+        # Halo 2.0.2 round 6: /update -- the check (git/network) runs on a
+        # worker, never the UI thread; the dialog's own Enter is what
+        # actually requests the quit-update-relaunch handoff (see
+        # `_on_update_dialog_result`).
+        "update": _handle_update,
+        # Halo 2.0.2 round 7: /setup [roles|orgs] -- the init wizard's own
+        # Roles/Organizations step(s), pushed onto THIS live app's screen
+        # stack (same pattern as /roles edit, /org edit).
+        "setup": _handle_setup,
+        # Halo 2.0.2 round C (macOS/VS Code terminal brief): `/editor` is
+        # the keyboard-independent way to reach Ctrl+E's own action --
+        # for a terminal that eats the chord before halo ever sees it
+        # (VS Code's integrated terminal on macOS, the owner's own
+        # report), typing the command always works. `/keys` opens the
+        # key-name tester dialog (same dock Ctrl+T/`/tasks` already use).
+        "editor": _handle_editor, "keys": _handle_keys,
+        # Halo 2.0.3 round 3 (brief items 4/6): /ollama's host analysis is
+        # a real network read (same thread-worker pattern /doctor/
+        # /providers already use); /local's small-role answer is a real
+        # inference call -- neither may block the UI thread.
+        "ollama": _handle_ollama, "local": _handle_local,
+        # Halo 2.0.3 round 5e: /offline on|off mutates live process state
+        # (HALO_OFFLINE) -- push the status bar's chip immediately, same
+        # "no event round-trip" reasoning /effort already uses. Bare
+        # /offline and /escalation stay on the generic headless-text
+        # fallback below (no live widget of their own to push).
+        "offline": _handle_offline,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -112,6 +152,11 @@ async def _handle_model(app, args: str) -> None:
     # triggered the same way.
     app.run_worker(lambda: _cc_auth_status_auto_refresh_worker(app), thread=True, name="cc-auth-auto-refresh",
                     group="cc-auth-auto-refresh")
+    # Round 5i part 2: the `cx:` counterpart -- same staleness-gated
+    # re-check, so `/model`'s own codex group reflects a login/logout that
+    # happened since the TUI started without needing a restart.
+    app.run_worker(lambda: _codex_auth_status_auto_refresh_worker(app), thread=True, name="codex-auth-auto-refresh",
+                    group="codex-auth-auto-refresh")
     # 1.0.1 fixpass finding 1: `list_models()` -- builds ctx/price columns
     # per Databricks endpoint and (pre-fix) span the `claude auth status`
     # subprocess -- runs off the UI thread now, the exact same `thread=True`
@@ -139,6 +184,17 @@ def _cc_auth_status_auto_refresh_worker(app) -> None:
         pass
 
 
+def _codex_auth_status_auto_refresh_worker(app) -> None:
+    """The `cx:` counterpart of `_cc_auth_status_auto_refresh_worker`
+    just above -- same reasoning, substituting `codex_models`."""
+    try:
+        from halo_harness.providers.codex_models import cached_auth_status_is_stale, refresh_cached_codex_auth_status
+        if cached_auth_status_is_stale():
+            refresh_cached_codex_auth_status()
+    except Exception:
+        pass
+
+
 def _list_models_worker(app) -> None:
     models = app.controller.list_models()
     app.call_from_thread(_open_model_picker, app, models)
@@ -151,6 +207,267 @@ def _open_model_picker(app, models) -> None:
     last_used = launch_state.resolve_last_model(app.cwd, memory=get_config_value("model_memory", default="cwd")) or ""
     app.push_screen(ModelPicker(models, current=app.status_bar.model, last_used=last_used),
                      lambda ref: _apply_model(app, ref))
+
+
+async def _handle_roles(app, args: str) -> None:
+    """Halo 2.0.2 brief A.5: `/roles edit <name>` opens a real form
+    (`tui/dialogs/roles_editor.py`), or shells to `$EDITOR` when
+    `roles.editor: "external"` is configured -- every other `/roles`
+    subcommand (`templates`/`save`/`load`/`new`/`show`/`set`, or the bare
+    table) still goes through the SAME headless-text fallback every other
+    command uses (`commands/builtins.py::_cmd_roles`, off the UI thread,
+    exactly like `/effort`'s own bare case)."""
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    if sub != "edit":
+        app.run_worker(lambda: _run_slash_worker(app, "roles", args), thread=True, name="run-slash", group="run-slash")
+        return
+    name = parts[1].strip() if len(parts) > 1 else ""
+    if not name:
+        await app.transcript.add_note("Usage: /roles edit <name>", kind="command")
+        return
+    from halo_harness.theme import get_config_value
+    if get_config_value("roles.editor", default="") == "external":
+        _edit_role_template_externally(app, name)
+        return
+    app.run_worker(lambda: _roles_edit_form_worker(app, name), thread=True, name="roles-edit-form",
+                    group="roles-edit-form")
+
+
+def _edit_role_template_externally(app, name: str) -> None:
+    """`roles.editor: "external"` -- the SAME `app.suspend()` dance
+    `action_open_editor` (Ctrl+E, `tui/app.py`) uses: `$EDITOR` needs the
+    REAL terminal, not Textual's own screen buffer, so this runs
+    synchronously on the UI thread like that one does (`suspend()`'s own
+    contract), never inside a `thread=True` worker."""
+    import json
+    import os
+    import subprocess as sp
+
+    from halo_harness.roles import load_role_template, role_templates_dir, save_role_template, validate_role_template
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        app.notify("No $VISUAL/$EDITOR set.", severity="warning", title="/roles edit")
+        return
+    if load_role_template(name) is None:
+        ok, problems = save_role_template(name, {"roles": {}})
+        if not ok:
+            app.notify(f"Could not create {name!r}: " + "; ".join(problems), severity="error", title="/roles edit")
+            return
+    path = role_templates_dir() / f"{name}.json"
+    app._enter_suspend_for_editor()
+    try:
+        with app.suspend():
+            sp.run(f'{editor} "{path}"', shell=True)
+    finally:
+        app._exit_suspend_for_editor()
+    try:
+        problems = validate_role_template(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as e:
+        app.notify(f"Could not re-read role template {name!r}: {e}", severity="error", title="/roles edit")
+        return
+    if problems:
+        app.notify(f"Role template {name!r} is now invalid: " + "; ".join(problems),
+                    severity="error", title="/roles edit")
+    else:
+        app.notify(f"Saved role template {name!r}.", title="/roles edit")
+
+
+def _roles_edit_form_worker(app, name: str) -> None:
+    """A brand-new (not-yet-on-disk) template is only ever built IN
+    MEMORY here -- never written until the user actually presses ctrl+s
+    inside `RolesEditor.action_save` -- so pressing Esc on a template
+    that never existed before leaves nothing on disk at all."""
+    from halo_harness.roles import load_role_template
+    template = load_role_template(name) or {"name": name, "description": "", "roles": {}}
+    models = app.controller.list_models()
+    app.call_from_thread(_open_roles_editor, app, name, template, models)
+
+
+def _open_roles_editor(app, name: str, template: dict, models: list) -> None:
+    from halo_harness.tui.dialogs.roles_editor import RolesEditor
+
+    def _after(saved) -> None:
+        if saved:
+            app.notify(f"Saved role template {name!r}.", title="/roles edit")
+        else:
+            app.notify("Role template edit cancelled.", title="/roles edit")
+
+    app.push_screen(RolesEditor(name, template["roles"], models, description=template.get("description", "")), _after)
+
+
+async def _handle_org(app, args: str) -> None:
+    """Halo 2.0.2 round 2 (brief B) / round 3 (brief C): `/org edit <name>`
+    opens a real form (`tui/dialogs/org_editor.py`); `/org run` and (round
+    D, brief item 4) `/org resume` each get their OWN live worker (round 3
+    -- see `_run_org_worker`'s own docstring for why: the old headless-text
+    fallback dumped a raw `<task_result>` XML block into the transcript as
+    a plain note, with no live progress and no status-bar refresh); every
+    other subcommand (`list`/`show`/`new`/`load`/`install`/`export`/
+    `import`, or the bare list) still goes through the SAME headless-text
+    fallback every other command uses (`commands/builtins.py::_cmd_org`,
+    off the UI thread)."""
+    parts = (args or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    if sub == "run":
+        from halo_harness.orgs import default_org_name, parse_run_args
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        name, goal = parse_run_args(rest)
+        if not goal:
+            await app.transcript.add_note('Usage: /org run [<name>] "<goal>" (no name uses orgs.default, '
+                                           'see /setup orgs)', kind="command")
+            return
+        if name is None:
+            name = default_org_name()
+            if name is None:
+                await app.transcript.add_note(
+                    'No organization name given, and no default is set -- /org run <name> "<goal>", '
+                    'or set a default in /setup orgs.', kind="command")
+                return
+        app.run_worker(lambda: _run_org_worker(app, name, goal), thread=True, name="run-org", group="run-org")
+        return
+    if sub == "resume":
+        # Halo 2.0.2 round D (brief item 4): `/org resume` gets the SAME
+        # live-worker treatment `run` already does (real SubAgentCards,
+        # not a raw <task_result> dump) -- see `_run_org_resume_worker`.
+        app.run_worker(lambda: _run_org_resume_worker(app), thread=True, name="resume-org", group="resume-org")
+        return
+    if sub != "edit":
+        app.run_worker(lambda: _run_slash_worker(app, "org", args), thread=True, name="run-slash", group="run-slash")
+        return
+    name = parts[1].strip() if len(parts) > 1 else ""
+    if not name:
+        await app.transcript.add_note("Usage: /org edit <name>", kind="command")
+        return
+    app.run_worker(lambda: _org_edit_form_worker(app, name), thread=True, name="org-edit-form",
+                    group="org-edit-form")
+
+
+def _strip_task_result(text: str) -> str:
+    """`agent.subagent._wrap_task_result`'s own `<task_result task_id=
+    "...">...</task_result>` wrapper, stripped for display -- a no-op
+    (returns `text` unchanged) when it isn't present at all (an error
+    ToolResult from `run_org_call` -- unknown org, validation failure --
+    never gets wrapped in the first place)."""
+    import re
+    m = re.match(r'^<task_result task_id="[^"]*">\n(.*)\n</task_result>$', text or "", re.DOTALL)
+    return m.group(1) if m else (text or "")
+
+
+def _run_org_worker(app, name: str, goal: str) -> None:
+    """Halo 2.0.2 round 3 (brief C): runs `name` for real, LIVE -- unlike
+    the old headless-text path (`commands/builtins.py::_cmd_org`'s own
+    "run" branch, still used by `halo org run` from a real CLI with no
+    TUI at all), this passes `app.controller.events.put` as `run_org_
+    call`'s `on_event`, so the root position (and everything it
+    delegates to) gets a real SubAgentCard with its own position title --
+    the SAME live dock rendering an ordinary `Agent(subagent_type=...)`
+    tool call already gets -- instead of the whole run happening silently
+    and then dumping a raw `<task_result>` block into the transcript as a
+    plain note once it's done."""
+    session = getattr(app.controller, "session", None)
+    if session is None or getattr(session, "agent_runtime", None) is None:
+        app.call_from_thread(app.transcript.add_note,
+                              "Organizations can only be run once a session is running.", kind="command")
+        return
+    from halo_harness.agent.subagent import run_org_call
+    # 2.0.2 review finding 4 (major): `run_org_call`'s own contract is
+    # "never raises", but this is a Textual thread worker, where Textual's
+    # default `exit_on_error=True` takes the WHOLE app down the one time
+    # that contract is violated by a bug anywhere in the call tree (an
+    # org position's own `model:`/`/role` is validated up front now --
+    # see `orgs.validate_org`/`run_agent_call`'s own guard -- but this is
+    # still the right belt-and-suspenders place to stop any OTHER bug
+    # from taking the TUI down with it).
+    try:
+        _events, result = run_org_call(
+            runtime=session.agent_runtime, tool_id=f"org-run-{name}", tool_name="Agent",
+            tool_input={"org": name, "prompt": goal, "description": f"Run org {name}"},
+            on_event=app.controller.events.put,
+        )
+        text = _strip_task_result(result.content)
+        is_error = result.is_error
+    except Exception as e:
+        text = f"Organization {name!r} failed to run: {type(e).__name__}: {e}"
+        is_error = True
+    app.call_from_thread(_finish_org_run, app, name, text, is_error)
+
+
+def _run_org_resume_worker(app) -> None:
+    """Halo 2.0.2 round D (brief item 4): `/org resume`'s own live
+    worker, same shape as `_run_org_worker` just above (and the same
+    belt-and-suspenders `try/except` around `resume_org_run`'s own
+    "never raises" contract) -- resumes THIS session's own interrupted
+    run from its saved record + shared task board, instead of a NAMED
+    one."""
+    session = getattr(app.controller, "session", None)
+    if session is None or getattr(session, "agent_runtime", None) is None:
+        app.call_from_thread(app.transcript.add_note,
+                              "Organizations can only be resumed once a session is running.", kind="command")
+        return
+    from halo_harness.agent.subagent import _read_org_run_record, resume_org_run
+    session_dir = session.log.dir / session.log.session_id
+    # Cosmetic only (`_finish_org_run`'s own note reads "org {name!r}
+    # finished") -- the real org name, when a record exists at all, reads
+    # nicer than a bare placeholder; `resume_org_run` itself re-reads the
+    # SAME record and reports clearly if it's missing/invalid either way.
+    record = _read_org_run_record(session_dir)
+    name = (record or {}).get("org") or "(resumed)"
+    try:
+        _events, result = resume_org_run(
+            runtime=session.agent_runtime, tool_id="org-resume", tool_name="Agent", session_dir=session_dir,
+            on_event=app.controller.events.put,
+        )
+        text = _strip_task_result(result.content)
+        is_error = result.is_error
+    except Exception as e:
+        text = f"Could not resume: {type(e).__name__}: {e}"
+        is_error = True
+    app.call_from_thread(_finish_org_run, app, name, text, is_error)
+
+
+async def _finish_org_run(app, name: str, text: str, is_error: bool) -> None:
+    # `call_from_thread`'s own `invoke()` awaits an async callable like
+    # this one -- a plain sync function here would silently create-but-
+    # never-await the `add_note` coroutine (Transcript.add_note is async)
+    # and the note would never actually appear.
+    await app.transcript.add_note(f"org {name!r} finished:\n{text}", kind=("error" if is_error else "command"))
+    # round 3 (brief C): the whole org tree already rolled its spend into
+    # THIS session's own cost_meter/log (agent/subagent.py's `_rollup_
+    # child_cost_into_parent`, called once per child, bubbling all the way
+    # up to the top session) -- nothing else ever asks the status bar to
+    # re-read it, since `/org run` happens entirely OUTSIDE the normal
+    # turn loop (a `status` event otherwise only fires from Session.
+    # status_event()/message_end). The SAME status_event() the Controller
+    # already uses after a mode/model change -- just queued here too.
+    session = getattr(app.controller, "session", None)
+    if session is not None and hasattr(session, "status_event"):
+        app.controller.events.put(session.status_event())
+
+
+def _org_edit_form_worker(app, name: str) -> None:
+    """A brand-new (not-yet-on-disk) org is only ever built IN MEMORY
+    here -- never written until the user actually saves inside the
+    editor -- so cancelling one that never existed before leaves nothing
+    on disk at all."""
+    from halo_harness.orgs import load_org
+    org = load_org(name) or {"name": name, "description": "", "positions": [
+        {"title": "Orchestrator", "role": "orchestrator", "reports": [], "instructions": ""}]}
+    models = app.controller.list_models()
+    app.call_from_thread(_open_org_editor, app, name, org, models)
+
+
+def _open_org_editor(app, name: str, org: dict, models: list) -> None:
+    from halo_harness.tui.dialogs.org_editor import OrgEditor
+
+    def _after(saved) -> None:
+        if saved:
+            app.notify(f"Saved organization {name!r}.", title="/org edit")
+        else:
+            app.notify("Organization edit cancelled.", title="/org edit")
+
+    app.push_screen(OrgEditor(name, org, models), _after)
 
 
 def catalog_auto_refresh_worker(app) -> None:
@@ -201,6 +518,16 @@ def catalog_auto_refresh_worker(app) -> None:
                 summary = format_dbx_diff(diff)
                 if summary != "no changes":
                     notes.append(f"Databricks ({summary})")
+    if is_enabled_with_env("huggingface", env):
+        # Halo 2.0.3 round 4: same shape as the OpenRouter branch above --
+        # `refresh_huggingface_catalog_if_stale` only ever fetches the
+        # router's catalog when HF_TOKEN resolves (an endpoint-only setup
+        # has nothing to refresh here, by design); still background-thread-
+        # only/staleness-gated, so an enabled-but-fresh-cache box costs
+        # nothing extra on every `/model` open.
+        from halo_harness.providers.huggingface_catalog import load_hf_models_json, refresh_huggingface_catalog_if_stale
+        if refresh_huggingface_catalog_if_stale(state_dir, env=env):
+            notes.append(f"Hugging Face ({len(load_hf_models_json(state_dir))} models)")
     if notes:
         app.call_from_thread(app.notify, f"Catalog refreshed: {'; '.join(notes)}", title="/model")
 
@@ -399,6 +726,26 @@ async def _handle_effort(app, args: str) -> None:
                        override_note=override_note, requested=requested)
     await app.transcript.mount_widget(card)
     app.set_pending_card(card)
+
+
+# ============================================================================
+# Halo 2.0.3 round 5e: /offline on|off mutates live process state
+# (HALO_OFFLINE) directly, no event round-trip -- same reasoning as
+# /effort above. Bare /offline (nothing to push) falls through to the
+# generic headless-text path.
+# ============================================================================
+
+async def _handle_offline(app, args: str) -> None:
+    args = args.strip()
+    if not args:
+        app.run_worker(lambda: _run_slash_worker(app, "offline", args), thread=True,
+                        name="run-slash", group="run-slash")
+        return
+    result = app.controller.run_slash("offline", args)
+    if result:
+        await app.transcript.add_note(result, kind="command")
+    from halo_harness.providers.http import offline_mode_enabled
+    app.status_bar.set_offline(offline_mode_enabled())
 
 
 # ============================================================================
@@ -616,7 +963,7 @@ async def _handle_accounts(app, args: str) -> None:
             await app.transcript.add_note(f"/accounts: {exc}", kind="error")
             return
         await app.transcript.add_note(
-            f"Codex account {name!r} will be used when the next Codex app-server starts.", kind="command")
+            f"Codex account {name!r} will be used for new Halo sessions.", kind="command")
         return
     if action != "add" or len(tokens) != 3 or tokens[1].lower() != "codex":
         await app.transcript.add_note(
@@ -664,13 +1011,214 @@ def _doctor_worker(app) -> None:
     app.call_from_thread(app.transcript.add_note, "\n".join(lines), kind="command")
 
 
+async def _handle_update(app, _args: str) -> None:
+    app.run_worker(lambda: _update_worker(app), thread=True, name="update", group="update")
+
+
+def _update_worker(app) -> None:
+    """Halo 2.0.2 round 6: the check itself (installed_build/
+    latest_available/commits_between -- a git/network call) off the UI
+    thread; the dialog only ever gets built, pushed and read from the UI
+    thread via `call_from_thread`, same `_palette_worker`/`_on_palette_
+    pick` shape `tui/app.py`'s own Ctrl+P already uses."""
+    from pathlib import Path
+    from halo_harness import update as upd
+    from halo_harness.tui.dialogs.update_dialog import UpdateDialog
+    build = upd.installed_build()
+    # Halo 2.0.2 round C: "an explicit --check or /update always queries
+    # (5 s cap) with the cache only as the fallback" -- /update is an
+    # explicit, deliberate ask, never the passive startup note just below
+    # (which stays cache-first on purpose).
+    avail = upd.latest_available(upd.default_channel(build), refresh=True)
+    kind = upd.install_kind()
+    checkout = Path(build["checkout"]) if build.get("checkout") else None
+    lines, _count = upd.commits_between(build.get("commit"), avail.get("commit"), checkout=checkout)
+    ordering = upd.commit_is_ancestor(build.get("commit"), avail.get("commit"), checkout=checkout)
+    up_to_date = bool(build.get("commit") and avail.get("commit") and build["commit"] == avail["commit"])
+    installed_line = upd.format_version_line(build)[len("halo "):]
+    if avail.get("commit"):
+        ref = f", {avail['ref']}" if avail.get("ref") else ""
+        available_line = f"{avail['commit']}{ref}"
+    else:
+        available_line = f"unknown ({avail.get('reason') or 'no reason given'})"
+    dialog = UpdateDialog(installed_line, available_line, lines, kind.get("reinstall_cmd"),
+                           up_to_date=up_to_date, ordering=ordering)
+    app.call_from_thread(app.push_screen, dialog, lambda result: _on_update_dialog_result(app, result))
+
+
+def _on_update_dialog_result(app, result) -> None:
+    """Enter ("update"): the ONLY thing this does is exit the TUI itself
+    with `update.RESTART_EXIT_CODE` -- `cli.main` (past `run_tui()`,
+    Textual already torn down) is what actually runs the reinstall and
+    relaunches with `--continue`; see `cli._apply_update_and_relaunch`.
+    Esc (`None`): nothing happens at all."""
+    if result == "update":
+        from halo_harness.update import RESTART_EXIT_CODE
+        app.exit(return_code=RESTART_EXIT_CODE)
+
+
+def update_check_startup_worker(app) -> None:
+    """Halo 2.0.2 round 6: the SAME "stale -> background refresh" shape
+    `catalog_auto_refresh_worker` uses, called once at TUI launch
+    (`tui/app.py`'s own `on_mount`) -- a one-line transcript note, at most
+    once a day, ONLY when the (cache-first, `update.cache_ttl_s` TTL --
+    round C: 3600s default, was a flat 24h) check already knows an update
+    is available; never a fresh forced check (that's `/update`'s own
+    job, `refresh=True` there), never on the UI thread. Off entirely with
+    `update.check: false`/`update.notify: false`, or `BRIDGE_TEST_NO_
+    BACKGROUND_NET=1` (never touch the network from a test)."""
+    from halo_harness.config.paths import background_net_disabled
+    if background_net_disabled():
+        return
+    from halo_harness.theme import get_config_value
+    if get_config_value("update.check", True) is False or get_config_value("update.notify", True) is False:
+        return
+    state_dir = getattr(app.controller, "state_dir", None)
+    if state_dir is None:
+        return
+    from halo_harness import update as upd
+    build = upd.installed_build()
+    avail = upd.latest_available(upd.default_channel(build), state_dir=state_dir)
+    if not avail.get("commit") or not build.get("commit") or avail["commit"] == build["commit"]:
+        return
+    if not upd.note_due_today(state_dir):
+        return
+    new_version = avail["ref"][1:] if (avail.get("ref") or "").startswith("v") else build["version"]
+    text = f"update available: {build['version']} {build['commit']} -> {new_version} {avail['commit']}, /update"
+    app.call_from_thread(app.transcript.add_note, text, kind="note")
+
+
 async def _handle_mcp(app, _args: str) -> None:
     from halo_harness.tui.dialogs.mcp_status import McpStatus
 
     list_fn = getattr(app.controller, "list_mcp_servers", None)
     servers = list_fn() if list_fn is not None else []
-    app.push_screen(McpStatus(servers, reconnect=app.controller.reconnect_mcp,
-                               approve=app.controller.approve_mcp_server))
+    # round4 brief item 1: every new repair action is its own OPTIONAL
+    # Controller callable -- `getattr(..., None)` throughout so an older
+    # FakeController (or a future test double) missing one just disables
+    # that single key instead of making `/mcp` itself unusable.
+    app.push_screen(McpStatus(
+        servers, reconnect=app.controller.reconnect_mcp,
+        approve=app.controller.approve_mcp_server,
+        reconnect_all=getattr(app.controller, "reconnect_all_mcp", None),
+        login=getattr(app.controller, "login_mcp_server", None),
+        test=getattr(app.controller, "test_mcp_server", None),
+        disable=getattr(app.controller, "set_mcp_server_disabled", None),
+        resolve_config=getattr(app.controller, "resolve_mcp_config", None),
+        # finding 19: re-read real state after every action/bulk action
+        # instead of guessing it from the action's own result text.
+        refresh=list_fn,
+    ))
+
+
+async def _handle_tasks(app, _args: str) -> None:
+    app.action_toggle_tasks()
+
+
+def _ollama_analyses(args: str) -> list:
+    """Shared by `_handle_ollama`'s initial load and the dialog's own `r`
+    refresh callback -- `args` is `/ollama`'s raw argument text, same
+    `--host NAME`/`--refresh` vocabulary `halo ollama` accepts."""
+    from halo_harness.providers.ollama import resolve_ollama_hosts
+    from halo_harness.providers.ollama_panel import analyze_host
+    tokens = (args or "").split()
+    force = "--refresh" in tokens
+    names = [t for t in tokens if t not in ("--refresh", "--host")]
+    host_filter = None
+    if "--host" in tokens:
+        idx = tokens.index("--host")
+        host_filter = tokens[idx + 1] if idx + 1 < len(tokens) else None
+    hosts = resolve_ollama_hosts()
+    if host_filter:
+        hosts = [h for h in hosts if h.name.lower() == host_filter.lower()]
+    elif names:
+        hosts = [h for h in hosts if h.name.lower() in {n.lower() for n in names}]
+    return [analyze_host(h, force=force) for h in hosts]
+
+
+async def _handle_ollama(app, args: str) -> None:
+    app.run_worker(lambda: _ollama_worker(app, args), thread=True, name="ollama", group="ollama")
+
+
+def _ollama_worker(app, args: str) -> None:
+    from halo_harness.tui.dialogs.ollama_status import OllamaStatus
+    analyses = _ollama_analyses(args)
+    app.call_from_thread(app.push_screen, OllamaStatus(analyses, refresh=lambda: _ollama_analyses(args)))
+
+
+def _local_view_rows(args: str) -> list:
+    """Shared by `_handle_local`'s initial load and the dialog's own `r`
+    refresh callback -- `refresh=True` iff `args` is exactly `"refresh"`/
+    `"--refresh"`, the same vocabulary `halo local --refresh` accepts."""
+    from halo_harness.providers.local_models import build_local_view
+    refresh = (args or "").strip().lower() in ("refresh", "--refresh")
+    return build_local_view(refresh=refresh)
+
+
+async def _handle_local(app, args: str) -> None:
+    """Halo 2.0.3 round 3 (brief item 6) + round 5 (brief item 4): `/local`
+    with no arguments (or `refresh`/`--refresh`) opens the merged-view
+    dialog (Ollama hosts + Hugging Face local servers + the HF Hub cache),
+    off the UI thread -- every source here can touch the network. Any
+    OTHER argument text is round 3's own behaviour, unchanged: a one-shot
+    question answered from `roles.small` WITHOUT touching the main
+    transcript's context -- `Session.call_small_model` builds its body
+    directly, never through `derive_request`/`self.log` (see that
+    method's own docstring) -- now also accepting an `hf:` small-role ref,
+    not just `ol:` (round 5)."""
+    stripped = (args or "").strip()
+    if not stripped or stripped.lower() in ("refresh", "--refresh"):
+        app.run_worker(lambda: _local_dialog_worker(app, stripped), thread=True, name="local", group="local")
+        return
+    question = stripped
+    session = getattr(app.controller, "session", None)
+    if session is None:
+        await app.transcript.add_note("/local: no live session.", kind="command")
+        return
+    ref = getattr(session, "small_model_ref", None) or session.model_ref
+    if ref.provider not in ("ollama", "huggingface"):
+        await app.transcript.add_note(
+            f"/local needs roles.small set to an ol: or hf: model (currently resolves to {ref.raw!r}); "
+            f"set one via /roles, the model picker's u action, or `ollama.hosts`/`huggingface.*`/roles.small "
+            f"in config.", kind="command")
+        return
+    app.run_worker(lambda: _local_worker(app, question, ref), thread=True, name="local", group="local")
+
+
+def _local_dialog_worker(app, args: str) -> None:
+    from halo_harness.tui.dialogs.local_status import LocalStatus
+    rows = _local_view_rows(args)
+    # `r` inside the dialog always forces a true refresh (brief: "/local
+    # refresh re-probes everything") regardless of how the dialog was
+    # first opened -- unlike `/ollama`'s own `r` (which replays whatever
+    # args it was first opened with), a stale "configured, not probed"
+    # manual-entry row is exactly the case `r` exists to fix.
+    app.call_from_thread(app.push_screen, LocalStatus(rows, refresh=lambda: _local_view_rows("refresh")))
+
+
+def _local_worker(app, question: str, ref) -> None:
+    session = app.controller.session
+    try:
+        answer = session.call_small_model(
+            system_text="You are a fast local assistant answering a standalone question directly and "
+                        "concisely. This exchange is not part of any other conversation.",
+            user_text=question, model_ref=ref)
+    except Exception as e:
+        answer = f"(error: {type(e).__name__}: {e})"
+    app.call_from_thread(app.transcript.add_note, f"/local {question}\n\n{answer}", kind="command")
+
+
+async def _handle_editor(app, _args: str) -> None:
+    """Halo 2.0.2 round C: the keyboard-independent twin of Ctrl+E --
+    SAME action, so $VISUAL/$EDITOR-unset/failure handling is identical;
+    this exists purely so a terminal that never delivers the Ctrl+E chord
+    to halo at all still has a way to reach it (type it instead)."""
+    app.action_open_editor()
+
+
+async def _handle_keys(app, _args: str) -> None:
+    from halo_harness.tui.dialogs.keys_tester import KeysTesterDialog
+    app.push_screen(KeysTesterDialog())
 
 
 async def _handle_clear(app, _args: str) -> None:
@@ -1208,3 +1756,34 @@ async def _handle_copy(app, args: str) -> None:
         return
     from halo_harness.tui.clipboard import clean_copy_text
     app.perform_copy(clean_copy_text(widget.copy_text()), label="last reply")
+
+
+# ============================================================================
+# Halo 2.0.2 round 7: /setup [roles|orgs] -- pushes the init wizard's own
+# Roles/Organizations step(s) straight onto THIS live app's screen stack
+# (the "modal screen stack over the session" the brief names), reusing
+# the EXACT SAME step classes `halo init`/`halo setup`'s own standalone
+# `InitWizardApp` uses. Bare /setup chains roles -> orgs -> a short
+# summary (the "set up roles and orgs later" path); /setup roles or
+# /setup orgs opens just that one step. Finishing (or quitting) pops
+# every screen THIS call pushed, landing back on the live session with
+# nothing else to do -- config.json changes are already live the next
+# time anything reads them, and the roles step pushes a freshly-applied
+# template into the LIVE session's own role table too (see its own
+# `commit()`).
+# ============================================================================
+
+async def _handle_setup(app, args: str) -> None:
+    from halo_harness.tui.dialogs.init_wizard import build_truncated_state, first_step_screen
+    sub = (args or "").strip().lower()
+    if sub == "roles":
+        step_keys = ("roles",)
+    elif sub == "orgs":
+        step_keys = ("orgs",)
+    elif sub:
+        await app.transcript.add_note(f"Usage: /setup, /setup roles, or /setup orgs (got {sub!r})", kind="command")
+        return
+    else:
+        step_keys = ("roles", "orgs", "summary")
+    state = build_truncated_state(app.cwd, step_keys=step_keys, on_finish=lambda _app: None)
+    app.push_screen(first_step_screen(state))

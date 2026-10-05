@@ -1,6 +1,6 @@
 # H5b review findings (commit 4680804, diff c5a62fe..4680804)
 
-Format: severity — file:line — defect — failure scenario — fix. Line numbers refer to a `git archive 4680804` snapshot (the working tree was being edited during the review and was not read). "Verified" means reproduced with scratch scripts against that snapshot, driving a real `Session` against `tests/helpers/mock_openai` / `mock_anthropic` (Windows, Python 3.11.7) and, where marked, on WSL Ubuntu 24.04 with `~/halo-harness-wt-venv`; rolo's real `~/.halo/models.json` was read only. A wire-shape verification means the request body was captured at the mock: the mock does not enforce Anthropic's validation, so the resulting 400 is the documented API rule, not an observed response. No repo file was touched except this one.
+Format: severity — file:line — defect — failure scenario — fix. Line numbers refer to a `git archive 4680804` snapshot (the working tree was being edited during the review and was not read). "Verified" means reproduced with scratch scripts against that snapshot, driving a real `Session` against `tests/helpers/mock_openai` / `mock_anthropic` (Windows, Python 3.11.7) and, where marked, on WSL Ubuntu 24.04 with `~/halo-harness-wt-venv`; the owner's real `~/.halo/models.json` was read only. A wire-shape verification means the request body was captured at the mock: the mock does not enforce Anthropic's validation, so the resulting 400 is the documented API rule, not an observed response. No repo file was touched except this one.
 
 ## Findings
 

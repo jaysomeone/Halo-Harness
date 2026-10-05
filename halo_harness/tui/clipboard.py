@@ -162,10 +162,17 @@ _LINUX_CLIPBOARD_READ_ARGV = {
 }
 
 _MACOS_PASTE_ARGV = ["pbpaste"]
-_WINDOWS_PASTE_ARGV = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"]
+# review finding 25: forces PowerShell's OWN stdout encoding to UTF-8
+# before it ever prints anything, and `-Raw` (never the default, which
+# splits multi-line clipboard content into an array and re-joins it with
+# the PLATFORM newline) -- paired with the explicit "utf-8" decode and
+# BOM-identification below instead of trusting `text=True`'s locale-default
+# (cp1252 on this host) decode, which mangled any non-ASCII clipboard text.
+_WINDOWS_PASTE_ARGV = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                       "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw"]
 
 
-def read_via_external_tool(*, timeout_s: float = 3.0) -> "Optional[str]":
+def read_via_external_tool(*, timeout_s: float = 3.0, platform: "Optional[str]" = None) -> "Optional[str]":
     """Best-effort read of the REAL system clipboard -- `None` for "nothing
     usable" (no tool available, the run failed, or it timed out), never
     raises. `tui/app.py`'s own Ctrl+V handler shows the same "paste with
@@ -173,10 +180,13 @@ def read_via_external_tool(*, timeout_s: float = 3.0) -> "Optional[str]":
     this comes back `None`. An empty clipboard also comes back as `None`
     (via the empty-string-is-falsy check its one caller already does) --
     pasting nothing is a no-op either way, so this never needs to
-    distinguish "empty" from "no tool" any more precisely than that."""
-    if sys.platform == "win32":
+    distinguish "empty" from "no tool" any more precisely than that.
+    `platform` (default `sys.platform`) is the same test seam
+    `copy_via_external_tool` already has, for the same reason."""
+    plat = platform if platform is not None else sys.platform
+    if plat == "win32":
         argv = _WINDOWS_PASTE_ARGV
-    elif sys.platform == "darwin":
+    elif plat == "darwin":
         argv = _MACOS_PASTE_ARGV
     else:
         found = find_clipboard_tool()
@@ -187,6 +197,25 @@ def read_via_external_tool(*, timeout_s: float = 3.0) -> "Optional[str]":
         if argv is None:
             return None
     try:
+        if plat == "win32":
+            # review finding 25: raw bytes, decoded explicitly as UTF-8
+            # (never the bare `text=True` default, the locale's preferred
+            # encoding -- cp1252 on this host, which mangles non-ASCII
+            # clipboard content). `Get-Clipboard -Raw` prints the
+            # clipboard's exact content with no newline of its own, but
+            # PowerShell's own console/pipeline output still appends
+            # exactly one -- stripped here, and only one, so a clipboard
+            # that genuinely ends with a blank line keeps every line break
+            # but that last one.
+            proc = subprocess.run(argv, capture_output=True, timeout=timeout_s)
+            if proc.returncode != 0:
+                return None
+            text_out = proc.stdout.decode("utf-8", errors="replace")
+            if text_out.endswith("\r\n"):
+                text_out = text_out[:-2]
+            elif text_out.endswith("\n"):
+                text_out = text_out[:-1]
+            return text_out or None
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
         if proc.returncode != 0:
             return None
@@ -234,31 +263,41 @@ def clipboard_doctor_line(env: "Optional[dict]" = None, *, platform: "Optional[s
 # characters that are part of actual message CONTENT (the ✓/✗/⚠/↩/⑂/⬇/✦
 # decision-line/card glyphs elsewhere in this app all stay).
 _CHROME_GLYPHS = "⏺❯✻│─╭╰"
-_CHROME_GLYPH_RE = re.compile("[" + re.escape(_CHROME_GLYPHS) + "]")
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)(?:```|\Z)", re.DOTALL)
 
 
 def strip_chrome_glyphs(text: str) -> str:
-    """Remove the bullet (⏺), prompt arrow (❯), thinking spinner (✻) and
-    `│─╭╰` panel-border characters from copied text. A glyph sitting at
-    the very start of a line (every real call site's own convention --
-    `"⏺ Bash(...)"`, `"❯ hello"`) takes the ONE space right after it with
-    it, so the result reads as plain text rather than leaving a stray
-    leading space; a glyph found anywhere else (rare -- these are UI
-    chrome, not real content) is simply deleted in place, never touching
-    indentation that has nothing to do with it (a code block's own
-    leading spaces, for instance)."""
-    out_lines = []
-    for line in text.split("\n"):
-        prefix_len = len(line) - len(line.lstrip())
-        rest = line[prefix_len:]
+    """Remove the bullet (⏺), prompt arrow (❯) or thinking spinner (✻) from
+    the very FIRST line of `text` only, taking the ONE space right after
+    it with it so the result reads as plain text rather than leaving a
+    stray leading space (`"⏺ Bash(...)"` -> `"Bash(...)"`, `"❯ hello"` ->
+    `"hello"`).
+
+    Review finding 24: this used to ALSO strip a leading glyph from EVERY
+    line, and delete `│─╭╰` (and any of these six characters) from
+    anywhere else in the text, unconditionally. Real copied CONTENT
+    containing these same characters -- a `tree` command's own box-drawing
+    output, a markdown/ASCII table's `─`/`│` borders, a captured zsh `❯`
+    prompt line inside a Bash tool's own output -- was silently mangled
+    mid-character (`"├── src"` became `"├ src"`). Every real call site's
+    `copy_text()` puts its own chrome, if any, on line 0 and ONLY there
+    (a ToolCard/PagerScreen's `f"{header}\\n\\n{body}"`, `header` already
+    being e.g. `"⏺ Bash(git status -sb)"` -- a UserMessage's own
+    `copy_text()` returns the stored `raw_text` with no "❯ " in it at all
+    to begin with, see transcript.py's own comment on that) -- nothing
+    past the first line is this app's own UI chrome, so the body is never
+    touched at all now."""
+    lines = text.split("\n")
+    if lines:
+        first = lines[0]
+        prefix_len = len(first) - len(first.lstrip())
+        rest = first[prefix_len:]
         if rest[:1] in _CHROME_GLYPHS:
             rest = rest[1:]
             if rest.startswith(" "):
                 rest = rest[1:]
-            line = line[:prefix_len] + rest
-        out_lines.append(_CHROME_GLYPH_RE.sub("", line))
-    return "\n".join(out_lines)
+            lines[0] = first[:prefix_len] + rest
+    return "\n".join(lines)
 
 
 def normalize_line_endings(text: str) -> str:

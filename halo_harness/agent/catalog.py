@@ -37,7 +37,7 @@ DEFERRED_LRU_MAX = 100  # D5: "LRU of 100 loaded deferred tools"
 # query term many times could outrank a short, precisely-named tool that
 # mentions it once. Verified repro: on 117 real tool definitions, "list
 # MIDI ports" ranked mcp__hardware__hw_ports 14th (score 3) behind
-# ableton__moog_set at 20 (19 "midi" hits in a 2,510-character
+# daw__synth_set at 20 (19 "midi" hits in a 2,510-character
 # description), so the default 5-result cutoff never contained it.
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -78,8 +78,19 @@ def _term_score(term: str, *, name_tokens: set, name_lower: str,
     return score
 
 
-def host_cap(provider: str) -> int:
-    return DEFAULT_DATABRICKS_CAP if provider == "databricks" else DEFAULT_OPENROUTER_CAP
+def host_cap(provider: str, tools_max: Optional[int] = None) -> int:
+    """Halo 2.0.3 round 3 (brief item 3): `tools_max`, when given, is the
+    "ollama" dialect's own context-class tool-catalog cap (`providers.
+    ollama_fit.resolve_ollama_tools_max`) -- the SAME `SessionCatalog.cap`/
+    LRU-eviction mechanism `set_model` already uses for the Databricks/
+    OpenRouter caps below, never a second capping path for this provider.
+    Every other provider ignores `tools_max` entirely (unchanged
+    behavior)."""
+    if provider == "databricks":
+        return DEFAULT_DATABRICKS_CAP
+    if provider == "ollama" and isinstance(tools_max, int) and tools_max > 0:
+        return tools_max
+    return DEFAULT_OPENROUTER_CAP
 
 
 def select_preload(mcp_triples, *, preload_names=None, always_load_servers=None, cap_budget: int) -> "tuple[list, dict]":
@@ -94,7 +105,7 @@ def select_preload(mcp_triples, *, preload_names=None, always_load_servers=None,
     `mcpPreload`-listed names -- never anything beyond those two groups,
     even when `cap_budget` has room left over. The OLD behaviour filled
     remaining budget with alphabetically-next tools ("rest"), which at
-    rolo's real ~213-tool scale put the frozen catalog EXACTLY at cap with
+    the owner's real ~213-tool scale put the frozen catalog EXACTLY at cap with
     zero headroom: the instant ToolSearch loaded one more deferred tool,
     `SessionCatalog._evict_if_needed` had nothing to evict but the tool
     just loaded (the only entry ever added to `_loaded_order`), so it
@@ -170,6 +181,17 @@ class SessionCatalog:
     # after calling `load()` to report a clear error instead of a false
     # tool_reference promise.
     last_refused: list = field(default_factory=list)
+    # review finding 30: the same --tools subset / bare-deny-rule names
+    # `headless.build_session`'s own warm-cache connector loop filters by
+    # at session start (see that function's own `tools_subset`/`bare_
+    # denied_names` locals) -- `add_connector_tools` reads these so a
+    # connector discovered/re-discovered LATER (the TUI's background
+    # on_done, or a mid-session ToolSearch hit) is filtered identically,
+    # never becoming loadable again just because it was excluded before
+    # discovery had even finished. `None`/empty (the default) filters
+    # nothing, matching every caller that never passes these through.
+    tools_subset: "Optional[set]" = None
+    bare_denied_names: set = field(default_factory=set)
 
     def _deferred_definition(self, wire_name: str) -> dict:
         server, sdk_tool = self.deferred[wire_name]
@@ -402,6 +424,17 @@ class SessionCatalog:
                 wire_name = f"connector__{info.slug}"
                 if wire_name in self.names or wire_name in self.deferred:
                     continue
+                # review finding 30: this skipped the --tools/bare-deny
+                # filters `headless.build_session`'s own, otherwise
+                # identical, warm-cache loop already applies -- a
+                # connector excluded by `--tools`/a bare deny rule at
+                # session start became loadable again the moment it was
+                # (re)discovered mid-session (the TUI's background
+                # on_done, or a mid-session ToolSearch hit).
+                if self.tools_subset is not None and wire_name not in self.tools_subset:
+                    continue
+                if wire_name in self.bare_denied_names:
+                    continue
                 self.deferred[wire_name] = (None, ConnectorTool(info))
                 added.append(wire_name)
         return added
@@ -427,6 +460,16 @@ class SessionCatalog:
         if "connector" not in query.lower():
             return
         from halo_harness.mcp import connectors_bridge
+        # review finding 30: `already_discovered_or_warm()` is the SAME
+        # cheap, no-subprocess check `ensure_discovered_synchronously_if_
+        # cold` already runs internally -- checked here FIRST now so a
+        # warm cache (or a discovery already run/running this session)
+        # skips straight past `prime_auth_cache_if_stale()` (a real
+        # `claude auth status` spawn, up to 10s, once the 30s auth TTL has
+        # lapsed) instead of paying for it on every ToolSearch whose query
+        # merely contains "connector".
+        if connectors_bridge.already_discovered_or_warm():
+            return
         connectors_bridge.prime_auth_cache_if_stale()
         if not connectors_bridge.ensure_discovered_synchronously_if_cold(timeout=timeout):
             return

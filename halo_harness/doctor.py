@@ -255,40 +255,47 @@ def _check_claude_subscription() -> str:
 
 
 def _check_codex_subscription() -> str:
-    """2.0.2: `cx:` availability -- `codex login status` only (never
-    `~/.codex/auth.json`), the installed version against cx_tested.json,
-    and the plan and usage windows from the cached catalog. Optional, like
-    the Claude subscription: never fails doctor's overall `ok`."""
-    from halo_harness.providers.cx_models import (
-        cached_rate_limits_line, codex_installed, codex_version_outside_tested_range, installed_codex_version,
-        load_cx_tested_range, refresh_cached_codex_login_status,
-    )
-    if not codex_installed():
-        return _fix(f"{WARN} Codex subscription: codex not found (cx: models unavailable -- install the Codex CLI)",
-                    cmd="npm install -g @openai/codex && codex login")
+    """Round 5i part 2: `cx:` model availability -- the `codex_models`
+    counterpart of `_check_claude_subscription` just above, reading ONLY
+    `codex login status`'s plain-text answer (CODEX-RESEARCH.md section 1),
+    never `~/.codex/auth.json`. Optional (same reasoning as Claude): never
+    fails doctor's overall `ok` either way."""
+    from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
     try:
-        status = refresh_cached_codex_login_status()
+        status = refresh_cached_codex_auth_status()
     except Exception as e:
         return _fix(f"{WARN} Codex subscription: could not check ({type(e).__name__}: {e})", cmd="halo doctor")
-    if status is None or status.timed_out:
-        return _fix(f"{WARN} Codex subscription: `codex login status` did not answer (cx: models unavailable "
-                    f"for now)", cmd="codex login status")
+    if status is None:
+        return _fix(f"{WARN} Codex subscription: codex not found (cx: models unavailable -- install Codex CLI)",
+                     see="https://developers.openai.com/codex")
+    if getattr(status, "timed_out", False):
+        return _fix(f"{WARN} Codex subscription: `codex login status` timed out (try again -- cx: models "
+                     f"unavailable for now)", cmd="halo doctor")
     if not status.logged_in:
-        return _fix(f"{WARN} Codex subscription: codex found but not logged in (sign in with ChatGPT for cx: "
-                    f"models)", cmd="codex login")
-    version = installed_codex_version()
-    version_bit = f" via codex {version}" if version else ""
-    if status.method != "chatgpt":
-        return _fix(f"{WARN} Codex subscription: codex is logged in with an API key{version_bit} -- cx: uses "
-                    f"a ChatGPT subscription login", cmd="codex logout && codex login")
-    usage = cached_rate_limits_line()
-    usage_bit = f" ({usage})" if usage else ""
-    tested = load_cx_tested_range()
-    if codex_version_outside_tested_range(version, tested=tested):
-        return _fix(f"{WARN} Codex subscription: logged in (ChatGPT){version_bit} -- cx: models available, but "
-                    f"this is newer than the tested range ({tested.get('min')}-{tested.get('max')}, verified "
-                    f"{tested.get('date')}) -- watch for behavior changes", cmd="halo doctor")
-    return f"{OK} Codex subscription: logged in (ChatGPT){version_bit} -- cx: models available{usage_bit}"
+        return _fix(f"{WARN} Codex subscription: codex found but not logged in (run `codex login` once for "
+                     f"cx: models)", cmd="codex login")
+    if status.auth_method != "chatgpt":
+        return _fix(f"{WARN} Codex subscription: logged in via {status.auth_method or 'an unrecognized method'}, "
+                     f"not ChatGPT -- cx: will not use this (an API-key login belongs on the oai: route instead); "
+                     f"run `codex login` and sign in with ChatGPT for cx:", cmd="codex login")
+    return f"{OK} Codex subscription: logged in (ChatGPT) -- cx: models available"
+
+
+def _check_codex_settings() -> str:
+    """Round 5i part 2: the merged Claude-Code/Codex/Halo settings view's
+    own doctor line -- what was found in each place and which is primary,
+    never a pass/fail gate (there's nothing to fail: Halo reads, never
+    writes, either file). `halo doctor --json`/`/settings` share the same
+    `effective_settings`/`render_settings_text` this calls."""
+    from halo_harness.providers.settings_merge import effective_settings
+    try:
+        view = effective_settings(Path.cwd())
+    except Exception as e:
+        return _fix(f"{WARN} Settings sources: could not check ({type(e).__name__}: {e})", cmd="halo doctor")
+    return (f"{OK} Settings sources: primary={view.primary}; Claude Code instructions "
+            f"{view.claude_instructions_count} file(s); Codex config.toml "
+            f"{'found' if view.codex_config_found else 'not found'}, AGENTS.md chain "
+            f"{view.codex_agents_md_count} file(s) -- see `/settings` for the full merged view")
 
 
 def _claude_version() -> Optional[str]:
@@ -419,6 +426,30 @@ def _check_editor() -> str:
                 f"won't work", cmd="export EDITOR=nano")
 
 
+def _check_terminal_program() -> str:
+    """Halo 2.0.2 round C (the owner's own macOS report): "ctrl+e or
+    command+e does not work on the mac using halo" traced to VS Code's
+    integrated terminal intercepting the chord before halo ever sees it
+    (Cmd+E can never work at all, on ANY terminal app -- the terminal
+    app itself owns Cmd shortcuts; only Ctrl+E can ever reach halo).
+    Always prints TERM_PROGRAM/TERM (useful on its own for any "does a
+    shortcut even reach halo" question, not just this one -- `/keys` is
+    the live version of the same question); when it's exactly "vscode",
+    names BOTH real remedies verbatim (docs/TROUBLESHOOTING.md carries
+    the same two) so there's something to paste straight into
+    settings.json without hunting for the exact wording."""
+    term_program_raw = os.environ.get("TERM_PROGRAM") or ""
+    term_program = term_program_raw or "(not set)"
+    term = os.environ.get("TERM") or "(not set)"
+    if term_program_raw.strip().lower() == "vscode":
+        return (f"{OK} TERM_PROGRAM=vscode, TERM={term} -- if a shortcut (e.g. Ctrl+E) does nothing, add "
+                f'ONE of these to settings.json (Cmd+Shift+P, "Preferences: Open User Settings (JSON)"): '
+                f'"terminal.integrated.sendKeybindingsToShell": true  -- or, to release just that one key: '
+                f'"terminal.integrated.commandsToSkipShell": ["-<command owning ctrl+e>"] (find the exact '
+                f'command id in Keyboard Shortcuts, Cmd+K Cmd+S, search ctrl+e). Check with /keys afterward.')
+    return f"{OK} TERM_PROGRAM={term_program}, TERM={term}"
+
+
 def _check_shell() -> str:
     """H9 OpenCode item 23 (carried-over must-do: "Git Bash (win32)"): the
     Bash tool (halo_harness/tools/bash.py) needs Git Bash on win32
@@ -460,6 +491,68 @@ def _check_platform() -> str:
         hint = " (wsl.exe found -- verify parity there too)" if wsl else " (no wsl.exe found on PATH)"
         return f"{OK} Windows -- build/test host, not the primary target{hint}"
     return f"{OK} {system} -- {platform.release()}"
+
+
+def _check_drain_tick_rate() -> str:
+    """Halo 2.0.2 round C (the owner's own background-streaming report):
+    "halo doctor gains a measured drain-tick rate over 2 s" -- the TUI's
+    real `_drain` timer (tui/app.py) fires at `DRAIN_HZ` (30 Hz) and is
+    the ONLY thing that keeps the status bar's live signal (agents/bg
+    jobs/elapsed) and a sub-agent's own card moving while a turn runs
+    off-thread; if the host's asyncio event loop can't actually sustain
+    that rate (a busy terminal, a starved VM, the owner's own macOS/VS
+    Code report), the screen looks hung even though real work is still
+    happening. Runs a bare asyncio loop at the SAME cadence for 2 REAL
+    seconds and reports how many ticks landed -- never builds a real
+    BridgeApp/Controller/Session (this measures the HOST's own asyncio
+    scheduling under THIS terminal/platform, which is the actual
+    variable in play; a real session would need model/credential setup
+    doctor has no business requiring just to answer this)."""
+    import asyncio
+
+    from halo_harness.tui.keys import DRAIN_HZ
+
+    # Test hygiene: every doctor-touching test in the suite calls
+    # `run_checks()`/`run_checks_structured()` (several call it more than
+    # once), which would otherwise all pay a real 2 s for this one check --
+    # `tests/helpers/provider_env_defaults.ensure_default_provider_
+    # credentials`/`tests/helpers/runner.run_all` both `setdefault` this to
+    # a near-instant window before any test runs (same "scope it down for
+    # tests" rule BRIDGE_TEST_NO_BACKGROUND_NET already follows); a real
+    # `halo doctor` invocation never sets it, so it still measures the full
+    # 2 s the brief asks for.
+    window_s = 2.0
+    override = os.environ.get("BRIDGE_TEST_DRAIN_TICK_WINDOW_S")
+    if override:
+        try:
+            window_s = max(0.05, float(override))
+        except ValueError:
+            pass
+
+    async def _measure() -> int:
+        count = 0
+        interval = 1.0 / DRAIN_HZ
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + window_s
+        while loop.time() < deadline:
+            await asyncio.sleep(interval)
+            count += 1
+        return count
+
+    try:
+        ticks = asyncio.run(_measure())
+    except Exception as e:
+        return f"{WARN} could not measure the drain-tick rate: {type(e).__name__}: {e}"
+    hz = ticks / window_s
+    # Below half the target rate is a real, visible stall (a turn's own
+    # liveness segments would update roughly half as often as designed,
+    # or worse) -- above that, occasional scheduling jitter is normal
+    # and not worth a WARN.
+    if hz < DRAIN_HZ * 0.5:
+        return (f"{WARN} drain-tick rate ~{hz:.1f} Hz measured over {window_s:g} s (target {DRAIN_HZ} Hz) -- "
+                f"this terminal/platform may show stale liveness info (status bar, sub-agent cards) "
+                f"during a long-running turn")
+    return f"{OK} drain-tick rate ~{hz:.1f} Hz measured over {window_s:g} s (target {DRAIN_HZ} Hz)"
 
 
 def _check_catalog_ages() -> list:
@@ -687,6 +780,28 @@ def check_command_on_path(*, resolved=_UNSET, uv_found: Optional[bool] = None, p
     return f"{OK} halo command: {resolved} (installed console script)"
 
 
+def _check_install() -> str:
+    """Halo 2.0.2 round 6: a purely informative line (never WARN/MISSING --
+    `check_command_on_path` right below is what flags a PROBLEM) naming
+    HOW this running `halo` was installed, from where, and which commit --
+    `halo update`'s own `update.installed_build`/`install_kind`."""
+    from halo_harness import update as upd
+    label = {"uv_tool": "uv tool", "pipx": "pipx", "pip": "pip",
+             "editable_checkout": "editable checkout", "dir_checkout": "checkout",
+             "bare_checkout": "checkout on PYTHONPATH",
+             # Halo 2.0.2 round C: "treat it as a known kind (source_dir)
+             # in doctor's install line" -- a plain source directory (no
+             # .git, no dist metadata), never "unknown".
+             "source_dir": "plain source directory (no git metadata)", "unknown": "unknown"}
+    try:
+        build = upd.installed_build()
+        kind = upd.install_kind()
+        where = kind.get("spec") or build.get("checkout") or "?"
+        return f"{OK} install: {label.get(kind['kind'], kind['kind'])} ({where}) -- {upd.format_version_line(build)}"
+    except Exception as e:
+        return f"{OK} install: could not be determined ({type(e).__name__}: {e})"
+
+
 def _check_old_rolo_claude_leftover(*, resolved=_UNSET, uv_found: Optional[bool] = None,
                                      pipx_found: Optional[bool] = None,
                                      externally_managed: Optional[bool] = None) -> Optional[str]:
@@ -723,6 +838,51 @@ def _check_old_rolo_claude_leftover(*, resolved=_UNSET, uv_found: Optional[bool]
     return _fix(f"{WARN} rolo-claude: an old, separate install is still on PATH ({resolved}) -- halo no longer "
                 f"ships this executable (use `halo` instead); uninstall the old tool so it can never run by "
                 f"mistake", cmd=uninstall_cmd)
+
+
+# Test hygiene (round B fix pass, notes file): exact names several
+# test_*.py files' own fake MCP servers are known to use, plus the
+# `plugin_*fakeserver.log` shape a plugin-scoped fake server test uses --
+# every one found under a REAL `~/.halo/mcp/` (never a BRIDGE_TEST_HOME-
+# scoped one; a hermetic test run's own temp dir is never where a USER
+# would run `halo doctor`) is a near-certain leftover from a standalone
+# test run that predates `tests/helpers/runner.run_all`'s own fix for
+# this (it now scopes BRIDGE_TEST_HOME itself before any test runs).
+_TEST_FIXTURE_LOG_NAMES = frozenset({
+    "a.log", "b.log", "c.log", "big.log", "crash.log", "eager1.log", "fake.log",
+})
+
+
+def _is_test_fixture_log_name(name: str) -> bool:
+    if name in _TEST_FIXTURE_LOG_NAMES:
+        return True
+    if name.startswith("fake.log."):  # fake.log.1, fake.log.2, ... (rotated)
+        return True
+    return name.startswith("plugin_") and "fakeserver" in name and name.endswith(".log")
+
+
+def _check_test_leftovers(state_dir: Optional[Path] = None) -> Optional[str]:
+    """`None` (no entry at all -- this is informational, never a MISSING;
+    nothing is actually broken) when the mcp log dir doesn't exist or
+    nothing in it matches a known test-fixture name."""
+    try:
+        from halo_harness.config.paths import bridge_home
+        sd = Path(state_dir) if state_dir is not None else bridge_home()
+        mcp_dir = sd / "mcp"
+        if not mcp_dir.is_dir():
+            return None
+        found = sorted(p.name for p in mcp_dir.iterdir() if p.is_file() and _is_test_fixture_log_name(p.name))
+    except OSError:
+        return None
+    if not found:
+        return None
+    shown = ", ".join(found[:8]) + (f", +{len(found) - 8} more" if len(found) > 8 else "")
+    # H12 Part B: every WARN/MISSING line must end with -> fix:/-> see:
+    # (test_doctor_prescriptive_fixes.py's own enforced rule) -- there is
+    # no single safe `rm` one-liner for a variable-length file list, so
+    # this names the directory to inspect by hand instead of a command.
+    return _fix(f"{WARN} probable test leftovers in {mcp_dir}: {shown} -- safe to delete",
+                cmd=f"inspect and remove by hand from {mcp_dir}")
 
 
 def _check_mcp_servers(cwd: Optional[Path]) -> str:
@@ -801,6 +961,71 @@ def _check_mcp_connectors() -> str:
     return f"{OK} claude.ai connectors: bridge enabled, {len(connectors)} discovered ({names})"
 
 
+def _check_ollama_hosts() -> "list[tuple[str, str]]":
+    """Halo 2.0.3 round 3 (brief item 4): "`halo doctor` gains an Ollama
+    section, one line per host" -- a LIGHTWEIGHT per-host check
+    (`probe_version` + `/api/ps`'s own loaded count only, never the full
+    `/api/show`-per-model catalog `/ollama`/`halo ollama` read -- doctor
+    must stay fast even with several hosts configured). Never raises: an
+    unreachable host is the ordinary case on most boxes (no Ollama
+    installed at all), not a WARN-worthy one -- `[OK]` either way, same
+    "not configured" vocabulary this whole module already uses for
+    OpenRouter/Databricks."""
+    try:
+        from halo_harness.providers.ollama import fetch_ps, probe_version, resolve_ollama_hosts
+    except Exception as e:
+        return [("ollama_hosts", f"{WARN} Ollama: could not check ({type(e).__name__}: {e})")]
+    try:
+        hosts = resolve_ollama_hosts()
+    except Exception as e:
+        return [("ollama_hosts", f"{WARN} Ollama: could not resolve configured hosts ({type(e).__name__}: {e})")]
+    entries: "list[tuple[str, str]]" = []
+    for host in hosts:
+        cid = f"ollama_host_{host.name}"
+        version_info = probe_version(host)
+        if not isinstance(version_info, dict):
+            entries.append((cid, f"{OK} Ollama ({host.name}): not reachable at {host.url}"))
+            continue
+        version = version_info.get("version") or "?"
+        ps = fetch_ps(host) or {}
+        loaded = len(ps.get("models") or [])
+        entries.append((cid, f"{OK} Ollama ({host.name}): reachable, version {version}, "
+                              f"{loaded} model(s) loaded ({host.url})"))
+        # Round 5b part 2 (brief item 4): "the matching section in `halo
+        # doctor`" -- the SAME `host_setup_checklist` text `halo ollama
+        # doctor` prints, one [OK] line per sentence (never a block) so
+        # this stays inside doctor.py's own one-line-per-fact format.
+        # Cheap (no extra network call beyond the probe/`/api/ps` already
+        # done above) -- never slows `halo doctor` down meaningfully.
+        try:
+            from halo_harness.providers.ollama_panel import host_setup_checklist
+            for i, line in enumerate(host_setup_checklist(host)):
+                entries.append((f"{cid}_setup_{i}", f"{OK} Ollama ({host.name}): {line}"))
+        except Exception as e:
+            entries.append((f"{cid}_setup", f"{WARN} Ollama ({host.name}): could not build the setup "
+                                              f"checklist ({type(e).__name__}: {e})"))
+    return entries
+
+
+def _check_mlx_extra() -> Optional[str]:
+    """Halo 2.0.3 round 5f (brief item 1): "`halo doctor` on macOS says
+    whether the extra is present; on other platforms nothing else
+    changes" -- `None` (omitted entirely, same `_check_tmux_mouse`-style
+    skip every other platform-conditional check on this page uses) off
+    Apple Silicon. On Apple Silicon: `[OK]`/`[WARN]` on whether `mlx-lm`
+    actually imports -- never a network call, never spawns `mlx_lm.
+    server` itself (that only happens once an `hf:mlx/<repo>` ref is
+    actually used)."""
+    from halo_harness.providers.huggingface_mlx import is_apple_silicon
+    if not is_apple_silicon():
+        return None
+    import importlib.util
+    if importlib.util.find_spec("mlx_lm") is not None:
+        return f"{OK} MLX (Apple Silicon): mlx-lm installed -- hf:mlx/<org>/<repo> is ready to use"
+    return _fix(f"{WARN} MLX (Apple Silicon): mlx-lm not installed -- hf:mlx/<org>/<repo> will decline until it is",
+                cmd='uv tool install "halo-harness[mlx]"')
+
+
 def _format_age(seconds: float) -> str:
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -835,9 +1060,11 @@ def _provider_configured(ref) -> "tuple[bool, str]":
             status = claude_auth_status()
             ok = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
             return ok, "Claude subscription"
-        if ref.provider == "cx":
-            from halo_harness.providers.cx_models import codex_login_status, is_subscription_login
-            return is_subscription_login(codex_login_status()), "Codex subscription"
+        if ref.provider == "codex":
+            from halo_harness.providers.codex_models import codex_login_status
+            status = codex_login_status()
+            ok = bool(status and status.logged_in and status.auth_method == "chatgpt")
+            return ok, "Codex subscription"
     except Exception as e:
         return False, f"could not check ({type(e).__name__}: {e})"
     return True, ref.provider
@@ -919,7 +1146,7 @@ def _check_default_model() -> str:
     # 1.0.1 hotfix 13 (drive-by): this suggestion still said `--preset
     # work`/`--preset home` -- the deprecated alias still works, but every
     # OTHER user-facing spot already moved to `--provider` at item 13.
-    provider_flag = {"databricks": "databricks", "cc": "claude", "cx": "codex", "anthropic": "anthropic"}.get(
+    provider_flag = {"databricks": "databricks", "cc": "claude", "anthropic": "anthropic"}.get(
         ref.provider, "openrouter")
     return _fix(f"{WARN} Default model: {configured} -- {provider_label} not configured",
                  cmd=f"halo init --provider {provider_flag}")
@@ -1394,13 +1621,16 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("databricks", _check_databricks()))
     entries.append(("claude_subscription", _check_claude_subscription()))
     entries.append(("codex_subscription", _check_codex_subscription()))
+    entries.append(("codex_settings", _check_codex_settings()))
     entries.append(("chrome", _check_chrome()))
     entries.append(("playwright", _check_playwright()))
     entries.append(("ripgrep", _check_ripgrep()))
     entries.append(("editor", _check_editor()))
+    entries.append(("terminal_program", _check_terminal_program()))
     entries.append(("shell", _check_shell()))
     entries.append(("plugins", _check_plugins()))
     entries.append(("platform", _check_platform()))
+    entries.append(("drain_tick_rate", _check_drain_tick_rate()))
     entries.append(("local_bin_on_path", _check_local_bin_on_path()))
     entries.append(("tmux_mouse", _check_tmux_mouse()))
     catalog_ids = ("catalog_models_json", "catalog_dbx_endpoints", "catalog_models_dev")
@@ -1417,10 +1647,14 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     from halo_harness.tui.clipboard import clipboard_doctor_line
     entries.append(("clipboard", _fix(clipboard_doctor_line(), cmd="sudo apt install xclip")))
     entries.append(("mcp_servers", _check_mcp_servers(cwd)))
+    entries.append(("test_leftovers", _check_test_leftovers()))
     entries.append(("mcp_connectors", _check_mcp_connectors()))
+    entries.extend(_check_ollama_hosts())
+    entries.append(("mlx_extra", _check_mlx_extra()))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))
+    entries.append(("install", _check_install()))
     entries.append(("command_on_path", check_command_on_path()))
     entries.append(("old_rolo_claude_on_path", _check_old_rolo_claude_leftover()))
     return [(cid, line) for cid, line in entries if line is not None]
@@ -1468,6 +1702,16 @@ def cmd_doctor(argv: list) -> int:
                          help="With --probe-all: also check one Read tool-call per endpoint")
     parser.add_argument("--only", default=None, metavar="GLOB",
                          help="With --probe-all: only endpoints matching this glob")
+    # Halo 2.0.3 round 5d (brief item 3): the 60-second local-model
+    # acceptance check -- its own preset, same shape as --work just above.
+    parser.add_argument("--local", action="store_true",
+                         help="Run the 60-second local-model acceptance check (load, tool call, structured "
+                             "output, compaction summary against a fixture transcript) instead of the "
+                             "general checks")
+    parser.add_argument("--model", default=None, metavar="REF",
+                         help="With --local: the ol:/hf:local/hf:mlx model to check (default: the configured "
+                             "default model if it is ol:, else the first model in the default Ollama host's "
+                             "catalog); an hf:mlx/<org>/<repo> ref starts its managed mlx_lm.server if needed")
     # Findings 22/23 (2.0.1): threaded into listing_effective_env (via
     # run_checks/_check_providers_enabled) so the provider-enablement line
     # never disagrees with what a real session launched against this same
@@ -1489,6 +1733,19 @@ def cmd_doctor(argv: list) -> int:
     migration_note = ensure_providers_migrated()
     if migration_note and not args.json:
         print(migration_note)
+    if args.local:
+        from halo_harness.config.paths import bridge_home
+        from halo_harness.doctor_local import format_acceptance_lines, run_local_acceptance_check
+        print(f"halo doctor --local{f' --model {args.model}' if args.model else ''}")
+        print("  Loads the model, makes one real tool call, one structured-output call, and one "
+              "compaction-style summary -- real requests against the live host this takes a moment.")
+        steps, ok = run_local_acceptance_check(args.model, state_dir=bridge_home())
+        if args.json:
+            print(json.dumps(steps, indent=2))
+        else:
+            for line in format_acceptance_lines(steps):
+                print(f"  {line}")
+        return 0 if ok else 1
     if args.work and args.probe_all:
         from halo_harness.work_matrix import format_table, run_work_matrix
         print("halo doctor --work --probe-all")

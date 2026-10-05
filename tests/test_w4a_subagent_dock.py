@@ -119,6 +119,65 @@ def test_background_subagent_permission_ask_reaches_the_parent_event_sink(ctx: C
         mock.stop()
 
 
+@test
+def test_background_subagent_end_reaches_the_parent_event_sink_when_it_finishes(ctx: Ctx):
+    """Release review finding 20: `subagent_end` must reach a live dock for
+    a BACKGROUND child too, not just the foreground path -- otherwise a
+    mounted SubAgentCard (started on `subagent_start`, which DOES already
+    reach the dock) never gets `card.finish()` and keeps ticking "thinking
+    Ns" forever, even after the completion notice lands in
+    `_pending_agent_notices`."""
+    mock = MockUpstream().start()
+    try:
+        SCENARIOS["w4a-dock-end-parent"] = ScriptedTurns([
+            _tool_call_step("Task", {"description": "write", "prompt": "write a note",
+                                      "subagent_type": "writer", "model": "or:mock/w4a-dock-end-child",
+                                      "run_in_background": True}),
+            _text_step("started it"),
+        ])
+        SCENARIOS["w4a-dock-end-child"] = ScriptedTurns([
+            _text_step("done, nothing to ask"),
+        ])
+        from halo_harness.config.agents_md import AgentSpec
+        spec = AgentSpec(name="writer", description="writer sub-agent", tools=None,
+                          disallowed_tools=["Agent", "Task"], body="write files.",
+                          permission_mode="bypassPermissions")
+        cwd = Path(tempfile.mkdtemp(prefix="w4a-dock-end-cwd-"))
+        session = _new_session(mock=mock, model="or:mock/w4a-dock-end-parent", agents={"writer": spec}, cwd=cwd)
+
+        q: "queue.Queue" = queue.Queue()
+        session._event_sink = q.put
+
+        list(session.turn("have the writer sub-agent write a note in the background"))
+
+        deadline = time.monotonic() + 10
+        drained = []
+        end_ev = None
+        while time.monotonic() < deadline:
+            try:
+                ev = q.get(timeout=0.1)
+            except queue.Empty:
+                if session._pending_agent_notices:
+                    # the notice is queued (under the same lock) right after
+                    # subagent_end is sent in agent/subagent.py's _bg_run --
+                    # if the notice is here, the end event, if it was ever
+                    # going to arrive, already has too.
+                    break
+                continue
+            drained.append(ev)
+            if ev.kind == "subagent_end":
+                end_ev = ev
+                break
+        ctx.check(f"a subagent_end from the BACKGROUND child reached the event sink, got kinds="
+                  f"{[e.kind for e in drained]}", end_ev is not None)
+        ctx.check(f"tagged with the child's own agent_id, got {end_ev.agent_id if end_ev else None}",
+                  end_ev is not None and end_ev.agent_id is not None)
+        ctx.check(f"is_error is False for a clean finish, got {end_ev.data if end_ev else None}",
+                  end_ev is not None and end_ev.data.get("is_error") is False)
+    finally:
+        mock.stop()
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

@@ -31,7 +31,8 @@ _KEY_ROWS = [
     ("o", "Expand a focused tool card in a full pager"),
     ("Ctrl+R", "Search prompt history"),
     ("Ctrl+P", "Command palette (slash commands, skills, files, sessions)"),
-    ("Ctrl+E", "Edit the current prompt draft in $VISUAL/$EDITOR"),
+    ("Ctrl+E", "Edit the current prompt draft in $VISUAL/$EDITOR (or /editor, if the "
+                "terminal doesn't deliver the chord -- see /keys)"),
     ("Ctrl+X", "Cuts a chat-box selection; otherwise a chord prefix -- shows a which-key "
                 "overlay listing continuations (export/rename/fork/undo/redo/stats/"
                 "child-session nav; see /keybindings)"),

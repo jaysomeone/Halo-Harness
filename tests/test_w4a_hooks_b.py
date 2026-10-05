@@ -101,6 +101,41 @@ def test_setup_directoryadded_instructionsloaded_fire_at_startup(ctx: Ctx):
 
 
 @test
+def test_review_finding_36_a_sub_agent_never_refires_setup_directoryadded_instructionsloaded(ctx: Ctx):
+    """Release review finding 36: `_fire_session_start` already skips a
+    sub-agent (`self.agent_id is not None`) outright -- Setup,
+    DirectoryAdded and InstructionsLoaded did not, so spawning a child
+    Session re-ran all three again, tagged to whichever session (main or
+    child) happened to trigger each one. A child's own `__init__` must
+    fire NONE of them."""
+    from halo_harness.agent.assemble import SessionContext
+    from halo_harness.agent.loop import Session
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.permissions import PermissionEngine
+
+    dump = Path(tempfile.mkdtemp(prefix="w4a-dump-child-")) / "dump.jsonl"
+    cwd = Path(tempfile.mkdtemp(prefix="w4a-cwd-child-"))
+    (cwd / "CLAUDE.md").write_text("# project notes\nUse tabs.", encoding="utf-8")
+    extra = Path(tempfile.mkdtemp(prefix="w4a-extra-child-"))
+    hook_runner = _dump_hook_runner(dump, ["Setup", "DirectoryAdded", "InstructionsLoaded"], cwd=cwd)
+    os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="w4a-hooksb-home-child-")))
+    session_ctx = SessionContext(cwd=cwd, model_label="or:mock/w4a-b", bare=False)
+    engine = PermissionEngine(mode="auto", cwd=cwd, extra_dirs=[extra])
+    Session(cwd=cwd, model_ref=parse_model_ref("or:mock/w4a-b"), model_profile=ModelProfile(), creds=None,
+            state_dir=Path(tempfile.mkdtemp(prefix="w4a-hooksb-state-child-")), model_label="or:mock/w4a-b",
+            session_context=session_ctx, max_turns=5, permission_engine=engine, agents={}, routes={},
+            hook_runner=hook_runner, agent_id="child-1")
+
+    lines = _dump_lines(dump)
+    ctx.check(f"Setup never fires for a sub-agent, got {_events_named(lines, 'Setup')}",
+              _events_named(lines, "Setup") == [])
+    ctx.check(f"DirectoryAdded never fires for a sub-agent, got {_events_named(lines, 'DirectoryAdded')}",
+              _events_named(lines, "DirectoryAdded") == [])
+    ctx.check(f"InstructionsLoaded never fires for a sub-agent, got {_events_named(lines, 'InstructionsLoaded')}",
+              _events_named(lines, "InstructionsLoaded") == [])
+
+
+@test
 def test_configchange_fires_when_a_settings_file_mtime_moves(ctx: Ctx):
     from halo_harness.config.settings import Settings, SettingsLayer
 

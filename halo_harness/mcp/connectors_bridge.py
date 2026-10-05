@@ -8,6 +8,7 @@ to keep each file under the house 250-line limit.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ from typing import Callable, Optional
 
 from halo_harness.config.paths import background_net_disabled, bridge_home
 from halo_harness.mcp.connectors import ConnectorInfo, discover_connectors_now
+
+log = logging.getLogger("bridge")
 
 _CACHE_NAME = "connectors.json"
 
@@ -181,9 +184,19 @@ def ensure_discovered_in_background(*, timeout: float = 20.0, on_done: "Optional
     (brief: "once per session in a background worker... never on the UI
     thread"). Returns True iff a worker was actually started. Honors
     `BRIDGE_TEST_NO_BACKGROUND_NET=1` like every other startup worker in
-    this tree."""
+    this tree.
+
+    Round 5e: also skipped under offline mode, with one DEBUG line -- the
+    real network call this discovers happens INSIDE a spawned `claude`
+    subprocess (`discover_connectors_now`'s own `claude mcp list`/`claude
+    -p`), outside `providers.http`'s own choke point, so it is skipped here
+    rather than refused there."""
     global _session_discovered
     if background_net_disabled() or not discovery_eligible():
+        return False
+    from halo_harness.providers.http import offline_mode_enabled
+    if offline_mode_enabled():
+        log.debug("connectors_bridge: offline mode -- skipping background discovery")
         return False
     with _session_lock:
         if _session_discovered:
@@ -229,6 +242,10 @@ def ensure_discovered_synchronously_if_cold(*, timeout: float = 20.0) -> bool:
     global _session_discovered
     if background_net_disabled() or not discovery_eligible():
         return False
+    from halo_harness.providers.http import offline_mode_enabled
+    if offline_mode_enabled():
+        log.debug("connectors_bridge: offline mode -- skipping cold-start discovery")
+        return False
     connectors, _fetched_at = load_cache()
     if connectors:
         return False  # something real is already cached -- never block on it again
@@ -241,9 +258,35 @@ def ensure_discovered_synchronously_if_cold(*, timeout: float = 20.0) -> bool:
     return True
 
 
+def already_discovered_or_warm() -> bool:
+    """Review finding 30: a cheap, no-subprocess check for a caller that
+    wants to skip STRAIGHT PAST `prime_auth_cache_if_stale()` (a real
+    `claude auth status` spawn, up to 10s, once the 30s auth TTL has
+    lapsed) when there is nothing it could usefully change -- either the
+    cache already has something real (the common case, once discovery
+    has run even once this process), or this session already ran, or is
+    running, its own discovery round (the same once-per-session flag
+    `ensure_discovered_synchronously_if_cold`/`ensure_discovered_in_
+    background` share)."""
+    connectors, _fetched_at = load_cache()
+    if connectors:
+        return True
+    with _session_lock:
+        return _session_discovered
+
+
 def refresh_now(*, timeout: float = 20.0) -> "list[ConnectorInfo]":
     """Synchronous, forced refresh (`halo mcp list --refresh`, `/mcp`
-    reconnect) -- ignores the once-per-session gate and any existing cache."""
+    reconnect) -- ignores the once-per-session gate and any existing cache.
+
+    Round 5e: still runs under offline mode -- unlike the two background/
+    cold-start paths above, this one is an explicit, user-requested action
+    (`--refresh`), so it is NOT silently skipped; `discover_connectors_now`
+    spawns the real `claude` subprocess exactly as it would with offline
+    mode off (that subprocess's own network call is outside this harness's
+    choke point either way) and the result is whatever that subprocess
+    found or failed to find -- same as running `claude mcp list` directly
+    in an offline shell."""
     connectors = discover_connectors_now(timeout=timeout)
     save_cache(connectors)
     global _session_discovered
@@ -272,14 +315,25 @@ def connector_status_entry(info: ConnectorInfo) -> dict:
             "status_text": info.status_text, "tool_count": len(info.tools)}
 
 
+def reauth_instructions(info: ConnectorInfo) -> Optional[str]:
+    """round4 brief item 1: the re-auth instructions line `/mcp`'s `l`
+    action shows verbatim for a claude.ai connector row (there is no
+    local OAuth flow for one of these -- the account-side login lives in
+    claude.ai/claude itself) -- factored out of `status_line` below so
+    there is exactly ONE copy of this wording, not two. `None` when the
+    connector isn't in `needs_auth` (nothing to show)."""
+    if info.status != "needs_auth":
+        return None
+    return ("authorize it at claude.ai or inside `claude` with /mcp, then run "
+            "`/mcp` reconnect (or `halo mcp list --refresh`) here; halo never reads "
+            "claude's own credentials file")
+
+
 def status_line(info: ConnectorInfo) -> str:
     from halo_harness.mcp_cli import format_mcp_list_line
     line = format_mcp_list_line(connector_status_entry(info))
-    if info.status == "needs_auth":
-        line += (" -- authorize it at claude.ai or inside `claude` with /mcp, then run "
-                 "`/mcp` reconnect (or `halo mcp list --refresh`) here; halo never reads "
-                 "claude's own credentials file")
-    return line
+    extra = reauth_instructions(info)
+    return f"{line} -- {extra}" if extra else line
 
 
 _CLAUDE_AI_RULE_RE = re.compile(r"^mcp__claude_ai_([A-Za-z0-9_]+?)(?:__(\*|[A-Za-z0-9_]+))?$")

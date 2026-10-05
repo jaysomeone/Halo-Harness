@@ -292,6 +292,27 @@ def test_extract_leaked_call_qwen3_coder_xml(ctx: Ctx):
 
 
 @test
+def test_qwen3_coder_xml_param_value_is_always_a_plain_string(ctx: Ctx):
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 2): opencode#6918 cites
+    a "string-typed parameter value arrives as a JSON object" failure
+    mode for this XML wire shape -- verified here that Halo's OWN
+    extractor (`_tag_params`, raw `.strip()`'d tag TEXT, never a nested
+    parse) cannot itself produce that bug: a parameter value that LOOKS
+    like a JSON object is still captured as the literal string it is,
+    which `validate_and_coerce` then accepts as-is for a string-typed
+    field -- no dict ever reaches that far for this extractor."""
+    text = '<tool_call><function=Write><parameter=content>{"a": 1}</parameter></function></tool_call>'
+    result = repair.extract_leaked_call(text, _FakeProfile(("qwen3_coder_xml",)))
+    ctx.check(f"value captured as a plain string, got {result}",
+              result == {"name": "Write", "arguments": {"content": '{"a": 1}'}})
+    ctx.check("it is a str, never a dict", isinstance(result["arguments"]["content"], str))
+    coerced, errors = repair.validate_and_coerce(
+        result["arguments"], {"type": "object", "properties": {"content": {"type": "string"}}})
+    ctx.check(f"validate_and_coerce accepts it as-is for a string-typed field, got errors={errors}", errors == [])
+    ctx.check("value unchanged by coercion", coerced["content"] == '{"a": 1}')
+
+
+@test
 def test_extract_leaked_call_kimi(ctx: Ctx):
     text = '<|tool_call_begin|>Read:0<|tool_call_argument_begin|>{"file_path": "/k.txt"}<|tool_call_end|>'
     result = repair.extract_leaked_call(text, _FakeProfile(("kimi_section_tokens",)))

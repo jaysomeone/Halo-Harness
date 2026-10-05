@@ -230,7 +230,7 @@ left to crash whatever reads it next.
 ## Permissions: grammar, modes, and what "auto" means here
 
 `permissions.py::PermissionEngine.decide(tool_name, tool_input, tool)` is
-grammar and modes **only** -- rolo's explicit "no cyber blocks" decision:
+grammar and modes **only** -- the owner's explicit "no cyber blocks" decision:
 there is no classifier, no destructive-command list, no protected-path
 list, and no security-tool flagging anywhere in this engine or the tool
 layer. `Tool.is_read_only`/`is_destructive` exist purely for the read-only

@@ -212,7 +212,7 @@ def _summarize_nodes(*, session_id: str, slug: str, path: str, mtime: float, siz
     # `_switch_model`'s own comment) -- a pre-H10 `usage` node never carried
     # its own `model`/`provider` at all, so without this fallback its
     # tokens/cost/etc. were silently dropped entirely (nothing to key
-    # `s.models` by), which is why `stats --models` over rolo's real,
+    # `s.models` by), which is why `stats --models` over the owner's real,
     # nearly-all-pre-H10 logs used to show almost nothing.
     current_model: Optional[str] = None
     # H10b defect 1: `tool_use_id -> tool name`, built up as assistant

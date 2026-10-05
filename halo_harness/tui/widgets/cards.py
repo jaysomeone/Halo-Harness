@@ -317,12 +317,19 @@ class PermissionCard(Static, can_focus=True):
 
     def __init__(self, *, request_id: str, summary: str, reason: str,
                  suggested_rule: Optional[str], on_decide: Callable,
-                 on_resolved_externally: Optional[Callable] = None) -> None:
+                 on_resolved_externally: Optional[Callable] = None,
+                 input_data: Optional[dict] = None) -> None:
         super().__init__("", markup=False, classes="permission-card")
         self.request_id = request_id
         self.summary = summary
         self.reason = reason
         self.suggested_rule = suggested_rule
+        # parity gap: PendingDock's own `o` pager used to show only
+        # `reason` (a short, one-line rationale), never the full tool
+        # call it's actually asking about -- kept here so the pager can
+        # render it in full (`input_data=None`, the default, for any
+        # caller that predates this -- `_refresh` below never needed it).
+        self.input_data = input_data
         self._on_decide = on_decide
         # H15 Part D2.3: for a card resolved OUTSIDE the model loop (the
         # `!cmd` inline-shell ask has no worker thread of its own to wake
@@ -467,6 +474,10 @@ class QuestionCard(Static, can_focus=True):
         super().__init__(classes="question-card")
         self.request_id = request_id
         self._on_answer = on_answer
+        # parity gap: PendingDock's own `o` pager showed "(no further
+        # detail)" for a question card -- the raw input (every question
+        # and its options) is kept so the pager can render it in full.
+        self.input_data = input_data
         questions = input_data.get("questions") if isinstance(input_data.get("questions"), list) else None
         if questions:
             self.questions = [(q.get("question", "?"), _option_texts(q.get("options"))) for q in questions
@@ -600,6 +611,78 @@ class PlanCard(Static, can_focus=True):
 
     def resolve_with_message(self, message: str) -> None:
         self._finish({"approved": False, "mode_after": None, "feedback": message})
+
+
+class ApprovalCard(Static, can_focus=True):
+    """Halo 2.0.2 round D (brief item 2, "approval gates"): a `requires_
+    approval: true` org position's just-finished result, held pending a
+    human decision -- `on_decide({"action": "accept"|"edit"|"stop",
+    "instruction": str|None})` fires exactly once. `2`/`e` borrows
+    PromptInput for the revision instruction first (mirrors
+    `PermissionCard.action_choose_deny`'s own deny-feedback flow)."""
+
+    BINDINGS = [
+        Binding("1,a", "choose_accept", "Accept", show=False),
+        Binding("2,e", "choose_edit", "Edit, re-run", show=False),
+        Binding("3,s,escape", "choose_stop", "Stop", show=False),
+    ]
+
+    def __init__(self, *, request_id: str, position: str, text: str, is_error: bool, on_decide: Callable) -> None:
+        super().__init__("", markup=False, classes="approval-card")
+        self.request_id = request_id
+        self.position = position
+        self.text = text
+        self.is_error = is_error
+        # PendingDock's own `o`-pager title fallback reads this (same
+        # attribute name PermissionCard/QuestionCard/PlanCard already use).
+        self.summary = f"Approval needed: {position}"
+        self._on_decide = on_decide
+        self.awaiting_instruction = False
+        self.done = False
+        # 2.0.1 W3a (PendingDock): see PermissionCard's own matching attribute.
+        self.decision_line: "Optional[str]" = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        lines = [f"⚠ Approval needed: {self.position}'s result" + (" (error)" if self.is_error else "")]
+        preview = self.text.strip()
+        lines.append(preview[:2000] + ("…" if len(preview) > 2000 else ""))
+        if self.done:
+            pass
+        elif self.awaiting_instruction:
+            lines.append("  Tell it what to change, or press Enter for no extra detail.")
+        else:
+            lines.append("  [1] Accept   [2] Edit, re-run   [3] Stop")
+        self.update("\n".join(lines))
+
+    def _finish(self, decision: dict) -> None:
+        self.done = True
+        self.awaiting_instruction = False
+        glyph = {"accept": "✓", "edit": "↻"}.get(decision["action"], "✗")
+        label = {"accept": "accepted", "edit": "sent back for edits"}.get(decision["action"], "stopped")
+        self.decision_line = f"{glyph} {label}: {self.position}"
+        self._refresh()
+        self._on_decide(decision)
+
+    def action_choose_accept(self) -> None:
+        if not self.done:
+            self._finish({"action": "accept", "instruction": None})
+
+    def action_choose_edit(self) -> None:
+        if self.done:
+            return
+        self.awaiting_instruction = True
+        self._refresh()
+        self.app.borrow_input(self, placeholder="What should change? (Enter for no extra detail)")
+
+    def action_choose_stop(self) -> None:
+        if not self.done:
+            self._finish({"action": "stop", "instruction": None})
+
+    def resolve_with_message(self, message: str) -> None:
+        if self.done:
+            return
+        self._finish({"action": "edit", "instruction": message})
 
 
 class EffortCard(Static, can_focus=True):

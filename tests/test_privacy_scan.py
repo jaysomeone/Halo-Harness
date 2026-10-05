@@ -75,20 +75,40 @@ _REMOVED_NAMES = (
     "~/Documents/vibes/appDev/Halo-Harness",
 )
 
+# Release review finding 38 / W6b section C: a broader, case-INSENSITIVE
+# safety net alongside `_REMOVED_NAMES` above -- generic substrings
+# rather than exact multi-word strings, so a differently-worded FUTURE
+# mention of the same hobby gear/vendor names, or of the owner's own
+# first/last name, is still caught (the exact-string check above only
+# ever catches the SPECIFIC wording this pass already found and fixed).
+# Scoped to exactly the directories/files the brief names -- deliberately
+# NOT the whole tree the other checks in this file scan: the repo's own
+# LICENSE file legitimately carries the owner's real full name in its
+# copyright line (expected, standard, not a leak) and must never be
+# flagged by this.
+_EXTENDED_SCAN_TERMS = ("ableton", "moog", "sd3", "superior drummer", "caido", "roundboy", "lowery", "robert")
+_EXTENDED_SCAN_ROOTS = ("halo_harness/", "tests/", "docs/", "README.md", "CHANGELOG.md")
+
 
 def _tracked_files() -> "list[Path]":
-    """`git ls-files` in a git checkout; otherwise (the tar copy the Kali
-    suite runs from, a source archive) a walk of the tree minus the
-    directories git never tracks, so the scan runs on every copy the suites
-    run from instead of erroring out where there is no `.git`."""
+    """`git ls-files` PLUS `git ls-files --others --exclude-standard` (2.0.3
+    round 4 fix-pass note: a worker's own NEW, still-untracked files went
+    unscanned until staged -- two "Bearer <fake-token>" literals in a new
+    test slipped through the worker's own full run this way and only
+    surfaced at review) in a git checkout; otherwise (the tar copy the
+    Kali suite runs from, a source archive) a walk of the tree minus the
+    directories git never tracks, so the scan runs on every copy the
+    suites run from instead of erroring out where there is no `.git`."""
     # This file names every banned string, so it is the one tracked file
     # the scan must never read (untracked while it was written, which hid
     # the self-match until the first git-less run on the Kali copy).
     self_path = Path(__file__).resolve()
     try:
-        out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
-        return [REPO_DIR / line for line in out.stdout.splitlines()
-                if line.strip() and (REPO_DIR / line).resolve() != self_path]
+        tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
+        untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                                    capture_output=True, text=True, cwd=str(REPO_DIR), check=True)
+        lines = list(dict.fromkeys(tracked.stdout.splitlines() + untracked.stdout.splitlines()))
+        return [REPO_DIR / line for line in lines if line.strip() and (REPO_DIR / line).resolve() != self_path]
     except (OSError, subprocess.CalledProcessError):
         pass
     skip_dirs = {".git", "__pycache__", ".venv", "venv", "build", "dist", "wheels", "node_modules",
@@ -173,6 +193,42 @@ def test_no_removed_machine_or_project_names_regress(ctx: Ctx):
             line_no = text.count("\n", 0, idx) + 1
             problems.append(f"{path.relative_to(REPO_DIR)}:{line_no}: removed name {name!r} is back")
     ctx.check("no removed machine/project names regressed:\n  " + "\n  ".join(problems), not problems)
+
+
+def _extended_scan_files() -> "list[Path]":
+    out: "list[Path]" = []
+    for path in _tracked_files():
+        try:
+            rel = path.resolve().relative_to(REPO_DIR).as_posix()
+        except ValueError:
+            continue
+        if any(rel == root or rel.startswith(root) for root in _EXTENDED_SCAN_ROOTS):
+            out.append(path)
+    return out
+
+
+@test
+def test_no_hobby_gear_vendor_or_owner_name_terms_case_insensitive(ctx: Ctx):
+    """Release review finding 38 / W6b section C: a broader net than
+    `_REMOVED_NAMES` above -- case-insensitive, generic substrings for the
+    owner's hobby gear/vendor names and the owner's own first/last name,
+    across halo_harness/, tests/, docs/, README.md and CHANGELOG.md (never
+    the whole tree -- see `_EXTENDED_SCAN_TERMS`'s own docstring for why
+    LICENSE is deliberately excluded)."""
+    problems = []
+    for path in _extended_scan_files():
+        text = _read_text(path)
+        if not text:
+            continue
+        lower = text.lower()
+        for term in _EXTENDED_SCAN_TERMS:
+            idx = lower.find(term)
+            while idx != -1:
+                line_no = text.count("\n", 0, idx) + 1
+                problems.append(f"{path.relative_to(REPO_DIR)}:{line_no}: {term!r}-shaped term found: "
+                                 f"{text[idx:idx + len(term)]!r}")
+                idx = lower.find(term, idx + 1)
+    ctx.check("no hobby-gear/vendor/owner-name terms found:\n  " + "\n  ".join(problems), not problems)
 
 
 @test

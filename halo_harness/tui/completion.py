@@ -105,7 +105,9 @@ def current_token(text: str, cursor_pos: int) -> "tuple[str, int, str]":
     the flat string `text` to the nearest preceding whitespace or start of
     string. `kind` is "slash" (only valid when the token starts at index 0
     -- a real Claude Code slash command is only recognized as the first
-    thing on the line), "at", or "" (no completion applies here)."""
+    thing on the line), "at", "arg" (Halo 2.0.2 brief A.4: an ARGUMENT of
+    `/role ...`/`/roles set ...` -- see `role_command_arg_index`), or ""
+    (no completion applies here)."""
     start = cursor_pos
     while start > 0 and not text[start - 1].isspace():
         start -= 1
@@ -114,4 +116,110 @@ def current_token(text: str, cursor_pos: int) -> "tuple[str, int, str]":
         return "slash", start, token[1:]
     if token.startswith("@"):
         return "at", start, token[1:]
+    if role_command_arg_index(text, cursor_pos) is not None:
+        return "arg", start, token
+    if org_command_arg_index(text, cursor_pos) is not None:
+        return "orgarg", start, token
     return "", start, token
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.2 (W7 round 1, brief A.4): `/role <name> <model> [effort]` and
+# `/roles set <name> <model> [effort]` argument completion. Pure, no
+# textual/controller import -- `tui/app.py` supplies the live candidate
+# lists (role names, model refs, effort levels) for whichever argument
+# index these report; this module only ever decides "which argument" and
+# "which of these candidates match."
+# ---------------------------------------------------------------------------
+
+_ROLE_ARG_COMMAND_RE = re.compile(r"^/role(?:s\s+set)?\s")
+
+
+def role_command_arg_index(text: str, cursor_pos: int) -> "object":
+    """`0`/`1`/`2` (role name / model / effort) for a cursor inside a
+    `/role ...`/`/roles set ...` line's ARGUMENTS, or `None` when `text`
+    isn't shaped like one at all -- `text`/`cursor_pos` are the WHOLE
+    input and the live caret position, exactly like `current_token`'s own
+    parameters (checked independently here since the two commands' shared
+    `/role` prefix makes a plain startswith check ambiguous on its own).
+    An index past 2 (a 4th+ argument) is still reported as-is -- the
+    caller decides there's nothing left to complete."""
+    m = _ROLE_ARG_COMMAND_RE.match(text)
+    if not m:
+        return None
+    after_command = text[:cursor_pos][m.end():].lstrip(" \t")
+    pieces = re.split(r"[ \t]+", after_command) if after_command else [""]
+    return len(pieces) - 1
+
+
+def role_command_args(text: str) -> "Optional[list]":
+    """The FULL `/role ...`/`/roles set ...` line's own argument pieces
+    (role name, model, effort, ...), with the command's own `/role`/
+    `/roles set` prefix stripped off first -- `None` when `text` isn't
+    shaped like either command at all. 2.0.2 review finding 24: shared
+    with `role_command_arg_index` above (same prefix regex) so a caller
+    completing one argument (the effort level) can read an EARLIER one
+    (the model just typed) without re-splitting the whole line itself and
+    getting the two commands' different prefix word counts wrong -- that
+    was `tui/app.py::_complete_role_command_arg`'s own bug: it read
+    `pieces[1]` of the UN-stripped line, which is the role name for
+    `/role` and the literal word "set" for `/roles set`, never the model."""
+    m = _ROLE_ARG_COMMAND_RE.match(text)
+    if not m:
+        return None
+    after_command = text[m.end():].strip()
+    return re.split(r"[ \t]+", after_command) if after_command else []
+
+
+# ---------------------------------------------------------------------------
+# 2.0.2 review ("No Tab completion for org/position names in /org ..."
+# confirmed, round 2 notes; fix pass round B): `/org show|edit|run|load
+# <name> ...` -- the FIRST argument of each of these four subcommands is
+# an existing organization's own name (`run`'s own goal text after it is
+# free-form prose, never completed). Deliberately narrower than the
+# `/role` pair above: unlike `/role <name> <model> [effort]`, there is no
+# slash-command surface that ever takes a bare POSITION name as its own
+# argument (positions are only ever edited inside the `/org edit` form
+# itself) -- "position names" in the org editor's own "Reports" field is
+# a DIFFERENT, modal-dialog-local completion surface, not this one.
+# ---------------------------------------------------------------------------
+
+_ORG_ARG_COMMAND_RE = re.compile(r"^/org\s+(show|edit|run|load)\s")
+
+
+def org_command_arg_index(text: str, cursor_pos: int) -> "object":
+    """`0` for a cursor inside the org-NAME argument of `/org show|edit|
+    run|load <name> ...`, `None` otherwise (including a cursor already
+    past argument 0, e.g. `run`'s own goal text -- there is nothing to
+    complete there)."""
+    m = _ORG_ARG_COMMAND_RE.match(text)
+    if not m:
+        return None
+    after_command = text[:cursor_pos][m.end():].lstrip(" \t")
+    if not after_command:
+        return 0
+    pieces = re.split(r"[ \t]+", after_command)
+    index = len(pieces) - 1
+    return index if index == 0 else None
+
+
+def filter_items(items: "list[str]", prefix: str) -> "list[str]":
+    """Ranks `items` for a `prefix` the user is typing (brief A.4: "prefix
+    first, then substring"): every item whose text starts with `prefix`
+    (case-insensitive) first, in their original relative order, then
+    every item that merely CONTAINS `prefix` elsewhere, same relative
+    order -- never re-sorted alphabetically, so a caller's own meaningful
+    ordering (role-table order, a model catalog's own ranking, ...)
+    survives untouched within each tier. An empty `prefix` returns
+    `items` unchanged (every item "starts with" "")."""
+    if not prefix:
+        return list(items)
+    low = prefix.lower()
+    starts, contains = [], []
+    for it in items:
+        it_low = it.lower()
+        if it_low.startswith(low):
+            starts.append(it)
+        elif low in it_low:
+            contains.append(it)
+    return starts + contains

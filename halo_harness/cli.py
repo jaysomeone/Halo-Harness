@@ -106,15 +106,23 @@ _REAL_FLAGS = [
     # shows -- same effect as `"intro": false` in ~/.halo/config.json, see
     # tui/launch.py's own show_intro resolution.
     (["--no-intro"], dict(dest="no_intro", action="store_true")),
+    # Halo 2.0.3 round 5e: enforced offline mode for this one process --
+    # never persisted (see `main()`'s own handling, right after parsing:
+    # sets `HALO_OFFLINE=1` in THIS process's environment only); `/offline
+    # on` is the persisted equivalent (`network.offline` in
+    # `~/.halo/config.json`). Not a Claude Code flag -- Halo-only, same as
+    # `--demo`/`--stress`/`--bare` just above.
+    (["--offline"], dict(dest="offline", action="store_true")),
     # H6: real now (agent definitions + the Agent tool + plan mode +
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
     (["--agents"], dict(dest="agents", default=None, metavar="JSON_OR_FILE")),
-    # V2c (H15): repeatable NAME=MODEL override for one of the five roles
+    # V2c (H15), widened Halo 2.0.2: repeatable NAME=MODEL[:EFFORT] override
+    # for one of the ten built-in roles (or a currently-known custom one)
     # (orchestrator|coder|reviewer|researcher|small) -- validated in main()
     # right after parsing, so a bad NAME=MODEL is a clean exit-2 usage error
     # before either run_print_mode or the TUI ever starts building a Session.
-    (["--role"], dict(dest="role", action="append", default=None, metavar="NAME=MODEL")),
+    (["--role"], dict(dest="role", action="append", default=None, metavar="NAME=MODEL[:EFFORT]")),
     (["-c", "--continue"], dict(dest="continue_", action="store_true")),
     (["-r", "--resume"], dict(dest="resume", nargs="?", const="", default=None)),
     (["--fork-session"], dict(dest="fork_session", action="store_true")),
@@ -253,7 +261,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="halo", add_help=True,
         description="halo - starts an interactive session by default, use -p/--print for non-interactive output",
-        epilog="Commands: init, proxy, mcp, models, config, doctor, stats, improve, export "
+        epilog="Commands: init, proxy, mcp, models, config, doctor, update, stats, improve, export, "
+               "roles, completion "
                "(run `halo <command> --help`; `halo init` sets up a fresh box in one go)",
     )
     try:
@@ -318,6 +327,33 @@ def _parse_stream_json_lines(raw: str) -> list:
     return out
 
 
+def _apply_update_and_relaunch(argv: list) -> int:
+    """Halo 2.0.2 round 6 `/update`: `run_tui(args)` just returned
+    `update.RESTART_EXIT_CODE` -- the TUI's own Textual app has already
+    exited (screen torn down, terminal restored) by the time `run_tui`
+    returns at all, so only NOW is it safe to run the reinstall: the
+    Windows order is always quit, then update, then relaunch, never
+    update while any halo process (this one included) still has the
+    install open. A failed update still relaunches the OLD halo with
+    `--continue`, same as a successful one -- the session must resume
+    either way, never strand the user at a dead prompt."""
+    from halo_harness.update import relaunch_halo
+    from halo_harness.update_cli import apply_update
+    try:
+        # Finding 2: this process's own Textual app has ALREADY exited
+        # (see this function's own docstring above) -- the ONLY thing
+        # `other_halo_pids`'s refusal could still be catching at this
+        # exact point is this same invocation's own uv/pipx console-
+        # script launcher parent (now excluded by `_ancestor_pids`, but
+        # `force=True` here too so this specific, already-past-the-TUI
+        # handoff never refuses on account of itself either way).
+        apply_update(force=True)
+    except Exception as e:
+        print(f"halo: update failed: {e}", file=sys.stderr)
+    relaunch_args = [a for a in argv if a not in ("--continue", "-c")]
+    return relaunch_halo(["--continue", *relaunch_args])
+
+
 def main(argv: Optional[list] = None) -> int:
     _make_streams_utf8_safe()
     try:  # best-effort: SIGTERM -> exit 143 (not available on every platform/thread)
@@ -358,6 +394,9 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "doctor":
         from halo_harness.doctor import cmd_doctor
         return cmd_doctor(argv[1:])
+    if argv and argv[0] == "update":
+        from halo_harness.update_cli import cmd_update
+        return cmd_update(argv[1:])
     if argv and argv[0] == "work-matrix":
         from halo_harness.work_matrix import cmd_work_matrix
         return cmd_work_matrix(argv[1:])
@@ -388,6 +427,27 @@ def main(argv: Optional[list] = None) -> int:
     if argv and argv[0] == "bg":
         from halo_harness.bg_cli import cmd_bg
         return cmd_bg(argv[1:])
+    if argv and argv[0] == "roles":
+        from halo_harness.roles_cli import cmd_roles
+        return cmd_roles(argv[1:])
+    if argv and argv[0] == "ollama":
+        from halo_harness.ollama_cli import cmd_ollama
+        return cmd_ollama(argv[1:])
+    if argv and argv[0] == "gym":
+        from halo_harness.gym_cli import cmd_gym
+        return cmd_gym(argv[1:])
+    if argv and argv[0] == "local":
+        from halo_harness.local_cli import cmd_local
+        return cmd_local(argv[1:])
+    if argv and argv[0] == "org":
+        from halo_harness.org_cli import cmd_org
+        return cmd_org(argv[1:])
+    if argv and argv[0] == "setup":
+        from halo_harness.setup_cli import cmd_setup
+        return cmd_setup(argv[1:])
+    if argv and argv[0] == "completion":
+        from halo_harness.completion_cli import cmd_completion
+        return cmd_completion(argv[1:])
 
     parser = _build_parser()
     try:
@@ -401,7 +461,14 @@ def main(argv: Optional[list] = None) -> int:
         args, _ = parser.parse_known_args(argv)
 
     if args.version:
-        print(f"halo {__version__}")
+        # Halo 2.0.2 round 6: `(commit, branch)` once the install's own
+        # commit is known (PEP 610 direct_url.json, or git in a live
+        # checkout) -- see update.installed_build/format_version_line.
+        try:
+            from halo_harness.update import format_version_line, installed_build
+            print(format_version_line(installed_build()))
+        except Exception:
+            print(f"halo {__version__}")
         return 0
 
     for _flags, kwargs, label, milestone in _NOT_YET_FLAGS:
@@ -414,22 +481,25 @@ def main(argv: Optional[list] = None) -> int:
     if _flag_was_set(getattr(args, "debug", None)) or getattr(args, "debug_file", None):
         _enable_debug_logging(getattr(args, "debug_file", None))
 
-    # W4a: `--autocompact <auto|tokens>` -- "auto" (or anything non-numeric)
-    # leaves the existing default alone; a token count reuses the SAME
-    # `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var `agent/compact.resolve_knobs`
-    # already reads (settings.effective_env falls back to real os.environ,
-    # so a real process-env var set here reaches it either way, TUI or -p)
-    # -- no new compaction-trigger plumbing needed at all.
-    autocompact_raw = getattr(args, "autocompact", None)
-    if autocompact_raw and autocompact_raw.strip().lower() != "auto":
-        try:
-            int(autocompact_raw.rstrip("kK")) if autocompact_raw.rstrip("kK").isdigit() else int(autocompact_raw)
-        except ValueError:
-            pass
-        else:
-            raw = autocompact_raw.strip()
-            tokens = int(raw[:-1]) * 1000 if raw[-1:].lower() == "k" else int(raw)
-            os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(tokens)
+    # Halo 2.0.3 round 5e: `--offline` -- sets `HALO_OFFLINE=1` for THIS
+    # PROCESS ONLY (never written to `~/.halo/config.json`; `providers.
+    # http.offline_mode_enabled()` checks this env var first, ahead of the
+    # persisted `network.offline` key, same "env overrides the file"
+    # convention every other knob here already uses). Set as early as
+    # possible, before either run_print_mode or the TUI ever builds a
+    # Session or makes a single network call (an update check, a catalog
+    # refresh, ...).
+    if getattr(args, "offline", False):
+        os.environ["HALO_OFFLINE"] = "1"
+
+    # review finding 34: `--autocompact <auto|tokens>` used to write
+    # straight into `os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]`, the
+    # LOWEST (shell) layer of `settings.effective_env` -- a settings.json
+    # `env` block setting the SAME name silently outranked this explicit
+    # flag. The raw value already reaches `cli_flags["autocompact"]`
+    # (`cli_flags_from_args`) unconditionally; `agent/compact.resolve_
+    # knobs` now parses it itself and gives it top precedence, so nothing
+    # needs doing here at all any more.
 
     if getattr(args, "role", None):
         # V2c (H15): validated ONCE, here, before either run_print_mode or
@@ -496,7 +566,11 @@ def main(argv: Optional[list] = None) -> int:
             from halo_harness.ax_mode import run_ax_screen_reader_mode
             return run_ax_screen_reader_mode(args)
         from halo_harness.tui.launch import run_tui
-        return run_tui(args)
+        code = run_tui(args)
+        from halo_harness.update import RESTART_EXIT_CODE
+        if code == RESTART_EXIT_CODE:
+            return _apply_update_and_relaunch(argv)
+        return code
 
     system_prompt_text = args.system_prompt
     if args.system_prompt_file and system_prompt_text is None:

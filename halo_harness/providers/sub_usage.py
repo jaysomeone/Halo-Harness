@@ -225,7 +225,7 @@ def subscription_usage_cache_dir(provider: str, state_dir: Optional[Path] = None
     normal state directory. A live cx state wins because failover may have
     moved to another account since the persisted selection was read.
     """
-    if provider != "cx":
+    if provider not in ("cx", "codex"):
         return state_dir
     live_dir = getattr(cx_state, "cache_dir", None)
     if live_dir is not None:
@@ -246,7 +246,7 @@ def subscription_usage(provider: str, state_dir: Optional[Path] = None, *,
     if provider == "cc":
         data = load_cc_usage(state_dir)
         session, weekly = data.get("session"), data.get("weekly")
-    elif provider == "cx":
+    elif provider in ("cx", "codex"):
         from halo_harness.providers.cx_models import load_cx_models_cache
         rl = load_cx_models_cache(state_dir).get("rate_limits") or {}
         session, weekly = rl.get("primary"), rl.get("secondary")

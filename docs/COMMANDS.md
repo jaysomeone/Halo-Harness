@@ -82,7 +82,7 @@ models --refresh`) and something close matches:
 halo -p --model not-a-real-model-ref "hi"
 ```
 ```
-halo: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, cx:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
+halo: invalid --model: no route: 'not-a-real-model-ref' (accepted forms are dbx:, or:, ant:, cc:, vendor/model, a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias)
 ```
 
 Exit codes across every route: `0` success, `1` the turn ran and ended in an
@@ -111,6 +111,26 @@ OpenRouter, `reasoning_effort` on Databricks chat) -- ignored (no field
 added) for a model whose profile doesn't support it. Related config:
 `effortLevel`/`modelSettings.<id>.effortLevel` in `settings.json` set a
 session's *default* effort when `--effort` is omitted (`docs/CONFIG.md`).
+
+#### `--offline`
+Halo 2.0.3 round 5e, Halo-only (not a Claude Code flag). What: enforces
+offline mode for this one process -- sets `HALO_OFFLINE=1` in this
+process's own environment (never written to `~/.halo/config.json`; `/offline
+on` is the persisted equivalent). The one HTTP choke point
+(`providers/http.py`'s `open_upstream`/`urlopen_tls`) then refuses any
+connection whose host isn't loopback or an allow-listed local host (every
+`ollama.hosts` entry, `huggingface.local_servers` entry, or managed
+local-server-registry entry) -- update checks, catalog refreshes, the
+Hugging Face router, OpenRouter, Databricks, Anthropic and WebFetch/
+WebSearch are all refused the same way; the claude.ai connectors bridge's
+background discovery is skipped instead (its real network call happens
+inside a spawned `claude` subprocess, outside this process's own choke
+point). The refusal is always one plain sentence: "offline mode: not
+connecting to \<host\>". See [CONFIG.md](CONFIG.md)'s `network.offline`
+section and [SLASH-COMMANDS.md](SLASH-COMMANDS.md)'s `/offline`.
+```sh
+halo --offline -p "reply with the single word pong" --model ol:qwen3-coder:30b
+```
 
 #### `-c`, `--continue`
 What: resumes the most recently modified session for the current directory
@@ -153,18 +173,21 @@ JSON file holding `{name: {description, prompt, tools, model, ...}}`. See
 `docs/CONFIG.md`'s agents section for the full discovery precedence these
 sit on top of.
 
-#### `--role NAME=MODEL`
+#### `--role NAME=MODEL[:EFFORT]`
 
-What: overrides one of the five roles (`orchestrator`, `coder`, `reviewer`,
-`researcher`, `small`) for this run only -- a built-in/custom sub-agent whose
-own role resolves to `NAME` uses `MODEL` instead of whatever `~/.halo/
-config.json`/`team.json`'s own `roles` table (or the cost-aware default) says,
-even beating that agent's own file `model:` (a freshly-typed, run-only
-override the user gets to trump a shared/managed agent file with). Repeatable
-(`--role coder=... --role researcher=...`); a later repeat of the SAME role
-wins. A bad `NAME=MODEL` (missing `=`, an unrecognized role name, an empty
-model) is a clean exit-2 usage error before any Session is built. See
-`docs/ROLES.md` for the full precedence chain, `/roles`, and `stats --roles`.
+What: overrides one of the ten built-in roles (`orchestrator`, `planner`,
+`coder`, `reviewer`, `judge`, `researcher`, `tester`, `compaction`, `small`,
+`subagent_default`) -- or any custom name a team.json/loaded template
+already defines -- for this run only -- a built-in/custom sub-agent whose
+own role resolves to `NAME` uses `MODEL` (and `EFFORT`, if given) instead of
+whatever `~/.halo/config.json`/`team.json`'s own `roles` table (or the
+cost-aware default) says, even beating that agent's own file `model:` (a
+freshly-typed, run-only override the user gets to trump a shared/managed
+agent file with). Repeatable (`--role coder=... --role researcher=...`); a
+later repeat of the SAME role wins. A bad `NAME=MODEL` (missing `=`, an
+unrecognized role name, an empty model) is a clean exit-2 usage error before
+any Session is built. See `docs/ROLES.md` for the full precedence chain,
+`/role`/`/roles`, role templates, and `stats --roles`.
 ```sh
 halo -p --role researcher=or:deepseek/deepseek-v4.1-flash "use the Researcher agent to summarize this repo"
 ```
@@ -534,10 +557,12 @@ before. `host` consults `--permission-prompt-tool` when one is given.
 
 #### `--plugin-dir PATH`
 What: loads a plugin's agent definitions from `PATH` for this session only
-(repeatable). v1 scope: wired into agent discovery; a plugin's own
-skills/hooks/MCP servers from a CLI-supplied directory are a follow-up (an
-*installed* plugin's skills/hooks/MCP servers, via `config/plugins.py`,
-already work independently of this flag).
+(repeatable). Also wired into skill, hook and MCP server discovery for
+this session (`commands/registry.py`, `hooks.load_plugin_hooks`,
+`mcp_setup.build_manager`), plus a model-invoked `Skill` tool call via
+`Session.plugin_roots`/`ToolContext.plugin_roots` -- the same sources an
+*installed* plugin's skills/hooks/MCP servers (`config/plugins.py`) already
+read from, now extended to cover a CLI-supplied directory too.
 
 #### `--plugin-url URL`
 What: like `--plugin-dir`, but `URL` is a git URL, shallow-cloned once into
@@ -609,6 +634,57 @@ or `--dangerously-skip-permissions` is given that run (see
 chain). Every step is idempotent -- re-running only reports what's already
 correct. Never writes `~/.claude.json`/`~/.claude/settings.json`, never
 prints a key or token.
+
+**Halo 2.0.2 round 7**: on a real terminal, every interactive step above
+(Providers, Default model, Permission mode) plus three more -- **Theme**
+(the six built-in themes, a live preview of the transcript/status bar in
+each), **Roles** and **Organizations** (see below), and **Linux fixes**
+(skipped automatically when nothing needs fixing) -- run inside ONE
+Textual app, `Step N of M: <name>` in the header and `Back` / `Skip` /
+`Next` (`Finish` on the last step) in the footer; nothing exits to the
+console between steps, and Esc asks "Quit setup? What you saved so far
+stays" instead of ending the run silently. A piped/non-tty run (every
+script, `--yes`, `--provider`) is unaffected -- it keeps the exact
+sequential-picker/numbered-fallback behaviour the worked example below
+shows.
+
+**Halo 2.0.3 round 5**: the INTERACTIVE Providers step's tab bar gains two
+more tabs beyond the four above -- `Ollama (local or LAN)` (detects/
+registers the local daemon, or add a LAN/cloud host with an optional key)
+and `Hugging Face` (paste `HF_TOKEN`, add a dedicated endpoint, add a
+local server by URL with an optional key, or rely on auto-detection --
+any subset, all optional) -- both Skippable, same Back/Skip/Next footer.
+Deliberately NOT `--provider`/`--preset` CLI-flag choices (the piped/
+non-tty fallback above still only ever offers the original four): neither
+has one sensible hardcoded default model the way the table below's four
+providers each do, so there is nothing non-interactive `--provider
+ollama`/`--provider huggingface` could safely default to without a real
+catalog already cached. See [MODELS.md](MODELS.md)'s Ollama/Hugging Face
+sections and [CONFIG.md](CONFIG.md)'s "Providers" section.
+
+**Halo 2.0.3 round 5b part 2**: both of those two tabs now open with a
+short detection summary -- GPU/unified memory, whether Ollama is already
+reachable and what it has, any running local server, and model folders
+already known -- filled in by a background probe (never the UI thread; a
+slow probe just leaves the "detecting..." placeholder a little longer,
+the rest of the tab is usable immediately either way). For each already-
+installed Ollama model it names the largest fully-resident context
+(learned cap or fit estimate, labelled); for free room, one or two
+illustrative model classes/quantizations that would fit with a 32k
+context -- an estimate, never a download from here. See
+[MODELS.md](MODELS.md)'s "The wizard detects before it asks" section.
+
+**Halo 2.0.3 round 5i**: the Providers step gains two more tabs -- "OpenAI
+API (key)" (paste `OPENAI_API_KEY`, Save) and "Codex subscription" (same
+"Check login" button as the Claude Code tab -- nothing is stored, it only
+confirms a ChatGPT login via `codex login status`) -- both Skippable, same
+pattern as every tab above. A separate step, "Settings sources", shows
+what was found in Claude Code's own settings/CLAUDE.md and in Codex's own
+`config.toml`/`AGENTS.md` chain and lets you pick which one wins when
+both set the same thing and nothing else already decides it
+(`settings.primary`) -- see [MODELS.md](MODELS.md)'s "Codex subscription
+(ChatGPT)" and "Codex settings and instructions" sections and
+[CONFIG.md](CONFIG.md)'s `settings.primary` row.
 
 ```sh
 halo init --help
@@ -717,7 +793,7 @@ halo doctor --help
 ```
 ```
 usage: halo doctor [-h] [--work] [--json] [--probe-all] [--both]
-                          [--tools] [--only GLOB]
+                          [--tools] [--only GLOB] [--local] [--model REF]
 
 Check the health of your halo installation.
 
@@ -734,7 +810,28 @@ options:
                anthropic gateway
   --tools      With --probe-all: also check one Read tool-call per endpoint
   --only GLOB  With --probe-all: only endpoints matching this glob
+  --local      Run the 60-second local-model acceptance check (load, tool
+               call, structured output, compaction summary) instead of the
+               general checks
+  --model REF  With --local: the ol:/hf:local/hf:mlx model to check (default:
+               the configured default model if it is ol:, else the first
+               model in the default Ollama host's catalog); an
+               hf:mlx/<org>/<repo> ref starts its managed mlx_lm.server
+               first if one isn't already running
 ```
+
+`halo doctor --local [--model ol:x]` (round 5d; round 5f extends `--model`
+to `hf:local/*`/`hf:mlx/*`) is the 60-second "works out of the box" proof
+for a local model on THIS machine: load, one real Read tool call, one
+structured-output call (the same constrained-decoding path the repair loop
+uses), and one summary of a small fixture transcript, each printed as
+`[PASS]`/`[FAIL]` with a plain reason and the elapsed time, in that fixed
+order even when an earlier step failed. Exit 0 iff all four passed. An
+`hf:mlx/<org>/<repo>` ref on anything but Apple Silicon fails all four
+steps with the one plain "MLX runs on Apple Silicon only" reason -- still
+a clean, deterministic answer, never a crash. See [MODELS.md](MODELS.md)'s
+"Finding and using file-backed models"/"Apple Silicon (`hf:mlx/*`, round
+5f)" sections; new local-model users are pointed at this command first.
 
 Bare `halo doctor` checks: Python version, `~/.claude` layout, the env
 file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
@@ -742,11 +839,12 @@ file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
 plugin-provided MCP servers, the OS/WSL/Kali platform hint, `~/.local/bin` on
 PATH (Linux), tmux mouse mode (inside tmux), the three cached-catalog ages,
 session count + `/improve` config, clipboard backend, configured MCP servers
-(eager vs. lazy), the resolved default model, how many of the five providers
-are enabled (`databricks`/`openrouter`/`anthropic`/`claude_subscription`/
-`typesafe` -- see "`halo providers`" below), and the `halo`
-command itself on PATH. Exit 0 unless something is `[MISSING]` (a `[WARN]`
-alone, e.g. "no Databricks configured", never fails the command).
+(eager vs. lazy), the resolved default model, how many of the seven
+providers are enabled (`databricks`/`openrouter`/`anthropic`/
+`claude_subscription`/`typesafe`/`huggingface`/`openai` -- see "`halo
+providers`" below), and the `halo` command itself on PATH. Exit 0 unless
+something is `[MISSING]` (a `[WARN]` alone, e.g. "no Databricks
+configured", never fails the command).
 
 **Install once, run anywhere.** The "command on PATH" check fails WARN when
 `halo` either isn't found at all or resolves to this checkout's own
@@ -770,7 +868,7 @@ halo doctor
   [OK] /improve: enabled=True hint=True model=(small/session model) since_days=7 max_candidates=8
   [OK] MCP servers: none configured
   [OK] Default model: not set in config.json -- built-in default 'or:deepseek/deepseek-v4.1-flash' applies (HALO_MODEL/routes.json still win when set)
-  [OK] Providers: 0/5 enabled (none)
+  [OK] Providers: 0/6 enabled (none)
   [WARN] halo command: not found on PATH -> fix: pip install --user -e . (run from this checkout -- repeat after every `git pull`)
 ```
 (trimmed -- a real run has one line per check; see `docs/TROUBLESHOOTING.md`
@@ -779,51 +877,95 @@ for what each WARN/MISSING line means)
 `doctor --work` and `doctor --work --probe-all` are Databricks-specific --
 see `docs/DATABRICKS.md`.
 
+## `halo update`
+
+Checks the installed build (PEP 610 `direct_url.json`, or `git` in a live
+checkout) against what's available upstream (cached 24h in
+`~/.halo/update-check.json`), and, unless `--check`, applies it. See
+"Update" in `docs/INSTALL.md` for the full walkthrough; `/update` inside
+the TUI is the same check with an update-and-restart dialog.
+
+```sh
+halo update --help
+```
+```
+usage: halo update [-h] [--check] [--to TAG_OR_BRANCH_OR_COMMIT]
+                   [--channel {stable,main}] [--force] [--refresh]
+
+Check for, or apply, a halo update.
+
+options:
+  -h, --help            show this help message and exit
+  --check               Report only -- never reinstalls
+  --to TAG_OR_BRANCH_OR_COMMIT
+                        Pick an exact revision instead of the channel's latest
+  --channel {stable,main}
+                        stable tracks the newest v* tag, main tracks the
+                        branch halo came from
+  --force               Reinstall even if another halo process looks like it's
+                        running
+  --refresh             Ignore the 24h cache, always check live
+```
+
+`halo update --check` prints installed vs. available, up to 15 commits
+between them, and the exact reinstall command this box would run, then
+exits 0 (up to date), 10 (an update is available), or 1 (couldn't tell --
+offline, no git, rate-limited). Without `--check`, it refuses (exit 1) if
+another `halo` process looks like it's running on this machine (excluding
+itself) unless `--force` is also given -- a reinstall under a running TUI
+has broken the install on Windows before; close other sessions first, or
+pass `--force` once you're sure none is actually using the install. On
+success it runs the reinstall command live (output visible) and reports
+the before/after commit by re-running `halo --version` as a fresh process.
+
+```sh
+halo update --check
+```
+```
+installed: halo 2.0.2 (c93480d, master)
+available (main): e1f2a3b (master)
+3 commit(s):
+  e1f2a3b fix: ...
+  ...
+update command: uv tool install --reinstall git+https://github.com/roloVibes/Halo-Harness
+```
+
 ## `halo accounts`
 
-Creates and lists isolated subscription-login profiles owned by the current
-user. The first supported provider is Codex:
+Creates, lists, and selects isolated Codex subscription-login profiles:
 
 ```sh
 halo accounts list
 halo accounts add codex --name personal
-halo accounts add codex --name work
 halo accounts use codex --name personal
 ```
 
-`add codex` creates a private profile under
-`~/.halo/accounts/codex/<name>/codex-home/`, forces Codex's file credential
-store inside that directory, and runs the official `codex login` browser flow.
-Halo confirms the result with `codex login status`; it does not read or print
-the profile's `auth.json`. Account names may contain letters, numbers, dots,
-dashes, and underscores. Run the command once per account, selecting the
-matching ChatGPT account in the browser each time. The first profile becomes
-active; `accounts use` changes which isolated profile the next Codex app-server
-uses. When that account reports a confirmed usage limit, Halo looks for
-another logged-in Codex profile whose cached limit has not been reached. A
-turn with no tool calls continues automatically on the replacement account;
-if the interrupted turn already ran a tool, Halo switches accounts but asks
-you to send `continue` so a write or command cannot be repeated accidentally.
-The equivalent TUI commands are `/accounts add codex <name>` and `/accounts
-use codex <name>`.
+Each profile gets a private `CODEX_HOME` under
+`~/.halo/accounts/codex/<name>/codex-home/`. `add` launches the official
+`codex login` flow and verifies it with `codex login status`; Halo never
+prints the profile's `auth.json`. The selected profile is used by new Halo
+sessions on the `cx:` route. The TUI equivalents are `/accounts list`,
+`/accounts add codex <name>`, and `/accounts use codex <name>`.
 
 ## `halo providers`
 
 ```
 Usage: halo providers [list|enable <name>|disable <name>|setup <name>]
-Providers: databricks, openrouter, anthropic, claude_subscription, typesafe
+Providers: databricks, openrouter, anthropic, claude_subscription, typesafe, huggingface, openai
 ```
 
 Detected credentials/a real claude.ai login AUTO-enable a provider (H15
-part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe once their key
-is found (env file, shell env, or the settings env chain), Databricks once
-a host AND token are found (same sources, plus `~/.databrickscfg`), Claude
-Code subscription (`cc:`) ONLY when `claude auth status` reports
-`loggedIn` with `authMethod` exactly `claude.ai`. No `halo init` run
+part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe/OpenAI API
+once their key is found (env file, shell env, or the settings env chain),
+Databricks once a host AND token are found (same sources, plus
+`~/.databrickscfg`), Claude Code subscription (`cc:`) ONLY when `claude
+auth status` reports `loggedIn` with `authMethod` exactly `claude.ai`,
+Hugging Face (Halo 2.0.3 round 4) once `HF_TOKEN` is found OR at least one
+`huggingface.endpoints` entry is configured. No `halo init` run
 is required for this. `~/.halo/config.json`'s `"providers"` block
 stores OVERRIDES only -- `enable <name>`/`disable <name>` write an explicit
 `true`/`false` there that always wins over auto-detection (`cc`/`ant`/
-`dbx`/`or` are accepted aliases for the canonical names); `setup <name>`
+`dbx`/`or`/`hf`/`oai` are accepted aliases for the canonical names); `setup <name>`
 needs a real terminal and runs the same per-provider tab `halo init`
 shows.
 
@@ -831,8 +973,13 @@ Bare `halo providers` (or `list`) prints one row per provider --
 status (`auto (detected from <source>)` / `disabled by you` / `enabled by
 you` / `not set up`), reachable, cached model count -- plus a trailing
 OpenRouter balance line once a background fetch has ever succeeded (see
-`halo models`/`/cost`). See `docs/MODELS.md`'s "Provider
-enablement" section for the full prefix/label table.
+`halo models`/`/cost`), and (round 5i part 1) a plain note once OpenAI
+API is enabled: it has no public balance endpoint for ordinary keys, so
+this prints a pointer at `/cost` here (the standalone CLI has no live
+session to read a number from) or, from `/providers` inside a running
+session on an `oai:` model, that session's own computed spend. See
+`docs/MODELS.md`'s "Provider enablement" section for the full prefix/
+label table.
 
 ```sh
 halo providers
@@ -912,9 +1059,9 @@ options:
   --cc        List the Claude subscription models (cc:/ant: aliases) instead
               of the OpenRouter/Databricks catalog; with --refresh, re-pings
               each alias to confirm its current canonical id
-  --cx        List the Codex subscription models (cx:) this ChatGPT account
-              may use, with effort levels and usage windows; with --refresh,
-              re-reads them from codex
+  --cx        List the Codex subscription models (cx: aliases) instead of
+              the OpenRouter/Databricks catalog; with --refresh, re-pings
+              each alias to confirm it is accepted (marks refused ids)
   --urls      Databricks endpoints: also print the exact URL and path type
               each one resolves to
   --json      Machine-readable JSON output
@@ -925,7 +1072,7 @@ options:
 | (bare) | reads `~/.halo/models.json`/`dbx-endpoints.json`; refreshes automatically the first time either cache is empty |
 | `--refresh` | live probe: OpenRouter `GET /api/v1/models` -> `models.json`; Databricks `GET /api/2.0/serving-endpoints` -> `dbx-endpoints.json`; models.dev's public `api.json` -> `models-dev.json` |
 | `--cc` | reads `claude auth status` + the `cc-models.json` cache; `--cc --refresh` also sends nine tiny `-p --max-turns 1` pings under your subscription |
-| `--cx` | reads `codex login status` + the `cx-models.json` cache: the models your ChatGPT plan may use through the installed `codex`, their effort levels, and the plan's usage windows; `--cx --refresh` re-reads them from codex's own app-server (`model/list`, `account/rateLimits/read`; no model call, nothing spent). A plain `--refresh` also refreshes this list when the Codex subscription is enabled |
+| `--cx` | reads `codex login status` + the `cx-models.json` cache; `--cx --refresh` sends one tiny `codex exec --ephemeral` ping per alias under your subscription -- no ChatGPT login exists on the build host, so this is verified against `tests/helpers/fake_codex.py` only, not the real CLI |
 | `--urls` | Databricks rows only: adds the exact resolved URL + path type (`mlflow`/`cursor`/`anthropic`/`invocations`) per endpoint -- see `docs/DATABRICKS.md` |
 | `--json` | same data as machine-readable JSON |
 
@@ -968,6 +1115,8 @@ Commands:
   serve                   Expose halo's own built-in tools as an MCP server
   login <name>            OAuth-authenticate a remote MCP server
   logout <name>           Clear stored OAuth credentials for a server
+  fix <name> [--apply]    Diagnose (and, with --apply, fix) a failed server
+  test <name>             A tools/list round trip with timing
 ```
 
 ### `mcp list [--cwd DIR] [--refresh]`
@@ -1069,6 +1218,80 @@ one file. Tested only against a local fake OAuth server
 against any specific vendor's real endpoints, and no vendor is named here
 or in the code.
 
+### `mcp fix <name> [--apply] [--cwd DIR]`
+Halo 2.0.2 round 4: the same diagnosis the `/mcp` dialog shows per row --
+prints the server's status, the WHY (`failure_reason`, the same text
+`mcp list` shows in parentheses) and the one fix line (`fix_line_for`,
+shared code, never duplicated between this command and the dialog).
+Without `--apply`, prints only. With it, actually runs the matching
+action: approves a pending `.mcp.json` server, runs the OAuth login for a
+`needs_auth` http/sse server, reconnects a server that's merely down, or
+-- for a command-not-found server -- prints the install hint (never runs
+it; that line is for you to run):
+```sh
+halo mcp fix my-server
+```
+```
+my-server: ✗ Failed to connect
+  reason: command not found on PATH: npx
+  fix: install Node.js (npx ships with it): https://nodejs.org/
+Re-run with --apply to run it.
+```
+
+### `mcp test <name> [--cwd DIR]`
+The `/mcp` dialog's `t` action from the CLI: connects (lazy servers
+connect on first use, same as any real tool call) and times a fresh
+`tools/list` round trip:
+```sh
+halo mcp test my-server
+```
+```
+halo mcp test: my-server: ok in 42ms -- 7 tool(s).
+```
+
+### `mcp learned [--forget <endpoint>]`
+Halo 2.0.2 round D: lists every endpoint
+`providers/learned_rules.py` has learned something about (a learned
+`tools_rejected` rule from a live 400, or a learned `reasoning_effort_
+with_tools` override), each under its own `"<provider>:<model>"` key;
+`--forget <endpoint>` clears that endpoint's `tools_rejected` rule before
+its TTL would otherwise expire it naturally, leaving any other learned
+field for that same endpoint untouched:
+```sh
+halo mcp learned
+halo mcp learned --forget databricks:my-endpoint
+```
+
+## `/mcp` (the repair dialog)
+
+Halo 2.0.2 round 4: lists every configured server and claude.ai connector
+with a status glyph, and -- for anything not healthy -- the WHY and the
+one fix line (`halo mcp fix`'s own `fix_line_for`, never duplicated) plus,
+for a server that died mid-session, its reconnect-backoff attempt count
+and next retry. The key legend is always shown at the bottom. All actions
+act on the highlighted row (`R` excepted) and run off the UI thread, so a
+hung/slow server never freezes the dialog -- Esc while one is in flight
+cancels the WAIT on it, never the app.
+
+| Key | Does |
+|---|---|
+| `r` | Reconnect the highlighted server (re-reads its config first, so an on-disk edit or a brand-new name takes effect without restarting halo). |
+| `R` | Reconnect every server, one at a time; also resets the backoff on each one. |
+| `a` | Approve a `pending_approval` project (`.mcp.json`) server, then reconnect it. |
+| `l` | For a local `http`/`sse` server: the 2.0.1 OAuth login flow (`halo mcp login`). For a claude.ai connector row: the re-auth instructions (there is no local OAuth flow for one of these -- the login lives in claude.ai/claude itself). |
+| `L` | A tail of `~/.halo/mcp/<server>.log` (stdio stderr + connect/transport errors, rotated at 1 MB) in a small viewer; Esc returns. |
+| `e` | Edit the entry: opens the source file at that server's own line in `$VISUAL`/`$EDITOR`, using THAT editor's own line syntax (`+<line>` for vim/nvim/nano/emacs, `--goto file:line` for `code`, `file:line` for `subl`; any other editor opens the file plain, with no line argument at all), or, with neither set, an inline form (command/args/env, or url/headers) that writes back to the exact same scope file `mcp add` uses; reconnects after either path. |
+| `i` | An install hint for a command-not-found server, guessed from the missing command itself (`npx`/`node`/`uvx`/`uv`/`pipx`/`pip`/`python`) -- shown as a copyable line, never run for you. |
+| `d` | Disable (or re-enable) the server for THIS directory only -- Claude Code's own per-directory `disabledMcpServers` list, so its definition is untouched and every other project keeps seeing it. |
+| `t` | A `tools/list` round trip with timing, shown in the hint line. |
+| Esc | Cancel a busy action, or close the dialog. |
+
+**Reconnect backoff**: a server that dies mid-session reconnects on its
+next use, but not on every next use while it's still down -- 1, 2, 4, 8
+seconds, then every 30 seconds, giving up automatically after 10 minutes
+(the row then says so); `r`/`R`/`halo mcp fix --apply` always reset this,
+since asking by hand is itself the reset.
+
 ## claude.ai connectors bridge
 
 When `claude` is installed and logged in with a claude.ai subscription,
@@ -1134,6 +1357,217 @@ already uses) to a model whose profile declares audio support; every model
 in this build's own table omits that today, so in practice every MCP
 audio result still becomes the existing `[audio content (<mime>) omitted
 -- this model has no audio support]` text note.
+
+## `halo ollama`
+
+```sh
+halo ollama
+halo ollama --host <name>
+halo ollama --refresh
+```
+
+Halo 2.0.3 round 3: per-configured-host analysis for `ollama.hosts`
+(`docs/CONFIG.md`) -- reachability, version, loaded models (`size` vs
+`size_vram` as one plain offload sentence, trained vs. effective
+context, the KV-bytes/token figure, this round's `tools_max` and its
+rough per-request prompt-token cost), and -- local hosts only -- OS-level
+GPU memory. `--host NAME` narrows to one configured entry instead of
+every one; `--refresh` bypasses the short in-memory catalog TTL and
+re-reads `/api/tags`+`/api/show` now. With no `ollama.hosts` configured
+at all, probes the same synthesized default (`OLLAMA_HOST`, else
+`127.0.0.1:11434`) a bare `ol:<model>` ref would use. Round 5b adds a
+"what fits" column per catalog model (not just loaded ones) -- the
+learned calibration cap or "not calibrated," and the one-phrase source
+of the num_ctx decision -- plus the last turn's own tokens/second and
+prefill seconds when one has happened on that host/model since. See
+[MODELS.md](MODELS.md)'s Ollama section; the TUI's own `/ollama` opens an
+interactive dialog instead (`docs/SLASH-COMMANDS.md`).
+
+## `halo ollama calibrate`
+
+```sh
+halo ollama calibrate <model>
+halo ollama calibrate <model> --host <name>
+halo ollama calibrate <model> --start <num_ctx>
+halo ollama calibrate <model> --no-up
+```
+
+Halo 2.0.3 round 5b: loads `<model>` on the chosen host (the default host
+when `--host` is omitted) at a candidate `num_ctx` and reads `/api/ps`
+back, stepping DOWN by powers of two until it is fully resident in GPU
+memory (`size_vram >= size`) or the candidate drops below 4096, whichever
+comes first -- this loads the model several times in a row, by design.
+`--start` overrides the first candidate tried; left unset, it is the
+GPU-based fit estimate when a local or `ollama.hosts[].ssh` read exists,
+else 32768. Once a fitting candidate is found, round 5b part 2 keeps
+STEPPING UP by powers of two (bounded by the model's own trained context
+and the 131072 hard cap) to find the true ceiling rather than settling for
+the first lucky guess -- `--no-up` skips that phase and keeps the first
+fitting candidate. Prints the host/model being calibrated, the starting
+candidate, and the result (the fully-resident `num_ctx` and how many
+steps it took, or "does not fit... even at num_ctx=4096"); either outcome
+is recorded in `~/.halo/ollama-fit.json` (a "does not fit" result is a
+real, remembered fact too, not a failure to retry on the next run). The
+SAME procedure also runs automatically the first time a model is used on
+a host with no learned cap at all -- `ollama.auto_calibrate: false`
+(`docs/CONFIG.md`) opts out of that; this command is always available
+regardless, for an explicit re-measurement after a GPU/driver/other-
+process change. See [MODELS.md](MODELS.md)'s "Fit calibration" section.
+
+## `halo ollama doctor`
+
+```sh
+halo ollama doctor
+halo ollama doctor --host <name>
+```
+
+Halo 2.0.3 round 5b part 2: the same per-host analysis `halo ollama`
+prints, plus the documented host-tuning recommendations Halo cannot read
+back from any API (`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=
+q8_0`, `OLLAMA_NUM_PARALLEL=1` on a single-user box, `OLLAMA_KEEP_ALIVE`,
+`OLLAMA_CONTEXT_LENGTH`) and exactly where each one lives per OS of the
+HOST -- the OS Halo itself runs on for a local host, all three briefly for
+a remote one. A loopback-only host also gets a one-line "reachable from
+this machine only" hint naming the per-OS switch that would share it on
+the LAN. `halo doctor`'s own Ollama section prints the identical checklist
+text, one line per host. See [MODELS.md](MODELS.md)'s "Host setup
+checklist" section.
+
+## `halo gym`
+
+```sh
+halo gym
+halo gym --models ol:qwen3-coder:30b,ol:gpt-oss:20b
+halo gym --roles small,judge
+halo gym --quick
+```
+
+Halo 2.0.3 round 5d: runs the fixed task battery (tool-call accuracy, edit
+success, context recall, instruction adherence, tokens/second, prefill
+seconds -- see [MODELS.md](MODELS.md)'s "The model gym" section for what
+each one means) against each `--models` ref, or every model in the default
+Ollama host's own catalog when `--models` is omitted; `hf:local/...` and
+`hf:mlx/...` refs run the same battery through their own server (Halo 2.0.3
+round 5f follow-up: tokens/second is then a wall-clock estimate and prefill is
+not reported); a cloud ref may be named for comparison but is never included
+by default. `--roles`
+also prints each model's weighted composite for those roles right under
+its card (default: `small`, `researcher`, `judge`, `subagent_default`).
+`--quick` halves the battery size for a faster, noisier read. Every
+model's card is saved to `~/.halo/gym/<host>/<digest>.json` and printed as
+it finishes.
+
+## `halo gym show`
+
+```sh
+halo gym show
+halo gym show qwen3-coder:30b
+```
+
+Prints the saved per-model card(s) from `~/.halo/gym/` -- a bare name or
+full `ol:` ref both match (tag-aware, same as the Ollama catalog's own
+matching); omit it to print every saved card, newest-measured first. Never
+runs a fresh probe -- `halo gym` is what measures.
+
+## `halo gym propose`
+
+```sh
+halo gym propose
+halo gym propose --roles small,judge
+halo gym propose --main ol:qwen3-coder:30b
+halo gym propose --apply
+halo gym propose --apply --name my-local-roles
+```
+
+Turns saved `halo gym` scores into a role-table proposal -- the best LOCAL
+model per supporting role, respecting the round 5b VRAM-aware rule, with
+one plain sentence per role naming the composite score behind it (or
+saying plainly that no local model has a usable score for that role yet).
+`main` is never proposed; `--main REF` only changes which model the VRAM
+rule compares candidates against (the configured default model otherwise).
+`--apply` saves the proposal as a role template through the existing `halo
+roles template import` path (`gym-proposed` by default, `--name` to
+change) -- `halo roles template load <name>` (or the picker) is the
+separate step that makes it the live table. See [ROLES.md](ROLES.md)'s
+"Data-driven roles" section.
+
+## `halo local`
+
+```sh
+halo local
+halo local --refresh
+```
+
+Halo 2.0.3 round 5: the shared local-model discovery view, merging THREE
+sources into one list, in this order, with a group label per source/host:
+each configured Ollama host's own catalog (same analysis `halo ollama`
+shows), running Hugging Face local servers (auto-detected on the default
+ports plus any configured `huggingface.local_servers` entry), and the
+Hugging Face Hub cache (models on disk, from `hf download`, not
+necessarily being served by anything right now). Bare `halo local` never
+probes a MANUAL Hugging Face local-server entry over the network (shown
+as "configured, not probed yet" instead) -- `--refresh` additionally
+probes every one of those, and bypasses the Ollama catalog's own short
+TTL cache; auto-detected servers are probed either way (background-probe-
+gated, same `BRIDGE_TEST_NO_BACKGROUND_NET` seam every other probe in this
+codebase honours). Round 5c adds a fourth source to that merged list:
+every `.gguf` file/safetensors or MLX folder found under `huggingface.
+model_dirs` (`/local add`/`forget` manage that list, below), each row
+carrying its format, size, and -- read from the file itself -- trained
+context and quantization where the file says so. See
+[MODELS.md](MODELS.md)'s Hugging Face section; the TUI's own `/local` (no
+arguments) opens the same view as an interactive dialog instead
+(`docs/SLASH-COMMANDS.md`).
+
+### `halo local add <path>` / `halo local forget <path>`
+
+Adds/removes one folder from `huggingface.model_dirs`, persisted to
+`~/.halo/config.json` immediately -- the CLI twin of `/local add`/`/local
+forget` (`docs/SLASH-COMMANDS.md`). `add` refuses a path that isn't an
+existing directory, or one already in the list; `forget` refuses a path
+that isn't in the list. Neither touches the network.
+
+### `halo local serve <model> [--runtime llama-server|mlx_lm] [--port N] [--keep]`
+
+Starts a managed `llama-server` (`.gguf`) or `mlx_lm` (a safetensors/MLX
+folder, Apple Silicon only) child process on a free loopback port, sized
+to this machine's own fitted context, and records it in `~/.halo/run/
+local-servers.json`. `<model>` is either an exact path, or a name shown by
+a bare `halo local`. Stopped when Halo exits unless `--keep` is given.
+When the chosen runtime isn't found (on `PATH`, or already fetched into
+`~/.halo/runtimes/`), `llama-server` is offered as a download (named size
+and URL, verified against the GitHub Releases API's own per-asset
+`digest`) -- nothing downloads without a `y`/`--yes`; declining prints the
+one-line install hint for this OS instead. See [MODELS.md](MODELS.md)'s
+"Finding and using file-backed models" section for the full story.
+
+Round 5f: `<model>` with `--runtime mlx_lm` also accepts a bare Hugging
+Face Hub repo id instead of a path or folder (`halo local serve
+mlx-community/Qwen2.5-7B-Instruct-4bit --runtime mlx_lm`) -- the explicit,
+non-`--model` form of `hf:mlx/<org>/<repo>` (see [MODELS.md](MODELS.md)'s
+"Apple Silicon" section and [MAC.md](MAC.md)); `mlx_lm` itself is never
+fetched by `halo local serve` the way `llama-server` is -- it's the
+optional `uv tool install "halo-harness[mlx]"` extra instead.
+
+### `halo local stop <model>`
+
+Stops a model `halo local serve` (or the `/local` dialog's `s` key)
+started, by the SAME `<model>` name it was started with. Works even in a
+brand new `halo` process -- it reads `~/.halo/run/local-servers.json` and
+kills by the recorded pid, rather than needing a live handle.
+
+### `halo local import <model> [--name NAME] [--host NAME] [--yes]`
+
+Copies a `.gguf` file into an Ollama host's own model store (writes a
+Modelfile, calls `/api/create`) -- after naming the file's size and that
+it's about to be copied, nothing happens without a `y`/`--yes`. The result
+is an ordinary `ol:<name>` (default: the file's own name). Only `.gguf`
+files are offered this path this round -- see [MODELS.md](MODELS.md).
+
+### `halo local runtime remove [VERSION]`
+
+Deletes a fetched `llama-server` runtime from `~/.halo/runtimes/` -- one
+version, or every version when none is named.
 
 ## `halo config`
 
@@ -1432,6 +1866,141 @@ command; `logs` prints the captured stdout+stderr (`-n` for just the tail);
 `stop` kills the process tree by pid (same Windows orphan-grandchild-aware
 kill background Bash jobs already use); `rm` deletes the run's directory,
 refusing a still-running one unless `--force` (which stops it first).
+
+## `halo roles`
+
+```sh
+halo roles template list
+halo roles template show <name>
+halo roles template save <name> [--description TEXT]
+halo roles template new <name> [--description TEXT]
+halo roles template load <name>
+halo roles template edit <name>
+```
+
+Halo 2.0.2: manages `~/.halo/roles/<name>.json` role templates (`{"name",
+"description", "roles": {role: model_or_{"model","effort"}}}`). `save`
+captures the CURRENT `~/.halo/config.json` role table under a name; `new`
+starts an empty one; `load` writes every role the template defines back
+into config.json, overwriting a stale local value for that role (the one
+deliberately non-idempotent write in this whole table -- see
+[ROLES.md](ROLES.md)'s own precedence section); `edit` opens `$EDITOR`/
+`$VISUAL` on the raw JSON file (creating it first if it doesn't exist),
+re-validating on save. The TUI's own `/roles edit <name>` opens a form
+instead (`tui/dialogs/roles_editor.py`) unless `roles.editor: "external"`
+is configured, in which case it uses the same `$EDITOR` flow as this CLI
+command; that form, and the init wizard's own Roles step, both gain a
+"start from" template picker in round 7 (three shipped presets --
+`balanced`/`quality`/`local-first` -- written on first use, never
+overwritten). See [ROLES.md](ROLES.md) for the full picture: the role
+table itself, per-role effort, custom role names, `/role`/`/roles` in the
+TUI and print mode, the presets, and the `roles.enabled` mode switch.
+
+## `halo org`
+
+```sh
+halo org list
+halo org show <name>
+halo org new <name> [--description TEXT]
+halo org install <name> [--force]
+halo org edit <name>
+halo org run [<name>] "<goal>" [--model REF] [--yes]
+halo org export <name> [file]
+halo org import <file>
+halo org resume <session-id> [--cwd DIR] [--model REF] [--yes]
+```
+
+Halo 2.0.2 round 2: manages `~/.halo/orgs/<name>.json` organizations -- a
+tree of positions (`halo org new` starts a one-position "Orchestrator"
+root); `show` prints the text tree; `edit` opens `$EDITOR`/`$VISUAL` on
+the raw JSON file (creating a starter first if it doesn't exist already),
+re-validating on save; `run` executes the org's root position on
+`<goal>`, delegating through the same sub-agent machinery an
+`Agent(org=...)` tool call uses, and prints its final answer. `--model`
+on `run` is only a fallback for a position with neither its own `role`
+nor `model` set (every built-in template's own positions always set
+one). Round 7: `<name>` is optional on `run` -- a bare `halo org run
+"<goal>"` (one argument) uses `orgs.default` (set via the init wizard's
+own Organizations step, `/setup orgs`, or `halo setup orgs`); with no
+default set either, it refuses cleanly instead of guessing. The TUI's
+own `/org edit <name>` opens a form instead (`tui/dialogs/org_editor.py`,
+also gaining a round 7 "start from: solo / release-flow / company /
+<saved>" template picker); `/org load <name>` (TUI-only -- re-installs
+one of the three shipped built-ins, overwriting a local copy) has no CLI
+equivalent, since `edit`/`new` already cover the same ground from a
+script.
+
+Round D: `install <name>` copies a shipped built-in or a template saved
+under `~/.halo/org-templates/<name>.json` into `~/.halo/orgs/`, refusing
+to overwrite an existing file there without `--force`; `list`/`/org list`
+show each one's own one-line README (its `description` field). `export`/
+`import` move an org as plain JSON -- `export` writes to `file` or stdout
+when omitted; `import` validates the same way any other org write is
+(role names, reports, `budget_usd`), listing every problem it finds, and
+falls back to the file's own basename when the JSON has no "name" field.
+`resume` continues an interrupted run from a PAST session's own saved run
+record and shared task board (open and claimed tasks become the work
+list, done tasks are kept), with that run's own `max_concurrent`/
+`budget_usd` restored from the record even if the org definition has
+since been edited; `/org resume` (no argument) is the TUI/print-mode
+form, for the CURRENT session's own interrupted run. A position with
+`requires_approval: true` holds its just-finished result as a pending
+card in the dock (accept, edit the instruction and re-run, or stop)
+before its own parent continues; with no live dock at all (`run`/
+`resume` from a plain terminal), it prints the result and waits on
+stdin the same way; `--yes` on `run`/`resume`, or the session's own
+`dontAsk` permission mode, accepts every gate automatically instead of
+asking. See [ORGS.md](ORGS.md) for the full schema, the three built-ins,
+how a run flows through the tree, budgets, goals, approval gates,
+export/import and resume.
+
+## `halo setup` / `/setup` (Halo 2.0.2 round 7)
+
+```sh
+halo setup            # the init wizard's Roles step, then Organizations, then a short summary
+halo setup roles       # just the Roles setup screen
+halo setup orgs        # just the Organizations setup screen
+```
+
+The SAME two setup screens `halo init`'s own wizard shows (Roles,
+Organizations -- see [ROLES.md](ROLES.md)/[ORGS.md](ORGS.md)), reachable
+again later without re-running the whole provider flow -- "a setup
+screen should pop up to set those features up in addition to doing it
+within halo." On a real terminal this opens the wizard screen(s); with no
+TTY it prints the current roles table / orgs list instead of blocking,
+and exits 0. `/setup`, `/setup roles`, `/setup orgs` do the same thing
+inside a running session (`tui/slash.py`'s own handler pushes the screen
+onto the live app -- a modal stack over the session, not a separate
+program): saving a role template there updates the LIVE session's own
+role table immediately, no restart needed.
+
+## `/tasks` (Ctrl+T)
+
+Halo 2.0.2 round 3: a full-height panel listing every running, queued,
+background and finished sub-agent of this session (position/role, model,
+status, elapsed, tool count, cost, and an org run's place in the tree),
+plus a second tab for the shared task board (`TaskCreate`/`TaskUpdate`/
+`TaskList`). Enter opens a live transcript viewer of the highlighted
+agent's own log; `Tab` switches tabs; Ctrl+T or Esc closes it. The Agent
+tool's own `count`/`batch` parameters spawn several sub-agents in one
+call (capped at `agents.max_concurrent`, excess ones queue); see
+[SUBAGENTS.md](SUBAGENTS.md) for the full picture.
+
+## `halo completion`
+
+```sh
+halo completion bash
+halo completion zsh
+halo completion powershell
+```
+
+Halo 2.0.2: prints a shell-completion script for the `halo` command
+itself -- every top-level subcommand, every known role name
+([ROLES.md](ROLES.md)), and every model ref already cached under
+`~/.halo` (`models.json`/`dbx-endpoints.json` -- read as plain files, no
+network call of its own). `eval "$(halo completion bash)"` (or `zsh`) in
+your shell's rc file, or dot-source the `powershell` form from your
+`$PROFILE`.
 
 ## `halo proxy`
 

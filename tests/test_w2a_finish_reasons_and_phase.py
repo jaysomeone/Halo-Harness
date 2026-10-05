@@ -177,6 +177,42 @@ def test_steer_restart_disabled_via_config_never_fires_the_event(ctx: Ctx):
 
 
 @_scoped
+def test_steer_restart_does_not_inflate_the_logged_retry_count(ctx: Ctx):
+    """Release review finding 19: a steer-restart re-enters the attempt
+    loop through the same `attempts += 1` a real 429/5xx retry uses, but
+    the comment above the restart branch says it is "never counted
+    against ... any retry-ladder cap" -- one restart with NO real
+    provider failure at all must still log `retries: 0` on the eventual
+    successful call, not 1 (before the fix, each restart inflated the
+    count by one, lengthening the next real backoff and eventually
+    starving MAX_RETRIES)."""
+    fh = build_fake_home()
+    mock = MockDatabricks().start()
+    try:
+        session = _session(fh, mock, model="dbx:databricks-glm-5-3-delay-then-ok")
+        events_seen = []
+
+        def _drive():
+            events_seen.extend(session.turn("howdy"))
+
+        t = threading.Thread(target=_drive, daemon=True)
+        t.start()
+        time.sleep(0.35)
+        session.steer(STEER_RESTART_MARKER)
+        t.join(timeout=10)
+        ctx.check("the turn thread finished", not t.is_alive())
+        restarts = [e for e in events_seen if e.kind == "steer_restart"]
+        ctx.check("a steer_restart fired (sanity check, same setup as the pilot test)", restarts)
+        usage_nodes = [n for n in session.log.nodes() if n.get("type") == "usage"]
+        ctx.check(f"a usage node was logged, got {session.log.nodes()}", usage_nodes)
+        u = usage_nodes[-1]
+        ctx.check(f"retries is 0 (the restart was free, nothing actually failed), got {u.get('retries')}",
+                  u.get("retries") == 0)
+    finally:
+        mock.stop()
+
+
+@_scoped
 def test_phase_events_fire_in_order_request_sent_headers_first_token(ctx: Ctx):
     fh = build_fake_home()
     mock = MockDatabricks().start()

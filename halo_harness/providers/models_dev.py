@@ -12,6 +12,12 @@ this module fetches, then re-save via `write_databricks_fallback` below --
 a human/release step, never done automatically) -- see
 `providers/catalog/__init__.py`'s own docstring for why only that one
 provider's ids are a direct model-id match for this harness's own routing.
+
+Round 5i part 1 adds `providers/catalog/models_dev_openai_fallback.json`
+the same way (fetch, keep just the `openai` provider entry, trim each
+row's fields -- see `load_vendored_openai_fallback`/`openai_profile_
+fields_from_models_dev` below) -- the `oai:` route's own direct model-id
+match, same reasoning as the Databricks file.
 """
 
 from __future__ import annotations
@@ -148,6 +154,70 @@ def load_vendored_openrouter_fallback() -> dict:
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def load_vendored_openai_fallback() -> dict:
+    """Halo 2.0.3 round 5i part 1: the package-shipped `{openai-model-id:
+    {...}}` dict -- models.dev's own `openai` provider entry (53 ids,
+    confirmed live 2026-10-04, `docs/harness/OPENAI-RESEARCH.md`), trimmed
+    to id/name/family/description/attachment/reasoning/reasoning_options/
+    tool_call/structured_output/temperature/knowledge/release_date/
+    last_updated/modalities/open_weights/limit(context,output)/cost(input,
+    output,cache_read,cache_write) -- same trim shape `load_vendored_
+    databricks_fallback` ships, minus `cost.tiers`/`context_over_200k`/
+    `canonical_model_id`/`experimental`, which `oai:` never needs. {} if
+    the file is somehow missing/unparseable."""
+    path = _vendored_catalog_dir() / "models_dev_openai_fallback.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def openai_entries_from_full_models_dev(raw: dict) -> dict:
+    """The `openai` twin of `databricks_entries_from_full_models_dev` --
+    navigates the FULL `models.dev/api.json` shape down to just the
+    `openai` provider's `{model_id: entry}` map. `{}` for anything
+    unexpected -- never raises."""
+    provider = raw.get("openai") if isinstance(raw, dict) else None
+    models = provider.get("models") if isinstance(provider, dict) else None
+    return models if isinstance(models, dict) else {}
+
+
+def openai_profile_fields_from_models_dev(entry: dict) -> dict:
+    """One models.dev `openai` provider model entry -> the subset of
+    `model.ModelProfile` fields it can supply -- same field mapping as
+    `databricks_profile_fields_from_models_dev` (USD-per-million-token
+    `cost` values divided down to per-token here); kept as its own
+    function (rather than sharing one generic helper) to match this
+    module's existing one-function-per-provider style. Never raises on a
+    malformed entry."""
+    out: dict = {}
+    limit = entry.get("limit") if isinstance(entry.get("limit"), dict) else {}
+    if isinstance(limit.get("context"), int):
+        out["context_tokens"] = limit["context"]
+    if isinstance(limit.get("output"), int):
+        out["max_output_tokens"] = limit["output"]
+    modalities = entry.get("modalities") if isinstance(entry.get("modalities"), dict) else {}
+    input_modalities = modalities.get("input")
+    if isinstance(input_modalities, list):
+        out["vision"] = "image" in input_modalities
+    if isinstance(entry.get("reasoning"), bool):
+        out["reasoning"] = "openai" if entry["reasoning"] else "none"
+    cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
+    if isinstance(cost.get("input"), (int, float)):
+        out["price_in"] = cost["input"] / 1_000_000
+    if isinstance(cost.get("output"), (int, float)):
+        out["price_out"] = cost["output"] / 1_000_000
+    if isinstance(cost.get("cache_read"), (int, float)):
+        out["price_cache_read"] = cost["cache_read"] / 1_000_000
+    if isinstance(cost.get("cache_write"), (int, float)):
+        out["price_cache_write"] = cost["cache_write"] / 1_000_000
+    return out
 
 
 def databricks_entries_from_full_models_dev(raw: dict) -> dict:

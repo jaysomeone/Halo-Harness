@@ -344,7 +344,7 @@ Of ~40 compared capabilities, halo's briefs already target Claude Code parity on
 | 34 | SDK | Agent SDK (TS/Python) | `@opencode-ai/sdk` (TS), community Go/Python | None | A thin Python client over the HTTP API once #33 lands |
 | 35 | ACP (editors) | IDE extensions | `opencode acp` (Zed/JetBrains/Neovim) | None | Defer; low value on a Kali TUI box |
 | 36 | Worktrees | `--worktree`, hooks | Plugins; CLI unverified | Not in briefs | Adopt Claude's `--worktree` semantics later |
-| 37 | Multi-provider auth | Anthropic + Bedrock/Vertex/Foundry gateways | 75+ providers, OAuth for ChatGPT/Copilot/GitLab | Bridge routes (OpenRouter, Databricks, `ant:`) | Parity for rolo's needs |
+| 37 | Multi-provider auth | Anthropic + Bedrock/Vertex/Foundry gateways | 75+ providers, OAuth for ChatGPT/Copilot/GitLab | Bridge routes (OpenRouter, Databricks, `ant:`) | Parity for the owner's needs |
 | 38 | Compaction | Auto + `/compact`, Pre/PostCompact hooks | `compaction` config, prune, DCP plugin | dsh replay + pruning + hooks (H5) | Add model-invoked `compress` tool (DCP idea) |
 | 39 | Notifications | `Notification` hook, terminal bell | `attention` sounds/desktop notifications when blurred | Not in briefs | Add bell + optional `notify-send` on Linux when unfocused |
 | 40 | Config format | settings.json chain (user/project/local/managed) | JSONC merge chain incl. remote `.well-known`, `{env:}`/`{file:}` | Claude settings chain | Parity; maybe `{env:}` substitution |

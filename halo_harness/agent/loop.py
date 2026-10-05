@@ -55,25 +55,35 @@ from halo_harness.agent.log import SessionLog
 from halo_harness.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
 from halo_harness.agent.repair import build_tool_meta, repair_assistant_turn
 from halo_harness.hooks import HookRunner
-from halo_harness.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
+from halo_harness.model import (
+    CostMeter, ModelProfile, ModelRef, is_local_model_ref, parse_model_ref, resolve_model_profile,
+)
 from halo_harness.permissions import Decision, PermissionEngine
 from halo_harness.providers.errors import (
     CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_effort_rejected_message, is_effort_with_tools_rejected_message,
-    is_reasoning_replay_bug, is_retryable_message, retry_delay_ms,
+    is_reasoning_replay_bug, is_retryable_message, is_tools_rejected_message, retry_delay_ms,
 )
-from halo_harness.providers.http import is_connect_failure_message
+from halo_harness.providers.http import is_connect_failure_message, is_offline_refusal_message
 from halo_harness.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
     max_tokens_budget, overflow_classifier, record_databricks_output_tokens,
 )
 from halo_harness.providers.config import tool_child_env
 from halo_harness.providers.profiles import ProviderProfile, resolve_profile
-from halo_harness.providers.request import ToolCatalogTooLarge, build_anthropic_request_body, build_request_body
+from halo_harness.providers.request import (
+    ToolCatalogTooLarge, ToolsNotSupported, build_anthropic_request_body, build_request_body,
+)
 from halo_harness.providers.routing import InvalidModelError, Route
 from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
-    UpstreamError, stream_anthropic_completion, stream_completion,
+    UpstreamError, stream_anthropic_completion, stream_completion, stream_ollama_completion,
+    stream_openai_responses_completion,
 )
+from halo_harness.providers.ollama import (
+    get_catalog, ollama_overflow_retry_ceiling, resolve_ollama_host, trained_context_for,
+)
+from halo_harness.providers.ollama_request import build_ollama_request_body
+from halo_harness.providers.responses_request import build_openai_responses_body
 from halo_harness.tools.base import ToolContext, ToolResult
 from halo_harness.tools.imageutil import sniff_dimensions
 from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
@@ -561,7 +571,7 @@ class _StepResult:
     def __init__(self, *, assistant_blocks, stop_reason, usage, reasoning, body, tool_call_flags=None,
                  finish_reason=None, latency_ms=None, ttft_ms=None, retries=0, status="ok",
                  responding_provider=None, ttfb_ms=None, first_reasoning_ms=None, first_text_ms=None,
-                 first_tool_ms=None, reasoning_streamed=False):
+                 first_tool_ms=None, reasoning_streamed=False, timing_ns=None):
         self.assistant_blocks = assistant_blocks
         self.stop_reason = stop_reason
         self.usage = usage
@@ -593,13 +603,20 @@ class _StepResult:
         # KIND (None for a kind that never streamed this call);
         # `reasoning_streamed` is True iff reasoning arrived over MULTIPLE
         # separate wire chunks (vs. one lump, early or -- Databricks GLM,
-        # per the brief's own open question -- at the very end) so rolo's
+        # per the brief's own open question -- at the very end) so the owner's
         # real session logs can answer which gateways actually stream it.
         self.ttfb_ms = ttfb_ms
         self.first_reasoning_ms = first_reasoning_ms
         self.first_text_ms = first_text_ms
         self.first_tool_ms = first_tool_ms
         self.reasoning_streamed = reasoning_streamed
+        # Round 5b (brief item 7): `providers.ollama_stream`'s own
+        # `harness_meta["timing_ns"]` -- {prompt_eval_count, eval_count,
+        # prompt_eval_duration, eval_duration, load_duration,
+        # total_duration}, Ollama's documented nanosecond timing fields --
+        # `None`/`{}` for every non-`ollama` dialect (that key is only ever
+        # set by `OllamaStreamToAnthropic._finalize`).
+        self.timing_ns = timing_ns or {}
 
 
 def _assistant_block_is_replayable(b: dict) -> bool:
@@ -640,6 +657,37 @@ def generated_tokens_for_otpm(usage) -> "int | None":
         return None
     return int(out or 0) + int(reasoning or 0)
 
+
+# Halo 2.0.2 round C (the owner's own background-streaming report, part
+# b -- "one compact block per turn ... never a flood of raw results"):
+# per-notice preview length inside a COMBINED block (2+ notices queued
+# between turns). A single pending notice is left completely untouched
+# by the two `_apply_pending_*_notices` methods below -- one notice was
+# never the "flood" this exists for, and several existing tests already
+# pin that the model sees a single notice's full result text verbatim.
+_COMPACT_NOTICE_PREVIEW_CHARS = 280
+
+
+def _compact_notices_text(notices: "list[str]", *, noun: str) -> str:
+    """2+ queued notices (either `_pending_agent_notices` or `_pending_
+    job_notices`) -> ONE block: a head count, then per item its own
+    FIRST line (already carries its task_id/job_id and status -- see
+    agent/subagent.py's `_bg_run`/agent/jobs.py's `_push_notice`) plus a
+    short preview of the rest, never the full per-item text repeated N
+    times over. Ends with a pointer to `/tasks` (and task_id resume,
+    for an agent) for whoever wants the complete result of any one of
+    them -- the SAME "short result ... task id" shape Claude Code
+    parity (H6 scope F) already promised, just never flooded."""
+    lines = [f"{len(notices)} background {noun}s finished while you were away:"]
+    for text in notices:
+        head, _, rest = text.partition("\n")
+        preview = " ".join(rest.split())
+        if len(preview) > _COMPACT_NOTICE_PREVIEW_CHARS:
+            preview = preview[:_COMPACT_NOTICE_PREVIEW_CHARS].rstrip() + "…"
+        lines.append(f"{head}\n  {preview}" if preview else head)
+    lines.append("(see /tasks, or resume the task_id above, for each one's full result)")
+    return "\n\n".join(lines)
+
 class Session:
     """One conversation against one model. `session_context.system_prompt`
     is computed ONCE by the caller and logged as the session's single
@@ -648,7 +696,8 @@ class Session:
     def __init__(
         self, *, cwd, model_ref: ModelRef, model_profile: ModelProfile,
         creds: Optional[ProviderCreds], state_dir, model_label: str, session_context,
-        small_model_ref: Optional[ModelRef] = None, session_log: Optional[SessionLog] = None,
+        small_model_ref: Optional[ModelRef] = None, small_model_effort: Optional[str] = None,
+        session_log: Optional[SessionLog] = None,
         max_turns: int = 50, openrouter_base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None, effort: Optional[str] = None,
         effort_source: Optional[str] = None,
@@ -660,6 +709,7 @@ class Session:
         agent_id: Optional[str] = None, job_registry: Optional[JobRegistry] = None,
         roles: Optional[dict] = None, cli_roles: Optional[dict] = None,
         cli_flags: Optional[dict] = None, settings: Optional[object] = None,
+        role_name: Optional[str] = None,
     ):
         # H9: identifies THIS session as a particular sub-agent (passed by
         # `agent/subagent.py`'s `_build_child_session`; the parent/main
@@ -678,6 +728,13 @@ class Session:
         self.cwd = cwd
         self.model_ref = model_ref
         self.small_model_ref = small_model_ref
+        # 2.0.2 review finding 12 (major), second half: "per-role effort"
+        # was partial -- `roles.small`'s own `effort` (a `{"model",
+        # "effort"}` table value) had nowhere to go at all. `None` (no
+        # table value, a bare-string one, or no caller passing this new
+        # optional param) changes nothing -- `call_small_model` already
+        # falls back to `self.effort`, exactly as before this existed.
+        self.small_model_effort = small_model_effort
         self.model_profile = model_profile
         self.creds = creds
         # finding 3 (W6a): kept so `apply_next_fallback_model` can resolve
@@ -704,6 +761,48 @@ class Session:
         self.cost_meter = CostMeter(price_in=model_profile.price_in, price_out=model_profile.price_out,
                                      price_cache_read=model_profile.price_cache_read,
                                      price_cache_write=model_profile.price_cache_write)
+        # Halo 2.0.3 round 5e: "saved versus cloud" -- resolved ONCE, here,
+        # only for an ol:/hf:local/hf:mlx session (`is_local_model_ref`;
+        # never for a cloud-model session, so a cloud session's meter never
+        # even tries). Reference price: the session's configured escalation
+        # target (`routing.escalation.to`, resolved through the harness's
+        # OWN `parse_model_ref`/`resolve_model_profile` -- never a second
+        # resolver), or, when no escalation policy is configured at all,
+        # the vendored catalog's median price (`model.catalog_median_
+        # prices` -- offline-safe, no network). Best-effort: any failure
+        # (an unresolvable `to` ref, a catalog with zero priced rows) just
+        # leaves the meter with no reference price, same as a cloud session
+        # -- `CostMeter.add_savings` already treats that as "nothing to
+        # add", never a crash.
+        if is_local_model_ref(model_ref):
+            try:
+                self._init_savings_reference(routes=routes)
+            except Exception:
+                pass
+        # Round 5e: `/escalation`'s own "last decisions" list -- session-
+        # lifetime (never reset per-turn, unlike the per-turn counters
+        # `_turn_inner` resets below). Uncapped here; `_cmd_escalation`
+        # shows only the last few (a session realistically sees a handful
+        # of these at most).
+        self._escalation_decisions: list = []
+        # Round 5b: `_maybe_auto_calibrate_ollama`'s own per-process dedupe
+        # (a (host.url, model) pair already attempted this run, success or
+        # failure, is never retried within the SAME process -- a completed
+        # calibration persists to `~/.halo/ollama-fit.json` regardless of
+        # outcome, so a FRESH process finds `has_calibration_entry` already
+        # true and never re-triggers at all) and the plain-notice queue
+        # `_step` flushes as real `notification` events right after
+        # `_derive_and_build` returns.
+        self._ollama_calibrate_attempted: set = set()
+        self._pending_ollama_notices: list = []
+        # Round 5b (brief item 7): throughput for the status bar's model
+        # chip and `halo ollama`'s own "last turn" printout -- `_account_
+        # usage` fills `_last_ollama_throughput` from each `ollama`-route
+        # `_StepResult.timing_ns`; `_build_ollama_body_for_ref` fills the
+        # other two just before the matching request goes out.
+        self._last_ollama_host_url: Optional[str] = None
+        self._last_ollama_offloaded: Optional[bool] = None
+        self._last_ollama_throughput: Optional[dict] = None
         self.tool_registry: ToolRegistry = session_context.tool_registry
         self.route = Route(provider=model_ref.provider, upstream_model=model_ref.model, dialect=model_ref.dialect)
         # item 22 remainder: state_dir threaded through so a Databricks
@@ -785,6 +884,21 @@ class Session:
         # excluded below) -- that stays exclusively the counter above's job.
         self._loop_breaker_history: list = []
         self._loop_breaker_period2: dict = {}
+        # Round 5b part 2 fix pass (live-run finding, 2026-10-04): a
+        # STRICTER, ollama/huggingface-only guard, independent of the
+        # generic loop breaker above -- a live run looped for 25 minutes
+        # (175 requests) with the model repeating one meaningless tool
+        # call turn after turn once `format` could no longer let it just
+        # answer in prose (see `_build_ollama_body_for_ref`'s own updated
+        # comment on why that constraint was removed). `_identical_call_
+        # guard_key`/`_count` track only the MOST RECENT call's (name,
+        # canonical args) and how many times IN A ROW (never non-
+        # consecutive, unlike `_loop_breaker`'s own per-turn total) that
+        # exact pair has just repeated; reset every turn alongside
+        # `_loop_breaker` itself (see `_turn_inner`). See `_resolve_tool_
+        # call`'s own use of this for the exact threshold/wording.
+        self._identical_call_guard_key: Optional[tuple] = None
+        self._identical_call_guard_count: int = 0
         # H10 Part B4: `/improve`'s hint -- fires AT MOST once per session
         # (status-bar text + one `notification` event, never a card, never
         # a model call); `_maybe_yield_improve_hint` (called from
@@ -922,7 +1036,7 @@ class Session:
         # from [effective_env]" -- same `raw_env` precedence chain (shell <
         # user < trusted project/local < flag < policy) everything else on
         # this line already uses, not a bare os.environ re-read.
-        self._compaction_knobs = resolve_knobs(settings, raw_env)
+        self._compaction_knobs = resolve_knobs(settings, raw_env, cli_autocompact=self.cli_flags.get("autocompact"))
         # Updated by `_account_usage` from each reply's real `input_tokens`;
         # None until the first reply lands, in which case the auto-compact
         # check falls back to a rough estimate of the about-to-be-sent
@@ -1027,9 +1141,32 @@ class Session:
         # model (its documented "orchestrator" default anyway).
         self.roles = roles or {}
         self.cli_roles = cli_roles or {}
+        # Halo 2.0.3 round 5e: which role (if any) THIS session was built
+        # under -- `None` for the main/orchestrator session, a sub-agent's
+        # own role name (`agent/subagent.py::_build_child_session` passes
+        # it) for a child. Read-only bookkeeping purely for `roles.
+        # role_escalation_enabled` (a role-table entry's own `"escalation":
+        # false` turns hybrid escalation off for every session built under
+        # that role) -- nothing else in this codebase reads it.
+        self.role_name = role_name
         self.agent_runtime = AgentRuntime(parent=self, agents=(agents or {}), routes=(routes or {}),
                                            role_table=self.roles, cli_role_overrides=self.cli_roles,
                                            depth=agent_depth)
+        # 2.0.2 review finding 10 (major): ONE semaphore for the WHOLE
+        # session tree, sized here (for a genuinely top-level Session --
+        # a CHILD's own transient `agent_runtime` built by THIS same
+        # `__init__`, for a sub-agent, is immediately replaced right after
+        # construction by `agent.subagent._build_child_session`'s own
+        # `AgentRuntime(..., concurrency_semaphore=runtime.concurrency_
+        # semaphore)`, which propagates the REAL one instead -- this one
+        # is simply discarded, unused, in that case). Without this, two
+        # separate `count`/`batch` calls in one turn (or nested levels)
+        # each got their OWN independently-sized ThreadPoolExecutor pool,
+        # so the total running at once could multiply well past `agents.
+        # max_concurrent`.
+        from halo_harness.agent.subagent import SessionConcurrencyGate, effective_max_concurrent
+        self.agent_runtime.concurrency_semaphore = SessionConcurrencyGate(
+            effective_max_concurrent(self.agent_runtime))
         self.agent_type_restriction = agent_type_restriction
         # H6 scope F: background sub-agent completions wait here (a plain
         # list under a lock, exactly like the steering queue) until the
@@ -1089,6 +1226,17 @@ class Session:
         # carries no request_id to key on either -- see resolve_plan).
         self._plan_waiters: dict = {}
         self._pending_plan_id: Optional[str] = None
+        # Halo 2.0.2 round D (brief item 2, "approval gates"): a request_
+        # id-keyed dict + threading.Event, same shape as `_permission_
+        # waiters`/`_question_waiters` (several may be pending at once --
+        # an org with `max_concurrent` > 1 can gate more than one position
+        # in parallel, unlike plan mode's own single-flight assumption).
+        # `agent/subagent.py`'s `_build_child_session` shares this SAME
+        # dict onto every descendant, exactly like those two already are,
+        # so a deeply-nested org position's own gate reaches the TOP
+        # session's `resolve_approval` (the UI's `Controller.answer_
+        # approval`) with no extra plumbing.
+        self._approval_waiters: dict = {}
 
         self.log = session_log or SessionLog(cwd)
         # H9 whole-tree review finding 21: this session's own tool-results
@@ -1303,7 +1451,11 @@ class Session:
                 return None
             try:
                 _, _, _, body = self._derive_and_build(tool_choice=tool_choice, no_tools=no_tools)
-            except ToolCatalogTooLarge:
+            except (ToolCatalogTooLarge, ToolsNotSupported):
+                # item 1/4: a fallback that can't take this session's tools
+                # at all (too many, or none-supported) is just as unusable
+                # as one `apply_next_fallback_model` already skips for an
+                # unresolvable model string -- move on to the next one.
                 continue
             req = self._build_request(body)
             yield events.notification(
@@ -1311,6 +1463,151 @@ class Session:
                 f"{self.model_ref.raw} for the rest of this turn"
             )
             return body, req
+
+    def _init_savings_reference(self, *, routes: Optional[dict]) -> None:
+        """Round 5e: resolves and pins `self.cost_meter`'s saved-vs-cloud
+        reference price -- see the constructor's own call site for the
+        precedence (escalation target, else the catalog median). Split out
+        of `__init__` only so that constructor's own best-effort wrapper
+        stays a one-line call."""
+        from halo_harness.agent.escalation import load_escalation_policy
+        policy = load_escalation_policy()
+        if policy is not None:
+            target_ref = parse_model_ref(policy.to, routes)
+            target_profile = resolve_model_profile(target_ref, self.state_dir, routes)
+            if target_profile.price_in is not None and target_profile.price_out is not None:
+                self.cost_meter.set_savings_reference(
+                    price_in=target_profile.price_in, price_out=target_profile.price_out,
+                    source=f"escalation target {policy.to}",
+                )
+                return
+        from halo_harness.model import catalog_median_prices
+        med_in, med_out, label = catalog_median_prices(source_label=True)
+        if med_in is not None and med_out is not None:
+            self.cost_meter.set_savings_reference(price_in=med_in, price_out=med_out, source=label)
+
+    def _judge_confidence(self, final_text: str) -> bool:
+        """Round 5e's own `low_confidence` trigger -- the EXACT `call_
+        small_model` mechanism every `small`-role caller already uses,
+        pointed at the `judge` role instead (`roles.resolve_role_ref`,
+        which falls back to THIS session's own model/profile when no
+        `judge` role is configured -- a local-first session with no
+        distinct judge configured ends up asking itself, which is still a
+        real, if weak, self-check, never a crash or a skipped trigger).
+        Never a new judging mechanism of its own; defaults to "confident"
+        on any failure (judge unreachable, malformed reply) -- see
+        `escalation.judge_says_confident`'s own docstring for why a flaky
+        judge call must never, by itself, force an escalation."""
+        from halo_harness.agent.escalation import JUDGE_SYSTEM_PROMPT, judge_says_confident
+        from halo_harness.roles import resolve_role_ref
+        try:
+            # H9-style note: a SUB-AGENT's own `self.roles`/`self.cli_roles`
+            # are never populated (agent/subagent.py never passes `roles=`/
+            # `cli_roles=` when constructing a child Session) -- the REAL,
+            # propagated-down-the-whole-tree role table/CLI overrides live
+            # on `self.agent_runtime.role_table`/`.cli_role_overrides`
+            # instead (the SAME object `resolve_agent_model` itself already
+            # resolves a child's own model through), so a configured
+            # `roles.judge` is honoured on a sub-agent's own escalation
+            # check too, not just the top-level session's.
+            judge_ref, _profile, _effort, _source = resolve_role_ref(
+                "judge", role_table=self.agent_runtime.role_table, cli_overrides=self.agent_runtime.cli_role_overrides,
+                parent_ref=self.model_ref, parent_profile=self.model_profile, state_dir=self.state_dir,
+                routes=self.agent_runtime.routes,
+            )
+            answer = self.call_small_model(
+                system_text=JUDGE_SYSTEM_PROMPT, user_text=final_text[:4000],
+                max_tokens=8, timeout_s=20.0, model_ref=judge_ref,
+            )
+        except Exception:
+            return True
+        return judge_says_confident(answer)
+
+    def _maybe_escalate(self, turn_no: int, *, final_text: "Optional[str]" = None):
+        """Round 5e: hybrid escalation (`routing.escalation`), checked from
+        TWO safe points in `_turn_body` (see each call site's own comment
+        for why there and not deeper inside tool dispatch): right before
+        looping back for another model call (catches `tool_failures`/
+        `context_overflow`, both knowable mid-turn) and right before a
+        normal end-of-turn `turn_done` (catches `low_confidence`, only
+        knowable once the final reply text exists). Local first: a no-op
+        on a cloud-model session, when no policy is configured, when this
+        role's own table entry turned escalation off, or once this turn has
+        already escalated once (never a second switch mid-turn). Yields at
+        most one `events.notification`; never raises outward -- any
+        internal failure (an unresolvable `to` ref, no credentials for it)
+        degrades to "stayed local", reported plainly, never a crash."""
+        if getattr(self, "_escalated_this_turn", False):
+            return
+        if not is_local_model_ref(self.model_ref):
+            return
+        from halo_harness.agent.escalation import (
+            TOOL_FAILURE_THRESHOLD, EscalationDecision, count_tool_failures_since, load_escalation_policy,
+            role_escalation_enabled,
+        )
+        policy = load_escalation_policy()
+        # `self.agent_runtime.role_table` -- see `_judge_confidence`'s own
+        # matching comment: a sub-agent's `self.roles` is never populated,
+        # the real table lives here instead.
+        if policy is None or not role_escalation_enabled(self.role_name, self.agent_runtime.role_table):
+            return
+        trigger = None
+        if "context_overflow" in policy.when and getattr(self, "_turn_context_overflow_count", 0) > 0:
+            trigger = "context_overflow"
+        elif "tool_failures" in policy.when and count_tool_failures_since(
+                self.log.nodes(), getattr(self, "_turn_log_start_idx", 0)) >= TOOL_FAILURE_THRESHOLD:
+            trigger = "tool_failures"
+        elif "low_confidence" in policy.when and final_text and final_text.strip():
+            try:
+                confident = self._judge_confidence(final_text)
+            except Exception:
+                confident = True
+            if not confident:
+                trigger = "low_confidence"
+        if trigger is None:
+            return
+        self._escalated_this_turn = True
+        if policy.ask:
+            self._escalation_decisions.append(
+                EscalationDecision(turn=turn_no, trigger=trigger, to=policy.to, action="asked"))
+            yield events.notification(
+                f"local model hit {trigger} this turn -- escalation to {policy.to} is set to ask, so "
+                f"this turn stayed on {self.model_ref.raw}; switch by hand with /model {policy.to}, or "
+                f"set routing.escalation.ask to false to auto-switch next time"
+            )
+            return
+        routes = self.agent_runtime.routes if self.agent_runtime is not None else {}
+        try:
+            target_ref = parse_model_ref(policy.to, routes)
+            target_profile = resolve_model_profile(target_ref, self.state_dir, routes)
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(target_ref, self.settings)
+        except Exception:
+            creds = None
+            target_ref = target_profile = None
+        if target_ref is None or creds is None:
+            self._escalation_decisions.append(EscalationDecision(
+                turn=turn_no, trigger=trigger, to=policy.to, action="asked",
+                note="escalation target did not resolve or has no credentials -- stayed local"))
+            yield events.notification(
+                f"local model hit {trigger} this turn, but the configured escalation target {policy.to!r} "
+                f"isn't usable right now -- stayed on {self.model_ref.raw}"
+            )
+            return
+        self.set_model(target_ref, target_profile, creds)
+        # Deliberately NOT reverted by `_restore_primary_model_after_turn`
+        # the way a `--fallback-model` swap is: a REAL escalation (as
+        # opposed to a `--fallback-model` swap covering a transient
+        # provider outage) is "this local setup is not holding up", which
+        # re-snapshotting here as the new primary makes stick for every
+        # later turn too, until the user switches back by hand -- going
+        # back to the same local model next turn with no new information
+        # would just re-trigger the identical trigger right away.
+        self._primary_model_snapshot = (self.model_ref, self.model_profile, self.creds,
+                                         self.effort, self.effort_source)
+        self._escalation_decisions.append(
+            EscalationDecision(turn=turn_no, trigger=trigger, to=policy.to, action="escalated"))
+        yield events.notification(f"escalated to {policy.to}: {trigger}")
 
     def _run_hook_stop(self, event: str, **kwargs):
         """W3b item 11: the `run_stop(...)` counterpart to `_run_hook`
@@ -1478,7 +1775,15 @@ class Session:
         """W4a: InstructionsLoaded -- "CLAUDE.md chain loaded" (removed from
         NOT_EMITTED_V1). Fires every time the chain is (re)loaded into the
         log as a snapshot -- startup, resume, and after a compaction -- same
-        set of call sites `kind="claude_md"` itself already has."""
+        set of call sites `kind="claude_md"` itself already has.
+
+        Review finding 36: a sub-agent (`self.agent_id is not None`) NEVER
+        fires the user's own lifecycle hooks at all -- same rule, same
+        reasoning, as `_fire_session_start`'s own identical guard just
+        above (spawning N sub-agents used to re-fire this N extra times,
+        once per child, same InstructionsLoaded payload every time)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("InstructionsLoaded"):
             return
         payload = self.hook_runner.payload("InstructionsLoaded", extra={"char_count": len(claude_md_text)})
@@ -1509,7 +1814,17 @@ class Session:
         "startup" path -- never on resume, never again on a later launch.
         `halo init`'s own wizard is a SEPARATE, optional setup flow a user
         may never run at all; this is the one trigger guaranteed to exist
-        for every box."""
+        for every box.
+
+        Review finding 36: same sub-agent guard as `_fire_session_start`
+        -- a child Session's own `__init__` used to attempt this too,
+        once per sub-agent spawned (the `.setup_done` marker limited the
+        actual hook run to once ever regardless, but still tagged to
+        whichever session -- main or child -- happened to start first on
+        a fresh box, and paid the marker-file stat on every single spawn
+        after that)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("Setup"):
             return
         marker = Path(self.state_dir) / ".setup_done"
@@ -1574,7 +1889,13 @@ class Session:
         settings `permissions.additionalDirectories`, already merged into
         `self.permission_engine.extra_dirs` by the time this runs) -- fired
         once per directory, at both startup and resume (an unchanged set on
-        resume is a harmless re-announcement, never tracked as a diff)."""
+        resume is a harmless re-announcement, never tracked as a diff).
+
+        Review finding 36: same sub-agent guard as `_fire_session_start`
+        -- InstructionsLoaded/Setup's own sibling fix (once per extra
+        directory, it fired again on every sub-agent spawn)."""
+        if self.agent_id is not None:
+            return
         if self.hook_runner is None or not self.hook_runner.has_hooks("DirectoryAdded"):
             return
         for d in self.permission_engine.extra_dirs:
@@ -1600,10 +1921,15 @@ class Session:
         group) and close its bridge server, if `cc:` was ever used this
         session -- a safe no-op otherwise. Called from Controller.quit(),
         headless.py's own atexit/finally cleanup, and SIGTERM/SIGHUP (via
-        the same paths that already call job_registry.kill_all())."""
-        from halo_harness.agent import cc_runtime, cx_runtime
+        the same paths that already call job_registry.kill_all()).
+
+        Round 5i part 2: ALSO closes `cx:`'s own bridge server (if `cx:`
+        was ever used this session) -- broadened rather than adding a
+        parallel `close_cx()` call at every one of this method's own call
+        sites (controller.py, headless.py, agent/subagent.py)."""
+        from halo_harness.agent import cc_runtime, codex_runtime
         cc_runtime.close_cc(self)
-        cx_runtime.close_cx(self)
+        codex_runtime.close_cx(self)
 
     def clear(self) -> None:
         """U5 must-do: `/clear` starts a genuinely NEW session log --
@@ -1632,11 +1958,6 @@ class Session:
             from halo_harness.agent import cc_runtime
             cc_runtime.close_cc(self)
             self._cc_state = None
-        if getattr(self, "_cx_state", None) is not None:
-            # 2.0.2: same for a live Codex thread -- the fresh log has no
-            # `cx_thread_id`, so the next cx: turn starts a new thread.
-            from halo_harness.agent import cx_runtime
-            cx_runtime.close_cx(self)
         self._fire_session_end("clear")
         self._reset_prune_state()  # H5b finding 2: no old log left for these ids to refer to
         self.log = SessionLog(self.cwd)
@@ -1731,32 +2052,84 @@ class Session:
         to fail outright on a `cc:` session ("the summarisation call
         failed"). Routed to a quick, stateless one-shot `claude -p`
         instead (never touches this session's own live `_cc_state`/
-        conversation)."""
+        conversation).
+
+        Halo 2.0.3 round 2b: an `ollama`-dialect `ref` (almost always
+        `self.small_model_ref`, a DIFFERENT host/model than `self.
+        model_ref`) builds its body through the SAME `_build_ollama_body_
+        for_ref` helper `_derive_and_build` uses, and streams through
+        `self._stream` (the dialect dispatcher) rather than the bare
+        openai-chat-only `stream_completion`. Credentials for a NON-main
+        ref (`ref is not self.model_ref`) are resolved with the exact
+        resolver `/model` itself uses (`headless._resolve_creds` -- see
+        `apply_next_fallback_model`'s own finding 3/W6a fix for why this
+        matters: `self.creds` is the CURRENT model's creds, wrong for a
+        small model on a different provider), falling back to `self.creds`
+        only when that resolver finds nothing -- every existing same-
+        provider caller is unaffected either way."""
         ref = model_ref or self.small_model_ref or self.model_ref
         if ref.provider == "cc":
             from halo_harness.agent.cc_runtime import one_shot_cc_call
             return one_shot_cc_call(ref.model, system_text, user_text, timeout_s=timeout_s)
-        if ref.provider == "cx":
-            from halo_harness.agent.cx_runtime import one_shot_cx_call
+        if ref.provider == "codex":
+            from halo_harness.agent.codex_runtime import one_shot_cx_call
             return one_shot_cx_call(ref.model, system_text, user_text, timeout_s=timeout_s)
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
-        body = build_request_body(
-            system_text=system_text,
-            messages=[{"role": "user", "content": [{"type": "text", "text": user_text}]}],
-            tools=[], route=route, profile=profile, effort=self.effort,
-            context_tokens=self.model_profile.context_tokens,
-            prompt_estimate=_rough_estimate("", []),
-            requested_max_tokens=max_tokens,
-        )
-        req = self._build_request(body)
+        # 2.0.2 review finding 12, second half: `roles.small`'s own
+        # `effort` applies ONLY when this call is actually ON the small
+        # model (`ref is not self.model_ref`) -- the plain main-model
+        # fallback case is completely unchanged.
+        effort = self.effort if ref is self.model_ref else (self.small_model_effort or self.effort)
+        messages = [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
+        if route.dialect == "ollama":
+            body = self._build_ollama_body_for_ref(
+                ref=ref, route=route, profile=profile, system_text=system_text, messages=messages,
+                tools=[], tool_choice=None, effort=effort, requested_max_tokens=max_tokens,
+            )
+            # Round 5b part 2 (brief item 7): this method returns a plain
+            # string with no event stream of its own to yield a
+            # `notification` through (callers include `/local`'s own
+            # reply text, a title suggestion, and `/improve`'s draft text
+            # -- none of those may be silently polluted with an extra
+            # line) -- logged instead, so the notice is actually SURFACED
+            # from this call site (visible in logs/`--verbose`) rather
+            # than sitting queued until some LATER `_step` call happens to
+            # flush it, or never if this session never makes one.
+            for _notice in self._drain_pending_ollama_notices():
+                log.info("ollama: %s", _notice)
+        elif route.dialect == "openai-responses":
+            body = build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=[], tool_choice=None,
+                route=route, profile=profile, effort=effort, requested_max_tokens=max_tokens,
+            )
+        else:
+            body = build_request_body(
+                system_text=system_text, messages=messages,
+                tools=[], route=route, profile=profile, effort=effort,
+                context_tokens=self.model_profile.context_tokens,
+                prompt_estimate=_rough_estimate("", []),
+                requested_max_tokens=max_tokens,
+            )
+        creds = self.creds
+        if ref is not self.model_ref:
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(ref, self.settings) or self.creds
+        req = self._build_request(body, route=route, creds=creds)
         abort = threading.Event()
         timer = threading.Timer(max(0.1, timeout_s), abort.set)
         timer.daemon = True
         timer.start()
         text_parts: list = []
-        gen = stream_completion(req, abort=abort)
+        # Halo 2.0.3 round 5i part 1: `self._stream` is the dialect
+        # dispatcher (falls through to the bare `stream_completion` for
+        # every dialect it doesn't special-case) -- routed through it for
+        # "ollama"/"openai-responses" only, same as before this round,
+        # rather than widening this one-line ternary into a three-way
+        # branch that would just re-derive `_stream`'s own fallback.
+        gen = (self._stream(req, abort=abort) if route.dialect in ("ollama", "openai-responses")
+               else stream_completion(req, abort=abort))
         try:
             for ev in gen:
                 kind = ev.get("type")
@@ -1832,17 +2205,60 @@ class Session:
         other route -- `notify_catalog_changed` itself no-ops with no
         `_cc_state`) so its child sends Claude Code a real
         `notifications/tools/list_changed` -- without this, a tool
-        ToolSearch loads mid-session enters rolo's own catalog but
+        ToolSearch loads mid-session enters the owner's own catalog but
         Claude Code, which only ever listed tools once at startup, never
         learns it exists and can never call it."""
         self.log.append_meta(tools=self.tool_registry.definitions_for(names))
-        from halo_harness.agent import cc_runtime, cx_runtime
+        from halo_harness.agent import cc_runtime
         cc_runtime.notify_catalog_changed(self)
-        cx_runtime.notify_catalog_changed(self)
 
     # ---- request construction ------------------------------------------
 
+    def _sync_ollama_tools_cap(self) -> None:
+        """Halo 2.0.3 round 3 (brief item 3): before THIS turn's tool list
+        is derived from the logged catalog below, re-size it to what the
+        CURRENT ollama model's context class allows -- reusing the EXACT
+        cap-shrink + LRU-evict + re-log-meta dance `set_model` already
+        runs on a provider switch (`agent/catalog.py`'s `host_cap`/
+        `SessionCatalog._evict_one`), never a second capping path. A no-op
+        for every non-ollama route, and a no-op once the computed cap
+        already matches `self.session_catalog.cap` (so an ordinary multi-
+        step turn doesn't log a new meta node per tool call -- only an
+        actual CHANGE, e.g. the catalog loading for the first time or a
+        `/model` switch's own context class differing, writes one)."""
+        if self.route.dialect != "ollama" or self.session_catalog is None:
+            return
+        from halo_harness.agent.catalog import host_cap
+        from halo_harness.providers.ollama_hw import resolve_context_decision
+        env = self.settings.effective_env if self.settings is not None else None
+        try:
+            decision = resolve_context_decision(self.model_ref, env)
+        except Exception:
+            log.debug("ollama: _sync_ollama_tools_cap could not resolve a context decision", exc_info=True)
+            return
+        new_cap = host_cap(self.route.provider, decision.tools_max)
+        # Never below what's already irrevocably frozen (every currently-
+        # loaded name minus the loaded-DEFERRED ones -- `_evict_one` can
+        # only ever remove one of those): a smaller computed cap still
+        # evicts every loaded-deferred tool it can, but can't be asked to
+        # remove a frozen/preloaded one, so the catalog's OWN stored cap
+        # must never promise more shrinkage than eviction can deliver.
+        frozen_count = len(self.session_catalog.names) - len(self.session_catalog._loaded_order)
+        new_cap = max(new_cap, frozen_count)
+        if new_cap == self.session_catalog.cap:
+            return
+        self.session_catalog.cap = new_cap
+        while len(self.session_catalog.names) > self.session_catalog.cap and self.session_catalog._evict_one():
+            pass
+        if self.provider_profile.tools_max != decision.tools_max:
+            self.provider_profile = dataclasses.replace(self.provider_profile, tools_max=decision.tools_max)
+        self.log.append_meta(tools=self.tool_registry.definitions_for(self.session_catalog.names))
+
     def _derive_and_build(self, tool_choice=None, no_tools: bool = False):
+        # Halo 2.0.3 round 3: MUST run before derive_request below -- it
+        # can shrink the catalog derive_request is about to read from the
+        # log's last meta node (see _sync_ollama_tools_cap's own docstring).
+        self._sync_ollama_tools_cap()
         # finding 4: tools=None makes derive_request fall back to the
         # logged meta node's FROZEN catalog, never the live registry --
         # what actually reached the model must match what a later replay
@@ -1881,6 +2297,30 @@ class Session:
                 profile=self.provider_profile, effort=self.effort,
                 requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
             )
+        elif self.route.dialect == "ollama":
+            # Halo 2.0.3 round 2b: the native `/api/chat` body, via the
+            # shared helper below -- host resolution, the trained-context
+            # catalog read, and keeping `self.model_profile.context_tokens`
+            # in sync with whatever `options.num_ctx` this request actually
+            # sent (round 2's context-ownership rule) all live there, not
+            # inline here, so this method stays readable.
+            body = self._build_ollama_body_for_ref(
+                ref=self.model_ref, route=self.route, profile=self.provider_profile,
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                effort=self.effort, requested_max_tokens=requested_max_tokens,
+            )
+        elif self.route.dialect == "openai-responses":
+            # Halo 2.0.3 round 5i part 1: the `/v1/responses` body, via
+            # the SAME Anthropic-shaped `messages`/`tools` every other
+            # dialect builds from -- `instructions`/`input` items/
+            # function-call items all come from `system_text`/`messages`
+            # directly (providers/responses_request.py), no intermediate
+            # openai-chat translation step.
+            body = build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                route=self.route, profile=self.provider_profile, effort=self.effort,
+                requested_max_tokens=requested_max_tokens,
+            )
         else:
             body = build_request_body(
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
@@ -1891,7 +2331,135 @@ class Session:
             )
         return system_text, messages, tools, body
 
-    def _build_request(self, body: dict) -> CompletionRequest:
+    def _maybe_auto_calibrate_ollama(self, host, model: str) -> None:
+        """Halo 2.0.3 round 5b (brief item 2): "run it automatically the
+        first time a model is used on a host with no learned cap."
+        Gated three ways, cheapest check first: (1) this (host.url, model)
+        pair was already attempted THIS PROCESS (`_ollama_calibrate_
+        attempted`, in-memory only -- see `__init__`'s own comment for why
+        that's enough); (2) `BRIDGE_TEST_NO_BACKGROUND_NET` (never touches
+        the network in a hermetic test); (3) `ollama.auto_calibrate: false`
+        (brief's own opt-out) or an entry already on disk (a different
+        process already measured this pair, or an earlier `halo ollama
+        calibrate` did). Any exception anywhere in this path is swallowed
+        and logged at DEBUG -- a failed calibration attempt must never
+        block the ordinary turn it was trying to help."""
+        key = (host.url, model)
+        if key in self._ollama_calibrate_attempted:
+            return
+        self._ollama_calibrate_attempted.add(key)
+        try:
+            from halo_harness.config.paths import background_net_disabled
+            if background_net_disabled():
+                return
+            from halo_harness.providers.ollama_calibrate import (
+                auto_calibrate_enabled, has_calibration_entry, run_auto_calibration,
+            )
+            if not auto_calibrate_enabled():
+                return
+            state_dir = self.state_dir
+            if has_calibration_entry(state_dir, host_url=host.url, model=model):
+                return
+            notice = run_auto_calibration(host, model, state_dir=state_dir)
+            if notice:
+                self._pending_ollama_notices.append(notice)
+        except Exception:
+            log.debug("ollama: auto-calibration for %s@%s failed", model, host.name, exc_info=True)
+
+    def _drain_pending_ollama_notices(self) -> list:
+        """Round 5b part 2 (brief item 7, "the auto-calibrate notice
+        flushes from the two secondary call sites too"): pops and clears
+        every notice `_maybe_auto_calibrate_ollama` queued since the last
+        drain, from WHICHEVER call site actually triggered it -- `_step`'s
+        own main-turn flush (unchanged, still inline there) and this
+        method share the exact same list, so a notice is never shown
+        twice and never silently dropped just because the call that
+        triggered it wasn't the main turn. `call_small_model` (no event
+        stream of its own to yield through -- see that method's own
+        docstring on why its return value must stay clean) logs the
+        drained text instead of yielding it; `_run_compaction` (a real
+        event-yielding generator) yields it exactly like `_step` does."""
+        if not self._pending_ollama_notices:
+            return []
+        notices = list(self._pending_ollama_notices)
+        self._pending_ollama_notices.clear()
+        return notices
+
+    def _build_ollama_body_for_ref(self, *, ref: ModelRef, route: Route, profile: ProviderProfile,
+                                    system_text: str, messages: list, tools, tool_choice=None,
+                                    effort: Optional[str], requested_max_tokens: Optional[int]) -> dict:
+        """Halo 2.0.3 round 2b: the `ollama` dialect's own body-building
+        step -- shared by `_derive_and_build` (this session's own current
+        model) and `call_small_model` (a `small_model_ref`/hook `ol:` ref,
+        almost always a DIFFERENT model than `self.model_ref`), so neither
+        call site repeats the host-resolve/trained-context/context-
+        ownership-sync dance inline. Resolves `ref.host` against `ollama.
+        hosts` -- a missing entry raises `ProviderNotConfigured` naming the
+        ref's host and `ollama.hosts` rather than silently falling back to
+        some other host -- then reads the model's trained context from the
+        (cached, short-TTL) catalog, with ANY exception or an unreachable
+        host swallowed to `None` (round 3's fit-estimate wiring is the only
+        other input `compute_num_ctx` takes; this round never fails a turn
+        over a best-effort catalog probe). Only when `ref is self.model_ref`
+        (the session's OWN current model, never a small/hook ref on some
+        other model) does a successful build also sync `self.model_profile.
+        context_tokens` to whatever `options.num_ctx` this request actually
+        computed, so the status bar and the compaction trigger both follow
+        the real window instead of a stale pre-catalog guess."""
+        env = self.settings.effective_env if self.settings is not None else None
+        host = resolve_ollama_host(ref.host, env)
+        if host is None:
+            raise ProviderNotConfigured(
+                f"no Ollama host named {ref.host!r} for {ref.raw!r} -- configure it under `ollama.hosts`")
+        # Halo 2.0.3 round 3 (hand-off item): `fit_estimate` used to be
+        # hardcoded `None` here -- a 27B model's trained context (262144)
+        # alone decided `num_ctx`, so it got the full 131072 hard cap even
+        # on a host whose VRAM couldn't actually hold that much.
+        # `providers.ollama_hw.resolve_context_decision` reads the SAME
+        # trained-context catalog this method always has, plus (local
+        # hosts) a cached OS GPU-memory read or (remote, loaded) `/api/ps`
+        # -- see that function's own docstring for the full fallback
+        # chain; any failure degrades to `None`, same as round 2's own
+        # catalog read.
+        # Round 5b: runs (at most once per process per host+model, see the
+        # method's own docstring) BEFORE resolve_context_decision below, so
+        # that if it actually calibrates, THIS SAME request's own
+        # learned_cap lookup -- not just the next one -- already sees the
+        # freshly-written entry.
+        self._maybe_auto_calibrate_ollama(host, ref.model)
+        from halo_harness.providers.ollama_hw import resolve_context_decision
+        decision = resolve_context_decision(ref, env)
+        body = build_ollama_request_body(
+            system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+            route=route, profile=profile, effort=effort, host=host,
+            trained_context=decision.trained_context, fit_estimate=decision.fit_estimate,
+            requested_max_tokens=requested_max_tokens,
+            learned_cap=decision.learned_cap, remote=decision.remote,
+        )
+        # Halo 2.0.3 round 5c FIX PASS: `_build_request`'s own side-channel
+        # read, same lazy-attribute pattern as `_last_ollama_host_url`/
+        # `_last_ollama_offloaded` just below -- UNCONDITIONAL (every
+        # ollama ref, not just `self.model_ref`), since a small-model/hook
+        # call needs the SAME overflow-retry ceiling as the main turn.
+        self._last_ollama_ctx_ceiling = ollama_overflow_retry_ceiling(
+            host_max_ctx=host.max_ctx, fit_estimate=decision.fit_estimate, learned_cap=decision.learned_cap)
+        if ref is self.model_ref:
+            num_ctx = (body.get("options") or {}).get("num_ctx")
+            if isinstance(num_ctx, int) and num_ctx != self.model_profile.context_tokens:
+                self.model_profile = dataclasses.replace(self.model_profile, context_tokens=num_ctx)
+            # Round 5b (brief item 7): `_account_usage` reads this right
+            # after the matching `_step` call returns, to decide the
+            # status bar's "offloaded" marker -- sourced from `last_known_
+            # offload`'s cache (a side effect of the fit-estimate's own
+            # `/api/ps` read above), never a dedicated extra probe.
+            self._last_ollama_host_url = host.url
+            self._last_ollama_offloaded = decision.offloaded
+        return body
+
+    def _build_request(self, body: dict, *, route: Optional[Route] = None,
+                        creds: Optional[ProviderCreds] = None) -> CompletionRequest:
+        route = route if route is not None else self.route
+        creds = creds if creds is not None else self.creds
         kimi_tool_id_start = 0
         if self.provider_profile.tool_id_format == "kimi_functions_idx":
             # H9 critical review finding 1: seed the per-stream rename
@@ -1901,34 +2469,52 @@ class Session:
             from halo_harness.agent.invariants import highest_kimi_functions_idx
             kimi_tool_id_start = highest_kimi_functions_idx(self.log) + 1
         kwargs = dict(
-            body={"messages": []}, route=self.route,
+            body={"messages": []}, route=route,
             profile={"context_tokens": self.model_profile.context_tokens,
                      "max_output_tokens": self.model_profile.max_output_tokens},
-            creds=self.creds, state_dir=self.state_dir, extra_headers=self.extra_headers,
+            creds=creds, state_dir=self.state_dir, extra_headers=self.extra_headers,
             model_label=self.model_ref.raw, openrouter_base_url=self.openrouter_base_url,
             harness_mode=True, ping_interval=float(env_compat("PING_INTERVAL", default="15")),
             tool_id_format=self.provider_profile.tool_id_format,
             kimi_tool_id_start=kimi_tool_id_start,
         )
-        if self.route.dialect == "anthropic-passthrough":
+        if route.dialect == "anthropic-passthrough":
             kwargs["prebuilt_anthropic_body"] = body
+        elif route.dialect == "ollama":
+            kwargs["prebuilt_ollama_body"] = body
+            # FIX PASS: set unconditionally by `_build_ollama_body_for_ref`
+            # just above for THIS exact ref -- `getattr` only guards a
+            # hypothetical ollama request built some other way.
+            kwargs["ollama_ctx_retry_ceiling"] = getattr(self, "_last_ollama_ctx_ceiling", None)
+        elif route.dialect == "openai-responses":
+            kwargs["prebuilt_responses_body"] = body
         else:
             kwargs["prebuilt_oai_body"] = body
         return CompletionRequest(**kwargs)
 
     def _stream(self, req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
         """Dispatch to the right dialect's orchestration -- the ONE place
-        that decides `stream_completion` vs `stream_anthropic_completion`,
-        so every `_step`/`_run_compaction` call site stays dialect-blind.
-        `abort`, when given, is used INSTEAD of `self.abort` -- Halo 2.0.1's
-        steer-restart watcher (`_step`) passes a combined `_EitherAbort`
-        (this session's real abort OR a dedicated per-attempt restart
-        event) so a silently-blocked call can be force-closed without ever
-        touching `self.abort` itself (reserved for a genuine user
-        interrupt -- see `_EitherAbort`'s own docstring)."""
+        that decides `stream_completion` vs `stream_anthropic_completion`
+        vs `stream_ollama_completion`, so every `_step`/`_run_compaction`
+        call site stays dialect-blind. Dispatches on `req.route.dialect`
+        (never `self.route.dialect`) so a caller building a request for a
+        DIFFERENT model than this session's own current one (`call_small_
+        model` on a `small_model_ref`/hook ref) still gets routed
+        correctly -- every existing caller passes a `req` whose `route` IS
+        `self.route`, so this is identical for them. `abort`, when given,
+        is used INSTEAD of `self.abort` -- Halo 2.0.1's steer-restart
+        watcher (`_step`) passes a combined `_EitherAbort` (this session's
+        real abort OR a dedicated per-attempt restart event) so a silently-
+        blocked call can be force-closed without ever touching `self.abort`
+        itself (reserved for a genuine user interrupt -- see
+        `_EitherAbort`'s own docstring)."""
         eff_abort = abort if abort is not None else self.abort
-        if self.route.dialect == "anthropic-passthrough":
+        if req.route.dialect == "anthropic-passthrough":
             return stream_anthropic_completion(req, abort=eff_abort)
+        if req.route.dialect == "ollama":
+            return stream_ollama_completion(req, abort=eff_abort)
+        if req.route.dialect == "openai-responses":
+            return stream_openai_responses_completion(req, abort=eff_abort)
         return stream_completion(req, abort=eff_abort)
 
     def _abort_sleep(self, delay: float) -> bool:
@@ -1978,6 +2564,26 @@ class Session:
                 turn=turn_no, err_type="tool_catalog_too_large",
             )
             return None
+        except ToolsNotSupported as e:
+            # Halo 2.0.2 round 5 item 1/4: a decision-only/judge endpoint
+            # (e.g. databricks-openjev-qwen35-4b), or any endpoint a prior
+            # live request already proved rejects tools outright -- never
+            # retried and never silently sent tool-less (this session's
+            # whole premise is tool use); `str(e)` already names the model
+            # and points at the judge role (`request.ToolsNotSupported`).
+            yield events.error(str(e), turn=turn_no, err_type="tools_not_supported")
+            return None
+        # Round 5b: surfaces `_build_ollama_body_for_ref`'s own auto-
+        # calibration notice (queued, never yielded from deep inside a
+        # plain function) right after the body that triggered it was
+        # built -- a plain UI-only `notification` event, never written
+        # into the logged transcript (a snapshot would replay on every
+        # future turn for no reason). Round 5b part 2: shares `_drain_
+        # pending_ollama_notices` with the two secondary call sites
+        # (`call_small_model`/`_run_compaction`) now that a THIRD place
+        # can queue one -- same list, same "never shown twice" contract.
+        for _notice in self._drain_pending_ollama_notices():
+            yield events.notification(_notice, level="info")
         req = self._build_request(body)
 
         attempts = 0
@@ -2262,6 +2868,14 @@ class Session:
                 # fires while `chunk_started[0]` is still False, i.e. before
                 # any of the three could have been set.
                 ttfb_ms = None
+                # review finding 19: this `continue` re-enters the loop
+                # through `attempts += 1` at its top, but a steer-restart is
+                # explicitly "never counted against ... any retry-ladder
+                # cap" (comment above) -- undo that increment here so a
+                # restart is free, exactly as documented, instead of
+                # silently lengthening the next real 429/5xx backoff and
+                # eventually starving MAX_RETRIES or the fallback trigger.
+                attempts -= 1
                 continue
 
             if self.abort.is_set():
@@ -2308,6 +2922,11 @@ class Session:
             if phase1_failure is not None:
                 if isinstance(phase1_failure, ContextOverflow):
                     e = phase1_failure
+                    # Round 5e: counted regardless of overflow_handled (a
+                    # trigger for `_maybe_escalate`'s own "did this turn
+                    # hit context_overflow" check, below -- a second
+                    # overflow after the compaction retry still counts).
+                    self._turn_context_overflow_count += 1
                     if not overflow_handled:
                         # H5 scope B: signal the caller (_turn_body) to run
                         # one compaction pass and retry this SAME step once
@@ -2332,6 +2951,29 @@ class Session:
                     # is checked too, not just a phase-2 wire error -- this
                     # ALWAYS means OUR OWN reasoning-replay logic has a bug.
                     yield events.error(f"reasoning-replay bug (never retried): {e.message}", turn=turn_no, err_type="reasoning_replay_bug")
+                    return None
+                # Halo 2.0.2 round 5 item 1/4: same reasoning as the effort-
+                # field comment just below -- a non-2xx HTTP response
+                # (Databricks' own `unknown field "tools"`, OpenRouter's
+                # `no endpoints... support tool use`) is rejected before
+                # any SSE starts, so THIS is where it's actually caught for
+                # a request that genuinely went out with `tools` (the
+                # `wire_error` branch below keeps its own copy as the
+                # backstop for a dialect that surfaces it mid-stream
+                # instead). Learn it (Databricks only) so the NEXT request
+                # against this exact endpoint never pays for the round trip
+                # again, then end the turn with a clear, never-retried
+                # error -- never silently drop tools and keep going.
+                if is_tools_rejected_message(e.message) and body.get("tools"):
+                    if self.route.provider == "databricks":
+                        from halo_harness.providers.learned_rules import learn_tools_rejected
+                        learn_tools_rejected(self.state_dir, "databricks", self.model_ref.model)
+                    self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
+                    yield events.error(
+                        f"{self.model_ref.raw} does not accept tool calls ({e.message}) -- "
+                        "use the judge role instead of the session model",
+                        turn=turn_no, err_type="tools_not_supported",
+                    )
                     return None
                 # 1.0.1 hotfix 19.3: an effort-field 400 is a phase-1
                 # failure too, not a phase-2 (mid-stream) wire_error -- a
@@ -2390,7 +3032,7 @@ class Session:
                 # phase 1's own first and only attempt, so this is correctly
                 # terminal here either way -- retrying a DNS failure on a
                 # 1-16s timer just repeats the identical failure, slower.
-                if is_connect_failure_message(e.message):
+                if is_connect_failure_message(e.message) or is_offline_refusal_message(e.message):
                     self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
                     yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=False,
                                         category=overflow_classifier(e.status, e.message))
@@ -2428,6 +3070,29 @@ class Session:
                 message = wire_error.get("message", "unknown upstream error")
                 if is_reasoning_replay_bug(message):
                     yield events.error(f"reasoning-replay bug (never retried): {message}", turn=turn_no, err_type="reasoning_replay_bug")
+                    return None
+                if is_tools_rejected_message(message) and body.get("tools"):
+                    # Halo 2.0.2 round 5 item 1/4: the LIVE twin of
+                    # `request.ToolsNotSupported` -- this endpoint had no
+                    # row/pattern/learned-rule telling Halo up front, so
+                    # the request already went out with `tools` and got
+                    # refused at the wire (Databricks' own `unknown field
+                    # "tools"`, or OpenRouter's `no endpoints... support
+                    # tool use`). Learn it (Databricks only -- the same
+                    # per-endpoint cache `reasoning_effort_with_tools`
+                    # already uses) so the NEXT request against this exact
+                    # endpoint never pays for the round trip again, then
+                    # end the turn with a clear, never-retried error --
+                    # never silently drop tools and keep going, which would
+                    # break this session's whole tool-using premise.
+                    if self.route.provider == "databricks":
+                        from halo_harness.providers.learned_rules import learn_tools_rejected
+                        learn_tools_rejected(self.state_dir, "databricks", self.model_ref.model)
+                    yield events.error(
+                        f"{self.model_ref.raw} does not accept tool calls ({message}) -- "
+                        "use the judge role instead of the session model",
+                        turn=turn_no, err_type="tools_not_supported",
+                    )
                     return None
                 # 1.0.1 hotfix 19.3: a 400 naming the effort field itself
                 # (verified wording: `output_config.effort: Input should be
@@ -2493,6 +3158,7 @@ class Session:
                 # contract, same terminal wording/category on a SECOND
                 # overflow), since this is the identical failure arriving
                 # mid-stream instead of as an upfront 400.
+                self._turn_context_overflow_count += 1  # round 5e, see the phase-1 branch's matching comment
                 if not overflow_handled:
                     return _OVERFLOW_NEEDS_COMPACTION
                 self._log_call_failure("overflow", retries=attempts - 1)
@@ -2627,7 +3293,7 @@ class Session:
         # multiple real native `thinking_delta` events both mean "this
         # gateway genuinely streamed reasoning incrementally" -- see
         # `OpenAIStreamToAnthropic._note_reasoning_chunk`'s own docstring
-        # for why rolo's real session logs need this to answer GLM-brief.md
+        # for why the owner's real session logs need this to answer GLM-brief.md
         # item 6's open question (does Databricks stream GLM's reasoning?).
         reasoning_streamed = (native_thinking_delta_count > 1) or (
             (harness_meta.get("reasoning_chunk_count") or 0) > 1)
@@ -2644,7 +3310,8 @@ class Session:
                             retries=attempts - 1, status="ok",
                             responding_provider=harness_meta.get("responding_provider"),
                             ttfb_ms=ttfb_ms, first_reasoning_ms=first_reasoning_ms, first_text_ms=first_text_ms,
-                            first_tool_ms=first_tool_ms, reasoning_streamed=reasoning_streamed)
+                            first_tool_ms=first_tool_ms, reasoning_streamed=reasoning_streamed,
+                            timing_ns=harness_meta.get("timing_ns"))
 
     # H10 Part A: "or"|"dbx"|"ant" -- the coarse routing rail
     # (`ModelRef.provider`), independent of which specific backend actually
@@ -2698,6 +3365,9 @@ class Session:
         real tokens against the account, so it must still count here even
         though it never becomes a logged assistant message)."""
         cost = self.cost_meter.add_usage(self.model_ref.provider, result.usage)
+        # Round 5e: a no-op on a cloud-model session (no reference price
+        # was ever pinned -- `__init__`'s own `is_local_model_ref` gate).
+        self.cost_meter.add_savings(result.usage)
         # H10 Part A: telemetry.py's own source of truth -- see
         # `agent/log.py`'s `append_usage` docstring for why these extra
         # keys never touch a derived request.
@@ -2727,6 +3397,45 @@ class Session:
         total_prompt_tokens = _total_prompt_tokens(result.usage)
         if total_prompt_tokens is not None:
             self._last_prompt_tokens = total_prompt_tokens
+        if self.model_ref.provider == "ollama" and result.timing_ns:
+            self._record_ollama_throughput(result.timing_ns)
+
+    def _record_ollama_throughput(self, timing_ns: dict) -> None:
+        """Round 5b (brief item 7): tokens/second and prefill seconds from
+        one `ol:` step's own `eval_count`/`eval_duration`/`prompt_eval_
+        duration` (Ollama's documented NANOSECOND timing fields) --
+        `None` for a figure whose inputs are missing/zero rather than a
+        divide-by-zero or a misleading 0. Stashed on `self` for `status_
+        event` to include on the NEXT status event (never computed
+        twice), and persisted via `ollama_calibrate.record_last_turn_
+        throughput` so a separate `halo ollama` CLI process can print it
+        too. Never raises -- a malformed timing dict degrades to "nothing
+        learned this step", same as a missing one."""
+        try:
+            eval_count = timing_ns.get("eval_count")
+            eval_duration = timing_ns.get("eval_duration")
+            prompt_eval_duration = timing_ns.get("prompt_eval_duration")
+            tokens_per_second = None
+            if (isinstance(eval_count, int) and isinstance(eval_duration, (int, float))
+                    and eval_duration > 0):
+                tokens_per_second = round(eval_count / (eval_duration / 1_000_000_000.0), 1)
+            prefill_seconds = None
+            if isinstance(prompt_eval_duration, (int, float)) and prompt_eval_duration >= 0:
+                prefill_seconds = round(prompt_eval_duration / 1_000_000_000.0, 2)
+            self._last_ollama_throughput = {
+                "tokens_per_second": tokens_per_second, "prefill_seconds": prefill_seconds,
+                "offloaded": self._last_ollama_offloaded,
+            }
+            if self._last_ollama_host_url:
+                from halo_harness.providers.ollama_calibrate import record_last_turn_throughput
+                record_last_turn_throughput(
+                    self.state_dir, host_url=self._last_ollama_host_url, model=self.model_ref.model,
+                    tokens_per_second=tokens_per_second, prefill_seconds=prefill_seconds,
+                    offloaded=self._last_ollama_offloaded,
+                    output_tokens=eval_count if isinstance(eval_count, int) else None,
+                )
+        except Exception:
+            log.debug("ollama: _record_ollama_throughput failed", exc_info=True)
 
     def _maybe_yield_improve_hint(self) -> Iterator[events.Event]:
         """H10 Part B4: counters only, no model call, fires AT MOST once
@@ -2782,6 +3491,29 @@ class Session:
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
                 profile=self.provider_profile, effort=effort,
                 requested_max_tokens=requested_max_tokens, tool_choice=tool_choice,
+            )
+        if self.route.dialect == "ollama":
+            # Halo 2.0.3 round 2b: the SAME helper `_derive_and_build` uses.
+            # `self.model_ref`/`self.route`/`self.provider_profile` are
+            # already whichever model is ACTIVE for this call -- the main
+            # session model, or a compactionModel `_compaction_model_
+            # override` swapped in (see that method's own docstring) --
+            # so passing them through is "pass that model's own
+            # ref/route/profile", not necessarily the main model's.
+            return self._build_ollama_body_for_ref(
+                ref=self.model_ref, route=self.route, profile=self.provider_profile,
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                effort=effort, requested_max_tokens=requested_max_tokens,
+            )
+        if self.route.dialect == "openai-responses":
+            # Halo 2.0.3 round 5i part 1: the SAME builder `_derive_and_
+            # build` uses -- `self.route`/`self.provider_profile` are
+            # already whichever model is ACTIVE for this call (see this
+            # method's own "ollama" branch comment just above for why).
+            return build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                route=self.route, profile=self.provider_profile, effort=effort,
+                requested_max_tokens=requested_max_tokens,
             )
         return build_request_body(
             system_text=system_text, messages=messages, tools=tools, route=self.route,
@@ -2925,15 +3657,46 @@ class Session:
         it used to be resolved and then never read anywhere. Returns a
         `(saved_state_or_None)` token for `_restore_compaction_model`;
         temporarily swaps `self.route`/`self.provider_profile`/
-        `self.model_profile`/`self.model_ref` (everything `_build_request`/
-        `_build_body_for_messages` read off `self`) to the resolved
-        override for the DURATION of the summarisation call(s) only.
-        Same-provider only (falls back to the main model otherwise) --
-        `self.creds` is a single set for the whole Session, same documented
-        limitation as `_call_model_for_hook`'s own `small_model_ref` (true
-        cross-provider routing needs separate credential resolution, a
-        follow-up refinement, not this one-liner)."""
+        `self.model_profile`/`self.model_ref`/`self.creds` (everything
+        `_build_request`/`_build_body_for_messages` read off `self`) to
+        the resolved override for the DURATION of the summarisation
+        call(s) only.
+
+        Halo 2.0.3 round 2b: a compactionModel on a DIFFERENT provider
+        than the main model now actually runs on that provider, instead
+        of the documented "same-provider only... a follow-up refinement"
+        limitation this used to carry -- credentials for the override ref
+        are resolved with the exact resolver `/model` itself uses
+        (`headless._resolve_creds`, the same fix `call_small_model`'s own
+        `small_model_ref` case got), falling back to `self.creds` only
+        when that resolver finds nothing configured for the override's
+        own provider. `cc:` (the installed Claude binary) is still
+        refused -- same reason `call_small_model` special-cases it before
+        ever building a route/body: there is no HTTP route for a one-shot
+        summarisation call against it at all.
+
+        Halo 2.0.2 (brief A.1): "`compaction` is the rung after
+        `compactionModel`" -- the `roles.<compaction>` table entry (config.
+        json/team.json/a loaded template) is consulted ONLY when
+        `compactionModel` itself resolved to nothing (`resolve_knobs`
+        already checked config.json's bare `compactionModel` key and
+        Claude Code's own settings chain; this is strictly the next,
+        lower-precedence rung, never a competitor to either)."""
         raw = self._compaction_knobs.compaction_model
+        # 2.0.2 review finding 12 (major), second half: the `compaction`
+        # role's own `effort` (a `{"model", "effort"}` table value) used
+        # to be unpacked and then dropped outright -- the summary call
+        # ran on the swapped-in MODEL but the SESSION's own ordinary
+        # effort, never a role-specific one. `None` (no table value, or
+        # a bare-string one) changes nothing below -- `self.effort`
+        # simply isn't swapped, same as before this existed.
+        compaction_effort = None
+        if not raw:
+            from halo_harness.roles import role_value_parts
+            role_raw = (self.cli_roles or {}).get("compaction")
+            if role_raw is None:
+                role_raw = (self.roles or {}).get("compaction")
+            raw, compaction_effort = role_value_parts(role_raw)
         if not raw or raw == self.model_ref.raw:
             return None
         try:
@@ -2942,20 +3705,31 @@ class Session:
         except InvalidModelError:
             log.warning("compactionModel %r did not resolve to a valid model ref; using the session's main model", raw)
             return None
-        if ref.provider != self.model_ref.provider:
-            log.warning("compactionModel %r is on a different provider (%s) than the session's own creds (%s); "
-                        "using the session's main model for this summary", raw, ref.provider, self.model_ref.provider)
+        if ref.provider == "cc":
+            log.warning("compactionModel %r is cc: (no HTTP route for a one-shot summarisation call); "
+                        "using the session's main model for this summary", raw)
+            return None
+        if ref.provider == "codex":
+            log.warning("compactionModel %r is cx: (no HTTP route for a one-shot summarisation call); "
+                        "using the session's main model for this summary", raw)
             return None
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
         profile = resolve_profile(route)
         model_profile = resolve_model_profile(ref, self.state_dir, routes)
-        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref)
-        self.route, self.provider_profile, self.model_profile, self.model_ref = route, profile, model_profile, ref
+        creds = self.creds
+        if ref.provider != self.model_ref.provider:
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(ref, self.settings) or self.creds
+        saved = (self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort, self.creds)
+        self.route, self.provider_profile, self.model_profile, self.model_ref, self.creds = (
+            route, profile, model_profile, ref, creds)
+        if compaction_effort:
+            self.effort = compaction_effort
         return saved
 
     def _restore_compaction_model(self, saved) -> None:
         if saved is not None:
-            self.route, self.provider_profile, self.model_profile, self.model_ref = saved
+            self.route, self.provider_profile, self.model_profile, self.model_ref, self.effort, self.creds = saved
 
     def _run_summary_call(self, system_text: str, call_messages: list, tools, requested_max_tokens: int):
         """One streamed summarisation-call attempt, reusing `_step`'s OWN
@@ -2998,6 +3772,7 @@ class Session:
                             stop_reason = delta.get("stop_reason")
                         if isinstance(ev.get("usage"), dict):
                             cost = self.cost_meter.add_usage(self.model_ref.provider, ev["usage"])
+                            self.cost_meter.add_savings(ev["usage"])  # round 5e, no-op on a cloud session
                             # H10 Part A: a compaction summariser call is a
                             # real model call against the same account --
                             # `model`/`route`/`finish_reason` cost nothing to
@@ -3031,7 +3806,7 @@ class Session:
                 # `_step` above -- never ladder-retry a DNS/refused/
                 # unreachable failure just because a compaction summarisation
                 # call happened to hit it.
-                if is_connect_failure_message(e.message):
+                if is_connect_failure_message(e.message) or is_offline_refusal_message(e.message):
                     return "", None, "failed"
                 merged_retryable = e.retryable or is_retryable_message(
                     e.status, e.message, host=self.model_ref.provider,
@@ -3088,12 +3863,22 @@ class Session:
         THIS log would compact something the model never even sees.
         Claude Code auto-compacts its own context; this is the documented
         no-op (README: "`/compact` prints a note")."""
-        if self.model_ref.provider in ("cc", "cx"):
-            agent_name = "Claude Code" if self.model_ref.provider == "cc" else "Codex"
+        if self.model_ref.provider == "cc":
             yield events.compaction(
                 phase="failed", trigger=trigger, turn=turn_no,
-                reason=f"halo's own compaction is a no-op for {self.model_ref.provider}: sessions -- "
-                       f"{agent_name} manages its own context/compaction internally.",
+                reason="halo's own compaction is a no-op for cc: sessions -- Claude Code "
+                       "manages its own context/compaction internally.",
+            )
+            return False
+        if self.model_ref.provider == "codex":
+            # Round 5i part 2: same reasoning as the cc: branch just above
+            # -- a cx: turn's model-visible context is whatever Codex's own
+            # `codex exec resume <id>` thread holds, never this log's own
+            # `derive_request` replay.
+            yield events.compaction(
+                phase="failed", trigger=trigger, turn=turn_no,
+                reason="halo's own compaction is a no-op for cx: sessions -- Codex manages its own "
+                       "context/compaction internally.",
             )
             return False
         system_text, raw_messages, tools = derive_request(self.log, tools=None)
@@ -3134,6 +3919,15 @@ class Session:
                     system_text, call_messages, call_tools,
                     min(4096, self.model_profile.max_output_tokens or 4096),
                 )
+                # Round 5b part 2 (brief item 7): `_run_summary_call`'s own
+                # `_build_body_for_messages` call can trigger the auto-
+                # calibrate notice (a compaction summariser swapped to a
+                # different `compactionModel`, or the main model's own
+                # first-use-on-this-host trigger) -- `_run_compaction` IS
+                # a real event-yielding generator, so this flushes it the
+                # SAME way `_step`'s own main-turn site already does.
+                for _notice in self._drain_pending_ollama_notices():
+                    yield events.notification(_notice, level="info")
                 if outcome == "overflow":
                     if not tried_fallback:
                         # finding 4: OpenCode-style fallback -- flatten the
@@ -3353,6 +4147,17 @@ class Session:
         self._loop_breaker = {}
         self._loop_breaker_history = []
         self._loop_breaker_period2 = {}
+        self._identical_call_guard_key = None
+        self._identical_call_guard_count = 0
+        # Round 5e: hybrid-escalation per-turn state -- `_turn_log_start_
+        # idx` is where `escalation.count_tool_failures_since` starts
+        # counting THIS turn's own tool_result failures from (never an
+        # earlier turn's); `_turn_context_overflow_count` is bumped at the
+        # two `ContextOverflow` catch sites in `_step`; `_escalated_this_
+        # turn` keeps `_maybe_escalate` from switching twice in one turn.
+        self._turn_log_start_idx = len(self.log.nodes())
+        self._turn_context_overflow_count = 0
+        self._escalated_this_turn = False
         # H3/H4 must-do: a PREVIOUS turn's interrupt (Esc/Ctrl+C) leaves
         # `self.abort` set -- reused unchanged, a brand new turn would see
         # it already fired and abort immediately, before ever streaming a
@@ -3427,12 +4232,13 @@ class Session:
                     from halo_harness.agent import cc_runtime
                     yield from cc_runtime.turn_body_cc(self, turn_no, text, images=images,
                                                         hook_context=hook_context_text)
-                elif self.model_ref.provider == "cx":
-                    # 2.0.2: the installed `codex` binary under the user's
-                    # ChatGPT subscription -- same contract as cc: above
-                    # (agent/cx_runtime.py logs its own nodes).
-                    from halo_harness.agent import cx_runtime
-                    yield from cx_runtime.turn_body_cx(self, turn_no, text, images=images,
+                elif self.model_ref.provider == "codex":
+                    # Round 5i part 2: the cx: counterpart of the cc: branch
+                    # just above -- a separate turn-execution path
+                    # (agent/codex_turn.py) for the SAME reason, substituting
+                    # `codex exec` for `claude -p`.
+                    from halo_harness.agent import codex_turn
+                    yield from codex_turn.turn_body_cx(self, turn_no, text, images=images,
                                                         hook_context=hook_context_text)
                 else:
                     yield from self._turn_body(turn_no)
@@ -3563,6 +4369,7 @@ class Session:
                         context_limit=self.model_profile.context_tokens,
                         total_input_tokens=self.cost_meter.total_input_tokens,
                         total_output_tokens=self.cost_meter.total_output_tokens,
+                        saved_usd=(self.cost_meter.saved_usd if self.cost_meter.saved_turns else None),
                     )
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -3712,6 +4519,12 @@ class Session:
                 context_limit=self.model_profile.context_tokens,
                 total_input_tokens=self.cost_meter.total_input_tokens,
                 total_output_tokens=self.cost_meter.total_output_tokens,
+                # Round 5e: None on every cloud-model session (no reference
+                # price was ever pinned) and on a local session's very
+                # first call (nothing accumulated yet) -- the status bar's
+                # own `apply_status` only overwrites its reading when this
+                # is NOT None, so neither case ever blanks out a real one.
+                saved_usd=(self.cost_meter.saved_usd if self.cost_meter.saved_turns else None),
             )
 
             if not tool_use_blocks:
@@ -3758,6 +4571,14 @@ class Session:
                     reason = "interrupted"
                 else:
                     reason = "max_tokens" if result.stop_reason == "max_tokens" else "end_turn"
+                # Round 5e: hybrid escalation's own `low_confidence` trigger
+                # -- only knowable now that a final reply actually exists;
+                # never on an aborted/interrupted turn (nothing to judge
+                # confidence in, and escalating an Esc makes no sense).
+                if not self.abort.is_set():
+                    final_text = "".join(b.get("text", "") for b in result.assistant_blocks
+                                          if b.get("type") == "text")
+                    yield from self._maybe_escalate(turn_no, final_text=final_text)
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
 
@@ -3782,6 +4603,16 @@ class Session:
                 reason = "interrupted" if self.abort.is_set() else "end_turn"
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
+            # Round 5e: hybrid escalation's `tool_failures`/`context_
+            # overflow` triggers -- both already knowable at this point
+            # (tools just finished dispatching; any context-overflow retry
+            # this turn already happened inside `_step`), and checking HERE
+            # -- rather than deeper inside `_dispatch_tools`/`_step`
+            # themselves -- means a triggered auto-switch takes effect on
+            # the NEXT `_step()` call this same `while True:` is about to
+            # make, "for the rest of this turn", exactly like `_try_
+            # fallback_after_exhaustion`'s own identically-shaped switch.
+            yield from self._maybe_escalate(turn_no)
             # HALO-2.0.1-liveness-tips-brief.md Part A1 / W2-plan item 6:
             # tool results were just dispatched back; the NEXT model call
             # (the top of this `while True:`, back in `_step`) hasn't been
@@ -3791,6 +4622,95 @@ class Session:
             yield events.phase(state="waiting_for_model", turn=turn_no, model=self.model_ref.raw)
             # else: loop back for another _step() call with the new tool_results
 
+    def _attempt_tool_repair(self, *, tool_name: Optional[str], schema: Optional[dict],
+                              error_message: str, raw_input) -> Optional[dict]:
+        """Round 5b part 2 (brief item 2): ONE local, isolated repair
+        round -- a tools-less, history-less completion against THIS
+        session's own current model (never `small_model_ref`: it never
+        made the original call, so asking it to fix one would be asking
+        the wrong model), constrained to `tool_name`'s own `input_schema`
+        via `build_ollama_request_body`/`providers.request.build_request_
+        body`'s new `force_format`/`force_response_format` override, on
+        the `ollama`/`huggingface` (local) routes ONLY (`providers.
+        tool_call_schema.supports_constrained_tool_calls` -- every other
+        dialect's caller never even reaches this far, see `_resolve_tool_
+        call`'s own gating). Returns the repaired, schema-coerced
+        arguments dict on success; `None` on ANY failure whatsoever --
+        `schema is None` (an unresolved tool), the host rejecting the
+        route entirely, a network/timeout failure, a reply that still
+        isn't a JSON object, or a reply that still fails `agent.repair.
+        validate_and_coerce` against the SAME schema -- the caller always
+        falls back to the existing plain error either way (the brief's
+        own pin: "one repair round then the plain error"). Never raises."""
+        if schema is None or not tool_name:
+            return None
+        from halo_harness.providers.tool_call_schema import repair_prompt_for, supports_constrained_tool_calls
+        env = self.settings.effective_env if self.settings is not None else None
+        is_ollama = self.route.dialect == "ollama"
+        is_hf_local = self.route.provider == "huggingface" and bool(getattr(self.model_ref, "local", False))
+        host = None
+        if is_ollama:
+            from halo_harness.providers.ollama import resolve_ollama_host
+            from halo_harness.providers.ollama_hw import is_local_host
+            host = resolve_ollama_host(self.model_ref.host, env)
+            if host is None or not supports_constrained_tool_calls(
+                    provider="ollama", dialect="ollama", local=is_local_host(host)):
+                return None
+        elif not (is_hf_local and supports_constrained_tool_calls(
+                provider="huggingface", dialect="openai-chat", local=True)):
+            return None
+        system_text, user_text = repair_prompt_for(
+            tool_name=tool_name, schema=schema, error_message=error_message, raw_input=raw_input)
+        messages = [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
+        try:
+            if is_ollama:
+                from halo_harness.providers.ollama_hw import resolve_context_decision
+                from halo_harness.providers.ollama_request import build_ollama_request_body
+                decision = resolve_context_decision(self.model_ref, env)
+                body = build_ollama_request_body(
+                    system_text=system_text, messages=messages, tools=[], route=self.route,
+                    profile=self.provider_profile, effort=None, host=host,
+                    trained_context=decision.trained_context, fit_estimate=decision.fit_estimate,
+                    requested_max_tokens=512, learned_cap=decision.learned_cap, remote=decision.remote,
+                    force_format=schema,
+                )
+            else:
+                body = build_request_body(
+                    system_text=system_text, messages=messages, tools=[], route=self.route,
+                    profile=self.provider_profile, effort=None,
+                    context_tokens=self.model_profile.context_tokens,
+                    prompt_estimate=_rough_estimate(system_text, messages), requested_max_tokens=512,
+                    force_response_format=schema,
+                )
+            req = self._build_request(body)
+            abort = threading.Event()
+            timer = threading.Timer(20.0, abort.set)
+            timer.daemon = True
+            timer.start()
+            text_parts: list = []
+            gen = self._stream(req, abort=abort)
+            try:
+                for ev in gen:
+                    kind = ev.get("type")
+                    if kind == "content_block_delta":
+                        delta = ev.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            text_parts.append(str(delta.get("text", "")))
+                    elif kind == "error":
+                        return None
+            finally:
+                timer.cancel()
+                gen.close()
+            parsed = json.loads("".join(text_parts).strip())
+        except Exception:
+            log.debug("ollama/huggingface: tool-call repair round failed for %s", tool_name, exc_info=True)
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        from halo_harness.agent.repair import validate_and_coerce
+        coerced, errors = validate_and_coerce(parsed, schema)
+        return None if errors else coerced
+
     def _resolve_tool_call(self, tu: dict, outcome, tool_call_flags: dict) -> dict:
         """Everything about ONE tool_use call up to (never including)
         actual dispatch: length/malformed short-circuit -> basic shape
@@ -3799,48 +4719,115 @@ class Session:
         means "go dispatch me"; the reason this is its own function is so
         a run of consecutive read-only READY calls can be discovered and
         batched -- see `_dispatch_tools` -- without duplicating any of
-        this decision logic)."""
+        this decision logic).
+
+        Round 5b part 2 (brief item 2, "repair loop"): a length-truncated
+        call is NEVER offered the repair round (the brief's own list is
+        "bad JSON arguments, unknown tool, missing required argument" --
+        truncation is a max_tokens budget problem a same-sized repair call
+        would hit again) and an UNRESOLVED tool name is also never
+        attempted (there is no single schema to constrain a repair call
+        against when Halo doesn't yet know which tool was meant -- see
+        `_attempt_tool_repair`'s own docstring). The other two cases
+        (malformed JSON, and a resolved tool whose arguments failed
+        `agent.repair.validate_and_coerce` -- which already covers "missing
+        required argument") each get exactly ONE `_attempt_tool_repair`
+        call; its own `None` return (gated to `ollama`/`huggingface` local
+        routes, or any failure at all) falls straight through to the SAME
+        plain error this always surfaced before this round existed."""
         tool_id, raw_name = tu.get("id"), tu.get("name")
         item = {"tool_id": tool_id, "name": raw_name, "input": tu.get("input") or {}, "repaired": False, "ready": False}
 
         classification = classify_length_tool_call(tool_call_flags.get(tool_id) or {})
-        if classification in ("length", "malformed"):
-            if classification == "length":
-                item["text"] = (f"Tool call {raw_name!r} was cut off at max_tokens mid-call -- split the "
-                                 f"operation into smaller steps and retry.")
-            else:
-                json_error = (tool_call_flags.get(tool_id) or {}).get("json_error", "invalid JSON")
-                item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
+        if classification == "length":
+            item["text"] = (f"Tool call {raw_name!r} was cut off at max_tokens mid-call -- split the "
+                             f"operation into smaller steps and retry.")
             item["input"] = {}
-            # H10 Part A: both a length-truncated and an unrecoverably
-            # malformed call are "the model never produced usable args" --
-            # lumped under schema_invalid rather than growing the taxonomy.
             item["error_class"] = "schema_invalid"
             return item
 
-        basic_error = validate_tool_use(tu)
-        if basic_error is not None:
-            item["text"] = basic_error
-            item["error_class"] = "schema_invalid"
-            return item
+        name = tool_input = None
+        repaired = False
 
-        if not outcome.ok:
-            item["text"] = outcome.error_text
-            item["repaired"] = outcome.repaired
-            # H10 Part A: a duplicate call is never "invalid" -- classed
-            # "other" so it never inflates schema_invalid/not_found counts.
-            item["error_class"] = {"unknown_tool": "other", "invalid_args": "schema_invalid"}.get(
-                outcome.error_kind, "other")
-            return item
+        if classification == "malformed":
+            flags = tool_call_flags.get(tool_id) or {}
+            json_error = flags.get("json_error", "invalid JSON")
+            tool = self.tool_registry.get(raw_name) if raw_name else None
+            repaired_input = self._attempt_tool_repair(
+                tool_name=raw_name, schema=(tool.input_schema if tool is not None else None),
+                error_message=f"arguments were not valid JSON: {json_error}",
+                raw_input=flags.get("raw_input"),
+            ) if tool is not None else None
+            if repaired_input is None:
+                item["text"] = f"Tool call {raw_name!r} arguments were not valid JSON: {json_error}"
+                item["input"] = {}
+                # H10 Part A: both a length-truncated and an unrecoverably
+                # malformed call are "the model never produced usable
+                # args" -- lumped under schema_invalid rather than growing
+                # the taxonomy.
+                item["error_class"] = "schema_invalid"
+                return item
+            name, tool_input, repaired = raw_name, repaired_input, True
+        else:
+            basic_error = validate_tool_use(tu)
+            if basic_error is not None:
+                item["text"] = basic_error
+                item["error_class"] = "schema_invalid"
+                return item
 
-        name = outcome.block.get("name")  # possibly renamed by repair
-        tool_input = outcome.block.get("input") or {}
-        # A block promoted from a text-embedded leak (H2 scope B) is
-        # ALWAYS "repaired" for transparency -- it never arrived as a
-        # native call, regardless of whether its name/schema also happened
-        # to need fixing up.
-        repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
+            if not outcome.ok:
+                if outcome.error_kind == "invalid_args":
+                    resolved_name = outcome.block.get("name")
+                    tool = self.tool_registry.get(resolved_name) if resolved_name else None
+                    repaired_input = self._attempt_tool_repair(
+                        tool_name=resolved_name, schema=(tool.input_schema if tool is not None else None),
+                        error_message=outcome.error_text or "invalid arguments",
+                        raw_input=tu.get("input"),
+                    ) if tool is not None else None
+                    if repaired_input is not None:
+                        name, tool_input, repaired = resolved_name, repaired_input, True
+                if name is None:
+                    item["text"] = outcome.error_text
+                    item["repaired"] = outcome.repaired
+                    # H10 Part A: a duplicate call is never "invalid" --
+                    # classed "other" so it never inflates schema_invalid/
+                    # not_found counts.
+                    item["error_class"] = {"unknown_tool": "other", "invalid_args": "schema_invalid"}.get(
+                        outcome.error_kind, "other")
+                    return item
+            else:
+                name = outcome.block.get("name")  # possibly renamed by repair
+                tool_input = outcome.block.get("input") or {}
+                # A block promoted from a text-embedded leak (H2 scope B)
+                # is ALWAYS "repaired" for transparency -- it never
+                # arrived as a native call, regardless of whether its
+                # name/schema also happened to need fixing up.
+                repaired = outcome.repaired or bool(tu.get("_promoted_from_leak"))
         item.update(name=name, input=tool_input, repaired=repaired)
+
+        # Round 5b part 2 fix pass (live-run finding): a STRICTER,
+        # ollama/huggingface-only 3-in-a-row guard -- see `__init__`'s own
+        # comment on `_identical_call_guard_key`/`_count` for why this is
+        # separate from the generic loop breaker below (threshold 3, not
+        # 5/8; counts only an unbroken run of the IDENTICAL call, not a
+        # per-turn total). Same `BashOutput` exemption as the generic
+        # breaker, for the same reason (a legitimate poll loop must not
+        # be cut off after 3 polls) -- an exempt call leaves this guard's
+        # state untouched rather than resetting the run, so neither side
+        # of an exempt call miscounts.
+        if (self.route.dialect == "ollama" or self.route.provider == "huggingface") and name != "BashOutput":
+            guard_key = (name, _canonical_args(tool_input))
+            if guard_key == self._identical_call_guard_key:
+                self._identical_call_guard_count += 1
+            else:
+                self._identical_call_guard_key = guard_key
+                self._identical_call_guard_count = 1
+            if self._identical_call_guard_count >= 3:
+                item["text"] = (f"{name}: the model repeated the same tool call three times in a row -- "
+                                 f"stopping this turn so you can steer it.")
+                item["end_turn"] = True
+                item["error_class"] = "loop_breaker"
+                return item
 
         # H9 whole-tree review finding 8: polling a background job with
         # BashOutput(shell_id=...) -- Moonshot's OWN documented pattern for
@@ -4559,6 +5546,23 @@ class Session:
         slot["event"].set()
         return True
 
+    def resolve_approval(self, request_id: str, decision) -> bool:
+        """Halo 2.0.2 round D (brief item 2): called from the UI THREAD
+        (`Controller.answer_approval`, DIRECTLY -- same reasoning as
+        `resolve_permission`/`resolve_question`/`resolve_plan`: the
+        worker is parked in `agent/subagent.py`'s `_ask_approval_live`,
+        not polling `commands`) to answer a pending approval-gate card.
+        `decision` is `{"action": "accept"|"edit"|"stop", "instruction":
+        str|None}` (`ApprovalCard`'s own shape). Returns False when
+        nothing is waiting for `request_id` (already answered, or the
+        run was interrupted first)."""
+        slot = self._approval_waiters.get(request_id)
+        if slot is None:
+            return False
+        slot["decision"] = decision
+        slot["event"].set()
+        return True
+
     def resolve_plan(self, decision) -> bool:
         """Called from the UI THREAD (`Controller.answer_plan`, DIRECTLY --
         never through the command queue, same reasoning as
@@ -4584,32 +5588,54 @@ class Session:
 
     def _apply_pending_agent_notices(self, turn_no: int):
         """Pop every queued background-sub-agent-completion notice and
-        apply each as a user-role message (H6 scope F / dsh: "background
+        apply it as a user-role message (H6 scope F / dsh: "background
         jobs ... report completion as a user-role notice in the next
         step") -- called once at the START of `_turn_body`, so the model
         sees any sub-agent that finished while this session was between
         turns (or during a PRIOR turn's own tool dispatch) before it does
-        anything else this turn."""
+        anything else this turn.
+
+        Halo 2.0.2 round C (the owner's own background-streaming report):
+        a SINGLE notice is applied exactly as before (its own full text,
+        one user_message, one notification) -- but 2+, which used to
+        reach the model as that many separate full-length messages back
+        to back ("a flood of raw results"), are now collapsed into ONE
+        block by `_compact_notices_text` first."""
         with self._agent_notices_lock:
             notices, self._pending_agent_notices = self._pending_agent_notices, []
-        for text in notices:
-            self.log.append_user([{"type": "text", "text": text}], kind="agent_notice")
-            yield events.user_message(text, turn=turn_no)
-            yield events.notification(f"Sub-agent finished: {text.splitlines()[0]}")
+        if not notices:
+            return
+        if len(notices) == 1:
+            text = notices[0]
+            notif = f"Sub-agent finished: {text.splitlines()[0]}"
+        else:
+            text = _compact_notices_text(notices, noun="sub-agent")
+            notif = f"{len(notices)} background sub-agents finished while you were away"
+        self.log.append_user([{"type": "text", "text": text}], kind="agent_notice")
+        yield events.user_message(text, turn=turn_no)
+        yield events.notification(notif)
 
     def _apply_pending_job_notices(self, turn_no: int):
         """H8 scope A: the background-Bash-job sibling of
         `_apply_pending_agent_notices` (same dsh rule, same "called once at
-        the START of `_turn_body`" timing) -- a job that finished while this
-        session was between turns (or during a prior turn's own tool
-        dispatch) is applied as a user-role message before the model does
-        anything else this turn."""
+        the START of `_turn_body`" timing, same round-C compacting for 2+
+        queued notices) -- a job that finished while this session was
+        between turns (or during a prior turn's own tool dispatch) is
+        applied as a user-role message before the model does anything
+        else this turn."""
         with self._job_notices_lock:
             notices, self._pending_job_notices = self._pending_job_notices, []
-        for text in notices:
-            self.log.append_user([{"type": "text", "text": text}], kind="job_notice")
-            yield events.user_message(text, turn=turn_no)
-            yield events.notification(f"Background job finished: {text.splitlines()[0]}")
+        if not notices:
+            return
+        if len(notices) == 1:
+            text = notices[0]
+            notif = f"Background job finished: {text.splitlines()[0]}"
+        else:
+            text = _compact_notices_text(notices, noun="job")
+            notif = f"{len(notices)} background jobs finished while you were away"
+        self.log.append_user([{"type": "text", "text": text}], kind="job_notice")
+        yield events.user_message(text, turn=turn_no)
+        yield events.notification(notif)
 
     def _await_reply(self, waiters: dict, request_id: str, *, timeout: Optional[float] = None):
         """Block the WORKER thread until a UI-thread `resolve_*` call answers
@@ -4817,7 +5843,7 @@ class Session:
             Each item's `tool_result` is finalized (in ORIGINAL order) only
             once every child in this batch has actually finished."""
             nonlocal end_turn
-            from halo_harness.agent.subagent import MAX_CONCURRENT_AGENTS, run_agent_call
+            from halo_harness.agent.subagent import effective_max_concurrent, run_agent_call, run_org_call
             from halo_harness.tools.base import ToolResult
 
             q: "queue.Queue" = queue.Queue()
@@ -4836,7 +5862,13 @@ class Session:
                     if self.abort.is_set():
                         it["result"] = ToolResult("Sub-agent not started: interrupted by the user.", is_error=True)
                         return
-                    _, tr = run_agent_call(
+                    # Halo 2.0.2 round 2 (brief B): `org=` in the tool_use's
+                    # own input picks the org-running path instead of a
+                    # single sub-agent -- same split as tools/agent.py's
+                    # direct-dispatch fallback.
+                    _input = it["input"] if isinstance(it["input"], dict) else {}
+                    _dispatch = run_org_call if _input.get("org") else run_agent_call
+                    _, tr = _dispatch(
                         runtime=self.agent_runtime, tool_id=it["tool_id"], tool_input=it["input"],
                         tool_name=it["name"], on_event=q.put,
                     )
@@ -4847,7 +5879,14 @@ class Session:
                 finally:
                     q.put((_DONE, it))
 
-            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_AGENTS, len(agent_batch))) as pool:
+            # 2.0.2 review finding 10: `wrap_for_pool`, called on THIS
+            # (submitting) thread -- see `SessionConcurrencyGate`'s own
+            # docstring (agent/subagent.py) for why a bare `threading.
+            # local` cannot carry a nesting depth across the thread
+            # boundary a fresh pool worker always is, even for a single
+            # Agent tool_use (this pool is built regardless of count).
+            _cap = effective_max_concurrent(self.agent_runtime)
+            with self.agent_runtime.concurrency_semaphore.pool(max_workers=min(_cap, len(agent_batch)), limit=_cap) as pool:
                 for it in agent_batch:
                     pool.submit(_run_one, it)
                 remaining = len(agent_batch)
@@ -5215,19 +6254,27 @@ class Session:
         now drains it (capped) before returning, see that function."""
         old_model_raw = self.model_ref.raw
         self._fire_model_switch("PreModelSwitch", old_model=old_model_raw, new_model=model_ref.raw)
-        if model_ref.provider == "cx" and self.model_ref.provider != "cx":
-            from halo_harness.agent import cx_runtime
-            cx_runtime.prepare_conversation_so_far(self)
-        elif self.model_ref.provider == "cx" and (
-            model_ref.provider != "cx" or model_ref.model != self.model_ref.model
-        ):
-            # 2.0.2: a Codex thread is bound to its model at start/resume;
-            # the next cx: turn resumes the same thread under the new one.
-            from halo_harness.agent import cx_runtime
-            cx_runtime.close_cx(self)
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
             from halo_harness.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
+        elif model_ref.provider == "codex" and self.model_ref.provider != "codex":
+            # Round 5i part 2: the `cx:` counterpart of the cc: branch just
+            # above -- same reasoning (no codex thread exists yet for
+            # history that happened under a different provider).
+            from halo_harness.agent import codex_turn
+            codex_turn.prepare_conversation_so_far_cx(self)
+        elif self.model_ref.provider == "codex" and model_ref.provider != "codex":
+            # Round 5i part 2: unlike cc:, codex has no long-held process
+            # to prime/close for a MODEL change within codex (the next
+            # turn's fresh subprocess just reads `self.model_ref.model`
+            # and resumes the SAME codex thread id under the new model --
+            # see `codex_turn.turn_body_cx`) -- only an actual PROVIDER
+            # switch away from codex closes the bridge, for tidiness
+            # (an idle socket/thread otherwise lingers for the rest of the
+            # session). The log's own `cx_session_id` meta node is left
+            # alone, so switching back into cx: later still resumes it.
+            from halo_harness.agent import codex_runtime
+            codex_runtime.close_cx(self)
         elif self.model_ref.provider == "cc" and (
             model_ref.provider != "cc" or model_ref.model != self.model_ref.model
         ):
@@ -5384,6 +6431,10 @@ class Session:
         # would otherwise read as a lie the moment the next turn goes out.
         from halo_harness.providers.profiles import effort_display_override
         effort_tag = effort_display_override(self.provider_profile) or self.effort
+        # Round 5b (brief item 7): only an `ol:` route's own measured
+        # throughput is ever sent -- a model switch away from `ollama`
+        # must not keep showing a stale reading from the previous model.
+        throughput = self._last_ollama_throughput if self.model_ref.provider == "ollama" else None
         from halo_harness.providers.sub_usage import (
             maybe_refresh_cc_usage,
             subscription_usage,
@@ -5402,6 +6453,9 @@ class Session:
             total_input_tokens=self.cost_meter.total_input_tokens,
             total_output_tokens=self.cost_meter.total_output_tokens,
             effort=effort_tag,
+            ollama_tokens_per_second=(throughput or {}).get("tokens_per_second"),
+            ollama_prefill_seconds=(throughput or {}).get("prefill_seconds"),
+            ollama_offloaded=(throughput or {}).get("offloaded"),
             subscription_usage=subscription_usage(self.model_ref.provider, usage_cache_dir),
         )
 
@@ -5445,10 +6499,13 @@ class Session:
             # safe point a cc: turn never runs.
             from halo_harness.agent import cc_runtime
             return cc_runtime.steer_cc(self, text)
-        if self.model_ref.provider == "cx":
-            # 2.0.2: `turn/steer` into Codex's running turn.
-            from halo_harness.agent import cx_runtime
-            return cx_runtime.steer_cx(self, text)
+        if self.model_ref.provider == "codex":
+            # Round 5i part 2: codex exec has no live mid-turn channel at
+            # all (CODEX-RESEARCH.md section 7) -- `steer_cx` queues `text`
+            # and delivers it as soon as the current turn's subprocess
+            # exits, the documented fallback.
+            from halo_harness.agent import codex_turn
+            return codex_turn.steer_cx(self, text)
         with self._steer_lock:
             if not self._busy.is_set():
                 return False
@@ -5740,3 +6797,9 @@ class Session:
                 # calls resolve_plan() directly (this branch is unreachable
                 # while that wait is in flight).
                 self.resolve_plan(data)
+            elif kind == "approval_reply":
+                # Halo 2.0.2 round D (brief item 2): safety net only, same
+                # shape as "permission_reply"/"question_reply" above --
+                # Controller.answer_approval normally calls resolve_
+                # approval() directly.
+                self.resolve_approval(data.get("id"), data.get("decision"))

@@ -38,7 +38,7 @@ from halo_harness.config.agents_md import discover_agents
 from halo_harness.config.claude_json import is_trusted, load_claude_json
 from halo_harness.config.paths import bridge_home, env_compat, home, lookup_project
 from halo_harness.config.settings import resolve_settings
-from halo_harness.model import parse_model_ref, resolve_default_model_raw, resolve_model_profile
+from halo_harness.model import DEFAULT_MODEL_REF, parse_model_ref, resolve_default_model_raw, resolve_model_profile
 from halo_harness.output import PrintModeSink, StreamJsonSink
 from halo_harness.providers.routing import InvalidModelError
 from halo_harness.permissions import (
@@ -83,7 +83,115 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         if ant is None:
             return None
         return ProviderCreds(base_url=ant.base_url, api_key=ant.api_key)
+    if ref.provider == "ollama":
+        # Halo 2.0.3 round 2b: the ONE place print mode (`build_session`
+        # below), the TUI (`controller.py`'s own `_default_model_resolver`),
+        # `/model`, and the fallback chain (`agent/loop.py`'s
+        # `apply_next_fallback_model`) all resolve an `ol:` ref's
+        # credentials -- no other call site needs its own ollama creds
+        # code. `host.api_key` is unset for every host but an Ollama Cloud
+        # one (research doc Q7); `or ""` keeps `ProviderCreds.api_key` a
+        # plain str (its declared type), matching `stream_ollama_
+        # completion`'s own `req.creds.api_key or None` read on the way
+        # back out.
+        from halo_harness.providers.ollama import resolve_ollama_host
+        host = resolve_ollama_host(getattr(ref, "host", None), env)
+        if host is None:
+            return None
+        return ProviderCreds(base_url=host.url, api_key=host.api_key or "")
+    if ref.provider == "huggingface":
+        # Halo 2.0.3 round 4: `ref.host` set means `hf:endpoint/<name>` --
+        # a dedicated Inference Endpoint's OWN url/token, resolved from
+        # `huggingface.endpoints` and used as-is; `ref.host is None` means
+        # the router, resolved from HF_TOKEN. Pinned by
+        # tests/test_providers_huggingface.py: these two sources must never
+        # cross-wire (an endpoint's own token never substitutes for
+        # HF_TOKEN or vice versa).
+        #
+        # Round 5: `ref.local` (checked FIRST -- a local ref's `host` can
+        # ALSO be `None`, for the bare/default-server shape, which must
+        # never fall into the endpoint/router branches below) resolves
+        # through `providers.huggingface_local_resolve.resolve_local_
+        # server` -- a manual `huggingface.local_servers` entry (named or
+        # default) or, with none configured, the first auto-detected
+        # server; its OWN `api_key` (when set) is sent as this request's
+        # bearer, pinned apart from both HF_TOKEN and an endpoint's token
+        # the exact same way those two are already pinned apart from each
+        # other below.
+        if getattr(ref, "mlx", False):
+            # Round 5f: an EXACT registry lookup by repo id (`ref.model`),
+            # never the generic `ref.local` "most recently started wins"
+            # fallback below -- an `hf:mlx/<repo>` ref always names its
+            # exact repo, so resolving it must never return a DIFFERENT
+            # repo's managed server just because that one happened to
+            # start more recently. Lookup-ONLY, deliberately no side
+            # effect (`_resolve_creds` is called from several places,
+            # including a bare "is this configured" probe -- line ~790 --
+            # that must never itself spawn a process): the actual ENSURE/
+            # start-with-consent step runs once, earlier, in `build_
+            # session` below (or `doctor_local.py` for `--local`). `None`
+            # here (nothing started yet) is the ordinary "not configured"
+            # outcome every other provider branch on this page already has.
+            from halo_harness.providers.huggingface_local_resolve import resolve_managed_server_by_model
+            target = resolve_managed_server_by_model(ref.model)
+            if target is None:
+                return None
+            return ProviderCreds(base_url=target.base_url, api_key=target.api_key or "")
+        if ref.local:
+            from halo_harness.providers.huggingface_local_resolve import resolve_local_server
+            target = resolve_local_server(ref.host, env)
+            if target is None:
+                return None
+            return ProviderCreds(base_url=target.base_url, api_key=target.api_key or "")
+        if ref.host:
+            from halo_harness.providers.huggingface import resolve_huggingface_endpoint
+            ep = resolve_huggingface_endpoint(ref.host)
+            if ep is None:
+                return None
+            return ProviderCreds(base_url=ep.url, api_key=ep.token or "")
+        from halo_harness.providers.config import resolve_huggingface
+        hf = resolve_huggingface(env)
+        if hf is None:
+            return None
+        return ProviderCreds(base_url=hf.base_url, api_key=hf.api_key)
+    if ref.provider == "openai":
+        # Halo 2.0.3 round 5i part 1: `OPENAI_API_KEY` only -- no
+        # endpoint/local-server concept the way `huggingface` has; both
+        # the `openai-chat` and `openai-responses` dialects share this
+        # SAME credential pair (`providers.stream._run_phase1`/`_run_
+        # phase1_responses` each pick their own call_* with it).
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai(env)
+        if oai is None:
+            return None
+        return ProviderCreds(base_url=oai.base_url, api_key=oai.api_key)
     return None
+
+
+def _ensure_mlx_server_for_ref(ref, state_dir) -> None:
+    """Round 5f: the ONE place a session (print mode via `build_session`
+    below, and the TUI's initial launch via `tui/bootstrap.py`'s own call
+    to `build_session`) ensures a Halo-managed `mlx_lm.server` exists for
+    an `hf:mlx/<repo>` ref BEFORE the turn/profile-read-back that needs it
+    runs -- `_resolve_creds`'s own `ref.mlx` branch is deliberately lookup-
+    only (no side effect; it's called from several places, including a
+    bare "is this configured" probe) so this is where the real start-with-
+    consent step lives instead. A no-op for every other ref shape, and a
+    cheap registry-read no-op on every call AFTER the first for the SAME
+    repo (`ensure_mlx_server`'s own "already running" short-circuit) --
+    safe to call more than once per session (main ref, then the small
+    role's ref, which may name the same or a different mlx repo).
+    `confirm` is left at `ensure_mlx_server`'s own default (auto-proceed,
+    print the notice) -- the brief's own "`--yes` in print mode": there is
+    no interactive prompt loop wired this deep, and typing `hf:mlx/<repo>`
+    at all is the same explicit-action-is-consent rule every other `hf:`/
+    `or:` cloud ref already follows with no separate gate."""
+    if getattr(ref, "provider", None) != "huggingface" or not getattr(ref, "mlx", False):
+        return
+    from halo_harness.providers.huggingface_mlx import ensure_mlx_server
+    _target, lines = ensure_mlx_server(ref.model, state_dir=state_dir)
+    for line in lines:
+        print(f"halo: {line}", file=sys.stderr)
 
 
 def _resolve_dbx_config_for_headers(settings=None):
@@ -275,6 +383,11 @@ def _append_at_mention_snapshots(session, text: Optional[str], cwd: Path) -> Non
     for server in unresolved_server_mentions(text, mcp_manager=session.mcp_manager):
         warning = f"@{server}:... does not match any currently connected MCP server named {server!r}."
         session.log.append_snapshot([{"type": "text", "text": warning}], kind="at_mention")
+        # review finding 23 / parity gap: the snapshot above is model-only
+        # context; there is no live UI to notice here (print/headless
+        # mode -- controller.py's own identical call site pushes a TUI
+        # notice instead), so the user's only view of it is this line.
+        print(f"halo: {warning}", file=sys.stderr)
 
 
 def _resolve_local_file_spec(raw: str, *, cwd: Path) -> "Optional[Path]":
@@ -707,16 +820,109 @@ def build_session(
         last_model_raw = launch_state.resolve_last_model(cwd, memory=model_memory)
         if last_model_raw:
             try:
-                parse_model_ref(last_model_raw, routes)  # validate only -- parsed for real just below
-                model_raw = last_model_raw
+                last_ref = parse_model_ref(last_model_raw, routes)  # validate only -- parsed for real just below
             except InvalidModelError as e:
                 print(f"halo: the last-used model {last_model_raw!r} is no longer available ({e}) -- "
                       f"using the configured default instead", file=sys.stderr)
+            else:
+                # review finding 35: `parse_model_ref` only ever rejects an
+                # explicitly DISABLED provider -- a model whose provider is
+                # merely "not set up" (no credentials at all, e.g. a global
+                # last model remembered from a DIFFERENT box) used to be
+                # accepted silently and built with `creds=None`, failing
+                # every turn with no notice at all. `cc:` (and anything
+                # else `_resolve_creds` doesn't model) needs no
+                # `ProviderCreds` at all -- that is not this check's
+                # business, so it is skipped entirely for those. Halo
+                # 2.0.3 round 2b: `ollama` added -- a missing/renamed
+                # `ollama.hosts` entry (a stale `ol:<model>@<hostname>`
+                # remembered from a DIFFERENT box that actually had that
+                # named host) is this provider's own equivalent of
+                # "no credentials configured", now that `_resolve_creds`
+                # models it too. 2.0.3 round 4: `huggingface` added for the
+                # SAME reason -- a stale `hf:endpoint/<name>` remembered
+                # from a box whose `huggingface.endpoints` no longer has
+                # that name (or no HF_TOKEN for a stale router ref).
+                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama", "huggingface", "openai")
+                        and _resolve_creds(last_ref, settings) is None):
+                    print(f"halo: the last-used model {last_model_raw!r} has no credentials configured on "
+                          f"this box -- using the configured default instead", file=sys.stderr)
+                else:
+                    model_raw = last_model_raw
     if model_raw is None:
         model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
     model_ref = parse_model_ref(model_raw, routes)
+    if model_ref.provider == "databricks":
+        # Halo 2.0.2 round 5 (Qwen-at-work brief, item 1): a decision-only/
+        # judge endpoint (databricks-openjev-qwen35-4b and any other
+        # `decision_only_info` match) is never the session model, however
+        # it was chosen (--model, the last-used model, or the configured
+        # default) -- routed to the `judge` role automatically instead
+        # (the same action `Controller.set_model` takes for a MID-session
+        # `/model` switch), falling this session back to the ordinary
+        # configured default so launch never just fails outright over it.
+        from halo_harness.providers.profiles import decision_only_notice
+        _decision_notice = decision_only_notice(model_ref.model)
+        if _decision_notice:
+            from halo_harness.theme import set_config_value
+            set_config_value("roles.judge", model_ref.raw)
+            print(f"halo: {_decision_notice}\n`judge` role set to {model_ref.raw} -- "
+                  f"using the configured default model for this session instead", file=sys.stderr)
+            model_raw = resolve_default_model_raw(routes, env=settings.effective_env)
+            model_ref = parse_model_ref(model_raw, routes)
+            # 2.0.2 review finding 8 (major): `resolve_default_model_raw`'s
+            # OWN "configured default" chain (config.model, HALO_MODEL,
+            # routes.default, or the work-env `dbx:<ANTHROPIC_MODEL>`
+            # shortcut) is exactly what pointed at the decision-only
+            # endpoint in the first place -- calling it again with the
+            # SAME inputs just returned the SAME ref, uncaught, so "a
+            # session can never start on it" failed precisely when the
+            # CONFIGURED default itself was the decision-only endpoint.
+            # Falls all the way through to the hardcoded DEFAULT_MODEL_REF
+            # instead, which this whole block never routes to `roles.
+            # judge` (it isn't Databricks), so this loop can run at most
+            # once.
+            if model_ref.provider == "databricks" and decision_only_notice(model_ref.model):
+                print(f"halo: the configured default model is ALSO a decision-only endpoint -- "
+                      f"using {DEFAULT_MODEL_REF!r} for this session instead", file=sys.stderr)
+                model_raw = DEFAULT_MODEL_REF
+                model_ref = parse_model_ref(model_raw, routes)
+    # V2c (H15): the persisted role table (config.json's own "roles" --
+    # itself already seeded from a team.json at `init` time -- or, only
+    # when that's completely empty AND this session's own model is a
+    # Databricks one, the documented cost-aware default) plus this run's
+    # own `--role name=model` CLI overrides (always win, even over the
+    # persisted table -- see `config.agents_md.resolve_agent_model`'s own
+    # docstring for the full chain). Resolved HERE (moved up from just
+    # below the small-model block) so `roles.small`/`--role small=...`
+    # can actually be consulted for `small_raw` right below -- 2.0.2
+    # review finding 12 (major): neither was ever read before this;
+    # the session's own small model came only from `--small-model`/
+    # `HALO_MODEL_SMALL`/`routes.json`'s own "small"/the main model,
+    # even though both the built-in presets AND the Databricks cost-
+    # aware table set `roles.small`, and ROLES.md documents it driving
+    # summaries/titles/`/improve`/the compaction fallback.
+    from halo_harness.roles import parse_role_flags, resolve_role_table, role_value_parts
+    cli_roles = parse_role_flags(roles_flag)
+    persisted_roles = resolve_role_table(provider=model_ref.provider)
+    _small_role_raw = cli_roles.get("small")
+    _small_role_from_table = _small_role_raw is None
+    if _small_role_raw is None:
+        _small_role_raw = persisted_roles.get("small")
+    if _small_role_from_table and _small_role_raw is not None:
+        # Round 5b part 2 (brief item 3): a TABLE value only (never a
+        # `--role small=...` override THIS run -- that stays untouched,
+        # same rule `roles.resolve_role_ref` already applies for every
+        # other role) redirected to the main model when it would not fit
+        # beside it on the SAME Ollama host -- see `roles.vram_aware_
+        # override`'s own docstring. `model_ref` is already resolved
+        # above (the session's own main ref).
+        from halo_harness.roles import vram_aware_override
+        _small_role_raw, _small_vram_reason = vram_aware_override("small", _small_role_raw, main_ref=model_ref)
+    _small_role_model, small_effort = role_value_parts(_small_role_raw)
+
     explicit_small_raw = small_model_ref_raw or env_compat("MODEL_SMALL")
-    small_raw = explicit_small_raw or routes.get("small") or model_raw
+    small_raw = explicit_small_raw or _small_role_model or routes.get("small") or model_raw
     try:
         small_ref = parse_model_ref(small_raw, routes) if small_raw else None
     except InvalidModelError:
@@ -736,19 +942,14 @@ def build_session(
         if explicit_small_raw:
             print(f"halo: --small-model/HALO_MODEL_SMALL {small_raw!r} does not resolve -- "
                   f"using the main model {model_raw!r} for background calls instead", file=sys.stderr)
+    # Round 5f: ensure an `hf:mlx/<repo>` main or small-role ref has a
+    # running Halo-managed mlx_lm.server BEFORE the profile read-back just
+    # below needs one -- see `_ensure_mlx_server_for_ref`'s own docstring.
+    _ensure_mlx_server_for_ref(model_ref, state_dir)
+    if small_ref is not None:
+        _ensure_mlx_server_for_ref(small_ref, state_dir)
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
-
-    # V2c (H15): the persisted role table (config.json's own "roles" --
-    # itself already seeded from a team.json at `init` time -- or, only
-    # when that's completely empty AND this session's own model is a
-    # Databricks one, the documented cost-aware default) plus this run's
-    # own `--role name=model` CLI overrides (always win, even over the
-    # persisted table -- see `config.agents_md.resolve_agent_model`'s own
-    # docstring for the full chain).
-    from halo_harness.roles import parse_role_flags, resolve_role_table
-    cli_roles = parse_role_flags(roles_flag)
-    persisted_roles = resolve_role_table(provider=model_ref.provider)
 
     # H12 Part C (RECOMMENDATIONS.md P0 #3): a per-family Edit context-line
     # hint, appended to the frozen registry's OWN Edit tool INSTANCE
@@ -891,7 +1092,23 @@ def build_session(
             denied |= {r.strip() for r in cli_disallow if "(" not in r and r.strip().startswith("mcp__")}
             survivors = [t for t in all_mcp if t[1] not in denied]
 
-            cap = host_cap(model_ref.provider)
+            # Halo 2.0.3 round 3 (brief item 3): an ollama ref's initial
+            # freeze/preload budget already respects its context class --
+            # without this, the INITIAL preload could fill the catalog
+            # past the (smaller) cap `Session._sync_ollama_tools_cap`
+            # would otherwise only discover and shrink to on the first
+            # real turn, and eviction can never remove a FROZEN/preloaded
+            # tool (`SessionCatalog._evict_one`'s own contract), so getting
+            # this right at build time avoids a permanently-stuck-over-cap
+            # catalog for a small-context local model.
+            ollama_tools_max = None
+            if model_ref.provider == "ollama":
+                try:
+                    from halo_harness.providers.ollama_hw import resolve_context_decision
+                    ollama_tools_max = resolve_context_decision(model_ref).tools_max
+                except Exception:
+                    ollama_tools_max = None
+            cap = host_cap(model_ref.provider, ollama_tools_max)
             cap_budget = max(0, cap - len(frozen_registry.names()))
             preload_names = set((load_rolo_config().get("mcpPreload") or []))
             # finding 13 must-do: server-level "alwaysLoad" preloads every
@@ -962,9 +1179,23 @@ def build_session(
                 from halo_harness.tools.tool_search import ToolSearchTool
                 frozen_registry.add_tool(ToolSearchTool())
 
+            # Halo 2.0.3 round 3: `cap` above was sized from the context
+            # class BEFORE `ToolSearchTool`/the preload loop could add
+            # anything further to `frozen_registry` -- never let the
+            # catalog's own stored cap end up SMALLER than what's already
+            # irrevocably frozen in it (eviction can only ever remove a
+            # LOADED-DEFERRED tool, never one of these), or the very next
+            # request would raise ToolCatalogTooLarge against a catalog
+            # that was never actually allowed to shrink.
+            cap = max(cap, len(frozen_registry.names()))
             session_catalog = SessionCatalog(
                 registry=frozen_registry, deferred=deferred, manager=mcp_manager, cap=cap,
                 vision=model_profile.vision, audio=model_profile.audio, family=family, names=frozen_registry.names(),
+                # review finding 30: so a connector `add_connector_tools`
+                # loads LATER (background discovery, or a mid-session
+                # ToolSearch hit) is filtered the same way the warm-cache
+                # loop just above already filtered every OTHER connector.
+                tools_subset=tools_subset, bare_denied_names=bare_denied_names,
             )
             mcp_servers_for_prompt = [
                 {"name": name, "instructions": h.instructions}
@@ -1022,6 +1253,19 @@ def build_session(
         from halo_harness.providers.config import merge_databricks_headers
         dbx_cfg = _resolve_dbx_config_for_headers(settings)
         extra_headers = merge_databricks_headers(dbx_cfg.custom_headers if dbx_cfg else None)
+    if model_ref.provider == "huggingface" and not model_ref.host and not model_ref.local:
+        # Halo 2.0.3 round 4 (brief item 1): `X-HF-Bill-To` is a ROUTER-only
+        # header (research doc section 9: Team/Enterprise billing a
+        # specific org) -- `model_ref.host` set means `hf:endpoint/<name>`
+        # (a dedicated endpoint, its own compute-time billing, no such
+        # header), so this is gated to the router shape only. Round 5:
+        # `not model_ref.local` added -- a bare `hf:local/<model>` ALSO
+        # leaves `host` unset, and a local server gets no router billing
+        # header either.
+        from halo_harness.providers.huggingface import resolve_huggingface_bill_to
+        bill_to = resolve_huggingface_bill_to()
+        if bill_to:
+            extra_headers = {**(extra_headers or {}), "X-HF-Bill-To": bill_to}
     if cli_flags.get("betas"):
         # W4a `--betas`: "Beta headers to include in API requests (API key
         # users only)" -- a comma-joined `anthropic-beta` header, the real
@@ -1094,7 +1338,8 @@ def build_session(
     )
     session = Session(
         cwd=cwd, model_ref=model_ref, model_profile=model_profile, creds=creds, state_dir=state_dir,
-        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref, session_log=session_log,
+        model_label=model_ref.raw, session_context=ctx, small_model_ref=small_ref,
+        small_model_effort=small_effort, session_log=session_log,
         max_turns=max_turns, openrouter_base_url=openrouter_base_url, effort=effort,
         effort_source=effort_source,
         extra_headers=extra_headers, permission_engine=permission_engine,
@@ -1118,6 +1363,11 @@ def build_session(
     # session's own claude subprocess -- a no-op session.close_cc() when
     # cc: was never used.
     atexit.register(session.close_cc)
+    # Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits unless
+    # keep: true" -- same belt-and-suspenders atexit safety net alongside
+    # the two just above; a no-op when `halo local serve` was never used
+    # this run (an empty/absent registry file).
+    atexit.register(_stop_managed_local_servers_quietly)
 
     command_registry = Registry.discover(cwd, home(), plugin_roots=plugin_roots)
     if not bare:
@@ -1182,6 +1432,21 @@ def maybe_create_worktree(cwd: Path, cli_flags: dict) -> Path:
     return cwd
 
 
+def _stop_managed_local_servers_quietly() -> None:
+    """Halo 2.0.3 round 5c (brief item 3): "stopped when Halo exits unless
+    keep: true" -- called from BOTH the explicit `finally:` block below
+    AND the `atexit.register` safety net right after `SessionBuild`
+    (mirrors `session.job_registry.kill_all`/`session.close_cc`'s own
+    belt-and-suspenders pair). Idempotent (an already-empty registry is a
+    no-op) and never raises -- a managed server is a nice-to-have cleanup,
+    never worth crashing the exit path over."""
+    try:
+        from halo_harness.providers.local_runtime import stop_all_managed_servers_except_kept
+        stop_all_managed_servers_except_kept()
+    except Exception:
+        pass
+
+
 def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
     """W5 (carried from W4a): the session-end half of `-w/--worktree`'s own
     WorktreeRemoved trigger (the other half is the explicit `halo worktree
@@ -1207,7 +1472,16 @@ def maybe_remove_worktree_on_exit(cli_flags: dict, session) -> bool:
         return False
     try:
         from halo_harness.worktree import remove_worktree
-        if not remove_worktree(Path(wt_created_path)):
+        removed, reason = remove_worktree(Path(wt_created_path))
+        if not removed:
+            # review finding 28: a dirty worktree is kept, never force-
+            # removed (its uncommitted edits are this -p -w run's own
+            # output) -- said plainly instead of a silent no-op, so it is
+            # never simply stranded with no indication it is still there.
+            if reason == "dirty":
+                print(f"halo: kept the worktree at {wt_created_path} -- it has uncommitted changes "
+                      f"(remove it yourself with `halo worktree rm {wt_created_path}` once you're "
+                      f"done with it)", file=sys.stderr)
             return False
         session._fire_worktree_removed(wt_created_path)
         return True
@@ -1268,6 +1542,25 @@ def run_print_mode(
     cli_flags = dict(cli_flags or {})
     cwd = maybe_create_worktree(cwd, cli_flags)
 
+    # Halo 2.0.2 W7 round 1 (brief F): "set halo at start and restore the
+    # previous title at exit" -- captured/set as early as possible (before
+    # even the --session-id/--resume validation below, which can exit
+    # this function in just a few lines), restored on EVERY exit path:
+    # each early `return 2` below calls `_pm_title_exit`, and the existing
+    # outer `finally` further down (already the one place guaranteed to
+    # run on every OTHER exit -- a normal return or an exception) restores
+    # it last, after every other cleanup. `_pm_prev_title` is None on a
+    # platform/terminal this process can't read a title back from (POSIX)
+    # -- `restore()` is then a no-op, i.e. "otherwise leave it" (brief).
+    from halo_harness.termtitle import get_terminal_title, set_terminal_title
+    _pm_prev_title = get_terminal_title()
+    set_terminal_title("halo")
+
+    def _pm_title_exit(code: int) -> int:
+        if _pm_prev_title is not None:
+            set_terminal_title(_pm_prev_title)
+        return code
+
     # must-do: validated FIRST, before anything (incl. MCP) starts -- the
     # old position (right before `Session(...)`, well after `build_manager`
     # already spawned real MCP subprocesses) meant a bad --session-id
@@ -1276,7 +1569,7 @@ def run_print_mode(
     # rather than starting-then-cleaning-up.
     if session_id and not agent_sessions.is_valid_session_id(session_id):
         print(f"halo: --session-id must be a valid UUID, got {session_id!r}", file=sys.stderr)
-        return 2
+        return _pm_title_exit(2)
     if resume is not None and resume != "" and not continue_:
         # H13 Part C ("--resume <text> picks the unique match or opens the
         # picker filtered"): print mode has no picker to open, so a genuine
@@ -1294,11 +1587,11 @@ def run_print_mode(
             for m in matches[:8]:
                 label = m.get("title") or m.get("summary") or "(no summary)"
                 print(f"  {m['id']}  {label}", file=sys.stderr)
-            return 2
+            return _pm_title_exit(2)
         _resolved_probe, resume_err = agent_sessions.resolve_resume(cwd, resume)
         if _resolved_probe is None and resume_err:
             print(f"halo: --resume: {resume_err}", file=sys.stderr)
-            return 2
+            return _pm_title_exit(2)
 
     # u2-h3b finding 9: everything through a ready-to-drive Session is now
     # the ONE shared builder both -p and the TUI call -- see
@@ -1544,6 +1837,10 @@ def run_print_mode(
             session.job_registry.kill_all()
         except Exception:
             pass
+        # Halo 2.0.3 round 5c (brief item 3): a model served by `halo local
+        # serve`/the `/local` dialog's `s` key must never outlive the
+        # session that started it either, unless `keep: true`.
+        _stop_managed_local_servers_quietly()
         if mcp_manager is not None:
             mcp_manager.close_all()
         if cli_flags.get("no_session_persistence"):
@@ -1583,3 +1880,10 @@ def run_print_mode(
         # in. Pulled into its own function (below) so the decision itself
         # is unit-testable without driving a whole print-mode session.
         maybe_remove_worktree_on_exit(cli_flags, session)
+        # Halo 2.0.2 W7 round 1 (brief F): restores whatever title was
+        # there before this run started (a no-op when nothing was
+        # captured) -- last, after every other cleanup above, on every
+        # exit path this outer `finally` already covers (a normal
+        # return, an early stream-json `return 2`, or an exception).
+        if _pm_prev_title is not None:
+            set_terminal_title(_pm_prev_title)

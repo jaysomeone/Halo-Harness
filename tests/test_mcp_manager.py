@@ -758,6 +758,122 @@ def test_http_transport_raises_the_original_error_when_sse_also_fails(ctx: Ctx):
         http_sse.connect_http, http_sse.connect_sse = orig_http, orig_sse
 
 
+# ---- Halo 2.0.2 round C: connection-refused/DNS-failure fail fast ---------
+
+@test
+def test_preflight_tcp_reachability_raises_fast_on_connection_refused(ctx: Ctx):
+    """Halo 2.0.2 round C: "connection refused ... fail fast ... instead
+    of waiting out MCP_TIMEOUT" -- a FAKE `open_connection` that raises
+    ConnectionRefusedError immediately (standing in for the real OS-level
+    refusal, verified separately to behave this way for real) must come
+    straight back as `ConnectionRefusedError`, never swallowed/retried."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _refused(host, port):
+        raise ConnectionRefusedError(f"[Errno 111] Connection refused: {host}:{port}")
+
+    raised = None
+    try:
+        asyncio.run(http_sse.preflight_tcp_reachability(
+            "http://127.0.0.1:9/mcp", timeout=5.0, open_connection=_refused))
+    except ConnectionRefusedError as e:
+        raised = e
+    ctx.check(f"raises ConnectionRefusedError naming host:port, got {raised!r}",
+              raised is not None and "127.0.0.1:9" in str(raised))
+
+
+@test
+def test_preflight_tcp_reachability_raises_fast_on_dns_failure(ctx: Ctx):
+    """Halo 2.0.2 round C: "DNS failure fail fast" -- `socket.gaierror`
+    IS an `OSError` (same branch as connection-refused), covered by the
+    same fast-fail path."""
+    import asyncio
+    import socket
+    from halo_harness.mcp import http_sse
+
+    async def _no_such_host(host, port):
+        raise socket.gaierror("getaddrinfo failed")
+
+    raised = None
+    try:
+        asyncio.run(http_sse.preflight_tcp_reachability(
+            "http://does-not-resolve.invalid/mcp", timeout=5.0, open_connection=_no_such_host))
+    except ConnectionRefusedError as e:
+        raised = e
+    ctx.check(f"a DNS failure ALSO raises ConnectionRefusedError (never the raw gaierror), got {raised!r}",
+              raised is not None and "does-not-resolve.invalid" in str(raised))
+
+
+@test
+def test_preflight_tcp_reachability_is_inconclusive_for_a_merely_slow_server(ctx: Ctx):
+    """A server that's simply SLOW to accept (never confirmed refused)
+    must not be treated as dead -- this probe's own timeout elapsing
+    returns normally (never raises), leaving the real, longer connect
+    attempt to make the actual call."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _never_returns(host, port):
+        await asyncio.sleep(60)
+        raise AssertionError("should have been cancelled by the probe's own short timeout")
+
+    import time
+    t0 = time.monotonic()
+    asyncio.run(http_sse.preflight_tcp_reachability(
+        "http://slow.example/mcp", timeout=0.2, open_connection=_never_returns))
+    ctx.check(f"returned promptly (bounded by its OWN short timeout), got {time.monotonic()-t0:.2f}s",
+              time.monotonic() - t0 < 2.0)
+
+
+@test
+def test_preflight_tcp_reachability_succeeds_silently_on_a_real_connect(ctx: Ctx):
+    """The ordinary, overwhelmingly common case -- a reachable server --
+    must never raise or otherwise change anything downstream."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    class _FakeWriter:
+        def close(self):
+            pass
+
+    async def _ok(host, port):
+        return object(), _FakeWriter()
+
+    asyncio.run(http_sse.preflight_tcp_reachability(
+        "http://example.com/mcp", timeout=5.0, open_connection=_ok))  # must not raise
+    ctx.check("reaches here -- no exception for a successful connect", True)
+
+
+@test
+def test_connect_http_and_connect_sse_both_run_the_preflight_check_first(ctx: Ctx):
+    """Halo 2.0.2 round C: both transports must run the SAME preflight
+    check before any of the real (SDK-internal) connect work -- proven
+    by a fake `preflight_tcp_reachability` that raises unconditionally;
+    if either transport skipped it, it would instead fail later/
+    differently (or hang, per the real bug this closes) rather than with
+    this EXACT error."""
+    import asyncio
+    from halo_harness.mcp import http_sse
+
+    async def _boom(url, *, timeout, open_connection=None):
+        raise ConnectionRefusedError("preflight fired")
+
+    orig = http_sse.preflight_tcp_reachability
+    http_sse.preflight_tcp_reachability = _boom
+    try:
+        for coro_fn in (http_sse.connect_http, http_sse.connect_sse):
+            raised = None
+            try:
+                asyncio.run(coro_fn(url="http://127.0.0.1:9/mcp", headers={}, connect_timeout=1.0))
+            except ConnectionRefusedError as e:
+                raised = e
+            ctx.check(f"{coro_fn.__name__} ran the preflight check first, got {raised!r}",
+                      raised is not None and "preflight fired" in str(raised))
+    finally:
+        http_sse.preflight_tcp_reachability = orig
+
+
 # ---- Linux/H4 must-do: mcpLazy servers connect for discoverability --------
 
 @test
@@ -1004,6 +1120,32 @@ def test_manager_reconnect(ctx: Ctx):
         ok = mgr.reconnect("fake")
         ctx.check("reconnect() re-establishes the connection", ok is True)
         ctx.check("still connected after reconnect", mgr.status()[0]["state"] == "connected")
+    finally:
+        mgr.close_all()
+
+
+@test
+def test_manager_reconnect_skips_a_disabled_handle(ctx: Ctx):
+    """2.0.2 review finding 18 (major) pin: `reconnect()` used to
+    unconditionally set `h.state` to "pending"/"pending_approval"
+    BEFORE calling `start()`, which skipped `start()`'s own "disabled"
+    guard (by then `h.state` was no longer "disabled" at all) -- `R`
+    (reconnect all) silently brought back up any server the user just
+    disabled with `d`, and a single `r` on a disabled row did the
+    same. `h.state = "disabled"` here mirrors exactly what `Controller.
+    set_mcp_server_disabled(name, True)` does to a live handle."""
+    from halo_harness.mcp.manager import McpManager
+    mgr = McpManager({"fake": _fake_cfg()}, tool_env=dict(os.environ))
+    try:
+        mgr.start_all()
+        ctx.check("connected first", mgr.status()[0]["state"] == "connected")
+        h = mgr.handles["fake"]
+        h.close(timeout=5.0)
+        h.state = "disabled"
+        h.error = "disabled by the user (`/mcp` d)"
+        ok = mgr.reconnect("fake")
+        ctx.check(f"reconnect() refuses a disabled handle, got {ok!r}", ok is False)
+        ctx.check(f"the handle STAYS disabled, got {h.state!r}", h.state == "disabled")
     finally:
         mgr.close_all()
 
@@ -1445,6 +1587,42 @@ def test_f13_w6a_connect_with_oauth_retry_refreshes_once_then_succeeds(ctx: Ctx)
             os.environ.pop("BRIDGE_TEST_HOME", None)
         else:
             os.environ["BRIDGE_TEST_HOME"] = saved_home
+
+
+@test
+def test_run_all_scopes_the_state_dir_when_nothing_set_it_first(ctx: Ctx):
+    """Test hygiene (round B fix pass, notes file): THIS file is exactly
+    the one the notes file names -- a standalone `python tests/test_mcp_
+    manager.py` run used to write fake-server logs into the REAL
+    `~/.halo/mcp/`, because nothing in this file itself (unlike files
+    that call `ensure_scoped_state_dir_once()`/`ensure_default_provider_
+    credentials()` at module level) ever scoped `BRIDGE_TEST_HOME`
+    before a test touched `bridge_home()`. `run_all` itself now does
+    this, before running any test -- checked here by clearing both
+    state-dir vars, running an EMPTY test list through it, and confirming
+    `bridge_home()` resolves under a freshly-made temp dir afterward,
+    never the real machine home."""
+    import tests.helpers.runner as runner_mod
+    from halo_harness.config.paths import bridge_home
+    saved = {k: os.environ.get(k) for k in ("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_TEST_NO_BACKGROUND_NET")}
+    for k in saved:
+        os.environ.pop(k, None)
+    try:
+        real_home = Path.home() / ".halo"
+        runner_mod.run_all([], Ctx())
+        ctx.check("BRIDGE_TEST_HOME was set by run_all with nothing scoping it before",
+                  bool(os.environ.get("BRIDGE_TEST_HOME")))
+        ctx.check(f"BRIDGE_TEST_NO_BACKGROUND_NET was set too, got {os.environ.get('BRIDGE_TEST_NO_BACKGROUND_NET')!r}",
+                  os.environ.get("BRIDGE_TEST_NO_BACKGROUND_NET") == "1")
+        resolved = bridge_home()
+        ctx.check(f"bridge_home() resolves under the scoped temp dir, got {resolved}",
+                  str(resolved) != str(real_home) and str(resolved).startswith(os.environ["BRIDGE_TEST_HOME"]))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

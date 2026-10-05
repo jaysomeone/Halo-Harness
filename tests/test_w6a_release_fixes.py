@@ -809,6 +809,44 @@ def test_parity_betas_header_dropped_on_switch_away_from_anthropic_family(ctx: C
         _end(mock)
 
 
+# ---- 2.0.2 review finding 7 (major): a decision-only endpoint can never
+# ---- carry Judge's own hard-coded Explore tool set -------------------
+
+@test
+def test_2_0_2_finding7_judge_on_decision_only_endpoint_runs_tool_less(ctx: Ctx):
+    """2.0.2 review finding 7 (major) pin: the built-in Judge agent
+    always carries Explore's six tools -- a decision-only/judge endpoint
+    (`roles.judge` is auto-routed there by `Controller.set_model`/
+    `headless.build_session`) can never actually take a tool call, so
+    every one of its requests raised ToolsNotSupported before the model
+    ever answered. The child must build with an EMPTY tool registry
+    instead whenever the RESOLVED model itself can't take tools,
+    regardless of which agent/role asked for it."""
+    from halo_harness.agent.subagent import AgentRuntime, _build_child_session
+    from halo_harness.config.agents_md import AgentSpec
+    fh, mock = _begin()
+    try:
+        repo = fh["proj"]
+        parent = _new_parent_session(repo, mock)
+        spec = AgentSpec(name="Judge", description="d",
+                          tools=["Read", "Glob", "Grep", "Bash", "WebFetch", "ToolSearch"],
+                          body="You are a judging sub-agent.")
+        runtime = AgentRuntime(parent=parent, agents={"Judge": spec}, routes={})
+        child, _meta_path = _build_child_session(
+            runtime=runtime, spec=spec, agent_id="agentid-judge",
+            model_override="dbx:databricks-openjev-qwen35-4b",
+            parent_tool_use_id="toolu_1", background=False, role_override=None,
+        )
+        ctx.check(f"the resolved model really is decision-only (test premise), got {child.model_ref.raw}",
+                  child.model_ref.provider == "databricks")
+        ctx.check(f"the child's own tool registry is EMPTY, got {child.tool_registry.names()}",
+                  child.tool_registry.names() == [])
+        ctx.check("the system prompt tells the model it has no tools at all",
+                  "no tool call" in (child.session_context.system_prompt or "").lower())
+    finally:
+        _end(mock)
+
+
 if __name__ == "__main__":
     ctx = Ctx()
     results, passed, failed, skipped = run_all(TESTS, ctx)

@@ -25,7 +25,14 @@ from typing import Optional
 # `@server-name:some/uri` -- server names are the same charset MCP server
 # config names use (letters/digits/-/_/.); the URI itself is whatever the
 # server declared, taken verbatim up to the next whitespace.
-_AT_SERVER_RESOURCE_RE = re.compile(r"@([A-Za-z0-9_.\-]+):(\S+)")
+#
+# review finding 23: the leading `(?<![^\s])` requires start-of-text or a
+# preceding whitespace character -- without it, this matched the `@` inside
+# an ordinary `git@github.com:org/repo.git` clone URL or a bare `user@
+# host:22` SSH target as if it were a real `@server:uri` mention (server=
+# "github.com"/"host", uri="org/repo.git"/"22"), which `unresolved_server_
+# mentions` below then warned about as an unconnected MCP server.
+_AT_SERVER_RESOURCE_RE = re.compile(r"(?<![^\s])@([A-Za-z0-9_.\-]+):(\S+)")
 
 # H9 whole-tree review finding 14: `McpManager.resources()` is one live
 # `resources/list` RPC per CONNECTED server (MCP_TIMEOUT, 30s, each) -- a
@@ -121,6 +128,24 @@ def _resource_result_text(result) -> "Optional[str]":
     return joined
 
 
+def _connected_server_names(mcp_manager) -> "set[str]":
+    """review finding 23: `unresolved_server_mentions` used to check
+    against `_known_resources_cached`'s own keys, which only ever contains
+    a server that currently lists at least one resource -- a perfectly
+    real, connected server with no resources at all (most MCP servers:
+    tools only) was wrongly reported as "not connected". The real
+    membership test is connection state, read straight off each handle,
+    exactly like `McpManager.status()` does -- `.handles` is a real
+    `McpManager`-only attribute, so this is empty (never raises) for a
+    minimal, duck-typed test double that implements only `.resources()`/
+    `.read_resource()` (this package's own documented minimal mcp_manager
+    shape); `unresolved_server_mentions` below additionally falls back to
+    `_known_resources_cached`'s own keys for exactly that case, so such a
+    double's own resource-bearing servers are still recognized."""
+    handles = getattr(mcp_manager, "handles", None) or {}
+    return {name for name, h in handles.items() if getattr(h, "state", None) == "connected"}
+
+
 def unresolved_server_mentions(text: str, *, mcp_manager) -> "list[str]":
     """W4a misc: "unresolved `@server:uri` mentions warn visibly naming the
     server" -- every `@name:uri`-SHAPED candidate in `text` whose `name`
@@ -131,17 +156,32 @@ def unresolved_server_mentions(text: str, *, mcp_manager) -> "list[str]":
     user almost certainly meant a real server and mistyped or forgot to
     connect it). Returns the distinct, first-seen-order server names named
     this way; `[]` when there are none or `mcp_manager` is None (no MCP
-    client this session)."""
+    client this session).
+
+    review finding 23: "known" is `_connected_server_names` (handle state
+    -- catches a real, connected, resource-less server) OR a key of
+    `_known_resources_cached` (catches a duck-typed test double with no
+    `.handles` at all, this package's own documented minimal mcp_manager
+    shape, whose resource-bearing servers must still be recognized)."""
     if mcp_manager is None or not text:
         return []
     candidates = list(_AT_SERVER_RESOURCE_RE.finditer(text))
     if not candidates:
         return []
-    known = _known_resources_cached(mcp_manager)
+    try:
+        resource_known = set(_known_resources_cached(mcp_manager))
+    except Exception:
+        # Best-effort, same spirit as every other mcp_manager call in this
+        # module: a minimal/incompatible test double (no `.resources()`
+        # at all, or not weakly-referenceable -- `types.SimpleNamespace`
+        # instances aren't) must never crash this, only skip the duck-
+        # typed fallback for it.
+        resource_known = set()
+    connected = _connected_server_names(mcp_manager) | resource_known
     seen: list = []
     for m in candidates:
         server = m.group(1)
-        if server not in known and server not in seen:
+        if server not in connected and server not in seen:
             seen.append(server)
     return seen
 

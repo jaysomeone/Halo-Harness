@@ -283,7 +283,7 @@ def test_h5b_f17_thinking_tool_turn_through_real_session_merges_message_start_us
     # H10b: never set before -- the real in-process Session below fell
     # through to the REAL `~/.halo/sessions`, leaking
     # `ant:claude-sonnet-4.5-thinking-then-tool-then-reply` sessions into
-    # rolo's real session history (H10b report).
+    # the owner's real session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     mock = MockAnthropic().start()
     try:
@@ -357,7 +357,7 @@ def test_h5c_f05_steer_mid_thinking_before_signature_delta_logs_no_empty_node(ct
     fh = build_fake_home()
     # H10b: never set before -- the real in-process Session below fell
     # through to the REAL `~/.halo/sessions`, leaking
-    # `ant:claude-h5c-f05-thinking-and-signature` sessions into rolo's real
+    # `ant:claude-h5c-f05-thinking-and-signature` sessions into the owner's real
     # session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     mock = MockAnthropic().start()

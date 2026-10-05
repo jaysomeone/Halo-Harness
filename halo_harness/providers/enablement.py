@@ -16,9 +16,7 @@ AND token are found (same sources, plus `~/.databrickscfg`); Claude Code
 subscription (`cc:`) ONLY when `claude auth status` reports `loggedIn` with
 `authMethod` exactly `"claude.ai"` -- a `claude` driven by an API token or
 a custom base URL (a work box's own settings-driven login) never auto-
-enables it, loggedIn or not. Codex subscription (`cx:`, 2.0.2) the same
-way: only when `codex login status` reports a ChatGPT login, never an API
-key.
+enables it, loggedIn or not.
 
 Stored at `~/.halo/config.json`'s own `"providers"` key:
 `{"<name>": {"enabled": bool, ...non-secret settings}}` -- secrets stay in
@@ -34,7 +32,15 @@ from __future__ import annotations
 from typing import Optional
 
 # Order matters for display only (the `providers` table/`/providers`).
-PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "codex_subscription", "typesafe")
+# Halo 2.0.3 round 4: "huggingface" added -- unlike "ollama" (round 2/3,
+# surfaced only via its own `/ollama` panel and doctor section, never this
+# generic table), the round 4 brief explicitly asks for `/providers`/
+# `halo providers`/doctor's enabled-count line to show Hugging Face, so it
+# joins this table while "ollama" still deliberately does not. Round 5i
+# part 1: "openai" joins the same way, for the same reason (the brief:
+# "same should be... in the model list with what models they can use").
+PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "codex_subscription",
+                   "typesafe", "huggingface", "openai")
 
 LABELS = {
     "databricks": "Databricks",
@@ -43,6 +49,8 @@ LABELS = {
     "claude_subscription": "Claude Code subscription",
     "codex_subscription": "Codex subscription (ChatGPT)",
     "typesafe": "TypeSafe",
+    "huggingface": "Hugging Face",
+    "openai": "OpenAI API (key)",
 }
 
 # item 21.6: the `dbx:`/`or:`/`ant:`/`cc:` prefix table -- also in
@@ -50,7 +58,8 @@ LABELS = {
 # for a later feature"), so it has no prefix of its own.
 PREFIXES = {
     "databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:",
-    "claude_subscription": "cc:", "codex_subscription": "cx:", "typesafe": None,
+    "claude_subscription": "cc:", "typesafe": None, "huggingface": "hf:",
+    "openai": "oai:", "codex_subscription": "cx:",
 }
 
 # A caller naturally has `ModelRef.provider` ("cc"), `init_providers.py`'s
@@ -59,8 +68,9 @@ PREFIXES = {
 # one spelling.
 _ALIASES = {
     "cc": "claude_subscription", "claude": "claude_subscription",
-    "cx": "codex_subscription", "codex": "codex_subscription",
     "dbx": "databricks", "or": "openrouter", "ant": "anthropic",
+    "hf": "huggingface", "oai": "openai",
+    "cx": "codex_subscription", "codex": "codex_subscription",
 }
 
 
@@ -142,11 +152,6 @@ def enablement_display(name: str, *, state_dir=None, detected: Optional[bool] = 
         from halo_harness.providers.cc_models import is_claude_gateway_driven
         if is_claude_gateway_driven():
             return "not set up (claude is configured for a gateway)"
-    if name == "codex_subscription":
-        from halo_harness.providers.cx_models import cached_codex_login_status
-        status = cached_codex_login_status()
-        if status is not None and status.logged_in and status.method != "chatgpt":
-            return "not set up (codex is logged in with an API key, not ChatGPT)"
     return "not set up"
 
 
@@ -265,8 +270,49 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
         from halo_harness.init_providers import claude_login_available
         return claude_login_available()
     if name == "codex_subscription":
-        from halo_harness.providers.cx_models import codex_login_available
+        # Round 5i part 2: same cache-only reasoning as claude_subscription
+        # just above -- never spawns `codex login status` itself.
+        from halo_harness.providers.codex_models import codex_login_available
         return codex_login_available()
+    if name == "huggingface":
+        # 2.0.3 round 4 brief item 3: "HF_TOKEN present OR at least one
+        # endpoint configured" -- either source alone is enough (a user who
+        # only ever uses a dedicated endpoint never needs HF_TOKEN at all).
+        # Round 5: a manually-configured `huggingface.local_servers` entry
+        # is a THIRD, equally-sufficient source -- auto-DETECTED servers are
+        # deliberately NOT checked here (that needs a live network probe;
+        # this function's whole contract, shared with every other provider
+        # branch on this page, is config/env reads only, never network).
+        from halo_harness.providers.config import resolve_huggingface
+        if resolve_huggingface(env) is not None:
+            return True
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints, resolve_huggingface_local_servers
+        if resolve_huggingface_endpoints():
+            return True
+        return bool(resolve_huggingface_local_servers())
+    if name == "openai":
+        # Round 5i part 1: a single credential source (OPENAI_API_KEY) --
+        # no endpoint/local-server concept the way huggingface has.
+        from halo_harness.providers.config import resolve_openai
+        return resolve_openai(env) is not None
+    if name == "ollama":
+        # Round 5: config-only, never a network probe (same contract as
+        # every branch on this page) -- `ollama.hosts` carries at least one
+        # EXPLICIT entry, or `OLLAMA_HOST` names a specific daemon.
+        # Deliberately NOT added to PROVIDER_NAMES/LABELS/PREFIXES/
+        # _ALIASES above -- keeping "ollama" out of the generic
+        # `/providers`/`halo providers`/doctor's enabled-count table is a
+        # decision rounds 3/4 already made on purpose (see PROVIDER_NAMES's
+        # own comment) and round 5 does not revisit it. This branch exists
+        # ONLY so `halo init`'s new Ollama tab (`init_providers.py`) can ask
+        # `reachability.reachability_tag("ollama")` for a real probe
+        # without that tab first joining the generic table.
+        import os
+        e = env if env is not None else os.environ
+        if e.get("OLLAMA_HOST"):
+            return True
+        from halo_harness.theme import get_config_value
+        return bool(get_config_value("ollama.hosts", default=None))
     if name == "typesafe":
         import os
         e = env if env is not None else os.environ
@@ -301,7 +347,7 @@ def credentials_source(name: str, *, detected: Optional[bool] = None) -> Optiona
     if name == "claude_subscription":
         return "claude.ai login"
     if name == "codex_subscription":
-        return "ChatGPT login (codex)"
+        return "ChatGPT login"
     if name == "typesafe":
         return "env"
     return "env file / shell env"

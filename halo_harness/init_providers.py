@@ -14,23 +14,32 @@ from pathlib import Path
 from typing import Optional
 
 # Order matters: this is the exact row order `init`'s provider picker shows.
-PROVIDERS = ("databricks", "openrouter", "anthropic", "claude", "codex")
+PROVIDERS = ("databricks", "openrouter", "anthropic", "claude")
 
-# Providers set up by logging in to an installed CLI (no key to paste): their
-# tab shows a "Check login" button instead of a Save form.
-LOGIN_PROVIDERS = ("claude", "codex")
-
-# H15 Part A: the tabbed init view's own 5 tabs -- PROVIDERS plus TypeSafe,
-# which has no model catalog/default-model concept of its own (it only
-# ever stores TYPESAFE_API_KEY, "for a later feature") and so is kept OUT
-# of PROVIDERS itself -- every model-related helper above/below (the
-# cross-provider default-model pick, `configured_providers()`) must never
-# see it as a provider with models to offer.
-TAB_PROVIDERS = PROVIDERS + ("typesafe",)
+# H15 Part A: the tabbed init view's own tabs -- PROVIDERS plus Ollama,
+# Hugging Face (round 5) and TypeSafe. Deliberately NOT added to PROVIDERS
+# itself: that tuple also drives the OLD sequential `--provider`/`--preset`
+# CLI picker (`init_cli.py`'s own `_step_credentials`/`PROVIDER_LABEL`/
+# `PROVIDER_DEFAULT_MODEL` -- none of which have a branch/sensible
+# hardcoded default model for either, unlike every provider already in
+# PROVIDERS) and the cross-provider "Default model" step's own
+# `configured_providers()` (a few-second live probe for either would be
+# out of place blocking that step's synchronous `body()`) -- same reason
+# TypeSafe (no model catalog/default-model concept of its own) was
+# already kept out. `halo init`'s INTERACTIVE Providers tab (and its own
+# no-TTY/Textual-failure fallback, which is the OLD sequential picker
+# above and so never offers these two either -- a documented, deliberate
+# gap, not an oversight) is the only surface TAB_PROVIDERS drives;
+# `halo setup`/`/setup` never reach a providers step at all (`setup_cli.
+# py`'s own step list is `roles`/`orgs`/`summary` only), so neither is
+# affected by this tuple either way.
+TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "openai", "codex", "typesafe", "settings_sources")
 
 TAB_LABEL = {
     "databricks": "Databricks", "openrouter": "OpenRouter", "anthropic": "Anthropic API (key)",
-    "claude": "Claude Code subscription", "codex": "Codex subscription (ChatGPT)", "typesafe": "TypeSafe",
+    "claude": "Claude Code subscription", "ollama": "Ollama (local or LAN)", "huggingface": "Hugging Face",
+    "openai": "OpenAI API (key)", "codex": "Codex subscription", "typesafe": "TypeSafe",
+    "settings_sources": "Settings sources",
 }
 
 PROVIDER_LABEL = {
@@ -38,7 +47,6 @@ PROVIDER_LABEL = {
     "openrouter": "OpenRouter -- API key, full catalog",
     "anthropic": "Anthropic API -- API key, ant: models",
     "claude": "Claude subscription -- uses your claude.ai login through the installed claude, cc: models",
-    "codex": "Codex subscription -- uses your ChatGPT login through the installed codex, cx: models",
 }
 
 PROVIDER_DEFAULT_MODEL = {
@@ -46,7 +54,6 @@ PROVIDER_DEFAULT_MODEL = {
     "openrouter": "or:deepseek/deepseek-v4.1-flash",
     "anthropic": "ant:sonnet",
     "claude": "cc:sonnet",
-    "codex": "cx:default",
 }
 
 # 1.0.1 hotfix 13 point 5: `--preset` stays accepted as a deprecated alias
@@ -73,6 +80,14 @@ def claude_login_available() -> bool:
     return bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
 
 
+def codex_login_available() -> bool:
+    """`cx:`'s own counterpart -- cache-only, see `codex_models.
+    codex_login_available`'s own docstring (same reasoning as
+    `claude_login_available` just above)."""
+    from halo_harness.providers.codex_models import codex_login_available as _codex_login_available
+    return _codex_login_available()
+
+
 def provider_status(name: str) -> str:
     """`"configured"` / `"logged in"` (claude only) / `"not set up"` -- a
     status TAG only, never a decision: the picker's cursor position comes
@@ -87,7 +102,6 @@ def provider_status(name: str) -> str:
     if name == "claude":
         return "logged in" if claude_login_available() else "not set up"
     if name == "codex":
-        from halo_harness.providers.cx_models import codex_login_available
         return "logged in" if codex_login_available() else "not set up"
     return "not set up"
 
@@ -107,9 +121,6 @@ def detect_default_provider() -> str:
         return "anthropic"
     if claude_login_available():
         return "claude"
-    from halo_harness.providers.cx_models import codex_login_available
-    if codex_login_available():
-        return "codex"
     return "openrouter"
 
 
@@ -156,6 +167,11 @@ def _openrouter_entries(state_dir) -> "list[dict]":
             "max_output_tokens": entry.get("max_output_tokens"),
             "price_in_per_m": _price_per_m(pricing.get("prompt")),
             "price_out_per_m": _price_per_m(pricing.get("completion")),
+            # 2.0.2 review finding 28: carried through so `roles.py::_cheapest_
+            # model_entry` can skip a tool-less endpoint when the catalog
+            # says so -- `None` (most other providers' own row shapes never
+            # set this at all) means "unknown", never "no tools".
+            "supported_parameters": entry.get("supported_parameters"),
         })
     return out
 
@@ -180,25 +196,63 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
         from halo_harness.providers.cc_models import CC_ALIASES
         return _cc_ant_entries("cc", CC_ALIASES)
     if provider == "codex":
-        return cx_entries(state_dir)
+        # Round 5i part 2: the `cx:` counterpart -- not `_cc_ant_entries`
+        # (hardcoded to `cc_models`'s own functions), since `codex_models`
+        # never prices a row (a ChatGPT subscription has no metered price).
+        from halo_harness.providers.codex_models import (
+            CODEX_ALIASES, alias_display_detail as cx_alias_detail, profile_fields_for_codex_model,
+        )
+        out = []
+        for alias in CODEX_ALIASES:
+            fields = profile_fields_for_codex_model(alias) or {}
+            out.append({
+                "ref": f"cx:{alias}", "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": fields.get("max_output_tokens"),
+                "price_in_per_m": None, "price_out_per_m": None,
+                "detail": cx_alias_detail(alias),
+            })
+        return out
+    if provider == "huggingface":
+        # Round 5 fix: this branch never existed before (`huggingface` was
+        # never a `model_entries_for_provider` caller until now, since it
+        # was never in PROVIDERS/TAB_PROVIDERS) -- `halo providers`/
+        # `/providers`'s own "models" column (`providers_cli.py::_model_
+        # count`, keyed by `enablement.PROVIDER_NAMES`, which HAS included
+        # "huggingface" since round 4) always showed "-" for it
+        # regardless of configuration; this is the router's own cached
+        # catalog only (mirrors `_openrouter_entries` above) -- a local
+        # server/dedicated endpoint has no persisted catalog of its own to
+        # list here, same reason `refresh_tab_catalog` skips them too.
+        from halo_harness.providers.huggingface_catalog import load_hf_models_json
+        models = load_hf_models_json(state_dir) or {}
+        out = []
+        for mid in sorted(models):
+            entry = models[mid] or {}
+            pricing = entry.get("pricing") or {}
+            out.append({
+                "ref": f"hf:{mid}", "context_tokens": entry.get("context_length"),
+                "price_in_per_m": _price_per_m(pricing.get("prompt")),
+                "price_out_per_m": _price_per_m(pricing.get("completion")),
+            })
+        return out
+    if provider == "openai":
+        # Round 5i part 1: the real API's own cached id list (`GET /v1/
+        # models` carries no price/context -- docs/harness/OPENAI-
+        # RESEARCH.md section 3) with price/context merged in from the
+        # SEPARATE models.dev cross-check, same source `model.resolve_
+        # model_profile`'s own "openai" branch uses.
+        from halo_harness.providers.openai_catalog import load_oai_models_json, oai_picker_fields
+        models = load_oai_models_json(state_dir) or {}
+        out = []
+        for mid in sorted(models):
+            fields = oai_picker_fields(mid, state_dir)
+            out.append({
+                "ref": f"oai:{mid}", "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": None,
+                "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
+            })
+        return out
     return []
-
-
-def cx_entries(state_dir: Optional[Path] = None) -> "list[dict]":
-    """`cx:` picker rows: the ChatGPT account's own models (hidden ones
-    left out), with the effort levels each accepts."""
-    from halo_harness.providers.cx_models import cx_models, profile_fields_for_cx_model
-    out = []
-    for m in cx_models(state_dir):
-        if m.get("hidden"):
-            continue
-        fields = profile_fields_for_cx_model(m["id"], state_dir)
-        from halo_harness.providers.profiles import EFFORT_LEVELS
-        efforts = "/".join(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS)
-        out.append({"ref": f"cx:{m['id']}", "context_tokens": fields.get("context_tokens"),
-                    "max_output_tokens": fields.get("max_output_tokens"), "price_in_per_m": None,
-                    "price_out_per_m": None, "detail": f"effort {efforts}" if efforts else ""})
-    return out
 
 
 def configured_providers() -> "list[str]":
@@ -298,13 +352,87 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
         return {"configured": available, "source": "claude.ai login" if available else None,
                 "masked": "logged in" if available else None, "known_host": None, "fields": []}
     if provider == "codex":
-        from halo_harness.providers.cx_models import cached_codex_login_status, cached_rate_limits_line
-        status = cached_codex_login_status()
-        available = bool(status and status.logged_in and status.method == "chatgpt")
-        masked = (cached_rate_limits_line() or "logged in") if available else (
-            "logged in with an API key -- cx: needs a ChatGPT login" if status and status.logged_in else None)
-        return {"configured": available, "source": "ChatGPT login (codex)" if available else None,
-                "masked": masked, "known_host": None, "fields": []}
+        available = codex_login_available()
+        return {"configured": available, "source": "ChatGPT login" if available else None,
+                "masked": "logged in" if available else None, "known_host": None, "fields": []}
+    if provider == "settings_sources":
+        # Round 5i part 2: not a credential tab at all -- "configured"
+        # always True (there is nothing to set up, only a preference to
+        # pick), `masked` carries the one-line merged summary so the step
+        # opens already showing what it found, per the brief's "detects
+        # before it asks" pattern every other local-models step follows.
+        from halo_harness.providers.settings_merge import effective_settings, settings_primary
+        primary = settings_primary()
+        try:
+            view = effective_settings(Path.cwd())
+            summary = (f"Claude Code instructions: {view.claude_instructions_count} file(s); "
+                        f"Codex config.toml: {'found' if view.codex_config_found else 'not found'}; "
+                        f"Codex AGENTS.md chain: {view.codex_agents_md_count} file(s)")
+        except Exception:
+            summary = "(could not read Claude Code/Codex settings yet)"
+        return {"configured": True, "source": f"primary: {primary}", "masked": summary, "known_host": None,
+                "fields": [{"name": "primary", "label": "Primary when Claude Code and Codex disagree "
+                                                           "(claude/codex)", "secret": False}]}
+    if provider == "ollama":
+        # Round 5: config-only (`ollama.hosts`, never a live probe here --
+        # see this function's own "never computed here" contract).
+        # `fields` stay visible EVEN ONCE configured -- unlike every
+        # provider above, this tab is ADDITIVE ("add a LAN or cloud host"
+        # on top of whatever's already there), never a single secret that
+        # should disappear once set.
+        from halo_harness.theme import get_config_value
+        hosts_cfg = get_config_value("ollama.hosts", default=None)
+        hosts_cfg = [h for h in hosts_cfg if isinstance(h, dict)] if isinstance(hosts_cfg, list) else []
+        names = [h.get("name") or h.get("url") or "?" for h in hosts_cfg]
+        fields = [
+            {"name": "name", "label": "Host name (blank = default)", "secret": False},
+            {"name": "url", "label": "Ollama URL (blank = local daemon, 127.0.0.1:11434)", "secret": False},
+            {"name": "api_key", "label": "API key (optional, e.g. Ollama Cloud)", "secret": True},
+        ]
+        return {"configured": bool(hosts_cfg), "source": "config.json" if hosts_cfg else None,
+                "masked": (f"{len(hosts_cfg)} host(s): " + ", ".join(names)) if hosts_cfg else None,
+                "known_host": None, "fields": fields}
+    if provider == "huggingface":
+        # Round 5: THREE independent, equally-optional sources -- the
+        # router token, a dedicated endpoint, a manual local server --
+        # `fields` cover all three at once and stay visible even once one
+        # is configured, same "additive tab" reasoning as Ollama above
+        # (a user who already pasted HF_TOKEN can still come back and add
+        # a local server entry too).
+        from halo_harness.providers.config import resolve_huggingface
+        from halo_harness.providers.huggingface import resolve_huggingface_endpoints, resolve_huggingface_local_servers
+        parts = []
+        hf = resolve_huggingface(env)
+        if hf is not None:
+            parts.append(f"HF_TOKEN set ({redact(hf.api_key)})")
+        endpoints = resolve_huggingface_endpoints()
+        if endpoints:
+            parts.append(f"{len(endpoints)} endpoint(s)")
+        servers = resolve_huggingface_local_servers()
+        if servers:
+            parts.append(f"{len(servers)} local server(s)")
+        fields = [
+            {"name": "token", "label": "HF_TOKEN (router)", "secret": True},
+            {"name": "endpoint_name", "label": "Dedicated endpoint name (optional)", "secret": False},
+            {"name": "endpoint_url", "label": "Dedicated endpoint URL (optional)", "secret": False},
+            {"name": "endpoint_token", "label": "Dedicated endpoint token (optional)", "secret": True},
+            {"name": "local_url", "label": "Local server URL (optional -- blank relies on auto-detection)",
+             "secret": False},
+            {"name": "local_key", "label": "Local server API key (optional)", "secret": True},
+        ]
+        return {"configured": bool(parts), "source": "env file / config.json" if parts else None,
+                "masked": "; ".join(parts) if parts else None, "known_host": None, "fields": fields}
+    if provider == "openai":
+        # Round 5i part 1: a single credential source (no endpoint/local-
+        # server tiers the way huggingface has) -- same shape as the
+        # openrouter/anthropic branches just above.
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai(env)
+        if oai is not None:
+            return {"configured": True, "source": "env file", "masked": redact(oai.api_key),
+                    "known_host": None, "fields": []}
+        return {"configured": False, "source": None, "masked": None, "known_host": None,
+                "fields": [{"name": "key", "label": "OPENAI_API_KEY", "secret": True}]}
     if provider == "typesafe":
         key = env.get("TYPESAFE_API_KEY")
         if key:
@@ -315,7 +443,8 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
     return {"configured": False, "source": None, "masked": None, "known_host": None, "fields": []}
 
 
-_TAB_KEY_ENV = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "typesafe": "TYPESAFE_API_KEY"}
+_TAB_KEY_ENV = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY", "typesafe": "TYPESAFE_API_KEY"}
 
 
 def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict] = None) -> "tuple[bool, str]":
@@ -357,6 +486,61 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
             from halo_harness.roles import apply_role_preference
             apply_role_preference(team_cfg["roles"])
         return True, f"wrote DATABRICKS_HOST/DATABRICKS_TOKEN to {path}"
+    if provider == "ollama":
+        url = (values.get("url") or "").strip()
+        name = (values.get("name") or "").strip() or "default"
+        api_key = (values.get("api_key") or "").strip()
+        from halo_harness.providers.ollama import DEFAULT_OLLAMA_URL, _normalize_host_url
+        from halo_harness.theme import get_config_value, set_config_value
+        normalized = _normalize_host_url(url) if url else DEFAULT_OLLAMA_URL
+        hosts = get_config_value("ollama.hosts", default=None)
+        hosts = [h for h in hosts if isinstance(h, dict)] if isinstance(hosts, list) else []
+        entry = {"name": name, "url": normalized}
+        if api_key:
+            entry["api_key"] = api_key
+        if not hosts:
+            entry["default"] = True
+        hosts = [h for h in hosts if h.get("name") != name] + [entry]
+        set_config_value("ollama.hosts", hosts)
+        return True, f"added Ollama host {name!r} ({normalized}) to ollama.hosts"
+    if provider == "huggingface":
+        from halo_harness.theme import get_config_value, set_config_value
+        wrote = []
+        token = (values.get("token") or "").strip()
+        if token:
+            path = _env_file_path()
+            _write_env_var(path, "HF_TOKEN", token)
+            os.environ["HF_TOKEN"] = token
+            wrote.append("HF_TOKEN")
+        ep_name = (values.get("endpoint_name") or "").strip()
+        ep_url = (values.get("endpoint_url") or "").strip()
+        if ep_name and ep_url:
+            entries = get_config_value("huggingface.endpoints", default=None)
+            entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+            entry = {"name": ep_name, "url": ep_url}
+            ep_token = (values.get("endpoint_token") or "").strip()
+            if ep_token:
+                entry["token"] = ep_token
+            entries = [e for e in entries if e.get("name") != ep_name] + [entry]
+            set_config_value("huggingface.endpoints", entries)
+            wrote.append(f"huggingface.endpoints[{ep_name}]")
+        local_url = (values.get("local_url") or "").strip()
+        if local_url:
+            servers = get_config_value("huggingface.local_servers", default=None)
+            servers = [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
+            local_key = (values.get("local_key") or "").strip()
+            entry = {"name": "default", "url": local_url}
+            if local_key:
+                entry["api_key"] = local_key
+            if not servers:
+                entry["default"] = True
+            servers = [s for s in servers if s.get("name") != "default"] + [entry]
+            set_config_value("huggingface.local_servers", servers)
+            wrote.append("huggingface.local_servers[default]")
+        if not wrote:
+            return False, ("nothing entered -- paste HF_TOKEN, add a dedicated endpoint (name + URL), add a "
+                           "local server (URL), or Skip to rely on auto-detection")
+        return True, "wrote " + ", ".join(wrote)
     if provider in _TAB_KEY_ENV:
         key_env = _TAB_KEY_ENV[provider]
         value = (values.get("key") or "").strip()
@@ -371,9 +555,16 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
             return True, "claude.ai login confirmed"
         return False, "no claude.ai login found -- run `claude` once to log in first"
     if provider == "codex":
-        from halo_harness.agent.cx_runtime import preflight_cx
-        err = preflight_cx()  # refreshes the cached login status
-        return (False, err) if err else (True, "ChatGPT login confirmed")
+        from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
+        status = refresh_cached_codex_auth_status()
+        if status and status.logged_in and status.auth_method == "chatgpt":
+            return True, "ChatGPT login confirmed"
+        return False, "no ChatGPT login found -- run `codex login` once to log in first"
+    if provider == "settings_sources":
+        from halo_harness.providers.settings_merge import set_settings_primary
+        chosen = (values.get("primary") or "claude").strip().lower()
+        set_settings_primary("codex" if chosen == "codex" else "claude")
+        return True, f"settings.primary: {'codex' if chosen == 'codex' else 'claude'}"
     return False, f"unknown provider: {provider}"
 
 
@@ -406,10 +597,28 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
         root = derive_workspace_root(dbx.host)
         ok, _diff, note = refresh_dbx_catalog(state_dir, root, dbx.token)
         return ok, (note if not ok else "catalog refreshed")
-    if provider == "codex":
-        from halo_harness.providers.cx_models import refresh_cx_catalog
-        data = refresh_cx_catalog(state_dir=state_dir)
-        models = [m for m in data.get("models") or [] if not m.get("hidden")]
-        return (True, f"{len(models)} model(s) on this ChatGPT plan") if models else (
-            False, "codex did not list any models")
-    return True, ""  # claude / anthropic / typesafe: no catalog of their own to cache here
+    if provider == "huggingface":
+        from halo_harness.providers.config import resolve_huggingface
+        hf = resolve_huggingface()
+        if hf is None:
+            return True, ""  # endpoint/local-only setup -- no router catalog to fetch
+        from halo_harness.providers.huggingface_catalog import probe_huggingface_models, write_hf_models_json
+        try:
+            fetched = probe_huggingface_models(hf.base_url, hf.api_key)
+            write_hf_models_json(state_dir, fetched)
+            return True, f"{len(fetched)} model(s) cached"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    if provider == "openai":
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai()
+        if oai is None:
+            return False, "OpenAI API is not configured"
+        from halo_harness.providers.openai_catalog import probe_openai_models, write_oai_models_json
+        try:
+            fetched = probe_openai_models(oai.base_url, oai.api_key)
+            write_oai_models_json(state_dir, fetched)
+            return True, f"{len(fetched)} model(s) cached"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    return True, ""  # claude / anthropic / ollama / typesafe: no catalog of their own to cache here

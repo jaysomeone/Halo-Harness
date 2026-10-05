@@ -34,6 +34,17 @@ from halo_harness.model_display import ROW_HEADER, format_model_row
 from halo_harness.tui.dialogs.listnav import NavInput
 
 
+def _gym_score_suffix(model_ref: str) -> str:
+    """Best-effort, synchronous (`gym.picker_score_suffix` only ever reads
+    local `~/.halo/gym/*/*.json` files, never the network) -- "" on any
+    failure so a corrupt/unreadable gym result can never break the picker."""
+    try:
+        from halo_harness.gym import picker_score_suffix
+        return picker_score_suffix(model_ref)
+    except Exception:
+        return ""
+
+
 def _grouped(models: "list[dict]") -> "list[tuple[str, list[dict]]]":
     """Stable-groups `models` by their own `group` tag (ungrouped rows --
     OpenRouter, aliases, the synthesized current-model row -- share one
@@ -54,7 +65,12 @@ def _grouped(models: "list[dict]") -> "list[tuple[str, list[dict]]]":
 
 
 class ModelPicker(ModalScreen):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        # Halo 2.0.3 round 3 (brief item 5): set a role for the
+        # HIGHLIGHTED model without editing JSON/leaving this dialog.
+        Binding("u", "set_role", "Set role", show=True),
+    ]
     DEFAULT_CSS = """
     ModelPicker { align: center middle; }
     ModelPicker > Vertical { width: 90%; height: 80%; border: round $primary; background: $surface; padding: 1 2; }
@@ -83,6 +99,8 @@ class ModelPicker(ModalScreen):
     def compose(self):
         with Vertical():
             yield Static(f"Select a model (current: {self.current or '?'})", classes="dialog-title")
+            yield Static("Enter: select  |  u: set a role for the highlighted model  |  Esc: cancel",
+                          classes="dialog-subtitle")
             yield Static(ROW_HEADER, classes="dialog-subtitle")
             yield NavInput(placeholder="Filter models...", id="model-filter", option_list_id="model-list")
             yield OptionList(id="model-list")
@@ -108,6 +126,14 @@ class ModelPicker(ModalScreen):
                                                    disabled=True))
                 for m in members:
                     row_text = Text(format_model_row(m), no_wrap=True, overflow="ellipsis")
+                    # Halo 2.0.3 round 5d (brief item 2): "the picker shows
+                    # the gym score beside a model when one exists" -- a
+                    # local-file-only lookup (gym.picker_score_suffix),
+                    # never a network call, so it is safe right here in
+                    # the synchronous row-building loop.
+                    gym_suffix = _gym_score_suffix(m["ref"])
+                    if gym_suffix:
+                        row_text.append(gym_suffix, style="dim")
                     if self.last_used and m["ref"] == self.last_used:
                         row_text.append("  (last used)", style="dim italic")
                     option_list.add_option(Option(row_text, id=m["ref"]))
@@ -142,6 +168,164 @@ class ModelPicker(ModalScreen):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(str(event.option_id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_set_role(self) -> None:
+        """Halo 2.0.3 round 3 (brief item 5): `u` on the highlighted row
+        opens `RoleAssignPicker` for that model's own ref -- never
+        dismisses THIS dialog (the user may want to assign several roles
+        in one browse); `RoleAssignPicker` itself writes `roles.<name>`
+        via `roles.assign_role` (the SAME config-table mechanism `/roles`
+        already reads, no second one) and reports the result in
+        `#model-hint`."""
+        option_list = self.query_one("#model-list", OptionList)
+        highlighted = option_list.highlighted
+        if highlighted is None or highlighted >= len(self._filtered):
+            return
+        ref = self._filtered[highlighted]["ref"]
+        self.app.push_screen(RoleAssignPicker(ref, main_ref=self.current),
+                              lambda role_name: self._role_assigned(ref, role_name))
+
+    def _role_assigned(self, ref: str, role_name) -> None:
+        hint = self.query_one("#model-hint", Static)
+        if not role_name:
+            hint.update("")
+            return
+        hint.update(f"Set role {role_name!r} to {ref!r}.")
+        if role_name == "orchestrator" and ref.startswith("ol:"):
+            # brief: "choosing a non-session-capable local model as main
+            # prints the plain consequence sentence and proceeds" -- the
+            # assignment above ALREADY happened (proceeds immediately);
+            # the catalog read behind the consequence sentence is a real
+            # network call, so it runs off the UI thread and the hint is
+            # amended a moment later rather than ever blocking this dialog.
+            self.app.run_worker(lambda: self._consequence_worker(ref), thread=True,
+                                 name="role-consequence", group="role-consequence")
+
+    def _consequence_worker(self, ref: str) -> None:
+        from halo_harness.roles import main_role_consequence_note
+        note = main_role_consequence_note(ref, catalog_capabilities=_catalog_capabilities_for(ref))
+        if note:
+            self.app.call_from_thread(self._append_hint, note)
+
+    def _append_hint(self, note: str) -> None:
+        hint = self.query_one("#model-hint", Static)
+        current = hint.renderable
+        hint.update(f"{current}\n{note}" if current else note)
+
+
+def _catalog_capabilities_for(model_ref: str):
+    """Best-effort, OFF the UI thread (see `ModelPicker._consequence_
+    worker`, the only caller): a dim/offline host, or a model not yet in
+    the catalog, must never turn `u` into a hang or a traceback -- see
+    `roles.main_role_consequence_note`'s own "benefit of the doubt" note
+    for what `None` here means to that function."""
+    if not model_ref.startswith("ol:"):
+        return None
+    try:
+        from halo_harness.model import parse_model_ref
+        from halo_harness.providers.ollama import get_catalog, resolve_ollama_host
+        ref = parse_model_ref(model_ref)
+        host = resolve_ollama_host(ref.host)
+        if host is None:
+            return None
+        for row in get_catalog(host).get("models") or []:
+            if isinstance(row, dict) and (row.get("model") == ref.model or row.get("name") == ref.model):
+                return row.get("capabilities")
+    except Exception:
+        pass
+    return None
+
+
+class RoleAssignPicker(ModalScreen):
+    """Halo 2.0.3 round 3 (brief item 5): `u` on `ModelPicker`'s
+    highlighted row -- a short list of `roles.known_role_names()`,
+    pre-selecting `roles.default_role_for_ref(model_ref)` (`small` for
+    an `ol:` ref, never main by default). Enter writes `roles.<chosen>`
+    to `model_ref` (`roles.assign_role` -- cheap, a local config write,
+    safe to do right here on the UI thread) and dismisses with the
+    chosen role name; Escape dismisses with `None` (no write). The
+    brief's own "choosing a non-session-capable local model as main
+    prints the plain consequence sentence and proceeds" is `ModelPicker`'s
+    job, not this dialog's -- that sentence needs a real catalog read,
+    which never belongs on this (or any) Textual event handler; see
+    `ModelPicker._role_assigned`/`_consequence_worker`."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    RoleAssignPicker { align: center middle; }
+    RoleAssignPicker > Vertical { width: 50%; height: 60%; border: round $primary; background: $surface; padding: 1 2; }
+    RoleAssignPicker OptionList { height: 1fr; }
+    """
+
+    def __init__(self, model_ref: str, *, main_ref: str = "") -> None:
+        super().__init__()
+        self.model_ref = model_ref
+        # Round 5b part 2 (brief item 3): the session's CURRENT model --
+        # needed only for the "(same as main: fits beside it: no)" caption
+        # below; `""` (a caller that omits it, or no session is running
+        # yet) just means the caption never has anything to show.
+        self.main_ref = main_ref
+
+    def compose(self):
+        with Vertical():
+            yield Static(f"Set a role for {self.model_ref}", classes="dialog-title")
+            yield Static("Enter: set  |  Esc: cancel", classes="dialog-subtitle")
+            yield OptionList(id="role-assign-list")
+
+    def on_mount(self) -> None:
+        from halo_harness.roles import default_role_for_ref, known_role_names
+        option_list = self.query_one("#role-assign-list", OptionList)
+        default = default_role_for_ref(self.model_ref)
+        names = known_role_names()
+        for name in names:
+            option_list.add_option(Option(f"{name}{'  (default)' if name == default else ''}", id=name))
+        if default in names:
+            option_list.highlighted = names.index(default)
+        option_list.focus()
+        from halo_harness.roles import VRAM_AWARE_ROLE_NAMES
+        if self.main_ref and self.main_ref != self.model_ref and default in VRAM_AWARE_ROLE_NAMES:
+            # Round 5b part 2: a real GPU-memory/`/api/ps` read, off the UI
+            # thread (the SAME `run_worker(thread=True)` pattern every
+            # other live probe in this codebase uses) and short -- the
+            # dialog is already fully usable before this resolves; the
+            # caption just appears a moment later, or never if the probe
+            # never finishes before the screen closes (`query_one`'s own
+            # `except Exception: pass` below degrades silently).
+            self.run_worker(self._vram_reason_worker, thread=True, name="role-assign-vram-reason")
+
+    def _vram_reason_worker(self) -> None:
+        from halo_harness.model import parse_model_ref
+        from halo_harness.roles import default_role_for_ref, vram_aware_override
+        try:
+            default = default_role_for_ref(self.model_ref)
+            main = parse_model_ref(self.main_ref)
+            _value, reason = vram_aware_override(default, self.model_ref, main_ref=main)
+        except Exception:
+            reason = None
+        if reason:
+            self.app.call_from_thread(self._apply_vram_reason, default, reason)
+
+    def _apply_vram_reason(self, role_name: str, reason: str) -> None:
+        try:
+            option_list = self.query_one("#role-assign-list", OptionList)
+            option_list.replace_option_prompt(role_name, f"{role_name}  (default)  {reason}")
+        except Exception:
+            pass
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """`roles.assign_role` is a local config write (no network) --
+        safe to call right here; dismisses with the plain role-name
+        string either way (a write failure is vanishingly rare -- a
+        syntactically bad role name can't reach this list at all, since
+        every option id comes from `known_role_names()` -- so this
+        never needs its own error-reporting shape)."""
+        role_name = str(event.option_id)
+        from halo_harness.roles import assign_role
+        assign_role(role_name, self.model_ref)
+        self.dismiss(role_name)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

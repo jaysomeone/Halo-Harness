@@ -51,9 +51,12 @@ from halo_harness.providers.errors import (
     parse_databricks_rate_limit, upstream_error_text,
 )
 from halo_harness.providers.http import (
-    UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_openai_chat, is_connect_failure_message,
+    UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_ollama_chat, call_openai_chat,
+    call_openai_responses, is_connect_failure_message, is_offline_refusal_message,
 )
 from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
+from halo_harness.providers.ollama_stream import OllamaStreamToAnthropic
+from halo_harness.providers.responses_stream import ResponsesStreamToAnthropic
 from halo_harness.providers.routing import Route
 from halo_harness.providers.translate import anthropic_to_openai
 from halo_harness.providers.anthropic_sse import AnthropicSSEDecoder
@@ -127,6 +130,34 @@ class CompletionRequest:
     # same "prebuilt body, caller already did the profile-driven building"
     # pattern as `prebuilt_oai_body` above.
     prebuilt_anthropic_body: Optional[dict] = None
+    # Halo 2.0.3 round 2: `stream_ollama_completion`'s own sibling field --
+    # the caller always builds this via `providers.ollama_request.
+    # build_ollama_request_body` first (same "prebuilt body" pattern as
+    # `prebuilt_anthropic_body` just above; Ollama's native wire shape is
+    # neither openai-chat nor Anthropic-passthrough, so it gets its own
+    # field rather than overloading either existing one).
+    prebuilt_ollama_body: Optional[dict] = None
+    # Halo 2.0.3 round 5c FIX PASS: the retry CEILING for `_run_phase1_
+    # ollama`'s own "the server said this prompt exceeds num_ctx" 400 --
+    # `min(learned_cap, host_max_ctx, fit_estimate, hard_cap)` for
+    # whichever of those four are known (the task's own exact candidate
+    # list -- NOT `trained_context`/the conservative fallback, since
+    # those are already reflected in `prebuilt_ollama_body["options"]
+    # ["num_ctx"]` and second-guessing either would risk asking for more
+    # context than the model was actually trained for). `agent/loop.py`'s
+    # `_build_ollama_body_for_ref` is the only populator; `None` (every
+    # non-ollama dialect, and any ollama caller that predates this fix)
+    # means "no bigger number ctx is known to be available" -- `_run_
+    # phase1_ollama` then raises the SAME plain `ContextOverflow` it
+    # always did, straight to the existing compaction path.
+    ollama_ctx_retry_ceiling: Optional[int] = None
+    # Halo 2.0.3 round 5i part 1: `stream_openai_responses_completion`'s
+    # own sibling field -- same "prebuilt body, caller already did the
+    # profile-driven building" pattern as `prebuilt_ollama_body`/
+    # `prebuilt_anthropic_body` above. The Responses wire shape is neither
+    # openai-chat nor Anthropic-passthrough nor Ollama's native API, so it
+    # gets its own field rather than overloading any of the other three.
+    prebuilt_responses_body: Optional[dict] = None
 
 
 class ContextOverflow(Exception):
@@ -282,6 +313,35 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
             oai_body["max_tokens"] = cached_limit
 
     if req.creds is None:
+        # 2.0.3 round 4: a huggingface route with no creds gets its OWN
+        # message naming BOTH config keys (`HF_TOKEN` for the router,
+        # `huggingface.endpoints` for a named dedicated endpoint) -- before
+        # this branch existed, the two-way Databricks/"everything else"
+        # label below mislabeled it "OpenRouter not configured", which is
+        # wrong and unhelpful for either hf: failure shape (brief item 2:
+        # "a missing entry gives a plain ProviderNotConfigured message
+        # naming the config key").
+        if req.route.provider == "huggingface":
+            # Round 5: the message now also names `huggingface.local_
+            # servers`/auto-detection -- `req.route` (providers.routing.
+            # Route) carries no field distinguishing router/endpoint/local
+            # at all (it is built from `ModelRef` by dropping `.host`/
+            # `.local`, same as every other Route construction site in
+            # this codebase), so this stays ONE generic message naming
+            # every way to configure Hugging Face, exactly like round 4's
+            # original version already did for router-vs-endpoint.
+            raise ProviderNotConfigured(
+                "Hugging Face not configured -- set HF_TOKEN for the router, add this name to "
+                "huggingface.endpoints, or add/run a local server (huggingface.local_servers, "
+                "or auto-detection on a default port)"
+            )
+        if req.route.provider == "openai":
+            # Halo 2.0.3 round 5i part 1: the `oai:` chat-completions
+            # dialect's own named message, same reasoning as the
+            # huggingface branch just above -- the generic Databricks/
+            # OpenRouter two-way label below would otherwise call this
+            # "OpenRouter not configured", which names the wrong env var.
+            raise ProviderNotConfigured("OpenAI API not configured -- set OPENAI_API_KEY")
         provider_label = "Databricks" if req.route.provider == "databricks" else "OpenRouter"
         raise ProviderNotConfigured(f"{provider_label} not configured")
 
@@ -345,7 +405,7 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
             # "a load balancer drops a keep-alive while Databricks queues
             # the request" scenario -- see test_step_retries_a_post_
             # connect_failure_through_the_normal_ladder).
-            if attempt == 0 and not is_connect_failure_message(str(e)):
+            if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
                 continue
             # 1.0.1 hotfix 2: the wire mapping here is DELIBERATELY left
             # byte-for-byte unchanged (`bridge.py`'s legacy proxy path calls
@@ -358,7 +418,16 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
             # `format_connect_error` always bakes in, which survives as a
             # substring through EITHER branch below) to skip its backoff
             # ladder, rather than this function changing status/err_type.
-            if req.route.provider == "databricks":
+            #
+            # Round 5e: an offline refusal (`is_offline_refusal_message`)
+            # is deliberately kept OFF the Databricks-specific wording --
+            # "offline mode: not connecting to <host> (are you on the VPN?
+            # Databricks is whitelisted)" would misdescribe a plain policy
+            # choice as a network problem, so it goes through the SAME
+            # plain `map_upstream_error` every other provider already uses.
+            if is_offline_refusal_message(str(e)):
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+            elif req.route.provider == "databricks":
                 status, jbody, hdrs = databricks_unreachable_response(str(e))
             else:
                 status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
@@ -619,7 +688,7 @@ def _run_phase1_anthropic(req: CompletionRequest, abort: "threading.Event | None
                 # on the first attempt; only a post-connect failure (no
                 # CONNECT_FAILURE_MARKER) still gets the one immediate
                 # re-dial.
-                if attempt == 0 and not is_connect_failure_message(str(e)):
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
                     continue
                 # 1.0.1 hotfix 2: see _run_phase1_attempts's matching comment
                 # -- wire mapping here stays exactly as it was (bridge.py's
@@ -743,6 +812,464 @@ def stream_anthropic_completion(req: CompletionRequest, abort: "threading.Event 
         # suite run). Every call opens its own connection (no keep-alive
         # reuse), so closing it here -- after the terminal event, or after
         # the SHUT_RDWR above on an early exit -- is always correct.
+        conn = getattr(result, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
+        dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 2: the `ol:` (Ollama native API) sibling of
+# stream_completion/stream_anthropic_completion. Ollama's NDJSON stream is
+# neither SSE (stream_completion's own dialect) nor Anthropic-native SSE
+# (stream_anthropic_completion's) -- one complete JSON object per line,
+# over a plain chunked HTTP body -- so it gets its own reader thread
+# (_ndjson_reader_thread) instead of reusing sse_reader_thread, which
+# assumes either real SSE framing or a single whole-body JSON fallback.
+# ---------------------------------------------------------------------------
+
+def _ndjson_reader_thread(resp, q: "queue.Queue") -> None:
+    """Background thread reading Ollama's native `/api/chat` NDJSON
+    response (one complete JSON object per line, chunked transfer -- never
+    SSE framing) and posting items to `q`, the SAME `(kind, value)`
+    protocol `sse_reader_thread` uses (`"line"`/`"eof"`/`"exc"`) so
+    `stream_ollama_completion`'s drain loop below can share its shape."""
+    try:
+        while True:
+            line = resp.readline()
+            if not line:
+                if getattr(resp, "chunk_left", None) is None:
+                    q.put(("eof", None))
+                else:
+                    q.put(("exc", ConnectionError("upstream connection closed mid-stream")))
+                break
+            q.put(("line", line))
+    except Exception as e:
+        q.put(("exc", e))
+    finally:
+        resp.close()
+
+
+def _ollama_overflow_info(status: int, err_obj) -> "Optional[dict]":
+    """Halo 2.0.3 round 5c FIX PASS (live run, build 0.34.2): Ollama DOES
+    answer a 400 when a prompt exceeds `num_ctx` -- confirmed live:
+    ``{"error": {"code": 400, "message": "request (N tokens) exceeds the
+    available context size (M tokens), try increasing it", "type":
+    "exceed_context_size_error", "n_prompt_tokens": N, "n_ctx": M}}``.
+    NOTE `error` is an OBJECT here, unlike Ollama's usual bare-string
+    `{"error": "..."}` shape elsewhere in this codebase. `{"n_prompt_
+    tokens", "n_ctx"}` when this exact shape matches, else `None` (any
+    other 400, or a malformed/incomplete one, falls through to the
+    ordinary `map_upstream_error` path unchanged)."""
+    if status != 400 or not isinstance(err_obj, dict):
+        return None
+    inner = err_obj.get("error")
+    if not isinstance(inner, dict) or inner.get("type") != "exceed_context_size_error":
+        return None
+    n_prompt_tokens, n_ctx = inner.get("n_prompt_tokens"), inner.get("n_ctx")
+    if not isinstance(n_prompt_tokens, int) or not isinstance(n_ctx, int):
+        return None
+    return {"n_prompt_tokens": n_prompt_tokens, "n_ctx": n_ctx}
+
+
+def _ollama_overflow_retry_num_ctx(req: CompletionRequest, body: dict, overflow: dict) -> "Optional[int]":
+    """The bigger `num_ctx` to retry with, or `None` when no larger
+    number is known to be available. Brief: "when the fit allows a
+    larger num_ctx (learned cap, host max_ctx, fit estimate, hard cap)
+    retry once with the smallest power of two that holds n_prompt_tokens
+    plus the max output budget" -- `req.ollama_ctx_retry_ceiling` is
+    exactly that `min(...)` of the four named candidates (see this
+    module's own `CompletionRequest.ollama_ctx_retry_ceiling` docstring
+    for why `trained_context`/the conservative fallback are deliberately
+    excluded from it). The output budget is `options.num_predict` on
+    THIS request when set (the tightest known bound), else `req.
+    profile["max_output_tokens"]` (the model's own configured ceiling, a
+    looser but always-available bound)."""
+    from halo_harness.providers.ollama_fit import power_of_two_ceil
+    ceiling = req.ollama_ctx_retry_ceiling
+    if not isinstance(ceiling, int) or ceiling <= 0:
+        return None
+    output_budget = (body.get("options") or {}).get("num_predict")
+    if not isinstance(output_budget, int) or output_budget <= 0:
+        # `req.profile` is a plain dict in every REAL agent/loop.py ollama
+        # request (`_build_request`'s own `{"context_tokens":...,
+        # "max_output_tokens":...}`) -- `getattr` as a defensive fallback
+        # for any other caller/test that passes a dataclass instead.
+        profile = req.profile
+        output_budget = (profile.get("max_output_tokens") if isinstance(profile, dict)
+                          else getattr(profile, "max_output_tokens", None)) or 16384
+    needed = power_of_two_ceil(overflow["n_prompt_tokens"] + output_budget)
+    current = (body.get("options") or {}).get("num_ctx")
+    if needed <= ceiling and (not isinstance(current, int) or needed > current):
+        return needed
+    return None
+
+
+def _body_with_num_ctx(body: dict, num_ctx: int) -> dict:
+    new_body = dict(body)
+    new_body["options"] = dict(body.get("options") or {})
+    new_body["options"]["num_ctx"] = num_ctx
+    return new_body
+
+
+def _run_phase1_ollama_attempt(req: CompletionRequest, body: dict, abort: "threading.Event | None" = None):
+    """Connect + POST `body` (a PARAMETER, not necessarily `req.
+    prebuilt_ollama_body` -- the ctx-overflow retry below calls this a
+    second time with a bumped `options.num_ctx`) to Ollama's native
+    `/api/chat`. Same one-immediate-redial rule as every other phase1
+    for a POST-CONNECT failure (never for a genuine connect-phase
+    failure, 2.0.1 finding 18). Returns `(body, result, overflow_info)`
+    on EITHER a 2xx (`overflow_info=None`) or the specific "prompt
+    exceeds num_ctx" 400 (`result=None`, `overflow_info` set) -- the
+    caller decides what to do with the overflow; every OTHER non-2xx (or
+    a connect failure after its own retry) still raises directly, exactly
+    as this function always has."""
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    if req.creds is None:
+        raise ProviderNotConfigured("Ollama host not configured")
+
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
+    def _call_upstream():
+        return call_ollama_chat(
+            base_url=req.creds.base_url, api_key=(req.creds.api_key or None), body=body,
+            extra_headers=req.extra_headers, state_dir=req.state_dir, on_connect=_register_sock,
+        )
+
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        for attempt in range(2):
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            try:
+                result = _call_upstream()
+            except UpstreamConnectError as e:
+                if abort is not None and abort.is_set():
+                    raise _Aborted() from e
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
+                    continue
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+                raise _upstream_error_from_mapping(status, jbody, hdrs) from e
+            if 200 <= result.status < 300:
+                return body, result, None
+            raw = result.resp.read() if result.resp else b""
+            try:
+                err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            overflow = _ollama_overflow_info(result.status, err_obj)
+            if overflow is not None:
+                return body, None, overflow
+            status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            raise _upstream_error_from_mapping(status, jbody, hdrs)
+        raise UpstreamError(502, "api_error", "upstream failure after retries", True)
+    finally:
+        watcher_done.set()
+
+
+def _run_phase1_ollama(req: CompletionRequest, abort: "threading.Event | None" = None):
+    """`req.prebuilt_ollama_body` through `_run_phase1_ollama_attempt`,
+    with ONE extra retry for the specific "prompt exceeds num_ctx" 400
+    (FIX PASS -- round 2's own docstring assumed Ollama "truncates
+    silently"; a live run on build 0.34.2 found it answers this 400
+    instead): when `_ollama_overflow_retry_num_ctx` finds a bigger
+    number actually available, bump `options.num_ctx` and try exactly
+    once more; otherwise (or if that retry ALSO overflows) raise the
+    SAME `ContextOverflow` this function always raised, unchanged --
+    `agent/loop.py`'s existing compaction-and-retry path picks it up
+    from there with no changes of its own needed."""
+    body, result, overflow = _run_phase1_ollama_attempt(req, req.prebuilt_ollama_body, abort=abort)
+    if overflow is None:
+        return body, result
+    retry_num_ctx = _ollama_overflow_retry_num_ctx(req, body, overflow)
+    if retry_num_ctx is not None:
+        retry_body = _body_with_num_ctx(body, retry_num_ctx)
+        body, result, overflow = _run_phase1_ollama_attempt(req, retry_body, abort=abort)
+        if overflow is None:
+            return body, result
+    raise ContextOverflow(overflow["n_ctx"], overflow["n_prompt_tokens"], overflow["n_prompt_tokens"])
+
+
+def stream_ollama_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
+    """Drive one `ol:` completion end to end (native `/api/chat`, NDJSON).
+    Same two-phase contract as `stream_completion`/`stream_anthropic_
+    completion`: raises before the first yield on a phase-1 failure;
+    `req.prebuilt_ollama_body` MUST be set (the caller builds it via
+    `providers.ollama_request.build_ollama_request_body` first).
+
+    Round 2 brief: `done_reason: "load"` is treated as "retry once" (the
+    2.0.5 brief's own assumption; UNCONFIRMED against a live server --
+    research doc Q1, round 6's own live-check). The retry is silent only
+    while NOTHING has been shown to the caller yet for this turn (checked
+    via `OllamaStreamToAnthropic.any_output_emitted`, which `message_start`
+    alone never sets) -- real content/thinking/tool-call output alongside
+    a "load" done_reason is treated as an ordinary completion instead,
+    never discarded. Capped at exactly one retry per turn."""
+    try:
+        _body, result = _run_phase1_ollama(req, abort=abort)
+    except _Aborted:
+        return
+
+    estimate = estimate_tokens(req.prebuilt_ollama_body)
+    sm = OllamaStreamToAnthropic(req.model_label, estimate)
+    dumped_lines: list = []
+    dumped_events: list = []
+    start_ev = sm.message_start_event()
+    dumped_events.append(start_ev)
+    yield start_ev
+
+    retried_once = False
+    while True:
+        reader_q: "queue.Queue" = queue.Queue()
+        reader = threading.Thread(target=_ndjson_reader_thread, args=(result.resp, reader_q))
+        reader.daemon = True
+        reader.start()
+        sock = result.conn.sock if result.conn is not None else None
+        terminal_reached = False
+        retry_this_attempt = False
+
+        try:
+            poll_timeout = min(req.ping_interval, 0.25) if req.ping_interval > 0 else 0.25
+            elapsed = 0.0
+            while True:
+                if abort is not None and abort.is_set():
+                    return
+                try:
+                    item = reader_q.get(timeout=poll_timeout)
+                except queue.Empty:
+                    elapsed += poll_timeout
+                    if elapsed >= req.ping_interval:
+                        elapsed = 0.0
+                        yield {"type": "ping"}
+                    continue
+                elapsed = 0.0
+                kind, value = item
+                if kind == "line":
+                    line = value.decode("utf-8", "replace").rstrip("\n")
+                    dumped_lines.append(line)
+                    step_events = sm.feed_line(line)
+                    if sm.done:
+                        terminal_reached = True
+                        if sm.done_reason == "load" and not sm.any_output_emitted and not retried_once:
+                            retry_this_attempt = True  # discard step_events (just the trivial finalize)
+                        else:
+                            for ev in step_events:
+                                dumped_events.append(ev)
+                                yield ev
+                        break
+                    for ev in step_events:
+                        dumped_events.append(ev)
+                        yield ev
+                elif kind == "eof":
+                    for ev in sm.on_eof():
+                        dumped_events.append(ev)
+                        yield ev
+                    terminal_reached = True
+                    break
+                else:  # "exc"
+                    ev = sm.error_event(f"upstream connection error: {value}")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+        finally:
+            if not terminal_reached and sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            conn = getattr(result, "conn", None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        if not retry_this_attempt:
+            break
+        retried_once = True
+        sm = OllamaStreamToAnthropic(req.model_label, estimate, msg_id=sm.msg_id)
+        try:
+            _body, result = _run_phase1_ollama(req, abort=abort)
+        except _Aborted:
+            break
+        except (UpstreamError, ProviderNotConfigured) as e:
+            ev = sm.error_event(str(e))
+            dumped_events.append(ev)
+            yield ev
+            break
+
+    dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
+    dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 5i part 1: the `openai-responses` dialect's own sibling
+# of stream_anthropic_completion -- a real SSE wire format (unlike Ollama's
+# NDJSON), so phase 2 reuses sse_reader_thread unchanged; phase 1 is its own
+# function (not a parameterization of _run_phase1) for the same reason
+# stream_anthropic_completion is its own function rather than a
+# parameterization of _run_phase1 -- a different prebuilt-body field, a
+# different call_*, no max_tokens-limit-cache concern.
+# ---------------------------------------------------------------------------
+
+def _run_phase1_responses(req: CompletionRequest, abort: "threading.Event | None" = None):
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    body = req.prebuilt_responses_body
+    if req.creds is None:
+        raise ProviderNotConfigured("OpenAI API not configured -- set OPENAI_API_KEY")
+
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
+    def _call_upstream():
+        return call_openai_responses(
+            base_url=req.creds.base_url, api_key=req.creds.api_key, body=body,
+            extra_headers=req.extra_headers, state_dir=req.state_dir, on_connect=_register_sock,
+        )
+
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        for attempt in range(2):
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            try:
+                result = _call_upstream()
+            except UpstreamConnectError as e:
+                if abort is not None and abort.is_set():
+                    raise _Aborted() from e
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
+                    continue
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+                raise _upstream_error_from_mapping(status, jbody, hdrs) from e
+            if 200 <= result.status < 300:
+                return body, result
+            raw = result.resp.read() if result.resp else b""
+            try:
+                err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            err_msg = upstream_error_text(err_obj)
+            if result.status == 400:
+                overflow = parse_context_overflow(result.status, err_msg, None, requested_max_tokens=body.get("max_output_tokens"))
+                if overflow:
+                    raise ContextOverflow(overflow.limit, overflow.prompt_tokens, overflow.total)
+            status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            raise _upstream_error_from_mapping(status, jbody, hdrs)
+        raise UpstreamError(502, "api_error", "upstream failure after retries", True)
+    finally:
+        watcher_done.set()
+
+
+def stream_openai_responses_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
+    """Drive one `openai-responses`-dialect completion end to end
+    (`oai:gpt-6-astra`/`oai:gpt-6.1-sol` by default, or any `oai:` model
+    `openai.dialect_overrides` names). Same two-phase contract as every
+    other dialect here; `req.prebuilt_responses_body` MUST be set (the
+    caller builds it via `providers.responses_request.build_openai_
+    responses_body` first)."""
+    try:
+        _body, result = _run_phase1_responses(req, abort=abort)
+    except _Aborted:
+        return
+
+    estimate = estimate_tokens(req.prebuilt_responses_body)
+    sm = ResponsesStreamToAnthropic(req.model_label, estimate)
+    dumped_lines: list = []
+    dumped_events: list = []
+    q: "queue.Queue" = queue.Queue()
+    reader = threading.Thread(target=sse_reader_thread, args=(result.resp, q))
+    reader.daemon = True
+    reader.start()
+    sock = result.conn.sock if result.conn is not None else None
+    terminal_reached = False
+
+    try:
+        start_ev = sm.message_start_event()
+        dumped_events.append(start_ev)
+        yield start_ev
+
+        poll_timeout = min(req.ping_interval, 0.25) if req.ping_interval > 0 else 0.25
+        elapsed = 0.0
+        while True:
+            if abort is not None and abort.is_set():
+                return
+            try:
+                item = q.get(timeout=poll_timeout)
+            except queue.Empty:
+                elapsed += poll_timeout
+                if elapsed >= req.ping_interval:
+                    elapsed = 0.0
+                    yield {"type": "ping"}
+                continue
+            elapsed = 0.0
+            kind, value = item
+            try:
+                if kind == "line":
+                    line = value.decode("utf-8", "replace").rstrip("\n")
+                    dumped_lines.append(line)
+                    step = sm.feed_sse_line(line)
+                    for ev in step["events"]:
+                        dumped_events.append(ev)
+                        yield ev
+                    if step["kind"] == "done":
+                        terminal_reached = True
+                        break
+                    if step["kind"] == "error":
+                        break  # finding 12's own reasoning: upstream may still be writing -- see stream_completion
+                elif kind == "eof":
+                    for ev in sm.on_eof():
+                        dumped_events.append(ev)
+                        yield ev
+                    terminal_reached = True
+                    break
+                elif kind == "exc":
+                    ev = sm.error_event(f"upstream connection error: {value}")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+                elif kind == "json":
+                    # Responses streaming is always real SSE per
+                    # docs/harness/OPENAI-RESEARCH.md -- an unexpectedly
+                    # whole-body-buffered JSON reply (the content-type
+                    # lied) is a plain error, never a guessed shape.
+                    ev = sm.error_event("upstream returned a non-streamed JSON body for a streaming request")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+            except Exception as e:
+                log.warning("malformed upstream Responses stream data: %s", e)
+                ev = sm.error_event(f"upstream sent malformed data: {e}")
+                dumped_events.append(ev)
+                yield ev
+                break
+    finally:
+        if not terminal_reached and sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         conn = getattr(result, "conn", None)
         if conn is not None:
             try:

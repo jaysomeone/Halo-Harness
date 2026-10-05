@@ -39,13 +39,22 @@ class _Env:
 
     def __enter__(self):
         import json
-        self._saved = {k: os.environ.get(k) for k in (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR") + _PROVIDER_ENV_VARS)}
+        self._saved = {k: os.environ.get(k) for k in
+                       (("BRIDGE_TEST_HOME", "BRIDGE_STATE_DIR", "BRIDGE_TEST_NO_BACKGROUND_NET")
+                        + _PROVIDER_ENV_VARS)}
         d = Path(tempfile.mkdtemp(prefix="h15-catalog-refresh-"))
         os.environ["BRIDGE_TEST_HOME"] = str(d)
         os.environ["BRIDGE_STATE_DIR"] = str(d / ".halo")
         for k in _PROVIDER_ENV_VARS:
             os.environ.pop(k, None)
         os.environ["BRIDGE_TEST_CC_AUTH_STATUS"] = json.dumps({"loggedIn": False})
+        # W6b section E fallout: tests/run_all.py's own whole-run default
+        # (closing a WSL hang in an unrelated module) now leaves this set
+        # ambiently for every module -- this one's own worker tests need
+        # it genuinely ABSENT to exercise "the background worker actually
+        # ran", so it is cleared here, not just left to whatever happened
+        # to be ambient before this scope.
+        os.environ.pop("BRIDGE_TEST_NO_BACKGROUND_NET", None)
         self.home = d
         self.state_dir = d / ".halo"
         return self
@@ -189,7 +198,7 @@ def test_refresh_anthropic_catalog_if_stale_boot_time_monotonic_is_never_a_false
 
 @test
 def test_list_models_openrouter_group_populated_after_catalog_refresh(ctx: Ctx):
-    """rolo's own Mac report: "/model showed one OpenRouter row" because
+    """the owner's own Mac report: "/model showed one OpenRouter row" because
     models.json had never been fetched -- after a refresh, the real
     catalog populates the group, not just a synthesized current-model row."""
     from halo_harness.controller import Controller

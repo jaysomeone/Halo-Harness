@@ -101,6 +101,45 @@ def test_stats_roles_end_to_end_json(ctx: Ctx):
     ctx.check("plain text mentions the role", "coder" in text_result.stdout)
 
 
+@test
+def test_stats_roles_shows_the_currently_configured_model_and_effort(ctx: Ctx):
+    """Halo 2.0.2 brief A.2: "`halo stats --roles` show model, effort ...".
+    A role with spend AND a current config.json entry shows both; one
+    with spend but nothing configured shows "-" (never a KeyError)."""
+    home = Path(tempfile.mkdtemp(prefix="stats-roles-model-home-"))
+    sessions_dir = home / ".halo" / "sessions" / "testproj"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {"type": "meta", "model": "or:vendor/parent"},
+        {"type": "usage", "usage": {"input_tokens": 300, "output_tokens": 80}, "cost_usd": 0.02,
+         "agent_id": "ag1", "role": "coder"},
+        {"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 5}, "cost_usd": 0.001,
+         "agent_id": "ag2", "role": "researcher"},
+    ]
+    p = sessions_dir / "sess1.jsonl"
+    p.write_text("\n".join(json.dumps(n) for n in lines) + "\n", encoding="utf-8")
+    now = time.time()
+    os.utime(p, (now, now))
+    (home / ".halo").mkdir(parents=True, exist_ok=True)
+    (home / ".halo" / "config.json").write_text(
+        json.dumps({"roles": {"coder": {"model": "or:vendor/coder-model", "effort": "high"}}}), encoding="utf-8")
+    cwd = Path(tempfile.mkdtemp(prefix="stats-roles-model-cwd-"))
+    result = _run_cli(["stats", "--roles", "--since", "all", "--all-projects", "--json"], home, cwd)
+    ctx.check(f"exit 0, got {result.returncode}, stderr={result.stderr!r}", result.returncode == 0)
+    obj = json.loads(result.stdout)
+    coder = next(r for r in obj["roles"] if r["role"] == "coder")
+    researcher = next(r for r in obj["roles"] if r["role"] == "researcher")
+    ctx.check(f"coder carries its configured model+effort, got {coder}",
+              coder["model"] == "or:vendor/coder-model" and coder["effort"] == "high")
+    ctx.check(f"researcher (spend but nothing configured) is None, not a KeyError, got {researcher}",
+              researcher["model"] is None and researcher["effort"] is None)
+
+    text_result = _run_cli(["stats", "--roles", "--since", "all", "--all-projects"], home, cwd)
+    ctx.check(f"plain-text run exits 0, got {text_result.returncode}", text_result.returncode == 0)
+    ctx.check(f"the configured model appears in the table, got {text_result.stdout!r}",
+              "or:vendor/coder-model" in text_result.stdout)
+
+
 def _hermetic_child_env() -> dict:
     """2.0.0 fixpass item G: never forward a stray BRIDGE_STATE_DIR
     (would let bridge_home() escape this test's own BRIDGE_TEST_HOME

@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.helpers.runner import Ctx, new_registry, print_results, run_all
+from tests.helpers.runner import Ctx, SkipTest, new_registry, print_results, run_all
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 test, TESTS = new_registry()
@@ -68,6 +68,39 @@ def test_list_runs_and_load_run_read_real_meta_files(ctx: Ctx):
         loaded = load_run(info["id"])
         ctx.check(f"load_run finds the same one, got {loaded}", loaded is not None and loaded["pid"] == 999999)
         ctx.check("load_run(unknown) is None", load_run("does-not-exist") is None)
+
+
+@test
+def test_start_background_run_windows_sets_detached_process_flag(ctx: Ctx):
+    """Release review finding 37: `CREATE_NEW_PROCESS_GROUP` alone still
+    leaves the detached child attached to the launching console --
+    Windows sends CTRL_CLOSE_EVENT to every process attached to a
+    closing console, killing this child the moment that terminal window
+    closes (the POSIX path's `start_new_session` is a real new session,
+    survives the launching terminal closing by construction).
+    `DETACHED_PROCESS` is what actually detaches it on Windows."""
+    if os.name != "nt":
+        raise SkipTest("Windows-only creationflags")
+    from halo_harness.bg_run import start_background_run
+
+    class _FakeProc:
+        pid = 999998
+
+    captured = {}
+
+    def _fake_popen(*a, **kw):
+        captured.update(kw)
+        return _FakeProc()
+
+    with _Env():
+        start_background_run(["--version"], popen=_fake_popen)
+        flags = captured.get("creationflags", 0)
+        ctx.check(f"CREATE_NEW_PROCESS_GROUP is set, got {flags!r}",
+                  bool(flags & subprocess.CREATE_NEW_PROCESS_GROUP))
+        ctx.check(f"DETACHED_PROCESS is ALSO set, got {flags!r}",
+                  bool(flags & subprocess.DETACHED_PROCESS))
+        ctx.check("start_new_session is False on Windows (creationflags is the win32 mechanism instead)",
+                  captured.get("start_new_session") is False)
 
 
 @test

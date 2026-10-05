@@ -30,11 +30,12 @@ def test_resolve_role_ref_session_model_when_nothing_set(ctx: Ctx):
     from halo_harness.roles import resolve_role_ref
     parent_ref = parse_model_ref("or:vendor/parent")
     parent_profile = ModelProfile()
-    ref, profile, source = resolve_role_ref("orchestrator", role_table={}, cli_overrides={},
-                                             parent_ref=parent_ref, parent_profile=parent_profile,
-                                             state_dir=Path(tempfile.mkdtemp()))
+    ref, profile, effort, source = resolve_role_ref("orchestrator", role_table={}, cli_overrides={},
+                                                     parent_ref=parent_ref, parent_profile=parent_profile,
+                                                     state_dir=Path(tempfile.mkdtemp()))
     ctx.check("reuses the parent ref object", ref is parent_ref)
     ctx.check("reuses the parent profile object", profile is parent_profile)
+    ctx.check(f"no role-sourced effort when nothing is set, got {effort!r}", effort is None)
     ctx.check(f"source is 'session model', got {source!r}", source == "session model")
 
 
@@ -45,17 +46,25 @@ def test_resolve_role_ref_role_table_and_cli_precedence(ctx: Ctx):
     parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
     state_dir = Path(tempfile.mkdtemp())
 
-    ref, _p, source = resolve_role_ref("researcher", role_table={"researcher": "or:vendor/fromtable"},
-                                        cli_overrides={}, parent_ref=parent_ref, parent_profile=parent_profile,
-                                        state_dir=state_dir)
+    ref, _p, _eff, source = resolve_role_ref("researcher", role_table={"researcher": "or:vendor/fromtable"},
+                                              cli_overrides={}, parent_ref=parent_ref, parent_profile=parent_profile,
+                                              state_dir=state_dir)
     ctx.check("role table used", ref.model == "vendor/fromtable")
     ctx.check(f"source is 'role table', got {source!r}", source == "role table")
 
-    ref2, _p2, source2 = resolve_role_ref("researcher", role_table={"researcher": "or:vendor/fromtable"},
-                                           cli_overrides={"researcher": "or:vendor/fromcli"},
-                                           parent_ref=parent_ref, parent_profile=parent_profile, state_dir=state_dir)
+    ref2, _p2, _eff2, source2 = resolve_role_ref(
+        "researcher", role_table={"researcher": "or:vendor/fromtable"},
+        cli_overrides={"researcher": "or:vendor/fromcli"},
+        parent_ref=parent_ref, parent_profile=parent_profile, state_dir=state_dir)
     ctx.check("CLI override wins", ref2.model == "vendor/fromcli")
     ctx.check(f"source is 'CLI --role', got {source2!r}", source2 == "CLI --role")
+
+    # Halo 2.0.2 brief A.2: a role value may carry its own effort.
+    ref3, _p3, eff3, source3 = resolve_role_ref(
+        "coder", role_table={"coder": {"model": "or:vendor/fromtable", "effort": "high"}},
+        cli_overrides={}, parent_ref=parent_ref, parent_profile=parent_profile, state_dir=state_dir)
+    ctx.check(f"dict-shaped role value resolves its model, got {ref3.model!r}", ref3.model == "vendor/fromtable")
+    ctx.check(f"...and its own effort, got {eff3!r}", eff3 == "high")
 
 
 @test
@@ -101,6 +110,37 @@ def test_resolve_all_roles_covers_every_role_name(ctx: Ctx):
     orchestrator_row = next(r for r in rows if r["role"] == "orchestrator")
     ctx.check("orchestrator (unset) falls back to the session model",
               orchestrator_row["model"] == parent_ref.raw)
+
+
+@test
+def test_resolve_all_roles_also_lists_a_custom_role(ctx: Ctx):
+    """Halo 2.0.2 brief A.3: a custom role actually DEFINED in the table
+    gets its own row in `/roles`, alongside the fixed `ROLE_NAMES`."""
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import ROLE_NAMES, resolve_all_roles
+    parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
+    rows = resolve_all_roles(role_table={"release_captain": "or:vendor/rc-model"}, cli_overrides={},
+                              parent_ref=parent_ref, parent_profile=parent_profile,
+                              state_dir=Path(tempfile.mkdtemp()))
+    names = [r["role"] for r in rows]
+    ctx.check(f"every built-in role is still present, got {names}", all(n in names for n in ROLE_NAMES))
+    ctx.check(f"the custom role appears too, got {names}", "release_captain" in names)
+    rc_row = next(r for r in rows if r["role"] == "release_captain")
+    ctx.check("the custom role resolved its own model", rc_row["model"] == "or:vendor/rc-model")
+
+
+@test
+def test_resolve_all_roles_effort_display_requested_vs_sent(ctx: Ctx):
+    """Halo 2.0.2 brief A.2: "`/roles` ... show model, effort as
+    `requested (sent as X)` when they differ"."""
+    from halo_harness.model import ModelProfile, parse_model_ref
+    from halo_harness.roles import resolve_all_roles
+    parent_ref, parent_profile = parse_model_ref("or:vendor/parent"), ModelProfile()
+    rows = resolve_all_roles(role_table={"coder": {"model": "or:vendor/coder-model", "effort": "high"}},
+                              cli_overrides={}, parent_ref=parent_ref, parent_profile=parent_profile,
+                              state_dir=Path(tempfile.mkdtemp()))
+    coder_row = next(r for r in rows if r["role"] == "coder")
+    ctx.check(f"effort column is populated, got {coder_row['effort']!r}", coder_row["effort"])
 
 
 @test

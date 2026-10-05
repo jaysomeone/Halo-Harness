@@ -1,7 +1,7 @@
 """halo_harness.permissions -- the permission engine (H2 scope C), per plan
 D6/D-CFG's "Permission grammar and matcher" + "Rule writes" sections and
 `docs/harness/claude-code-2.1.281-binary-facts.md` sec.3-5. Grammar and
-modes ONLY -- rolo's "no cyber blocks" decision (plan "Decisions taken with
+modes ONLY -- the owner's "no cyber blocks" decision (plan "Decisions taken with
 rolo"): **no classifier, no destructive-command list, no protected paths,
 no security-tool flagging anywhere**. `auto` = allow everything not matched
 by an explicit deny/ask rule; `bypassPermissions` = allow everything not

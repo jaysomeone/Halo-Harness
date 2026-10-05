@@ -540,7 +540,7 @@ def run_one_anthropic_native(seed: int, mock: MockAnthropic, *, timeout_s: float
     # fuzz_h9.run_one) does. Without it, SessionLog falls through to the
     # REAL `~/.halo/sessions` (config/paths.bridge_home's own
     # documented fallback), which is exactly how `ant:claude-h9fuzz-ant-*`
-    # sessions leaked into rolo's real session history (H10b report).
+    # sessions leaked into the owner's real session history (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(fh["home"])
     run_tmp = Path(tempfile.mkdtemp(prefix=f"fuzz-ant-{seed}-"))
     act = rng.choice(_ANTHROPIC_ACTS)

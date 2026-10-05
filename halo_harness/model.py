@@ -27,8 +27,71 @@ _ANT_PREFIX = "ant:"
 _DBX_PREFIX = "dbx:"
 _OR_PREFIX = "or:"
 _CC_PREFIX = "cc:"
+_OL_PREFIX = "ol:"
+_HF_PREFIX = "hf:"
+_HF_ENDPOINT_PREFIX = "endpoint/"
+_HF_LOCAL_PREFIX = "local/"
+_OAI_PREFIX = "oai:"
 _CX_PREFIX = "cx:"
+# Halo 2.0.3 round 5f: `hf:mlx/<org>/<repo>` -- a Hub repo served by a
+# Halo-managed `mlx_lm.server` (Apple Silicon only; see ModelRef.mlx).
+_HF_MLX_PREFIX = "mlx/"
 _MAX_ALIAS_HOPS = 4
+
+
+def is_local_model_ref(ref: "ModelRef") -> bool:
+    """Halo 2.0.3 round 5e: True for `ol:` (`provider == "ollama"`),
+    `hf:local/*` and `hf:mlx/*` (both carry `provider == "huggingface"` and
+    `local=True` -- see `ModelRef.local`'s own docstring: round 5f
+    deliberately reuses the SAME flag for mlx) -- never a new "is this
+    local" concept of its own. Used by both the hybrid-escalation policy
+    (`agent.escalation`) and the saved-vs-cloud cost meter below to decide
+    "is this session's model one that policy/meter should even look at"."""
+    return ref.provider == "ollama" or (ref.provider == "huggingface" and ref.local)
+
+
+def catalog_median_prices(*, source_label: bool = False):
+    """Halo 2.0.3 round 5e: `(median_price_in, median_price_out)` in USD per
+    token -- the saved-vs-cloud reference price when the session has no
+    `routing.escalation.to` configured. "the catalog the picker knows"
+    (brief wording) is read from the package-vendored fallback catalogs
+    (`providers.models_dev.load_vendored_databricks_fallback`/`_openrouter_
+    fallback` -- the SAME files `resolve_model_profile`'s own lowest-tier
+    fallback already reads), never a live network fetch: computing a
+    session's reference price must work exactly the same way under
+    `--offline` as it does online, and these files ship with the package
+    (always present, no prior `--refresh` required). Today only the
+    Databricks fallback carries `cost.input`/`cost.output` fields (the
+    OpenRouter one is behavior-only -- temperature/tool_id_format/... --
+    with no pricing of its own); both are walked anyway so a future catalog
+    update that adds pricing there is picked up with no code change.
+    `(None, None)` when neither source has a single priced entry (should
+    not happen in practice -- the vendored Databricks file always ships
+    with 30+ priced rows -- but never raises either way).
+
+    With `source_label=True`, returns `(median_in, median_out, label)`
+    instead, `label` a short phrase for `/cost`'s own breakdown naming how
+    many priced models the median was taken over."""
+    import statistics
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback, load_vendored_openrouter_fallback
+    ins: "list[float]" = []
+    outs: "list[float]" = []
+    for table in (load_vendored_databricks_fallback(), load_vendored_openrouter_fallback()):
+        for entry in (table or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
+            ci, co = cost.get("input"), cost.get("output")
+            if isinstance(ci, (int, float)) and not isinstance(ci, bool):
+                ins.append(ci / 1_000_000)
+            if isinstance(co, (int, float)) and not isinstance(co, bool):
+                outs.append(co / 1_000_000)
+    med_in = statistics.median(ins) if ins else None
+    med_out = statistics.median(outs) if outs else None
+    if not source_label:
+        return med_in, med_out
+    label = f"catalog median across {len(ins)} priced model(s) (vendored fallback catalog, no network)"
+    return med_in, med_out, label
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
 # OpenRouter (verified live against GET /api/v1/models on 2026-09-23/24 --
@@ -133,9 +196,47 @@ def _refuse_if_disabled(provider_key: str) -> None:
 @dataclass(frozen=True)
 class ModelRef:
     raw: str
-    provider: str  # "openrouter" | "databricks" | "anthropic"
-    model: str  # bare upstream model id/name, dbx:/or:/ant: prefix stripped
-    dialect: str  # "openai-chat" | "anthropic-passthrough"
+    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface" | "openai" | "cc" | "codex"
+    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf:/oai:/cx: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
+    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "codex-subprocess" | "ollama" | "openai-responses"
+    # Halo 2.0.3 round 2: the `@<hostname>` part of `ol:<model>@<hostname>`
+    # (research doc Q6/Q7) -- which entry of `ollama.hosts` this ref names;
+    # `None` means "the default host" (`providers.ollama.resolve_ollama_
+    # host(None)`). Halo 2.0.3 round 4 reuses this SAME field for
+    # `hf:endpoint/<name>` -- which entry of `huggingface.endpoints` this
+    # ref names (`providers.huggingface.resolve_huggingface_endpoint`);
+    # `None` for an `hf:<org>/<model>` router ref. Round 5 reuses it a
+    # THIRD way for `hf:local/<model>@<name>` -- which entry of
+    # `huggingface.local_servers` this ref names (`providers.huggingface.
+    # resolve_huggingface_local_server`); `None` for a bare `hf:local/
+    # <model>` (the default server -- a configured manual entry, else the
+    # first auto-detected one, see `providers.huggingface_local_probe.
+    # resolve_local_server`). Always `None` for every other provider.
+    host: Optional[str] = None
+    # Round 5: True for every `hf:local/*` ref (both the bare and `@<name>`
+    # shapes) -- the ONLY way to tell "a local-server ref with no `@name`"
+    # (host=None, local=True) apart from "a router ref" (host=None,
+    # local=False), since both leave `host` unset. An `hf:endpoint/<name>`
+    # ref always has `host` set AND `local=False` -- never both this flag
+    # and a dedicated endpoint at once. Always `False` for every other
+    # provider/ref shape. Round 5f: also `True` for an `hf:mlx/<repo>` ref
+    # (see `mlx` below) -- it rides the SAME hf:local profile/fit/role
+    # tiers (`model.resolve_model_profile`, `roles.default_role_for_ref`),
+    # since a Halo-managed mlx_lm.server is exactly as "local" as any other
+    # `hf:local/*` server.
+    local: bool = False
+    # Round 5f: `True` for `hf:mlx/<org>/<repo>` only -- `ref.model` is then
+    # the bare Hub repo id (e.g. "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+    # used VERBATIM as both the round 5c managed-server registry key and
+    # the `mlx_lm.server --model` argument. Unlike a generic `hf:local/*`
+    # ref (which only ever resolves to whatever is ALREADY running/
+    # configured), `ref.mlx=True` tells `headless.build_session`/`doctor_
+    # local.py`/`halo local serve` to ENSURE a managed server for this
+    # EXACT repo id exists first (starting one, with a plain consent
+    # notice, when it doesn't) -- see `providers.huggingface_mlx.
+    # ensure_mlx_server`. Always `False` for every other provider/ref
+    # shape, including every other `hf:` shape.
+    mlx: bool = False
 
 
 def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
@@ -178,19 +279,125 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
         bare = resolved[len(_OR_PREFIX):]
         _refuse_if_disabled("openrouter")
         return ModelRef(raw=raw, provider="openrouter", model=bare, dialect="openai-chat")
+    if resolved.startswith(_OL_PREFIX):
+        # Halo 2.0.3 round 2: `ol:<model>` (the default host) or
+        # `ol:<model>@<hostname>` (a named entry in `ollama.hosts` -- a LAN
+        # host or an Ollama Cloud entry addressed by whatever name the user
+        # gave it in config; research doc section 7/Q7: the native request
+        # shape is identical in all three cases, only `host.url`/`api_key`
+        # differ). `partition` (not `split`) on the FIRST "@": an Ollama tag
+        # itself may contain ":" (`qwen3:30b`) but never "@", so this is
+        # unambiguous either way.
+        bare = resolved[len(_OL_PREFIX):]
+        model_part, _, host_part = bare.partition("@")
+        _refuse_if_disabled("ollama")
+        return ModelRef(raw=raw, provider="ollama", model=model_part, dialect="ollama", host=host_part or None)
+    if resolved.startswith(_HF_PREFIX):
+        # Halo 2.0.3 round 4: `hf:<org>/<model>` (optionally `:fastest`/
+        # `:cheapest`/`:preferred`/`:<provider>`, passed through VERBATIM in
+        # `ref.model` -- research doc section 9: the suffix is part of the
+        # wire `model` field itself, never a separate parameter) routed to
+        # the Inference Providers router, dialect "openai-chat" so this
+        # reuses the SAME request/stream/profile code OpenRouter already
+        # has (`providers.profiles.resolve_profile`'s generic openai-chat
+        # fallback branch -- "tools supported, reasoning passthrough as
+        # OpenRouter does, no host-specific fields" falls out of that
+        # branch for free once `route.provider` is neither "openrouter" nor
+        # "databricks"). `hf:endpoint/<name>` is the OTHER shape (a
+        # dedicated Inference Endpoint, never the router): `host` carries
+        # the bare `<name>` -- the SAME field `ol:<model>@<hostname>` uses
+        # to name a config entry, reused here rather than adding a second
+        # field for the identical concept (headless._resolve_creds checks
+        # `ref.host` to decide which of the two credential sources to
+        # resolve). An endpoint ref's `model` is also the bare `<name>`
+        # (there is no separate model portion in this shape at all -- a
+        # dedicated endpoint serves exactly one model, chosen at
+        # provisioning time, never per request).
+        bare = resolved[len(_HF_PREFIX):]
+        _refuse_if_disabled("huggingface")
+        if bare.startswith(_HF_ENDPOINT_PREFIX):
+            name = bare[len(_HF_ENDPOINT_PREFIX):]
+            if not name:
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:endpoint/ needs a <name> naming a huggingface.endpoints entry)")
+            return ModelRef(raw=raw, provider="huggingface", model=name, dialect="openai-chat", host=name)
+        if bare.startswith(_HF_LOCAL_PREFIX):
+            # Round 5: `hf:local/<model>` (the default local server -- a
+            # configured `huggingface.local_servers` entry, else the first
+            # auto-detected one) or `hf:local/<model>@<name>` (a NAMED
+            # manual entry) -- `partition` on the first "@", same
+            # unambiguous reasoning `ol:<model>@<hostname>` already uses
+            # above (a local server's model id may itself contain "@" or
+            # ":" about as often as an Ollama tag contains ":", i.e. never
+            # in practice, but partition is still correct either way since
+            # a server NAME is never expected to contain "@" itself).
+            inner = bare[len(_HF_LOCAL_PREFIX):]
+            model_part, _, server_name = inner.partition("@")
+            if not model_part:
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:local/ needs a <model>, e.g. hf:local/qwen3-30b or "
+                    f"hf:local/qwen3-30b@my-server)")
+            return ModelRef(raw=raw, provider="huggingface", model=model_part, dialect="openai-chat",
+                             host=server_name or None, local=True)
+        if bare.startswith(_HF_MLX_PREFIX):
+            # Round 5f: `hf:mlx/<org>/<repo>` -- always parses, on every
+            # platform (the one-sentence "MLX runs on Apple Silicon only"
+            # refusal happens at RESOLVE time -- `providers.huggingface_mlx.
+            # ensure_mlx_server` -- never at parse time, exactly like an
+            # `hf:local/<model>` ref parses fine with no server running
+            # yet). `repo` needs a real `<org>/<repo>` shape (at least one
+            # internal "/", no leading/trailing slash, no whitespace) --
+            # mlx_lm's own Hub convention, and the same registry key/
+            # `--model` argument this ref resolves to verbatim.
+            repo = bare[len(_HF_MLX_PREFIX):]
+            if ("/" not in repo or repo.startswith("/") or repo.endswith("/")
+                    or any(ch.isspace() for ch in repo)):
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:mlx/ needs a <org>/<repo> Hugging Face Hub id, e.g. "
+                    f"hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit)")
+            return ModelRef(raw=raw, provider="huggingface", model=repo, dialect="openai-chat",
+                             host=None, local=True, mlx=True)
+        if not bare:
+            raise InvalidModelError(
+                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix], endpoint/<name>, local/<model>, "
+                f"or mlx/<org>/<repo>)")
+        return ModelRef(raw=raw, provider="huggingface", model=bare, dialect="openai-chat")
+    if resolved.startswith(_OAI_PREFIX):
+        # Halo 2.0.3 round 5i part 1: `oai:<model>` against the real
+        # OpenAI API (`OPENAI_API_KEY`). Dialect is decided HERE, once,
+        # per `docs/harness/OPENAI-RESEARCH.md`'s own table
+        # (`providers.responses_request.resolve_openai_dialect`) --
+        # exactly the two ids the Responses API reference names as
+        # requiring it for function calling, plus `openai.dialect_
+        # overrides` (always wins, either direction) -- never re-decided
+        # later: every `Route(...)` construction site in this codebase
+        # copies `ModelRef.dialect` straight through (`model_ref.dialect`),
+        # so this is the one place that gets to choose.
+        bare = resolved[len(_OAI_PREFIX):]
+        _refuse_if_disabled("openai")
+        if not bare:
+            raise InvalidModelError(f"no route: {raw!r} (oai: needs a model id, e.g. oai:gpt-6-astra)")
+        from halo_harness.providers.responses_request import resolve_openai_dialect
+        return ModelRef(raw=raw, provider="openai", model=bare, dialect=resolve_openai_dialect(bare))
+    if resolved.startswith(_CX_PREFIX):
+        # Halo 2.0.3 round 5i part 2: `cx:<name>` (the installed `codex`
+        # binary, driven under the user's own ChatGPT subscription login) --
+        # mirrors the cc: branch just below, substituting `codex_models` for
+        # `cc_models`. Never shares cc:'s bare-alias-route fallback (that
+        # mechanism is specific to the nine Claude names cc:/ant: both
+        # resolve); a bare word with no prefix never resolves to cx: on its
+        # own.
+        from halo_harness.providers.codex_models import resolve_codex_alias
+        bare = resolved[len(_CX_PREFIX):]
+        _refuse_if_disabled("codex_subscription")
+        if not bare:
+            raise InvalidModelError(f"no route: {raw!r} (cx: needs a model id, e.g. cx:astra)")
+        return ModelRef(raw=raw, provider="codex", model=resolve_codex_alias(bare), dialect="codex-subprocess")
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
         _refuse_if_disabled("claude_subscription")
         return ModelRef(raw=raw, provider="cc", model=resolve_cc_alias(bare), dialect="cc-subprocess")
-    if resolved.startswith(_CX_PREFIX):
-        # 2.0.2: the installed `codex` binary under the user's ChatGPT
-        # subscription (agent/cx_runtime.py); `cx:default` is the
-        # account's default model from Codex's own model/list.
-        from halo_harness.providers.cx_models import resolve_cx_alias
-        bare = resolved[len(_CX_PREFIX):]
-        _refuse_if_disabled("codex_subscription")
-        return ModelRef(raw=raw, provider="cx", model=resolve_cx_alias(bare), dialect="cx-appserver")
     if resolved.startswith(_ANT_PREFIX):
         from halo_harness.providers.cc_models import resolve_ant_alias
         bare = resolved[len(_ANT_PREFIX):]
@@ -250,7 +457,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
     hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, cx:, vendor/model, "
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, cx:, oai:, ol:, hf:, vendor/model, "
         f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 
@@ -371,14 +578,6 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
     # name is one of the nine known ones (anything else keeps falling
     # through to the plain 200000/8192 native-passthrough default below,
     # unchanged from before this milestone).
-    if ref.provider == "cx":
-        # 2.0.2: Codex reports the real context window with every turn
-        # (cached by cx_models.record_context_window); a subscription has
-        # no per-token price.
-        from halo_harness.providers.cx_models import profile_fields_for_cx_model
-        fields = profile_fields_for_cx_model(ref.model, state_dir)
-        return ModelProfile(context_tokens=fields["context_tokens"], max_output_tokens=fields["max_output_tokens"],
-                            vision=fields["vision"], reasoning="native")
     if ref.provider == "cc" or (ref.provider == "anthropic" and ref.dialect == "anthropic-passthrough"):
         from halo_harness.providers.cc_models import profile_fields_for_cc_model
         fields = profile_fields_for_cc_model(ref.model)
@@ -400,6 +599,87 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             # (Claude Code resolved it, whatever it is) -- vision=True for
             # the same reason reasoning="native" already is here.
             return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, vision=True, reasoning="native")
+
+    if ref.provider == "codex":
+        # Halo 2.0.3 round 5i part 2: reuses the SAME vendored `openai`
+        # fallback catalog `oai:` reads (the underlying model is identical
+        # either way, only the billing differs -- CODEX-RESEARCH.md
+        # section 2) with pricing always dropped (a ChatGPT subscription
+        # has no metered per-token price).
+        from halo_harness.providers.codex_models import profile_fields_for_codex_model
+        fields = profile_fields_for_codex_model(ref.model)
+        return ModelProfile(
+            context_tokens=fields.get("context_tokens", 1_050_000),
+            max_output_tokens=fields.get("max_output_tokens", 128_000),
+            vision=bool(fields.get("vision", True)), reasoning="openai",
+        )
+
+    if ref.provider == "huggingface":
+        # Halo 2.0.3 round 4 brief: just two tiers for `hf:` refs -- the
+        # router catalog (below), else the bare dataclass default; never
+        # OpenRouter's own models.json/routes.json profiles tiers (a
+        # colliding id there would be a DIFFERENT model on a different
+        # host) and never the vendored-fallback tier (that's keyed for
+        # databricks/openrouter catalogs specifically). `ref.host` set
+        # means an `hf:endpoint/<name>` ref -- a dedicated endpoint has no
+        # catalog entry of its own (it was never listed by the router's
+        # `GET /v1/models` at all), so this always falls to the dataclass
+        # default for one. A router ref's `:suffix` (`:fastest`/`:cheapest`/
+        # `:preferred`/`:<provider>`) is stripped before the catalog lookup
+        # -- the catalog is keyed by bare `<org>/<model>`, never by the
+        # routing suffix.
+        #
+        # Round 5: an `hf:local/*` ref (`ref.local`) is a THIRD tier, never
+        # the router catalog above (a local server was never listed by
+        # `GET /v1/models` on the router either) -- `providers.
+        # huggingface_local_probe.cached_local_context_tokens` reads
+        # whatever the resolved server's OWN `/v1/models` (or llama-
+        # server's `/props`) reports for this exact model id, short-TTL
+        # cached the same way `providers.ollama.get_catalog` is (research
+        # doc section 8/10: most local servers fix context at launch time,
+        # so Halo reads it back rather than requesting one); unknown (the
+        # server is unreachable, or never reported a number) falls back to
+        # the bare dataclass default, same as every other "nothing known
+        # yet" case on this page.
+        if ref.local:
+            from halo_harness.providers.huggingface_local_resolve import cached_local_context_tokens
+            ctx = cached_local_context_tokens(ref.host, ref.model, env=None)
+            return ModelProfile(context_tokens=ctx) if ctx else ModelProfile()
+        if ref.host is None:
+            from halo_harness.providers.huggingface_catalog import load_hf_models_json
+            bare_id = ref.model.split(":", 1)[0]
+            entry = load_hf_models_json(state_dir).get(bare_id)
+            if entry:
+                return _profile_from_models_json_entry(entry)
+        return ModelProfile()
+
+    if ref.provider == "openai":
+        # Halo 2.0.3 round 5i part 1: two tiers, same shape huggingface's
+        # own branch above uses -- `GET /v1/models` (`providers.openai_
+        # catalog`) carries no context/pricing at all (docs/harness/
+        # OPENAI-RESEARCH.md section 3, confirmed live), so the real
+        # source here is models.dev's cross-check (the refreshed `~/.halo/
+        # models-dev.json` cache first, else the vendored package
+        # fallback), never that catalog file. Dataclass default when
+        # neither source names this id (an id the live `/v1/models` probe
+        # proved exists but models.dev doesn't carry yet).
+        from halo_harness.providers.models_dev import (
+            load_models_dev_json, load_vendored_openai_fallback, openai_entries_from_full_models_dev,
+            openai_profile_fields_from_models_dev,
+        )
+        refreshed = openai_entries_from_full_models_dev(load_models_dev_json(state_dir)).get(ref.model)
+        vendored = refreshed or load_vendored_openai_fallback().get(ref.model)
+        if vendored:
+            fields = openai_profile_fields_from_models_dev(vendored)
+            return ModelProfile(
+                context_tokens=fields.get("context_tokens", 128000),
+                max_output_tokens=fields.get("max_output_tokens", 16384),
+                vision=bool(fields.get("vision", False)),
+                reasoning=fields.get("reasoning", "none"),
+                price_in=fields.get("price_in"), price_out=fields.get("price_out"),
+                price_cache_read=fields.get("price_cache_read"), price_cache_write=fields.get("price_cache_write"),
+            )
+        return ModelProfile()
 
     models = load_models_json(state_dir)
     entry = models.get(ref.model)
@@ -532,6 +812,22 @@ class CostMeter:
         # must show something other than a bare "$?").
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
+        # Halo 2.0.3 round 5e: "saved versus cloud" -- set ONLY by
+        # `add_savings` below, which a session calls alongside `add_usage`
+        # for an ol:/hf:local/hf:mlx turn only (never for a cloud-model
+        # session -- `Session.__init__` never even resolves a reference
+        # price for one). `saved_price_in`/`saved_price_out`/`saved_price_
+        # source` are the ONE reference price this meter's whole running
+        # `saved_usd` total was computed against, resolved once at session
+        # start and pinned for the session's life (switching models
+        # mid-session, e.g. a hybrid-escalation auto-switch, does not
+        # reprice EARLIER turns -- the figure is "what was saved so far
+        # under the policy that was active", not retroactively rebased).
+        self.saved_usd: float = 0.0
+        self.saved_turns: int = 0
+        self.saved_price_in: Optional[float] = None
+        self.saved_price_out: Optional[float] = None
+        self.saved_price_source: Optional[str] = None
 
     def _accumulate_tokens(self, usage) -> None:
         if not isinstance(usage, dict):
@@ -618,3 +914,57 @@ class CostMeter:
             self.total_usd += cost_usd
         if not has_cost_data:
             self.has_cost_data = False
+
+    def set_savings_reference(self, *, price_in: Optional[float], price_out: Optional[float],
+                               source: str) -> None:
+        """Pins the ONE reference price (USD/token) `add_savings` prices
+        every turn against, and `source` (a short human phrase for `/cost`'s
+        own breakdown -- e.g. `"escalation target or:anthropic/claude-..."`
+        or `"catalog median (30 priced models)"`) naming WHY. Called once,
+        at session start, only for an ol:/hf:local/hf:mlx session
+        (`model.is_local_model_ref`) -- never for a cloud-model session, so
+        `saved_usd` simply never accumulates for one (pinned by tests)."""
+        self.saved_price_in = price_in
+        self.saved_price_out = price_out
+        self.saved_price_source = source
+
+    def add_savings(self, usage: Optional[dict]) -> Optional[float]:
+        """Mirrors `add_usage`'s own `_fallback_cost` arithmetic EXACTLY
+        (input*price_in + (output+reasoning)*price_out, cache tokens at
+        their own rate or price_in -- pinned the same way `_fallback_cost`
+        already is) but against `saved_price_in`/`saved_price_out` instead
+        of this meter's own `price_in`/`price_out` -- "what this turn's
+        tokens would have cost on the reference price", added to the
+        running `saved_usd` total. Returns None (and changes nothing) when
+        no reference price was ever set (`set_savings_reference` never
+        called -- a cloud-model session) or `usage` is unusable, exactly
+        the same shape `add_usage`/`_fallback_cost` already use for "price
+        unknown"."""
+        if self.saved_price_in is None or self.saved_price_out is None:
+            return None
+        saved = self._fallback_cost_at(usage, price_in=self.saved_price_in, price_out=self.saved_price_out)
+        if saved is None:
+            return None
+        self.saved_usd += saved
+        self.saved_turns += 1
+        return saved
+
+    def _fallback_cost_at(self, usage, *, price_in: float, price_out: float) -> Optional[float]:
+        """The SAME formula `_fallback_cost` uses, parameterized on a
+        caller-given price pair instead of `self.price_in`/`self.price_out`
+        -- factored out so `add_savings` (above) can never drift from the
+        ordinary cost arithmetic's own pinned behaviour."""
+        if not isinstance(usage, dict):
+            return None
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+            return None
+        reasoning = usage.get("reasoning_tokens")
+        reasoning = reasoning if isinstance(reasoning, int) else 0
+        cache_read = usage.get("cache_read_input_tokens")
+        cache_read = cache_read if isinstance(cache_read, int) else 0
+        cache_write = usage.get("cache_creation_input_tokens")
+        cache_write = cache_write if isinstance(cache_write, int) else 0
+        return (input_tokens * price_in + (output_tokens + reasoning) * price_out
+                + cache_read * price_in + cache_write * price_in)

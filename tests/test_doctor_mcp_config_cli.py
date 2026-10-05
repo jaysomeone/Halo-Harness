@@ -122,6 +122,33 @@ def test_h5b_u5_doctor_reports_the_clipboard_backend(ctx: Ctx):
 
 
 @test
+def test_doctor_lists_probable_test_leftovers_in_mcp_log_dir(ctx: Ctx):
+    """Test hygiene (round B fix pass, notes file): the REAL `~/.halo/
+    mcp/` on the build host held `a.log`/`b.log`/`c.log`/`big.log`/
+    `crash.log`/`eager1.log` (older standalone-test leftovers) and
+    `fake.log`/`fake.log.1`/a `plugin_*fakeserver.log` -- `halo doctor`
+    now lists any of these as probable leftovers, safe to delete, never
+    as a MISSING (nothing is actually broken)."""
+    from halo_harness.doctor import WARN, _check_test_leftovers
+    state_dir = Path(tempfile.mkdtemp(prefix="doctor-leftovers-"))
+    ctx.check("no mcp dir at all -> no entry", _check_test_leftovers(state_dir) is None)
+
+    mcp_dir = state_dir / "mcp"
+    mcp_dir.mkdir()
+    (mcp_dir / "my-real-server.log").write_text("real", encoding="utf-8")
+    ctx.check("only a real-looking log -> still no entry", _check_test_leftovers(state_dir) is None)
+
+    for name in ("a.log", "crash.log", "fake.log", "fake.log.1", "plugin_demo_fakeserver.log"):
+        (mcp_dir / name).write_text("x", encoding="utf-8")
+    line = _check_test_leftovers(state_dir)
+    ctx.check(f"a WARN naming the matched files, got {line!r}", line is not None and line.startswith(WARN))
+    for name in ("a.log", "crash.log", "fake.log", "fake.log.1", "plugin_demo_fakeserver.log"):
+        ctx.check(f"{name} is named, got {line!r}", name in line)
+    ctx.check(f"the real-looking log is NOT flagged, got {line!r}", "my-real-server.log" not in line)
+    ctx.check(f"informational wording, safe-to-delete, got {line!r}", "safe to delete" in line)
+
+
+@test
 def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
     """H9 OpenCode item 23: doctor must ALSO check for `rg`, `$VISUAL`/
     `$EDITOR` and a usable Bash shell (Git Bash on win32, `/bin/bash` on
@@ -163,6 +190,52 @@ def test_h9_doctor_reports_ripgrep_editor_and_shell(ctx: Ctx):
     result = _run(["doctor"], home)
     ctx.check("real doctor CLI mentions ripgrep", "ripgrep" in result.stdout.lower())
     ctx.check("real doctor CLI mentions $VISUAL/$EDITOR", "$VISUAL/$EDITOR" in result.stdout)
+
+
+@test
+def test_doctor_reports_term_program_and_the_vscode_settings(ctx: Ctx):
+    """Halo 2.0.2 round C (the owner's own macOS report, "ctrl+e or
+    command+e does not work on the mac using halo"): `doctor` always
+    prints TERM_PROGRAM/TERM, and names BOTH real VS Code remedies
+    verbatim specifically when TERM_PROGRAM is vscode -- so a user can
+    paste either straight into settings.json without hunting for the
+    exact wording."""
+    from halo_harness.doctor import _check_terminal_program
+
+    old_term_program, old_term = os.environ.get("TERM_PROGRAM"), os.environ.get("TERM")
+    try:
+        os.environ.pop("TERM_PROGRAM", None)
+        line = _check_terminal_program()
+        ctx.check(f"unset TERM_PROGRAM is still reported plainly, got {line!r}",
+                  line.startswith("[OK]") and "TERM_PROGRAM=(not set)" in line)
+
+        os.environ["TERM_PROGRAM"] = "iTerm.app"
+        line = _check_terminal_program()
+        ctx.check(f"a non-vscode terminal is reported plainly, no settings.json hint, got {line!r}",
+                  "TERM_PROGRAM=iTerm.app" in line and "settings.json" not in line)
+
+        os.environ["TERM_PROGRAM"] = "vscode"
+        line = _check_terminal_program()
+        ctx.check(f"vscode is detected, got {line!r}", "TERM_PROGRAM=vscode" in line)
+        ctx.check('the sendKeybindingsToShell remedy is named verbatim, got {line!r}'.format(line=line),
+                  '"terminal.integrated.sendKeybindingsToShell": true' in line)
+        ctx.check('the commandsToSkipShell remedy is named verbatim, got {line!r}'.format(line=line),
+                  '"terminal.integrated.commandsToSkipShell": ["-<command owning ctrl+e>"]' in line)
+
+        # The real doctor CLI (subprocess) surfaces it too -- `_run`'s own
+        # `_hermetic_child_env()` forwards the parent's current os.environ
+        # (minus BRIDGE_STATE_DIR/HALO_*), so TERM_PROGRAM=vscode (set
+        # just above, still in effect here) reaches the child as-is.
+        home = _fresh_home()
+        result = _run(["doctor"], home)
+        ctx.check("real doctor CLI shows the vscode hint", "sendKeybindingsToShell" in result.stdout)
+    finally:
+        if old_term_program is not None:
+            os.environ["TERM_PROGRAM"] = old_term_program
+        else:
+            os.environ.pop("TERM_PROGRAM", None)
+        if old_term is not None:
+            os.environ["TERM"] = old_term
 
 
 @test

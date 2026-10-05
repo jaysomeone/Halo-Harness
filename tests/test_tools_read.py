@@ -352,7 +352,7 @@ def test_loop_tools_image_result_reaches_the_tool_result_event(ctx: Ctx):
 
     # H10b: never set before -- the real in-process Session below fell
     # through to the REAL `~/.halo/sessions`, leaking
-    # `or:mock/vision-model` sessions into rolo's real session history
+    # `or:mock/vision-model` sessions into the owner's real session history
     # (H10b report).
     os.environ["BRIDGE_TEST_HOME"] = str(Path(tempfile.mkdtemp(prefix="read-img-e2e-home-")))
     d = Path(tempfile.mkdtemp(prefix="read-img-e2e-"))

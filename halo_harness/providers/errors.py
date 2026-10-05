@@ -320,6 +320,37 @@ def is_effort_with_tools_rejected_message(message: str) -> bool:
     return "reasoning_effort" in text and "function tool" in text.lower()
 
 
+_TOOLS_REJECTED_RE = re.compile(
+    r'unknown field\s*"tools"'                                    # Databricks strict-allowlist 400
+    r"|no endpoints found that support tool use"                   # OpenRouter routing 404
+    r"|does not support (function|tool) calling",                  # generic provider wording
+    re.IGNORECASE,
+)
+
+
+def is_tools_rejected_message(message: str) -> bool:
+    """Halo 2.0.2 round 5 (Qwen-at-work brief, item 1/4): the upstream
+    flatly refused `tools` rather than anything inside a schema/argument
+    -- Databricks' own strict-body-allowlist wording for a field it never
+    expected at all (`json: unknown field "tools"`, confirmed today
+    against the real gateway's 400 shape -- see `profiles.
+    DATABRICKS_BODY_ALLOWLIST`'s own docstring) or OpenRouter's documented
+    `404 No endpoints found that support tool use` when routing lands on a
+    tool-less provider (docs/harness/QWEN-RESEARCH.md §3h, via
+    claude-code-router#409). Distinct from `ToolCatalogTooLarge` (a COUNT
+    problem this harness catches before ever sending the request) and from
+    any argument/schema-shaped 400 -- this is specifically "this endpoint
+    does not do tool calling at all," the live-400 twin of a decision-only
+    row's `capabilities.decision_only`/`ProviderProfile.tools_supported`
+    for an endpoint that had no row (or pattern match) to tell Halo that
+    up front. `agent/loop.py`'s `_step` calls `providers.learned_rules.
+    learn_tools_rejected` the first time this fires for a Databricks
+    endpoint, so the NEXT request against it never pays for the same
+    round trip -- `resolve_profile` consults that cache via `tools_
+    supported` before a request is even built."""
+    return bool(_TOOLS_REJECTED_RE.search(message or ""))
+
+
 def is_effort_rejected_message(message: str) -> bool:
     """1.0.1 hotfix 19.3: the upstream 400'd specifically on the effort
     field this harness put in the body -- verified wording on a Databricks

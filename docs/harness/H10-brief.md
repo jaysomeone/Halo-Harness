@@ -133,7 +133,7 @@ exactly one; `-p` never drafts; `~/.claude.json` and settings checksums unchange
 `.credentials.json` sentinel never opened.
 
 ## Acceptance (Fable re-runs)
-All suites green on Windows and WSL. `halo stats --models --since 30d` over rolo's real
+All suites green on Windows and WSL. `halo stats --models --since 30d` over the owner's real
 `~/.halo/sessions` shows the DeepSeek rows with cost, repair and edit-failure columns.
 TUI `/improve` on this repo yields ≥ 1 sensible candidate from this week's sessions; `a` writes a
 rule with provenance into `.claude/rules/`; `d` on another persists across restarts.
