@@ -64,6 +64,16 @@ OPENAI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 # instead of the general `EFFORT_LEVELS` above.
 ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "max")
 
+# Halo 2.0.3 round 5i part 1 (docs/harness/OPENAI-RESEARCH.md section 5,
+# confirmed live against the Responses API reference, 2026-10-04): the
+# `reasoning.effort` enum on this dialect is wider than the harness's own
+# EFFORT_LEVELS (adds "none"/"minimal") -- a strict superset, so
+# `clamp_effort` never needs to narrow a value the harness's own
+# `--effort`/`/effort` vocabulary can send; this profile exists so a
+# future config/settings value using "none"/"minimal" directly is still
+# accepted rather than clamped to this route's own default.
+OPENAI_RESPONSES_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
 
 def _model_table_path() -> Path:
     return Path(__file__).resolve().parent / "model_table.json"
@@ -437,6 +447,30 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
             tool_leak_patterns=("python_repr_args", "json_text_call"),
         )
 
+    if route.dialect == "openai-responses":
+        # Halo 2.0.3 round 5i part 1: `oai:gpt-6-astra`/`oai:gpt-6.1-sol`
+        # by default, or any `oai:` model `openai.dialect_overrides`
+        # names (`providers.responses_request.resolve_openai_dialect`).
+        # `thinking_format="openai_responses"` is its OWN value (never
+        # "anthropic_thinking"/"fmapi_blocks"/"openrouter_details" --
+        # none of those wire shapes apply to this dialect) so nothing
+        # downstream mistakes this dialect's reasoning for one of theirs.
+        # `reasoning_replay="empty"`: reasoning is carried for DISPLAY
+        # only, never replayed on the wire -- `docs/harness/OPENAI-
+        # RESEARCH.md`'s own documented scope cut (`store: false` means
+        # no `previous_response_id`, and the encrypted-reasoning-content
+        # replay alternative is out of scope this round). No model_table.
+        # json row lookup: that table is Databricks/OpenRouter-keyed
+        # only, and a bare OpenAI id would never match a row there anyway
+        # (same reasoning the "ollama" branch above already gives).
+        return ProviderProfile(
+            system_vs_developer="none", thinking_format="openai_responses",
+            reasoning_replay="empty", reasoning_effort_supported=True,
+            family=family, tools_supported=True, tools_max=128,
+            effort_values_supported=OPENAI_RESPONSES_EFFORT_LEVELS,
+            model_id=route.upstream_model,
+        )
+
     thinking_format, replay, effort_supported = _fallback_family_defaults(family, route.dialect)
     replay = row.get("reasoning_replay", replay)
     effort_supported = row.get("reasoning_effort_supported", effort_supported)
@@ -561,8 +595,10 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
         )
 
     # openrouter (also the fallback for any other openai-chat-dialect host,
-    # which per model.py's own routing is "huggingface" and nothing else --
-    # see the round 5b part 2 override just below the ProviderProfile call)
+    # which per model.py's own routing is "huggingface" or "openai" (the
+    # chat-completions dialect of the `oai:` route, round 5i part 1 --
+    # "openai-responses" already returned above) and nothing else -- see
+    # the round 5b part 2 override just below the ProviderProfile call)
     profile = ProviderProfile(
         system_vs_developer="system", max_tokens_field="max_tokens",
         reasoning_effort_supported=effort_supported, thinking_format="openrouter_details",

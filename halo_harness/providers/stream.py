@@ -52,10 +52,11 @@ from halo_harness.providers.errors import (
 )
 from halo_harness.providers.http import (
     UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_ollama_chat, call_openai_chat,
-    is_connect_failure_message, is_offline_refusal_message,
+    call_openai_responses, is_connect_failure_message, is_offline_refusal_message,
 )
 from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
 from halo_harness.providers.ollama_stream import OllamaStreamToAnthropic
+from halo_harness.providers.responses_stream import ResponsesStreamToAnthropic
 from halo_harness.providers.routing import Route
 from halo_harness.providers.translate import anthropic_to_openai
 from halo_harness.providers.anthropic_sse import AnthropicSSEDecoder
@@ -150,6 +151,13 @@ class CompletionRequest:
     # phase1_ollama` then raises the SAME plain `ContextOverflow` it
     # always did, straight to the existing compaction path.
     ollama_ctx_retry_ceiling: Optional[int] = None
+    # Halo 2.0.3 round 5i part 1: `stream_openai_responses_completion`'s
+    # own sibling field -- same "prebuilt body, caller already did the
+    # profile-driven building" pattern as `prebuilt_ollama_body`/
+    # `prebuilt_anthropic_body` above. The Responses wire shape is neither
+    # openai-chat nor Anthropic-passthrough nor Ollama's native API, so it
+    # gets its own field rather than overloading any of the other three.
+    prebuilt_responses_body: Optional[dict] = None
 
 
 class ContextOverflow(Exception):
@@ -327,6 +335,13 @@ def _run_phase1(req: CompletionRequest, abort: "threading.Event | None" = None):
                 "huggingface.endpoints, or add/run a local server (huggingface.local_servers, "
                 "or auto-detection on a default port)"
             )
+        if req.route.provider == "openai":
+            # Halo 2.0.3 round 5i part 1: the `oai:` chat-completions
+            # dialect's own named message, same reasoning as the
+            # huggingface branch just above -- the generic Databricks/
+            # OpenRouter two-way label below would otherwise call this
+            # "OpenRouter not configured", which names the wrong env var.
+            raise ProviderNotConfigured("OpenAI API not configured -- set OPENAI_API_KEY")
         provider_label = "Databricks" if req.route.provider == "databricks" else "OpenRouter"
         raise ProviderNotConfigured(f"{provider_label} not configured")
 
@@ -1098,3 +1113,168 @@ def stream_ollama_completion(req: CompletionRequest, abort: "threading.Event | N
 
     dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
     dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})
+
+
+# ---------------------------------------------------------------------------
+# Halo 2.0.3 round 5i part 1: the `openai-responses` dialect's own sibling
+# of stream_anthropic_completion -- a real SSE wire format (unlike Ollama's
+# NDJSON), so phase 2 reuses sse_reader_thread unchanged; phase 1 is its own
+# function (not a parameterization of _run_phase1) for the same reason
+# stream_anthropic_completion is its own function rather than a
+# parameterization of _run_phase1 -- a different prebuilt-body field, a
+# different call_*, no max_tokens-limit-cache concern.
+# ---------------------------------------------------------------------------
+
+def _run_phase1_responses(req: CompletionRequest, abort: "threading.Event | None" = None):
+    if abort is not None and abort.is_set():
+        raise _Aborted()
+    body = req.prebuilt_responses_body
+    if req.creds is None:
+        raise ProviderNotConfigured("OpenAI API not configured -- set OPENAI_API_KEY")
+
+    sock_box: list = [None]
+
+    def _register_sock(conn) -> None:
+        sock_box[0] = conn.sock
+
+    def _call_upstream():
+        return call_openai_responses(
+            base_url=req.creds.base_url, api_key=req.creds.api_key, body=body,
+            extra_headers=req.extra_headers, state_dir=req.state_dir, on_connect=_register_sock,
+        )
+
+    watcher_done = threading.Event()
+    watcher = None
+    if abort is not None:
+        watcher = threading.Thread(target=_phase1_abort_watcher, args=(abort, watcher_done, sock_box), daemon=True)
+        watcher.start()
+    try:
+        for attempt in range(2):
+            if abort is not None and abort.is_set():
+                raise _Aborted()
+            try:
+                result = _call_upstream()
+            except UpstreamConnectError as e:
+                if abort is not None and abort.is_set():
+                    raise _Aborted() from e
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
+                    continue
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+                raise _upstream_error_from_mapping(status, jbody, hdrs) from e
+            if 200 <= result.status < 300:
+                return body, result
+            raw = result.resp.read() if result.resp else b""
+            try:
+                err_obj = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            except (json.JSONDecodeError, ValueError):
+                err_obj = {"error": {"message": raw.decode("utf-8", "replace")}}
+            err_msg = upstream_error_text(err_obj)
+            if result.status == 400:
+                overflow = parse_context_overflow(result.status, err_msg, None, requested_max_tokens=body.get("max_output_tokens"))
+                if overflow:
+                    raise ContextOverflow(overflow.limit, overflow.prompt_tokens, overflow.total)
+            status, jbody, hdrs = map_upstream_error(result.status, err_obj, req.route.provider, result.headers)
+            raise _upstream_error_from_mapping(status, jbody, hdrs)
+        raise UpstreamError(502, "api_error", "upstream failure after retries", True)
+    finally:
+        watcher_done.set()
+
+
+def stream_openai_responses_completion(req: CompletionRequest, abort: "threading.Event | None" = None) -> Iterator[dict]:
+    """Drive one `openai-responses`-dialect completion end to end
+    (`oai:gpt-6-astra`/`oai:gpt-6.1-sol` by default, or any `oai:` model
+    `openai.dialect_overrides` names). Same two-phase contract as every
+    other dialect here; `req.prebuilt_responses_body` MUST be set (the
+    caller builds it via `providers.responses_request.build_openai_
+    responses_body` first)."""
+    try:
+        _body, result = _run_phase1_responses(req, abort=abort)
+    except _Aborted:
+        return
+
+    estimate = estimate_tokens(req.prebuilt_responses_body)
+    sm = ResponsesStreamToAnthropic(req.model_label, estimate)
+    dumped_lines: list = []
+    dumped_events: list = []
+    q: "queue.Queue" = queue.Queue()
+    reader = threading.Thread(target=sse_reader_thread, args=(result.resp, q))
+    reader.daemon = True
+    reader.start()
+    sock = result.conn.sock if result.conn is not None else None
+    terminal_reached = False
+
+    try:
+        start_ev = sm.message_start_event()
+        dumped_events.append(start_ev)
+        yield start_ev
+
+        poll_timeout = min(req.ping_interval, 0.25) if req.ping_interval > 0 else 0.25
+        elapsed = 0.0
+        while True:
+            if abort is not None and abort.is_set():
+                return
+            try:
+                item = q.get(timeout=poll_timeout)
+            except queue.Empty:
+                elapsed += poll_timeout
+                if elapsed >= req.ping_interval:
+                    elapsed = 0.0
+                    yield {"type": "ping"}
+                continue
+            elapsed = 0.0
+            kind, value = item
+            try:
+                if kind == "line":
+                    line = value.decode("utf-8", "replace").rstrip("\n")
+                    dumped_lines.append(line)
+                    step = sm.feed_sse_line(line)
+                    for ev in step["events"]:
+                        dumped_events.append(ev)
+                        yield ev
+                    if step["kind"] == "done":
+                        terminal_reached = True
+                        break
+                    if step["kind"] == "error":
+                        break  # finding 12's own reasoning: upstream may still be writing -- see stream_completion
+                elif kind == "eof":
+                    for ev in sm.on_eof():
+                        dumped_events.append(ev)
+                        yield ev
+                    terminal_reached = True
+                    break
+                elif kind == "exc":
+                    ev = sm.error_event(f"upstream connection error: {value}")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+                elif kind == "json":
+                    # Responses streaming is always real SSE per
+                    # docs/harness/OPENAI-RESEARCH.md -- an unexpectedly
+                    # whole-body-buffered JSON reply (the content-type
+                    # lied) is a plain error, never a guessed shape.
+                    ev = sm.error_event("upstream returned a non-streamed JSON body for a streaming request")
+                    dumped_events.append(ev)
+                    yield ev
+                    terminal_reached = True
+                    break
+            except Exception as e:
+                log.warning("malformed upstream Responses stream data: %s", e)
+                ev = sm.error_event(f"upstream sent malformed data: {e}")
+                dumped_events.append(ev)
+                yield ev
+                break
+    finally:
+        if not terminal_reached and sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        conn = getattr(result, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        dump_debug(req.state_dir, "upstream-stream", {"lines": dumped_lines})
+        dump_debug(req.state_dir, "emitted-events", {"events": dumped_events})

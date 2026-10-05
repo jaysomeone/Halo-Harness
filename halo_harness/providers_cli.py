@@ -75,7 +75,15 @@ def provider_rows(*, cwd=None, settings_flag=None, env=None) -> "list[dict]":
     return rows
 
 
-def format_providers_table(rows: "list[dict]") -> str:
+def format_providers_table(rows: "list[dict]", *, openai_spend_line: "str | None" = None) -> str:
+    """`openai_spend_line` (round 5i part 1): an already-formatted "this
+    session: $x.xxxx across N turn(s)" fragment -- `_cmd_providers`
+    passes one when a live session's `cost_meter` has data for an `oai:`
+    model; `None` (every OTHER caller, including the standalone `halo
+    providers` CLI, which has no live session at all) falls back to a
+    plain pointer at `/cost`/`halo cost` instead of a number. Either way
+    the note only appears when the `openai` row is actually enabled --
+    nothing to say about a balance endpoint nobody configured."""
     header = f"{'provider':<26} {'status':<40} {'reachable':<42} {'models':>6}"
     lines = [header]
     for r in rows:
@@ -89,6 +97,19 @@ def format_providers_table(rows: "list[dict]") -> str:
     if balance_line:
         lines.append("")
         lines.append(balance_line)
+    # Round 5i part 1 (brief item 1): "the OpenAI API has no public
+    # balance endpoint for ordinary keys -- say so and show computed
+    # spend" (the same rule part B of 2.0.3-brief.md gives for TypeSafe/
+    # Databricks). Plain and static -- never a network call from this
+    # function, which both the TUI's `/providers` and the standalone CLI
+    # call with no session attached half the time.
+    oai_row = next((r for r in rows if r["name"] == "openai"), None)
+    if oai_row is not None and oai_row["enabled"]:
+        lines.append("")
+        lines.append(
+            "OpenAI API has no public balance endpoint for ordinary keys -- " +
+            (openai_spend_line or "spend is computed per session from oai: catalog prices (see /cost).")
+        )
     return "\n".join(lines)
 
 

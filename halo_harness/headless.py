@@ -154,6 +154,17 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         if hf is None:
             return None
         return ProviderCreds(base_url=hf.base_url, api_key=hf.api_key)
+    if ref.provider == "openai":
+        # Halo 2.0.3 round 5i part 1: `OPENAI_API_KEY` only -- no
+        # endpoint/local-server concept the way `huggingface` has; both
+        # the `openai-chat` and `openai-responses` dialects share this
+        # SAME credential pair (`providers.stream._run_phase1`/`_run_
+        # phase1_responses` each pick their own call_* with it).
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai(env)
+        if oai is None:
+            return None
+        return ProviderCreds(base_url=oai.base_url, api_key=oai.api_key)
     return None
 
 
@@ -832,7 +843,7 @@ def build_session(
                 # SAME reason -- a stale `hf:endpoint/<name>` remembered
                 # from a box whose `huggingface.endpoints` no longer has
                 # that name (or no HF_TOKEN for a stale router ref).
-                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama", "huggingface")
+                if (last_ref.provider in ("openrouter", "databricks", "anthropic", "ollama", "huggingface", "openai")
                         and _resolve_creds(last_ref, settings) is None):
                     print(f"halo: the last-used model {last_model_raw!r} has no credentials configured on "
                           f"this box -- using the configured default instead", file=sys.stderr)

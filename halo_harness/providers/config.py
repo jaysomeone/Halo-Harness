@@ -466,6 +466,34 @@ def resolve_huggingface(env: dict | None = None) -> HfConfig | None:
     return HfConfig(api_key=api_key, base_url=base_url)
 
 
+@dataclass
+class OaiConfig:
+    """The OpenAI API (`oai:`) -- Halo 2.0.3 round 5i part 1. `api_key` is
+    `OPENAI_API_KEY`; `base_url` defaults to the real API root and is
+    overridden for tests by `BRIDGE_OPENAI_BASE_URL` (or the `HALO_`/
+    `ROLO_CLAUDE_` twins, `config/paths.py::env_compat`) -- same shape as
+    every other single-key provider on this page (`resolve_openrouter`/
+    `resolve_anthropic`)."""
+    api_key: str
+    base_url: str = "https://api.openai.com/v1"
+
+
+def resolve_openai(env: dict | None = None) -> OaiConfig | None:
+    """`None` if `OPENAI_API_KEY` isn't set -- `oai:<model>` is then
+    refused at request time with a plain "OpenAI API not configured"
+    message (`providers.stream._run_phase1`), same contract as every
+    other provider here. A bare call (no `env`) falls back to the
+    settings-env chain the same way `resolve_openrouter`/`resolve_
+    anthropic` do (`_settings_fallback_value`/`_settings_fallback_
+    base_url`)."""
+    env = env if env is not None else os.environ
+    api_key = _settings_fallback_value(env, "OPENAI_API_KEY")
+    if not api_key:
+        return None
+    base_url = _settings_fallback_base_url(env, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    return OaiConfig(api_key=api_key, base_url=base_url)
+
+
 def resolve_openrouter_management_key(env: dict | None = None) -> "str | None":
     """H15 part 2 addendum 4 (corrected): `OPENROUTER_MANAGEMENT_KEY` -- a
     SEPARATE, higher-privilege key OpenRouter's own `/credits` endpoint

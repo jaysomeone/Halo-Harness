@@ -801,6 +801,34 @@ class Controller:
             })
         _maybe_hint("huggingface", detected=hf_detected)
 
+        # Halo 2.0.3 round 5i part 1: the real OpenAI API's own cached id
+        # list (`GET /v1/models`, no price/context of its own -- docs/
+        # harness/OPENAI-RESEARCH.md section 3) -- price/context merged
+        # in from the SEPARATE models.dev cross-check (`providers.openai_
+        # catalog.oai_picker_fields`), same source `model.resolve_model_
+        # profile`'s own "openai" branch uses. Same first-paint-safe gate
+        # as the huggingface group just above: a pure file read, gated on
+        # enablement, never a network call from this method itself.
+        oai_detected = credentials_present("openai", env=env)
+        oai_enabled = is_enabled("openai", detected=oai_detected)
+        try:
+            from halo_harness.providers.openai_catalog import load_oai_models_json, oai_picker_fields
+            oai_models = load_oai_models_json(self.state_dir) or {} if oai_enabled else {}
+        except Exception:
+            oai_models = {}
+        for name in sorted(oai_models):
+            ref = f"oai:{name}"
+            if ref in seen:
+                continue
+            fields = oai_picker_fields(name, self.state_dir)
+            out.append({
+                "ref": ref, "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": None,
+                "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
+                "provider": "openai", "group": label_for("openai"),
+            })
+        _maybe_hint("openai", detected=oai_detected)
+
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,

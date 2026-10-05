@@ -344,6 +344,9 @@ class ProvidersStep(StepScreen):
                          "dedicated endpoint (name + URL [+ token]), or add one local server (URL [+ key]). "
                          "A local server on a default port (llama.cpp, vLLM, LM Studio, ...) is found "
                          "automatically by /local with none of this.", classes="tab-help")
+        if provider == "openai":
+            yield Static("Paste OPENAI_API_KEY to use the real OpenAI API directly (oai: models) -- "
+                         "separate from a Codex subscription login.", classes="tab-help")
         if provider == "typesafe":
             yield Static("Stores TYPESAFE_API_KEY only -- for a later feature, no routed models yet.",
                          classes="tab-help")

@@ -534,6 +534,48 @@ def call_openai_chat(base_url: str, api_key: str, body: dict, extra_headers: dic
 
 
 
+def call_openai_responses(base_url: str, api_key: str, body: dict, extra_headers: dict, state_dir: Path,
+                           on_connect=None) -> UpstreamResult:
+    """POST to the OpenAI Responses endpoint (`<base_url>/responses`) --
+    Halo 2.0.3 round 5i part 1, the `openai-responses` dialect's own
+    sibling of `call_openai_chat` just above: same headers/connect/retry
+    shape, only the path differs (`docs/harness/OPENAI-RESEARCH.md`
+    section 1 confirms the request is an ordinary POST, same as chat
+    completions)."""
+    if base_url.endswith("/"):
+        base_url = base_url.rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    tls = parsed.scheme == "https"
+    path = parsed.path + "/responses"
+    if not path.startswith("/"):
+        path = "/" + path
+
+    body_bytes = jdumps(body)
+    dump_debug(state_dir, "upstream-request", body)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+        "Content-Length": str(len(body_bytes)),
+    }
+    headers.update(extra_headers)
+
+    try:
+        conn = open_upstream(host, port, tls, on_connect=on_connect)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_connect_error(host, e), host=host) from e
+    try:
+        conn.request("POST", path, body=body_bytes, headers=headers)
+        resp = conn.getresponse()
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        return UpstreamResult(status=resp.status, headers=resp_headers, resp=resp, conn=conn)
+    except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+        raise UpstreamConnectError(format_post_connect_error(host, e), host=host) from e
+
+
 def call_ollama_chat(base_url: str, api_key: "str | None", body: dict, extra_headers: dict, state_dir: Path,
                       on_connect=None) -> UpstreamResult:
     """POST to Ollama's native `/api/chat` (Halo 2.0.3 round 2) -- local,

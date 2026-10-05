@@ -31,6 +31,7 @@ _OL_PREFIX = "ol:"
 _HF_PREFIX = "hf:"
 _HF_ENDPOINT_PREFIX = "endpoint/"
 _HF_LOCAL_PREFIX = "local/"
+_OAI_PREFIX = "oai:"
 # Halo 2.0.3 round 5f: `hf:mlx/<org>/<repo>` -- a Hub repo served by a
 # Halo-managed `mlx_lm.server` (Apple Silicon only; see ModelRef.mlx).
 _HF_MLX_PREFIX = "mlx/"
@@ -194,9 +195,9 @@ def _refuse_if_disabled(provider_key: str) -> None:
 @dataclass(frozen=True)
 class ModelRef:
     raw: str
-    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface"
-    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
-    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "ollama"
+    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface" | "openai"
+    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf:/oai: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
+    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "ollama" | "openai-responses"
     # Halo 2.0.3 round 2: the `@<hostname>` part of `ol:<model>@<hostname>`
     # (research doc Q6/Q7) -- which entry of `ollama.hosts` this ref names;
     # `None` means "the default host" (`providers.ollama.resolve_ollama_
@@ -360,6 +361,23 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
                 f"no route: {raw!r} (hf: needs <org>/<model>[:suffix], endpoint/<name>, local/<model>, "
                 f"or mlx/<org>/<repo>)")
         return ModelRef(raw=raw, provider="huggingface", model=bare, dialect="openai-chat")
+    if resolved.startswith(_OAI_PREFIX):
+        # Halo 2.0.3 round 5i part 1: `oai:<model>` against the real
+        # OpenAI API (`OPENAI_API_KEY`). Dialect is decided HERE, once,
+        # per `docs/harness/OPENAI-RESEARCH.md`'s own table
+        # (`providers.responses_request.resolve_openai_dialect`) --
+        # exactly the two ids the Responses API reference names as
+        # requiring it for function calling, plus `openai.dialect_
+        # overrides` (always wins, either direction) -- never re-decided
+        # later: every `Route(...)` construction site in this codebase
+        # copies `ModelRef.dialect` straight through (`model_ref.dialect`),
+        # so this is the one place that gets to choose.
+        bare = resolved[len(_OAI_PREFIX):]
+        _refuse_if_disabled("openai")
+        if not bare:
+            raise InvalidModelError(f"no route: {raw!r} (oai: needs a model id, e.g. oai:gpt-6-astra)")
+        from halo_harness.providers.responses_request import resolve_openai_dialect
+        return ModelRef(raw=raw, provider="openai", model=bare, dialect=resolve_openai_dialect(bare))
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
@@ -604,6 +622,34 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             entry = load_hf_models_json(state_dir).get(bare_id)
             if entry:
                 return _profile_from_models_json_entry(entry)
+        return ModelProfile()
+
+    if ref.provider == "openai":
+        # Halo 2.0.3 round 5i part 1: two tiers, same shape huggingface's
+        # own branch above uses -- `GET /v1/models` (`providers.openai_
+        # catalog`) carries no context/pricing at all (docs/harness/
+        # OPENAI-RESEARCH.md section 3, confirmed live), so the real
+        # source here is models.dev's cross-check (the refreshed `~/.halo/
+        # models-dev.json` cache first, else the vendored package
+        # fallback), never that catalog file. Dataclass default when
+        # neither source names this id (an id the live `/v1/models` probe
+        # proved exists but models.dev doesn't carry yet).
+        from halo_harness.providers.models_dev import (
+            load_models_dev_json, load_vendored_openai_fallback, openai_entries_from_full_models_dev,
+            openai_profile_fields_from_models_dev,
+        )
+        refreshed = openai_entries_from_full_models_dev(load_models_dev_json(state_dir)).get(ref.model)
+        vendored = refreshed or load_vendored_openai_fallback().get(ref.model)
+        if vendored:
+            fields = openai_profile_fields_from_models_dev(vendored)
+            return ModelProfile(
+                context_tokens=fields.get("context_tokens", 128000),
+                max_output_tokens=fields.get("max_output_tokens", 16384),
+                vision=bool(fields.get("vision", False)),
+                reasoning=fields.get("reasoning", "none"),
+                price_in=fields.get("price_in"), price_out=fields.get("price_out"),
+                price_cache_read=fields.get("price_cache_read"), price_cache_write=fields.get("price_cache_write"),
+            )
         return ModelProfile()
 
     models = load_models_json(state_dir)

@@ -36,8 +36,10 @@ from typing import Optional
 # surfaced only via its own `/ollama` panel and doctor section, never this
 # generic table), the round 4 brief explicitly asks for `/providers`/
 # `halo providers`/doctor's enabled-count line to show Hugging Face, so it
-# joins this table while "ollama" still deliberately does not.
-PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe", "huggingface")
+# joins this table while "ollama" still deliberately does not. Round 5i
+# part 1: "openai" joins the same way, for the same reason (the brief:
+# "same should be... in the model list with what models they can use").
+PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe", "huggingface", "openai")
 
 LABELS = {
     "databricks": "Databricks",
@@ -46,6 +48,7 @@ LABELS = {
     "claude_subscription": "Claude Code subscription",
     "typesafe": "TypeSafe",
     "huggingface": "Hugging Face",
+    "openai": "OpenAI API (key)",
 }
 
 # item 21.6: the `dbx:`/`or:`/`ant:`/`cc:` prefix table -- also in
@@ -54,6 +57,7 @@ LABELS = {
 PREFIXES = {
     "databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:",
     "claude_subscription": "cc:", "typesafe": None, "huggingface": "hf:",
+    "openai": "oai:",
 }
 
 # A caller naturally has `ModelRef.provider` ("cc"), `init_providers.py`'s
@@ -63,7 +67,7 @@ PREFIXES = {
 _ALIASES = {
     "cc": "claude_subscription", "claude": "claude_subscription",
     "dbx": "databricks", "or": "openrouter", "ant": "anthropic",
-    "hf": "huggingface",
+    "hf": "huggingface", "oai": "openai",
 }
 
 
@@ -278,6 +282,11 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
         if resolve_huggingface_endpoints():
             return True
         return bool(resolve_huggingface_local_servers())
+    if name == "openai":
+        # Round 5i part 1: a single credential source (OPENAI_API_KEY) --
+        # no endpoint/local-server concept the way huggingface has.
+        from halo_harness.providers.config import resolve_openai
+        return resolve_openai(env) is not None
     if name == "ollama":
         # Round 5: config-only, never a network probe (same contract as
         # every branch on this page) -- `ollama.hosts` carries at least one

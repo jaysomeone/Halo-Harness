@@ -399,6 +399,45 @@ version number.
    "reply with the single word pong" --model ol:qwen3-coder:30b` (loopback,
    succeeds) and the same with `--model or:<any>` (refuses with the plain
    sentence).
+9. **`oai:` -- the real OpenAI API, chat completions and a new Responses
+   dialect** (round 5i part 1, `docs/harness/OPENAI-RESEARCH.md`):
+   `oai:<model>` (group "OpenAI API (key)") against `https://
+   api.openai.com/v1`, `OPENAI_API_KEY` auto-enabling it the same way
+   every other single-key provider does; `BRIDGE_OPENAI_BASE_URL`/
+   `HALO_OPENAI_BASE_URL` overrides the base URL for tests. Chat
+   completions (the default) reuses the existing OpenAI-family compat
+   profile unchanged; a NEW `openai-responses` dialect (`POST /v1/
+   responses`: `instructions` for the system prompt, `input` items
+   including `function_call`/`function_call_output` for tool use, tools
+   as flat function items, `reasoning: {effort}`, `store: false` and
+   NEVER `previous_response_id` -- Halo always keeps owning the
+   transcript) is wired into the same three dialect-dispatch points the
+   `ollama` dialect uses, plus the small-model and compaction paths,
+   selected per model by an exact-id table (`gpt-6-astra`, `gpt-6.1-sol`
+   -- exactly the two ids the Responses API reference names as requiring
+   it for function calling, confirmed live 2026-10-04; similarly-named
+   ids the same page does not name are deliberately left on chat
+   completions) and `openai.dialect_overrides` config, either direction.
+   Reasoning is carried for display only, never replayed on the wire
+   (the documented scope cut: `store:false` rules out
+   `previous_response_id`, and encrypted-reasoning-content replay is not
+   implemented this round). `GET /v1/models` cached in its own state
+   file with a TTL (no price/context on this endpoint, confirmed live --
+   those come from a new vendored models.dev `openai` fallback, 53 ids);
+   error shapes (401, 429 `insufficient_quota`, 404) need no new mapping
+   code at all -- the existing OpenAI-shaped error path already produces
+   the real plain sentences, pinned with new tests instead. `/providers`
+   says plainly that the OpenAI API has no public balance endpoint for
+   ordinary keys and shows computed spend instead; the init wizard gets
+   an "OpenAI API (key)" tab (same pattern as Hugging Face's). **No
+   OpenAI key exists on the build host -- every behaviour above is
+   verified against the parameterized `tests/helpers/mock_openai.py`
+   fake only, including a live Read-tool round trip on the Responses
+   dialect; unverified against the real API until a key is available.**
+   Docs: `docs/MODELS.md` ("OpenAI API" section + the ref-form table),
+   `docs/CONFIG.md` (`OPENAI_API_KEY`, `HALO_OPENAI_BASE_URL`, `openai.
+   dialect_overrides`), `docs/COMMANDS.md` (`halo doctor`/`halo
+   providers`).
 
 ## [2.0.2] - 2026-10-04
 

@@ -982,7 +982,19 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
         # actually launched via --cwd/--settings (same fix `/doctor` already
         # had for --cwd via facade.cwd, below).
         live_env = facade.settings.effective_env if getattr(facade, "settings", None) is not None else None
-        return format_providers_table(provider_rows(cwd=facade.cwd, env=live_env))
+        # Round 5i part 1: when a LIVE session is attached and it's
+        # actually on an `oai:` model with real cost data, show the exact
+        # figure `/cost` would -- the standalone `halo providers` CLI (no
+        # session at all) and a session on any other provider both leave
+        # this None, which `format_providers_table` turns into a plain
+        # "see /cost" pointer instead of a number.
+        openai_spend_line = None
+        session = getattr(facade, "session", None)
+        if session is not None and getattr(session.route, "provider", None) == "openai":
+            cm = session.cost_meter
+            if cm.has_cost_data:
+                openai_spend_line = f"this session: ${cm.total_usd:.4f} across {cm.turns} turn(s)"
+        return format_providers_table(provider_rows(cwd=facade.cwd, env=live_env), openai_spend_line=openai_spend_line)
     action = tokens[0]
     if action in ("enable", "disable"):
         if len(tokens) < 2:

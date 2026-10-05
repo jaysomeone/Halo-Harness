@@ -33,12 +33,12 @@ PROVIDERS = ("databricks", "openrouter", "anthropic", "claude")
 # `halo setup`/`/setup` never reach a providers step at all (`setup_cli.
 # py`'s own step list is `roles`/`orgs`/`summary` only), so neither is
 # affected by this tuple either way.
-TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "typesafe")
+TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "openai", "typesafe")
 
 TAB_LABEL = {
     "databricks": "Databricks", "openrouter": "OpenRouter", "anthropic": "Anthropic API (key)",
     "claude": "Claude Code subscription", "ollama": "Ollama (local or LAN)", "huggingface": "Hugging Face",
-    "typesafe": "TypeSafe",
+    "openai": "OpenAI API (key)", "typesafe": "TypeSafe",
 }
 
 PROVIDER_LABEL = {
@@ -207,6 +207,23 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
                 "price_out_per_m": _price_per_m(pricing.get("completion")),
             })
         return out
+    if provider == "openai":
+        # Round 5i part 1: the real API's own cached id list (`GET /v1/
+        # models` carries no price/context -- docs/harness/OPENAI-
+        # RESEARCH.md section 3) with price/context merged in from the
+        # SEPARATE models.dev cross-check, same source `model.resolve_
+        # model_profile`'s own "openai" branch uses.
+        from halo_harness.providers.openai_catalog import load_oai_models_json, oai_picker_fields
+        models = load_oai_models_json(state_dir) or {}
+        out = []
+        for mid in sorted(models):
+            fields = oai_picker_fields(mid, state_dir)
+            out.append({
+                "ref": f"oai:{mid}", "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": None,
+                "price_in_per_m": fields.get("price_in_per_m"), "price_out_per_m": fields.get("price_out_per_m"),
+            })
+        return out
     return []
 
 
@@ -355,6 +372,17 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
         ]
         return {"configured": bool(parts), "source": "env file / config.json" if parts else None,
                 "masked": "; ".join(parts) if parts else None, "known_host": None, "fields": fields}
+    if provider == "openai":
+        # Round 5i part 1: a single credential source (no endpoint/local-
+        # server tiers the way huggingface has) -- same shape as the
+        # openrouter/anthropic branches just above.
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai(env)
+        if oai is not None:
+            return {"configured": True, "source": "env file", "masked": redact(oai.api_key),
+                    "known_host": None, "fields": []}
+        return {"configured": False, "source": None, "masked": None, "known_host": None,
+                "fields": [{"name": "key", "label": "OPENAI_API_KEY", "secret": True}]}
     if provider == "typesafe":
         key = env.get("TYPESAFE_API_KEY")
         if key:
@@ -365,7 +393,8 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
     return {"configured": False, "source": None, "masked": None, "known_host": None, "fields": []}
 
 
-_TAB_KEY_ENV = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "typesafe": "TYPESAFE_API_KEY"}
+_TAB_KEY_ENV = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY", "typesafe": "TYPESAFE_API_KEY"}
 
 
 def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict] = None) -> "tuple[bool, str]":
@@ -516,6 +545,18 @@ def refresh_tab_catalog(provider: str) -> "tuple[bool, str]":
         try:
             fetched = probe_huggingface_models(hf.base_url, hf.api_key)
             write_hf_models_json(state_dir, fetched)
+            return True, f"{len(fetched)} model(s) cached"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    if provider == "openai":
+        from halo_harness.providers.config import resolve_openai
+        oai = resolve_openai()
+        if oai is None:
+            return False, "OpenAI API is not configured"
+        from halo_harness.providers.openai_catalog import probe_openai_models, write_oai_models_json
+        try:
+            fetched = probe_openai_models(oai.base_url, oai.api_key)
+            write_oai_models_json(state_dir, fetched)
             return True, f"{len(fetched)} model(s) cached"
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"

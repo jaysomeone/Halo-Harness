@@ -827,11 +827,12 @@ file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
 plugin-provided MCP servers, the OS/WSL/Kali platform hint, `~/.local/bin` on
 PATH (Linux), tmux mouse mode (inside tmux), the three cached-catalog ages,
 session count + `/improve` config, clipboard backend, configured MCP servers
-(eager vs. lazy), the resolved default model, how many of the six providers
-are enabled (`databricks`/`openrouter`/`anthropic`/`claude_subscription`/
-`typesafe`/`huggingface` -- see "`halo providers`" below), and the `halo`
-command itself on PATH. Exit 0 unless something is `[MISSING]` (a `[WARN]`
-alone, e.g. "no Databricks configured", never fails the command).
+(eager vs. lazy), the resolved default model, how many of the seven
+providers are enabled (`databricks`/`openrouter`/`anthropic`/
+`claude_subscription`/`typesafe`/`huggingface`/`openai` -- see "`halo
+providers`" below), and the `halo` command itself on PATH. Exit 0 unless
+something is `[MISSING]` (a `[WARN]` alone, e.g. "no Databricks
+configured", never fails the command).
 
 **Install once, run anywhere.** The "command on PATH" check fails WARN when
 `halo` either isn't found at all or resolves to this checkout's own
@@ -921,21 +922,21 @@ update command: uv tool install --reinstall git+https://github.com/roloVibes/Hal
 
 ```
 Usage: halo providers [list|enable <name>|disable <name>|setup <name>]
-Providers: databricks, openrouter, anthropic, claude_subscription, typesafe, huggingface
+Providers: databricks, openrouter, anthropic, claude_subscription, typesafe, huggingface, openai
 ```
 
 Detected credentials/a real claude.ai login AUTO-enable a provider (H15
-part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe once their key
-is found (env file, shell env, or the settings env chain), Databricks once
-a host AND token are found (same sources, plus `~/.databrickscfg`), Claude
-Code subscription (`cc:`) ONLY when `claude auth status` reports
-`loggedIn` with `authMethod` exactly `claude.ai`, Hugging Face (Halo 2.0.3
-round 4) once `HF_TOKEN` is found OR at least one `huggingface.endpoints`
-entry is configured. No `halo init` run
+part 2 addendum) -- OpenRouter/Anthropic API (key)/TypeSafe/OpenAI API
+once their key is found (env file, shell env, or the settings env chain),
+Databricks once a host AND token are found (same sources, plus
+`~/.databrickscfg`), Claude Code subscription (`cc:`) ONLY when `claude
+auth status` reports `loggedIn` with `authMethod` exactly `claude.ai`,
+Hugging Face (Halo 2.0.3 round 4) once `HF_TOKEN` is found OR at least one
+`huggingface.endpoints` entry is configured. No `halo init` run
 is required for this. `~/.halo/config.json`'s `"providers"` block
 stores OVERRIDES only -- `enable <name>`/`disable <name>` write an explicit
 `true`/`false` there that always wins over auto-detection (`cc`/`ant`/
-`dbx`/`or`/`hf` are accepted aliases for the canonical names); `setup <name>`
+`dbx`/`or`/`hf`/`oai` are accepted aliases for the canonical names); `setup <name>`
 needs a real terminal and runs the same per-provider tab `halo init`
 shows.
 
@@ -943,8 +944,13 @@ Bare `halo providers` (or `list`) prints one row per provider --
 status (`auto (detected from <source>)` / `disabled by you` / `enabled by
 you` / `not set up`), reachable, cached model count -- plus a trailing
 OpenRouter balance line once a background fetch has ever succeeded (see
-`halo models`/`/cost`). See `docs/MODELS.md`'s "Provider
-enablement" section for the full prefix/label table.
+`halo models`/`/cost`), and (round 5i part 1) a plain note once OpenAI
+API is enabled: it has no public balance endpoint for ordinary keys, so
+this prints a pointer at `/cost` here (the standalone CLI has no live
+session to read a number from) or, from `/providers` inside a running
+session on an `oai:` model, that session's own computed spend. See
+`docs/MODELS.md`'s "Provider enablement" section for the full prefix/
+label table.
 
 ```sh
 halo providers

@@ -553,6 +553,164 @@ SCENARIOS = {
 }
 
 
+# ============================================================================
+# Section 1b: the Responses-dialect (`/v1/responses`) scenarios (Halo
+# 2.0.3 round 5i part 1). `_finish_responses` writes REAL SSE framing
+# (`event: <type>` + `data: {...}`, matching the real API, unlike chat
+# completions' bare `data:`-only lines -- see `write_sse_chunk`'s own
+# `event_name` parameter above) via the SAME start_sse/end_sse helpers;
+# no trailing "[DONE]" sentinel -- the Responses API's own terminal event
+# IS `response.completed` (docs/harness/OPENAI-RESEARCH.md section 2).
+# A 4xx scenario (401/429/404) needs no SSE at all, same `send_json_
+# response` every chat-completions error scenario above already uses --
+# `do_POST`'s own `RESPONSES_SCENARIOS.get(scenario) or SCENARIOS.get(
+# scenario)` fallback means an existing chat-dialect error scenario would
+# also work on the Responses path, but these three are kept here, with
+# the EXACT confirmed OpenAI error shapes, so a test can assert on them
+# precisely.
+# ============================================================================
+
+def _finish_responses(h: "_Handler", events: list) -> None:
+    start_sse(h)
+    for ev in events:
+        write_sse_chunk(h, ev.get("type"), ev)
+    end_sse(h)
+
+
+def _resp_item_added(output_index, item):
+    return {"type": "response.output_item.added", "output_index": output_index, "item": item}
+
+
+def _resp_item_done(output_index, item):
+    return {"type": "response.output_item.done", "output_index": output_index, "item": item}
+
+
+def _resp_text_delta(item_id, output_index, delta):
+    return {"type": "response.output_text.delta", "item_id": item_id, "output_index": output_index,
+            "content_index": 0, "delta": delta}
+
+
+def _resp_completed(usage=None):
+    response = {"id": "resp_mock", "object": "response", "status": "completed"}
+    if usage is not None:
+        response["usage"] = usage
+    return {"type": "response.completed", "response": response}
+
+
+def _scn_responses_text(h, body):
+    _finish_responses(h, [
+        {"type": "response.created", "response": {"id": "resp_mock", "status": "in_progress"}},
+        _resp_item_added(0, {"type": "message", "id": "msg_mock", "role": "assistant", "content": []}),
+        _resp_text_delta("msg_mock", 0, "pong"),
+        _resp_item_done(0, {"type": "message", "id": "msg_mock", "role": "assistant",
+                             "content": [{"type": "output_text", "text": "pong"}]}),
+        _resp_completed({"input_tokens": 10, "output_tokens": 3}),
+    ])
+
+
+def _scn_responses_tool_call(h, body):
+    _finish_responses(h, [
+        {"type": "response.created", "response": {"id": "resp_mock", "status": "in_progress"}},
+        _resp_item_added(0, {"type": "function_call", "id": "fc_mock", "call_id": "call_mock",
+                              "name": "Read", "arguments": ""}),
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_mock", "output_index": 0,
+         "delta": '{"file_'},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_mock", "output_index": 0,
+         "delta": 'path": "a"}'},
+        {"type": "response.function_call_arguments.done", "item_id": "fc_mock", "output_index": 0,
+         "arguments": '{"file_path": "a"}'},
+        _resp_item_done(0, {"type": "function_call", "id": "fc_mock", "call_id": "call_mock",
+                             "name": "Read", "arguments": '{"file_path": "a"}'}),
+        _resp_completed({"input_tokens": 12, "output_tokens": 5}),
+    ])
+
+
+def _scn_responses_reasoning(h, body):
+    _finish_responses(h, [
+        {"type": "response.created", "response": {"id": "resp_mock", "status": "in_progress"}},
+        _resp_item_added(0, {"type": "reasoning", "id": "rs_mock", "summary": []}),
+        _resp_item_done(0, {"type": "reasoning", "id": "rs_mock",
+                             "summary": [{"type": "summary_text", "text": "thinking it through"}]}),
+        _resp_item_added(1, {"type": "message", "id": "msg_mock", "role": "assistant", "content": []}),
+        _resp_text_delta("msg_mock", 1, "the answer"),
+        _resp_item_done(1, {"type": "message", "id": "msg_mock", "role": "assistant",
+                             "content": [{"type": "output_text", "text": "the answer"}]}),
+        _resp_completed({"input_tokens": 20, "output_tokens": 15,
+                          "output_tokens_details": {"reasoning_tokens": 8}}),
+    ])
+
+
+def _scn_responses_usage(h, body):
+    _finish_responses(h, [
+        {"type": "response.created", "response": {"id": "resp_mock", "status": "in_progress"}},
+        _resp_item_added(0, {"type": "message", "id": "msg_mock", "role": "assistant", "content": []}),
+        _resp_text_delta("msg_mock", 0, "usage check"),
+        _resp_item_done(0, {"type": "message", "id": "msg_mock", "role": "assistant",
+                             "content": [{"type": "output_text", "text": "usage check"}]}),
+        _resp_completed({"input_tokens": 100, "output_tokens": 40,
+                          "input_tokens_details": {"cached_tokens": 30},
+                          "output_tokens_details": {"reasoning_tokens": 10}}),
+    ])
+
+
+def _scn_responses_401(h, body):
+    send_json_response(h, 401, {"error": {"message": "Incorrect API key provided.",
+                                           "type": "authentication_error", "code": "invalid_api_key"}})
+
+
+def _scn_responses_429_quota(h, body):
+    send_json_response(h, 429, {"error": {
+        "message": "You exceeded your current quota, please check your plan and billing details.",
+        "type": "insufficient_quota", "code": "insufficient_quota"}})
+
+
+def _scn_responses_404_model(h, body):
+    send_json_response(h, 404, {"error": {
+        "message": f"The model `{(body or {}).get('model')}` does not exist or you do not have access to it.",
+        "type": "invalid_request_error", "code": "model_not_found"}})
+
+
+RESPONSES_SCENARIOS = {
+    "model": _scn_responses_text,
+    "oai-responses-text": _scn_responses_text,
+    "oai-responses-tool-call": _scn_responses_tool_call,
+    "oai-responses-reasoning": _scn_responses_reasoning,
+    "oai-responses-usage": _scn_responses_usage,
+    "oai-responses-401": _scn_responses_401,
+    "oai-responses-429-quota": _scn_responses_429_quota,
+    "oai-responses-404-model": _scn_responses_404_model,
+}
+
+
+class ScriptedByCallCount:
+    """The Responses-dialect twin of `tests.helpers.mock_ollama.
+    ScriptedByCallCount` (same simple semantics, copied rather than
+    imported -- this file and that one already duplicate `ScriptedTurns`/
+    `ScriptedByCallCount`-shaped helpers independently per dialect): a
+    scenario callable keyed on how many times THIS ONE INSTANCE has been
+    invoked (`steps[call_index]`, clamped to the last step once
+    exhausted) -- for a tool-call round trip, where `ScriptedTurns`' own
+    request-content keying (count `function_call_output` items) would
+    need its own `input`-shaped scan this dialect doesn't need yet.
+    Construct a FRESH instance per test."""
+
+    def __init__(self, steps: list):
+        self.steps = steps
+        self.calls = 0
+
+    def __call__(self, handler, body) -> None:
+        if not self.steps:
+            send_json_response(handler, 500, {"error": "ScriptedByCallCount has no steps configured"})
+            return
+        idx = min(self.calls, len(self.steps) - 1)
+        self.calls += 1
+        step = self.steps[idx]
+        if callable(step) and not isinstance(step, list):
+            step(handler, body)
+        else:
+            _finish_responses(handler, step)
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -586,10 +744,21 @@ class _Handler(BaseHTTPRequestHandler):
         # == "/api/v1"` and `expected_bearer is None`, so `expected_path`
         # always matches (the request was built from THIS SAME base_url)
         # and the bearer check is skipped entirely: byte-for-byte the old
-        # behavior.
-        expected_path = mock.path_prefix.rstrip("/") + "/chat/completions"
-        if self.path != expected_path:
-            send_json_response(self, 404, {"error": f"path {self.path!r} not served (expected {expected_path!r})"})
+        # behavior. Round 5i part 1: a SECOND path, `.../responses`, is
+        # now also served -- which one matched picks which scenario table
+        # this request dispatches through (chat-completions' `SCENARIOS`
+        # vs. the Responses dialect's own `RESPONSES_SCENARIOS`); a 4xx/
+        # error scenario (shared by both -- see `RESPONSES_SCENARIOS`'s
+        # own docstring) is unaffected either way.
+        chat_path = mock.path_prefix.rstrip("/") + "/chat/completions"
+        responses_path = mock.path_prefix.rstrip("/") + "/responses"
+        if self.path == chat_path:
+            is_responses = False
+        elif self.path == responses_path:
+            is_responses = True
+        else:
+            send_json_response(self, 404, {"error": f"path {self.path!r} not served "
+                                                      f"(expected {chat_path!r} or {responses_path!r})"})
             return
         if mock.expected_bearer is not None:
             auth = self.headers.get("Authorization", "")
@@ -602,7 +771,8 @@ class _Handler(BaseHTTPRequestHandler):
         scenario = model[len("mock/"):] if model.startswith("mock/") else "model"
 
         try:
-            fn = SCENARIOS.get(scenario)
+            fn = (RESPONSES_SCENARIOS.get(scenario) or SCENARIOS.get(scenario)) if is_responses \
+                else SCENARIOS.get(scenario)
             if fn is not None:
                 fn(self, body)
                 return

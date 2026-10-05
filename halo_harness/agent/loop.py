@@ -77,11 +77,13 @@ from halo_harness.providers.routing import InvalidModelError, Route
 from halo_harness.providers.stream import (
     CompletionRequest, ContextOverflow, ProviderCreds, ProviderNotConfigured,
     UpstreamError, stream_anthropic_completion, stream_completion, stream_ollama_completion,
+    stream_openai_responses_completion,
 )
 from halo_harness.providers.ollama import (
     get_catalog, ollama_overflow_retry_ceiling, resolve_ollama_host, trained_context_for,
 )
 from halo_harness.providers.ollama_request import build_ollama_request_body
+from halo_harness.providers.responses_request import build_openai_responses_body
 from halo_harness.tools.base import ToolContext, ToolResult
 from halo_harness.tools.imageutil import sniff_dimensions
 from halo_harness.tools.registry import ToolRegistry, run_read_only_batch
@@ -2088,6 +2090,11 @@ class Session:
             # flush it, or never if this session never makes one.
             for _notice in self._drain_pending_ollama_notices():
                 log.info("ollama: %s", _notice)
+        elif route.dialect == "openai-responses":
+            body = build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=[], tool_choice=None,
+                route=route, profile=profile, effort=effort, requested_max_tokens=max_tokens,
+            )
         else:
             body = build_request_body(
                 system_text=system_text, messages=messages,
@@ -2106,7 +2113,14 @@ class Session:
         timer.daemon = True
         timer.start()
         text_parts: list = []
-        gen = self._stream(req, abort=abort) if route.dialect == "ollama" else stream_completion(req, abort=abort)
+        # Halo 2.0.3 round 5i part 1: `self._stream` is the dialect
+        # dispatcher (falls through to the bare `stream_completion` for
+        # every dialect it doesn't special-case) -- routed through it for
+        # "ollama"/"openai-responses" only, same as before this round,
+        # rather than widening this one-line ternary into a three-way
+        # branch that would just re-derive `_stream`'s own fallback.
+        gen = (self._stream(req, abort=abort) if route.dialect in ("ollama", "openai-responses")
+               else stream_completion(req, abort=abort))
         try:
             for ev in gen:
                 kind = ev.get("type")
@@ -2286,6 +2300,18 @@ class Session:
                 system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
                 effort=self.effort, requested_max_tokens=requested_max_tokens,
             )
+        elif self.route.dialect == "openai-responses":
+            # Halo 2.0.3 round 5i part 1: the `/v1/responses` body, via
+            # the SAME Anthropic-shaped `messages`/`tools` every other
+            # dialect builds from -- `instructions`/`input` items/
+            # function-call items all come from `system_text`/`messages`
+            # directly (providers/responses_request.py), no intermediate
+            # openai-chat translation step.
+            body = build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                route=self.route, profile=self.provider_profile, effort=self.effort,
+                requested_max_tokens=requested_max_tokens,
+            )
         else:
             body = build_request_body(
                 system_text=system_text, messages=messages, tools=tools, route=self.route,
@@ -2451,6 +2477,8 @@ class Session:
             # just above for THIS exact ref -- `getattr` only guards a
             # hypothetical ollama request built some other way.
             kwargs["ollama_ctx_retry_ceiling"] = getattr(self, "_last_ollama_ctx_ceiling", None)
+        elif route.dialect == "openai-responses":
+            kwargs["prebuilt_responses_body"] = body
         else:
             kwargs["prebuilt_oai_body"] = body
         return CompletionRequest(**kwargs)
@@ -2476,6 +2504,8 @@ class Session:
             return stream_anthropic_completion(req, abort=eff_abort)
         if req.route.dialect == "ollama":
             return stream_ollama_completion(req, abort=eff_abort)
+        if req.route.dialect == "openai-responses":
+            return stream_openai_responses_completion(req, abort=eff_abort)
         return stream_completion(req, abort=eff_abort)
 
     def _abort_sleep(self, delay: float) -> bool:
@@ -3465,6 +3495,16 @@ class Session:
                 ref=self.model_ref, route=self.route, profile=self.provider_profile,
                 system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
                 effort=effort, requested_max_tokens=requested_max_tokens,
+            )
+        if self.route.dialect == "openai-responses":
+            # Halo 2.0.3 round 5i part 1: the SAME builder `_derive_and_
+            # build` uses -- `self.route`/`self.provider_profile` are
+            # already whichever model is ACTIVE for this call (see this
+            # method's own "ollama" branch comment just above for why).
+            return build_openai_responses_body(
+                system_text=system_text, messages=messages, tools=tools, tool_choice=tool_choice,
+                route=self.route, profile=self.provider_profile, effort=effort,
+                requested_max_tokens=requested_max_tokens,
             )
         return build_request_body(
             system_text=system_text, messages=messages, tools=tools, route=self.route,

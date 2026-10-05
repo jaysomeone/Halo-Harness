@@ -217,6 +217,7 @@ directly by the features that own them:
 | `huggingface.lmstudio_models_dir` | unset (`~/.lmstudio/models`, LM Studio's own documented default) | `halo config set huggingface.lmstudio_models_dir /path/to/models`; only needed when LM Studio's own in-app "Model Storage" setting moved the folder -- see `docs/MODELS.md`'s "LM Studio's own model folder" |
 | `huggingface.model_dirs` | unset (nothing scanned) | `/local add <path>`/`/local forget <path>` (persisted immediately), `halo init`'s "Local models" step, or hand-edited; a list of folder paths Halo scans recursively for `.gguf` files and safetensors/MLX model folders -- see `docs/MODELS.md`'s "Finding and using file-backed models" |
 | `huggingface.preferred_runtime` | unset (Halo picks the only valid runtime per file format: `llama-server` for `.gguf`, `mlx_lm` for safetensors/MLX on Apple Silicon) | `halo init`'s "Local models" step; `"llama-server"` or `"mlx_lm"` -- a `halo local serve --runtime` flag always wins over this; stored for a future round where the same file could genuinely be served more than one way |
+| `openai.dialect_overrides` | unset (the built-in table alone: `gpt-6-astra`/`gpt-6.1-sol` default to the Responses dialect, every other `oai:` id to chat completions) | `halo config set openai.dialect_overrides '{"gpt-5": "responses"}'`; a map of bare `oai:` model id to `"chat"`/`"responses"` -- always wins over the table, in either direction; see `docs/MODELS.md`'s "OpenAI API" section |
 
 ## Every environment variable
 
@@ -270,6 +271,8 @@ good, with no `HALO_` twin, since the test suites depend on the exact name.
 | `HF_HUB_CACHE` | the Hugging Face Hub local cache directory itself (used as-is); `/local`'s hub-cache scan walks this when set, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub` |
 | `HF_HOME` | the Hugging Face Hub root directory -- `/local`'s hub-cache scan walks `$HF_HOME/hub` when `HF_HUB_CACHE` is unset |
 | `HF_LOCAL_PROBE_PORTS` | comma-separated ints overriding which ports the `hf:local/*` auto-detect sweep probes (default `8080,8000,1234` -- see `docs/MODELS.md`); wins over `huggingface.local_probe_ports` when both are set |
+| `OPENAI_API_KEY` | the real OpenAI API credential (`oai:<model>`) -- the ONLY name read, same as every other provider's single-key env var here |
+| `HALO_OPENAI_BASE_URL` (legacy `BRIDGE_OPENAI_BASE_URL`) | override the OpenAI API base URL (default `https://api.openai.com/v1`) -- the test seam that stands in for the real API everywhere this round's own fake is used |
 
 ## Providers (`halo init --provider ...`)
 
