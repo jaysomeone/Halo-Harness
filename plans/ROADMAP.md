@@ -368,3 +368,15 @@ Metroid theme and a Mario theme.
   (Halo config > Claude Code > Codex, Codex leading on a `cx:` session),
   `settings.primary` to flip it, a wizard "Settings sources" step, and the
   merged view in doctor and `/settings`. Halo never writes Codex's files.
+
+## CUT 2026-10-05 morning (rolo: "Fine do that"): 2.0.3 closes after round 5i
+
+After an overnight stall on a redundant test run and about 25,000 new lines
+in one day, the batch is cut before the review grows further: 2.0.3 ends
+with round 5i part 2 (Codex), then round 6 (docs and live checks), the
+Opus review, the fix pass and the tag. Round 5h (the full Experiential
+Labs `xp:` integration) moves to 2.0.4 round 1, on top of the reviewed,
+tagged 2.0.3; the 5g research (e9e09ef) already carries everything it
+needs. 2.0.4's order becomes: Experiential `xp:` -> picker columns,
+balances, enumeration -> jev decision API -> learned rules -> `cc:` v2 ->
+legacy env-file drop -> the Governor last.
