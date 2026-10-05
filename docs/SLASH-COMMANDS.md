@@ -255,9 +255,11 @@ the current roles table/orgs list with no TTY instead of blocking). See
 ### `/providers [list|enable <name>|disable <name>|setup <name>]`
 H15 item 21 (rule replaced by the H15 part 2 addendum): the provider-
 enablement table -- status, reachable, cached model count -- for
-`databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`), and
-`typesafe` (stores `TYPESAFE_API_KEY` only, for a later feature; no routed
-models yet). Each row's status is `auto (detected from <source>)` once a
+`databricks`, `openrouter`, `anthropic`, `claude_subscription` (`cc:`),
+`codex_subscription` (`cx:`, round 5i part 2), `huggingface` (`hf:`),
+`openai` (`oai:`, round 5i part 1), and `typesafe` (stores
+`TYPESAFE_API_KEY` only, for a later feature; no routed models yet). Each
+row's status is `auto (detected from <source>)` once a
 real credential/login is found (no `init` step required), `disabled by
 you`/`enabled by you` once an explicit override exists, or `not set up`.
 Bare `/providers` (or `list`) prints the table, plus a trailing OpenRouter
@@ -271,6 +273,23 @@ show from a real terminal, so headless just points at that command instead
 of half-implementing it. See `docs/MODELS.md`'s "Provider enablement"
 section for the full prefix/label table and the exact per-provider
 detection rule.
+
+### `/settings [primary claude|codex]`
+Halo 2.0.3 round 5i part 2. Bare `/settings` prints the merged Claude
+Code / Codex / halo settings view (`providers.settings_merge.
+effective_settings`): one row per tracked setting (model, permission/
+approval mode, sandbox, reasoning effort) showing every source's own
+value and which one is effective, the Codex-only MCP servers found, and
+how many Claude Code instruction files / Codex `AGENTS.md` chain files
+were found. `/settings primary claude|codex` persists `settings.primary`
+(`~/.halo/config.json`) -- which of Claude Code's or Codex's own value
+wins when both are set and halo's own config and a live `cx:` session
+don't already decide it. Read-only otherwise: halo never writes to
+either Claude Code's or Codex's own files. `halo doctor`'s
+`codex_settings` line is the one-line summary of the same view; the init
+wizard's "Settings sources" step is the interactive equivalent. See
+`docs/MODELS.md`'s "Codex settings and instructions" section for the
+exact precedence rule.
 
 ### `/effort [level]`
 1.0.1 hotfix 19/20. Bare `/effort` shows the effective level, its source

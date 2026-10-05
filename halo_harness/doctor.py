@@ -254,6 +254,50 @@ def _check_claude_subscription() -> str:
     return f"{OK} Claude subscription: logged in (claude.ai){version_bit} -- cc: models available"
 
 
+def _check_codex_subscription() -> str:
+    """Round 5i part 2: `cx:` model availability -- the `codex_models`
+    counterpart of `_check_claude_subscription` just above, reading ONLY
+    `codex login status`'s plain-text answer (CODEX-RESEARCH.md section 1),
+    never `~/.codex/auth.json`. Optional (same reasoning as Claude): never
+    fails doctor's overall `ok` either way."""
+    from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
+    try:
+        status = refresh_cached_codex_auth_status()
+    except Exception as e:
+        return _fix(f"{WARN} Codex subscription: could not check ({type(e).__name__}: {e})", cmd="halo doctor")
+    if status is None:
+        return _fix(f"{WARN} Codex subscription: codex not found (cx: models unavailable -- install Codex CLI)",
+                     see="https://developers.openai.com/codex")
+    if getattr(status, "timed_out", False):
+        return _fix(f"{WARN} Codex subscription: `codex login status` timed out (try again -- cx: models "
+                     f"unavailable for now)", cmd="halo doctor")
+    if not status.logged_in:
+        return _fix(f"{WARN} Codex subscription: codex found but not logged in (run `codex login` once for "
+                     f"cx: models)", cmd="codex login")
+    if status.auth_method != "chatgpt":
+        return _fix(f"{WARN} Codex subscription: logged in via {status.auth_method or 'an unrecognized method'}, "
+                     f"not ChatGPT -- cx: will not use this (an API-key login belongs on the oai: route instead); "
+                     f"run `codex login` and sign in with ChatGPT for cx:", cmd="codex login")
+    return f"{OK} Codex subscription: logged in (ChatGPT) -- cx: models available"
+
+
+def _check_codex_settings() -> str:
+    """Round 5i part 2: the merged Claude-Code/Codex/Halo settings view's
+    own doctor line -- what was found in each place and which is primary,
+    never a pass/fail gate (there's nothing to fail: Halo reads, never
+    writes, either file). `halo doctor --json`/`/settings` share the same
+    `effective_settings`/`render_settings_text` this calls."""
+    from halo_harness.providers.settings_merge import effective_settings
+    try:
+        view = effective_settings(Path.cwd())
+    except Exception as e:
+        return _fix(f"{WARN} Settings sources: could not check ({type(e).__name__}: {e})", cmd="halo doctor")
+    return (f"{OK} Settings sources: primary={view.primary}; Claude Code instructions "
+            f"{view.claude_instructions_count} file(s); Codex config.toml "
+            f"{'found' if view.codex_config_found else 'not found'}, AGENTS.md chain "
+            f"{view.codex_agents_md_count} file(s) -- see `/settings` for the full merged view")
+
+
 def _claude_version() -> Optional[str]:
     # 2.0.1 W3a: the real implementation moved to providers.cc_models
     # (`installed_claude_version`) so `agent/cc_runtime.py`'s own one-shot
@@ -1016,6 +1060,11 @@ def _provider_configured(ref) -> "tuple[bool, str]":
             status = claude_auth_status()
             ok = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
             return ok, "Claude subscription"
+        if ref.provider == "codex":
+            from halo_harness.providers.codex_models import codex_login_status
+            status = codex_login_status()
+            ok = bool(status and status.logged_in and status.auth_method == "chatgpt")
+            return ok, "Codex subscription"
     except Exception as e:
         return False, f"could not check ({type(e).__name__}: {e})"
     return True, ref.provider
@@ -1074,6 +1123,7 @@ def _check_default_model() -> str:
             disabled_msg = is_provider_disabled_message(provider_guess)
             if disabled_msg:
                 provider_flag = {"databricks": "databricks", "claude_subscription": "claude",
+                                  "codex_subscription": "codex",
                                   "anthropic": "anthropic"}.get(provider_guess, "openrouter")
                 return _fix(f"{WARN} Default model: {configured} -- {disabled_msg}",
                              cmd=f"halo init --provider {provider_flag}")
@@ -1570,6 +1620,8 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("openrouter", _check_openrouter()))
     entries.append(("databricks", _check_databricks()))
     entries.append(("claude_subscription", _check_claude_subscription()))
+    entries.append(("codex_subscription", _check_codex_subscription()))
+    entries.append(("codex_settings", _check_codex_settings()))
     entries.append(("chrome", _check_chrome()))
     entries.append(("playwright", _check_playwright()))
     entries.append(("ripgrep", _check_ripgrep()))

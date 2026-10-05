@@ -74,6 +74,12 @@ def ensure_default_provider_credentials() -> None:
     # any other shape) by setting this var itself, before or after import,
     # is never overridden by this default.
     os.environ.setdefault("BRIDGE_TEST_CC_AUTH_STATUS", json.dumps({"loggedIn": False}))
+    # Round 5i part 2: the `cx:`/`codex_models` counterpart of the
+    # `BRIDGE_TEST_CC_AUTH_STATUS` default just above -- same reasoning,
+    # this build host has a real (not logged in) `codex` on PATH, so a
+    # module that never sets `BRIDGE_TEST_CODEX_LOGIN_STATUS` itself would
+    # otherwise spawn a real `codex login status` subprocess.
+    os.environ.setdefault("BRIDGE_TEST_CODEX_LOGIN_STATUS", "Not logged in")
 
 
 def ensure_scoped_state_dir_once() -> None:

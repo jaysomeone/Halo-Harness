@@ -152,6 +152,11 @@ async def _handle_model(app, args: str) -> None:
     # triggered the same way.
     app.run_worker(lambda: _cc_auth_status_auto_refresh_worker(app), thread=True, name="cc-auth-auto-refresh",
                     group="cc-auth-auto-refresh")
+    # Round 5i part 2: the `cx:` counterpart -- same staleness-gated
+    # re-check, so `/model`'s own codex group reflects a login/logout that
+    # happened since the TUI started without needing a restart.
+    app.run_worker(lambda: _codex_auth_status_auto_refresh_worker(app), thread=True, name="codex-auth-auto-refresh",
+                    group="codex-auth-auto-refresh")
     # 1.0.1 fixpass finding 1: `list_models()` -- builds ctx/price columns
     # per Databricks endpoint and (pre-fix) span the `claude auth status`
     # subprocess -- runs off the UI thread now, the exact same `thread=True`
@@ -173,6 +178,17 @@ def _cc_auth_status_auto_refresh_worker(app) -> None:
         from halo_harness.providers.cc_models import cached_auth_status_is_stale, refresh_cached_claude_auth_status
         if cached_auth_status_is_stale():
             refresh_cached_claude_auth_status()
+    except Exception:
+        pass
+
+
+def _codex_auth_status_auto_refresh_worker(app) -> None:
+    """The `cx:` counterpart of `_cc_auth_status_auto_refresh_worker`
+    just above -- same reasoning, substituting `codex_models`."""
+    try:
+        from halo_harness.providers.codex_models import cached_auth_status_is_stale, refresh_cached_codex_auth_status
+        if cached_auth_status_is_stale():
+            refresh_cached_codex_auth_status()
     except Exception:
         pass
 

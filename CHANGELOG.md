@@ -438,6 +438,64 @@ version number.
    `docs/CONFIG.md` (`OPENAI_API_KEY`, `HALO_OPENAI_BASE_URL`, `openai.
    dialect_overrides`), `docs/COMMANDS.md` (`halo doctor`/`halo
    providers`).
+10. **`cx:` -- the Codex subscription route, and Codex settings/AGENTS.md
+    read beside Claude Code's** (round 5i part 2, `docs/harness/
+    CODEX-RESEARCH.md`): `cx:<model>` (group "Codex subscription
+    (ChatGPT)") drives the installed `codex` CLI headlessly under the
+    user's own ChatGPT login, mirroring the `cc:` design wherever Codex's
+    architecture allows it: detection is the `codex` binary on PATH plus
+    `codex login status`'s plain-text answer (never `~/.codex/auth.json`;
+    only `"Logged in using ChatGPT"` counts, an API-key/Bedrock/token
+    login points at `oai:` instead); short aliases `astra`/`sol`/`luna`
+    for the documented ChatGPT-plan ids, reusing the `oai:` route's own
+    vendored models.dev catalog for context/output (price is always
+    `None` -- a subscription isn't metered). Unlike `cc:` (one held-open
+    `claude` process fed one stdin line per turn), `codex exec` has no
+    stdin-streaming protocol at all -- each Halo turn spawns a FRESH
+    `codex exec [resume <thread-id>] --json <prompt>` subprocess and runs
+    it to completion, so steering is a documented fallback (queued, sent
+    as its own follow-up `resume` call the moment the current turn ends,
+    repeating until nothing is queued, before one `turn_done` closes the
+    whole chain) rather than a live mid-turn channel. Codex keeps its own
+    native shell/apply_patch tools running in its own sandbox (no flag
+    disables them the way `cc:`'s `--tools ""` does) while Halo's own
+    tool catalog is ADDITIONALLY exposed through an inline `-c
+    mcp_servers.halo.<field>=<value>` override at the SAME bridge `cc:`
+    uses -- a native Codex action is logged read-only after the fact, a
+    real `mcp_servers.halo` call is dispatched through Halo's own
+    permission engine/hooks exactly like every other route's tools; the
+    bridge's own token/socket address ride on the subprocess's
+    environment, forwarded to the MCP child by name
+    (`mcp_servers.halo.env_vars`), never spelled out on Codex's command
+    line. Halo's permission mode maps onto `approval_policy`/
+    `sandbox_mode`: bypass/auto -> `never`/`danger-full-access`, default
+    -> `on-request`/`workspace-write`, manual -> `untrusted`/`read-only`.
+    Also reads (never writes) Codex's own `config.toml` (`$CODEX_HOME`
+    plus a trusted project's `.codex/config.toml`, a small hand-rolled
+    reader -- this repo ships no TOML dependency) and its `AGENTS.md`
+    chain (global override-or-plain, then the SAME rule from the git
+    root down to cwd, 32 KiB cap -- a DIFFERENT walk than Halo's existing
+    CLAUDE.md/AGENTS.md loader, kept deliberately separate) into one
+    merged view beside Claude Code's own settings/CLAUDE.md
+    (`providers/settings_merge.py`): non-overlapping entries merge (a
+    Codex-only MCP server joins the list, its AGENTS.md is its own
+    block); overlapping entries follow halo's own config, then Claude
+    Code, then Codex, except on a live `cx:` session where Codex's own
+    model/reasoning-effort/approval-and-sandbox policy leads;
+    `settings.primary: "claude"|"codex"` flips the Claude-Code-vs-Codex
+    half of that order. New `/settings [primary claude|codex]` command,
+    `halo doctor`'s `codex_settings` line, and the init wizard's
+    "Settings sources" step all show/set the same merged view. **No one
+    is logged into Codex on the build host -- every behaviour above is
+    verified against the parameterized `tests/helpers/fake_codex.py`
+    only, including a real MCP tool-call round trip through the bridge
+    and the steer-fallback's follow-up `resume` call; unverified against
+    the real CLI until a ChatGPT login is available.** Docs:
+    `docs/MODELS.md` ("Codex subscription (ChatGPT)" and "Codex settings
+    and instructions" sections + the ref-form/alias tables),
+    `docs/CONFIG.md` (the Codex-files section, `settings.primary`),
+    `docs/COMMANDS.md` (`halo models --cx`, the init wizard tabs/step),
+    `docs/SLASH-COMMANDS.md` (`/settings`, the `/providers` row).
 
 ## [2.0.2] - 2026-10-04
 

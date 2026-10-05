@@ -76,6 +76,42 @@ def _cmd_models_cc(state_dir, *, refresh: bool) -> int:
     return 0
 
 
+def _cmd_models_cx(state_dir, *, refresh: bool) -> int:
+    """Round 5i part 2: `halo models --cx` -- the Codex counterpart of
+    `_cmd_models_cc`. Never touches `~/.codex/auth.json` -- only `codex
+    login status` (plain text) and, with --refresh, a handful of cheap
+    `codex exec --ephemeral` one-token pings (providers.codex_models.
+    refresh_cx_catalog)."""
+    from halo_harness.providers.codex_models import (
+        CODEX_ALIASES, codex_login_status, load_cx_models_cache, profile_fields_for_codex_model,
+        refresh_cx_catalog,
+    )
+    status = codex_login_status()
+    if status is None:
+        print("Codex subscription: codex not found -- cx: models unavailable (install Codex CLI)")
+    elif not status.logged_in:
+        print("Codex subscription: codex found but not logged in -- run `codex login` once to log in")
+    elif status.auth_method != "chatgpt":
+        print(f"Codex subscription: logged in via {status.auth_method or 'an unrecognized method'}, not "
+              f"ChatGPT -- cx: will not use this (that's the oai: route)")
+    else:
+        print("Codex subscription: logged in (ChatGPT) -- cx: models available")
+
+    if refresh:
+        refresh_cx_catalog(state_dir=state_dir)
+        print("(refreshed cx-models.json from live codex exec pings)\n")
+    refused = set(load_cx_models_cache(state_dir).get("refused") or [])
+
+    print(f"{'alias':<8} {'cx: target':<16} {'context':>10} {'out cap':>9} {'status':<10}")
+    for alias, model_id in CODEX_ALIASES.items():
+        fields = profile_fields_for_codex_model(alias) or {}
+        ctx = fields.get("context_tokens", "?")
+        out_cap = fields.get("max_output_tokens", "?")
+        tag = "refused" if alias in refused else "ok"
+        print(f"{alias:<8} {model_id:<16} {str(ctx):>10} {str(out_cap):>9} {tag:<10}")
+    return 0
+
+
 def _endpoint_url_for_path_type(root: str, name: str, path_type: str) -> str:
     """The exact URL for an already-computed `path_type` (1.0.1 hotfix 4:
     split out of the old `_endpoint_url_and_path_type` so `_dbx_rows` can
@@ -179,6 +215,10 @@ def cmd_models(argv) -> int:
                          help="List the Claude subscription models (cc:/ant: aliases) instead of the "
                               "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
                               "confirm its current canonical id")
+    parser.add_argument("--cx", action="store_true",
+                         help="List the Codex subscription models (cx: aliases) instead of the "
+                              "OpenRouter/Databricks catalog; with --refresh, re-pings each alias to "
+                              "confirm it is accepted (marks refused ids)")
     parser.add_argument("--urls", action="store_true",
                          help="Databricks endpoints: also print the exact URL and path type each one resolves to")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
@@ -190,6 +230,8 @@ def cmd_models(argv) -> int:
     state_dir = bridge_home()
     if args.cc:
         return _cmd_models_cc(state_dir, refresh=args.refresh)
+    if args.cx:
+        return _cmd_models_cx(state_dir, refresh=args.refresh)
     # 1.0.1 hotfix 3: bare `halo models` (no --refresh) NEVER touches
     # the network, full stop -- not even "the first time the cache is
     # empty" (the old behavior here, and still `--cc`'s own documented

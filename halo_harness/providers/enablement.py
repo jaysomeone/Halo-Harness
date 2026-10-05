@@ -39,13 +39,15 @@ from typing import Optional
 # joins this table while "ollama" still deliberately does not. Round 5i
 # part 1: "openai" joins the same way, for the same reason (the brief:
 # "same should be... in the model list with what models they can use").
-PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "typesafe", "huggingface", "openai")
+PROVIDER_NAMES = ("databricks", "openrouter", "anthropic", "claude_subscription", "codex_subscription",
+                   "typesafe", "huggingface", "openai")
 
 LABELS = {
     "databricks": "Databricks",
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic API (key)",
     "claude_subscription": "Claude Code subscription",
+    "codex_subscription": "Codex subscription (ChatGPT)",
     "typesafe": "TypeSafe",
     "huggingface": "Hugging Face",
     "openai": "OpenAI API (key)",
@@ -57,7 +59,7 @@ LABELS = {
 PREFIXES = {
     "databricks": "dbx:", "openrouter": "or:", "anthropic": "ant:",
     "claude_subscription": "cc:", "typesafe": None, "huggingface": "hf:",
-    "openai": "oai:",
+    "openai": "oai:", "codex_subscription": "cx:",
 }
 
 # A caller naturally has `ModelRef.provider` ("cc"), `init_providers.py`'s
@@ -68,6 +70,7 @@ _ALIASES = {
     "cc": "claude_subscription", "claude": "claude_subscription",
     "dbx": "databricks", "or": "openrouter", "ant": "anthropic",
     "hf": "huggingface", "oai": "openai",
+    "cx": "codex_subscription", "codex": "codex_subscription",
 }
 
 
@@ -266,6 +269,11 @@ def credentials_present(name: str, env: Optional[dict] = None) -> bool:
     if name == "claude_subscription":
         from halo_harness.init_providers import claude_login_available
         return claude_login_available()
+    if name == "codex_subscription":
+        # Round 5i part 2: same cache-only reasoning as claude_subscription
+        # just above -- never spawns `codex login status` itself.
+        from halo_harness.providers.codex_models import codex_login_available
+        return codex_login_available()
     if name == "huggingface":
         # 2.0.3 round 4 brief item 3: "HF_TOKEN present OR at least one
         # endpoint configured" -- either source alone is enough (a user who
@@ -338,6 +346,8 @@ def credentials_source(name: str, *, detected: Optional[bool] = None) -> Optiona
         return resolve_databricks_source() or "env"
     if name == "claude_subscription":
         return "claude.ai login"
+    if name == "codex_subscription":
+        return "ChatGPT login"
     if name == "typesafe":
         return "env"
     return "env file / shell env"

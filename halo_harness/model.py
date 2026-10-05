@@ -32,6 +32,7 @@ _HF_PREFIX = "hf:"
 _HF_ENDPOINT_PREFIX = "endpoint/"
 _HF_LOCAL_PREFIX = "local/"
 _OAI_PREFIX = "oai:"
+_CX_PREFIX = "cx:"
 # Halo 2.0.3 round 5f: `hf:mlx/<org>/<repo>` -- a Hub repo served by a
 # Halo-managed `mlx_lm.server` (Apple Silicon only; see ModelRef.mlx).
 _HF_MLX_PREFIX = "mlx/"
@@ -195,9 +196,9 @@ def _refuse_if_disabled(provider_key: str) -> None:
 @dataclass(frozen=True)
 class ModelRef:
     raw: str
-    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface" | "openai"
-    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf:/oai: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
-    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "ollama" | "openai-responses"
+    provider: str  # "openrouter" | "databricks" | "anthropic" | "ollama" | "huggingface" | "openai" | "cc" | "codex"
+    model: str  # bare upstream model id/name, dbx:/or:/ant:/ol:/hf:/oai:/cx: prefix (and ol:'s @host / hf:'s endpoint/<name>) stripped
+    dialect: str  # "openai-chat" | "anthropic-passthrough" | "cc-subprocess" | "codex-subprocess" | "ollama" | "openai-responses"
     # Halo 2.0.3 round 2: the `@<hostname>` part of `ol:<model>@<hostname>`
     # (research doc Q6/Q7) -- which entry of `ollama.hosts` this ref names;
     # `None` means "the default host" (`providers.ollama.resolve_ollama_
@@ -378,6 +379,20 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
             raise InvalidModelError(f"no route: {raw!r} (oai: needs a model id, e.g. oai:gpt-6-astra)")
         from halo_harness.providers.responses_request import resolve_openai_dialect
         return ModelRef(raw=raw, provider="openai", model=bare, dialect=resolve_openai_dialect(bare))
+    if resolved.startswith(_CX_PREFIX):
+        # Halo 2.0.3 round 5i part 2: `cx:<name>` (the installed `codex`
+        # binary, driven under the user's own ChatGPT subscription login) --
+        # mirrors the cc: branch just below, substituting `codex_models` for
+        # `cc_models`. Never shares cc:'s bare-alias-route fallback (that
+        # mechanism is specific to the nine Claude names cc:/ant: both
+        # resolve); a bare word with no prefix never resolves to cx: on its
+        # own.
+        from halo_harness.providers.codex_models import resolve_codex_alias
+        bare = resolved[len(_CX_PREFIX):]
+        _refuse_if_disabled("codex_subscription")
+        if not bare:
+            raise InvalidModelError(f"no route: {raw!r} (cx: needs a model id, e.g. cx:astra)")
+        return ModelRef(raw=raw, provider="codex", model=resolve_codex_alias(bare), dialect="codex-subprocess")
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias
         bare = resolved[len(_CC_PREFIX):]
@@ -442,7 +457,7 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
     near = difflib.get_close_matches(raw, cached_names, n=3, cutoff=0.5) if cached_names else []
     hint = f" -- did you mean one of the cached Databricks endpoints: {', '.join(near)}?" if near else ""
     raise InvalidModelError(
-        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, ol:, hf:, vendor/model, "
+        f"no route: {raw!r} (accepted forms are dbx:, or:, ant:, cc:, cx:, oai:, ol:, hf:, vendor/model, "
         f"a bare databricks-*/system.ai.* name, a subscription-model alias, or a routes.json alias){hint}"
     )
 
@@ -584,6 +599,20 @@ def resolve_model_profile(ref: ModelRef, state_dir: Path, routes: Optional[dict]
             # (Claude Code resolved it, whatever it is) -- vision=True for
             # the same reason reasoning="native" already is here.
             return ModelProfile(context_tokens=1_000_000, max_output_tokens=64_000, vision=True, reasoning="native")
+
+    if ref.provider == "codex":
+        # Halo 2.0.3 round 5i part 2: reuses the SAME vendored `openai`
+        # fallback catalog `oai:` reads (the underlying model is identical
+        # either way, only the billing differs -- CODEX-RESEARCH.md
+        # section 2) with pricing always dropped (a ChatGPT subscription
+        # has no metered per-token price).
+        from halo_harness.providers.codex_models import profile_fields_for_codex_model
+        fields = profile_fields_for_codex_model(ref.model)
+        return ModelProfile(
+            context_tokens=fields.get("context_tokens", 1_050_000),
+            max_output_tokens=fields.get("max_output_tokens", 128_000),
+            vision=bool(fields.get("vision", True)), reasoning="openai",
+        )
 
     if ref.provider == "huggingface":
         # Halo 2.0.3 round 4 brief: just two tiers for `hf:` refs -- the

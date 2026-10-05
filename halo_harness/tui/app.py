@@ -475,6 +475,12 @@ class BridgeApp(App):
         # now, never spawns the `claude auth status` subprocess itself.
         self.run_worker(self._prime_auth_status_worker, thread=True, name="auth-status-startup",
                          group="auth-status-startup")
+        # Round 5i part 2: the `cx:` counterpart, same reasoning -- primes
+        # `codex_models.cached_codex_auth_status()` off the UI thread so
+        # `Controller.list_models()`'s own cx: group never spawns `codex
+        # login status` itself.
+        self.run_worker(self._prime_codex_auth_status_worker, thread=True, name="codex-auth-status-startup",
+                         group="codex-auth-status-startup")
         # H15 part 2 addendum 3.2a: the SAME staleness-gated, every-
         # enabled-provider catalog refresh `/model` triggers on open also
         # runs once at launch -- a provider set up with just a key/token
@@ -621,6 +627,21 @@ class BridgeApp(App):
                 connectors_bridge.ensure_discovered_in_background(on_done=on_done)
             except Exception:
                 pass
+
+    def _prime_codex_auth_status_worker(self) -> None:
+        """Round 5i part 2: the `cx:` counterpart of `_prime_auth_status_
+        worker` just above -- same reasoning, no connectors-discovery kick
+        (codex has no equivalent concept)."""
+        try:
+            from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
+            status = refresh_cached_codex_auth_status()
+        except Exception:
+            return
+        if status and status.logged_in and status.auth_method == "chatgpt":
+            self.call_from_thread(
+                self.notify, "Codex subscription detected -- cx: models available (see /model).",
+                title="providers", timeout=4,
+            )
 
     def _catalog_startup_refresh_worker(self) -> None:
         """H15 part 2 addendum 3.2a: launch-time catalog refresh -- see

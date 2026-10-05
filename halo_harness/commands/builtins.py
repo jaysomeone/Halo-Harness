@@ -974,6 +974,15 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
                 refresh_cached_claude_auth_status()
         except Exception:
             pass
+        try:
+            from halo_harness.providers.codex_models import (
+                cached_auth_status_is_stale as cx_auth_status_is_stale,
+                refresh_cached_codex_auth_status,
+            )
+            if cx_auth_status_is_stale():
+                refresh_cached_codex_auth_status()
+        except Exception:
+            pass
         # Findings 22/23 (2.0.1): this session's OWN cwd, and (when a real
         # Settings object was resolved for it) its own effective_env --
         # passed straight through rather than letting provider_rows()
@@ -1011,6 +1020,28 @@ def _cmd_providers(args: str, facade: HeadlessFacade) -> str:
         return ("/providers setup needs the interactive picker -- run `halo providers setup "
                 f"{tokens[1] if len(tokens) > 1 else '<name>'}` (or `halo init`) from a real terminal.")
     return "Usage: /providers [list|enable <name>|disable <name>|setup <name>]"
+
+
+def _cmd_settings(args: str, facade: HeadlessFacade) -> str:
+    """Round 5i part 2: the merged Claude-Code/Codex/Halo settings view
+    (`providers.settings_merge.effective_settings`) -- `halo doctor`'s
+    `codex_settings` line is the one-line summary of the SAME thing; this
+    is the full table. Bare `/settings`: the view. `/settings primary
+    claude|codex`: persists `settings.primary` (flips which of Claude
+    Code's/Codex's own values wins when they disagree and Halo's own
+    config and an active `cx:` session don't already decide it -- see
+    that module's own docstring for the exact chain)."""
+    from halo_harness.providers.settings_merge import effective_settings, render_settings_text, set_settings_primary
+    tokens = (args or "").split()
+    if tokens[:1] == ["primary"]:
+        if len(tokens) < 2 or tokens[1] not in ("claude", "codex"):
+            return "Usage: /settings primary claude|codex"
+        set_settings_primary(tokens[1])
+        return f"settings.primary: {tokens[1]}"
+    session = facade.session
+    session_provider = getattr(getattr(session, "model_ref", None), "provider", None) if session else None
+    view = effective_settings(facade.cwd, session_provider=session_provider)
+    return render_settings_text(view)
 
 
 def _cmd_effort(args: str, facade: HeadlessFacade) -> str:
@@ -1377,6 +1408,8 @@ _BUILTIN_SPECS = {
     "setup": ("core", "Open the roles/organizations guided setup screens", "[roles|orgs]", _cmd_setup),
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
                   _cmd_providers),
+    "settings": ("core", "Show the merged Claude Code / Codex / halo settings view", "[primary claude|codex]",
+                 _cmd_settings),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
     "offline": ("core", "Show or change enforced offline mode (network.offline)", "[on|off]", _cmd_offline),
     "escalation": ("core", "Show the hybrid-escalation policy and this session's last decisions", None,

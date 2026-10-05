@@ -33,12 +33,13 @@ PROVIDERS = ("databricks", "openrouter", "anthropic", "claude")
 # `halo setup`/`/setup` never reach a providers step at all (`setup_cli.
 # py`'s own step list is `roles`/`orgs`/`summary` only), so neither is
 # affected by this tuple either way.
-TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "openai", "typesafe")
+TAB_PROVIDERS = PROVIDERS + ("ollama", "huggingface", "openai", "codex", "typesafe", "settings_sources")
 
 TAB_LABEL = {
     "databricks": "Databricks", "openrouter": "OpenRouter", "anthropic": "Anthropic API (key)",
     "claude": "Claude Code subscription", "ollama": "Ollama (local or LAN)", "huggingface": "Hugging Face",
-    "openai": "OpenAI API (key)", "typesafe": "TypeSafe",
+    "openai": "OpenAI API (key)", "codex": "Codex subscription", "typesafe": "TypeSafe",
+    "settings_sources": "Settings sources",
 }
 
 PROVIDER_LABEL = {
@@ -79,6 +80,14 @@ def claude_login_available() -> bool:
     return bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
 
 
+def codex_login_available() -> bool:
+    """`cx:`'s own counterpart -- cache-only, see `codex_models.
+    codex_login_available`'s own docstring (same reasoning as
+    `claude_login_available` just above)."""
+    from halo_harness.providers.codex_models import codex_login_available as _codex_login_available
+    return _codex_login_available()
+
+
 def provider_status(name: str) -> str:
     """`"configured"` / `"logged in"` (claude only) / `"not set up"` -- a
     status TAG only, never a decision: the picker's cursor position comes
@@ -92,6 +101,8 @@ def provider_status(name: str) -> str:
         return "configured" if resolve_anthropic() is not None else "not set up"
     if name == "claude":
         return "logged in" if claude_login_available() else "not set up"
+    if name == "codex":
+        return "logged in" if codex_login_available() else "not set up"
     return "not set up"
 
 
@@ -184,6 +195,23 @@ def model_entries_for_provider(provider: str, state_dir: Path) -> "list[dict]":
     if provider == "claude":
         from halo_harness.providers.cc_models import CC_ALIASES
         return _cc_ant_entries("cc", CC_ALIASES)
+    if provider == "codex":
+        # Round 5i part 2: the `cx:` counterpart -- not `_cc_ant_entries`
+        # (hardcoded to `cc_models`'s own functions), since `codex_models`
+        # never prices a row (a ChatGPT subscription has no metered price).
+        from halo_harness.providers.codex_models import (
+            CODEX_ALIASES, alias_display_detail as cx_alias_detail, profile_fields_for_codex_model,
+        )
+        out = []
+        for alias in CODEX_ALIASES:
+            fields = profile_fields_for_codex_model(alias) or {}
+            out.append({
+                "ref": f"cx:{alias}", "context_tokens": fields.get("context_tokens"),
+                "max_output_tokens": fields.get("max_output_tokens"),
+                "price_in_per_m": None, "price_out_per_m": None,
+                "detail": cx_alias_detail(alias),
+            })
+        return out
     if provider == "huggingface":
         # Round 5 fix: this branch never existed before (`huggingface` was
         # never a `model_entries_for_provider` caller until now, since it
@@ -323,6 +351,28 @@ def tab_credential_state(provider: str, *, team_cfg: Optional[dict] = None,
         available = claude_login_available()
         return {"configured": available, "source": "claude.ai login" if available else None,
                 "masked": "logged in" if available else None, "known_host": None, "fields": []}
+    if provider == "codex":
+        available = codex_login_available()
+        return {"configured": available, "source": "ChatGPT login" if available else None,
+                "masked": "logged in" if available else None, "known_host": None, "fields": []}
+    if provider == "settings_sources":
+        # Round 5i part 2: not a credential tab at all -- "configured"
+        # always True (there is nothing to set up, only a preference to
+        # pick), `masked` carries the one-line merged summary so the step
+        # opens already showing what it found, per the brief's "detects
+        # before it asks" pattern every other local-models step follows.
+        from halo_harness.providers.settings_merge import effective_settings, settings_primary
+        primary = settings_primary()
+        try:
+            view = effective_settings(Path.cwd())
+            summary = (f"Claude Code instructions: {view.claude_instructions_count} file(s); "
+                        f"Codex config.toml: {'found' if view.codex_config_found else 'not found'}; "
+                        f"Codex AGENTS.md chain: {view.codex_agents_md_count} file(s)")
+        except Exception:
+            summary = "(could not read Claude Code/Codex settings yet)"
+        return {"configured": True, "source": f"primary: {primary}", "masked": summary, "known_host": None,
+                "fields": [{"name": "primary", "label": "Primary when Claude Code and Codex disagree "
+                                                           "(claude/codex)", "secret": False}]}
     if provider == "ollama":
         # Round 5: config-only (`ollama.hosts`, never a live probe here --
         # see this function's own "never computed here" contract).
@@ -504,6 +554,17 @@ def save_tab_credentials(provider: str, values: dict, *, team_cfg: Optional[dict
         if claude_login_available():
             return True, "claude.ai login confirmed"
         return False, "no claude.ai login found -- run `claude` once to log in first"
+    if provider == "codex":
+        from halo_harness.providers.codex_models import refresh_cached_codex_auth_status
+        status = refresh_cached_codex_auth_status()
+        if status and status.logged_in and status.auth_method == "chatgpt":
+            return True, "ChatGPT login confirmed"
+        return False, "no ChatGPT login found -- run `codex login` once to log in first"
+    if provider == "settings_sources":
+        from halo_harness.providers.settings_merge import set_settings_primary
+        chosen = (values.get("primary") or "claude").strip().lower()
+        set_settings_primary("codex" if chosen == "codex" else "claude")
+        return True, f"settings.primary: {'codex' if chosen == 'codex' else 'claude'}"
     return False, f"unknown provider: {provider}"
 
 

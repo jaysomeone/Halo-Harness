@@ -1921,9 +1921,15 @@ class Session:
         group) and close its bridge server, if `cc:` was ever used this
         session -- a safe no-op otherwise. Called from Controller.quit(),
         headless.py's own atexit/finally cleanup, and SIGTERM/SIGHUP (via
-        the same paths that already call job_registry.kill_all())."""
-        from halo_harness.agent import cc_runtime
+        the same paths that already call job_registry.kill_all()).
+
+        Round 5i part 2: ALSO closes `cx:`'s own bridge server (if `cx:`
+        was ever used this session) -- broadened rather than adding a
+        parallel `close_cx()` call at every one of this method's own call
+        sites (controller.py, headless.py, agent/subagent.py)."""
+        from halo_harness.agent import cc_runtime, codex_runtime
         cc_runtime.close_cc(self)
+        codex_runtime.close_cx(self)
 
     def clear(self) -> None:
         """U5 must-do: `/clear` starts a genuinely NEW session log --
@@ -2065,6 +2071,9 @@ class Session:
         if ref.provider == "cc":
             from halo_harness.agent.cc_runtime import one_shot_cc_call
             return one_shot_cc_call(ref.model, system_text, user_text, timeout_s=timeout_s)
+        if ref.provider == "codex":
+            from halo_harness.agent.codex_runtime import one_shot_cx_call
+            return one_shot_cx_call(ref.model, system_text, user_text, timeout_s=timeout_s)
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect) \
             if ref is not self.model_ref else self.route
         profile = resolve_profile(route) if ref is not self.model_ref else self.provider_profile
@@ -3700,6 +3709,10 @@ class Session:
             log.warning("compactionModel %r is cc: (no HTTP route for a one-shot summarisation call); "
                         "using the session's main model for this summary", raw)
             return None
+        if ref.provider == "codex":
+            log.warning("compactionModel %r is cx: (no HTTP route for a one-shot summarisation call); "
+                        "using the session's main model for this summary", raw)
+            return None
         route = Route(provider=ref.provider, upstream_model=ref.model, dialect=ref.dialect)
         profile = resolve_profile(route)
         model_profile = resolve_model_profile(ref, self.state_dir, routes)
@@ -3855,6 +3868,17 @@ class Session:
                 phase="failed", trigger=trigger, turn=turn_no,
                 reason="halo's own compaction is a no-op for cc: sessions -- Claude Code "
                        "manages its own context/compaction internally.",
+            )
+            return False
+        if self.model_ref.provider == "codex":
+            # Round 5i part 2: same reasoning as the cc: branch just above
+            # -- a cx: turn's model-visible context is whatever Codex's own
+            # `codex exec resume <id>` thread holds, never this log's own
+            # `derive_request` replay.
+            yield events.compaction(
+                phase="failed", trigger=trigger, turn=turn_no,
+                reason="halo's own compaction is a no-op for cx: sessions -- Codex manages its own "
+                       "context/compaction internally.",
             )
             return False
         system_text, raw_messages, tools = derive_request(self.log, tools=None)
@@ -4207,6 +4231,14 @@ class Session:
                     # resume all keep working unchanged.
                     from halo_harness.agent import cc_runtime
                     yield from cc_runtime.turn_body_cc(self, turn_no, text, images=images,
+                                                        hook_context=hook_context_text)
+                elif self.model_ref.provider == "codex":
+                    # Round 5i part 2: the cx: counterpart of the cc: branch
+                    # just above -- a separate turn-execution path
+                    # (agent/codex_turn.py) for the SAME reason, substituting
+                    # `codex exec` for `claude -p`.
+                    from halo_harness.agent import codex_turn
+                    yield from codex_turn.turn_body_cx(self, turn_no, text, images=images,
                                                         hook_context=hook_context_text)
                 else:
                     yield from self._turn_body(turn_no)
@@ -6225,6 +6257,24 @@ class Session:
         if model_ref.provider == "cc" and self.model_ref.provider != "cc":
             from halo_harness.agent import cc_runtime
             cc_runtime.prepare_conversation_so_far(self)
+        elif model_ref.provider == "codex" and self.model_ref.provider != "codex":
+            # Round 5i part 2: the `cx:` counterpart of the cc: branch just
+            # above -- same reasoning (no codex thread exists yet for
+            # history that happened under a different provider).
+            from halo_harness.agent import codex_turn
+            codex_turn.prepare_conversation_so_far_cx(self)
+        elif self.model_ref.provider == "codex" and model_ref.provider != "codex":
+            # Round 5i part 2: unlike cc:, codex has no long-held process
+            # to prime/close for a MODEL change within codex (the next
+            # turn's fresh subprocess just reads `self.model_ref.model`
+            # and resumes the SAME codex thread id under the new model --
+            # see `codex_turn.turn_body_cx`) -- only an actual PROVIDER
+            # switch away from codex closes the bridge, for tidiness
+            # (an idle socket/thread otherwise lingers for the rest of the
+            # session). The log's own `cx_session_id` meta node is left
+            # alone, so switching back into cx: later still resumes it.
+            from halo_harness.agent import codex_runtime
+            codex_runtime.close_cx(self)
         elif self.model_ref.provider == "cc" and (
             model_ref.provider != "cc" or model_ref.model != self.model_ref.model
         ):
@@ -6439,6 +6489,13 @@ class Session:
             # safe point a cc: turn never runs.
             from halo_harness.agent import cc_runtime
             return cc_runtime.steer_cc(self, text)
+        if self.model_ref.provider == "codex":
+            # Round 5i part 2: codex exec has no live mid-turn channel at
+            # all (CODEX-RESEARCH.md section 7) -- `steer_cx` queues `text`
+            # and delivers it as soon as the current turn's subprocess
+            # exits, the documented fallback.
+            from halo_harness.agent import codex_turn
+            return codex_turn.steer_cx(self, text)
         with self._steer_lock:
             if not self._busy.is_set():
                 return False

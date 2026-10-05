@@ -25,7 +25,7 @@ def _model_count(name: str) -> "int | None":
         return None
     from halo_harness.config.paths import bridge_home
     from halo_harness.init_providers import model_entries_for_provider
-    picker_name = "claude" if name == "claude_subscription" else name
+    picker_name = {"claude_subscription": "claude", "codex_subscription": "codex"}.get(name, name)
     try:
         return len(model_entries_for_provider(picker_name, bridge_home()))
     except Exception:
@@ -197,7 +197,7 @@ def cmd_providers(argv: list) -> int:
                   "(set TYPESAFE_API_KEY in the env file, then `halo providers enable typesafe`).",
                   file=sys.stderr)
             return 2
-        picker_name = "claude" if name == "claude_subscription" else name
+        picker_name = {"claude_subscription": "claude", "codex_subscription": "codex"}.get(name, name)
         from halo_harness.init_cli import cmd_init
         return cmd_init(["--provider", picker_name] + argv[2:])
     print(f"halo providers: unrecognized arguments: {' '.join(argv)}", file=sys.stderr)

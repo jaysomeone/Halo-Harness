@@ -146,6 +146,38 @@ entirely.
   servers) and `hooks/hooks.json` (hooks), with `${CLAUDE_PLUGIN_ROOT}`
   expanded to that plugin's own install directory.
 
+## Codex CLI files -- read only, never written
+
+Halo 2.0.3 round 5i part 2 (`providers/codex_settings.py`,
+`providers/settings_merge.py`). Read for `/settings`/`halo doctor`'s
+`codex_settings` line/the init wizard's "Settings sources" step only --
+never consulted when building a request for any OTHER route, and a
+`cx:` session's actual execution reads these files itself (Codex loads
+its own config/AGENTS.md the moment `codex exec` starts, same as Claude
+Code does for a `cc:` session), so there is nothing to feed it from here
+either.
+
+- **`config.toml`**: `$CODEX_HOME/config.toml` (`CODEX_HOME` defaults to
+  `~/.codex`), with `<project-root>/.codex/config.toml` layered over it
+  for a trusted project. Parsed by a small hand-rolled reader (this repo
+  ships no TOML dependency) that handles plain `key = value` scalars and
+  `[table]`/`[table.sub]` headers -- enough for the documented keys
+  (`model`, `model_provider`, `model_reasoning_effort`, `approval_policy`,
+  `sandbox_mode`, `mcp_servers.<name>`, `profiles.<name>`,
+  `shell_environment_policy`, `notify`, `history`), not a full TOML
+  implementation; an unparseable line is skipped, never raised.
+- **`AGENTS.md` chain**: `$CODEX_HOME/AGENTS.override.md` else
+  `$CODEX_HOME/AGENTS.md` (global, first non-empty wins), then the SAME
+  override-or-plain rule walked from the git repository root down to the
+  working directory, concatenated root-to-leaf, capped at
+  `project_doc_max_bytes` (32 KiB default). A DIFFERENT walk than Halo's
+  own CLAUDE.md/AGENTS.md loader (`config/claude_md.py`, a filesystem-root
+  walk with no git-root concept) -- kept as its own, separate reader since
+  the two rules genuinely differ; see `docs/MODELS.md`'s "Codex settings
+  and instructions" section.
+- **`.codex/config.toml`**: a project's own scoped config (MCP servers,
+  mainly), read the same way as the home one and layered over it.
+
 ## halo's own files
 
 None of these are read by Claude Code; nothing here is ever confused with
@@ -218,6 +250,7 @@ directly by the features that own them:
 | `huggingface.model_dirs` | unset (nothing scanned) | `/local add <path>`/`/local forget <path>` (persisted immediately), `halo init`'s "Local models" step, or hand-edited; a list of folder paths Halo scans recursively for `.gguf` files and safetensors/MLX model folders -- see `docs/MODELS.md`'s "Finding and using file-backed models" |
 | `huggingface.preferred_runtime` | unset (Halo picks the only valid runtime per file format: `llama-server` for `.gguf`, `mlx_lm` for safetensors/MLX on Apple Silicon) | `halo init`'s "Local models" step; `"llama-server"` or `"mlx_lm"` -- a `halo local serve --runtime` flag always wins over this; stored for a future round where the same file could genuinely be served more than one way |
 | `openai.dialect_overrides` | unset (the built-in table alone: `gpt-6-astra`/`gpt-6.1-sol` default to the Responses dialect, every other `oai:` id to chat completions) | `halo config set openai.dialect_overrides '{"gpt-5": "responses"}'`; a map of bare `oai:` model id to `"chat"`/`"responses"` -- always wins over the table, in either direction; see `docs/MODELS.md`'s "OpenAI API" section |
+| `settings.primary` | `"claude"` | `/settings primary claude\|codex`, `halo config set settings.primary codex`, or the init wizard's "Settings sources" step; which of Claude Code's or Codex's own setting wins the merged `/settings`/doctor view when BOTH are set and halo's own config and a live `cx:` session don't already decide it -- see `docs/MODELS.md`'s "Codex settings and instructions" section |
 
 ## Every environment variable
 
@@ -288,20 +321,24 @@ deprecated alias for `--provider openrouter|databricks|claude` respectively
 | `anthropic` | `ant:sonnet` | `ANTHROPIC_API_KEY` |
 | `claude` | `cc:sonnet` | none -- uses your existing `claude` login as-is |
 
-Ollama and Hugging Face each get their own tab in `halo init`'s
-INTERACTIVE Providers step (Halo 2.0.3 round 5, `init_providers.
-TAB_PROVIDERS`). `halo setup`/`/setup` never reach a Providers step at all
-(their own step list is `roles`/`orgs`/`summary` only -- see `docs/
-COMMANDS.md`'s `setup` section), so neither tab appears there; only `halo
-init` itself shows them. Neither is a `halo init --provider`/
-`--preset` CLI-flag CHOICE, though, and that's deliberate: that flag
-drives the OLDER sequential, non-interactive picker, which has no sensible
-single hardcoded default model for either (unlike the four providers in
-the table above, which always have one well-known catalog entry) -- the
-same reason that picker's own no-TTY/Textual-failure fallback never offers
-either tab. Configure `HF_TOKEN`/`huggingface.endpoints`/`huggingface.
-local_servers`/`ollama.hosts` directly instead on a non-interactive box
-(see `docs/MODELS.md`'s "Ollama"/"Hugging Face" sections). The wizard's
+Ollama, Hugging Face, OpenAI API (key) and Codex subscription each get
+their own tab in `halo init`'s INTERACTIVE Providers step (Halo 2.0.3
+round 5 for Ollama/Hugging Face, round 5i for OpenAI/Codex --
+`init_providers.TAB_PROVIDERS`). `halo setup`/`/setup` never reach a
+Providers step at all (their own step list is `roles`/`orgs`/`summary`
+only -- see `docs/COMMANDS.md`'s `setup` section), so none of these tabs
+appear there; only `halo init` itself shows them. None of the four is a
+`halo init --provider`/`--preset` CLI-flag CHOICE, though, and that's
+deliberate: that flag drives the OLDER sequential, non-interactive
+picker, which has no sensible single hardcoded default model for any of
+them (unlike the four providers in the table above, which always have
+one well-known catalog entry) -- the same reason that picker's own
+no-TTY/Textual-failure fallback never offers any of these tabs. Configure
+`HF_TOKEN`/`huggingface.endpoints`/`huggingface.local_servers`/
+`ollama.hosts`/`OPENAI_API_KEY` directly instead on a non-interactive
+box, or run `codex login` directly for Codex (see `docs/MODELS.md`'s
+"Ollama"/"Hugging Face"/"OpenAI API"/"Codex subscription" sections). The
+wizard's
 own "Local models" step (round 5c, right after the Providers step) is
 the SAME kind of interactive-only addition -- `huggingface.model_dirs`/
 `huggingface.preferred_runtime` above are its two config keys; `/local

@@ -674,6 +674,18 @@ illustrative model classes/quantizations that would fit with a 32k
 context -- an estimate, never a download from here. See
 [MODELS.md](MODELS.md)'s "The wizard detects before it asks" section.
 
+**Halo 2.0.3 round 5i**: the Providers step gains two more tabs -- "OpenAI
+API (key)" (paste `OPENAI_API_KEY`, Save) and "Codex subscription" (same
+"Check login" button as the Claude Code tab -- nothing is stored, it only
+confirms a ChatGPT login via `codex login status`) -- both Skippable, same
+pattern as every tab above. A separate step, "Settings sources", shows
+what was found in Claude Code's own settings/CLAUDE.md and in Codex's own
+`config.toml`/`AGENTS.md` chain and lets you pick which one wins when
+both set the same thing and nothing else already decides it
+(`settings.primary`) -- see [MODELS.md](MODELS.md)'s "Codex subscription
+(ChatGPT)" and "Codex settings and instructions" sections and
+[CONFIG.md](CONFIG.md)'s `settings.primary` row.
+
 ```sh
 halo init --help
 ```
@@ -1022,7 +1034,7 @@ Lists (and refreshes) the OpenRouter and Databricks model catalogs.
 halo models --help
 ```
 ```
-usage: halo models [-h] [--refresh] [--cc] [--urls] [--json]
+usage: halo models [-h] [--refresh] [--cc] [--cx] [--urls] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -1030,6 +1042,9 @@ options:
   --cc        List the Claude subscription models (cc:/ant: aliases) instead
               of the OpenRouter/Databricks catalog; with --refresh, re-pings
               each alias to confirm its current canonical id
+  --cx        List the Codex subscription models (cx: aliases) instead of
+              the OpenRouter/Databricks catalog; with --refresh, re-pings
+              each alias to confirm it is accepted (marks refused ids)
   --urls      Databricks endpoints: also print the exact URL and path type
               each one resolves to
   --json      Machine-readable JSON output
@@ -1040,6 +1055,7 @@ options:
 | (bare) | reads `~/.halo/models.json`/`dbx-endpoints.json`; refreshes automatically the first time either cache is empty |
 | `--refresh` | live probe: OpenRouter `GET /api/v1/models` -> `models.json`; Databricks `GET /api/2.0/serving-endpoints` -> `dbx-endpoints.json`; models.dev's public `api.json` -> `models-dev.json` |
 | `--cc` | reads `claude auth status` + the `cc-models.json` cache; `--cc --refresh` also sends nine tiny `-p --max-turns 1` pings under your subscription |
+| `--cx` | reads `codex login status` + the `cx-models.json` cache; `--cx --refresh` sends one tiny `codex exec --ephemeral` ping per alias under your subscription -- no ChatGPT login exists on the build host, so this is verified against `tests/helpers/fake_codex.py` only, not the real CLI |
 | `--urls` | Databricks rows only: adds the exact resolved URL + path type (`mlflow`/`cursor`/`anthropic`/`invocations`) per endpoint -- see `docs/DATABRICKS.md` |
 | `--json` | same data as machine-readable JSON |
 

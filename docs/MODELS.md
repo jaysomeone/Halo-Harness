@@ -28,6 +28,7 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | `hf:local/<model>@<name>` | `hf:local/qwen3-30b@bench` | the same, a NAMED entry in `huggingface.local_servers` -- never an auto-detected server, which has no name of its own to address |
 | `hf:mlx/<org>/<repo>` | `hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit` | round 5f, experimental, Apple Silicon only: a Halo-managed `mlx_lm.server` for this exact Hugging Face Hub repo, started on first use and reused afterward -- see "Apple Silicon (`hf:mlx/*`, round 5f)" below and [MAC.md](MAC.md) |
 | `oai:<model>` | `oai:gpt-5`, `oai:gpt-6-astra` | the real OpenAI API (`OPENAI_API_KEY`) -- chat completions, or the Responses dialect for the two models that need it -- see "OpenAI API" below |
+| `cx:<model>` | `cx:astra`, `cx:gpt-6.1-sol` | your Codex ChatGPT subscription, via the installed `codex` binary -- see "Codex subscription (ChatGPT)" below |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
 
 Parsing order (`model.py::parse_model_ref`): an exact match in
@@ -68,6 +69,24 @@ and `opus-5.5` are the same model.
 `sonnet`/`haiku` specifically (the two whose target moves as Anthropic
 ships new point releases) -- so a stale hardcoded id here is never the
 only source once a refresh has run.
+
+### `cx:` alias table
+
+Short names Halo adds on top of the documented ChatGPT-plan ids
+(`providers/codex_models.py` `CODEX_ALIASES`) -- every one is a specific,
+pinned id; none of them move the way `cc:opus`/`cc:sonnet` do.
+
+| Alias | `cx:` resolves to |
+|---|---|
+| `astra` | `gpt-6-astra` |
+| `sol` | `gpt-6.1-sol` |
+| `luna` | `gpt-6-luna` |
+
+The full id also works directly (`cx:gpt-6-astra`). No live `/models
+refresh` has run against this table (no ChatGPT login on the build host) --
+`halo models --cx --refresh` is implemented the same way `--cc --refresh`
+is (a cheap one-token headless call per id, refused ones marked) but
+unexercised; see `docs/harness/CODEX-RESEARCH.md` section 2.
 
 ## Provider enablement
 
@@ -1062,6 +1081,125 @@ the env file; auto-enabled once detected, same rule every other key-only
 provider here follows. `halo doctor`'s provider count already includes
 it once enabled (the generic `PROVIDER_NAMES` table, no bespoke doctor
 line needed).
+
+## Codex subscription (ChatGPT)
+
+Halo 2.0.3 round 5i part 2 (`plans/2.0.3-ollama-round2-brief.md` "Round
+5i", design doc `docs/harness/CODEX-RESEARCH.md`). `cx:<model>` drives
+the installed `codex` CLI headlessly under the user's own ChatGPT
+subscription login -- the Codex counterpart of `cc:`, mirroring its
+design wherever Codex's own architecture allows and documenting where it
+genuinely differs. **No one is logged into Codex on the build host as of
+this round -- every behaviour below is verified against the parameterized
+fake (`tests/helpers/fake_codex.py`) only, never against the real CLI;
+treat it as unverified live until a ChatGPT login is available and the
+orchestrator runs a real check.**
+
+**Detection.** The `codex` binary on PATH (bare, `.exe`, or `.cmd` -- the
+same resolution `cc:` uses for `claude`, deliberately never probing
+`codex.ps1`) plus `codex login status` reporting a real ChatGPT login.
+That command prints PLAIN TEXT, never JSON -- the one string that counts
+as a subscription login is `"Logged in using ChatGPT"`; every other
+answer (an API key, Bedrock, an access/personal-access token, workload
+identity) is logged in but NOT the subscription cx: wants, so it is
+refused with a message pointing at `oai:` instead. Halo never reads
+`~/.codex/auth.json`.
+
+**Models.** `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` are the documented
+ChatGPT-plan ids (`gpt-5.5` is API-key only, retired from ChatGPT products
+2026-10-14) -- short aliases `cx:astra`/`cx:sol`/`cx:luna`, or the full id
+directly. Context/output/vision come from the SAME vendored `openai`
+models.dev catalog `oai:` reads (the model is identical either way); price
+is always `None` on this route -- a ChatGPT subscription has no metered
+per-token price, so the cost meter records token usage with no dollar
+figure rather than inventing one.
+
+**Execution, one subprocess per turn.** Unlike `cc:` (one `claude`
+process held open across the whole session, fed one stdin line per turn),
+`codex exec` has no stdin-streaming protocol at all -- each Halo turn
+spawns a FRESH `codex exec [resume <thread-id>] --json <prompt>` and runs
+it to completion. The thread id is Codex's own (learned from its first
+`thread.started` event, logged as a `cx_session_id` meta node, exactly
+like `cc_session_id`) -- every turn after the first resumes it, so the
+conversation is continuous on Codex's own side even though the OS process
+is not. Halo's permission mode maps onto Codex's `approval_policy`/
+`sandbox_mode`: bypass and auto -> `never`/`danger-full-access`; default
+-> `on-request`/`workspace-write`; manual -> `untrusted`/`read-only`.
+
+**Tools.** Codex keeps its OWN native tools (shell, apply_patch) running
+in its own sandbox -- no flag was found to disable them the way `cc:`'s
+`--tools ""` disables Claude Code's. Halo's own tool catalog is
+ADDITIONALLY exposed through an inline `-c mcp_servers.halo.<field>=
+<value>` override pointing at the SAME `python -m halo_harness.ccbridge`
+child + bridge server `cc:` already uses -- a genuine MCP tool call
+through it is dispatched through Halo's own permission engine/hooks/log
+exactly like every other route's tools; a native Codex action is logged
+read-only, after the fact, from its own `item.completed` event, never
+gated by Halo (there is nothing left to gate -- it already ran). The
+bridge's own secret token/socket address are never spelled out on Codex's
+command line -- they ride on the subprocess's own environment, forwarded
+to the MCP child by NAME via `mcp_servers.halo.env_vars`, the same privacy
+property `cc:` gets from folding its bridge env into the claude
+subprocess's own env.
+
+**Steering.** `codex exec` has no live channel into an already-running
+turn (no queued-stdin-line concept the way `cc:` has). A steer is
+accepted immediately and queued; the moment the CURRENT subprocess exits,
+it is sent as its own follow-up `codex exec resume <id> <text>` call
+(logged as a `steer` node), repeating until nothing is left queued,
+before the whole chain reports one `turn_done` back to Halo -- "finish
+the turn, then send", literally. (A separate `codex queue --thread <id>
+--message <text>` command exists and MIGHT inject into a still-running
+turn from a second process -- unconfirmed without a live login, and not
+wired in; see `docs/harness/CODEX-RESEARCH.md` section 7.)
+
+**Setup.** `halo init`'s "Codex subscription" tab (same "Check login"
+button as the Claude Code tab -- nothing is stored, it only confirms the
+login) or run `codex login` directly; auto-enabled only on a genuine
+ChatGPT login, never merely because `codex` is installed. `/providers`
+and `halo doctor` show it under `codex_subscription`.
+
+## Codex settings and instructions
+
+Round 5i part 2 also reads Codex's OWN `config.toml` and `AGENTS.md`
+chain, beside Claude Code's settings/CLAUDE.md, into one merged view --
+`/settings`, `halo doctor`'s `codex_settings` line, and the init wizard's
+"Settings sources" step all show the SAME thing. Halo never writes to
+either Claude Code's or Codex's own files; this is read-only awareness,
+not a second configuration mechanism.
+
+**What gets read.** Codex's `config.toml` (`$CODEX_HOME`, default
+`~/.codex`, plus `.codex/config.toml` at a trusted project root, layered
+over the home one) for `model`/`model_provider`/`model_reasoning_effort`/
+`approval_policy`/`sandbox_mode`/`mcp_servers.<name>`/`profiles.<name>`/
+`shell_environment_policy`/`notify`/`history`; its `AGENTS.md` chain
+(global `AGENTS.override.md` else `AGENTS.md` under `$CODEX_HOME`, then
+the SAME override-or-plain rule from the git repo root down to the
+working directory, concatenated root-to-leaf, capped at `project_doc_
+max_bytes`, 32 KiB by default) -- a DIFFERENT walk than the one Halo
+already uses for CLAUDE.md/AGENTS.md (`halo_harness/config/claude_md.py`,
+a filesystem-root walk with no git-root concept), kept deliberately
+separate since the two rules genuinely differ. `config.toml`'s own
+`profiles.<name>` table is read when present; no persisted "default
+profile" pointer was found in either the table or the installed CLI's
+separate `-p/--profile` per-file scheme, so Halo never guesses which
+profile (if any) is active.
+
+**How it merges.** Each setting Halo tracks (model, permission/approval
+mode, sandbox, reasoning effort) gets one row showing EVERY source's own
+value plus which one is "effective". Non-overlapping entries always
+merge: a Codex-only MCP server joins the MCP list labeled `(codex)`;
+Codex's AGENTS.md chain is its own block, never silently folded into
+Claude Code's own CLAUDE.md block. Overlapping entries follow one
+precedence: Halo's own config first, then Claude Code's settings, then
+Codex's -- EXCEPT on a live `cx:` session, where Codex's own model/
+reasoning-effort/approval-and-sandbox policy leads for those specific
+keys (it is, after all, what is actually about to run). `settings.
+primary: "claude"|"codex"` (`~/.halo/config.json`, default `"claude"`)
+flips which of Claude Code's or Codex's value is preferred when both are
+set and Halo's own config and a live cx: session don't already decide
+it -- set it from the init wizard's "Settings sources" step, `/settings
+primary claude|codex`, or `halo config set settings.primary codex`.
 
 ## Families and their rules
 

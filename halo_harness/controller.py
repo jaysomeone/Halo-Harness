@@ -829,6 +829,39 @@ class Controller:
             })
         _maybe_hint("openai", detected=oai_detected)
 
+        # Halo 2.0.3 round 5i part 2: the "Codex subscription (ChatGPT)"
+        # group -- the `cx:` counterpart of the "Claude Code subscription"
+        # block above, substituting `codex_models.cached_codex_auth_
+        # status()` for `cc_models.cached_claude_auth_status()`. Shown
+        # only once a real ChatGPT login is BOTH detected AND enabled, same
+        # two-gate rule every subscription route on this page already
+        # follows (a login never enables anything on its own).
+        from halo_harness.providers.codex_models import (
+            CODEX_ALIASES, alias_display_detail as cx_alias_display_detail, cached_codex_auth_status,
+            profile_fields_for_codex_model,
+        )
+        try:
+            cx_status = cached_codex_auth_status()
+        except Exception:
+            cx_status = None
+        cx_available = bool(cx_status and cx_status.logged_in and cx_status.auth_method == "chatgpt")
+        if cx_available and is_enabled("codex_subscription", detected=cx_available):
+            for alias in CODEX_ALIASES:
+                ref = f"cx:{alias}"
+                if ref in seen:
+                    continue
+                fields = profile_fields_for_codex_model(alias) or {}
+                out.append({
+                    "ref": ref, "context_tokens": fields.get("context_tokens"),
+                    "max_output_tokens": fields.get("max_output_tokens"),
+                    "price_in_per_m": None, "price_out_per_m": None,
+                    "detail": cx_alias_display_detail(alias),
+                    "provider": "codex", "group": label_for("codex_subscription"),
+                })
+        if cx_available and not is_enabled("codex_subscription", detected=cx_available):
+            hints.append({"hint": f"{label_for('codex_subscription')} detected but not enabled -- "
+                                   f"run `halo providers enable codex_subscription`"})
+
         current = self.session.model_ref.raw
         if current and current not in {m["ref"] for m in out}:
             out.insert(0, {"ref": current, "context_tokens": self.session.model_profile.context_tokens,
