@@ -107,9 +107,10 @@ def build_cx_argv(*, model: str, prompt: str, resume_id: Optional[str], permissi
     argv = resolve_codex_launch_argv() + ["exec"]
     if resume_id:
         argv += ["resume", resume_id]
+    # `-c sandbox_mode=` rather than `-s`: `codex exec resume` rejects `-s`.
     argv += [
         "--json", "--skip-git-repo-check", "-m", model,
-        "-c", f"approval_policy={approval_policy}", "-s", sandbox_mode,
+        "-c", f"approval_policy={approval_policy}", "-c", f"sandbox_mode={sandbox_mode}",
     ]
     argv += mcp_override_args
     if ephemeral:

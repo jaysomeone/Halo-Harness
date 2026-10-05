@@ -96,6 +96,11 @@ def _parse_exec_argv(argv: "list[str]") -> dict:
         if a in ("--json", "--skip-git-repo-check", "--ephemeral"):
             i += 1
             continue
+        if a == "-s" and opts["resume_id"] is not None:
+            # Real `codex exec resume` has no `-s`/`--sandbox` option.
+            sys.stderr.write("error: unexpected argument '-s' found\n\n"
+                             "For more information, try '--help'.\n")
+            sys.exit(2)
         if a == "-s" or a == "-i" or a == "-o":
             i += 2
             continue

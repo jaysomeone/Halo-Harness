@@ -123,7 +123,9 @@ def test_second_turn_resumes_same_thread(ctx: Ctx):
     with _fake_codex_env(argv_log=log_path):
         session, _ = _new_cx_session()
         list(session.turn("reply with the single word pong"))
-        list(session.turn("reply with the single word pong"))
+        second = list(session.turn("reply with the single word pong"))
+        errors = [e.data.get("message") for e in second if e.kind == "error"]
+        ctx.check(f"resumed turn has no error, got {errors}", not errors)
         # the log also carries the ONE `login status` preflight call --
         # filtered out here since this test is only about `exec` shape.
         lines = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
