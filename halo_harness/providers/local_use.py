@@ -145,6 +145,20 @@ def serve_local_model(model: str, *, runtime: Optional[str] = None, port: Option
     confirm = confirm or (lambda _q: False)
     entry = resolve_local_file(model, env=env)
     if entry is None:
+        # Round 5f: "`halo local serve <mlx repo or folder> --runtime
+        # mlx_lm` is the explicit form" -- a bare Hugging Face Hub repo id
+        # (never resolvable as a FILE -- `resolve_local_file` already
+        # tried an exact path and every `huggingface.model_dirs` folder)
+        # with `--runtime mlx_lm` EXPLICITLY requested delegates to the
+        # SAME `hf:mlx/<repo>` machinery `--model hf:mlx/<repo>` uses,
+        # keyed by the repo id itself rather than a file path. Gated on
+        # `runtime == "mlx_lm"` specifically -- an unresolvable PATH with
+        # no `--runtime` (or `--runtime llama-server`) still gets the
+        # plain "no file-backed model found" message below, unchanged.
+        if runtime == "mlx_lm" and "/" in model and not any(ch.isspace() for ch in model):
+            from halo_harness.providers.huggingface_mlx import ensure_mlx_server
+            target, mlx_lines = ensure_mlx_server(model, confirm=confirm, state_dir=state_dir, keep=keep, port=port)
+            return target is not None, mlx_lines
         return False, [f"no file-backed model found at or named {model!r} (try an exact path, or /local add "
                         f"a folder first)"]
     from halo_harness.providers.local_fit import fit_result_for_path

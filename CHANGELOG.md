@@ -303,6 +303,59 @@ version number.
    `tests/test_doctor_local_5d.py`), hermetic throughout -- never a real
    model.
 
+   Fix pass (2026-10-04, live run on qwen3.8:27b, a thinking-by-default
+   model): context recall and instruction adherence scored a flat,
+   unexplained 0% -- a 16/32-token output budget left no room for the
+   model's own reasoning before the real answer, so the reply came back
+   genuinely empty (the NDJSON decoder never turns `message.thinking`
+   into checked text in the first place, confirmed with a dedicated
+   pin). Both tasks now request a flat 160-token budget; `halo gym
+   [show] --show-replies` prints each reply-only task's actual excerpt,
+   and the same excerpts are always saved in the result JSON under each
+   metric's own `samples` key, so a future 0% is diagnosable without
+   re-running anything; the needle check is also now case-insensitive. 5
+   more tests pin the thinking/text separation, the new token budget on
+   the wire, the tolerant needle match, and the samples/`--show-replies`
+   round trip -- live-verified against the real qwen3.8:27b daemon
+   (instruction adherence and context recall both went from 0% to 100%).
+7. **`hf:mlx/<org>/<repo>` -- Apple Silicon in-process backend, experimental**
+   (round 5f): an optional extra, `uv tool install "halo-harness[mlx]"`
+   (`pyproject.toml`'s own `mlx` group, an environment marker restricting
+   it to macOS on arm64 -- never attempted on any other platform), adds a
+   route that resolves a Hugging Face Hub repo id straight to a Halo-
+   managed `mlx_lm.server` on a free loopback port: started with `--model
+   <repo>` (mlx-lm downloads/reuses the Hub cache itself on first use; a
+   plain notice names the repo, its approximate cached size when known,
+   and the cache destination), recorded in round 5c's own managed-server
+   registry (`~/.halo/run/local-servers.json`), reused by an EXACT repo-id
+   match on every later use (never the generic `hf:local/*` "most
+   recently started wins" fallback, which would silently hand a specific
+   `hf:mlx/<repo>` ref a DIFFERENT repo's server), stopped when the
+   session that started it exits unless kept, and stoppable by hand with
+   `halo local stop <repo>`. Rides the EXISTING `hf:local/*` tiers
+   end to end (`ModelRef.local=True` alongside the new `ModelRef.mlx=True`):
+   tools, the repair loop and constrained decoding, the `small`-by-default
+   role, the fit arithmetic, tokens/second, `halo doctor --local --model
+   hf:mlx/<repo>`, and `halo gym --models hf:mlx/<repo>,ol:<model>`; on
+   any platform that isn't Apple Silicon, resolving the ref gives exactly
+   one plain sentence, "MLX runs on Apple Silicon only," and nothing else
+   changes (`halo doctor` itself only ever mentions the extra on Apple
+   Silicon too). `halo local serve <repo> --runtime mlx_lm` is the
+   explicit, non-`--model` form of the same route; the `/local` view
+   labels an `mlx-community/*` Hub-cache repo with this exact `hf:mlx/*`
+   ref and the explicit `--runtime mlx_lm` serve hint. `doctor_local.py`
+   gained a second, provider-agnostic request sender (`providers.
+   huggingface_send`, the openai-chat dialect `gym_send.py`'s Ollama-only
+   sender has no branch for) so `halo doctor --local` now also accepts an
+   `hf:local/*`/`hf:mlx/*` `--model`, not just `ol:`. New tests across
+   `tests/test_providers_huggingface_mlx.py`, `tests/test_doctor_local_
+   mlx.py`, and `tests/test_huggingface_mlx_extras.py` -- hermetic
+   throughout (a fake stub process stands in for `mlx_lm.server`, the
+   Apple-Silicon platform check is injectable, and the non-macOS sentence
+   is pinned on this suite's own real, non-Apple-Silicon host); the live
+   check is the owner running [docs/MAC.md](docs/MAC.md)'s quick-start
+   on his own Mac.
+
 ## [2.0.2] - 2026-10-04
 
 W7 rounds 1-7 of the 2.0.2 brief (F, A, B, C, D, E, then the init wizard):

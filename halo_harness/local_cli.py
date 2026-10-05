@@ -66,8 +66,11 @@ def _cmd_serve(argv: list) -> int:
     from halo_harness.providers.local_use import serve_local_model
     parser = argparse.ArgumentParser(prog="halo local serve", description="Serve a file-backed model on a "
                                       "free loopback port with a managed llama-server/mlx_lm runtime.")
-    parser.add_argument("model", help="an exact .gguf/model-folder path, or a name shown by `halo local`")
-    parser.add_argument("--runtime", choices=("llama-server", "mlx_lm"), default=None)
+    parser.add_argument("model", help="an exact .gguf/model-folder path, a name shown by `halo local`, or "
+                         "(round 5f, with --runtime mlx_lm) a bare Hugging Face Hub repo id, e.g. "
+                         "mlx-community/Qwen2.5-7B-Instruct-4bit -- the explicit form of hf:mlx/<org>/<repo>")
+    parser.add_argument("--runtime", choices=("llama-server", "mlx_lm"), default=None,
+                         help="mlx_lm is Apple Silicon only; round 5f: also accepts a bare repo id (above)")
     parser.add_argument("--backend", choices=("cuda", "vulkan", "cpu", "metal"), default=None,
                          help="override which llama-server build to fetch (default: CUDA if your driver "
                               "reports a version, else Vulkan; Metal on macOS)")

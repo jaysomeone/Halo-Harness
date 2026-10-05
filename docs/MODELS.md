@@ -26,6 +26,7 @@ Verified against `halo_harness/model.py`, `providers/profiles.py`,
 | `hf:endpoint/<name>` | `hf:endpoint/my-prod` | a dedicated Hugging Face Inference Endpoint, a named entry in `huggingface.endpoints` (see "Hugging Face" below) |
 | `hf:local/<model>` | `hf:local/qwen3-30b` | a local OpenAI-compatible server (llama-server, vLLM, LM Studio, ...) -- a configured `huggingface.local_servers` default entry, else the first auto-detected one (see "Hugging Face" below) |
 | `hf:local/<model>@<name>` | `hf:local/qwen3-30b@bench` | the same, a NAMED entry in `huggingface.local_servers` -- never an auto-detected server, which has no name of its own to address |
+| `hf:mlx/<org>/<repo>` | `hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit` | round 5f, experimental, Apple Silicon only: a Halo-managed `mlx_lm.server` for this exact Hugging Face Hub repo, started on first use and reused afterward -- see "Apple Silicon (`hf:mlx/*`, round 5f)" below and [MAC.md](MAC.md) |
 | a `routes.json` alias | whatever `aliases` defines | resolved recursively (max 4 hops) before any of the above rules apply |
 
 Parsing order (`model.py::parse_model_ref`): an exact match in
@@ -553,7 +554,20 @@ measurements, each a plain ratio (never a vendor claim):
     battery turn, from the identical `eval_count`/`eval_duration`/
     `prompt_eval_duration` fields the status bar already reads.
 `--quick` halves N (and context recall's own smaller base count) for a
-faster, noisier read. Results persist at `~/.halo/gym/<host-slug>/
+faster, noisier read. `--show-replies` prints each reply-only task's
+actual reply excerpt (first 200 characters) alongside its score; the same
+excerpts are ALWAYS saved in the result JSON under each metric's own
+`samples` key, so a 0% is diagnosable from the file alone even without the
+flag. Fix pass (2026-10-04 live run, a thinking-by-default model):
+context recall and instruction adherence used to request only 16-32
+output tokens -- too small for a model that spends its OWN tokens
+reasoning before emitting the real answer, so the reply came back
+genuinely empty (never thinking text mistaken for the answer -- the
+decoder never turns `message.thinking` into checked text in the first
+place) and scored a flat, unexplained 0%. Both now request a flat,
+generous 160-token budget; the needle check is also now case-insensitive
+(already tolerant of surrounding punctuation/quotes as a plain substring
+check). Results persist at `~/.halo/gym/<host-slug>/
 <digest>.json` with the model name, digest, quantization, fitted context,
 Ollama version, and timestamps measured AT THAT TIME -- `halo gym show
 [model]` prints a per-model card from the saved file, never a fresh probe.
@@ -884,6 +898,59 @@ those.
 the `small` role, the same as any other local model -- never picked as
 the session's main model without you asking for it (see "Roles" above/
 docs/ROLES.md).
+
+**Apple Silicon (`hf:mlx/*`, round 5f, experimental)**
+
+`hf:mlx/<org>/<repo>` names a Hugging Face Hub repo directly (for
+example `hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit`) rather than a
+file already on disk -- the difference from `hf:local/*`/option A above:
+nothing needs to be downloaded or discovered first. The FIRST use starts
+a Halo-managed `mlx_lm.server` on a free loopback port with `--model
+<repo>` (mlx-lm itself downloads the weights into the Hugging Face Hub
+cache, or reuses them if already there, the first time it runs -- Halo
+never downloads anything itself here); a plain notice names the repo,
+its approximate size when the Hub cache already knows it, and the cache
+destination. Every later use of the SAME repo id reuses that already-
+running server -- no second download, no second notice. Recorded in the
+exact same `~/.halo/run/local-servers.json` registry option A's managed
+servers use, so `halo local stop <repo>` stops it, and it is stopped when
+the `halo` process that started it exits unless kept.
+
+Off by default -- `mlx-lm` is an optional extra, never installed unless
+you ask for it:
+
+```sh
+uv tool install "halo-harness[mlx]"
+```
+
+(`pyproject.toml`'s own environment marker restricts this to macOS on
+arm64 -- `uv`/`pip` never even attempt it on any other platform.) `halo
+doctor` names whether the extra is present on Apple Silicon; on every
+other platform, resolving an `hf:mlx/*` ref gives exactly one plain
+sentence, **"MLX runs on Apple Silicon only."**, and nothing else about
+the install, the doctor output, or any other route changes.
+
+Because the ref rides the SAME `hf:local/*` tiers everywhere else in this
+codebase (`ref.local=True` alongside the new `ref.mlx=True`), everything
+else about using it is identical to any other local model: tools, the
+repair loop and constrained decoding (behind the `huggingface` profile,
+same as `hf:local/*`), the `small`-by-default role, the fit arithmetic
+(the Apple unified-memory share above, calibrated against whatever
+context `mlx_lm.server` itself reports, or the repo's own cached
+`config.json` when it doesn't), tokens/second on the status bar, `halo
+doctor --local --model hf:mlx/<repo>` (the 60-second acceptance check),
+and `halo gym --models hf:mlx/<repo>,ol:<same model>` (a side-by-side
+card, including both engines' version strings, so a stale comparison is
+visibly stale). `halo local` lists an `mlx-community/*` repo already in
+your Hub cache with this exact ref and a `halo local serve <repo-or-
+folder> --runtime mlx_lm` hint -- the explicit, non-ref form of the same
+thing.
+
+`mlx_lm.server`'s own flags beyond `--model`/`--port` (a host default, a
+context-length-at-launch flag) were not confirmed from its README this
+round (`docs/harness/GPU-RESEARCH.md` section 7) -- see
+[MAC.md](MAC.md), the live Mac quick-start that resolves this and the
+Apple memory-share fraction in practice.
 
 ## Families and their rules
 

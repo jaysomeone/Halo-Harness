@@ -169,9 +169,18 @@ def _runnability_text(fmt: str, path, *, state_dir, running: "Optional[dict]" = 
         text = f"no managed runtime for {fmt} on this platform"
     else:
         found = find_runtime_binary(runtime, state_dir=state_dir)
-        hint = "" if found else (" (not installed -- `halo local serve` offers to fetch it)"
-                                  if runtime == "llama-server" else " (not installed -- pip install mlx-lm)")
-        text = f"servable: {runtime}{hint} [halo local serve {path}]"
+        # Round 5f: the MLX hint names `--runtime mlx_lm` explicitly
+        # (`halo local serve <mlx repo or folder> --runtime mlx_lm` is the
+        # brief's own documented "explicit form") -- `runtime_for_format`
+        # already disambiguates by file format so the flag is never
+        # strictly REQUIRED here, but naming it avoids any doubt next to
+        # an `hf:mlx/<repo>` hint on the SAME row (see `build_local_view`).
+        if runtime == "mlx_lm":
+            hint = "" if found else ' (not installed -- `uv tool install "halo-harness[mlx]"`)'
+            text = f"servable: {runtime}{hint} [halo local serve {path} --runtime mlx_lm]"
+        else:
+            hint = "" if found else " (not installed -- `halo local serve` offers to fetch it)"
+            text = f"servable: {runtime}{hint} [halo local serve {path}]"
     if fmt == "gguf":
         text += f"  or `halo local import {path}`"
     return text
@@ -256,9 +265,21 @@ def build_local_view(*, refresh: bool = False, env: Optional[dict] = None, state
         is_mlx = m.repo_id.lower().startswith("mlx-community/")
         fmt = "gguf" if (m.path is not None and m.path.suffix.lower() == ".gguf") else ("mlx" if is_mlx
                                                                                          else "safetensors")
-        rows.append(_file_backed_row("Hugging Face (cache, not served)", out_name, m.path, fmt, m.size_bytes,
-                                      state_dir=state_dir,
-                                      extra_capability_note=" -- runnable through MLX" if is_mlx else None))
+        row = _file_backed_row("Hugging Face (cache, not served)", out_name, m.path, fmt, m.size_bytes,
+                                state_dir=state_dir,
+                                extra_capability_note=" -- runnable through MLX" if is_mlx else None)
+        # Round 5f: an `hf:mlx/<repo_id>` ref is ALWAYS usable for an
+        # mlx-community repo, even with nothing cached yet (mlx_lm.server
+        # downloads it on first use) -- so it's offered here independent
+        # of whatever `_file_backed_row` found on disk, UNLESS round 5c's
+        # own folder-based `halo local serve --runtime mlx_lm` is already
+        # serving this exact file (then `row.ref` is already the running
+        # `hf:local/<name>`, which is strictly more ready right now and
+        # wins).
+        if is_mlx and row.ref is None:
+            import dataclasses
+            row = dataclasses.replace(row, ref=f"hf:mlx/{m.repo_id}")
+        rows.append(row)
     from halo_harness.providers.lmstudio_cache import scan_lmstudio_models
     for m in scan_lmstudio_models(env=env):
         out_name = m.repo_id + (f" ({'/'.join(m.formats)})" if m.formats else "")

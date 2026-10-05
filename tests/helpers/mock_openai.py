@@ -474,8 +474,52 @@ def _scn_tools_echo(h, body):
     ])
 
 
+def _scn_doctor(good: bool):
+    """Halo 2.0.3 round 5f: the openai-chat-dialect twin of `tests.
+    test_doctor_local_5d`'s own `_doctor_scenario` (same content-based
+    dispatch -- which of `doctor_local.py`'s four fixed-order steps this
+    request is, inferred from the system/user text and whether `tools`
+    is non-empty, since there is no per-step model name to key on here).
+    `good=False` makes each step's own reply fail validation instead of
+    the request itself erroring, exactly like the ndjson twin does."""
+    def responder(h, body):
+        messages = body.get("messages") or []
+        text_all = " ".join(str(m.get("content") or "") for m in messages)
+        tools = body.get("tools") or []
+        if tools:
+            args = ({"file_path": "fixture.txt"} if good else {"not_file_path": 1})
+            _finish(h, [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                {"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_1", "type": "function",
+                     "function": {"name": "Read", "arguments": json.dumps(args)}}]}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ])
+        elif "Reply with the single word ready" in text_all:
+            _finish(h, [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                        {"choices": [{"index": 0, "delta": {"content": "ready"}}]},
+                        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}])
+        elif "Reply with exactly this JSON object" in text_all:
+            content = json.dumps({"answer": "halo"}) if good else "sure, the answer is halo"
+            _finish(h, [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                        {"choices": [{"index": 0, "delta": {"content": content}}]},
+                        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}])
+        elif "Summarize the following conversation" in text_all:
+            content = "Two debug lines were added and all tests passed." if good else ""
+            _finish(h, [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                        {"choices": [{"index": 0, "delta": {"content": content}}]},
+                        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}])
+        else:
+            _finish(h, [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+                        {"choices": [{"index": 0, "delta": {"content": "ok"}}]},
+                        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}])
+    return responder
+
+
 SCENARIOS = {
     "model": _scn_model,
+    "doctor-good": _scn_doctor(True),
+    "doctor-bad": _scn_doctor(False),
     "small": _scn_small,
     "session-a": _scn_session_a,
     "session-b": _scn_session_b,

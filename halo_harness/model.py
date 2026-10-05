@@ -31,6 +31,9 @@ _OL_PREFIX = "ol:"
 _HF_PREFIX = "hf:"
 _HF_ENDPOINT_PREFIX = "endpoint/"
 _HF_LOCAL_PREFIX = "local/"
+# Halo 2.0.3 round 5f: `hf:mlx/<org>/<repo>` -- a Hub repo served by a
+# Halo-managed `mlx_lm.server` (Apple Silicon only; see ModelRef.mlx).
+_HF_MLX_PREFIX = "mlx/"
 _MAX_ALIAS_HOPS = 4
 
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
@@ -159,8 +162,24 @@ class ModelRef:
     # local=False), since both leave `host` unset. An `hf:endpoint/<name>`
     # ref always has `host` set AND `local=False` -- never both this flag
     # and a dedicated endpoint at once. Always `False` for every other
-    # provider/ref shape.
+    # provider/ref shape. Round 5f: also `True` for an `hf:mlx/<repo>` ref
+    # (see `mlx` below) -- it rides the SAME hf:local profile/fit/role
+    # tiers (`model.resolve_model_profile`, `roles.default_role_for_ref`),
+    # since a Halo-managed mlx_lm.server is exactly as "local" as any other
+    # `hf:local/*` server.
     local: bool = False
+    # Round 5f: `True` for `hf:mlx/<org>/<repo>` only -- `ref.model` is then
+    # the bare Hub repo id (e.g. "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+    # used VERBATIM as both the round 5c managed-server registry key and
+    # the `mlx_lm.server --model` argument. Unlike a generic `hf:local/*`
+    # ref (which only ever resolves to whatever is ALREADY running/
+    # configured), `ref.mlx=True` tells `headless.build_session`/`doctor_
+    # local.py`/`halo local serve` to ENSURE a managed server for this
+    # EXACT repo id exists first (starting one, with a plain consent
+    # notice, when it doesn't) -- see `providers.huggingface_mlx.
+    # ensure_mlx_server`. Always `False` for every other provider/ref
+    # shape, including every other `hf:` shape.
+    mlx: bool = False
 
 
 def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
@@ -263,9 +282,28 @@ def parse_model_ref(raw: str, routes: Optional[dict] = None) -> ModelRef:
                     f"hf:local/qwen3-30b@my-server)")
             return ModelRef(raw=raw, provider="huggingface", model=model_part, dialect="openai-chat",
                              host=server_name or None, local=True)
+        if bare.startswith(_HF_MLX_PREFIX):
+            # Round 5f: `hf:mlx/<org>/<repo>` -- always parses, on every
+            # platform (the one-sentence "MLX runs on Apple Silicon only"
+            # refusal happens at RESOLVE time -- `providers.huggingface_mlx.
+            # ensure_mlx_server` -- never at parse time, exactly like an
+            # `hf:local/<model>` ref parses fine with no server running
+            # yet). `repo` needs a real `<org>/<repo>` shape (at least one
+            # internal "/", no leading/trailing slash, no whitespace) --
+            # mlx_lm's own Hub convention, and the same registry key/
+            # `--model` argument this ref resolves to verbatim.
+            repo = bare[len(_HF_MLX_PREFIX):]
+            if ("/" not in repo or repo.startswith("/") or repo.endswith("/")
+                    or any(ch.isspace() for ch in repo)):
+                raise InvalidModelError(
+                    f"no route: {raw!r} (hf:mlx/ needs a <org>/<repo> Hugging Face Hub id, e.g. "
+                    f"hf:mlx/mlx-community/Qwen2.5-7B-Instruct-4bit)")
+            return ModelRef(raw=raw, provider="huggingface", model=repo, dialect="openai-chat",
+                             host=None, local=True, mlx=True)
         if not bare:
             raise InvalidModelError(
-                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix], endpoint/<name>, or local/<model>)")
+                f"no route: {raw!r} (hf: needs <org>/<model>[:suffix], endpoint/<name>, local/<model>, "
+                f"or mlx/<org>/<repo>)")
         return ModelRef(raw=raw, provider="huggingface", model=bare, dialect="openai-chat")
     if resolved.startswith(_CC_PREFIX):
         from halo_harness.providers.cc_models import resolve_cc_alias

@@ -34,6 +34,19 @@ vision = [
 images = [
     "Pillow>=10",
 ]
+# Halo 2.0.3 round 5f: `uv tool install "halo-harness[mlx]"` -- the
+# `hf:mlx/<org>/<repo>` route's own managed `mlx_lm.server` helper
+# (halo_harness/providers/huggingface_mlx.py). The environment marker
+# restricts this to Apple Silicon ONLY (macOS on arm64) so `uv`/`pip`
+# never even ATTEMPT the install on any other platform -- mlx-lm's own
+# PyPI classifiers now also list Linux/cuda/cpu extras (docs/harness/
+# GPU-RESEARCH.md section 7's "Corrections" item 4), but round 5f's own
+# scope is specifically the Apple/Metal unified-memory case, so the
+# marker is deliberately narrower than what the package itself would
+# technically accept.
+mlx = [
+    "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [project.scripts]
 # 2.0.1: this distribution ships EXACTLY ONE executable. The 2.0.0 comment

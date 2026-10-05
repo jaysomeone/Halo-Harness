@@ -963,6 +963,25 @@ def _check_ollama_hosts() -> "list[tuple[str, str]]":
     return entries
 
 
+def _check_mlx_extra() -> Optional[str]:
+    """Halo 2.0.3 round 5f (brief item 1): "`halo doctor` on macOS says
+    whether the extra is present; on other platforms nothing else
+    changes" -- `None` (omitted entirely, same `_check_tmux_mouse`-style
+    skip every other platform-conditional check on this page uses) off
+    Apple Silicon. On Apple Silicon: `[OK]`/`[WARN]` on whether `mlx-lm`
+    actually imports -- never a network call, never spawns `mlx_lm.
+    server` itself (that only happens once an `hf:mlx/<repo>` ref is
+    actually used)."""
+    from halo_harness.providers.huggingface_mlx import is_apple_silicon
+    if not is_apple_silicon():
+        return None
+    import importlib.util
+    if importlib.util.find_spec("mlx_lm") is not None:
+        return f"{OK} MLX (Apple Silicon): mlx-lm installed -- hf:mlx/<org>/<repo> is ready to use"
+    return _fix(f"{WARN} MLX (Apple Silicon): mlx-lm not installed -- hf:mlx/<org>/<repo> will decline until it is",
+                cmd='uv tool install "halo-harness[mlx]"')
+
+
 def _format_age(seconds: float) -> str:
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -1579,6 +1598,7 @@ def _check_entries(cwd: Optional[Path] = None, settings_flag: Optional[str] = No
     entries.append(("test_leftovers", _check_test_leftovers()))
     entries.append(("mcp_connectors", _check_mcp_connectors()))
     entries.extend(_check_ollama_hosts())
+    entries.append(("mlx_extra", _check_mlx_extra()))
     entries.append(("default_model", _check_default_model()))
     entries.append(("permission_mode", _check_permission_mode()))
     entries.append(("providers_enabled", _check_providers_enabled(cwd, settings_flag)))
@@ -1637,8 +1657,9 @@ def cmd_doctor(argv: list) -> int:
                              "output, compaction summary against a fixture transcript) instead of the "
                              "general checks")
     parser.add_argument("--model", default=None, metavar="REF",
-                         help="With --local: the ol: model to check (default: the configured default "
-                             "model if it is ol:, else the first model in the default Ollama host's catalog)")
+                         help="With --local: the ol:/hf:local/hf:mlx model to check (default: the configured "
+                             "default model if it is ol:, else the first model in the default Ollama host's "
+                             "catalog); an hf:mlx/<org>/<repo> ref starts its managed mlx_lm.server if needed")
     # Findings 22/23 (2.0.1): threaded into listing_effective_env (via
     # run_checks/_check_providers_enabled) so the provider-enablement line
     # never disagrees with what a real session launched against this same

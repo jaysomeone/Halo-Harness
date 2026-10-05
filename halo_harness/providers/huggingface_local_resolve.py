@@ -82,6 +82,27 @@ def _most_recent_managed_server(state_dir=None) -> Optional[dict]:
     return entries[-1] if entries else None
 
 
+def resolve_managed_server_by_model(model_id: str, *, state_dir=None) -> Optional[ResolvedLocalServer]:
+    """Halo 2.0.3 round 5f: an EXACT registry lookup by `model` id --
+    unlike `resolve_local_server`'s own "most recently started wins"
+    fallback (right above), which is correct ONLY for a BARE `hf:local/
+    <model>` ref that has no specific id of its own to insist on. An
+    `hf:mlx/<repo>` ref always names its exact repo id, so it must find
+    THAT entry specifically -- "most recent" would silently hand it a
+    DIFFERENT model's server whenever more than one managed server is
+    running at once. `None` when no registry entry has this exact `model`
+    id (the caller, `providers.huggingface_mlx.ensure_mlx_server`, then
+    starts one)."""
+    from halo_harness.providers.local_runtime import load_registry
+    if state_dir is None:
+        from halo_harness.config.paths import bridge_home
+        state_dir = bridge_home()
+    for entry in load_registry(state_dir):
+        if entry.get("model") == model_id:
+            return ResolvedLocalServer(name=model_id, base_url=entry.get("base_url"), api_key=None)
+    return None
+
+
 _context_cache_lock = threading.Lock()
 _context_cache: dict = {}  # (base_url, model_id) -> (monotonic_ts, Optional[int])
 

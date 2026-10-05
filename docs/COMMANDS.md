@@ -781,19 +781,25 @@ options:
   --local      Run the 60-second local-model acceptance check (load, tool
                call, structured output, compaction summary) instead of the
                general checks
-  --model REF  With --local: the ol: model to check (default: the configured
-               default model if it is ol:, else the first model in the
-               default Ollama host's catalog)
+  --model REF  With --local: the ol:/hf:local/hf:mlx model to check (default:
+               the configured default model if it is ol:, else the first
+               model in the default Ollama host's catalog); an
+               hf:mlx/<org>/<repo> ref starts its managed mlx_lm.server
+               first if one isn't already running
 ```
 
-`halo doctor --local [--model ol:x]` (round 5d) is the 60-second "works out
-of the box" proof for a local model on THIS machine: load, one real Read
-tool call, one structured-output call (the same constrained-decoding path
-the repair loop uses), and one summary of a small fixture transcript, each
-printed as `[PASS]`/`[FAIL]` with a plain reason and the elapsed time, in
-that fixed order even when an earlier step failed. Exit 0 iff all four
-passed. See [MODELS.md](MODELS.md)'s "The 60-second acceptance check"
-section; new local-model users are pointed at this command first.
+`halo doctor --local [--model ol:x]` (round 5d; round 5f extends `--model`
+to `hf:local/*`/`hf:mlx/*`) is the 60-second "works out of the box" proof
+for a local model on THIS machine: load, one real Read tool call, one
+structured-output call (the same constrained-decoding path the repair loop
+uses), and one summary of a small fixture transcript, each printed as
+`[PASS]`/`[FAIL]` with a plain reason and the elapsed time, in that fixed
+order even when an earlier step failed. Exit 0 iff all four passed. An
+`hf:mlx/<org>/<repo>` ref on anything but Apple Silicon fails all four
+steps with the one plain "MLX runs on Apple Silicon only" reason -- still
+a clean, deterministic answer, never a crash. See [MODELS.md](MODELS.md)'s
+"Finding and using file-backed models"/"Apple Silicon (`hf:mlx/*`, round
+5f)" sections; new local-model users are pointed at this command first.
 
 Bare `halo doctor` checks: Python version, `~/.claude` layout, the env
 file, OpenRouter/Databricks/Claude-subscription configuration, `claude`/
@@ -1472,6 +1478,14 @@ and URL, verified against the GitHub Releases API's own per-asset
 `digest`) -- nothing downloads without a `y`/`--yes`; declining prints the
 one-line install hint for this OS instead. See [MODELS.md](MODELS.md)'s
 "Finding and using file-backed models" section for the full story.
+
+Round 5f: `<model>` with `--runtime mlx_lm` also accepts a bare Hugging
+Face Hub repo id instead of a path or folder (`halo local serve
+mlx-community/Qwen2.5-7B-Instruct-4bit --runtime mlx_lm`) -- the explicit,
+non-`--model` form of `hf:mlx/<org>/<repo>` (see [MODELS.md](MODELS.md)'s
+"Apple Silicon" section and [MAC.md](MAC.md)); `mlx_lm` itself is never
+fetched by `halo local serve` the way `llama-server` is -- it's the
+optional `uv tool install "halo-harness[mlx]"` extra instead.
 
 ### `halo local stop <model>`
 

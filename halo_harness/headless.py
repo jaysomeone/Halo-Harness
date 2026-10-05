@@ -118,6 +118,25 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
         # bearer, pinned apart from both HF_TOKEN and an endpoint's token
         # the exact same way those two are already pinned apart from each
         # other below.
+        if getattr(ref, "mlx", False):
+            # Round 5f: an EXACT registry lookup by repo id (`ref.model`),
+            # never the generic `ref.local` "most recently started wins"
+            # fallback below -- an `hf:mlx/<repo>` ref always names its
+            # exact repo, so resolving it must never return a DIFFERENT
+            # repo's managed server just because that one happened to
+            # start more recently. Lookup-ONLY, deliberately no side
+            # effect (`_resolve_creds` is called from several places,
+            # including a bare "is this configured" probe -- line ~790 --
+            # that must never itself spawn a process): the actual ENSURE/
+            # start-with-consent step runs once, earlier, in `build_
+            # session` below (or `doctor_local.py` for `--local`). `None`
+            # here (nothing started yet) is the ordinary "not configured"
+            # outcome every other provider branch on this page already has.
+            from halo_harness.providers.huggingface_local_resolve import resolve_managed_server_by_model
+            target = resolve_managed_server_by_model(ref.model)
+            if target is None:
+                return None
+            return ProviderCreds(base_url=target.base_url, api_key=target.api_key or "")
         if ref.local:
             from halo_harness.providers.huggingface_local_resolve import resolve_local_server
             target = resolve_local_server(ref.host, env)
@@ -136,6 +155,32 @@ def _resolve_creds(ref, settings=None) -> Optional[ProviderCreds]:
             return None
         return ProviderCreds(base_url=hf.base_url, api_key=hf.api_key)
     return None
+
+
+def _ensure_mlx_server_for_ref(ref, state_dir) -> None:
+    """Round 5f: the ONE place a session (print mode via `build_session`
+    below, and the TUI's initial launch via `tui/bootstrap.py`'s own call
+    to `build_session`) ensures a Halo-managed `mlx_lm.server` exists for
+    an `hf:mlx/<repo>` ref BEFORE the turn/profile-read-back that needs it
+    runs -- `_resolve_creds`'s own `ref.mlx` branch is deliberately lookup-
+    only (no side effect; it's called from several places, including a
+    bare "is this configured" probe) so this is where the real start-with-
+    consent step lives instead. A no-op for every other ref shape, and a
+    cheap registry-read no-op on every call AFTER the first for the SAME
+    repo (`ensure_mlx_server`'s own "already running" short-circuit) --
+    safe to call more than once per session (main ref, then the small
+    role's ref, which may name the same or a different mlx repo).
+    `confirm` is left at `ensure_mlx_server`'s own default (auto-proceed,
+    print the notice) -- the brief's own "`--yes` in print mode": there is
+    no interactive prompt loop wired this deep, and typing `hf:mlx/<repo>`
+    at all is the same explicit-action-is-consent rule every other `hf:`/
+    `or:` cloud ref already follows with no separate gate."""
+    if getattr(ref, "provider", None) != "huggingface" or not getattr(ref, "mlx", False):
+        return
+    from halo_harness.providers.huggingface_mlx import ensure_mlx_server
+    _target, lines = ensure_mlx_server(ref.model, state_dir=state_dir)
+    for line in lines:
+        print(f"halo: {line}", file=sys.stderr)
 
 
 def _resolve_dbx_config_for_headers(settings=None):
@@ -886,6 +931,12 @@ def build_session(
         if explicit_small_raw:
             print(f"halo: --small-model/HALO_MODEL_SMALL {small_raw!r} does not resolve -- "
                   f"using the main model {model_raw!r} for background calls instead", file=sys.stderr)
+    # Round 5f: ensure an `hf:mlx/<repo>` main or small-role ref has a
+    # running Halo-managed mlx_lm.server BEFORE the profile read-back just
+    # below needs one -- see `_ensure_mlx_server_for_ref`'s own docstring.
+    _ensure_mlx_server_for_ref(model_ref, state_dir)
+    if small_ref is not None:
+        _ensure_mlx_server_for_ref(small_ref, state_dir)
     model_profile = resolve_model_profile(model_ref, state_dir, routes)
     family = model_family(model_ref.model)
 

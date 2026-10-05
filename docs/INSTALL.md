@@ -187,6 +187,12 @@ halo --version          # halo 2.0.1
 halo doctor              # read-only environment check -- every WARN/MISSING line names its own fix
 ```
 
+**On an Apple Silicon Mac**, once the install above is verified, see
+[docs/MAC.md](MAC.md) for a full quick-start covering the Mac's own
+Ollama daemon and the optional, experimental `uv tool install
+"halo-harness[mlx]"` extra (`hf:mlx/<org>/<repo>`, round 5f) -- off by
+default and only installable on macOS/arm64 in the first place.
+
 See the [README](../README.md) for the 10-minute walkthrough and
 [docs/harness/INSTALL.md](harness/INSTALL.md) for everything this page
 doesn't cover: offline/work-box installs, Windows detail, PATH

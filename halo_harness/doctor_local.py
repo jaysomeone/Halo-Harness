@@ -6,9 +6,16 @@ earlier FAIL (brief: "printing PASS or FAIL per step with the plain reason
 and the elapsed time"): load the model, one real tool call, one structured
 output (the SAME constrained-decoding path `agent/loop.py`'s repair round
 uses), one compaction-style summary against a fixture transcript. Every
-step is a real request/decode against the live host, through `gym_send.
-send_turn` -- the identical primitive the gym's own battery uses, so this
-check and `halo gym` can never quietly disagree about what "works" means.
+step is a real request/decode against the live host -- `gym_send.
+send_turn` for an `ol:` model (the identical primitive the gym's own
+battery uses, so this check and `halo gym` can never quietly disagree
+about what "works" means for Ollama), or, round 5f, `providers.
+huggingface_send.send_hf_turn` for an `hf:local/*`/`hf:mlx/*` model (the
+openai-chat dialect `gym_send.py` has no branch for at all) -- picked by
+`_send_turn_for` below. `hf:mlx/<repo>` also ENSURES its own
+Halo-managed `mlx_lm.server` is running first (`providers.huggingface_mlx.
+ensure_mlx_server`), so this command works from one line even before
+anything has been started.
 """
 
 from __future__ import annotations
@@ -41,10 +48,59 @@ def _resolve_default_ref(state_dir) -> Optional[str]:
     return refs[0] if refs else None
 
 
+class _HFHost:
+    """Duck-typed stand-in for an `ollama.OllamaHost` -- just enough shape
+    (`base_url`/`api_key`/`name`, plus a `url` alias for the two spots --
+    `_load`'s own message, `ollama_hw.is_local_host`'s hostname check --
+    that read `host.url` regardless of provider) for `_send_turn_for`'s
+    huggingface branch and the step functions below; never passed to
+    anything Ollama-specific beyond that attribute duck-typing."""
+    __slots__ = ("base_url", "api_key", "name")
+
+    def __init__(self, base_url: str, api_key: Optional[str], name: str):
+        self.base_url, self.api_key, self.name = base_url, api_key, name
+
+    @property
+    def url(self) -> str:
+        return self.base_url
+
+
+def _resolved_huggingface(ref, ref_raw, state_dir):
+    """`(host, error)` for an `hf:local/*`/`hf:mlx/*` `--model` -- round
+    5f: `ref.mlx` ENSURES a managed mlx_lm.server exists (starting one,
+    with a plain printed notice, when it doesn't -- `doctor --local` is
+    explicitly meant to "just work" from one command); a generic
+    `hf:local/*` ref only ever RESOLVES whatever is already running/
+    configured (unchanged round 5 behaviour -- `doctor --local` is a
+    check, not a second place that starts servers for an ordinary local
+    server). `state_dir` is threaded through explicitly to `ensure_mlx_
+    server` (its own test seam) rather than left to default -- every
+    caller of `run_local_acceptance_check` already passes the SAME value
+    `bridge_home()` would resolve on its own, but a test that pins an
+    explicit, different `state_dir` must still land in the registry IT
+    passed, not a real/differently-scoped one."""
+    if ref.mlx:
+        from halo_harness.providers.huggingface_mlx import ensure_mlx_server
+        target, lines = ensure_mlx_server(ref.model, state_dir=state_dir)
+        if target is None:
+            return None, "; ".join(lines) or f"could not start a managed mlx_lm.server for {ref_raw!r}"
+    else:
+        from halo_harness.providers.huggingface_local_resolve import resolve_local_server
+        target = resolve_local_server(ref.host, env=None)
+        if target is None:
+            return None, f"no Hugging Face local server resolved for {ref_raw!r}"
+    return _HFHost(base_url=target.base_url, api_key=target.api_key or "", name=target.name), None
+
+
 def _resolved(model_ref_raw, state_dir):
     """`(host, route, profile, decision, model_label, error)` -- `error`
     is the one FAIL reason for every step at once when nothing can even
-    be resolved (no ref given/found, or no configured host)."""
+    be resolved (no ref given/found, or no configured host). `route`'s
+    `dialect` tells `_send_turn_for` which sender to use -- "ollama" (the
+    original round 5d scope) or "openai-chat" (round 5f: an `hf:local/*`/
+    `hf:mlx/*` `--model`, sent through `providers.huggingface_send`
+    instead of the Ollama-only `gym_send.send_turn`); `profile`/`decision`
+    are `None` for the huggingface branch (unused by that sender)."""
     from halo_harness.model import parse_model_ref
     from halo_harness.providers.ollama import resolve_ollama_host
     from halo_harness.providers.ollama_hw import resolve_context_decision
@@ -52,11 +108,18 @@ def _resolved(model_ref_raw, state_dir):
     from halo_harness.providers.routing import Route
     ref_raw = model_ref_raw or _resolve_default_ref(state_dir)
     if not ref_raw:
-        return None, None, None, None, None, ("no ol: model given and no default local model found -- pass "
-                                               "--model ol:x, or configure `ollama.hosts`/pull a model")
+        return None, None, None, None, None, ("no ol:/hf: model given and no default local model found -- pass "
+                                               "--model ol:x (or hf:local/x, hf:mlx/org/repo), or configure "
+                                               "`ollama.hosts`/pull a model")
     ref = parse_model_ref(ref_raw)
+    if ref.provider == "huggingface":
+        host, error = _resolved_huggingface(ref, ref_raw, state_dir)
+        if error:
+            return None, None, None, None, None, error
+        route = Route(provider="huggingface", upstream_model=ref.model, dialect="openai-chat")
+        return host, route, None, None, ref_raw, None
     if ref.provider != "ollama":
-        return None, None, None, None, None, f"{ref_raw!r} is not a local ol: model"
+        return None, None, None, None, None, f"{ref_raw!r} is not a local ol:/hf: model"
     host = resolve_ollama_host(ref.host)
     if host is None:
         return None, None, None, None, None, f"no configured Ollama host for {ref_raw!r}"
@@ -64,6 +127,21 @@ def _resolved(model_ref_raw, state_dir):
     profile = resolve_profile(route, state_dir=state_dir)
     decision = resolve_context_decision(ref)
     return host, route, profile, decision, ref_raw, None
+
+
+def _send_turn_for(*, host, route, profile, decision, **kwargs):
+    """Round 5f: picks the sender by `route.provider` -- `gym_send.
+    send_turn` (Ollama, round 5d's original scope) or `providers.
+    huggingface_send.send_hf_turn` (an `hf:local/*`/`hf:mlx/*` `--model`,
+    the openai-chat dialect `gym_send.py` has no branch for at all). Every
+    `_resolved` caller below goes through THIS function now instead of
+    importing `send_turn` directly, so the 4 step functions stay provider-
+    agnostic -- `profile`/`decision` are simply unused by the huggingface
+    branch (always `None` from `_resolved` for that provider)."""
+    if route.provider == "huggingface":
+        from halo_harness.providers.huggingface_send import send_hf_turn
+        return send_hf_turn(base_url=host.base_url, api_key=host.api_key, model_id=route.upstream_model, **kwargs)
+    return send_turn(host=host, route=route, profile=profile, decision=decision, **kwargs)
 
 
 def _step(name: str, fn, *a, **kw) -> dict:
@@ -76,10 +154,10 @@ def _step(name: str, fn, *a, **kw) -> dict:
 
 
 def _load(host, route, profile, decision, state_dir, model_label) -> "tuple[bool, str]":
-    turn = send_turn(host=host, route=route, profile=profile, decision=decision,
-                      system_text="Reply with the single word ready.", messages=[
+    turn = _send_turn_for(host=host, route=route, profile=profile, decision=decision,
+                           system_text="Reply with the single word ready.", messages=[
                           {"role": "user", "content": [{"type": "text", "text": "Reply with the single word ready."}]}],
-                      tools=None, requested_max_tokens=8, state_dir=state_dir)
+                           tools=None, requested_max_tokens=8, state_dir=state_dir)
     if turn.error:
         return False, turn.error
     return True, f"{model_label} answered on '{host.name}' ({host.url})"
@@ -92,8 +170,8 @@ def _tool_call(host, route, profile, decision, scratch_dir: Path, state_dir) -> 
     fixture.write_text(_SCRATCH_CONTENT, encoding="utf-8")
     read_tool = ToolRegistry().get("Read")
     read_def = read_tool.definition()
-    turn = send_turn(host=host, route=route, profile=profile, decision=decision,
-                      system_text="You are a careful tool-using assistant.", messages=[
+    turn = _send_turn_for(host=host, route=route, profile=profile, decision=decision,
+                           system_text="You are a careful tool-using assistant.", messages=[
                           {"role": "user", "content": [{"type": "text",
                            "text": f"Call the Read tool on exactly this file, then stop: {fixture}"}]}],
                       tools=[read_def], requested_max_tokens=128, state_dir=state_dir)
@@ -119,10 +197,20 @@ def _tool_call(host, route, profile, decision, scratch_dir: Path, state_dir) -> 
 
 def _structured_output(host, route, profile, decision, state_dir) -> "tuple[bool, str]":
     from halo_harness.agent.repair import validate_and_coerce
-    from halo_harness.providers.ollama_hw import is_local_host
     from halo_harness.providers.tool_call_schema import supports_constrained_tool_calls
-    constrained = supports_constrained_tool_calls(provider="ollama", dialect="ollama", local=is_local_host(host))
-    turn = send_turn(
+    if route.provider == "huggingface":
+        # Round 5f: an `hf:local/*`/`hf:mlx/*` ref is ALWAYS "local" in the
+        # sense this gate means (never the router/a dedicated endpoint --
+        # `_resolved_huggingface` only ever reaches here through a managed
+        # or configured local server) -- mirrors `model.ModelRef.local`'s
+        # own always-True value for both ref shapes, never `ollama_hw.
+        # is_local_host` (an Ollama-host-shaped check that would not even
+        # apply to an `_HFHost`).
+        constrained = supports_constrained_tool_calls(provider="huggingface", dialect="openai-chat", local=True)
+    else:
+        from halo_harness.providers.ollama_hw import is_local_host
+        constrained = supports_constrained_tool_calls(provider="ollama", dialect="ollama", local=is_local_host(host))
+    turn = _send_turn_for(
         host=host, route=route, profile=profile, decision=decision,
         system_text="Reply with ONLY a JSON object matching the given schema -- no prose, no markdown fence.",
         messages=[{"role": "user", "content": [{"type": "text",
@@ -145,7 +233,7 @@ def _structured_output(host, route, profile, decision, state_dir) -> "tuple[bool
 
 
 def _compaction_summary(host, route, profile, decision, state_dir) -> "tuple[bool, str]":
-    turn = send_turn(
+    turn = _send_turn_for(
         host=host, route=route, profile=profile, decision=decision,
         system_text="Summarize the following conversation in two or three sentences.",
         messages=[{"role": "user", "content": [{"type": "text", "text": _FIXTURE_TRANSCRIPT}]}],
