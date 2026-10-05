@@ -1,4 +1,4 @@
-# Status board (updated 2026-10-05 ~09:10; version order REORDERED by rolo 2026-10-05, see ROADMAP.md's last section: 2.0.4 tooling+history+providers, 2.0.5 control pack incl. Governor last, 2.0.6 hardening, 2.0.7 embeddings, 2.0.8 themes, 2.0.9 Signal, 2.0.10 review, then 3.0.1.1 research)
+# Status board (updated 2026-10-05 ~09:10; version order REORDERED by rolo 2026-10-05, see ROADMAP.md's last section: 2.0.4 tooling+history+providers, 2.0.5 control pack (cc: v2, learned rules, env drop, Governor last; jev API REMOVED 2026-10-05), 2.0.6 hardening, 2.0.7 embeddings, 2.0.8 themes, 2.0.9 Signal, 2.0.10 review, then 3.0.1.1 research)
 
 Legend: [x] shipped and pushed, [~] in progress, [ ] not started. The
 owner authorised running the whole roadmap without approvals; every round

@@ -438,3 +438,9 @@ every release; 2.0.4 had grown as large as 2.0.3 did.
   remote or WSL suite invocation now runs under a hard `timeout`, every
   backgrounded run gets a scheduled check within fifteen minutes, and a
   commit never waits on a redundant platform run.
+- 2026-10-05 ~09:35, rolo: "remove the jev api in the upcoming feature" ->
+  the jev decision API (plans/2.0.3-jev.md section D) is REMOVED from the
+  roadmap: 2.0.5 control pack = `cc:` route v2, learned gateway rules, the
+  legacy env-file drop, the Governor last. The jev brief stays in plans/ as
+  a record only; the jev-router idea remains parked; the Qwen decision-only
+  patterns shipped in 2.0.2 are unaffected.
