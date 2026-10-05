@@ -170,6 +170,36 @@ def test_submit_streams_text_and_mounts_tool_card(ctx: Ctx):
 
 
 @test
+def test_assistant_continuation_after_tool_is_mounted_below_the_tool(ctx: Ctx):
+    """A provider may resume the same text block after mounting activity.
+    The transcript stays append-only: never mutate the now-off-screen block
+    above a newer tool card."""
+    async def body():
+        fake = FakeController()
+        app = await _mounted(fake)
+        async with app.run_test(size=(100, 40)):
+            app.transcript.begin_message(1)
+            await app.transcript.append_text(1, 0, "First answer. ")
+            card = ToolCard(tool_use_id="tu-order", header="Read a file")
+            await app.transcript.mount_tool_card(card)
+            await app.transcript.append_text(1, 0, "Continued after the tool.")
+
+            visible = [w for w in app.transcript.children if isinstance(w, (AssistantText, ToolCard))]
+            ctx.check(f"text, tool, continuation order, got {[type(w).__name__ for w in visible]}",
+                      [type(w).__name__ for w in visible] == ["AssistantText", "ToolCard", "AssistantText"])
+            ctx.check("the first block stopped before the activity",
+                      visible[0].raw_text == "First answer. ")
+            ctx.check("the resumed text is live at the bottom",
+                      visible[2].raw_text == "Continued after the tool.")
+
+            await app.transcript.finish_open_streams()
+            ctx.check("both answer segments survive in plain-text scrollback exactly once",
+                      app.transcript.plain_log.count("First answer. ") == 1
+                      and app.transcript.plain_log.count("Continued after the tool.") == 1)
+    asyncio.run(body())
+
+
+@test
 def test_prompt_input_is_visible_above_the_status_bar(ctx: Ctx):
     """Found live on a Kali box: `#prompt-row` and `.status-bar` were BOTH
     docked to the bottom edge, and Textual overlaps same-edge docks instead
@@ -3769,9 +3799,14 @@ def test_thinking_block_renders_above_answer_even_when_text_arrives_first(ctx: C
             app.transcript.begin_message(1)
             await app.transcript.append_text(1, 0, "The answer is 42.")
             await app.transcript.append_thinking(1, 0, "Let me think about this...")
+            await app.transcript.append_text(1, 0, " Still the same answer.")
             kinds = [type(w).__name__ for w in app.transcript.children]
             ctx.check(f"ThinkingBlock is mounted BEFORE AssistantText despite arriving second, got {kinds}",
                       kinds == ["ThinkingBlock", "AssistantText"])
+            answer = app.transcript.children[-1]
+            ctx.check("thinking inserted above the answer does not split uninterrupted answer text",
+                      isinstance(answer, AssistantText)
+                      and answer.raw_text == "The answer is 42. Still the same answer.")
     asyncio.run(body())
 
 

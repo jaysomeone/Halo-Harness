@@ -681,6 +681,17 @@ class Transcript(VerticalScroll):
         seq = self._message_seq.get((agent_id, turn), 1)
         key = (agent_id, turn, seq, "text", index)
         widget = self._blocks.get(key)
+        if widget is not None and (not self.children or self.children[-1] is not widget):
+            # A tool card, phase line, note, or other activity has been
+            # mounted since this text block last streamed. Providers may
+            # nevertheless resume the SAME content-block index afterwards.
+            # Keep the transcript append-only: finish and harvest the old
+            # block, then let this delta create a continuation at the live
+            # bottom instead of mutating text that may now be off-screen.
+            await widget.finish()
+            if widget.raw_text.strip():
+                self.plain_log.append(widget.raw_text)
+            widget = None
         if widget is None:
             widget = AssistantText()
             if agent_id is not None:
