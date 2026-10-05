@@ -431,3 +431,10 @@ every release; 2.0.4 had grown as large as 2.0.3 did.
   between Halo instances incl. peer GPU sharing.
 - Unchanged rules: one commit per round; an Opus review + fix pass before
   every tag; live checks every round; status updates as rolo sets them.
+- 2026-10-05 ~09:20, rolo: "just park 3.0.1.1 for another time. Go all the
+  way to 2.0.10 do not stop. do not have stupid things hang and lose time
+  and money." -> 3.0.1.1 is PARKED (no research until rolo re-opens it);
+  the run proceeds through 2.0.10 without pausing between versions; every
+  remote or WSL suite invocation now runs under a hard `timeout`, every
+  backgrounded run gets a scheduled check within fifteen minutes, and a
+  commit never waits on a redundant platform run.
