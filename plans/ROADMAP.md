@@ -380,3 +380,54 @@ tagged 2.0.3; the 5g research (e9e09ef) already carries everything it
 needs. 2.0.4's order becomes: Experiential `xp:` -> picker columns,
 balances, enumeration -> jev decision API -> learned rules -> `cc:` v2 ->
 legacy env-file drop -> the Governor last.
+
+## REORDERED 2026-10-05 (rolo: "reorder") -- this section is the authority from here on
+
+Why: the manual three-platform runs and an unwatched overnight test stall
+cost most of a day; the public repo's history gets harder to rewrite with
+every release; 2.0.4 had grown as large as 2.0.3 did.
+
+- **2.0.3** (closing): round 5i part 2 Codex -> round 6 docs + live checks
+  -> Opus review -> fix pass -> tag v2.0.3 -> both installs.
+- **2.0.3.x patch tags:** anything the review, rolo's Mac run or first use
+  turns up after the tag ships as 2.0.3.1, 2.0.3.2, ... instead of waiting.
+- **2.0.4 = tooling, history, provider pack:**
+  round 0 tooling: a GitHub Actions workflow running test_bridge,
+  tests/run_all.py and test_tui.py on Windows and Linux on every push and
+  pull request (the orchestrator's manual three-platform runs become the
+  exception, not the rule); a release script (version bump, CHANGELOG
+  check, tag, push, the two install refreshes); the invariants from the
+  old hardening list.
+  round 1 history: `halo audit privacy`, then the git history rewrite
+  (mirror backup first, announced never asked; removes the stray
+  `%SystemDrive%` cache files and anything the audit names), force-push,
+  both clones reset.
+  rounds 2+: Experiential Labs `xp:` full integration (brief Round 5h, research
+  e9e09ef); the three-column picker (price, context, speed); provider
+  balances; `cc:`/`ant:` enumeration; catalog auto-refresh; error
+  translation; command consolidation.
+- **2.0.5 = control pack:** `cc:` route v2; jev decision API; learned
+  gateway rules; the legacy env-file drop (announced for 2.0.4 originally,
+  now here, with the same notice period); the Governor LAST (rolo's rule,
+  kit in plans/governor-import).
+- **2.0.6 = hardening:** soak run + watchdog; MCP connects off the TUI
+  startup path; the gym's cloud-model ranking; the in-process MLX
+  experiment measured against the managed server; every carried fix-pass
+  item (doctor budgets for thinking models, confirmation before a
+  multi-model gym run, zombie checks on every child-process stop, config
+  writers refusing the real home under a test marker, the escalation
+  approval card, print-mode saved_usd); invariants extended.
+- **2.0.7 = embeddings:** local embeddings through Ollama or a managed
+  server with the same fit rules, memory and search, the generic `local:`
+  route.
+- **2.0.8 = theme pack:** DOOM, Metroid, Mario (see "ADDED 2026-10-04:
+  2.0.7 becomes a theme pack"; the content is unchanged, only the number).
+- **2.0.9 = Signal remote control** (plan `2.0.8-signal-brief.md`, content
+  unchanged, number moved).
+- **2.0.10 = review:** `/review` as a Halo feature, the security review of
+  the code (section A2 of the old 2.0.9 brief), the front page redo. The
+  privacy audit and the history rewrite moved to 2.0.4 round 1.
+- **3.0.1.1 = research only, after 2.0.10 ships:** serverless collaboration
+  between Halo instances incl. peer GPU sharing.
+- Unchanged rules: one commit per round; an Opus review + fix pass before
+  every tag; live checks every round; status updates as rolo sets them.
