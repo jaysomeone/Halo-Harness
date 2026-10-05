@@ -67,14 +67,25 @@ def run(cmd, **kwargs):
 def http_get_json(url: str, *, timeout: float = 5.0) -> Optional[dict]:
     """The one network seam this module uses -- the GitHub REST API, no
     auth. Never raises; `None` on any failure (offline, rate-limited, a
-    malformed body). Tests monkeypatch this, never urllib."""
+    malformed body). Tests monkeypatch this, never urllib.
+
+    Round 5e: `urlopen_tls` itself refuses this call under `network.offline`
+    (github.com is never loopback/allow-listed) -- caught by the same
+    blanket `except Exception` every other failure already was, so the
+    update check keeps its pre-5e "just comes back None" contract; one
+    DEBUG line names the reason instead of folding silently into "any
+    failure"."""
     try:
         import urllib.request
-        from halo_harness.providers.http import urlopen_tls
+        from halo_harness.providers.http import OfflineBlocked, urlopen_tls
         req = urllib.request.Request(url, headers={"User-Agent": "halo",
                                                      "Accept": "application/vnd.github+json"})
         with urlopen_tls(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except OfflineBlocked as e:
+        import logging
+        logging.getLogger("bridge").debug("update: skipping update check -- %s", e)
+        return None
     except Exception:
         return None
 

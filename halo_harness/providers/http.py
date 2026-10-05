@@ -74,6 +74,139 @@ def is_connect_failure_message(message: "str | None") -> bool:
     return CONNECT_FAILURE_MARKER in (message or "")
 
 
+# Halo 2.0.3 round 5e: enforced offline mode. `OFFLINE_REFUSAL_MARKER` is a
+# SEPARATE marker from `CONNECT_FAILURE_MARKER` above -- an offline refusal
+# is a deliberate, user-chosen network policy, never a DNS/VPN failure, so
+# it must never pick up `format_connect_error`'s "check the machine's
+# network, DNS or VPN" wording (which would misdescribe a plain, intentional
+# refusal as if something were broken) or Databricks' own "(are you on the
+# VPN? Databricks is whitelisted)" suffix (`providers.stream._run_phase1_
+# attempts` checks `is_offline_refusal_message` before ever reaching that
+# branch -- see its own comment). `is_offline_refusal_message` is checked
+# everywhere `is_connect_failure_message` already is (agent/loop.py's `_step`
+# retry ladder, providers/stream.py's three phase-1 retry loops) so a
+# refusal is exactly as terminal as a genuine connect failure -- never
+# retried, never counted toward a fallback-model exhaustion ladder (a
+# deliberate policy block cannot be fixed by trying again).
+OFFLINE_REFUSAL_MARKER = "offline mode: not connecting to"
+
+
+def format_offline_refusal(host: "str | None") -> str:
+    """The one plain sentence an offline refusal ever uses, naming the
+    host -- "offline mode: not connecting to <host>". No safety/refusal
+    framing ("blocked", "not allowed") anywhere in it: offline mode is a
+    user-chosen network policy, described plainly, same as every other
+    behaviour in this codebase."""
+    named = host or "the upstream host"
+    return f"{OFFLINE_REFUSAL_MARKER} {named}"
+
+
+def is_offline_refusal_message(message: "str | None") -> bool:
+    return OFFLINE_REFUSAL_MARKER in (message or "")
+
+
+class OfflineBlocked(UpstreamConnectError):
+    """Raised by `_check_offline_allowed` (below) -- a `UpstreamConnectError`
+    subclass so every existing `except UpstreamConnectError` catch (doctor's
+    probes, catalog fetchers, every phase-1 retry loop) keeps working with
+    no changes of its own; callers that care specifically about an offline
+    refusal (vs. a real connect failure) use `is_offline_refusal_message`."""
+
+    def __init__(self, host: "str | None"):
+        super().__init__(format_offline_refusal(host), host=host)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "[::1]"})
+
+
+def _is_loopback_host(host: "str | None") -> bool:
+    return (host or "").strip().lower().rstrip(".") in _LOOPBACK_HOSTS
+
+
+def allowlisted_local_hosts() -> "set[str]":
+    """Every hostname `network.offline` lets through besides loopback --
+    lowercased. Three sources, each read-only/local (no network call of its
+    own, so computing the allow-list itself is always safe under offline
+    mode): every `ollama.hosts` entry (`providers.ollama.resolve_ollama_
+    hosts` -- a LAN Ollama box the user explicitly configured), every
+    `huggingface.local_servers` entry (`providers.huggingface.resolve_
+    huggingface_local_servers` -- the same "one GPU box, several laptops"
+    manual entries round 5's own brief introduced), and every managed-
+    runtime registry entry (`providers.local_runtime.load_registry` --
+    `~/.halo/run/local-servers.json`; always `127.0.0.1` by construction
+    today, included anyway so the allow-list stays correct if that ever
+    changes). Deferred imports throughout: this module is the lowest layer
+    in the provider tree (loaded before config/provider modules exist), the
+    same reason every cross-module import elsewhere in this file is also
+    done lazily, inside the function body.  Never raises -- any one
+    source's own failure (a malformed config.json, an unreadable registry
+    file) just contributes nothing, the other sources still apply."""
+    hosts: "set[str]" = set()
+    try:
+        from halo_harness.providers.ollama import resolve_ollama_hosts
+        for h in resolve_ollama_hosts():
+            hostname = urllib.parse.urlparse(h.url).hostname
+            if hostname:
+                hosts.add(hostname.lower())
+    except Exception:
+        pass
+    try:
+        from halo_harness.providers.huggingface import resolve_huggingface_local_servers
+        for s in resolve_huggingface_local_servers():
+            hostname = urllib.parse.urlparse(s.url).hostname
+            if hostname:
+                hosts.add(hostname.lower())
+    except Exception:
+        pass
+    try:
+        from halo_harness.providers.config import default_state_dir
+        from halo_harness.providers.local_runtime import load_registry
+        for entry in load_registry(default_state_dir()):
+            base_url = entry.get("base_url") if isinstance(entry, dict) else None
+            hostname = urllib.parse.urlparse(base_url or "").hostname
+            if hostname:
+                hosts.add(hostname.lower())
+    except Exception:
+        pass
+    return hosts
+
+
+def offline_mode_enabled() -> bool:
+    """`network.offline` -- `HALO_OFFLINE=1`/`HALO_OFFLINE=0` (set for the
+    CURRENT PROCESS ONLY by `--offline`, never persisted -- `cli.py`'s own
+    flag handler) wins over the persisted `~/.halo/config.json` value
+    (`/offline on|off`, via `theme.set_config_value`), same "env overrides
+    the persisted file" convention `config.paths.env_compat` already uses
+    everywhere else in this codebase. Deferred import, same reason as
+    `allowlisted_local_hosts`. Never raises -- a malformed config.json
+    degrades to "offline mode is off", never a crash on every network call
+    in the tree."""
+    env_override = os.environ.get("HALO_OFFLINE")
+    if env_override == "1":
+        return True
+    if env_override == "0":
+        return False
+    try:
+        from halo_harness.theme import get_config_value
+        return bool(get_config_value("network.offline", default=False))
+    except Exception:
+        return False
+
+
+def _check_offline_allowed(host: "str | None") -> None:
+    """The ONE gate `open_upstream`/`urlopen_tls` (below) both call before
+    ever resolving DNS or opening a socket. A no-op whenever offline mode
+    is off (the overwhelmingly common case) or `host` is loopback or
+    allow-listed; raises `OfflineBlocked` otherwise."""
+    if not offline_mode_enabled():
+        return
+    if _is_loopback_host(host):
+        return
+    if (host or "").strip().lower() in allowlisted_local_hosts():
+        return
+    raise OfflineBlocked(host)
+
+
 def default_tls_context() -> ssl.SSLContext:
     """1.0.1 hotfix 11: the ONE TLS context every HTTPS connection this
     harness makes is built through -- `open_upstream` and `urlopen_tls`
@@ -125,9 +258,26 @@ def urlopen_tls(req, timeout=None):
     harness makes outside `open_upstream`'s own http.client-based path
     (currently: hooks.py's webhook helpers, linux_fixes.py's rg-release
     lookup/download, team_config.py's `--team <url>` fetch, tools/
-    websearch.py) goes through this so all of them share the SAME
-    VERIFY_X509_STRICT/custom-CA-bundle policy `open_upstream` uses,
-    instead of quietly using a stricter/different one of urllib's own."""
+    websearch.py, update.py's GitHub check, providers/local_runtime_
+    fetch.py's llama.cpp release fetch) goes through this so all of them
+    share the SAME VERIFY_X509_STRICT/custom-CA-bundle policy `open_upstream`
+    uses, instead of quietly using a stricter/different one of urllib's own.
+
+    Halo 2.0.3 round 5e: also the second half of the offline-mode choke
+    point -- `_check_offline_allowed` runs here BEFORE anything is opened,
+    exactly like `open_upstream` below, so every caller of this function is
+    covered by `--offline`/`/offline on` with no change of its own. `req`
+    is either a `urllib.request.Request` (`.full_url`) or a bare URL string
+    (`team_config.py`'s own caller passes one directly) -- both `urlopen`
+    itself and this wrapper accept either shape, so the host extraction
+    must too; a string with neither attribute falls back to itself."""
+    host = None
+    try:
+        full_url = req.full_url if hasattr(req, "full_url") else req
+        host = urllib.parse.urlparse(full_url).hostname
+    except Exception:
+        pass
+    _check_offline_allowed(host)
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=default_tls_context()))
     return opener.open(req, timeout=timeout)
 
@@ -251,7 +401,15 @@ def open_upstream(host: str, port: int, tls: bool, connect_timeout: int = DEFAUL
     handshake -- and raises `UpstreamConnectError` (naming `host`) directly
     on either a timeout or an immediate failure (gaierror/refused/
     unreachable/...), rather than leaving a raw socket exception for every
-    caller to catch and reformat itself."""
+    caller to catch and reformat itself.
+
+    Halo 2.0.3 round 5e: `_check_offline_allowed(host)` runs FIRST, before
+    `pick_proxy`/DNS/anything else -- this is the one HTTP choke point
+    `call_openai_chat`/`call_ollama_chat`/`_dbx_post`/`proxy_anthropic` (and
+    therefore every OpenAI-chat, Ollama native, Databricks, and Anthropic-
+    passthrough request this harness makes) all funnel through, so offline
+    enforcement lives here exactly once."""
+    _check_offline_allowed(host)
     proxy_url = pick_proxy(host)
 
     # 1.0.1 hotfix 11: built through default_tls_context() (VERIFY_X509_

@@ -52,7 +52,7 @@ from halo_harness.providers.errors import (
 )
 from halo_harness.providers.http import (
     UpstreamConnectError, call_anthropic_native, call_databricks_chat, call_ollama_chat, call_openai_chat,
-    is_connect_failure_message,
+    is_connect_failure_message, is_offline_refusal_message,
 )
 from halo_harness.providers.oai_stream import MessageCollector, OpenAIStreamToAnthropic
 from halo_harness.providers.ollama_stream import OllamaStreamToAnthropic
@@ -390,7 +390,7 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
             # "a load balancer drops a keep-alive while Databricks queues
             # the request" scenario -- see test_step_retries_a_post_
             # connect_failure_through_the_normal_ladder).
-            if attempt == 0 and not is_connect_failure_message(str(e)):
+            if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
                 continue
             # 1.0.1 hotfix 2: the wire mapping here is DELIBERATELY left
             # byte-for-byte unchanged (`bridge.py`'s legacy proxy path calls
@@ -403,7 +403,16 @@ def _run_phase1_attempts(req, oai_body, _call_upstream, abort, max_attempts):
             # `format_connect_error` always bakes in, which survives as a
             # substring through EITHER branch below) to skip its backoff
             # ladder, rather than this function changing status/err_type.
-            if req.route.provider == "databricks":
+            #
+            # Round 5e: an offline refusal (`is_offline_refusal_message`)
+            # is deliberately kept OFF the Databricks-specific wording --
+            # "offline mode: not connecting to <host> (are you on the VPN?
+            # Databricks is whitelisted)" would misdescribe a plain policy
+            # choice as a network problem, so it goes through the SAME
+            # plain `map_upstream_error` every other provider already uses.
+            if is_offline_refusal_message(str(e)):
+                status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
+            elif req.route.provider == "databricks":
                 status, jbody, hdrs = databricks_unreachable_response(str(e))
             else:
                 status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
@@ -664,7 +673,7 @@ def _run_phase1_anthropic(req: CompletionRequest, abort: "threading.Event | None
                 # on the first attempt; only a post-connect failure (no
                 # CONNECT_FAILURE_MARKER) still gets the one immediate
                 # re-dial.
-                if attempt == 0 and not is_connect_failure_message(str(e)):
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
                     continue
                 # 1.0.1 hotfix 2: see _run_phase1_attempts's matching comment
                 # -- wire mapping here stays exactly as it was (bridge.py's
@@ -934,7 +943,7 @@ def _run_phase1_ollama_attempt(req: CompletionRequest, body: dict, abort: "threa
             except UpstreamConnectError as e:
                 if abort is not None and abort.is_set():
                     raise _Aborted() from e
-                if attempt == 0 and not is_connect_failure_message(str(e)):
+                if attempt == 0 and not is_connect_failure_message(str(e)) and not is_offline_refusal_message(str(e)):
                     continue
                 status, jbody, hdrs = map_upstream_error(502, {"error": {"message": str(e)}}, req.route.provider)
                 raise _upstream_error_from_mapping(status, jbody, hdrs) from e

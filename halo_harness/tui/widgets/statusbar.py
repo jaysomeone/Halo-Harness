@@ -108,6 +108,21 @@ class StatusBar(Static):
         # react to (agent/jobs.py).
         self.bg_jobs_running: int = 0
         self.oldest_bg_elapsed_s: "float | None" = None
+        # Halo 2.0.3 round 5e: `network.offline` -- set once at session
+        # build time (`providers.http.offline_mode_enabled()`) and pushed
+        # live by `/offline on|off` (tui/slash.py's own `_handle_offline`,
+        # the same "mutates live state, push the chip immediately" pattern
+        # `/effort` already uses). Rendered as its own short segment,
+        # never dropped by the width-shrink cascade below -- an active
+        # network policy should never be the first thing a narrow terminal
+        # hides.
+        self.offline: bool = False
+        # Round 5e: cumulative "what the same ol:/hf:local/hf:mlx tokens
+        # would have cost on the escalation target (or the catalog
+        # median)" -- None/0 omits the " · saved $x" suffix entirely, same
+        # "blank, not a placeholder" convention as every other optional
+        # segment here. Pushed from `message_end` (`CostMeter.saved_usd`).
+        self.saved_usd: "float | None" = None
         self.mode = "default"
         self.cwd = cwd
         self.branch = branch
@@ -167,6 +182,12 @@ class StatusBar(Static):
             self.effort = data["effort"]
         if data.get("cost_usd") is not None:
             self.cost_usd = data["cost_usd"]
+        # Round 5e: "saved $x" -- only ever carried by a message_end whose
+        # turn actually was ol:/hf:local/hf:mlx; absent (not merely falsy)
+        # on every other turn, so a later cloud-model turn in the SAME
+        # session never blanks out an earlier real reading.
+        if data.get("saved_usd") is not None:
+            self.saved_usd = data["saved_usd"]
         # 1.0.1 hotfix 14: keep the raw tokens/limit (not just the derived
         # percentage) so `_refresh_display` can render "ctx 12k/1M 1%" --
         # each only overwrites its own attribute when THIS event actually
@@ -314,6 +335,21 @@ class StatusBar(Static):
         self.oldest_bg_elapsed_s = oldest_elapsed_s
         self._refresh_display()
 
+    def set_offline(self, value: bool) -> None:
+        """Round 5e: direct, immediate push -- same reasoning as
+        `set_effort` (offline mode is a plain attribute change the user
+        just made, never something worth waiting for the next `status`
+        event to happen to carry)."""
+        value = bool(value)
+        if value != self.offline:
+            self.offline = value
+            self._refresh_display()
+
+    def set_saved_usd(self, saved_usd: "float | None") -> None:
+        if saved_usd is not None:
+            self.saved_usd = saved_usd
+            self._refresh_display()
+
     def set_effort(self, effort: "str | None") -> None:
         # 1.0.1 hotfix 20.3: `/effort`'s own immediate UI update -- unlike
         # apply_status's fields, this DOES accept None (a switch to a model
@@ -359,6 +395,16 @@ class StatusBar(Static):
         # genuinely isn't known.
         ctx_str = format_status_context(self.context_tokens, self.context_limit)
         cost_str = format_status_cost(self.cost_usd, self.total_input_tokens, self.total_output_tokens)
+        # Round 5e: " · saved $x" appended to the SAME chip, never a
+        # separate segment -- `format_status_cost` itself stays untouched
+        # (shared with the model-listing row format, per its own docstring;
+        # changing its signature would ripple into that unrelated caller).
+        if self.saved_usd:
+            cost_str = f"{cost_str} · saved ${self.saved_usd:.4f}"
+        # Round 5e: a short, never-dropped "offline" tag, same segment
+        # style as effort_str below -- blank (no segment) when offline mode
+        # is off, the ordinary case.
+        offline_str = "offline" if self.offline else ""
         # Halo 2.0.3 round 5b (brief item 7): "41 tok/s · prefill 1.2 s"
         # (plus "· offloaded"), right next to the model chip -- "" (no
         # segment) before the first `ol:` reply of the session, or on any
@@ -449,8 +495,9 @@ class StatusBar(Static):
         if width and self.cwd:
             def _overflow(loc: str, mcp_on: bool, bal_on: bool, tp_on: bool) -> int:
                 bits = [b for b in (ctx_str, cost_str, bal_on and or_balance_str, mode_str, effort_str,
-                                     permission_str, needs_you_str, agents_str, bg_jobs_str, oldest_str,
-                                     mcp_on and mcp_str, tp_on and throughput_str, spinner_str, new_str) if b]
+                                     offline_str, permission_str, needs_you_str, agents_str, bg_jobs_str,
+                                     oldest_str, mcp_on and mcp_str, tp_on and throughput_str, spinner_str,
+                                     new_str) if b]
                 # Each segment below is rendered as "<text> " with a "│ "
                 # separator before it -- 3 extra columns per segment is
                 # that separator plus its own trailing space, a close-
@@ -520,6 +567,9 @@ class StatusBar(Static):
         if effort_str:
             text.append("│ ", style="dim")
             text.append(f"{effort_str} ", style="magenta")
+        if offline_str:
+            text.append("│ ", style="dim")
+            text.append(f"{offline_str} ", style="bold yellow")
         if permission_str:
             text.append("│ ", style="dim")
             text.append(f"{permission_str} ", style="bold yellow")

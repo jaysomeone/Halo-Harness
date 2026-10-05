@@ -1392,3 +1392,56 @@ Ollama hosts and Hugging Face local servers never appear in THIS picker
 often than "the one main model," and listing every host's live catalog
 here would mean a network read on every `/model` open); `/local` (round
 5) is the dedicated discovery view for both.
+
+## Enforced offline mode (Halo 2.0.3 round 5e)
+
+`halo --offline`/`/offline on`/`network.offline` in `~/.halo/config.json`
+make the one HTTP choke point (`providers/http.py`'s `open_upstream`/
+`urlopen_tls` -- every provider call in this document, every catalog
+refresh, every update check, and the WebFetch/WebSearch tools all funnel
+through one of the two) refuse any connection whose host is not loopback
+or an allow-listed local host (`ollama.hosts`, `huggingface.
+local_servers`, or a `halo local serve` managed server); a refusal is
+always the one plain sentence "offline mode: not connecting to \<host\>",
+never retried. In practice this means every route this document describes
+except `ol:`, `hf:local/*` and `hf:mlx/*` (and a `hf:endpoint`/manual
+`hf:local` entry that happens to point at a LAN address the user never
+configured) simply refuses outright while offline mode is on -- see
+[CONFIG.md](CONFIG.md)'s `network.offline` section for the full allow-list
+and [COMMANDS.md](COMMANDS.md)'s `--offline`/[SLASH-COMMANDS.md](SLASH-COMMANDS.md)'s
+`/offline` for how to turn it on.
+
+## Hybrid escalation (Halo 2.0.3 round 5e)
+
+`routing.escalation` (`~/.halo/config.json`) lets a local-first session
+(`ol:`/`hf:local/*`/`hf:mlx/*` -- never a cloud-model session) name a
+cloud fallback ref and the conditions that should escalate to it:
+`low_confidence` (a one-word CONFIDENT/UNSURE check against the `judge`
+role -- the exact same role-resolution and one-shot-call shape `roles.
+small`'s own answers already use, never a new scoring mechanism of its
+own), `tool_failures` (two or more failed tool calls in the current
+turn), and `context_overflow` (the existing compaction-overflow retry path
+firing this turn). `ask: true` (the default) only ever notifies, staying
+on the local model; `ask: false` switches for the rest of the turn (`tool_
+failures`/`context_overflow`) or starting with the next model call
+(`low_confidence`, since the triggering turn has already finished) and
+says so in the transcript. A role-table entry's own `"escalation": false`
+turns this off for every sub-agent resolved under that role, regardless of
+the top-level policy. `/escalation` shows the active policy and this
+session's last few decisions; see [CONFIG.md](CONFIG.md)'s `routing.
+escalation` section for the full config shape.
+
+## Saved versus cloud (Halo 2.0.3 round 5e)
+
+For an `ol:`/`hf:local/*`/`hf:mlx/*` turn, the cost meter also prices that
+turn's real input/output/cache token counts (the exact same arithmetic
+`CostMeter`'s own cloud-pricing fallback formula uses) against a
+REFERENCE price -- the session's configured `routing.escalation.to`, when
+one is set, else the median `price_in`/`price_out` across every model the
+package's own vendored fallback catalogs carry a real price for (no
+network call, so this works identically online or under `--offline`) --
+and accumulates the difference as "saved". The status bar's cost chip
+shows it as " · saved $x" next to the ordinary cost figure; `/cost` prints
+the running total, the turn/token counts it is over, and which reference
+price it used and why. Always `$0.00`/omitted on a cloud-model session --
+there is nothing to compare it against.

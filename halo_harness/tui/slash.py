@@ -96,6 +96,12 @@ async def handle_slash(app, name: str, args: str) -> None:
         # /providers already use); /local's small-role answer is a real
         # inference call -- neither may block the UI thread.
         "ollama": _handle_ollama, "local": _handle_local,
+        # Halo 2.0.3 round 5e: /offline on|off mutates live process state
+        # (HALO_OFFLINE) -- push the status bar's chip immediately, same
+        # "no event round-trip" reasoning /effort already uses. Bare
+        # /offline and /escalation stay on the generic headless-text
+        # fallback below (no live widget of their own to push).
+        "offline": _handle_offline,
     }.get(name)
     if handler is not None:
         await handler(app, args)
@@ -696,6 +702,26 @@ async def _handle_effort(app, args: str) -> None:
                        override_note=override_note, requested=requested)
     await app.transcript.mount_widget(card)
     app.set_pending_card(card)
+
+
+# ============================================================================
+# Halo 2.0.3 round 5e: /offline on|off mutates live process state
+# (HALO_OFFLINE) directly, no event round-trip -- same reasoning as
+# /effort above. Bare /offline (nothing to push) falls through to the
+# generic headless-text path.
+# ============================================================================
+
+async def _handle_offline(app, args: str) -> None:
+    args = args.strip()
+    if not args:
+        app.run_worker(lambda: _run_slash_worker(app, "offline", args), thread=True,
+                        name="run-slash", group="run-slash")
+        return
+    result = app.controller.run_slash("offline", args)
+    if result:
+        await app.transcript.add_note(result, kind="command")
+    from halo_harness.providers.http import offline_mode_enabled
+    app.status_bar.set_offline(offline_mode_enabled())
 
 
 # ============================================================================

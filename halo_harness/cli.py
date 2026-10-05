@@ -106,6 +106,13 @@ _REAL_FLAGS = [
     # shows -- same effect as `"intro": false` in ~/.halo/config.json, see
     # tui/launch.py's own show_intro resolution.
     (["--no-intro"], dict(dest="no_intro", action="store_true")),
+    # Halo 2.0.3 round 5e: enforced offline mode for this one process --
+    # never persisted (see `main()`'s own handling, right after parsing:
+    # sets `HALO_OFFLINE=1` in THIS process's environment only); `/offline
+    # on` is the persisted equivalent (`network.offline` in
+    # `~/.halo/config.json`). Not a Claude Code flag -- Halo-only, same as
+    # `--demo`/`--stress`/`--bare` just above.
+    (["--offline"], dict(dest="offline", action="store_true")),
     # H6: real now (agent definitions + the Agent tool + plan mode +
     # sessions land this milestone).
     (["--agent"], dict(dest="agent", default=None, metavar="AGENT")),
@@ -470,6 +477,17 @@ def main(argv: Optional[list] = None) -> int:
 
     if _flag_was_set(getattr(args, "debug", None)) or getattr(args, "debug_file", None):
         _enable_debug_logging(getattr(args, "debug_file", None))
+
+    # Halo 2.0.3 round 5e: `--offline` -- sets `HALO_OFFLINE=1` for THIS
+    # PROCESS ONLY (never written to `~/.halo/config.json`; `providers.
+    # http.offline_mode_enabled()` checks this env var first, ahead of the
+    # persisted `network.offline` key, same "env overrides the file"
+    # convention every other knob here already uses). Set as early as
+    # possible, before either run_print_mode or the TUI ever builds a
+    # Session or makes a single network call (an update check, a catalog
+    # refresh, ...).
+    if getattr(args, "offline", False):
+        os.environ["HALO_OFFLINE"] = "1"
 
     # review finding 34: `--autocompact <auto|tokens>` used to write
     # straight into `os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]`, the

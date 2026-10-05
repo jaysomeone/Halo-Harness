@@ -55,13 +55,15 @@ from halo_harness.agent.log import SessionLog
 from halo_harness.agent.prune import PRUNE_PROTECT_TOKENS, PRUNE_REBALANCE_CHUNK_TOKENS, compute_stub_candidates, prune_messages
 from halo_harness.agent.repair import build_tool_meta, repair_assistant_turn
 from halo_harness.hooks import HookRunner
-from halo_harness.model import CostMeter, ModelProfile, ModelRef, parse_model_ref, resolve_model_profile
+from halo_harness.model import (
+    CostMeter, ModelProfile, ModelRef, is_local_model_ref, parse_model_ref, resolve_model_profile,
+)
 from halo_harness.permissions import Decision, PermissionEngine
 from halo_harness.providers.errors import (
     CONTEXT_WINDOW_EXCEEDED, MAX_RETRIES, is_effort_rejected_message, is_effort_with_tools_rejected_message,
     is_reasoning_replay_bug, is_retryable_message, is_tools_rejected_message, retry_delay_ms,
 )
-from halo_harness.providers.http import is_connect_failure_message
+from halo_harness.providers.http import is_connect_failure_message, is_offline_refusal_message
 from halo_harness.providers.hooks import (
     classify_length_tool_call, is_retryable_empty_completion, leak_parser,
     max_tokens_budget, overflow_classifier, record_databricks_output_tokens,
@@ -705,6 +707,7 @@ class Session:
         agent_id: Optional[str] = None, job_registry: Optional[JobRegistry] = None,
         roles: Optional[dict] = None, cli_roles: Optional[dict] = None,
         cli_flags: Optional[dict] = None, settings: Optional[object] = None,
+        role_name: Optional[str] = None,
     ):
         # H9: identifies THIS session as a particular sub-agent (passed by
         # `agent/subagent.py`'s `_build_child_session`; the parent/main
@@ -756,6 +759,30 @@ class Session:
         self.cost_meter = CostMeter(price_in=model_profile.price_in, price_out=model_profile.price_out,
                                      price_cache_read=model_profile.price_cache_read,
                                      price_cache_write=model_profile.price_cache_write)
+        # Halo 2.0.3 round 5e: "saved versus cloud" -- resolved ONCE, here,
+        # only for an ol:/hf:local/hf:mlx session (`is_local_model_ref`;
+        # never for a cloud-model session, so a cloud session's meter never
+        # even tries). Reference price: the session's configured escalation
+        # target (`routing.escalation.to`, resolved through the harness's
+        # OWN `parse_model_ref`/`resolve_model_profile` -- never a second
+        # resolver), or, when no escalation policy is configured at all,
+        # the vendored catalog's median price (`model.catalog_median_
+        # prices` -- offline-safe, no network). Best-effort: any failure
+        # (an unresolvable `to` ref, a catalog with zero priced rows) just
+        # leaves the meter with no reference price, same as a cloud session
+        # -- `CostMeter.add_savings` already treats that as "nothing to
+        # add", never a crash.
+        if is_local_model_ref(model_ref):
+            try:
+                self._init_savings_reference(routes=routes)
+            except Exception:
+                pass
+        # Round 5e: `/escalation`'s own "last decisions" list -- session-
+        # lifetime (never reset per-turn, unlike the per-turn counters
+        # `_turn_inner` resets below). Uncapped here; `_cmd_escalation`
+        # shows only the last few (a session realistically sees a handful
+        # of these at most).
+        self._escalation_decisions: list = []
         # Round 5b: `_maybe_auto_calibrate_ollama`'s own per-process dedupe
         # (a (host.url, model) pair already attempted this run, success or
         # failure, is never retried within the SAME process -- a completed
@@ -1112,6 +1139,14 @@ class Session:
         # model (its documented "orchestrator" default anyway).
         self.roles = roles or {}
         self.cli_roles = cli_roles or {}
+        # Halo 2.0.3 round 5e: which role (if any) THIS session was built
+        # under -- `None` for the main/orchestrator session, a sub-agent's
+        # own role name (`agent/subagent.py::_build_child_session` passes
+        # it) for a child. Read-only bookkeeping purely for `roles.
+        # role_escalation_enabled` (a role-table entry's own `"escalation":
+        # false` turns hybrid escalation off for every session built under
+        # that role) -- nothing else in this codebase reads it.
+        self.role_name = role_name
         self.agent_runtime = AgentRuntime(parent=self, agents=(agents or {}), routes=(routes or {}),
                                            role_table=self.roles, cli_role_overrides=self.cli_roles,
                                            depth=agent_depth)
@@ -1426,6 +1461,151 @@ class Session:
                 f"{self.model_ref.raw} for the rest of this turn"
             )
             return body, req
+
+    def _init_savings_reference(self, *, routes: Optional[dict]) -> None:
+        """Round 5e: resolves and pins `self.cost_meter`'s saved-vs-cloud
+        reference price -- see the constructor's own call site for the
+        precedence (escalation target, else the catalog median). Split out
+        of `__init__` only so that constructor's own best-effort wrapper
+        stays a one-line call."""
+        from halo_harness.agent.escalation import load_escalation_policy
+        policy = load_escalation_policy()
+        if policy is not None:
+            target_ref = parse_model_ref(policy.to, routes)
+            target_profile = resolve_model_profile(target_ref, self.state_dir, routes)
+            if target_profile.price_in is not None and target_profile.price_out is not None:
+                self.cost_meter.set_savings_reference(
+                    price_in=target_profile.price_in, price_out=target_profile.price_out,
+                    source=f"escalation target {policy.to}",
+                )
+                return
+        from halo_harness.model import catalog_median_prices
+        med_in, med_out, label = catalog_median_prices(source_label=True)
+        if med_in is not None and med_out is not None:
+            self.cost_meter.set_savings_reference(price_in=med_in, price_out=med_out, source=label)
+
+    def _judge_confidence(self, final_text: str) -> bool:
+        """Round 5e's own `low_confidence` trigger -- the EXACT `call_
+        small_model` mechanism every `small`-role caller already uses,
+        pointed at the `judge` role instead (`roles.resolve_role_ref`,
+        which falls back to THIS session's own model/profile when no
+        `judge` role is configured -- a local-first session with no
+        distinct judge configured ends up asking itself, which is still a
+        real, if weak, self-check, never a crash or a skipped trigger).
+        Never a new judging mechanism of its own; defaults to "confident"
+        on any failure (judge unreachable, malformed reply) -- see
+        `escalation.judge_says_confident`'s own docstring for why a flaky
+        judge call must never, by itself, force an escalation."""
+        from halo_harness.agent.escalation import JUDGE_SYSTEM_PROMPT, judge_says_confident
+        from halo_harness.roles import resolve_role_ref
+        try:
+            # H9-style note: a SUB-AGENT's own `self.roles`/`self.cli_roles`
+            # are never populated (agent/subagent.py never passes `roles=`/
+            # `cli_roles=` when constructing a child Session) -- the REAL,
+            # propagated-down-the-whole-tree role table/CLI overrides live
+            # on `self.agent_runtime.role_table`/`.cli_role_overrides`
+            # instead (the SAME object `resolve_agent_model` itself already
+            # resolves a child's own model through), so a configured
+            # `roles.judge` is honoured on a sub-agent's own escalation
+            # check too, not just the top-level session's.
+            judge_ref, _profile, _effort, _source = resolve_role_ref(
+                "judge", role_table=self.agent_runtime.role_table, cli_overrides=self.agent_runtime.cli_role_overrides,
+                parent_ref=self.model_ref, parent_profile=self.model_profile, state_dir=self.state_dir,
+                routes=self.agent_runtime.routes,
+            )
+            answer = self.call_small_model(
+                system_text=JUDGE_SYSTEM_PROMPT, user_text=final_text[:4000],
+                max_tokens=8, timeout_s=20.0, model_ref=judge_ref,
+            )
+        except Exception:
+            return True
+        return judge_says_confident(answer)
+
+    def _maybe_escalate(self, turn_no: int, *, final_text: "Optional[str]" = None):
+        """Round 5e: hybrid escalation (`routing.escalation`), checked from
+        TWO safe points in `_turn_body` (see each call site's own comment
+        for why there and not deeper inside tool dispatch): right before
+        looping back for another model call (catches `tool_failures`/
+        `context_overflow`, both knowable mid-turn) and right before a
+        normal end-of-turn `turn_done` (catches `low_confidence`, only
+        knowable once the final reply text exists). Local first: a no-op
+        on a cloud-model session, when no policy is configured, when this
+        role's own table entry turned escalation off, or once this turn has
+        already escalated once (never a second switch mid-turn). Yields at
+        most one `events.notification`; never raises outward -- any
+        internal failure (an unresolvable `to` ref, no credentials for it)
+        degrades to "stayed local", reported plainly, never a crash."""
+        if getattr(self, "_escalated_this_turn", False):
+            return
+        if not is_local_model_ref(self.model_ref):
+            return
+        from halo_harness.agent.escalation import (
+            TOOL_FAILURE_THRESHOLD, EscalationDecision, count_tool_failures_since, load_escalation_policy,
+            role_escalation_enabled,
+        )
+        policy = load_escalation_policy()
+        # `self.agent_runtime.role_table` -- see `_judge_confidence`'s own
+        # matching comment: a sub-agent's `self.roles` is never populated,
+        # the real table lives here instead.
+        if policy is None or not role_escalation_enabled(self.role_name, self.agent_runtime.role_table):
+            return
+        trigger = None
+        if "context_overflow" in policy.when and getattr(self, "_turn_context_overflow_count", 0) > 0:
+            trigger = "context_overflow"
+        elif "tool_failures" in policy.when and count_tool_failures_since(
+                self.log.nodes(), getattr(self, "_turn_log_start_idx", 0)) >= TOOL_FAILURE_THRESHOLD:
+            trigger = "tool_failures"
+        elif "low_confidence" in policy.when and final_text and final_text.strip():
+            try:
+                confident = self._judge_confidence(final_text)
+            except Exception:
+                confident = True
+            if not confident:
+                trigger = "low_confidence"
+        if trigger is None:
+            return
+        self._escalated_this_turn = True
+        if policy.ask:
+            self._escalation_decisions.append(
+                EscalationDecision(turn=turn_no, trigger=trigger, to=policy.to, action="asked"))
+            yield events.notification(
+                f"local model hit {trigger} this turn -- escalation to {policy.to} is set to ask, so "
+                f"this turn stayed on {self.model_ref.raw}; switch by hand with /model {policy.to}, or "
+                f"set routing.escalation.ask to false to auto-switch next time"
+            )
+            return
+        routes = self.agent_runtime.routes if self.agent_runtime is not None else {}
+        try:
+            target_ref = parse_model_ref(policy.to, routes)
+            target_profile = resolve_model_profile(target_ref, self.state_dir, routes)
+            from halo_harness.headless import _resolve_creds
+            creds = _resolve_creds(target_ref, self.settings)
+        except Exception:
+            creds = None
+            target_ref = target_profile = None
+        if target_ref is None or creds is None:
+            self._escalation_decisions.append(EscalationDecision(
+                turn=turn_no, trigger=trigger, to=policy.to, action="asked",
+                note="escalation target did not resolve or has no credentials -- stayed local"))
+            yield events.notification(
+                f"local model hit {trigger} this turn, but the configured escalation target {policy.to!r} "
+                f"isn't usable right now -- stayed on {self.model_ref.raw}"
+            )
+            return
+        self.set_model(target_ref, target_profile, creds)
+        # Deliberately NOT reverted by `_restore_primary_model_after_turn`
+        # the way a `--fallback-model` swap is: a REAL escalation (as
+        # opposed to a `--fallback-model` swap covering a transient
+        # provider outage) is "this local setup is not holding up", which
+        # re-snapshotting here as the new primary makes stick for every
+        # later turn too, until the user switches back by hand -- going
+        # back to the same local model next turn with no new information
+        # would just re-trigger the identical trigger right away.
+        self._primary_model_snapshot = (self.model_ref, self.model_profile, self.creds,
+                                         self.effort, self.effort_source)
+        self._escalation_decisions.append(
+            EscalationDecision(turn=turn_no, trigger=trigger, to=policy.to, action="escalated"))
+        yield events.notification(f"escalated to {policy.to}: {trigger}")
 
     def _run_hook_stop(self, event: str, **kwargs):
         """W3b item 11: the `run_stop(...)` counterpart to `_run_hook`
@@ -2703,6 +2883,11 @@ class Session:
             if phase1_failure is not None:
                 if isinstance(phase1_failure, ContextOverflow):
                     e = phase1_failure
+                    # Round 5e: counted regardless of overflow_handled (a
+                    # trigger for `_maybe_escalate`'s own "did this turn
+                    # hit context_overflow" check, below -- a second
+                    # overflow after the compaction retry still counts).
+                    self._turn_context_overflow_count += 1
                     if not overflow_handled:
                         # H5 scope B: signal the caller (_turn_body) to run
                         # one compaction pass and retry this SAME step once
@@ -2808,7 +2993,7 @@ class Session:
                 # phase 1's own first and only attempt, so this is correctly
                 # terminal here either way -- retrying a DNS failure on a
                 # 1-16s timer just repeats the identical failure, slower.
-                if is_connect_failure_message(e.message):
+                if is_connect_failure_message(e.message) or is_offline_refusal_message(e.message):
                     self._log_call_failure(self._status_label(e.status), retries=attempts - 1)
                     yield events.error(e.message, turn=turn_no, err_type=e.err_type, retryable=False,
                                         category=overflow_classifier(e.status, e.message))
@@ -2934,6 +3119,7 @@ class Session:
                 # contract, same terminal wording/category on a SECOND
                 # overflow), since this is the identical failure arriving
                 # mid-stream instead of as an upfront 400.
+                self._turn_context_overflow_count += 1  # round 5e, see the phase-1 branch's matching comment
                 if not overflow_handled:
                     return _OVERFLOW_NEEDS_COMPACTION
                 self._log_call_failure("overflow", retries=attempts - 1)
@@ -3140,6 +3326,9 @@ class Session:
         real tokens against the account, so it must still count here even
         though it never becomes a logged assistant message)."""
         cost = self.cost_meter.add_usage(self.model_ref.provider, result.usage)
+        # Round 5e: a no-op on a cloud-model session (no reference price
+        # was ever pinned -- `__init__`'s own `is_local_model_ref` gate).
+        self.cost_meter.add_savings(result.usage)
         # H10 Part A: telemetry.py's own source of truth -- see
         # `agent/log.py`'s `append_usage` docstring for why these extra
         # keys never touch a derived request.
@@ -3530,6 +3719,7 @@ class Session:
                             stop_reason = delta.get("stop_reason")
                         if isinstance(ev.get("usage"), dict):
                             cost = self.cost_meter.add_usage(self.model_ref.provider, ev["usage"])
+                            self.cost_meter.add_savings(ev["usage"])  # round 5e, no-op on a cloud session
                             # H10 Part A: a compaction summariser call is a
                             # real model call against the same account --
                             # `model`/`route`/`finish_reason` cost nothing to
@@ -3563,7 +3753,7 @@ class Session:
                 # `_step` above -- never ladder-retry a DNS/refused/
                 # unreachable failure just because a compaction summarisation
                 # call happened to hit it.
-                if is_connect_failure_message(e.message):
+                if is_connect_failure_message(e.message) or is_offline_refusal_message(e.message):
                     return "", None, "failed"
                 merged_retryable = e.retryable or is_retryable_message(
                     e.status, e.message, host=self.model_ref.provider,
@@ -3895,6 +4085,15 @@ class Session:
         self._loop_breaker_period2 = {}
         self._identical_call_guard_key = None
         self._identical_call_guard_count = 0
+        # Round 5e: hybrid-escalation per-turn state -- `_turn_log_start_
+        # idx` is where `escalation.count_tool_failures_since` starts
+        # counting THIS turn's own tool_result failures from (never an
+        # earlier turn's); `_turn_context_overflow_count` is bumped at the
+        # two `ContextOverflow` catch sites in `_step`; `_escalated_this_
+        # turn` keeps `_maybe_escalate` from switching twice in one turn.
+        self._turn_log_start_idx = len(self.log.nodes())
+        self._turn_context_overflow_count = 0
+        self._escalated_this_turn = False
         # H3/H4 must-do: a PREVIOUS turn's interrupt (Esc/Ctrl+C) leaves
         # `self.abort` set -- reused unchanged, a brand new turn would see
         # it already fired and abort immediately, before ever streaming a
@@ -4098,6 +4297,7 @@ class Session:
                         context_limit=self.model_profile.context_tokens,
                         total_input_tokens=self.cost_meter.total_input_tokens,
                         total_output_tokens=self.cost_meter.total_output_tokens,
+                        saved_usd=(self.cost_meter.saved_usd if self.cost_meter.saved_turns else None),
                     )
                 yield events.status(phase="idle", model=self.model_ref.raw, turn=turn_no,
                                      cost_usd=self.cost_meter.total_usd if self.cost_meter.has_cost_data else None)
@@ -4247,6 +4447,12 @@ class Session:
                 context_limit=self.model_profile.context_tokens,
                 total_input_tokens=self.cost_meter.total_input_tokens,
                 total_output_tokens=self.cost_meter.total_output_tokens,
+                # Round 5e: None on every cloud-model session (no reference
+                # price was ever pinned) and on a local session's very
+                # first call (nothing accumulated yet) -- the status bar's
+                # own `apply_status` only overwrites its reading when this
+                # is NOT None, so neither case ever blanks out a real one.
+                saved_usd=(self.cost_meter.saved_usd if self.cost_meter.saved_turns else None),
             )
 
             if not tool_use_blocks:
@@ -4293,6 +4499,14 @@ class Session:
                     reason = "interrupted"
                 else:
                     reason = "max_tokens" if result.stop_reason == "max_tokens" else "end_turn"
+                # Round 5e: hybrid escalation's own `low_confidence` trigger
+                # -- only knowable now that a final reply actually exists;
+                # never on an aborted/interrupted turn (nothing to judge
+                # confidence in, and escalating an Esc makes no sense).
+                if not self.abort.is_set():
+                    final_text = "".join(b.get("text", "") for b in result.assistant_blocks
+                                          if b.get("type") == "text")
+                    yield from self._maybe_escalate(turn_no, final_text=final_text)
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
 
@@ -4317,6 +4531,16 @@ class Session:
                 reason = "interrupted" if self.abort.is_set() else "end_turn"
                 yield events.turn_done(turn=turn_no, reason=reason)
                 return
+            # Round 5e: hybrid escalation's `tool_failures`/`context_
+            # overflow` triggers -- both already knowable at this point
+            # (tools just finished dispatching; any context-overflow retry
+            # this turn already happened inside `_step`), and checking HERE
+            # -- rather than deeper inside `_dispatch_tools`/`_step`
+            # themselves -- means a triggered auto-switch takes effect on
+            # the NEXT `_step()` call this same `while True:` is about to
+            # make, "for the rest of this turn", exactly like `_try_
+            # fallback_after_exhaustion`'s own identically-shaped switch.
+            yield from self._maybe_escalate(turn_no)
             # HALO-2.0.1-liveness-tips-brief.md Part A1 / W2-plan item 6:
             # tool results were just dispatched back; the NEXT model call
             # (the top of this `while True:`, back in `_step`) hasn't been

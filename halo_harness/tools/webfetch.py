@@ -150,6 +150,17 @@ class WebFetchTool(Tool):
         describing the failure -- callers check `isinstance(result,
         ToolResult)` to tell the two apart."""
         parsed = urlparse(url)
+        # Halo 2.0.3 round 5e: offline mode's choke point covers the
+        # provider/update/catalog network paths via providers.http.open_
+        # upstream/urlopen_tls; WebFetch opens its own connection (it needs
+        # a same-host-redirect handler urlopen_tls doesn't offer), so it
+        # checks the SAME gate directly rather than silently being a gap
+        # the invariant test would otherwise have to carve out.
+        from halo_harness.providers.http import _check_offline_allowed, OfflineBlocked
+        try:
+            _check_offline_allowed(parsed.hostname)
+        except OfflineBlocked as e:
+            return ToolResult(str(e), is_error=True)
         handler = _SameHostRedirectHandler(parsed.hostname)
         # 1.0.1 fixpass finding 8: WebFetch used urllib's own DEFAULT TLS
         # context (the plain build_opener(handler) below had no HTTPSHandler

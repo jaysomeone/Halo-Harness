@@ -355,6 +355,50 @@ version number.
    is pinned on this suite's own real, non-Apple-Silicon host); the live
    check is the owner running [docs/MAC.md](docs/MAC.md)'s quick-start
    on his own Mac.
+8. **Trust and escalation: enforced offline mode, hybrid escalation, saved
+   versus cloud** (round 5e): `halo --offline`/`/offline on|off`/
+   `network.offline` make the one HTTP choke point (`providers/http.py`'s
+   `open_upstream`/`urlopen_tls`) refuse any connection whose host isn't
+   loopback or an allow-listed local host (every `ollama.hosts`,
+   `huggingface.local_servers`, or managed-local-server-registry entry) --
+   update checks, catalog refreshes, the Hugging Face router, OpenRouter,
+   Databricks, Anthropic, and the WebFetch/WebSearch tools all refuse the
+   same way (one plain sentence, "offline mode: not connecting to
+   \<host\>", never retried); the claude.ai connectors bridge's background
+   discovery is skipped instead (its real network call runs inside a
+   spawned `claude` subprocess, outside this choke point) while an
+   explicit `--refresh`/reconnect still runs it. A new invariant test
+   greps the tracked tree for every raw `urllib`/`http.client` call site
+   and fails on one outside the choke point with no listed, reasoned
+   exception (today's exceptions: the MCP SDK's own httpx/websockets
+   transport for `http`/`sse`/`ws` MCP servers and `mcp/oauth.py`'s token
+   calls -- a separate, user-configured-server concern, not this round's
+   scope). **Hybrid escalation** (`routing.escalation`: `{to, when:
+   [low_confidence, tool_failures, context_overflow], ask}`) is local-
+   first and only ever evaluated on an `ol:`/`hf:local/*`/`hf:mlx/*`
+   session: `low_confidence` reuses the EXACT role-resolution + one-shot-
+   call shape `roles.small` answers already use, pointed at the `judge`
+   role instead (never a new judging mechanism); `tool_failures` counts
+   `is_error` tool results in the current turn; `context_overflow` is the
+   existing compaction-overflow retry path. `ask: true` (default) only
+   notifies; `ask: false` switches for the rest of the turn (the two mid-
+   turn triggers) or from the next model call on (`low_confidence`), with
+   a transcript note; a role-table entry's own `"escalation": false` turns
+   it off per role. `/escalation` shows the policy and this session's last
+   decisions. **Saved versus cloud**: the cost meter also prices an `ol:`/
+   `hf:local/*`/`hf:mlx/*` turn's tokens against the session's escalation
+   target (or, when none is configured, the median price across the
+   package's own vendored fallback catalogs -- no network call, works
+   identically under `--offline`), accumulating the difference; the status
+   bar's cost chip gains a " · saved $x" suffix and `/cost` prints the
+   full breakdown (turns, tokens, the reference price and why). Docs:
+   `docs/CONFIG.md` (`network.offline`, `routing.escalation`),
+   `docs/COMMANDS.md` (`--offline`), `docs/SLASH-COMMANDS.md` (`/offline`,
+   `/escalation`, the extended `/cost`), `docs/MODELS.md` (one section
+   each). Manual verification on the build host: `halo --offline -p
+   "reply with the single word pong" --model ol:qwen3-coder:30b` (loopback,
+   succeeds) and the same with `--model or:<any>` (refuses with the plain
+   sentence).
 
 ## [2.0.2] - 2026-10-04
 

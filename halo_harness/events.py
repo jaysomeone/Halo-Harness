@@ -150,18 +150,25 @@ def thinking_delta(text: str, *, index: int = 0, turn: int = 0) -> Event:
 def message_end(*, turn: int = 0, stop_reason: Optional[str] = None, usage: Optional[dict] = None,
                  cost_usd: Optional[float] = None, context_pct: Optional[float] = None,
                  context_tokens: Optional[int] = None, context_limit: Optional[int] = None,
-                 total_input_tokens: Optional[int] = None, total_output_tokens: Optional[int] = None) -> Event:
+                 total_input_tokens: Optional[int] = None, total_output_tokens: Optional[int] = None,
+                 saved_usd: Optional[float] = None) -> Event:
     """data: {stop_reason, usage, cost_usd, context_pct, context_tokens,
-    context_limit, total_input_tokens, total_output_tokens}. The last four
-    (1.0.1 hotfix 14) are the RAW numbers `context_pct` was already derived
-    from, plus the session's running token totals -- added so a consumer
-    (the TUI status bar) can render `"ctx 12k/1M 1%"`/`"in 12k out 3k"`
-    without re-deriving anything itself; `context_pct` is kept for any
-    existing consumer that only ever wanted the percentage."""
+    context_limit, total_input_tokens, total_output_tokens, saved_usd}. The
+    four token/context fields (1.0.1 hotfix 14) are the RAW numbers
+    `context_pct` was already derived from, plus the session's running
+    token totals -- added so a consumer (the TUI status bar) can render
+    `"ctx 12k/1M 1%"`/`"in 12k out 3k"` without re-deriving anything itself;
+    `context_pct` is kept for any existing consumer that only ever wanted
+    the percentage. `saved_usd` (Halo 2.0.3 round 5e) is `CostMeter.
+    saved_usd`'s running total -- None on every turn that isn't ol:/
+    hf:local/hf:mlx (the status bar's own `apply_status` only overwrites
+    its reading when this is NOT None, so a later cloud-model turn in the
+    same session never blanks out an earlier real saved-$ figure)."""
     return Event("message_end", {
         "stop_reason": stop_reason, "usage": usage or {}, "cost_usd": cost_usd, "context_pct": context_pct,
         "context_tokens": context_tokens, "context_limit": context_limit,
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens,
+        "saved_usd": saved_usd,
     }, turn=turn)
 
 

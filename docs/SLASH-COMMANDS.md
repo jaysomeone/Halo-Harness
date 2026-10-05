@@ -52,6 +52,13 @@ used so far (this key's spend so far -- no limit set, no management key
 configured; ...)". Omitted entirely when OpenRouter isn't enabled or
 nothing has been fetched yet. See `docs/ARCHITECTURE.md`'s status bar
 section for exactly where the figure comes from and how often it refreshes.
+Halo 2.0.3 round 5e: on an `ol:`/`hf:local`/`hf:mlx` session, a third line
+("Saved vs cloud: ...") shows the running total of what the SAME input/
+output tokens would have cost against the session's reference price (the
+configured `routing.escalation.to`, or the vendored catalog's median price
+when none is set), the reference price itself, and which one it is --
+omitted entirely on a cloud-model session. See [MODELS.md](MODELS.md)'s
+"Saved versus cloud" section for the arithmetic.
 
 ### `/context`
 A live breakdown of the current request's system/tools/messages/pruned
@@ -284,6 +291,31 @@ message, remembered for the rest of the session. `--effort`/settings
 when nothing more specific was set anywhere. See
 [MODELS.md](MODELS.md)'s "Reasoning effort" section for the accepted-level
 table per route family.
+
+### `/offline [on|off]`
+Halo 2.0.3 round 5e. Bare `/offline` reports whether offline mode is on and
+where that reading came from (`--offline`/`HALO_OFFLINE` for this one
+process, or the persisted `network.offline` key). `/offline on`/`/offline
+off` persists `network.offline` to `~/.halo/config.json` AND takes effect
+immediately for the rest of this process (no restart) -- in the TUI the
+status bar's "offline" chip updates right away, the same "direct push, no
+event round-trip" pattern `/effort` uses. While on, the one HTTP choke
+point (`providers/http.py`) refuses any connection whose host isn't
+loopback or an allow-listed local host (every `ollama.hosts` entry, every
+`huggingface.local_servers` entry, every managed local-server-registry
+entry); the refusal is always the one plain sentence "offline mode: not
+connecting to \<host\>". See [CONFIG.md](CONFIG.md)'s `network.offline`
+section and [COMMANDS.md](COMMANDS.md)'s `--offline`.
+
+### `/escalation`
+Halo 2.0.3 round 5e. Shows the configured hybrid-escalation policy
+(`routing.escalation` -- set with `halo config set routing.escalation
+'{"to": "...", "when": [...], "ask": true|false}'`, there is no `/escalation
+<args>` form of its own) and this session's last few escalation decisions
+(trigger, target, whether it asked or switched). Only ever relevant on a
+local-model session (`ol:`/`hf:local`/`hf:mlx`) -- see
+[MODELS.md](MODELS.md)'s "Hybrid escalation" section for the three
+triggers and what "ask" vs. auto actually do.
 
 ### `/init`
 A **prompt**-kind command: its body is a fixed instruction asking the

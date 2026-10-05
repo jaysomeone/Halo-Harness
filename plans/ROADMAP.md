@@ -351,3 +351,20 @@ Metroid theme and a Mario theme.
   a chat model), matching plans/2.0.3-jev.md; a Claude slug's thinking stays
   native only while an Anthropic-shaped rung serves it; cost APIs split by
   inference key versus a separate provisioning key.
+- MOVED 2026-10-04 evening (rolo: "Lets get all the codex and OpenAI stuff
+  integrated before experimental labs"): section C2 of the old 2.0.3 brief
+  (Codex subscription route `cx:` and the OpenAI API route `oai:` with the
+  Responses dialect) moves into 2.0.3 as Round 5i, in two parts (OpenAI API
+  first, Codex second), BEFORE 5h Experiential, whose `/v1/responses` work
+  now reuses 5i's Responses dialect. 2.0.4 keeps the generic picker columns,
+  balances, enumeration, jev, learned rules, `cc:` v2, the env-file drop and
+  the Governor. Order: 5e (committing) -> 5i part 1 -> 5i part 2 -> 5h -> 6
+  -> review -> fix pass -> tag v2.0.3.
+- Addition the same evening (rolo: "Just like how we did with Claude settings,
+  figure out where those settings exist for codex and let it implement those
+  settings"): 5i part 2 also reads Codex's settings and instructions
+  (`~/.codex/config.toml`, `AGENTS.md` files, profiles, its MCP servers) into
+  Halo's merged settings view with a per-entry source and one precedence
+  (Halo config > Claude Code > Codex, Codex leading on a `cx:` session),
+  `settings.primary` to flip it, a wizard "Settings sources" step, and the
+  merged view in doctor and `/settings`. Halo never writes Codex's files.

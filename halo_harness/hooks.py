@@ -568,7 +568,7 @@ def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict, 
             # STRICT (Python 3.13+) so a corporate TLS-inspection proxy's
             # re-signing CA is accepted the same way curl/Node/every other
             # HTTP client on the same network already does.
-            from halo_harness.providers.http import urlopen_tls
+            from halo_harness.providers.http import OfflineBlocked, urlopen_tls
             with urlopen_tls(req, timeout=timeout_s) as resp:
                 box["result"] = HookResult(0, resp.read().decode("utf-8", "replace"), "")
         except urllib.error.HTTPError as e:
@@ -577,6 +577,13 @@ def run_http_hook(hook: HookDef, payload: dict, *, timeout_s: float, env: dict, 
             except Exception:
                 body_text = ""
             box["result"] = HookResult(1, body_text, f"HTTP {e.code}: {e.reason}")
+        except OfflineBlocked as e:
+            # Round 5e: `e`'s own message IS the complete plain sentence
+            # ("offline mode: not connecting to <host>") -- not an
+            # OSError/URLError/ValueError, so it needs its own branch ahead
+            # of the generic one below, or it would propagate out of this
+            # thread uncaught instead of becoming a plain HookResult.
+            box["result"] = HookResult(1, "", str(e))
         except (urllib.error.URLError, OSError, ValueError) as e:
             box["result"] = HookResult(1, "", f"http hook failed: {e}")
 

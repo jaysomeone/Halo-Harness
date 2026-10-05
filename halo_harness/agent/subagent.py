@@ -604,6 +604,12 @@ def _build_child_session(*, runtime: AgentRuntime, spec: AgentSpec, agent_id: st
         max_turns=(spec.max_turns or parent.max_turns), effort=_effective_effort,
         permission_engine=child_engine, session_catalog=None, mcp_manager=parent.mcp_manager,
         hook_runner=hook_runner,
+        # Halo 2.0.3 round 5e: so `roles.role_escalation_enabled` can see
+        # which role this CHILD was actually resolved under -- the main
+        # session passes no role name at all (`Session.__init__`'s own
+        # default), so hybrid escalation is unaffected by this for a
+        # top-level session.
+        role_name=_effective_role_name,
         # bug fix: without these, a child ignores whatever custom routing
         # the PARENT was actually given (a mock upstream in tests; a
         # self-hosted proxy via BRIDGE_OPENROUTER_BASE_URL in real use) and

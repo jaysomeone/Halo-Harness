@@ -24,12 +24,13 @@ UNLESS a CUDA toolkit is already on this machine (`has_cuda_runtime_
 installed`: a `cudart64_*.dll` on PATH on Windows, `libcudart.so*` on
 Linux).
 
-The real network calls go through `urllib.request` (auto-follows the
-redirect a GitHub release asset's `browser_download_url` issues), injected
-via `fetcher` for tests -- NOT `providers/http.py`'s `open_upstream` (that
-module is today a raw socket+TLS opener with no redirect-following; round
-5e's own planned "one HTTP choke point for offline mode" is the natural
-place to fold this in later, once it exists).
+The real network calls go through `providers.http.urlopen_tls` (round 5e:
+folded into the offline-mode choke point -- `build_opener` keeps urllib's
+default `HTTPRedirectHandler`, so the GitHub release asset's
+`browser_download_url` redirect still auto-follows, same as the plain
+`urllib.request.urlopen` this used before), injected via `fetcher` for
+tests -- never `open_upstream` itself (a raw socket+TLS opener with no
+redirect-following of its own).
 """
 
 from __future__ import annotations
@@ -223,8 +224,9 @@ def verify_digest(file_path, digest: "Optional[str]") -> bool:
 
 def _default_fetcher(url: str, headers: dict) -> "tuple[int, bytes]":
     import urllib.request
+    from halo_harness.providers.http import urlopen_tls
     req = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=20) as resp:  # auto-follows the asset redirect
+    with urlopen_tls(req, timeout=20) as resp:  # auto-follows the asset redirect
         return resp.status, resp.read()
 
 

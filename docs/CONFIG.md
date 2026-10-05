@@ -331,6 +331,72 @@ just before it) only ever writes a value you actually chose THIS run --
 fresh box, so layer 4 above still applies) instead of forcing `auto`/an
 arbitrary other-provider's model over it.
 
+### `network.offline` (Halo 2.0.3 round 5e)
+
+`~/.halo/config.json`'s `network.offline` -- `true`/`false`, default
+`false`. Set directly (`halo config set network.offline true`) or through
+`/offline on|off` (persists the same key); `--offline`/`HALO_OFFLINE=1`
+override it for one process WITHOUT persisting anything (checked first,
+ahead of this key). While on, the one HTTP choke point
+(`halo_harness.providers.http`'s `open_upstream`/`urlopen_tls`) refuses any
+connection whose host is not loopback (`127.0.0.1`/`localhost`/`::1`) or an
+allow-listed local host:
+
+- every `ollama.hosts[].url` entry (this section's own LAN-Ollama config),
+- every `huggingface.local_servers[].url` entry,
+- every entry in the managed local-server registry (`halo local serve`'s
+  own `~/.halo/run/local-servers.json` -- always loopback by construction).
+
+Covers update checks, catalog refreshes, the Hugging Face router,
+OpenRouter, Databricks, Anthropic, and the WebFetch/WebSearch tools; the
+claude.ai connectors bridge's own background/cold-start discovery is
+skipped (one DEBUG line) rather than refused, since its real network call
+happens inside a spawned `claude` subprocess, outside this process's own
+choke point -- an explicit `halo mcp list --refresh`/`/mcp` reconnect still
+runs that subprocess regardless (same as running `claude mcp list`
+directly in an offline shell would). A refusal is always one plain
+sentence: `offline mode: not connecting to <host>` -- never retried, never
+treated as a reason to try a `--fallback-model` entry. See
+[COMMANDS.md](COMMANDS.md)'s `--offline` and
+[SLASH-COMMANDS.md](SLASH-COMMANDS.md)'s `/offline`.
+
+### `routing.escalation` (Halo 2.0.3 round 5e)
+
+`~/.halo/config.json`'s `routing.escalation` -- hybrid escalation as an
+explicit policy, local-first:
+
+```json
+{
+  "routing": {
+    "escalation": {
+      "to": "or:anthropic/claude-haiku-4.5",
+      "when": ["low_confidence", "tool_failures", "context_overflow"],
+      "ask": true
+    }
+  }
+}
+```
+
+- `to`: the cloud model ref to escalate to.
+- `when`: any of `low_confidence` (the `judge` role's own one-word
+  confidence check on the local model's final reply -- see `docs/
+  ROLES.md`), `tool_failures` (two or more `is_error` tool results in the
+  current turn), `context_overflow` (the existing compaction-overflow path
+  fired this turn).
+- `ask`: `true` (default) asks -- a plain notification naming the trigger
+  and target, stays on the local model; `false` switches automatically for
+  the rest of the turn (`tool_failures`/`context_overflow`) or from the
+  next model call on (`low_confidence`, since the turn that triggered it
+  is already over), with a transcript note ("escalated to \<ref\>:
+  \<trigger\>").
+
+Only ever evaluated on a local-model session (`ol:`/`hf:local`/`hf:mlx`) --
+never on a cloud-model session. A role-table entry's own `"escalation":
+false` turns it off for every sub-agent built under that role (`halo
+roles`/`docs/ROLES.md`), regardless of this top-level setting. `/escalation`
+shows the active policy and this session's last few decisions. See
+[MODELS.md](MODELS.md)'s "Hybrid escalation" section.
+
 ## What is never written
 
 - `~/.claude.json`, `~/.claude/settings.json` -- **never** touched by

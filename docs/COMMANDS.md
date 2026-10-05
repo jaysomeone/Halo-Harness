@@ -112,6 +112,26 @@ added) for a model whose profile doesn't support it. Related config:
 `effortLevel`/`modelSettings.<id>.effortLevel` in `settings.json` set a
 session's *default* effort when `--effort` is omitted (`docs/CONFIG.md`).
 
+#### `--offline`
+Halo 2.0.3 round 5e, Halo-only (not a Claude Code flag). What: enforces
+offline mode for this one process -- sets `HALO_OFFLINE=1` in this
+process's own environment (never written to `~/.halo/config.json`; `/offline
+on` is the persisted equivalent). The one HTTP choke point
+(`providers/http.py`'s `open_upstream`/`urlopen_tls`) then refuses any
+connection whose host isn't loopback or an allow-listed local host (every
+`ollama.hosts` entry, `huggingface.local_servers` entry, or managed
+local-server-registry entry) -- update checks, catalog refreshes, the
+Hugging Face router, OpenRouter, Databricks, Anthropic and WebFetch/
+WebSearch are all refused the same way; the claude.ai connectors bridge's
+background discovery is skipped instead (its real network call happens
+inside a spawned `claude` subprocess, outside this process's own choke
+point). The refusal is always one plain sentence: "offline mode: not
+connecting to \<host\>". See [CONFIG.md](CONFIG.md)'s `network.offline`
+section and [SLASH-COMMANDS.md](SLASH-COMMANDS.md)'s `/offline`.
+```sh
+halo --offline -p "reply with the single word pong" --model ol:qwen3-coder:30b
+```
+
 #### `-c`, `--continue`
 What: resumes the most recently modified session for the current directory
 (by the session `.jsonl` file's own mtime). Reads:

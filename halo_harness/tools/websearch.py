@@ -84,7 +84,7 @@ class WebSearchTool(Tool):
         )
         try:
             # 1.0.1 hotfix 11: urlopen_tls -- see providers/http.py's own docstring.
-            from halo_harness.providers.http import urlopen_tls
+            from halo_harness.providers.http import OfflineBlocked, urlopen_tls
             with urlopen_tls(req, timeout=_TIMEOUT_S) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
@@ -94,6 +94,11 @@ class WebSearchTool(Tool):
             except Exception:
                 pass
             return ToolResult(f"WebSearch failed: HTTP {e.code} {e.reason} {detail[:500]}", is_error=True)
+        except OfflineBlocked as e:
+            # Round 5e: not an OSError/URLError/TimeoutError, so it needs
+            # its own branch ahead of the generic one below -- `e`'s own
+            # message is already the complete plain sentence.
+            return ToolResult(str(e), is_error=True)
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             return ToolResult(f"WebSearch failed: {e}", is_error=True)
 

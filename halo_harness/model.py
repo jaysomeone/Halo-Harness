@@ -36,6 +36,61 @@ _HF_LOCAL_PREFIX = "local/"
 _HF_MLX_PREFIX = "mlx/"
 _MAX_ALIAS_HOPS = 4
 
+
+def is_local_model_ref(ref: "ModelRef") -> bool:
+    """Halo 2.0.3 round 5e: True for `ol:` (`provider == "ollama"`),
+    `hf:local/*` and `hf:mlx/*` (both carry `provider == "huggingface"` and
+    `local=True` -- see `ModelRef.local`'s own docstring: round 5f
+    deliberately reuses the SAME flag for mlx) -- never a new "is this
+    local" concept of its own. Used by both the hybrid-escalation policy
+    (`agent.escalation`) and the saved-vs-cloud cost meter below to decide
+    "is this session's model one that policy/meter should even look at"."""
+    return ref.provider == "ollama" or (ref.provider == "huggingface" and ref.local)
+
+
+def catalog_median_prices(*, source_label: bool = False):
+    """Halo 2.0.3 round 5e: `(median_price_in, median_price_out)` in USD per
+    token -- the saved-vs-cloud reference price when the session has no
+    `routing.escalation.to` configured. "the catalog the picker knows"
+    (brief wording) is read from the package-vendored fallback catalogs
+    (`providers.models_dev.load_vendored_databricks_fallback`/`_openrouter_
+    fallback` -- the SAME files `resolve_model_profile`'s own lowest-tier
+    fallback already reads), never a live network fetch: computing a
+    session's reference price must work exactly the same way under
+    `--offline` as it does online, and these files ship with the package
+    (always present, no prior `--refresh` required). Today only the
+    Databricks fallback carries `cost.input`/`cost.output` fields (the
+    OpenRouter one is behavior-only -- temperature/tool_id_format/... --
+    with no pricing of its own); both are walked anyway so a future catalog
+    update that adds pricing there is picked up with no code change.
+    `(None, None)` when neither source has a single priced entry (should
+    not happen in practice -- the vendored Databricks file always ships
+    with 30+ priced rows -- but never raises either way).
+
+    With `source_label=True`, returns `(median_in, median_out, label)`
+    instead, `label` a short phrase for `/cost`'s own breakdown naming how
+    many priced models the median was taken over."""
+    import statistics
+    from halo_harness.providers.models_dev import load_vendored_databricks_fallback, load_vendored_openrouter_fallback
+    ins: "list[float]" = []
+    outs: "list[float]" = []
+    for table in (load_vendored_databricks_fallback(), load_vendored_openrouter_fallback()):
+        for entry in (table or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
+            ci, co = cost.get("input"), cost.get("output")
+            if isinstance(ci, (int, float)) and not isinstance(ci, bool):
+                ins.append(ci / 1_000_000)
+            if isinstance(co, (int, float)) and not isinstance(co, bool):
+                outs.append(co / 1_000_000)
+    med_in = statistics.median(ins) if ins else None
+    med_out = statistics.median(outs) if outs else None
+    if not source_label:
+        return med_in, med_out
+    label = f"catalog median across {len(ins)} priced model(s) (vendored fallback catalog, no network)"
+    return med_in, med_out, label
+
 # scope J: the home default is the first-party DeepSeek V4 endpoint on
 # OpenRouter (verified live against GET /api/v1/models on 2026-09-23/24 --
 # `deepseek/deepseek-v4.1-flash` exists and is pinned to the `deepseek`
@@ -682,6 +737,22 @@ class CostMeter:
         # must show something other than a bare "$?").
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
+        # Halo 2.0.3 round 5e: "saved versus cloud" -- set ONLY by
+        # `add_savings` below, which a session calls alongside `add_usage`
+        # for an ol:/hf:local/hf:mlx turn only (never for a cloud-model
+        # session -- `Session.__init__` never even resolves a reference
+        # price for one). `saved_price_in`/`saved_price_out`/`saved_price_
+        # source` are the ONE reference price this meter's whole running
+        # `saved_usd` total was computed against, resolved once at session
+        # start and pinned for the session's life (switching models
+        # mid-session, e.g. a hybrid-escalation auto-switch, does not
+        # reprice EARLIER turns -- the figure is "what was saved so far
+        # under the policy that was active", not retroactively rebased).
+        self.saved_usd: float = 0.0
+        self.saved_turns: int = 0
+        self.saved_price_in: Optional[float] = None
+        self.saved_price_out: Optional[float] = None
+        self.saved_price_source: Optional[str] = None
 
     def _accumulate_tokens(self, usage) -> None:
         if not isinstance(usage, dict):
@@ -768,3 +839,57 @@ class CostMeter:
             self.total_usd += cost_usd
         if not has_cost_data:
             self.has_cost_data = False
+
+    def set_savings_reference(self, *, price_in: Optional[float], price_out: Optional[float],
+                               source: str) -> None:
+        """Pins the ONE reference price (USD/token) `add_savings` prices
+        every turn against, and `source` (a short human phrase for `/cost`'s
+        own breakdown -- e.g. `"escalation target or:anthropic/claude-..."`
+        or `"catalog median (30 priced models)"`) naming WHY. Called once,
+        at session start, only for an ol:/hf:local/hf:mlx session
+        (`model.is_local_model_ref`) -- never for a cloud-model session, so
+        `saved_usd` simply never accumulates for one (pinned by tests)."""
+        self.saved_price_in = price_in
+        self.saved_price_out = price_out
+        self.saved_price_source = source
+
+    def add_savings(self, usage: Optional[dict]) -> Optional[float]:
+        """Mirrors `add_usage`'s own `_fallback_cost` arithmetic EXACTLY
+        (input*price_in + (output+reasoning)*price_out, cache tokens at
+        their own rate or price_in -- pinned the same way `_fallback_cost`
+        already is) but against `saved_price_in`/`saved_price_out` instead
+        of this meter's own `price_in`/`price_out` -- "what this turn's
+        tokens would have cost on the reference price", added to the
+        running `saved_usd` total. Returns None (and changes nothing) when
+        no reference price was ever set (`set_savings_reference` never
+        called -- a cloud-model session) or `usage` is unusable, exactly
+        the same shape `add_usage`/`_fallback_cost` already use for "price
+        unknown"."""
+        if self.saved_price_in is None or self.saved_price_out is None:
+            return None
+        saved = self._fallback_cost_at(usage, price_in=self.saved_price_in, price_out=self.saved_price_out)
+        if saved is None:
+            return None
+        self.saved_usd += saved
+        self.saved_turns += 1
+        return saved
+
+    def _fallback_cost_at(self, usage, *, price_in: float, price_out: float) -> Optional[float]:
+        """The SAME formula `_fallback_cost` uses, parameterized on a
+        caller-given price pair instead of `self.price_in`/`self.price_out`
+        -- factored out so `add_savings` (above) can never drift from the
+        ordinary cost arithmetic's own pinned behaviour."""
+        if not isinstance(usage, dict):
+            return None
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+            return None
+        reasoning = usage.get("reasoning_tokens")
+        reasoning = reasoning if isinstance(reasoning, int) else 0
+        cache_read = usage.get("cache_read_input_tokens")
+        cache_read = cache_read if isinstance(cache_read, int) else 0
+        cache_write = usage.get("cache_creation_input_tokens")
+        cache_write = cache_write if isinstance(cache_write, int) else 0
+        return (input_tokens * price_in + (output_tokens + reasoning) * price_out
+                + cache_read * price_in + cache_write * price_in)

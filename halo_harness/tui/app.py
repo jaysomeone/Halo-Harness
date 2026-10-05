@@ -414,6 +414,13 @@ class BridgeApp(App):
         self.pending_dock = self.query_one(PendingDock)
         self.prompt_input = self.query_one(PromptInput)
         self.status_bar = self.query_one(StatusBar)
+        # Halo 2.0.3 round 5e: the "offline" chip's own initial reading --
+        # `--offline`/a persisted `network.offline` -- pushed once here,
+        # the same "direct push, no event round-trip" pattern `/offline`
+        # itself uses for a live toggle mid-session (tui/slash.py's own
+        # `_handle_offline`).
+        from halo_harness.providers.http import offline_mode_enabled
+        self.status_bar.set_offline(offline_mode_enabled())
         # Halo 2.0.2 W7 round 1 (brief F): `TITLE`/`self.title` above is
         # only ever this app's OWN in-app Header widget text -- Textual
         # never touches the REAL terminal/console title on its own (see

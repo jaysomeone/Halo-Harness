@@ -107,6 +107,7 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
         cost_str = f"${cm.total_usd:.4f}" if cm.has_cost_data else "n/a (provider does not report cost)"
         line = f"Total cost: {cost_str} across {cm.turns} turn(s) (model: {facade.model_ref or '?'})"
     else:
+        cm = None
         line = (f"Total cost: ${facade.cost_usd:.4f} across {facade.num_turns} turn(s) "
                 f"(model: {facade.model_ref or '?'})")
     # H15 part 2 addendum 4: the same OpenRouter balance figure the status
@@ -114,7 +115,73 @@ def _cmd_cost(args: str, facade: HeadlessFacade) -> str:
     # line) when no fetch has ever succeeded (not enabled, or offline).
     from halo_harness.providers.openrouter_account import format_balance_line
     balance_line = format_balance_line()
-    return f"{line}\n{balance_line}" if balance_line else line
+    lines = [line]
+    if balance_line:
+        lines.append(balance_line)
+    # Halo 2.0.3 round 5e: "saved versus cloud" breakdown -- omitted
+    # entirely on a cloud-model session (cm.saved_turns stays 0 there,
+    # `CostMeter.add_savings` never even tries -- see its own docstring).
+    if cm is not None and cm.saved_turns:
+        price_in_per_m = cm.saved_price_in * 1_000_000 if cm.saved_price_in is not None else None
+        price_out_per_m = cm.saved_price_out * 1_000_000 if cm.saved_price_out is not None else None
+        lines.append(
+            f"Saved vs cloud: ${cm.saved_usd:.4f} across {cm.saved_turns} turn(s) -- reference price "
+            f"${price_in_per_m:.2f}/M in, ${price_out_per_m:.2f}/M out ({cm.saved_price_source})"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_offline(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 5e: `/offline` (bare) reports the current state and
+    its source; `/offline on|off` persists `network.offline` to
+    `~/.halo/config.json` (`/offline on|off` is the persisted twin of
+    `--offline`, which only ever sets `HALO_OFFLINE=1` for the one process
+    that passed it) AND sets `HALO_OFFLINE` for THIS process too, so the
+    very next network attempt sees the new state with no restart."""
+    from halo_harness.providers.http import offline_mode_enabled
+    requested = (args or "").strip().lower()
+    if requested in ("on", "off"):
+        import os
+        from halo_harness.theme import set_config_value
+        value = requested == "on"
+        set_config_value("network.offline", value)
+        os.environ["HALO_OFFLINE"] = "1" if value else "0"
+        return f"Offline mode: {'on' if value else 'off'} (saved to ~/.halo/config.json)"
+    if requested:
+        return "Usage: /offline [on|off]"
+    now = offline_mode_enabled()
+    import os
+    source = "this process (--offline/HALO_OFFLINE)" if os.environ.get("HALO_OFFLINE") in ("0", "1") \
+        else "~/.halo/config.json (network.offline)"
+    return (f"Offline mode: {'on' if now else 'off'} (source: {source})\n"
+            f"  When on, every network call refuses any host that isn't loopback or an allow-listed "
+            f"local host (ollama.hosts, huggingface.local_servers, a managed local server).")
+
+
+def _cmd_escalation(args: str, facade: HeadlessFacade) -> str:
+    """Halo 2.0.3 round 5e: shows `routing.escalation`'s policy and this
+    session's last few decisions -- read-only (the policy itself is set
+    with `halo config set routing.escalation ...`, same as any other
+    nested config key; this command has no sub-actions of its own)."""
+    from halo_harness.agent.escalation import format_decision_line, load_escalation_policy
+    policy = load_escalation_policy()
+    if policy is None:
+        lines = ["No hybrid-escalation policy configured (routing.escalation).",
+                 "  Set one with: halo config set routing.escalation "
+                 '\'{"to": "or:anthropic/claude-haiku-4.5", "when": ["low_confidence", "tool_failures", '
+                 '"context_overflow"], "ask": true}\'']
+    else:
+        lines = [f"Escalation policy: to {policy.to}, when {', '.join(policy.when)}, "
+                 f"ask={'true' if policy.ask else 'false'}"]
+    session = getattr(facade, "session", None)
+    decisions = getattr(session, "_escalation_decisions", None) if session is not None else None
+    if decisions:
+        lines.append("Last decisions this session:")
+        for d in decisions[-5:]:
+            lines.append(f"  {format_decision_line(d)}")
+    elif session is not None:
+        lines.append("No escalation decisions yet this session.")
+    return "\n".join(lines)
 
 
 def _cmd_context(args: str, facade: HeadlessFacade) -> str:
@@ -1299,6 +1366,9 @@ _BUILTIN_SPECS = {
     "providers": ("core", "Show/enable/disable providers (dbx:/or:/ant:/cc:)", "[list|enable|disable <name>]",
                   _cmd_providers),
     "effort": ("core", "Show or change the active reasoning effort level", "[level]", _cmd_effort),
+    "offline": ("core", "Show or change enforced offline mode (network.offline)", "[on|off]", _cmd_offline),
+    "escalation": ("core", "Show the hybrid-escalation policy and this session's last decisions", None,
+                   _cmd_escalation),
     "init": ("prompt", "Analyze the codebase and write/update CLAUDE.md", None, _cmd_init),
     "doctor": ("core", "Check the health of this halo installation", None, _cmd_doctor),
     "export": ("ui", "Export the conversation", None, _cmd_export),

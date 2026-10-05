@@ -8,6 +8,7 @@ to keep each file under the house 250-line limit.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ from typing import Callable, Optional
 
 from halo_harness.config.paths import background_net_disabled, bridge_home
 from halo_harness.mcp.connectors import ConnectorInfo, discover_connectors_now
+
+log = logging.getLogger("bridge")
 
 _CACHE_NAME = "connectors.json"
 
@@ -181,9 +184,19 @@ def ensure_discovered_in_background(*, timeout: float = 20.0, on_done: "Optional
     (brief: "once per session in a background worker... never on the UI
     thread"). Returns True iff a worker was actually started. Honors
     `BRIDGE_TEST_NO_BACKGROUND_NET=1` like every other startup worker in
-    this tree."""
+    this tree.
+
+    Round 5e: also skipped under offline mode, with one DEBUG line -- the
+    real network call this discovers happens INSIDE a spawned `claude`
+    subprocess (`discover_connectors_now`'s own `claude mcp list`/`claude
+    -p`), outside `providers.http`'s own choke point, so it is skipped here
+    rather than refused there."""
     global _session_discovered
     if background_net_disabled() or not discovery_eligible():
+        return False
+    from halo_harness.providers.http import offline_mode_enabled
+    if offline_mode_enabled():
+        log.debug("connectors_bridge: offline mode -- skipping background discovery")
         return False
     with _session_lock:
         if _session_discovered:
@@ -229,6 +242,10 @@ def ensure_discovered_synchronously_if_cold(*, timeout: float = 20.0) -> bool:
     global _session_discovered
     if background_net_disabled() or not discovery_eligible():
         return False
+    from halo_harness.providers.http import offline_mode_enabled
+    if offline_mode_enabled():
+        log.debug("connectors_bridge: offline mode -- skipping cold-start discovery")
+        return False
     connectors, _fetched_at = load_cache()
     if connectors:
         return False  # something real is already cached -- never block on it again
@@ -260,7 +277,16 @@ def already_discovered_or_warm() -> bool:
 
 def refresh_now(*, timeout: float = 20.0) -> "list[ConnectorInfo]":
     """Synchronous, forced refresh (`halo mcp list --refresh`, `/mcp`
-    reconnect) -- ignores the once-per-session gate and any existing cache."""
+    reconnect) -- ignores the once-per-session gate and any existing cache.
+
+    Round 5e: still runs under offline mode -- unlike the two background/
+    cold-start paths above, this one is an explicit, user-requested action
+    (`--refresh`), so it is NOT silently skipped; `discover_connectors_now`
+    spawns the real `claude` subprocess exactly as it would with offline
+    mode off (that subprocess's own network call is outside this harness's
+    choke point either way) and the result is whatever that subprocess
+    found or failed to find -- same as running `claude mcp list` directly
+    in an offline shell."""
     connectors = discover_connectors_now(timeout=timeout)
     save_cache(connectors)
     global _session_discovered
