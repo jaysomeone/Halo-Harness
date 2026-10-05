@@ -20,6 +20,7 @@ BUILD
 - Made the status bar retain the last successful five-hour/weekly reading separately for `cc:` and `cx:`, replace it on a successful update, and hide it completely on non-subscription models.
 - Made subscription status events read the active Codex account's profile cache so account switches and failover replace the toolbar values correctly.
 - Verified the subscription toolbar suite (13/13), managed-account suite (10/10), syntax, and whitespace checks.
+- Installed this local fork into the pipx `halo-harness` environment and verified `halo accounts list` plus the interactive `/accounts` registration.
 
 ## Known baseline issue
 
