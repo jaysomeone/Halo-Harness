@@ -377,7 +377,7 @@ hosted models" (same page) -- i.e. it shows up in `/v1/models`/`/api/models` for
 like a catalog model, which matters for round 5h's picker integration (a user's own local model
 added this way should appear as an ordinary `xp:<slug>` entry, not a special case).
 
-**Pro plan, generally:** "Adding a [local] model needs the Pro plan ([upgrade](/credits)). A 402
+**Pro plan, generally:** "Adding a [local] model needs the Pro plan (upgrade at the platform's `/credits` page). A 402
 with code `pro_required` means the organization is not on Pro yet" (`/docs/plans`, 2026-10-04).
 Separately, `/docs/plans` (2026-10-04) describes a different Pro feature not mentioned in the
 brief: pooling ChatGPT (Plus/Pro/Team/Enterprise) and Claude (Pro/Max/Team) **subscription seats**
