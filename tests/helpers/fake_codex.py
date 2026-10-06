@@ -26,7 +26,15 @@ preamble never masks them):
   * `REFUSE_MODEL` -- (combined with `-m <id>` containing this model id)
     a top-level `error` event and nonzero exit, simulating an unknown
     model id.
+  * `NATIVE_CMD` -- one of Codex's own `command_execution` items first.
   * anything containing "pong" -- replies "pong"; anything else -- "noted".
+
+Per-account behavior, only when `CODEX_HOME` is set (a managed account):
+  * every thread id it starts is recorded in `$CODEX_HOME/fake-threads`;
+    `resume <id>` of an id that home never recorded fails the way real
+    Codex does ("no rollout found").
+  * `$CODEX_HOME/fake-out-of-credits` existing -> every turn ends with the
+    real "out of credits" error (after any `NATIVE_CMD`).
 
 `FAKE_CODEX_ARGV_LOG` (a path), when set, gets one JSON-array line per
 invocation -- lets a test assert the exact argv a real caller built.
@@ -131,12 +139,44 @@ def _next_item_id() -> str:
     return f"item_{uuid.uuid4().hex[:8]}"
 
 
+def _account_file(name: str) -> "str | None":
+    home = os.environ.get("CODEX_HOME")
+    return os.path.join(home, name) if home else None
+
+
 async def _run_exec(opts: dict) -> int:
+    threads_path = _account_file("fake-threads")
+    if threads_path and opts["resume_id"]:
+        try:
+            known = open(threads_path, encoding="utf-8").read().split()
+        except OSError:
+            known = []
+        if opts["resume_id"] not in known:
+            sys.stderr.write(f"Error: thread/resume: thread/resume failed: no rollout found for thread id "
+                             f"{opts['resume_id']} (code -32600)\n")
+            return 1
     thread_id = opts["resume_id"] or str(uuid.uuid4())
+    if threads_path and not opts["resume_id"]:
+        with open(threads_path, "a", encoding="utf-8") as f:
+            f.write(thread_id + "\n")
     _write({"type": "thread.started", "thread_id": thread_id})
     _write({"type": "turn.started"})
 
     prompt = opts["prompt"]
+    if "NATIVE_CMD" in prompt:
+        cmd_id = _next_item_id()
+        command = "/bin/bash -lc 'echo hi'"
+        _write({"type": "item.started", "item": {"id": cmd_id, "type": "command_execution", "command": command,
+                                                    "aggregated_output": "", "status": "in_progress"}})
+        _write({"type": "item.completed", "item": {"id": cmd_id, "type": "command_execution", "command": command,
+                                                      "aggregated_output": "hi\n", "exit_code": 0,
+                                                      "status": "completed"}})
+    out_of_credits = _account_file("fake-out-of-credits")
+    if out_of_credits and os.path.exists(out_of_credits):
+        message = "Your workspace is out of credits. Add credits to continue."
+        _write({"type": "error", "message": message})
+        _write({"type": "turn.failed", "error": {"message": message}})
+        return 1
     sleep_m = re.search(r"SLEEP:(\d+(?:\.\d+)?)", prompt)
     if sleep_m:
         time.sleep(float(sleep_m.group(1)))

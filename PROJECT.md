@@ -24,11 +24,16 @@ BUILD
 - Installed this local fork into the pipx `halo-harness` environment and verified `halo accounts list` plus the interactive `/accounts` registration.
 - Fixed `cx:` follow-up turns failing with "the codex subprocess ended unexpectedly": `codex exec resume` rejects `-s`, so the sandbox is now passed as `-c sandbox_mode=...`. The fake Codex now rejects `-s` on resume, and the resume test checks the second turn has no error.
 
+- Found that the upstream merge (`521063d`) routes `cx:` turns through `agent/codex_turn.py` (one `codex exec` per turn), so the failover in `agent/cx_runtime.py` never ran. Moved the account work onto the live path:
+  - Codex thread ids are recorded per account; a switched account starts its own thread primed with the conversation so far ("no rollout found" fix), and a thread Codex no longer has restarts fresh without an error.
+  - "Out of credits" / usage-limit errors switch to the next logged-in Codex account and continue; a turn that already ran a tool asks for `continue` instead.
+  - Codex's own shell commands now show as Bash tool cards with their output, and the log keeps the real output.
+- Separated consecutive Codex replies into paragraphs and made a finished streamed reply re-render only when its text was clipped.
+- `cc:` no longer forwards Halo's default `--max-turns 50` to Claude Code (long tasks stopped with `error_max_turns`); an explicit `--max-turns` still applies, and the error now explains how to continue.
+
 ## Known baseline issue
 
-`tests/test_cx_session.py` currently has 11 broken-pipe failures. The same failures reproduce from the untouched `d1a603a` source, so they predate this feature and are not caused by the account-profile milestone.
-
-`tests/test_codex_session.py::test_tool_call_runs_through_bridge_and_logs_result` also fails on the unmodified `aa899d6` source.
+`tests/test_cx_session.py` tests the app-server runtime (`agent/cx_runtime.py`), which nothing calls since the upstream merge; 13 of its tests fail because `cx:` now parses to provider `codex`. Decide whether to delete that module or bring it back.
 
 ## Next action
 

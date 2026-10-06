@@ -459,8 +459,9 @@ def _on_item_completed(session, state: CxState, item: dict) -> None:
             session.log.append_assistant(content=[{"type": "text", "text": text}])
             if item.get("id") not in state.delta_items:
                 _put(state, events.text_delta(text, turn=turn_no))
-            elif item.get("phase") == "commentary":
-                _put(state, events.text_delta("\n\n", turn=turn_no))
+            # Each item is a separate reply, even when phase is omitted
+            # or the server delivered only a completed snapshot.
+            _put(state, events.text_delta("\n\n", turn=turn_no))
     elif typ in ("fileChange", "commandExecution"):
         native = state.native_items.pop(item.get("id"), None)
         if native is None:

@@ -7912,6 +7912,67 @@ def test_copy_text_assistant_text_widget_is_the_raw_markdown_source(ctx: Ctx):
 
 
 @test
+def test_assistant_text_mounted_stream_preserves_opening_and_paragraphs(ctx: Ctx):
+    from textual.app import App
+    from halo_harness.tui.widgets.transcript import Transcript
+
+    class RenderProbe(App):
+        def compose(self):
+            yield Transcript()
+
+    async def body():
+        async with RenderProbe().run_test() as pilot:
+            transcript = pilot.app.query_one(Transcript)
+            expected = "Identify the version.\n\nYou’re using Python.\n\n"
+            for turn, paced in enumerate((False, True), start=1):
+                for delta in ("I", "dentify the version.", "\n\n", "You’re using Python.", "\n\n"):
+                    await transcript.append_text(turn, 0, delta)
+                    if paced:
+                        await pilot.pause()
+                await transcript.finish_open_streams()
+                await pilot.pause()
+                widget = list(transcript.query(AssistantText))[-1]
+                ctx.check("complete source survives streaming", widget.source == expected)
+                paragraphs = [str(p.render()) for p in widget.query("MarkdownParagraph")]
+                ctx.check(f"opening and separate paragraphs rendered: {paragraphs!r}",
+                          paragraphs == ["Identify the version.", "You’re using Python."])
+                ctx.check("copy source matches rendered reply", widget.copy_text() == expected)
+                ctx.check("saved transcript retains the complete reply", transcript.plain_log[-1] == expected)
+
+    asyncio.run(body())
+
+
+@test
+def test_assistant_text_finish_reconciles_the_complete_streamed_source(ctx: Ctx):
+    """A dropped render fragment must not leave a completed reply clipped."""
+    async def body():
+        widget = AssistantText()
+        rendered = []
+
+        class FakeStream:
+            async def write(self, _delta):
+                return None
+
+            async def stop(self):
+                return None
+
+        async def record_update(markdown):
+            rendered.append(markdown)
+
+        widget._stream = FakeStream()
+        widget.update = record_update
+        await widget.append_delta("I’ll use the git progress-saving wo")
+        await widget.append_delta("rkflow for this")
+        await widget.finish()
+
+        expected = "I’ll use the git progress-saving workflow for this"
+        ctx.check(f"finish re-rendered the complete source, got {rendered!r}", rendered == [expected])
+        ctx.check("the canonical source remains complete", widget.raw_text == expected)
+
+    asyncio.run(body())
+
+
+@test
 def test_copy_text_thinking_block_widget_is_reasoning_text_only_no_spinner_glyph(ctx: Ctx):
     async def body():
         fake = FakeController()

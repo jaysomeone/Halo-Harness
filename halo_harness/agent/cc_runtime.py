@@ -364,7 +364,7 @@ def _start_cc_process(session, *, conversation_id: str, resume: bool, fork_sessi
     argv = build_cc_argv(model=session.model_ref.model, session_id=conversation_id, resume=resume,
                           mcp_config=mcp_config, fork_session=fork_session,
                           append_system_prompt=_cc_system_addendum(session),
-                          max_turns=getattr(session, "max_turns", None), effort=getattr(session, "effort", None))
+                          max_turns=_cc_max_turns(session), effort=getattr(session, "effort", None))
     env = _cc_child_env(session)
     env.update(bridge.child_env())
     process = ClaudeCodeProcess(argv, cwd=session.cwd, env=env)
@@ -417,14 +417,28 @@ def _confirm_session_id(session, state: CcState, obj: dict) -> None:
     session.log.append_meta(cc_session_id=real_id, cc_resumed=True)
 
 
-def _render_conversation_so_far(session) -> str:
+# Halo's own `--max-turns` default (cli.py, Session). It bounds Halo's own
+# agent loop; Claude Code runs its own loop, so for cc: the cap is only
+# forwarded when the user (or a sub-agent spec) chose a different one --
+# otherwise any long task stopped with `error_max_turns` after 50 steps.
+_HALO_DEFAULT_MAX_TURNS = 50
+
+
+def _cc_max_turns(session) -> Optional[int]:
+    value = getattr(session, "max_turns", None)
+    return value if value and value != _HALO_DEFAULT_MAX_TURNS else None
+
+
+def _render_conversation_so_far(session, nodes: Optional[list] = None) -> str:
     """H11b finding 10: a CAPPED tail (never the whole log unbounded) --
     Claude Code compacts its own context once it has enough of one, but a
     huge one-shot prime is still needless latency/spend for a message
-    meant only to "catch up" a fresh/reused process."""
+    meant only to "catch up" a fresh/reused process. `nodes` renders a
+    slice of the log instead of all of it."""
     try:
         from halo_harness.controller import render_transcript_markdown
-        text = render_transcript_markdown(session.log.nodes(), session_id=session.log.session_id)
+        text = render_transcript_markdown(session.log.nodes() if nodes is None else nodes,
+                                          session_id=session.log.session_id)
     except Exception:
         text = ""
     text = (text or "").strip()
@@ -1132,7 +1146,12 @@ def _events_for_stdout_obj(session, turn_no: int, obj: dict, state: CcState) -> 
                                         cost_usd=turn_cost if turn_cost is not None else turn_delta_cost))
         if is_error:
             state.turn_is_error = True
-            msg = obj.get("result") or f"claude reported an error ({subtype or 'unknown'})"
+            if subtype == "error_max_turns":
+                msg = (f"Claude stopped after {obj.get('num_turns') or 'the maximum number of'} steps this turn "
+                       f"(the --max-turns limit). Send `continue` to keep going, or start halo with a higher "
+                       f"--max-turns.")
+            else:
+                msg = obj.get("result") or f"claude reported an error ({subtype or 'unknown'})"
             out.append(events.error(str(msg), turn=turn_no, err_type=f"cc_{subtype or 'api_error'}"))
         with state.lock:
             # finding 20: an announcement claude made but never actually

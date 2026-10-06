@@ -66,6 +66,12 @@ class CxState:
     cx_thinking_lens: dict = field(default_factory=dict)
     account_name: Optional[str] = None
     cache_dir: Optional[object] = None
+    # Per `codex exec` call: the usage-limit message that ended it (drives
+    # account failover), whether any tool ran (a retry could repeat it),
+    # and native items already shown as a tool card, keyed by item id.
+    limit_message: Optional[str] = None
+    tools_ran: bool = False
+    native_started: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.tool_use_cond = threading.Condition(self.lock)
@@ -108,15 +114,63 @@ def _cx_child_env(session) -> dict:
     return codex_profile_env(profile, env) if profile is not None else env
 
 
-def _last_cx_session_id(log) -> Optional[str]:
+def _last_cx_session_id(log, account_name: Optional[str] = None) -> Optional[str]:
     """The codex thread id (Codex's OWN, learned from a `thread.started`
     event and logged as a `cx_session_id` meta node) to `resume` -- `/clear`
     starts a fresh log with none, so a freshly-created `CxState` after that
-    has no id to resume either, same as `cc_runtime._last_cc_session_id`."""
+    has no id to resume either, same as `cc_runtime._last_cc_session_id`.
+    A thread lives in one account's CODEX_HOME, so only a thread recorded
+    under `account_name` counts; an unlabelled (older) node only matches
+    when no managed account is in use."""
     for node in reversed(log.nodes()):
-        if node.get("type") == "meta" and node.get("cx_session_id"):
+        if node.get("type") != "meta" or not node.get("cx_session_id"):
+            continue
+        recorded = node.get("cx_account")
+        if recorded == (account_name or "default") or (recorded is None and account_name is None):
             return node["cx_session_id"]
     return None
+
+
+def _active_profile(session):
+    try:
+        from halo_harness.accounts import active_codex_profile
+        return active_codex_profile(state_dir=getattr(session, "state_dir", None))
+    except Exception:
+        return None
+
+
+def _follow_active_account(session, state: CxState) -> bool:
+    """Picks up an account switch (`/accounts use`, another session's
+    failover) since the last turn. True when the account changed."""
+    profile = _active_profile(session)
+    name = getattr(profile, "name", None)
+    if name == state.account_name:
+        return False
+    state.account_name = name
+    state.cache_dir = getattr(profile, "profile_dir", None)
+    state.cx_session_id = _last_cx_session_id(session.log, name)
+    if state.cx_session_id is None:
+        state.preamble_sent = False
+    return True
+
+
+def switch_to_next_codex_account(session, state: CxState, *, excluded_names: set) -> Optional[str]:
+    """Make the next logged-in, non-exhausted Codex account active for this
+    session; the next `codex exec` starts a fresh thread under it. Returns
+    the new account's name, or None when there is no other account."""
+    from halo_harness.accounts import next_codex_profile, set_active_account
+    state_dir = getattr(session, "state_dir", None)
+    try:
+        profile = next_codex_profile(state.account_name, state_dir=state_dir,
+                                     base_env=getattr(session, "tool_env", None), excluded_names=excluded_names)
+        if profile is None:
+            return None
+        set_active_account("codex", profile.name, state_dir=state_dir)
+    except Exception:
+        log.exception("cx: could not switch Codex accounts")
+        return None
+    state.account_name, state.cache_dir, state.cx_session_id = profile.name, profile.profile_dir, None
+    return profile.name
 
 
 def ensure_cx_state(session) -> CxState:
@@ -129,6 +183,7 @@ def ensure_cx_state(session) -> CxState:
     thread instead of silently starting a new one."""
     state: Optional[CxState] = getattr(session, "_cx_state", None)
     if state is not None:
+        _follow_active_account(session, state)
         return state
     child_env = _cx_child_env(session)
     err = _preflight_cx(env=child_env)
@@ -137,14 +192,10 @@ def ensure_cx_state(session) -> CxState:
     bridge = ToolBridgeServer(session_id=str(_uuid_mod.uuid4()), list_tools_fn=lambda: bridge_list_tools(session),
                                call_tool_fn=lambda name, arguments: bridge_call_tool(session, name, arguments))
     bridge.start()
-    try:
-        from halo_harness.accounts import active_codex_profile
-        profile = active_codex_profile(state_dir=getattr(session, "state_dir", None))
-    except Exception:
-        profile = None
+    profile = _active_profile(session)
     state = CxState(
         bridge=bridge,
-        cx_session_id=_last_cx_session_id(session.log),
+        cx_session_id=_last_cx_session_id(session.log, getattr(profile, "name", None)),
         account_name=getattr(profile, "name", None),
         cache_dir=getattr(profile, "profile_dir", None),
     )

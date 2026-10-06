@@ -95,6 +95,35 @@ def _wait(pred, timeout=10.0) -> bool:
     return False
 
 
+@test
+def test_cx_separates_completed_replies_with_or_without_phase(ctx: Ctx):
+    from queue import Queue
+    from types import SimpleNamespace
+    from halo_harness.agent.cx_runtime import CxState, _on_notification
+
+    for streamed in (False, True):
+        for phase in (None, "commentary", "final_answer"):
+            q = Queue()
+            saved = []
+            session = SimpleNamespace(log=SimpleNamespace(append_assistant=lambda **kw: saved.append(kw)))
+            state = CxState(server=None, bridge=None, thread_id="t", model="test", active_queue=q)
+            for item_id, text in (("a", "Identify the version."), ("b", "You’re using Python.")):
+                if streamed:
+                    for fragment in (text[:1], text[1:]):
+                        _on_notification(session, state, "item/agentMessage/delta",
+                                         {"itemId": item_id, "delta": fragment})
+                item = {"type": "agentMessage", "id": item_id, "text": text}
+                if phase is not None:
+                    item["phase"] = phase
+                _on_notification(session, state, "item/completed", {"item": item})
+            evs = []
+            while not q.empty():
+                evs.append(q.get_nowait())
+            ctx.check(f"separate complete replies: streamed={streamed}, phase={phase}",
+                      _text(evs) == "Identify the version.\n\nYou’re using Python.\n\n")
+            ctx.check("both original replies saved", len(saved) == 2)
+
+
 # ---- lifecycle ----------------------------------------------------------------
 
 @test

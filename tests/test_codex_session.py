@@ -42,10 +42,13 @@ FAKE_CODEX = REPO_DIR / "tests" / "helpers" / "fake_codex.py"
 def _fake_codex_env(*, logged_in: bool = True, argv_log: "Path | None" = None):
     saved = {k: os.environ.get(k) for k in
              ("HALO_CODEX_EXE", "FAKE_CODEX_LOGIN_STATUS", "BRIDGE_TEST_CODEX_LOGIN_STATUS",
-              "FAKE_CODEX_ARGV_LOG")}
+              "BRIDGE_TEST_CX_LOGIN_STATUS", "FAKE_CODEX_ARGV_LOG")}
     os.environ["HALO_CODEX_EXE"] = '"' + sys.executable + '" "' + str(FAKE_CODEX) + '"'
     os.environ["FAKE_CODEX_LOGIN_STATUS"] = "Logged in using ChatGPT" if logged_in else "Not logged in"
-    os.environ.pop("BRIDGE_TEST_CODEX_LOGIN_STATUS", None)  # the fake's own real answer counts now
+    # the fake's own real answer counts now (account failover checks each
+    # managed account's login through the cx_models seam)
+    os.environ.pop("BRIDGE_TEST_CODEX_LOGIN_STATUS", None)
+    os.environ.pop("BRIDGE_TEST_CX_LOGIN_STATUS", None)
     if argv_log is not None:
         os.environ["FAKE_CODEX_ARGV_LOG"] = str(argv_log)
     else:
@@ -83,6 +86,30 @@ def _new_cx_session(*, permission_engine=None, model="cx:astra", cwd=None):
 # ---- plain turn -------------------------------------------------------
 
 @test
+def test_codex_separates_streamed_and_snapshot_replies(ctx: Ctx):
+    from types import SimpleNamespace
+    from halo_harness.agent.codex_runtime import CxState
+    from halo_harness.agent.codex_turn import _events_for_cx_obj
+
+    for streamed in (False, True):
+        state = CxState(bridge=None)
+        session = SimpleNamespace(log=SimpleNamespace(append_assistant=lambda **kw: None))
+        output = []
+        for item_id, text in (("a", "Identify the version."), ("b", "You’re using Python.")):
+            if streamed:
+                for fragment in (text[:1], text):
+                    evs, _ = _events_for_cx_obj(session, 1, {"type": "item.updated", "item":
+                        {"type": "agent_message", "id": item_id, "text": fragment}}, state)
+                    output.extend(evs)
+            evs, _ = _events_for_cx_obj(session, 1, {"type": "item.completed", "item":
+                {"type": "agent_message", "id": item_id, "text": text}}, state)
+            output.extend(evs)
+        text = "".join(e.data["text"] for e in output if e.kind == "text_delta")
+        ctx.check(f"complete replies remain separated: streamed={streamed}",
+                  text == "Identify the version.\n\nYou’re using Python.\n\n")
+
+
+@test
 def test_no_bridge_until_first_cx_turn(ctx: Ctx):
     with _fake_codex_env():
         session, _ = _new_cx_session()
@@ -110,7 +137,7 @@ def test_pong_reply_and_thread_id_logged(ctx: Ctx):
         session, _ = _new_cx_session()
         events_ = list(session.turn("reply with the single word pong"))
         text = "".join(e.data.get("text", "") for e in events_ if e.kind == "text_delta")
-        ctx.check(f"got pong, text={text!r}", text == "pong")
+        ctx.check(f"got pong, text={text!r}", text == "pong\n\n")
         ctx.check("turn_done end_turn", events_[-1].kind == "turn_done" and events_[-1].data["reason"] == "end_turn")
         meta_nodes = [n for n in session.log.nodes() if n.get("type") == "meta" and n.get("cx_session_id")]
         ctx.check(f"cx_session_id logged, got {meta_nodes}", len(meta_nodes) == 1)
@@ -133,6 +160,140 @@ def test_second_turn_resumes_same_thread(ctx: Ctx):
         ctx.check(f"two exec invocations, got {len(lines)}", len(lines) == 2)
         ctx.check(f"first call has no resume, got {lines[0]}", "resume" not in lines[0])
         ctx.check(f"second call resumes, got {lines[1]}", "resume" in lines[1])
+        session.close_cc()
+
+
+# ---- managed accounts: per-account threads, failover, visible commands ----
+
+def _codex_accounts(session, *names, out_of_credits=()):
+    """Managed Codex profiles under the session's state dir; the first is active."""
+    from halo_harness.accounts import prepare_codex_profile, set_active_account
+    for name in names:
+        profile = prepare_codex_profile(name, state_dir=session.state_dir)
+        if name in out_of_credits:
+            (profile.config_home / "fake-out-of-credits").write_text("", encoding="utf-8")
+    set_active_account("codex", names[0], state_dir=session.state_dir)
+
+
+def _exec_calls(log_path: Path) -> list:
+    lines = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [l for l in lines if l and l[0] == "exec"]
+
+
+def _errors(evs) -> list:
+    return [(e.data.get("err_type"), e.data.get("message")) for e in evs if e.kind == "error"]
+
+
+@test
+def test_account_switch_resumes_only_that_accounts_thread(ctx: Ctx):
+    from halo_harness.accounts import set_active_account
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b")
+        list(session.turn("reply with the single word pong"))
+        set_active_account("codex", "b", state_dir=session.state_dir)
+        on_b = list(session.turn("reply with the single word pong"))
+        ctx.check(f"switched account's turn has no error, got {_errors(on_b)}", not _errors(on_b))
+        set_active_account("codex", "a", state_dir=session.state_dir)
+        back_on_a = list(session.turn("reply with the single word pong"))
+        ctx.check(f"returning to the first account has no error, got {_errors(back_on_a)}", not _errors(back_on_a))
+        calls = _exec_calls(log_path)
+        ctx.check(f"three exec calls, got {len(calls)}", len(calls) == 3)
+        ctx.check("account b starts its own thread", "resume" not in calls[1])
+        ctx.check("account b's fresh thread carries the conversation so far",
+                  "<conversation-so-far>" in calls[1][-1])
+        accounts = {n.get("cx_session_id"): n.get("cx_account") for n in session.log.nodes()
+                    if n.get("type") == "meta" and n.get("cx_session_id")}
+        ctx.check(f"threads recorded per account, got {accounts}", sorted(accounts.values()) == ["a", "b"])
+        first_a = next(i for i, acct in accounts.items() if acct == "a")
+        ctx.check(f"account a resumes its own thread, got {calls[2]}",
+                  calls[2][1:3] == ["resume", first_a])
+        session.close_cc()
+
+
+@test
+def test_missing_thread_restarts_fresh_without_an_error(ctx: Ctx):
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a")
+        session.log.append_meta(cx_session_id="thread-codex-forgot", cx_account="a")
+        evs = list(session.turn("reply with the single word pong"))
+        text = "".join(e.data.get("text", "") for e in evs if e.kind == "text_delta")
+        ctx.check(f"no error shown, got {_errors(evs)}", not _errors(evs))
+        ctx.check(f"the reply still arrives, got {text!r}", text.strip() == "pong")
+        calls = _exec_calls(log_path)
+        ctx.check(f"a refused resume, then a fresh thread, got {[c[:3] for c in calls]}",
+                  len(calls) == 2 and calls[0][1:3] == ["resume", "thread-codex-forgot"] and "resume" not in calls[1])
+        ctx.check("turn ended normally", evs[-1].kind == "turn_done" and evs[-1].data["reason"] == "end_turn")
+        session.close_cc()
+
+
+@test
+def test_out_of_credits_fails_over_to_the_next_account(ctx: Ctx):
+    from halo_harness.accounts import active_account_name
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        evs = list(session.turn("reply with the single word pong"))
+        text = "".join(e.data.get("text", "") for e in evs if e.kind == "text_delta")
+        notes = [e.data.get("text") or e.data.get("message") for e in evs if e.kind == "notification"]
+        ctx.check(f"no error shown, got {_errors(evs)}", not _errors(evs))
+        ctx.check(f"the switch is announced, got {notes}", any("'b'" in str(n) for n in notes))
+        ctx.check(f"the work continued on the new account, got {text!r}", text.strip() == "pong")
+        ctx.check("account b is now active", active_account_name("codex", state_dir=session.state_dir) == "b")
+        calls = _exec_calls(log_path)
+        ctx.check(f"two exec calls, the second a fresh thread, got {len(calls)}",
+                  len(calls) == 2 and "resume" not in calls[1])
+        session.close_cc()
+
+
+@test
+def test_out_of_credits_after_a_command_waits_for_continue(ctx: Ctx):
+    from halo_harness.accounts import active_account_name
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        evs = list(session.turn("NATIVE_CMD then reply with the single word pong"))
+        ctx.check(f"asks for an explicit continue, got {_errors(evs)}",
+                  [t for t, _ in _errors(evs)] == ["cx_failover_needs_continue"])
+        ctx.check("the command is not re-run automatically", len(_exec_calls(log_path)) == 1)
+        ctx.check("account b is active for the continue", active_account_name("codex", state_dir=session.state_dir) == "b")
+        follow = list(session.turn("continue, and reply with the single word pong"))
+        ctx.check(f"continue works on the new account, got {_errors(follow)}", not _errors(follow))
+        session.close_cc()
+
+
+@test
+def test_out_of_credits_with_no_other_account_says_so(ctx: Ctx):
+    with _fake_codex_env():
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", out_of_credits=("a",))
+        evs = list(session.turn("reply with the single word pong"))
+        errors = _errors(evs)
+        ctx.check(f"one clear error, got {errors}",
+                  len(errors) == 1 and errors[0][0] == "cx_usage_exhausted" and "out of credits" in errors[0][1])
+        session.close_cc()
+
+
+@test
+def test_codex_native_command_is_shown_with_its_output(ctx: Ctx):
+    with _fake_codex_env():
+        session, _ = _new_cx_session()
+        evs = list(session.turn("NATIVE_CMD then reply with the single word pong"))
+        cards = [e for e in evs if e.kind == "tool_use_ready"]
+        results = [e for e in evs if e.kind == "tool_result"]
+        ctx.check(f"a Bash card shows the command, got {[c.data for c in cards]}",
+                  len(cards) == 1 and cards[0].data["name"] == "Bash"
+                  and "echo hi" in cards[0].data["input"]["command"])
+        ctx.check(f"its output fills the card, got {[r.data for r in results]}",
+                  len(results) == 1 and results[0].data["ok"] and results[0].data["content"] == "hi\n"
+                  and results[0].data["id"] == cards[0].data["id"])
+        logged = [n for n in session.log.nodes() if n.get("type") == "tool_result"]
+        ctx.check(f"the log keeps the real output, got {logged}", logged and logged[-1]["content"] == "hi\n")
         session.close_cc()
 
 

@@ -397,6 +397,13 @@ class AssistantText(Markdown):
         if self._stream is not None:
             await self._stream.stop()
             self._stream = None
+            # The stream renderer is incremental and may occasionally miss
+            # an early fragment even though raw_text received every delta.
+            # Reconcile once from the canonical source so the completed
+            # widget can never show only a suffix of the saved response
+            # (only when it differs: a full re-render per reply is costly).
+            if self.source != self.raw_text:
+                await self.update(self.raw_text)
 
 
 class Transcript(VerticalScroll):
