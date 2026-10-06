@@ -74,6 +74,7 @@ class StatusBar(Static):
         # Last successful 5 h / weekly usage reading, retained separately
         # for each subscription route so a failed refresh does not flicker.
         self.subscription_usage: "dict | None" = None
+        self._subscription_account: "str | None" = None
         self._subscription_usage_by_provider: dict[tuple, dict] = {}
         # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
         # already clamped to this model's own accepted set -- None for a
@@ -179,11 +180,16 @@ class StatusBar(Static):
             self.app.action_scroll_transcript_end()
 
     def apply_status(self, data: dict) -> None:
+        previous_provider = self.model.split(":", 1)[0]
         if data.get("model"):
             self.model = data["model"]
         provider = self.model.split(":", 1)[0]
+        if provider != previous_provider:
+            self._subscription_account = None
+        if "subscription_account" in data:
+            self._subscription_account = data["subscription_account"]
         if provider in ("cc", "cx"):
-            key = (provider, data.get("subscription_account"))
+            key = (provider, self._subscription_account)
             usage = data.get("subscription_usage")
             if isinstance(usage, dict) and any(value is not None for value in usage.values()):
                 self._subscription_usage_by_provider[key] = dict(usage)

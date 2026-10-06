@@ -623,8 +623,10 @@ class BridgeApp(App):
         # announced as an absence on every single launch.
         available = bool(status and status.logged_in and status.auth_method in SUBSCRIPTION_AUTH_METHODS)
         if available:
-            self.call_from_thread(
-                self.notify, "Claude subscription detected -- cc: models available (see /model).",
+            # notify posts a thread-safe message without waiting on the UI
+            # loop, which may already be shutting down after this probe.
+            self.notify(
+                "Claude subscription detected -- cc: models available (see /model).",
                 title="providers", timeout=4,
             )
             # 2.0.1 part 11 (live on the Kali VM): `tui/bootstrap.py`'s
@@ -654,8 +656,8 @@ class BridgeApp(App):
         except Exception:
             return
         if status and status.logged_in and status.auth_method == "chatgpt":
-            self.call_from_thread(
-                self.notify, "Codex subscription detected -- cx: models available (see /model).",
+            self.notify(
+                "Codex subscription detected -- cx: models available (see /model).",
                 title="providers", timeout=4,
             )
 

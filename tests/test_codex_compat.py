@@ -142,6 +142,52 @@ def test_toolbar_never_reuses_another_accounts_reading(ctx):
         ctx.check("new account has no stale percent", bar.subscription_usage is None)
         bar.apply_status({"model": "cx:astra", "subscription_account": "a", "subscription_usage": None})
         ctx.check("same account retains last success", bar.subscription_usage["session_pct"] == 42)
+        bar.apply_status({"phase": "thinking"})
+        ctx.check("partial phase update retains account usage", bar.subscription_usage["session_pct"] == 42)
+        bar.apply_status({"model": "cx:sol"})
+        ctx.check("model change within account retains usage", bar.subscription_usage["session_pct"] == 42)
+        bar.apply_status({"model": "or:other"})
+        bar.apply_status({"model": "cx:astra"})
+        ctx.check("provider round trip does not guess an account", bar.subscription_usage is None)
+
+
+@test
+def test_auth_notification_workers_finish_without_a_running_ui(ctx):
+    from halo_harness.testing.fake_controller import FakeController
+    from halo_harness.tui.app import BridgeApp
+    app = BridgeApp(FakeController(), cwd="/tmp")
+    errors = []
+
+    def run():
+        try:
+            app._prime_codex_auth_status_worker()
+            app._prime_auth_status_worker()
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+
+    with patch("halo_harness.providers.codex_models.refresh_cached_codex_auth_status",
+               return_value=SimpleNamespace(logged_in=True, auth_method="chatgpt")), \
+         patch("halo_harness.providers.cc_models.refresh_cached_claude_auth_status",
+               return_value=SimpleNamespace(logged_in=True, auth_method="claude.ai")), \
+         patch("halo_harness.mcp.connectors_bridge.ensure_discovered_in_background"):
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(2)
+        ctx.check("finished after UI shutdown", not worker.is_alive())
+        ctx.check(f"notification did not need the UI loop: {errors}", not errors)
+
+
+@test
+def test_claude_default_turn_limit_is_not_forwarded(ctx):
+    from halo_harness.agent.cc_runtime import _cc_max_turns
+    from halo_harness.agent.cc_process import build_cc_argv
+    for value, expected in ((50, None), (None, None), (8, 8), (100, 100)):
+        limit = _cc_max_turns(SimpleNamespace(max_turns=value))
+        ctx.check("default removed and custom limit preserved", limit == expected)
+        with patch("halo_harness.agent.cc_process.resolve_claude_launch_argv", return_value=["claude"]):
+            argv = build_cc_argv(model="sonnet", session_id="test", resume=False,
+                                 mcp_config={}, max_turns=limit)
+        ctx.check("CLI limit only for custom values", ("--max-turns" in argv) == (expected is not None))
 
 
 @test
@@ -154,13 +200,11 @@ def test_usage_read_over_real_stdio_without_model_turn(ctx):
 
 
 @test
-def test_exec_fork_and_effort_with_transport_stub(ctx):
-    # This tests the real exec subprocess and session/controller paths.
-    # The MCP listener is stubbed because these turns never call tools.
+def test_exec_fork_and_effort_with_real_bridge(ctx):
+    # Exercise the real exec subprocess, MCP listener and controller paths.
     from tests.test_codex_session import _fake_codex_env, _new_cx_session, _codex_accounts
-    from halo_harness.ccbridge.server import ToolBridgeServer
     from halo_harness.controller import Controller
-    with tempfile.TemporaryDirectory() as tmp, _fake_codex_env(argv_log=Path(tmp)/"argv"), patch.object(ToolBridgeServer, "start"):
+    with tempfile.TemporaryDirectory() as tmp, _fake_codex_env(argv_log=Path(tmp)/"argv"):
         session, cwd = _new_cx_session()
         _codex_accounts(session, "a", "b")
         session.effort = "high"
