@@ -364,9 +364,15 @@ def refresh_cx_catalog(*, state_dir: Optional[Path] = None, timeout: float = 30.
     cache. No model call is made, so a refresh spends nothing. Returns the
     written dict; on any failure the existing cache is returned unchanged."""
     from halo_harness.agent.cx_process import CodexAppServer, CodexRpcError
+    from halo_harness.accounts import active_codex_profile, codex_profile_env
+    profile = active_codex_profile(state_dir=state_dir)
+    env = cx_child_env(dict(os.environ))
+    if profile is not None:
+        state_dir = profile.profile_dir
+        env = codex_profile_env(profile, env)
     existing = load_cx_models_cache(state_dir)
     try:
-        server = CodexAppServer.start(cwd=Path.home(), env=cx_child_env(dict(os.environ)))
+        server = CodexAppServer.start(cwd=Path.home(), env=env)
     except (CodexNotFoundError, OSError, CodexRpcError):
         return existing
     try:
@@ -461,7 +467,9 @@ CATALOG_MAX_AGE_S = 24 * 3600
 def refresh_cx_catalog_if_stale(state_dir: Optional[Path] = None) -> bool:
     """The background auto-refresh rule every other catalog follows:
     refresh when never fetched or older than 24 h. True when it refreshed."""
-    fetched = load_cx_models_cache(state_dir).get("fetched_at")
+    from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+    cache_dir = subscription_usage_cache_dir("codex", state_dir)
+    fetched = load_cx_models_cache(cache_dir).get("fetched_at")
     if isinstance(fetched, (int, float)) and time.time() - fetched < CATALOG_MAX_AGE_S:
         return False
     return bool(refresh_cx_catalog(state_dir=state_dir).get("fetched_at"))
@@ -473,6 +481,8 @@ def models_summary_line(state_dir: Optional[Path] = None, *, refresh: bool = Fal
         data = refresh_cx_catalog(state_dir=state_dir)
         if not data.get("models"):
             return "Codex subscription refresh failed -- see `halo doctor`."
+    from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+    state_dir = subscription_usage_cache_dir("codex", state_dir)
     shown = [m for m in cx_models(state_dir) if not m.get("hidden")]
     fetched = load_cx_models_cache(state_dir).get("fetched_at")
     when = "built-in list, never refreshed" if not fetched else \

@@ -74,7 +74,7 @@ class StatusBar(Static):
         # Last successful 5 h / weekly usage reading, retained separately
         # for each subscription route so a failed refresh does not flicker.
         self.subscription_usage: "dict | None" = None
-        self._subscription_usage_by_provider: dict[str, dict] = {}
+        self._subscription_usage_by_provider: dict[tuple, dict] = {}
         # 1.0.1 hotfix 20.3: the session's current reasoning-effort level,
         # already clamped to this model's own accepted set -- None for a
         # model with no adjustable effort at all (renders no tag).
@@ -183,10 +183,11 @@ class StatusBar(Static):
             self.model = data["model"]
         provider = self.model.split(":", 1)[0]
         if provider in ("cc", "cx"):
+            key = (provider, data.get("subscription_account"))
             usage = data.get("subscription_usage")
             if isinstance(usage, dict) and any(value is not None for value in usage.values()):
-                self._subscription_usage_by_provider[provider] = dict(usage)
-            self.subscription_usage = self._subscription_usage_by_provider.get(provider)
+                self._subscription_usage_by_provider[key] = dict(usage)
+            self.subscription_usage = self._subscription_usage_by_provider.get(key)
         else:
             self.subscription_usage = None
         if data.get("permission_mode"):

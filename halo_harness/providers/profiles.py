@@ -385,12 +385,13 @@ def resolve_profile(route, model_table: Optional[dict] = None, state_dir=None) -
     decision_only = _decision is not None
     decision_only_reason = _decision.get("reason") if _decision else None
 
-    if route.provider == "cx":
+    if route.provider == "codex":
         # 2.0.2: the effort levels Codex's own model/list reports for this
         # model (within Halo's vocabulary), so `/effort` offers exactly
         # those; the cx: runtime clamps anything else before sending.
         from halo_harness.providers.cx_models import profile_fields_for_cx_model
-        fields = profile_fields_for_cx_model(route.upstream_model, state_dir)
+        from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+        fields = profile_fields_for_cx_model(route.upstream_model, subscription_usage_cache_dir("codex", state_dir))
         efforts = tuple(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS) or OPENAI_EFFORT_LEVELS
         default = fields.get("default_effort") if fields.get("default_effort") in efforts else None
         return ProviderProfile(family=family, reasoning_effort_supported=True, effort_values_supported=efforts,

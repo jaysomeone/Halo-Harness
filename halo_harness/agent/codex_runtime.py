@@ -123,11 +123,16 @@ def _last_cx_session_id(log, account_name: Optional[str] = None) -> Optional[str
     under `account_name` counts; an unlabelled (older) node only matches
     when no managed account is in use."""
     for node in reversed(log.nodes()):
-        if node.get("type") != "meta" or not node.get("cx_session_id"):
+        if node.get("type") != "meta":
+            continue
+        if node.get("cx_thread_boundary"):
+            return None
+        thread_id = node.get("cx_session_id") or node.get("cx_thread_id")
+        if not thread_id:
             continue
         recorded = node.get("cx_account")
         if recorded == (account_name or "default") or (recorded is None and account_name is None):
-            return node["cx_session_id"]
+            return thread_id
     return None
 
 

@@ -31,9 +31,23 @@ BUILD
 - Separated consecutive Codex replies into paragraphs and made a finished streamed reply re-render only when its text was clipped.
 - `cc:` no longer forwards Halo's default `--max-turns 50` to Claude Code (long tasks stopped with `error_max_turns`); an explicit `--max-turns` still applies, and the error now explains how to continue.
 
-## Known baseline issue
+## Upstream compatibility cleanup
 
-`tests/test_cx_session.py` tests the app-server runtime (`agent/cx_runtime.py`), which nothing calls since the upstream merge; 13 of its tests fail because `cx:` now parses to provider `codex`. Decide whether to delete that module or bring it back.
+- Standardized the active internal provider as `codex`, preserving `cx:` model references and `codex_subscription` enablement. Account catalogs supply aliases and supported effort; the selected effort is passed to `codex exec`.
+- Migrated setup and account tests to the active runtime and removed the unused app-server turn engine. Kept the app-server client for model discovery and usage queries.
+- Resume accepts both `cx_session_id` and legacy `cx_thread_id` with account ownership checks. Conversation forks persist a boundary so every account starts an independent thread, including after reopening.
+- Codex usage now refreshes from the owning account once per minute, with a five-second toolbar repaint while idle or busy. Failed reads retain that account's last success; another account's percentages are never substituted.
+- Regression coverage lives in `tests/test_codex_compat.py`; the retained `tests/test_cx_session.py` covers catalog discovery. Full MCP bridge integration requires permission to bind local sockets.
+
+## Validation and installation status
+
+The compatibility suite (9), account suite (10), catalog suite (3), and Codex settings suite (16) pass. A supplemental run of 22 existing Codex tests passes with only the unused MCP listener startup stubbed; it still runs the fake Codex executable and real session logic. The full bridge tests cannot bind sockets in this workspace sandbox. Eleven non-UI usage checks pass; the existing Claude context-prime check and full Textual usage test time out here. Compilation and diff checks pass.
+
+A clean installable wheel is prepared in `../halo-fix-dist/`. This session cannot write the pipx installation outside the workspace, so the installed harness still needs updating. The previous checkout at `/home/jay/Halo-Harness` and GitHub have not been changed.
+
+## Before merging upstream
+
+Check the changes to routing, `codex_runtime.py`, `codex_turn.py`, model resolution, and status events. Run the Codex, compatibility, catalog, account, settings, and usage suites. Investigate new failures instead of labeling them baseline failures. Keep the single active conversation runtime; migrate account behavior when upstream changes its interfaces.
 
 ## Next action
 

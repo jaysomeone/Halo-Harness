@@ -8,8 +8,8 @@ toward them), as last reported by the subscription's own CLI:
     .{utilization (0-1), resetsAt (epoch s)}`. Recorded here to
     `<state_dir>/cc-usage.json` -- its own file, since `refresh_cc_catalog`
     rewrites `cc-models.json` wholesale.
-  * `cx:` -- Codex's `account/rateLimits/updated`, already cached by
-    `cx_models.record_rate_limits` (primary = 5 h, secondary = weekly).
+  * `cx:` -- a throttled `account/rateLimits/read` app-server request,
+    cached per account (primary = 5 h, secondary = weekly). No model turn.
 
 claude emits `rate_limit_event` only on a process's FIRST turn, so a
 long-lived `cc:` process would show one stale snapshot forever --
@@ -206,6 +206,66 @@ def maybe_refresh_cc_usage(provider: str) -> bool:
     return True
 
 
+CX_USAGE_PROBE_INTERVAL_S = 60.0
+_cx_probe_lock = threading.Lock()
+_cx_probes_running: set = set()
+_cx_last_probe_at: dict = {}
+
+
+def probe_cx_usage(cache_dir: Path, env: dict) -> bool:
+    """Read account usage without a model turn; env and destination are
+    captured together so a concurrent account switch cannot mix accounts."""
+    from halo_harness.agent.cx_process import CodexAppServer
+    from halo_harness.providers.cx_models import record_rate_limits
+    server = CodexAppServer.start(cwd=Path.home(), env=env)
+    try:
+        result = server.request("account/rateLimits/read", None, timeout=15.0) or {}
+        limits = result.get("rateLimits")
+        if not isinstance(limits, dict) or not any(isinstance(limits.get(k), dict) for k in ("primary", "secondary")):
+            return False
+        record_rate_limits(limits, cache_dir)
+        return True
+    finally:
+        server.close()
+
+
+def maybe_refresh_cx_usage(provider: str, state_dir: Optional[Path] = None, *, cx_state=None, base_env=None) -> bool:
+    """At most one background probe per account per minute; failed reads
+    preserve the last successful reading and are retried on the next interval."""
+    from halo_harness.config.paths import background_net_disabled, bridge_home
+    if provider != "codex" or background_net_disabled():
+        return False
+    from halo_harness.accounts import active_codex_profile, codex_profile, codex_profile_env
+    from halo_harness.providers.cx_models import cx_child_env
+    name = getattr(cx_state, "account_name", None)
+    if cx_state is not None:
+        profile = codex_profile(name, state_dir=state_dir) if name else None
+    else:
+        profile = active_codex_profile(state_dir=state_dir)
+    cache_dir = profile.profile_dir if profile else Path(state_dir or bridge_home())
+    env = cx_child_env(dict(base_env if base_env is not None else os.environ))
+    if profile:
+        env = codex_profile_env(profile, env)
+    key = str(cache_dir.resolve())
+    with _cx_probe_lock:
+        now = time.monotonic()
+        if key in _cx_probes_running or now - _cx_last_probe_at.get(key, float("-inf")) < CX_USAGE_PROBE_INTERVAL_S:
+            return False
+        _cx_probes_running.add(key)
+        _cx_last_probe_at[key] = now
+
+    def run():
+        try:
+            probe_cx_usage(cache_dir, env)
+        except Exception:
+            pass
+        finally:
+            with _cx_probe_lock:
+                _cx_probes_running.discard(key)
+    threading.Thread(target=run, daemon=True, name="cx-usage-probe").start()
+    return True
+
+
 def _pct(window, now: float) -> Optional[int]:
     if not isinstance(window, dict) or not isinstance(window.get("used_percent"), (int, float)):
         return None
@@ -234,9 +294,9 @@ def subscription_usage_cache_dir(provider: str, state_dir: Optional[Path] = None
     """
     if provider not in ("cx", "codex"):
         return state_dir
-    live_dir = getattr(cx_state, "cache_dir", None)
-    if live_dir is not None:
-        return Path(live_dir)
+    if cx_state is not None:
+        live_dir = getattr(cx_state, "cache_dir", None)
+        return Path(live_dir) if live_dir is not None else state_dir
     try:
         from halo_harness.accounts import active_codex_profile
         profile = active_codex_profile(state_dir=state_dir)

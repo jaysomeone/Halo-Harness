@@ -141,15 +141,15 @@ def test_fallback_skips_current_unlogged_and_exhausted_profiles(ctx: Ctx):
 
 @test
 def test_runtime_uses_the_active_profile_environment(ctx: Ctx):
-    from halo_harness.agent.cx_runtime import _child_env, _managed_profile
+    from halo_harness.agent.codex_runtime import _cx_child_env, _active_profile
 
     state = Path(tempfile.mkdtemp(prefix="accounts-state-"))
     prepare_codex_profile("personal", state_dir=state)
     work = prepare_codex_profile("work", state_dir=state)
     set_active_account("codex", "work", state_dir=state)
     session = SimpleNamespace(state_dir=state, tool_env={"SAFE_VALUE": "kept"})
-    selected = _managed_profile(session)
-    env = _child_env(session, selected)
+    selected = _active_profile(session)
+    env = _cx_child_env(session)
     ctx.check("runtime selected active account", selected == work)
     ctx.check("runtime pins isolated CODEX_HOME", env["CODEX_HOME"] == str(work.config_home))
     ctx.check("ordinary safe env survives", env["SAFE_VALUE"] == "kept")

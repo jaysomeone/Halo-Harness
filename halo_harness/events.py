@@ -178,7 +178,8 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
             session_id: Optional[str] = None, total_input_tokens: Optional[int] = None,
             total_output_tokens: Optional[int] = None, effort: Optional[str] = None,
             ollama_tokens_per_second: Optional[float] = None, ollama_prefill_seconds: Optional[float] = None,
-            ollama_offloaded: Optional[bool] = None, subscription_usage: Optional[dict] = None) -> Event:
+            ollama_offloaded: Optional[bool] = None, subscription_usage: Optional[dict] = None,
+            subscription_account: Optional[str] = None) -> Event:
     """data: {phase, model, context_tokens, context_limit, cost_usd, turn,
     permission_mode, mcp: {connected, total}, session_id, total_input_tokens,
     total_output_tokens, effort, ollama_tokens_per_second, ollama_prefill_
@@ -202,6 +203,7 @@ def status(*, phase: str, model: Optional[str] = None, context_tokens: Optional[
         "total_input_tokens": total_input_tokens, "total_output_tokens": total_output_tokens, "effort": effort,
         "ollama_tokens_per_second": ollama_tokens_per_second, "ollama_prefill_seconds": ollama_prefill_seconds,
         "ollama_offloaded": ollama_offloaded, "subscription_usage": subscription_usage,
+        "subscription_account": subscription_account,
     }, turn=turn)
 
 

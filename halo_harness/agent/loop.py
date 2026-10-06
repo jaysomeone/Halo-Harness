@@ -6437,10 +6437,13 @@ class Session:
         throughput = self._last_ollama_throughput if self.model_ref.provider == "ollama" else None
         from halo_harness.providers.sub_usage import (
             maybe_refresh_cc_usage,
+            maybe_refresh_cx_usage,
             subscription_usage,
             subscription_usage_cache_dir,
         )
         maybe_refresh_cc_usage(self.model_ref.provider)
+        maybe_refresh_cx_usage(self.model_ref.provider, self.state_dir,
+                               cx_state=getattr(self, "_cx_state", None), base_env=self.tool_env)
         usage_cache_dir = subscription_usage_cache_dir(
             self.model_ref.provider, self.state_dir, cx_state=getattr(self, "_cx_state", None),
         )
@@ -6457,6 +6460,7 @@ class Session:
             ollama_prefill_seconds=(throughput or {}).get("prefill_seconds"),
             ollama_offloaded=(throughput or {}).get("offloaded"),
             subscription_usage=subscription_usage(self.model_ref.provider, usage_cache_dir),
+            subscription_account=str(usage_cache_dir) if self.model_ref.provider == "codex" else None,
         )
 
     @property

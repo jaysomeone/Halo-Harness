@@ -1,17 +1,5 @@
-"""halo_harness.agent.cx_process -- the `codex app-server` subprocess
-behind the `cx:` route, and a small JSON-RPC client for it.
-
-`codex app-server` speaks newline-delimited JSON-RPC 2.0 on stdio (the
-protocol the Codex IDE extension uses). Three message kinds arrive on
-stdout: responses to our requests (`id` + `result`/`error`), notifications
-(`method`, no `id`: streaming deltas, item lifecycle, token usage, rate
-limits, `turn/completed`), and server requests (`method` + `id`: approval
-prompts and MCP elicitations, which we must answer). Verified live against
-codex-cli 0.153.4.
-
-One process per Halo session, kept alive across turns, its own process
-group so Esc and quit reach every descendant (the MCP bridge child
-included), the same lifecycle `cc_process.ClaudeCodeProcess` has.
+"""Short-lived Codex app-server JSON-RPC client for model discovery and
+account usage. Conversation turns use codex_process.CodexExecProcess.
 """
 
 from __future__ import annotations

@@ -228,15 +228,15 @@ subscription (ChatGPT)" group appears in `/model` with exactly the models
 your plan offers (`halo models --cx` lists them with their effort levels;
 `cx:default` is the plan's default).
 
-It works the way `cc:` does: Halo drives the installed `codex` headlessly
-(`codex app-server`, one process per session) and never reads
-`~/.codex/auth.json`. Halo's tools reach Codex through the same local
-bridge, as an MCP server named `halo`, so permissions, hooks, plan mode
-and the session log behave exactly as on every other route; Codex's own
-shell and browser tools are switched off for the session, and a native
-`apply_patch` is decided by Halo as a Write/Edit before Codex applies it.
-Typing during a turn steers it, Esc interrupts it, and `/providers` shows
-the plan's 5-hour and weekly usage windows.
+Halo runs `codex exec` once per message and resumes the account's Codex
+thread on follow-up turns. Halo tools are available through the local
+`halo` MCP bridge and keep Halo's permission checks and hooks. Native
+Codex tools use Codex's sandbox and approval settings. Messages typed
+during a turn queue for the next Codex invocation; Esc interrupts it.
+The toolbar refreshes account usage in the background about once a minute,
+including while idle, without making a model call. A failed refresh keeps
+the last successful reading for that account. Forking a conversation starts
+an independent Codex thread with the visible conversation so far.
 
 **Limitations of this v1**: a steer sent mid-turn is forwarded to Claude
 Code immediately, which queues it on its own terms rather than halo

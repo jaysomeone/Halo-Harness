@@ -520,6 +520,7 @@ class BridgeApp(App):
         # `self._tick_spinner` on every tick instead.
         self.set_interval(1.0, lambda: self._tick_spinner())
         self.set_interval(5.0, self._refresh_cwd_branch)
+        self.set_interval(5.0, self._refresh_subscription_usage)
         self._start_watchdog()
         statusline_cfg = self._statusline_config()
         if statusline_cfg is not None:
@@ -556,6 +557,21 @@ class BridgeApp(App):
             # NOT an `OSError` subclass, so it used to kill the app.
             pass
         return ""
+
+    def _refresh_subscription_usage(self) -> None:
+        # Refresh only the usage fields; preserve the active turn's phase.
+        session = getattr(self.controller, "session", None)
+        if session is None or session.model_ref.provider != "codex":
+            return
+        from halo_harness.providers.sub_usage import (
+            maybe_refresh_cx_usage, subscription_usage, subscription_usage_cache_dir,
+        )
+        state = getattr(session, "_cx_state", None)
+        maybe_refresh_cx_usage("codex", session.state_dir, cx_state=state, base_env=session.tool_env)
+        cache = subscription_usage_cache_dir("codex", session.state_dir, cx_state=state)
+        self.status_bar.apply_status({"model": session.model_ref.raw,
+                                      "subscription_usage": subscription_usage("codex", cache),
+                                      "subscription_account": str(cache)})
 
     def _refresh_cwd_branch(self) -> None:
         # review finding 5/"UX" must-do: `git` runs on a worker thread --

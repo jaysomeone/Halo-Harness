@@ -682,12 +682,14 @@ class Controller:
             cx_available = is_subscription_login(cached_codex_login_status())
         except Exception:
             cx_available = False
+        from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+        cx_cache_dir = subscription_usage_cache_dir("codex", self.state_dir)
         if cx_available and is_enabled("codex_subscription", detected=cx_available):
-            for m in cx_models(self.state_dir):
+            for m in cx_models(cx_cache_dir):
                 ref = f"cx:{m['id']}"
                 if ref in seen or m.get("hidden"):
                     continue
-                fields = profile_fields_for_cx_model(m["id"], self.state_dir)
+                fields = profile_fields_for_cx_model(m["id"], cx_cache_dir)
                 from halo_harness.providers.profiles import EFFORT_LEVELS
                 efforts = "/".join(e for e in fields.get("efforts") or () if e in EFFORT_LEVELS)
                 detail = (m.get("display_name") or m["id"]) + (" · default" if m.get("is_default") else "")
@@ -696,7 +698,7 @@ class Controller:
                     "max_output_tokens": fields.get("max_output_tokens"),
                     "price_in_per_m": None, "price_out_per_m": None,
                     "detail": f"{detail} · effort {efforts}" if efforts else detail,
-                    "provider": "cx", "group": label_for("codex_subscription"),
+                    "provider": "codex", "group": label_for("codex_subscription"),
                 })
         elif cx_available:
             hints.append({"hint": f"{label_for('codex_subscription')} detected but not enabled -- "
@@ -880,8 +882,8 @@ class Controller:
             # and omit targets already shown by the real-models block.
             # Before refresh the seed is not an account access check, so
             # preserve the original alias rows on a fresh installation.
-            cx_seed = cx_catalog_is_seed(self.state_dir)
-            cx_ids = {m["id"] for m in cx_models(self.state_dir)} if not cx_seed else set()
+            cx_seed = cx_catalog_is_seed(cx_cache_dir)
+            cx_ids = {m["id"] for m in cx_models(cx_cache_dir)} if not cx_seed else set()
             cx_shown = {m["ref"] for m in out if m["ref"].startswith("cx:")}
             for alias in CODEX_ALIASES:
                 ref = f"cx:{alias}"
@@ -1459,14 +1461,13 @@ class Controller:
             self.session.close_cc()
             self.session._cc_state = None
             self.session._cc_fork_session = True
-        # 2.0.2: a log that carries a Codex thread id branches it with
-        # `thread/fork` on the next cx: turn instead of resuming the thread
-        # the original session still owns.
-        from halo_harness.agent.cx_runtime import _last_cx_thread_id
-        if _last_cx_thread_id(new_log):
-            from halo_harness.agent import cx_runtime
-            cx_runtime.close_cx(self.session)
-            self.session._cx_fork_session = True
+        # Retain Halo history, but start an
+        # independent Codex thread. The persisted boundary also prevents
+        # another account or a reopened session resuming the original.
+        if any(n.get("cx_session_id") or n.get("cx_thread_id") for n in new_log.nodes()):
+            from halo_harness.agent import codex_runtime
+            codex_runtime.close_cx(self.session)
+            new_log.append_meta(cx_thread_boundary=True)
         return new_id
 
     def export_session(self, *, sanitize: bool = False, path: Optional[str] = None) -> str:

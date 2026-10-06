@@ -964,8 +964,9 @@ def _run_provider_setup(provider: str, args, console: Console, cwd: Path,
                        "or pick a different provider.[/red]")
         return None
     if provider == "codex":
-        from halo_harness.agent.cx_runtime import preflight_cx
-        err = preflight_cx()
+        from types import SimpleNamespace
+        from halo_harness.agent.codex_runtime import _preflight_cx, _cx_child_env
+        err = _preflight_cx(env=_cx_child_env(SimpleNamespace()))
         if err:
             console.print(f"[red]{err}[/red]")
             return None

@@ -333,6 +333,13 @@ def _run_one_cx_subprocess(session, state, turn_no: int, prompt: str, image_path
     argv = build_cx_argv(model=session.model_ref.model, prompt=prompt, resume_id=state.cx_session_id,
                           permission_mode=session.permission_engine.mode, mcp_override_args=mcp_args,
                           image_paths=image_paths)
+    effort = getattr(session, "effort", None)
+    if effort:
+        from halo_harness.providers.profiles import clamp_effort, resolve_profile
+        profile = resolve_profile(session.route, state_dir=session.state_dir)
+        effort = clamp_effort(effort, profile)
+        if effort:
+            argv[-1:-1] = ["-c", f"model_reasoning_effort={effort}"]
     env = cx_subprocess_env(_cx_child_env(session), bridge_env)
     try:
         process = CodexExecProcess(argv, cwd=session.cwd, env=env)

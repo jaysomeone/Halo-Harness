@@ -42,7 +42,8 @@ FAKE_CODEX = REPO_DIR / "tests" / "helpers" / "fake_codex.py"
 def _fake_codex_env(*, logged_in: bool = True, argv_log: "Path | None" = None):
     saved = {k: os.environ.get(k) for k in
              ("HALO_CODEX_EXE", "FAKE_CODEX_LOGIN_STATUS", "BRIDGE_TEST_CODEX_LOGIN_STATUS",
-              "BRIDGE_TEST_CX_LOGIN_STATUS", "FAKE_CODEX_ARGV_LOG")}
+              "BRIDGE_TEST_CX_LOGIN_STATUS", "FAKE_CODEX_ARGV_LOG", "CODEX_HOME")}
+    os.environ.pop("CODEX_HOME", None)
     os.environ["HALO_CODEX_EXE"] = '"' + sys.executable + '" "' + str(FAKE_CODEX) + '"'
     os.environ["FAKE_CODEX_LOGIN_STATUS"] = "Logged in using ChatGPT" if logged_in else "Not logged in"
     # the fake's own real answer counts now (account failover checks each

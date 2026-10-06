@@ -45,11 +45,17 @@ def resolve_codex_alias(bare: str, state_dir: Optional[Path] = None) -> str:
     model ref from parsing, and full ids always pass through unchanged.
     The catalog helpers default to bridge_home() when state_dir is None.
     """
+    if bare == "default":
+        from halo_harness.providers.cx_models import resolve_cx_alias
+        from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+        return resolve_cx_alias(bare, subscription_usage_cache_dir("codex", state_dir))
     target = CODEX_ALIASES.get(bare)
     if target is None:
         return bare
     try:
         from halo_harness.providers.cx_models import cx_catalog_is_seed, cx_models
+        from halo_harness.providers.sub_usage import subscription_usage_cache_dir
+        state_dir = subscription_usage_cache_dir("codex", state_dir)
         if not cx_catalog_is_seed(state_dir):
             models = cx_models(state_dir)
             if target not in {m["id"] for m in models}:
